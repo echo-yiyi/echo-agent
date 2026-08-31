@@ -1,0 +1,17 @@
+{
+  "name": "echo-example-extension",
+  "private": true,
+  "type": "module",
+  "description": "扩展自动发现样例:往 extensions/ 里丢一个文件,工具就上线了。零凭据可跑。",
+  "dependencies": {
+    "@echo-agent/core": "*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  },
+  "scripts": {
+    "start": "bun index.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}

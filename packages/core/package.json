@@ -1,0 +1,82 @@
+{
+  "name": "@echo-agent/core",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "agent-core v2：一个持续存在的 Agent（状态机 + 命令 + 事件）与它的纯循环。零运行时依赖；Agent 管机制（状态机、恢复、提交顺序），用户换策略与基础设施（Store / Strategy / Source / Clock / Executor / Lock）。",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  },
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./background": {
+      "bun": "./src/background/public.ts",
+      "types": "./dist/background/public.d.ts",
+      "import": "./dist/background/public.js",
+      "default": "./dist/background/public.js"
+    },
+    "./engine": {
+      "bun": "./src/engine.ts",
+      "types": "./dist/engine.d.ts",
+      "import": "./dist/engine.js",
+      "default": "./dist/engine.js"
+    },
+    "./extension": {
+      "bun": "./src/extension/public.ts",
+      "types": "./dist/extension/public.d.ts",
+      "import": "./dist/extension/public.js",
+      "default": "./dist/extension/public.js"
+    },
+    "./mcp": {
+      "bun": "./src/mcp/port.ts",
+      "types": "./dist/mcp/port.d.ts",
+      "import": "./dist/mcp/port.js",
+      "default": "./dist/mcp/port.js"
+    },
+    "./package.json": "./package.json",
+    "./task": {
+      "bun": "./src/task/public.ts",
+      "types": "./dist/task/public.d.ts",
+      "import": "./dist/task/public.js",
+      "default": "./dist/task/public.js"
+    },
+    "./task/fs": {
+      "bun": "./src/task/fs.ts",
+      "types": "./dist/task/fs.d.ts",
+      "import": "./dist/task/fs.js",
+      "default": "./dist/task/fs.js"
+    },
+    "./testing": {
+      "bun": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js",
+      "default": "./dist/testing.js"
+    },
+    "./tools": {
+      "bun": "./src/tools/public.ts",
+      "types": "./dist/tools/public.d.ts",
+      "import": "./dist/tools/public.js",
+      "default": "./dist/tools/public.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "bun run build",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ]
+}

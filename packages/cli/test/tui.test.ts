@@ -1,0 +1,835 @@
+// TUI 的判据：**它是投影，不是第二个 Agent**。
+//
+// 所以测的是「事件进来 → 屏幕上出现什么」，不是「Agent 有没有跑对」（那归 core 的测试）。
+// 用一个假 TUI 接住 pi-tui 的 `TUI` 接口，就能在没有真终端的进程里断言渲染结果——
+// 真终端只在 `bin/echo-tui.ts` 里出现，测试一行都不碰它。
+
+import { test, expect } from "bun:test";
+import { Agent } from "@echo-agent/core";
+import { agentRuntimeOf, type AgentRuntime } from "@echo-agent/core/extension";
+import { scriptedStreamFn, textTurn, toolTurn } from "@echo-agent/core/testing";
+import { CURSOR_MARKER, type TUI } from "@earendil-works/pi-tui";
+import { runTui } from "../src/app.ts";
+import { fakeTui } from "./fake-tui.ts";
+import { Transcript } from "../src/transcript.ts";
+
+/**
+ * 假 TUI：只记「谁被挂上去、渲染成什么、输入监听器是谁」。
+ *
+ * **一次 `feed()` = 终端的一次数据到达**：真终端逐键送达（文本一段、回车一段），
+ * 粘贴才是一整块。所以测试里回车要单独喂——把 `"文本\r"` 当一块喂等于模拟了一次不存在的输入。
+ */
+/** 推进微任务：假 TUI 不驱动事件循环。 */
+async function flush(turns = 50): Promise<void> {
+  for (let i = 0; i < turns; i++) await Promise.resolve();
+}
+
+function agentWith(turns: ReturnType<typeof textTurn>[]): Agent {
+  return new Agent({
+    model: { provider: "t", id: "only", api: "scripted" },
+    streamFunction: scriptedStreamFn(turns),
+  });
+}
+
+/**
+ * 壳子只认 `AgentRuntime` 那份**封闭协议**——不认 Agent，也不认 Echo。
+ * 这里把测试用的低层 Agent 收窄成协议，走的是 core 出的那个收窄函数，
+ * **不是测试自己另写一份**：另写一份就等于壳子在测一个与生产不同的形状。
+ */
+/**
+ * 投递一条 lifecycle 事件。**捕获 `runTui` 真正挂上去的监听器**，不伪造假 Agent——
+ * 走的仍是生产那条订阅通道，只是事件由测试给。
+ */
+function emitLifecycle(agent: Agent, event: Record<string, unknown>): void {
+  const captured = lifecycleListeners.get(agent) ?? [];
+  for (const l of captured) l(event as never);
+}
+const lifecycleListeners = new WeakMap<Agent, ((e: never) => unknown)[]>();
+
+function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRuntime {
+  const base = agentRuntimeOf(agent);
+  // **不能用 `{...base}`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter，
+  // spread 会把它们**求值成快照**——打桩改了 `agent.acceptsWork` 之后协议这边还是旧值
+  // （写这条时实测踩到：装配层「起来了」之后壳子仍然拒收）。
+  // 所以逐个用 `get` 转发，覆盖项单独盖在上面。
+  const forwarded: AgentRuntime = {
+    get state() {
+      return base.state;
+    },
+    get pendingPermissions() {
+      return base.pendingPermissions;
+    },
+    get acceptsWork() {
+      return base.acceptsWork;
+    },
+    subscribe: (l) => base.subscribe(l),
+    subscribeLifecycle: (l) => {
+      const list = lifecycleListeners.get(agent) ?? [];
+      list.push(l as never);
+      lifecycleListeners.set(agent, list);
+      return base.subscribeLifecycle(l);
+    },
+    prompt: (i, images) => base.prompt(i, images),
+    steer: (m) => base.steer(m),
+    followUp: (m) => base.followUp(m),
+    answerPermission: (a) => base.answerPermission(a),
+    abort: (r) => base.abort(r),
+  };
+  // **不能用 `Object.assign`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter-only，
+  // 赋值会抛 "Attempted to assign to readonly property"（实测）。覆盖项一律走 `defineProperty`，
+  // 并且**定义成值属性**——覆盖的本意就是「钉死成这个」。
+  for (const [key, value] of Object.entries(overrides)) {
+    Object.defineProperty(forwarded, key, { value, configurable: true, enumerable: true });
+  }
+  return forwarded;
+}
+
+/* ─────────────── Transcript：投影本身 ─────────────── */
+
+test("流式用权威 partial 覆盖；定稿**无条件**为准（含定稿为空与被修正的情形）", () => {
+  const t = new Transcript();
+  const row = t.push({ kind: "assistant", text: "", streaming: true });
+  t.setAssistantText(row, "你");
+  t.setAssistantText(row, "你好"); // 事件带的是「此刻的完整 partial」，覆盖而不是累加
+  expect(t.render(40).join("\n")).toContain("你好");
+  expect(t.render(40).join("\n")).not.toContain("你好好"); // 累加的话会变成这样
+
+  // **定稿修正**：先流出旧 partial，定稿是另一份内容——屏幕必须换成定稿
+  const corrected = new Transcript();
+  const r2 = corrected.push({ kind: "assistant", text: "", streaming: true });
+  corrected.setAssistantText(r2, "旧的半截");
+  corrected.finishAssistant(r2, "权威定稿");
+  const screen = corrected.render(40).join("\n");
+  expect(screen).toContain("权威定稿");
+  expect(screen).not.toContain("旧的半截"); // 上一版这里会停在旧 partial
+
+  // 只发 done 的 provider：一个 partial 都没有，直接定稿
+  const silent = new Transcript();
+  const r3 = silent.push({ kind: "assistant", text: "", streaming: true });
+  silent.finishAssistant(r3, "整段定稿");
+  expect(silent.render(40).join("\n")).toContain("整段定稿");
+
+  // 定稿为空（只带 tool_use 的那一轮）：正文清掉，不留旧 partial
+  const toolOnly = new Transcript();
+  const r4 = toolOnly.push({ kind: "assistant", text: "", streaming: true });
+  toolOnly.setAssistantText(r4, "边想边说的半句");
+  toolOnly.finishAssistant(r4, "");
+  expect(toolOnly.render(40).join("\n")).not.toContain("边想边说的半句");
+});
+
+test("宽字符按列折行：中文一个字占两列，折出来的每行都不超过宽度", () => {
+  const t = new Transcript();
+  t.push({ kind: "assistant", text: "中文中文中文中文中文中文", streaming: false });
+  const lines = t.render(10).filter((l) => l !== "");
+  for (const line of lines) expect([...line].length).toBeLessThanOrEqual(5); // 10 列 = 5 个中文字
+  expect(lines.join("")).toBe("中文中文中文中文中文中文");
+});
+
+test("工具行有三态：跑着 / 成功 / 失败，各自的标记不同", () => {
+  const t = new Transcript();
+  const row = t.push({ kind: "tool", name: "read", detail: "a.ts", state: "running" });
+  expect(t.render(40).join("\n")).toContain("⋯ read");
+  t.updateTool(row, { state: "done" });
+  expect(t.render(40).join("\n")).toContain("✓ read");
+  t.updateTool(row, { state: "failed" });
+  expect(t.render(40).join("\n")).toContain("✗ read");
+});
+
+/* ─────────────── 输入：交给 pi-tui 的 Input，但**行为契约是我们的** ─────────────── */
+
+// 这几条测的是「本壳子对外许诺的行为」，实现在 pi-tui 里也一样要成立——
+// 上一版自写的 `PromptLine` 这三条全错（review 逐条实测），所以判据留在这儿盯着。
+
+test("emoji 退格删掉整个字符，不是半个代理对（上一版：删了等于没删）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("a😀");
+  ui.feed(String.fromCharCode(127)); // Backspace
+  expect(ui.screen()).toContain("a");
+  expect(ui.screen()).not.toContain("😀");
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("bracketed paste 的多行内容不许被当成回车提交（上一版：擅自提交第一行）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  const ESC = String.fromCharCode(27);
+  ui.feed(`${ESC}[200~foo\nbar${ESC}[201~`); // 粘贴两行
+  const screen = ui.screen();
+  expect(screen).toContain("foo"); // 还在输入行里
+  expect(screen).toContain("bar");
+  expect(screen).not.toContain("› foo"); // 没有变成已提交的用户行
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("跑着的时候提交被拒，且**文字放回输入行**——不排队也不用重打", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("第一句")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("第一条");
+  ui.feed("\r");
+  ui.feed("插队的");
+  ui.feed("\r"); // 上一条还在跑
+  await flush(300);
+  const screen = ui.screen();
+  expect(screen).toContain("第一条");
+  expect(screen).not.toContain("› 插队的"); // 没被当成第二条用户消息
+  // **而且文字要还在输入行里**：只断言「没变成用户行」是不够的——那样把输入清空也能过，
+  // 用户却得重打一遍（review 点名的判据缺口）
+  expect(screen).toContain("插队的");
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+/* ─────────────── 接线：Agent 事件 → 屏幕 ─────────────── */
+
+test("端到端：输入一句 → 屏幕上出现用户行与模型正文；Ctrl+C 退出，**但不停 Agent**", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("我在")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+
+  await flush();
+  expect(ui.screen()).toContain("已接上");
+
+  ui.feed("在吗");
+  ui.feed("\r");
+  await flush(200);
+  const screen = ui.screen();
+  expect(screen).toContain("在吗"); // 用户那行
+  expect(screen).toContain("我在"); // 模型正文
+
+  ui.feed(String.fromCharCode(3)); // Ctrl+C
+  expect(await done).toBe(0);
+
+  // **上一版这里断言「Agent 已 stop」。壳变 extension 之后那条不成立也不该成立**：
+  // 协议里没有 `stop`，收摊归装配层（`echo.stop()` 先卸壳这条 Extension、再停 Agent）。
+  // 壳子自己停 Agent 就是两个所有者——那正是把 `start`/`stop` 挡在协议外面要防的事。
+  expect(agent.acceptsWork).toBe(true); // 壳退出了，Agent 还活着
+  await agent.stop(); // 由「装配层」收
+});
+
+test("模型报错要显示出来，不静默吞掉；退出码为 1", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([]); // 脚本用尽 → provider 报错
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("说点什么");
+  ui.feed("\r");
+  await flush(200);
+  expect(ui.screen()).toContain("[错误]");
+  ui.feed(String.fromCharCode(3));
+  expect(await done).toBe(1);
+});
+
+test("工具调用在屏幕上有独立一行，跑完变成 ✓", async () => {
+  const ui = fakeTui();
+  const agent = new Agent({
+    model: { provider: "t", id: "only", api: "scripted" },
+    streamFunction: scriptedStreamFn([toolTurn("call-1", "echo_back", { text: "喂" }), textTurn("好了")]),
+    tools: [
+      {
+        kind: "model" as const,
+        name: "echo_back",
+        label: "回声",
+        description: "原样回声",
+        parameters: { type: "object", properties: { text: { type: "string" } } },
+        execute: async () => ({ content: "喂", isError: false, metadata: null }),
+      },
+    ],
+  });
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("用一下工具");
+  ui.feed("\r");
+  await flush(400);
+  expect(ui.screen()).toContain("echo_back");
+  expect(ui.screen()).toContain("✓ echo_back");
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("传进来的 signal 已经 abort：必须立刻收摊，不能永远停在等退出上", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("不会被用到")]);
+  const controller = new AbortController();
+  controller.abort(); // **进 runTui 之前就中止**——addEventListener 不会补发历史事件
+  let starts = 0;
+  const realStart = agent.start.bind(agent);
+  agent.start = async (...args: Parameters<Agent["start"]>): Promise<void> => {
+    starts += 1;
+    return realStart(...args);
+  };
+
+  const done = runTui({ agent: runtimeOf(agent), ui, signal: controller.signal });
+  await flush(200);
+  expect(await done).toBe(0); // 上一版这里会永远挂着
+  // **而且根本不许启动**：`start()` 会取锁、恢复会话、激活 Schedule、开 Inbox 消费。
+  // 上一版只是提前 resolve 了退出信号，`start()` 照跑（review 实测 starts === 1）——
+  // 那不叫立刻收摊，那叫先把副作用做完再退出。
+  expect(starts).toBe(0);
+});
+
+test("发完一句之后直接回车：不许重复发送同一句（pi-tui 的 Input 不会自己清空）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("收到一"), textTurn("收到二")]);
+  const prompts: string[] = [];
+  const realPrompt = agent.prompt.bind(agent);
+  agent.prompt = ((text: string, ...rest: never[]) => {
+    prompts.push(text);
+    return realPrompt(text, ...rest);
+  }) as Agent["prompt"];
+
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("first");
+  ui.feed("\r");
+  await flush(300); // 等这一轮跑完
+  ui.feed("\r"); // 空手再按一次回车
+  await flush(300);
+
+  // 上一版：输入行里还留着 "first"，这一下会把它再发一遍（review 实测收到两次）
+  expect(prompts).toEqual(["first"]);
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("聚焦之后渲染里要有 CURSOR_MARKER（可见光标——这正是改用 Input 的理由之一）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  // 上一版把焦点给了没有 `focused` 字段的 wrapper，Input.focused 永远 false，标记一次都不输出
+  expect(ui.screen()).toContain(CURSOR_MARKER);
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("壳子**不停 Agent**：协议里没有 stop，收摊归装配层（壳变 extension 之后的边界）", async () => {
+  // 上一版壳子自己调 `echo.stop()`。现在启停归装配层（`echo.agent.start()` / `echo.stop()`），
+  // 协议里根本没有那两个方法——壳子想碰也碰不到。判据落在**Agent 没被停掉**上：
+  // 壳子退出之后 Agent 仍然可用，因为收摊是别人的事。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed(String.fromCharCode(3));
+  expect(await done).toBe(0);
+
+  // 壳子退出了，但 Agent 还活着——它还接得了活
+  expect(agent.acceptsWork).toBe(true);
+  await agent.stop(); // 由「装配层」来收
+});
+
+test("接上那行报模型 id（启动是装配层的事，壳子只说自己接上了谁）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  expect(ui.screen()).toContain("已接上");
+  expect(ui.screen()).toContain("only"); // FAKE 模型 id
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+/* ─────────────── 权限：协议里「必须有人回答」的那一支 ─────────────── */
+
+test("permissionRequest 摆上屏幕并按 y 放行——不订阅 lifecycle 的壳会把 ask 拖成 deny", async () => {
+  // 上一版 TUI **根本没订阅 lifecycle**：每次 `ask` 都因无人回答被折成 deny，
+  // 用户看到「工具被拒」却不知道为什么。那不是设计，是壳子少实现了协议的一半。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const answered: { permissionId: string; decision: string }[] = [];
+  const runtime = runtimeOf(agent, {
+    answerPermission: async (a) => {
+      answered.push({ permissionId: a.permissionId, decision: a.decision });
+      return { kind: "accepted" as const, permissionId: a.permissionId, runId: "r", toolCallId: "c", decision: a.decision };
+    },
+  });
+  const done = runTui({ agent: runtime, ui });
+  await flush();
+
+  // core 发来一次 ask（真实来源是 authorization stage，这里直接投递那条 lifecycle 事件）
+  emitLifecycle(agent, {
+    type: "permissionRequest",
+    permissionId: "p1",
+    runId: "r1",
+    turnId: "t1",
+    toolCallId: "c1",
+    toolName: "bash",
+    params: { cmd: "rm -rf /" },
+    reason: "要跑命令",
+  });
+  await flush();
+
+  const screen = ui.screen();
+  expect(screen).toContain("bash");
+  expect(screen).toContain("[y/n]"); // **提示语必须写清怎么答**：问了却不说按什么键等于没问
+  // **危险参数必须真实可见**（review 二轮 P0）：上一版只显示「允许 bash？」，
+  // 而 ask 里带的是冻结后的最终参数 `rm -rf /`——用户批准的和实际要跑的，屏幕上看不出是不是一回事。
+  // 那叫**盲批**，是这个界面最不该有的东西。
+  expect(screen).toContain("rm -rf /");
+  expect(answered).toEqual([]); // 还没按键，不许替用户答
+
+  ui.feed("y");
+  await flush();
+  expect(answered).toEqual([{ permissionId: "p1", decision: "allow" }]);
+  expect(ui.screen()).not.toContain("[y/n]"); // 答完问题就撤掉
+
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("按 n 就是 deny；`y`/`n` 在待答期间**不落进输入行**", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const answered: string[] = [];
+  const runtime: AgentRuntime = {
+    ...runtimeOf(agent),
+    answerPermission: async (a) => {
+      answered.push(a.decision);
+      return { kind: "accepted" as const, permissionId: a.permissionId, runId: "r", toolCallId: "c", decision: a.decision };
+    },
+  };
+  const done = runTui({ agent: runtime, ui });
+  await flush();
+  emitLifecycle(agent, {
+    type: "permissionRequest",
+    permissionId: "p2",
+    runId: "r",
+    turnId: "t",
+    toolCallId: "c",
+    toolName: "write_file",
+    params: {},
+    reason: "要写盘",
+  });
+  await flush();
+
+  ui.feed("n");
+  await flush();
+  expect(answered).toEqual(["deny"]);
+  // 那一刻用户面对的是是非题，不是在写下一句话——按键落进输入行的话，
+  // 问题会一直挂着，core 那边则按 askTimeoutMs 折成 deny，用户全程不知道发生过什么
+  expect(ui.screen()).not.toContain("› n");
+
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("那一轮没了（permissionCancelled）：问题从屏幕上撤掉，不让用户对着死问题按键", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  emitLifecycle(agent, {
+    type: "permissionRequest",
+    permissionId: "p3",
+    runId: "r",
+    turnId: "t",
+    toolCallId: "c",
+    toolName: "bash",
+    params: {},
+    reason: "要跑命令",
+  });
+  await flush();
+  expect(ui.screen()).toContain("[y/n]");
+
+  emitLifecycle(agent, { type: "permissionCancelled", permissionId: "p3", toolCallId: "c", reason: "run-aborted" });
+  await flush();
+  expect(ui.screen()).not.toContain("[y/n]");
+
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+/* ─────────────── 清洗：模型说了什么 ≠ 模型能对你的终端做什么 ─────────────── */
+
+const ESC = String.fromCharCode(27);
+const BEL = String.fromCharCode(7);
+
+test("OSC 52：模型正文里的改剪贴板序列不许进终端（留下的只能是可见文本）", () => {
+  const t = new Transcript();
+  // `ESC ] 52 ; c ; <base64> BEL` = 「把这段 base64 写进用户剪贴板」。原样输出就等于模型有了剪贴板写权限。
+  t.push({ kind: "assistant", text: `${ESC}]52;c;aGFja2Vk${BEL}正文`, streaming: false });
+  const screen = t.render(40).join("\n");
+  expect(screen).toContain("正文");
+  expect(screen).not.toContain("]52;");
+  expect(screen).not.toContain("aGFja2Vk");
+  expect(screen).not.toContain(BEL);
+});
+
+test("CSI：清屏 / 光标移动序列不许进终端（否则模型能擦掉整个界面）", () => {
+  const t = new Transcript();
+  t.push({ kind: "assistant", text: `${ESC}[2J${ESC}[H都没了`, streaming: false });
+  const screen = t.render(40).join("\n");
+  expect(screen).toContain("都没了");
+  expect(screen).not.toContain("[2J");
+  expect(screen).not.toContain("[H");
+});
+
+test("裸 CR / BEL：`stripTerminalSequences()` 不管这两个，必须由第二遍 C0 清洗兜住", () => {
+  // 这条是「两遍缺一不可」的判据：实测 pi-tui 那一遍会把 `\r` 和 BEL 原样留下，
+  // 而 `\r` 能把后半句覆盖到行首、BEL 会让终端一直响。
+  const t = new Transcript();
+  t.push({ kind: "assistant", text: `前半${String.fromCharCode(13)}后半${BEL}`, streaming: false });
+  const screen = t.render(40).join("\n");
+  expect(screen).toContain("前半后半");
+  expect(screen).not.toContain(String.fromCharCode(13));
+  expect(screen).not.toContain(BEL);
+});
+
+test("四类条目都洗，且换行留着、tab 变空格", () => {
+  const t = new Transcript();
+  t.push({ kind: "user", text: `用户${ESC}[31m` });
+  t.push({ kind: "tool", name: `工具${BEL}`, detail: `细节${ESC}]52;c;eA==${BEL}`, state: "done" });
+  t.push({ kind: "notice", text: `通知${ESC}[2J` });
+  const screen = t.render(40).join("\n");
+  expect(screen).toContain("用户");
+  expect(screen).toContain("工具");
+  expect(screen).toContain("细节");
+  expect(screen).toContain("通知");
+  expect(screen).not.toContain("[31m"); // 模型自带的颜色也不留——只有 TUI 自己的 SGR 算数
+  expect(screen).not.toContain("[2J");
+  expect(screen).not.toContain(BEL);
+
+  // 换行是内容，要留；tab 展开成空格，不能被当控制字符删掉（那样代码缩进全丢）
+  const t2 = new Transcript();
+  t2.push({ kind: "assistant", text: "第一行\n\t缩进", streaming: false });
+  const lines = t2.render(40);
+  expect(lines).toContain("第一行");
+  expect(lines.some((l) => l.startsWith("    缩进"))).toBe(true);
+});
+
+test("清洗在加 SGR 之前：TUI 自己的颜色留得住", () => {
+  const t = new Transcript();
+  t.push({ kind: "user", text: "我说的话" });
+  // 顺序反了的话，`clean()` 会把我们刚加的 `ESC[36m` 一起洗掉，屏幕变成纯白
+  expect(t.render(40).join("\n")).toContain(`${ESC}[36m`);
+});
+
+/* ─────────────── 折行按 grapheme，不按 code point ─────────────── */
+
+test("家庭 emoji 不许被拆开（ZWJ 序列是一个字素，不是 7 个）", () => {
+  const t = new Transcript();
+  t.push({ kind: "assistant", text: "👨‍👩‍👧‍👦X", streaming: false });
+  // 上一版按 code point 累加宽度，宽度 2 时会得到 ["👨","‍","👩","‍","👧","‍","👦","X"]（实测）
+  const lines = t.render(2).filter((l) => l !== "");
+  expect(lines[0]).toBe("👨‍👩‍👧‍👦");
+  expect(lines[1]).toBe("X");
+});
+
+test("组合符不许与基字符分家", () => {
+  const t = new Transcript();
+  const combining = `e${String.fromCharCode(0x0301)}`; // e + 尖音符 = é（两个 code point，一个字素）
+  t.push({ kind: "assistant", text: `${combining}${combining}`, streaming: false });
+  const lines = t.render(1).filter((l) => l !== "");
+  expect(lines[0]).toBe(combining);
+  expect(lines[1]).toBe(combining);
+});
+
+/* ─────────────── 运行态：由 Agent 生命周期驱动，不是本地 prompt() ─────────────── */
+
+/**
+ * 让 core 报告「我接不接新工作」。
+ *
+ * 打桩的是 `acceptsWork` 而**不是** `status`：五轮 review 的那条就死在这个区别上——
+ * Inbox run 之后 core 是 `closeRun()`（置 `status = "idle"`）→ `await ackBatch()` →
+ * 清 `inboxTicketOutstanding`，中间 `status` 已经 idle 而 `prompt()` 照拒。
+ * 「core 忙不忙」的真判据只有 `acceptsWork` 一个（core 侧那条真跑 InboxStore 的判据在
+ * `packages/core/test/inbox-durable.test.ts`「ack 窗口」，这里只验壳子读没读它）。
+ */
+function setCoreAccepts(agent: Agent, accepts: boolean): void {
+  Object.defineProperty(agent, "acceptsWork", { get: () => accepts, configurable: true });
+}
+
+/** 捕获 runTui 挂上去的事件监听器，用来合成自主 run（Inbox / Schedule）的事件。 */
+function tapEvents(agent: Agent): (event: Record<string, unknown>) => void {
+  const captured: ((e: unknown, s: AbortSignal) => unknown)[] = [];
+  const real = agent.subscribe.bind(agent);
+  agent.subscribe = ((l: (e: unknown, s: AbortSignal) => unknown) => {
+    captured.push(l);
+    return real(l as never);
+  }) as Agent["subscribe"];
+  let seq = 1000;
+  return (event) => {
+    const enveloped = { seq: seq++, at: Date.now(), ...event };
+    for (const l of captured) l(enveloped, new AbortController().signal);
+  };
+}
+
+test("装配层还没把 Agent 起起来（acceptsWork=false）就提交：不发出、不清空、不显示拒绝", async () => {
+  // 上一版这条叫「慢启动期间提交」，判据是壳子自己 `start()` 到一半。**壳变 extension 之后
+  // 启停归装配层**，壳子压根不 start——「还没起来」这件事对它就是 `acceptsWork === false`，
+  // 与「正忙」「Inbox 还在 ack」走同一条判据。这正是协议要达到的效果：壳子不再自己数状态。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  setCoreAccepts(agent, false); // 装配层还没 start：core 说不接活
+  const prompts: string[] = [];
+  const realPrompt = agent.prompt.bind(agent);
+  agent.prompt = ((text: string, ...rest: never[]) => {
+    prompts.push(text);
+    return realPrompt(text, ...rest);
+  }) as Agent["prompt"];
+
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("等不及了");
+  ui.feed("\r");
+  await flush(100);
+
+  expect(prompts).toEqual([]);
+  expect(ui.screen()).toContain("等不及了"); // 还在输入行里，不用重打
+  expect(ui.screen()).not.toContain("[拒绝]");
+
+  setCoreAccepts(agent, true);
+  ui.feed("\r");
+  await flush(200);
+  expect(prompts).toEqual(["等不及了"]); // 起来了就发得出去
+
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("自主 run（Inbox / Schedule）跑着的时候提交：同样不发出、不清空", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const emit = tapEvents(agent);
+  const prompts: string[] = [];
+  const realPrompt = agent.prompt.bind(agent);
+  agent.prompt = ((text: string, ...rest: never[]) => {
+    prompts.push(text);
+    return realPrompt(text, ...rest);
+  }) as Agent["prompt"];
+
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  // 没有任何本地 prompt()，纯粹是 Agent 自己在跑一轮：
+  // run 落位（core 从此不接新工作）比 agent_start 那一拍还早，顺序与 `executeAdmitted` 一致
+  setCoreAccepts(agent, false);
+  emit({ type: "agent_start" });
+  ui.feed("插一句");
+  ui.feed("\r");
+  await flush(100);
+
+  expect(prompts).toEqual([]); // 上一版 `busy` 是 false → 这句会被发出去并撞上「已有一轮在飞」
+  expect(ui.screen()).toContain("插一句");
+
+  emit({ type: "agent_end", outcome: { kind: "completed" } });
+  setCoreAccepts(agent, true); // core 真正收完摊了（含 Inbox 的 ack 裁决）
+  await flush();
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("`agent_end` 不等于空闲：循环收尾了但 core 还没 closeRun()，这时不许放行第二条", async () => {
+  // 四轮 review 实测：`agent_end` 只说明循环不再产生事件；core 还要 `await ticket.settled`
+  // → `finishRun()` → `closeRun()` 才清 `activeRun`。上一版在 `agent_end` 就把运行态灭掉，
+  // 第二条输入于是被吃掉并换来一句「Agent 正在处理上一个 prompt」。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const emit = tapEvents(agent);
+  const prompts: string[] = [];
+  const realPrompt = agent.prompt.bind(agent);
+  agent.prompt = ((text: string, ...rest: never[]) => {
+    prompts.push(text);
+    return realPrompt(text, ...rest);
+  }) as Agent["prompt"];
+
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  setCoreAccepts(agent, false);
+  emit({ type: "agent_start" });
+  emit({ type: "agent_end", outcome: { kind: "completed" } }); // 循环收尾了……
+  await flush();
+
+  // ……但 core 还没 closeRun()：activeRun 还在，`acceptsWork` 还是 false
+  ui.feed("抢跑的第二条");
+  ui.feed("\r");
+  await flush(100);
+  expect(prompts).toEqual([]); // 上一版这里会发出去并撞上「正在处理上一个 prompt」
+  expect(ui.screen()).toContain("抢跑的第二条"); // 文字留在输入行，不用重打
+  expect(ui.screen()).not.toContain("[拒绝]");
+
+  // core 真的收完摊（permit settle + closeRun，Inbox 还要 ack 裁决）之后才放行
+  setCoreAccepts(agent, true);
+  ui.feed("\r");
+  await flush(200);
+  expect(prompts).toEqual(["抢跑的第二条"]);
+
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("自主 run 报错：屏幕要看得见，退出码要是 1", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const emit = tapEvents(agent);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  emit({ type: "agent_start" });
+  emit({
+    type: "agent_end",
+    outcome: { kind: "error", error: { source: "provider", code: "internal", retryable: false, message: "自主轮炸了" } },
+  });
+  await flush();
+
+  // 上一版：没有 prompt() 调用方接结果，`agent_end` 又没人听——屏幕上一个字都没有
+  expect(ui.screen()).toContain("自主轮炸了");
+
+  ui.feed(String.fromCharCode(3));
+  expect(await done).toBe(1); // 失败退出码
+});
+
+test("本地一轮出错只显示一次（`agent_end` 显示，`submit()` 不重复显示）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([]); // 脚本用尽 → provider 报错，走真的 agent_end(error)
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("会失败的一句");
+  ui.feed("\r");
+  await flush(200);
+
+  const screen = ui.screen();
+  const count = screen.split("[错误]").length - 1;
+  expect(count).toBe(1); // 两边都显示的话这里是 2
+
+  ui.feed(String.fromCharCode(3));
+  expect(await done).toBe(1);
+});
+
+test("Inbox 的 ack 窗口：core 报 `status = idle` 但还不接活，壳子不许被 status 骗过去", async () => {
+  // 五轮 review：Inbox run 之后 `closeRun()` 已经把 `status` 置回 idle，`ackBatch()` 的裁决
+  // 还没出来，`inboxTicketOutstanding` 还立着——这时 `prompt()` 会抛「Inbox 的一批还在等 ack 裁决」。
+  // 所以这条把 `status` 与 `acceptsWork` **故意摆成相反**：壳子读错哪一个，这里就红。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  Object.defineProperty(agent, "status", { get: () => "idle", configurable: true });
+  setCoreAccepts(agent, false);
+
+  const prompts: string[] = [];
+  const realPrompt = agent.prompt.bind(agent);
+  agent.prompt = ((text: string, ...rest: never[]) => {
+    prompts.push(text);
+    return realPrompt(text, ...rest);
+  }) as Agent["prompt"];
+
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("ack 还没裁决就发");
+  ui.feed("\r");
+  await flush(100);
+
+  expect(prompts).toEqual([]); // 读 status 的那版会在这里发出去，然后显示一句拒绝
+  expect(ui.screen()).toContain("ack 还没裁决就发");
+  expect(ui.screen()).not.toContain("[拒绝]");
+
+  setCoreAccepts(agent, true);
+  ui.feed("\r");
+  await flush(200);
+  expect(prompts).toEqual(["ack 还没裁决就发"]);
+
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("参数里的终端控制序列不许注入——「请你确认」这一步尤其不能被劫持", () => {
+  // 参数来自模型，与正文一样不可信。不洗的话一条 `OSC 52` 就能在确认框里改用户剪贴板：
+  // 用户以为自己在读「要执行什么」，实际屏幕已经被写这条参数的人接管了。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  return (async () => {
+    await flush();
+    emitLifecycle(agent, {
+      type: "permissionRequest",
+      permissionId: "pX",
+      runId: "r",
+      turnId: "t",
+      toolCallId: "c",
+      toolName: "bash",
+      params: { cmd: `${String.fromCharCode(27)}]52;c;aGFjaw==${String.fromCharCode(7)}真正的命令` },
+      reason: "要跑命令",
+    });
+    await flush();
+    const screen = ui.screen();
+    expect(screen).toContain("真正的命令"); // 内容留着——洗的是控制序列不是信息
+
+    // **判据落在「参数那一行里有没有真的控制字符」**，不是整屏——整屏本来就有 TUI 自己的
+    // SGR 与光标标记，那些是合法的。也不是断言「没有 `]52;` 这几个字」：
+    // `JSON.stringify` 会把 ESC 转成字面量 `\u001b`，那串东西作为**可见文本**出现是对的——
+    // 用户本来就该看见「这条命令里藏了个转义序列」。危险的是**真字节**进了终端。
+    // 写这条时先写成 `not.toContain("]52;")`，实测判红才发现自己在断言错的东西。
+    const paramLine = screen.split("\n").find((l) => l.includes("真正的命令")) ?? "";
+    const payload = paramLine.replace(/\u001b\[[0-9;]*m/g, ""); // 去掉 TUI 自己加的 SGR
+    const rawControls = [...payload].filter((c) => {
+      const code = c.codePointAt(0) ?? 0;
+      return code <= 0x1f || code === 0x7f;
+    });
+    expect(rawControls).toEqual([]); // 参数那一行里一个真控制字符都不许有
+    expect(payload).toContain("u001b"); // 而它以可见文本的样子留着——信息没被抹掉
+    ui.feed(String.fromCharCode(3));
+    await done;
+  })();
+});
+
+test("带着**已存在的 ask** 启动：壳子必须把它摆出来（`pendingPermissions` 就是为这个）", async () => {
+  // Extension 换代 / 壳重挂时，订阅只能收到「此后」的事件——**在那之前就欠着的那条谁也不会重发**。
+  // 不补的话用户看不到问题，run 一直等到 `askTimeoutMs` 折成 deny，全程无人知情。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const runtime = runtimeOf(agent, {
+    pendingPermissions: [
+      { permissionId: "old-1", runId: "r", turnId: "t", toolCallId: "c", toolName: "write_file", params: { path: "/etc/hosts" }, reason: "要写盘" },
+    ] as never,
+  });
+
+  const done = runTui({ agent: runtime, ui });
+  await flush();
+
+  const screen = ui.screen();
+  expect(screen).toContain("write_file");
+  expect(screen).toContain("/etc/hosts"); // 参数同样要看得见
+  expect(screen).toContain("[y/n]");
+
+  ui.feed(String.fromCharCode(3));
+  await done;
+});
+
+test("同一个 permissionId 不重复摆：补发的与订阅收到的会合并", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const runtime = runtimeOf(agent, {
+    pendingPermissions: [
+      { permissionId: "dup", runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params: {}, reason: "第一次" },
+    ] as never,
+  });
+  const done = runTui({ agent: runtime, ui });
+  await flush();
+
+  // 订阅之后 core 又把同一条发了一遍（换代重放的常见形状）
+  emitLifecycle(agent, {
+    type: "permissionRequest",
+    permissionId: "dup",
+    runId: "r",
+    turnId: "t",
+    toolCallId: "c",
+    toolName: "bash",
+    params: {},
+    reason: "第二次",
+  });
+  await flush();
+
+  const screen = ui.screen();
+  expect(screen.split("[权限] 要用 bash").length - 1).toBe(1); // 只摆一次
+  ui.feed(String.fromCharCode(3));
+  await done;
+});

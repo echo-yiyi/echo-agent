@@ -1,0 +1,17 @@
+{
+  "name": "echo-example-hello",
+  "private": true,
+  "type": "module",
+  "description": "最小样例:装一个包,说一句话。需要模型凭据。",
+  "dependencies": {
+    "@echo-agent/core": "*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  },
+  "scripts": {
+    "start": "bun index.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}

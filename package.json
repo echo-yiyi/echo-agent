@@ -1,0 +1,23 @@
+{
+  "name": "echo-agent-workspace",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "@echo-agent/core": "workspace:*",
+    "@echo-agent/coding-agent": "workspace:*",
+    "@types/bun": "latest",
+    "echo-agent": "workspace:*",
+    "typescript": "^5.5.0"
+  },
+  "scripts": {
+    "typecheck": "bun run typecheck:core && bun run typecheck:cli && bun run typecheck:coding-agent && bun run typecheck:repo",
+    "typecheck:core": "tsc -p packages/core --noEmit",
+    "typecheck:cli": "tsc -p packages/cli --noEmit",
+    "typecheck:coding-agent": "tsc -p packages/coding-agent --noEmit",
+    "typecheck:repo": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

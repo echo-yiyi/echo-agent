@@ -1,0 +1,8 @@
+node_modules/
+.echo/
+.env
+*.log
+
+# 构建产物（`bun run build` 出的，`files` 里发布、仓库里不收）
+packages/core/dist/
+*.tgz
