@@ -5,7 +5,7 @@
 // 要么慢要么飘。有了 fake clock 才谈得上「拨到那一刻，断言恰好投了一次」。
 //
 // **不暴露 timer handle**：`setInterval` 的返回值在 node 是 `NodeJS.Timeout`、在浏览器是
-// `number`——把它写进接口就等于把宿主类型拖进 engine 面（`engine-purity` 门会判红）。
+// `number`——把它写进接口就等于把宿主类型拖进 engine 面。
 // 所以 `setInterval` 返回的是**取消函数**，谁都不用知道底下是什么。
 
 export interface Clock {

@@ -1176,7 +1176,7 @@ export class Agent {
     try {
       if (this.stateLock !== undefined) {
         // holder 只是给人看的标识——**不要在这里取 pid**，那是 node 全局，
-        // agent.ts 在 engine 面（`engine-purity` 门会判红）。进程身份由 Lock 的实现自己记。
+        // agent.ts 在 engine 面。进程身份由 Lock 的实现自己记。
         const lease = await this.stateLock.acquire({ holder: `agent:${this.agentId}` });
         if (lease === null) {
           // 拿不到就是拿不到——core 不抢占（§13.12.3）。

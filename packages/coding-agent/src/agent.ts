@@ -21,7 +21,7 @@
 //
 // ⚠️ CODING_SYSTEM 是模型逐字读的 prompt 资产,临时措辞,定稿归 prompt 治理。
 
-import { DEFAULT_MAX_ITERATIONS } from "@echo-agent/core/engine"; // 执行预算的唯一出处(identity 读它)
+import { DEFAULT_MAX_ITERATIONS } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
 import type { ExtensionEntry } from "@echo-agent/core/extension";
 import type { PermissionPolicy as CorePermissionPolicy, Skill } from "@echo-agent/core";
 import { makeBashTool } from "./tools/bash.ts";
@@ -98,9 +98,12 @@ const AGENT_BUILTIN_TOOLS = [
   "skill_create",
 ] as const;
 
-/** 被测身份材料(evolve subject lock 用):真正决定行为的东西——系统 prompt 逐字、缺省模型、
- *  **完整**工具集(产品层三件套 + Agent 构造期自带)。消费方(evolve 根装配)对它算 digest,
- *  所以改 prompt / 换缺省模型 / 增删任一工具都会改 digest,重启后锁不上即判漂移。 */
+/** 本 preset 的**行为身份快照**:把真正决定行为的东西一次性固定下来——系统 prompt 逐字、缺省模型、
+ *  执行预算、**完整**工具集(产品层三件套 + Agent 构造期自带)。它是可复现的 digest 材料:
+ *  改 prompt / 换缺省模型 / 增删任一工具都会改 digest,两次结果一比就能判出静默漂移。
+ *
+ *  **不在公共面**(不从 `index.ts` 导出):本仓没有生产消费者,它现在只给 `test/identity.test.ts`
+ *  当判据——手写的清单必须等于真装出来的工具集。 */
 export function codingAgentIdentity(): {
   systemPrompt: string;
   defaultModel: string;

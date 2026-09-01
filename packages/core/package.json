@@ -23,12 +23,6 @@
       "import": "./dist/background/public.js",
       "default": "./dist/background/public.js"
     },
-    "./engine": {
-      "bun": "./src/engine.ts",
-      "types": "./dist/engine.d.ts",
-      "import": "./dist/engine.js",
-      "default": "./dist/engine.js"
-    },
     "./extension": {
       "bun": "./src/extension/public.ts",
       "types": "./dist/extension/public.d.ts",

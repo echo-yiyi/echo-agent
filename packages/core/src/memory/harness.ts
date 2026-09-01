@@ -87,8 +87,6 @@ export type AgentMemories = MemoryDeps & {
  * 从前这里写 `dir ?? new FileDir(join(echoHome(), "memory"))`——一个「顺手带的默认实现」，
  * 代价是把 `node:fs`/`node:os` 拖进 `Agent` 的依赖闭包：能力层只该定义语义与端口，
  * 默认件属于装配层（§13.3「Agent 拥有 Service，外部注入 Store」）。
- * 实测这条通路是 `agent.ts` 闭包里唯一的真 IO 来源；移走后闭包 `node:` 归零，
- * `@echo-yiyi/core/engine` 才可能是 Web-standard 的（门在 test/engine-purity.test.ts）。
  *
  * 「默认落盘」不是没有了，是**上移**：M3 的 `await createAgent()`（async，D17）负责注入 FileDir。
  */

@@ -1,60 +1,113 @@
 # echo-agent
 
-一个自主 agent 的运行时与官方 CLI。两个包：
+English | [中文](README.zh.md)
 
-| 包 | 是什么 | 硬约束 |
-|---|---|---|
-| `@echo-agent/core` | Runtime / SDK。循环、消息、状态机、工具调用、Extension 微内核、记忆与任务 | **运行时依赖恒空，不出 bin**（`packages/core/test/zero-runtime-deps.test.ts` 守着） |
-| `echo-agent` | 官方默认壳，**唯一的 `echo-agent` 可执行文件**（交互 / 管道两形态） | 依赖恰好 `@echo-agent/core` + `pi-tui` |
+An agent runtime and its official CLI: use the assembled runtime, build directly on the engine, or run the same agent interactively and through a Unix pipe.
 
-外加 `@echo-agent/coding-agent`：一份 preset（系统 prompt + 权限策略 + `echo:workspace` / `echo:shell`
-两条 Extension），把 core 装成一个能读写文件、跑命令的 coding agent。
+> **Status: pre-release and not published.** The workspace packages are currently private. Install from source for now; the public API may change before the first `0.x` release.
 
-> **状态：搬迁中，尚未发布。** npm 上的 `echo-agent@0.0.0` 只是名称占位。
-> 首个真实版本会是 `0.x`——`0.x` 就是 semver 里那个意思：公共面还会变。
+## Quick start
 
-## 跑起来
+[Bun](https://bun.sh/) is required to work from this repository. The default provider is Kimi.
 
 ```bash
 bun install
-bun run typecheck   # 四段 tsc --noEmit
-bun test            # 三个包 + 分发门
+MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
 ```
 
-## 两个使用高度，一个 composition root
-
-```ts
-// 高：装配好的完整 Runtime——扩展自动发现、内建能力都装上了
-import { createEcho, kimiProvider } from "@echo-agent/core";
-const echo = await createEcho({ provider: kimiProvider() });
-await echo.agent.start();
-
-// 低：自己给端口、自己注册工具
-import { Agent } from "@echo-agent/core/engine";
-const agent = new Agent({ model, streamFunction });
-```
-
-**装配只有 `createEcho()` 一处**。CLI 是它的调用方，不是第二个装配现场。
-
-## 形态由 stdin 决定
+In a terminal, the command opens the interactive UI. With redirected stdin, each input line is one turn; model text goes to stdout and operational output goes to stderr.
 
 ```bash
-echo-agent                    # 终端里 → 交互界面
-echo "修掉失败的测试" | echo-agent   # 管道里 → 一行一轮，正文进 stdout、旁白进 stderr
+printf 'Introduce yourself in one sentence.\n' |
+  MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
 ```
 
-不给 `--pipe` 这类开关：有没有人坐在终端前，进程自己看得见。
+By default, persistent state lives at `$ECHO_HOME/agents/<id>`, or `$PWD/.echo/agents/<id>` when `ECHO_HOME` is unset. Use `--state-dir <path>` to override the complete state directory.
 
-## 目录
+## Use the CLI
 
+See every option with:
+
+```bash
+bun packages/cli/bin/echo-agent.ts --help
 ```
-packages/core/          @echo-agent/core —— Runtime / SDK
-packages/cli/           echo-agent —— 官方 CLI 与 TUI 壳
-packages/coding-agent/  @echo-agent/coding-agent —— coding preset
-examples/               装 tarball 就能跑的样例（同时是分发门的消费者）
-test/                   仓库级的门：pack → install → 真执行
+
+Select a provider with `--provider`; override its default model with `--model`.
+
+| Provider | Credential environment variable |
+|---|---|
+| `kimi` | `MOONSHOT_API_KEY` or `ECHO_LLM_API_KEY` |
+| `deepseek` | `DEEPSEEK_API_KEY` |
+| `openai` | `OPENAI_API_KEY` or `ECHO_LLM_API_KEY` |
+| `zai` | `ZAI_CODING_CN_API_KEY`, `ZHIPU_API_KEY`, or `ECHO_LLM_API_KEY` |
+| `minimax` | `MINIMAX_API_KEY` or `ECHO_LLM_API_KEY` |
+
+The MiniMax adapter is covered by fixtures but has not yet been exercised against the live service.
+
+Use repeatable `--extensions <directory>` flags to choose the extension search directories; with no flag, the CLI searches `./extensions`. Pass `--no-memory` to omit Memory and Dream, or `--agent-id <id>` to choose the persistent agent identity.
+
+## Use the runtime
+
+`createEcho()` is the high-level composition root. It wires persistence, memory, tasks, and extensions, while lifecycle remains explicit:
+
+```ts
+import { createEcho, kimiProvider } from "@echo-agent/core";
+
+const echo = await createEcho({ provider: kimiProvider() });
+
+echo.agent.subscribe((event) => {
+  if (event.type === "message_update" && event.delta.type === "text_delta") {
+    process.stdout.write(event.delta.text);
+  }
+});
+
+await echo.agent.start();
+try {
+  await echo.agent.prompt("Introduce yourself in one sentence.");
+} finally {
+  await echo.stop();
+}
 ```
+
+For custom hosts, import `Agent` from `@echo-agent/core` and supply the model, stream function, and ports yourself. Both heights sit on the same entry point: `createEcho()` assembles the full runtime, while `Agent` leaves the ports to you.
+
+## Packages
+
+| Package | Role |
+|---|---|
+| `@echo-agent/core` | Runtime, engine, provider adapters, persistence, memory, tasks, and the extension API |
+| `echo-agent` | Official CLI with interactive and piped modes |
+| `@echo-agent/coding-agent` | Coding preset with workspace and shell extensions |
+
+Runnable consumers live in [`examples/`](examples/): a real-provider hello world, a credential-free scripted agent, and extension auto-discovery. The distribution test packs the workspaces, installs the tarballs in clean projects, and runs these public entry points with Bun and Node.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| [`packages/core/`](packages/core/) | `@echo-agent/core` runtime and SDK |
+| [`packages/cli/`](packages/cli/) | `echo-agent` CLI and TUI shell |
+| [`packages/coding-agent/`](packages/coding-agent/) | Coding-agent preset |
+| [`examples/`](examples/) | Executable package consumers |
+| [`test/`](test/) | Repository-level distribution and documentation checks |
+
+## Development
+
+```bash
+bun install
+bun run typecheck
+bun test
+```
+
+## Acknowledgements
+
+- [Pi](https://github.com/earendil-works/pi), whose `pi-tui` package provides the terminal UI foundation used by the official CLI.
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), whose open architecture and documentation informed this project's design and documentation work.
 
 ## License
 
-MIT
+Copyright © 2026 echo-yiyi.
+
+echo-agent is released under the [MIT License](LICENSE). You may use it privately or commercially, copy it, modify it, distribute it, and sublicense it. If you distribute the software or a substantial portion of it, you must retain the original copyright and license notice.
+
+The software is provided as-is, without warranty. Third-party components remain subject to their own licenses. If this summary differs from the license text, the [`LICENSE`](LICENSE) file controls.

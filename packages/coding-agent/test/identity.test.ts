@@ -1,6 +1,8 @@
-// review 四轮 #4:codingAgentIdentity() 是 evolve subject lock 的 digest 材料——它必须与
-// **真装出来的 agent** 一致,否则「改了 prompt/工具但 digest 没变」的漂移会被放过。
+// 这道门守的是**工具集/prompt 的静默漂移**:`codingAgentIdentity()` 里那份手写清单,必须等于
+// **真装出来的 agent** 身上的东西。抓到过的真事——工具集从 10 件漂到 15 件而清单纹丝不动。
 // 本测试从真 agent 取真相(不是照抄清单),identity 与之不符即红。
+//
+// `codingAgentIdentity()` 不在公共面(见 `src/agent.ts`),所以这里从 `../src/agent.ts` 直接取。
 //
 // 2026-08-31:装配从 `createCodingAgent()` 换成 `createEcho({ ...codingPreset() })`
 // （产品层只出配置，装配只有一处）。**判据一条没减**——恰恰因为装配路径换了，
@@ -12,7 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEcho, createProvider, createProviderStreams, type Echo, type Provider } from "@echo-agent/core";
 import { scriptedDialect } from "@echo-agent/core/testing";
-import { codingAgentIdentity, codingPreset } from "../src/index.ts";
+import { codingPreset } from "../src/index.ts";
+import { codingAgentIdentity } from "../src/agent.ts";
 
 const dirs: string[] = [];
 process.on("exit", () => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });

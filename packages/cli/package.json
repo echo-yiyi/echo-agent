@@ -26,5 +26,10 @@
       "bun": "./src/index.ts"
     },
     "./package.json": "./package.json"
-  }
+  },
+  "files": [
+    "src",
+    "bin",
+    "LICENSE"
+  ]
 }

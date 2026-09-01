@@ -6,7 +6,9 @@
 它负责「跑完一轮任务」以及「进程重启之后还记得自己是谁」。
 
 ```ts
-import { createEcho } from "@echo-agent/core";
+import { createEcho, type Provider } from "@echo-agent/core";
+
+declare const myProvider: Provider;
 
 const echo = await createEcho({ provider: myProvider });
 await echo.agent.start();               // 取单写锁 → 恢复会话
@@ -19,20 +21,18 @@ await echo.stop();                      // 先卸扩展 → 等落盘 settle →
 
 ## 两个使用高度
 
-| 说明符 | 面向 | 里面有什么 |
-|---|---|---|
-| `@echo/core` | Node / Bun | `createEcho()`（唯一装配现场）、`FileDir`、文件锁、Skill 加载 |
-| `@echo-agent/core/engine` | 浏览器 / Worker / Edge | **纯 Web 标准面**，不碰 `node:`。`Agent` 类、循环、消息、端口类型 |
+**都在 `@echo-agent/core` 这一条入口上**：
 
-低层用 `new Agent()`（`/engine`）：**自己给端口、自己注册工具**——它不会替你装任何默认件。
+| 高度 | 用法 | 你要自己给什么 |
+|---|---|---|
+| 高 | `createEcho()` | 只给 provider——端口、内建能力与扩展装配都已备好 |
+| 低 | `new Agent()` | 端口自己给、工具自己注册，它不会替你装任何默认件 |
+
 要内建工具但不想走完整装配，调 `mountBuiltinTools(agent)`（`@echo-agent/core/extension`），
 那就是 `createEcho()` 内部用的同一张表、同一条路。
 
 另有 `@echo-agent/core/testing`（FakeProvider 与脚本化流、in-memory 观测 collector）、
 `@echo-agent/core/extension`（写扩展的 ABI）、`@echo-agent/core/task/fs`、`@echo-agent/core/mcp`。
-
-`engine` 面的纯度**有门守着**（`test/engine-purity.test.ts`）：一旦有 `node:` 内建或 Node 全局
-经任何路径倒灌进来，构建即红。
 
 ## 几条硬约定
 

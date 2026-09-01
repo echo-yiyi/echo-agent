@@ -1,0 +1,27 @@
+{
+  "$comment": "文档花名册。**只登记已存在且已批准的文档**——计划中的文档放 issue,不放这里当 CI 判据。字段只有两个:path 与 bilingual。曾经有过的 sections / maxWords / tier 已撤(它们用结构近似代替内容判断,两头都不准)。 fileRefsExclude:按定义就是装「举例路径」的文件——filerefs 分不清引用与举例,这是它已知的边界,豁免必须写明理由,不许无声扩大。",
+  "docs": [
+    {
+      "path": "CLAUDE.md",
+      "bilingual": false
+    },
+    {
+      "path": "README.md",
+      "bilingual": true
+    },
+    {
+      "path": "AGENTS.md",
+      "bilingual": false
+    },
+    {
+      "path": "packages/core/README.md",
+      "bilingual": false
+    }
+  ],
+  "orphanExclude": [
+    "docs/review"
+  ],
+  "fileRefsExclude": [
+    "test/docs-lint-fixtures.test.ts"
+  ]
+}

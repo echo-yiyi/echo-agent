@@ -1,5 +1,5 @@
-// `/testing` 的 in-memory collector（§15.6，OR14）：Eval / Evolve 与 `/engine` 纯 loop fixture 用它同时收
-// AgentEvent 投影与内建 Capability fact。
+// `/testing` 的 in-memory collector（§15.6，OR14）：仓外的批量评测/回放消费者与 `/engine` 纯 loop fixture
+// 用它同时收 AgentEvent 投影与内建 Capability fact。
 //
 // 只会接收：有界、no-throw、不执行用户 callback；overflow 只进 collector 自己的诊断。
 // 输出是 ephemeral `EngineObservationFact`，没有 canonical identity——删掉它或让它坏掉都不改 Agent outcome。
