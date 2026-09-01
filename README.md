@@ -40,7 +40,7 @@ File and shell tools belong to `echo-coding` only. `echo-coding` does not change
 MOONSHOT_API_KEY=sk-... bun packages/coding/bin/echo-coding.ts
 ```
 
-Both commands accept the same options (`--help`). In `echo-coding`, `bash`, `write_file`, and `edit_file` ask for confirmation in the interactive UI; with redirected stdin nobody can answer, so every tool runs without asking — treat a piped `echo-coding` as a script that may change files.
+Both commands accept the same options (`--help`). `echo-coding` runs every tool without asking, in the interactive UI and through a pipe alike — treat it as a script that may change files in the current directory.
 
 ## Use the CLI
 

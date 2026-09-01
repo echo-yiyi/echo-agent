@@ -11,25 +11,17 @@ import { ECHO_CODING } from "../src/cli.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
-test("preset：产品自带 echo:workspace / echo:shell；工作区根 = cwd；权限交互形态动手先问、管道形态全放行", async () => {
+test("preset：产品自带 echo:workspace / echo:shell；工作区根 = cwd；两种形态都不装权限策略（缺省全放行）", () => {
   const cwd = join(tmpdir(), "echo-coding-workspace");
-  const tui = ECHO_CODING.preset!({ interactive: true, cwd });
-  // 文件读写、搜索、shell 只属于 coding（不在 echo-agent 里）——它们以两条 Extension 的形态跟着产品走
-  expect(tui.extensions?.map((e) => e.entryId)).toEqual(["echo:workspace", "echo:shell"]);
-  expect([tui.agent?.workspaceRoot, tui.agent?.cwd]).toEqual([cwd, cwd]);
-
-  // 规则是 `DEFAULT_PERMISSION`：读随便，动手先问
-  const policy = tui.agent!.permission!;
-  const ask = (toolName: string) => policy.authorize({ runId: "r", turnId: "t", toolCallId: "c", toolName, params: {} });
-  expect((await ask("read_file")).kind).toBe("allow");
-  expect((await ask("bash")).kind).toBe("ask");
-  expect((await ask("write_file")).kind).toBe("ask");
-
-  // 交互形态：壳（`echo:tui`）会摆出来问 → host
-  expect(policy.responder).toBe("host");
-  // 管道 / CI：没人在终端前，问不出去 → 不装权限策略（全放行）。反例是「ask 折成 deny」：
-  // 那样管道形态只能读不能改，等于没用（2026-09-01 用户拍板）。
-  expect(ECHO_CODING.preset!({ interactive: false, cwd }).agent?.permission).toBeUndefined();
+  for (const interactive of [true, false]) {
+    const preset = ECHO_CODING.preset!({ interactive, cwd });
+    // 文件读写、搜索、shell 只属于 coding（不在 echo-agent 里）——它们以两条 Extension 的形态跟着产品走
+    expect(preset.extensions?.map((e) => e.entryId)).toEqual(["echo:workspace", "echo:shell"]);
+    expect([preset.agent?.workspaceRoot, preset.agent?.cwd]).toEqual([cwd, cwd]);
+    // 缺省全放行（2026-09-01 用户拍板）：不装策略，bash / write_file / edit_file 不问直接跑。
+    // 「动手先问」仍在 `permission.ts`，是给评测 / 别的宿主自己传的，本产品不缺省开。
+    expect([interactive, preset.agent?.permission]).toEqual([interactive, undefined]);
+  }
 });
 
 /* ─────────────────────────── 可执行文件本身 ─────────────────────────── */
