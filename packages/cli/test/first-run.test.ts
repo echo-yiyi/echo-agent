@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deepseekProvider, FileCredentialStore, InMemoryCredentialStore, kimiProvider } from "@echo-agent/core";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { runFirstRunSetup, type FirstRunChoice, type FirstRunOutcome } from "../src/first-run.ts";
 import { fakeTui } from "./fake-tui.ts";
 
@@ -200,4 +201,27 @@ test("已经 abort 过的 signal：立刻 cancelled，不挂着等按键", async
   const { done } = start({ signal: controller.signal });
   const raced = await Promise.race([done, new Promise((r) => setTimeout(() => r("卡住了"), 200))]);
   expect(raced).toEqual({ kind: "cancelled" });
+});
+
+/* ─────────────────────────── 窄终端 ─────────────────────────── */
+
+test("窄终端：三屏的每一行都不超过宽度——pi-tui 对超宽行直接抛，说明文案原来是直接塞进去的", async () => {
+  const { ui, done } = start();
+  await flush();
+  const fits = (stage: string): void => {
+    const lines = ui.lines(40);
+    expect(lines.length).toBeGreaterThan(3); // 真的有东西在屏上，不是空屏恒绿
+    for (const line of lines) expect(visibleWidth(line), `${stage}: ${line}`).toBeLessThanOrEqual(40);
+  };
+  fits("provider");
+  ui.feed("1"); // 数字直选 → 收 key
+  await flush();
+  fits("key");
+  type(ui, "sk-GOOD");
+  ui.feed(ENTER);
+  await settle();
+  expect(screen(ui)).toContain("选择模型");
+  fits("model");
+  ui.feed(CTRL_D);
+  expect((await done).kind).toBe("cancelled");
 });

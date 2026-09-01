@@ -8,7 +8,7 @@ import { test, expect } from "bun:test";
 import { Agent, deepseekProvider, InMemoryCredentialStore, kimiProvider, type CredentialStore, type ProviderEvent } from "@echo-agent/core";
 import { agentRuntimeOf, type AgentRuntime } from "@echo-agent/core/extension";
 import { scriptedStreamFn, textTurn, toolTurn } from "@echo-agent/core/testing";
-import { CURSOR_MARKER, type TUI } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { runTui, type TuiConfigureOptions } from "../src/app.ts";
 import { fakeTui } from "./fake-tui.ts";
 import { Transcript } from "../src/transcript.ts";
@@ -145,6 +145,27 @@ test("工具行有三态：跑着 / 成功 / 失败，各自的标记不同", ()
   expect(t.render(40).join("\n")).toContain("✓ read");
   t.updateTool(row, { state: "failed" });
   expect(t.render(40).join("\n")).toContain("✗ read");
+});
+
+test("工具折叠行：摘要再长也截到宽度——pi-tui 对超宽行直接抛，实测 118 > 112 整屏崩", () => {
+  const t = new Transcript();
+  // 崩溃现场那条：`TaskCreate` 的参数 JSON 一行 118 列
+  const detail = JSON.stringify({ tasks: [{ title: "定位并读取本地代码", detail: "查找工作目录中的本地代码项目，读取其主要文件与结构" }] });
+  t.push({ kind: "tool", name: "TaskCreate", detail, state: "done" });
+  const lines = t.render(40);
+  for (const line of lines) expect(visibleWidth(line), line).toBeLessThanOrEqual(40);
+  expect(lines[0]).toContain("TaskCreate"); // 截的是摘要，不是工具名
+  expect(lines[0]).toContain("…"); // 截过要看得出来
+});
+
+test("欢迎头在窄终端上按宽度折：键位提示 95 列，40 列终端上原来启动即崩", async () => {
+  const ui = fakeTui();
+  const done = runTui({ agent: runtimeOf(agentWith([])), ui });
+  await flush();
+  for (const line of ui.lines(40)) expect(visibleWidth(line), line).toBeLessThanOrEqual(40);
+  expect(ui.lines(40).join("\n")).toContain("Ctrl+O 工具输出"); // 折了，没丢
+  quit(ui);
+  await done;
 });
 
 /* ─────────────── 输入：交给 pi-tui 的 Input，但**行为契约是我们的** ─────────────── */

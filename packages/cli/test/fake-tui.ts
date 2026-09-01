@@ -8,7 +8,7 @@
 
 import type { TUI } from "@earendil-works/pi-tui";
 
-export function fakeTui(): TUI & { screen: () => string; feed: (data: string) => void; renders: () => number } {
+export function fakeTui(): TUI & { screen: () => string; lines: (width: number) => string[]; feed: (data: string) => void; renders: () => number } {
   let root: { render(width: number): string[]; handleInput?(data: string): void; focused?: boolean } | null = null;
   const listeners: ((data: string) => unknown)[] = [];
   let renders = 0;
@@ -53,6 +53,8 @@ export function fakeTui(): TUI & { screen: () => string; feed: (data: string) =>
     render: () => [],
     invalidate: () => undefined,
     screen: () => (root?.render(80) ?? []).join("\n"),
+    // 按给定宽度取**原始行**（带 SGR）：宽度判据要量每一行的可见宽度，`screen()` 拼成一段就量不了了
+    lines: (width: number) => root?.render(width) ?? [],
     feed: (data: string) => {
       // 真 TUI 的口径：监听器返回 `{consume:true}` 就**不再往组件送**（Ctrl+C 就是这么被吃掉的）
       for (const l of listeners) {
@@ -63,5 +65,5 @@ export function fakeTui(): TUI & { screen: () => string; feed: (data: string) =>
     },
     renders: () => renders,
   };
-  return ui as unknown as TUI & { screen: () => string; feed: (data: string) => void; renders: () => number };
+  return ui as unknown as TUI & { screen: () => string; lines: (width: number) => string[]; feed: (data: string) => void; renders: () => number };
 }

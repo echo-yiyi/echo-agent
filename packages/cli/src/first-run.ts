@@ -31,6 +31,7 @@ import { bannerLines } from "./app.ts";
 import { describeModel, describeProvider } from "./catalog.ts";
 import { ECHO_AGENT, type Product } from "./product.ts";
 import { CredentialSetup, type VerifyFn } from "./setup.ts";
+import { wrap } from "./text.ts";
 import { bold, dim, SELECT_LIST_THEME } from "./theme.ts";
 
 /** 一个可选项。`name` 是 `--provider` 认的短名。 */
@@ -152,6 +153,9 @@ export async function runFirstRunSetup(opts: FirstRunOptions): Promise<FirstRunO
   const root = {
     focused: true,
     render: (width: number): string[] => {
+      // **每一行都按宽度折**：说明文案、键位提示、cwd 都可能比终端宽，而 pi-tui 的渲染门对超宽行
+      // 直接抛——这是用户看到的第一屏，窄终端上会启动即崩（与主界面欢迎头同一类，2026-09-01）。
+      const fit = (ls: string[]): string[] => ls.flatMap((l) => wrap(l, width));
       const lines = [...banner, ""];
       if (stage === "provider") {
         lines.push(bold("选择 provider"));
@@ -159,12 +163,12 @@ export async function runFirstRunSetup(opts: FirstRunOptions): Promise<FirstRunO
         lines.push("");
         lines.push(...providerList.render(width));
         lines.push("", dim("↑/↓ 选 · 数字直选 · 回车确认 · Ctrl+D 退出"));
-        return lines;
+        return fit(lines);
       }
       if (stage === "key" && setup !== null) {
         lines.push(...setup.render(width));
         lines.push(dim("Esc 返回选 provider"));
-        return lines;
+        return fit(lines);
       }
       if (stage === "model" && modelList !== null) {
         lines.push(bold("选择模型"));
@@ -172,9 +176,9 @@ export async function runFirstRunSetup(opts: FirstRunOptions): Promise<FirstRunO
         lines.push("");
         lines.push(...modelList.render(width));
         lines.push("", dim("↑/↓ 选 · 数字直选 · 回车确认 · Esc 返回 · Ctrl+D 退出"));
-        return lines;
+        return fit(lines);
       }
-      return lines;
+      return fit(lines);
     },
     handleInput: (data: string): void => {
       if (isKeyRelease(data)) return; // Kitty 补发的 release：按一下不许算两下
