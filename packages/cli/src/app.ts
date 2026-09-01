@@ -105,6 +105,12 @@ function footerLine(state: Readonly<AgentState>, width: number): string {
     STATUS_LABEL[state.status],
     `↑${short(state.usage.inputTokens)} ↓${short(state.usage.outputTokens)}`,
   ];
+  // 缓存情况（2026-09-01 用户拍板：token 就够，但要看到缓存）。provider 没报就不占地方——
+  // 显示 0% 会把「没报」冒充成「没命中」，那是两回事
+  const cached = state.usage.cachedInputTokens;
+  if (cached !== undefined && state.usage.inputTokens > 0) {
+    parts.push(`缓存 ${short(cached)} (${Math.round((cached / state.usage.inputTokens) * 100)}%)`);
+  }
   if (state.thinkingLevel !== "off") parts.push(`思考 ${state.thinkingLevel}`);
   if (state.tasks.total > 0) parts.push(`任务 ${state.tasks.active.length}/${state.tasks.total}`);
   if (state.activeSkills.length > 0) parts.push(`skill ${state.activeSkills.length}`);

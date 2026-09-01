@@ -75,3 +75,42 @@ test("reset：清 transcript 与运行态（usage 归零），装备不动；忙
   expect((await rt2.reset()).kind).toBe("rejected");
   await running;
 });
+
+/* ─────────────── usage 的缓存累计（与状态栏那格同一条数据线） ─────────────── */
+
+import type { ProviderEvent } from "../src/events.ts";
+
+/** 带 usage 的一轮（textTurn 的 usage 是 null，测账就得自己带）。 */
+function turnWithUsage(text: string, usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number }): ProviderEvent[] {
+  return [
+    {
+      type: "done",
+      message: { role: "assistant", content: [{ type: "text", text }], stopReason: "end_turn", usage },
+    },
+  ];
+}
+
+test("缓存命中逐轮累计；报过一次之后即使后面某轮没报，累计值也不丢；reset 归零回缺席", async () => {
+  const agent = agentWith([
+    turnWithUsage("一", { inputTokens: 100, outputTokens: 5, cachedInputTokens: 60 }) as never,
+    turnWithUsage("二", { inputTokens: 40, outputTokens: 5 }) as never,
+  ]);
+  const rt = agentRuntimeOf(agent);
+
+  await rt.prompt("1");
+  expect(rt.state.usage).toEqual({ inputTokens: 100, outputTokens: 5, cachedInputTokens: 60 });
+
+  await rt.prompt("2");
+  expect(rt.state.usage).toEqual({ inputTokens: 140, outputTokens: 10, cachedInputTokens: 60 });
+
+  await rt.reset();
+  expect(rt.state.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+  expect(Object.hasOwn(rt.state.usage, "cachedInputTokens"), "reset 之后不该还挂着缓存字段").toBe(false);
+});
+
+test("从没报过缓存：字段全程缺席（没报 ≠ 0）", async () => {
+  const agent = agentWith([turnWithUsage("好", { inputTokens: 10, outputTokens: 2 }) as never]);
+  const rt = agentRuntimeOf(agent);
+  await rt.prompt("hi");
+  expect(Object.hasOwn(rt.state.usage, "cachedInputTokens")).toBe(false);
+});

@@ -268,7 +268,14 @@ type OpenAiChunk = {
     };
     finish_reason?: string | null;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    /** OpenAI 系：缓存命中的输入。 */
+    prompt_tokens_details?: { cached_tokens?: number } | null;
+    /** DeepSeek：缓存命中的输入（miss 那半就是普通输入，不另记）。 */
+    prompt_cache_hit_tokens?: number;
+  } | null;
   error?: { message?: string };
 };
 
@@ -326,7 +333,13 @@ class Turn {
     }
     if (choice?.finish_reason != null) this.stop = mapStop(choice.finish_reason);
     if (chunk.usage != null) {
-      this.usage = { inputTokens: chunk.usage.prompt_tokens ?? 0, outputTokens: chunk.usage.completion_tokens ?? 0 };
+      // 缓存命中：两种上报形状择一（OpenAI 系 / DeepSeek）。没报就不带字段——不冒充报了账。
+      const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? chunk.usage.prompt_cache_hit_tokens;
+      this.usage = {
+        inputTokens: chunk.usage.prompt_tokens ?? 0,
+        outputTokens: chunk.usage.completion_tokens ?? 0,
+        ...(typeof cached === "number" ? { cachedInputTokens: cached } : {}),
+      };
     }
   }
 
