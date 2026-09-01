@@ -267,6 +267,8 @@ async function runPiped(
 ): Promise<number> {
   // **唯一 composition root**（§14.2）：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
   const echo = await createEcho(echoOptions(opts, provider, credentials));
+  // 装配诊断（坏扩展被跳过，D6）走旁白流：**说了才算没静默**，但不挡启动、不改退出码
+  for (const d of echo.diagnostics) process.stderr.write(`[扩展] [${d.code}] ${d.message}${d.path !== undefined ? `（${d.path}）` : ""}\n`);
   return await run({ echo, input: linesOf(process.stdin, signal), signal });
 }
 
@@ -294,6 +296,8 @@ async function runInteractive(
     ...echoOptions(opts, provider, credentials),
     extensions: [{ entryId: "echo:tui", definition: shell.definition as never }],
   });
+  // 装配诊断（坏扩展被跳过，D6）进界面：壳 mount 在先、这里在后，notify 直通或先攒着
+  for (const d of echo.diagnostics) shell.notify(`[扩展] 没装上：${d.message}${d.path !== undefined ? `（${d.path}）` : ""}`);
   try {
     // **启停归这一层**，不归壳：协议里没有 `start`/`stop`，壳子想碰也碰不到。
     await echo.agent.start();

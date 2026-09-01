@@ -39,6 +39,9 @@ const BUILTIN_NAMES = ["echo:agent", "echo:tasks", "echo:skills", "echo:memory",
 const temps: string[] = [];
 const running: Echo[] = [];
 
+/** 生成到 tmp 的 fixture 引 ABI 用的绝对路径：tmp 在 workspace 外，包名解析不了（实测），与包内 fixture 的相对引法等价。 */
+const ABI_PATH = join(import.meta.dir, "..", "src", "extension", "public.ts");
+
 async function tmp(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "echo-echo-"));
   temps.push(dir);
@@ -237,15 +240,134 @@ test("stop() 真的 unmount 了 Extension，而且发生在 Agent 收摊之前",
   await echo.stop(); // 幂等
 });
 
-test("一个坏扩展就整体不起，而且**已经造好的 Agent 会被收摊**（store 关掉，不泄漏）", async () => {
+test("盘上的坏扩展**不阻塞启动**：跳过 + 诊断带路径，好的照装，agent 起得来（D6）", async () => {
   const root = await tmp();
   const dir = join(root, "extensions");
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "ok.ts"), "export const x = 1;\n"); // 没有默认导出
-  const stateDir = join(root, "state");
+  await writeFile(join(dir, "broken.ts"), "export const x = 1;\n"); // 没有默认导出
+  await writeFile(
+    join(dir, "good.ts"),
+    `import { defineExtension } from ${JSON.stringify(ABI_PATH)};\n` +
+      `export default defineExtension({ name: "good", hostAbiVersion: 1, apply() {} });\n`,
+  );
 
-  // 判据落在**注入的 store 被关了几次**上。用默认 FileDir 是测不出来的：
-  // 文件锁要到 `start()` 才拿，没起过的 Agent 本来就不占锁——「还能再造一个」证明不了收摊跑过。
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(root, "state"),
+    extensionDirs: [dir],
+  });
+  try {
+    // 好的装上了、坏的不在清单里
+    expect(echo.extensions.map((e) => e.name)).toContain("good");
+    expect(echo.extensions.map((e) => e.name)).not.toContain("broken");
+    // 诊断一条、指名道姓——跳过而不上报就是静默失败
+    expect(echo.diagnostics.length).toBe(1);
+    expect(echo.diagnostics[0]!.code).toBe("extension_load_failed");
+    expect(echo.diagnostics[0]!.path).toBe(join(dir, "broken.ts"));
+    // agent 真的能起、能跑
+    await echo.agent.start();
+    const result = await echo.agent.prompt("在吗");
+    expect(result.outcome.kind).toBe("completed");
+  } finally {
+    await echo.stop();
+  }
+});
+
+test("盘上扩展 `apply()` 抛：只废它自己那代——跳过 + mount 诊断，后面的显式 Extension 照装（D6）", async () => {
+  const root = await tmp();
+  const dir = join(root, "extensions");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "explodes.ts"),
+    `import { defineExtension } from ${JSON.stringify(ABI_PATH)};\n` +
+      `export default defineExtension({ name: "explodes", hostAbiVersion: 1, apply() { throw new Error("apply 炸了"); } });\n`,
+  );
+
+  let probeMounted = 0;
+  const probe = defineExtension({
+    name: "after-broken",
+    hostAbiVersion: 1,
+    apply() {
+      probeMounted += 1;
+    },
+  });
+
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(root, "state"),
+    extensionDirs: [dir],
+    extensions: [{ entryId: "probe", definition: probe as never }],
+  });
+  try {
+    expect(probeMounted, "坏扩展把后面的显式 Extension（壳就在这个位置）拖死了").toBe(1);
+    expect(echo.extensions.map((e) => e.name)).toContain("after-broken");
+    expect(echo.extensions.map((e) => e.name)).not.toContain("explodes");
+    expect(echo.diagnostics.length).toBe(1);
+    expect(echo.diagnostics[0]!.code).toBe("extension_mount_failed");
+    expect(echo.diagnostics[0]!.message).toContain("apply 炸了");
+  } finally {
+    await echo.stop();
+  }
+});
+
+test("盘上扩展分代之后，`stop()` 仍要把**每一代**都卸掉：它的 disposer 必须真的跑（D6）", async () => {
+  // D6 把盘上扩展拆成每个一代——收摊清单要是漏了这些代，Fiber 的 disposer 一次都不跑，
+  // watcher / 连接 / 子进程就是真泄漏。全局计数器是 tmp 生成的 fixture 与测试之间唯一的通道。
+  const g = globalThis as { __d6_disposed?: number };
+  g.__d6_disposed = 0;
+  const root = await tmp();
+  const dir = join(root, "extensions");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "tracks-dispose.ts"),
+    `import { defineExtension } from ${JSON.stringify(ABI_PATH)};\n` +
+      `export default defineExtension({ name: "tracks-dispose", hostAbiVersion: 1, apply(ctx) {\n` +
+      `  void ctx.effect({ boundary: "agent", start: () => ({ value: 1, dispose: () => {\n` +
+      `    (globalThis).__d6_disposed = ((globalThis).__d6_disposed ?? 0) + 1;\n` +
+      `  } }) });\n` +
+      `} });\n`,
+  );
+
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(root, "state"),
+    extensionDirs: [dir],
+  });
+  expect(echo.extensions.map((e) => e.name)).toContain("tracks-dispose");
+  expect(g.__d6_disposed).toBe(0);
+
+  await echo.stop();
+  expect(g.__d6_disposed, "盘上扩展那一代没被卸——disposer 一次都没跑").toBe(1);
+});
+
+test("**显式传入的**坏 Extension 照旧整体不起（fail-loud）：那是代码 bug 不是运行态配置", async () => {
+  const bad = defineExtension({
+    name: "explicit-bad",
+    hostAbiVersion: 1,
+    apply() {
+      throw new Error("显式的炸了");
+    },
+  });
+  await expect(
+    createEcho({
+      provider: scripted([textTurn("ok")]),
+      allowNetwork: false,
+      stateDir: join(await tmp(), "state"),
+      extensionDirs: [],
+      extensions: [{ entryId: "bad", definition: bad as never }],
+    }),
+  ).rejects.toThrow("显式的炸了");
+});
+
+test("全部装上时 diagnostics 恒空；坏的被跳过后 stop() 照样把 store 恰好关一次（不泄漏）", async () => {
+  const root = await tmp();
+  const dir = join(root, "extensions");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "broken.ts"), "export const x = 1;\n");
+
   let closes = 0;
   const inner = new InMemoryDir();
   const store: StorageDir = {
@@ -255,19 +377,25 @@ test("一个坏扩展就整体不起，而且**已经造好的 Agent 会被收�
     list: (p) => inner.list(p),
     close: async () => void closes++,
   };
-
-  await expect(
-    createEcho({
-      provider: scripted([textTurn("ok")]),
-      allowNetwork: false,
-      stateDir,
-      extensionDirs: [dir],
-      store,
-      lock: new InMemoryStateLock(),
-    }),
-  ).rejects.toThrow(ExtensionLoadError);
-
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(root, "state"),
+    extensionDirs: [dir],
+    store,
+    lock: new InMemoryStateLock(),
+  });
+  await echo.stop();
   expect(closes).toBe(1);
+
+  const clean = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(root, "state2"),
+    extensionDirs: [],
+  });
+  expect(clean.diagnostics).toEqual([]);
+  await clean.stop();
 });
 
 test("两个目录指到同一个文件只装一次（按解析后的绝对路径去重）", async () => {

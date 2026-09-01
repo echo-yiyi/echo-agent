@@ -37,6 +37,11 @@ export type TuiAppOptions = Readonly<{
   /** 注入用：测试给假的 TUI 与终端。 */
   ui?: TUI;
   /**
+   * 壳外旁白的接入口（D6：装配诊断走它进屏幕）。传一个「挂 sink」函数，
+   * runTui 起来时用 transcript 的 notice 通道接上，返回的摘除函数在收摊时调。
+   */
+  announcer?: (fn: (text: string) => void) => () => void;
+  /**
    * 缺 key 时在界面里配的那一段要的东西（2026-09-01：配置是运行态，不阻塞启动）。
    * 不给 = 壳子不管凭据——低层用户自己装配、自己给 key 的场合。
    */
@@ -108,7 +113,7 @@ function footerLine(state: Readonly<AgentState>, width: number): string {
 
 /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止，返回退出码。**不负责收摊 Agent**——那归装配层。 */
 export async function runTui(options: TuiAppOptions): Promise<number> {
-  const { agent, signal, configure } = options;
+  const { agent, signal, configure, announcer } = options;
   const ui: TUI = options.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
 
   const transcript = new Transcript();
@@ -624,6 +629,12 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   ui.setFocus(root);
   ui.start();
 
+  // 壳外旁白（装配诊断等）接进 notice 通道；界面起来前积压的这一刻一次放行
+  const detachAnnouncer = announcer?.((text) => {
+    transcript.push({ kind: "notice", text });
+    rerender();
+  });
+
   try {
     // **壳子不再 `start()`**（2026-08-31 壳变 extension）：启停归装配层。
     // 「起来了没」由协议的 `acceptsWork` 说了算——它在 running 之前恒为 false，
@@ -636,6 +647,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     }
   } finally {
     signal?.removeEventListener("abort", onAbort);
+    detachAnnouncer?.();
     unsubscribeLifecycle();
     unsubscribe();
     // `setup` 只在闭包里被赋值，TS 在这个作用域把它收窄成了 null——显式标回类型再调
