@@ -9,13 +9,15 @@
 // 交互形态的判据在 `tui.test.ts` 与 `extension.test.ts`。
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createEcho,
   createProvider,
   createProviderStreams,
+  FileCredentialStore,
+  kimiProvider,
   toolOk,
   type Agent,
   type Context,
@@ -27,7 +29,8 @@ import {
 } from "@echo-agent/core";
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { PassThrough } from "node:stream";
-import { parseArgs, USAGE } from "../src/cli.ts";
+import { ensureCredentials, main, parseArgs, USAGE } from "../src/cli.ts";
+import { fakeTui } from "./fake-tui.ts";
 import { linesOf } from "../src/stdin.ts";
 import { run, type Sink } from "../src/run.ts";
 
@@ -247,9 +250,14 @@ test("bin:参数错以 2 退出,并把错因说出来", () => {
 test("bin:缺凭据诚实拒跑——不退化成假模型", () => {
   // 把两个 key 都清掉。缺凭据时 `createEcho` 解析不出模型,必须**报错退出**;
   // 静默跑起来（哪怕跑的是空目录）才是本仓最不能接受的那种失败。
+  //
+  // **`ECHO_HOME` 必须指到一个空目录**（2026-08-31 起）：凭据的解析顺序现在是
+  // 「环境变量 → 凭据文件 → 没有」，跑测试那台机器上真有 `~/.echo/credentials.json` 的话，
+  // 只清环境变量根本不构成「缺凭据」，这条判据会静默变成假绿。
   const r = spawnBin(["--state-dir", join(dir, "state")], {
     MOONSHOT_API_KEY: "",
     ECHO_LLM_API_KEY: "",
+    ECHO_HOME: join(dir, "home"),
   });
   expect(r.code).not.toBe(0);
   expect(r.err.length, "拒跑了却不说为什么").toBeGreaterThan(0);
@@ -316,4 +324,163 @@ test("已经 abort 过的 signal：run() 也不进输入循环，且照样干净
   expect(code).toBe(0);
   expect(out.text, "abort 在先，却还是跑了一轮").not.toContain("不该被跑到");
   expect(existsSync(join(dir, ".lock")), "没收摊").toBe(false);
+});
+
+/* ══════════════ 缺凭据：形态决定策略（2026-08-31 首次运行体验） ══════════════ */
+//
+// 一张表两行，两行**各有一条判据**，而且都造得出反例：
+//   · 管道 / 重定向 → 退出码 1 + 报错（现有行为，一行不改）
+//   · 终端         → 不退出，进配置流程，配完继续启动
+//
+// 「怎么识别缺凭据」用的是**装配前预检**（`Models.checkAuth`），不匹配错误文案——
+// 判据本身的说明在 `ensureCredentials` 的注释里。
+
+/** 干净的环境：两个 key 都清掉，`ECHO_HOME` 指到本次的临时目录。 */
+function isolate(): () => void {
+  const keys = ["MOONSHOT_API_KEY", "ECHO_LLM_API_KEY", "ECHO_HOME"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
+  process.env["ECHO_HOME"] = join(dir, "home");
+  return () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+}
+
+async function waitFor(check: () => boolean, what: string, ms = 5000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`等不到：${what}`);
+}
+
+test("ensureCredentials:非交互 + 缺凭据 → missing，**配置流程一次都没被调用**", async () => {
+  const restore = isolate();
+  try {
+    let setupCalls = 0;
+    const decision = await ensureCredentials({
+      provider: kimiProvider(),
+      credentials: new FileCredentialStore(join(dir, "credentials.json")),
+      interactive: false,
+      setup: async () => {
+        setupCalls += 1;
+        return { kind: "cancelled" };
+      },
+    });
+
+    expect(decision).toEqual({ kind: "missing" });
+    expect(setupCalls, "非交互形态下把问题问出去了——那头没人能回答").toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("ensureCredentials:交互 + 缺凭据 → 进配置流程，配完就 ready", async () => {
+  const restore = isolate();
+  try {
+    let setupCalls = 0;
+    const chosen = kimiProvider();
+    const decision = await ensureCredentials({
+      provider: kimiProvider(),
+      credentials: new FileCredentialStore(join(dir, "credentials.json")),
+      interactive: true,
+      setup: async () => {
+        setupCalls += 1;
+        return { kind: "configured", provider: chosen };
+      },
+    });
+
+    expect(setupCalls).toBe(1);
+    // **用配置流程里选的那个实例**：用户可能在界面里换了一家
+    expect(decision).toEqual({ kind: "ready", provider: chosen });
+  } finally {
+    restore();
+  }
+});
+
+test("ensureCredentials:凭据文件里有 key 就不问——环境变量空着也算配好了", async () => {
+  const restore = isolate();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+
+    let setupCalls = 0;
+    const decision = await ensureCredentials({
+      provider: kimiProvider(),
+      credentials,
+      interactive: true,
+      setup: async () => {
+        setupCalls += 1;
+        return { kind: "cancelled" };
+      },
+    });
+
+    expect(setupCalls, "文件里明明配过，却还是问了一遍").toBe(0);
+    expect(decision.kind).toBe("ready");
+  } finally {
+    restore();
+  }
+});
+
+test("main:非交互 + 缺凭据 → 退出码 1（现有行为不许被改坏）", async () => {
+  const restore = isolate();
+  try {
+    const code = await main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], false);
+    expect(code).toBe(1);
+  } finally {
+    restore();
+  }
+});
+
+test("main:交互 + 缺凭据 → **不退出**，进配置流程；配完直接继续启动，不用重敲命令", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const running = main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials: new FileCredentialStore(join(dir, "credentials.json")),
+      verify: async () => ({ ok: true }),
+    });
+    // 关键的一条：它**没有**以 1 退出，而是把问题摆到了屏幕上
+    await waitFor(() => ui.screen().includes("还没有可用的凭据"), "配置流程的第一屏");
+    expect(ui.screen()).toContain("Kimi (Moonshot)");
+
+    ui.feed("1"); // 选 kimi
+    for (const ch of "sk-GOOD") ui.feed(ch);
+    ui.feed("\r");
+
+    // 配完**直接进正常界面**——`已接上` 是主界面挂上来才有的那一行
+    await waitFor(() => ui.screen().includes("已接上"), "配完之后的主界面");
+    // 而且真的落盘了，下次启动就不会再问
+    expect(JSON.parse(readFileSync(join(dir, "credentials.json"), "utf8"))).toEqual({ kimi: { apiKey: "sk-GOOD" } });
+
+    ui.feed(String.fromCharCode(3)); // Ctrl+C 退出
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("main:交互 + 缺凭据，用户在配置流程里退出 → 不启动，退出码 1", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const running = main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials: new FileCredentialStore(join(dir, "credentials.json")),
+      verify: async () => ({ ok: true }),
+    });
+    await waitFor(() => ui.screen().includes("还没有可用的凭据"), "配置流程的第一屏");
+    ui.feed(String.fromCharCode(3));
+
+    expect(await running).toBe(1);
+    // 没配就没启动：状态根里不该有会话落盘
+    expect(existsSync(join(dir, "state", "sessions")), "没配凭据却把 agent 起起来了").toBe(false);
+  } finally {
+    restore();
+  }
 });

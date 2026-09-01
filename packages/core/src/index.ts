@@ -177,6 +177,12 @@ export { agentEventTapFor } from "./observability/agent-events.ts";
 /** 真盘的 `StorageDir` 实现（`node:fs` / `node:os` / `node:path`）。 */
 export { FileDir, echoHome } from "./storage/file-dir.ts";
 
+/**
+ * 落盘的 `CredentialStore`：`$ECHO_HOME/credentials.json`（0600，跨 agent 共享）。
+ * 端口 `CredentialStore` 与内存实现 `InMemoryCredentialStore` 在上半段。
+ */
+export { FileCredentialStore, CREDENTIALS_FILE } from "./provider/file-credentials.ts";
+
 /** first-party 的 single-writer 文件锁（`node:fs`）。端口 `StateLock` 本身是纯的，在上半段。 */
 export { fileStateLock, inspectStateLock } from "./storage/file-lock.ts";
 export type { PeekedLockRecord, StateLockInspection } from "./storage/file-lock.ts";

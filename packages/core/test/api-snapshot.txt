@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 212（value 50 · type 153 · both 9）
+符号 214（value 51 · type 153 · both 10）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -190,6 +190,10 @@ value  createProviderStreams
 value  DEFAULT_RETRY_POLICY
 type   Dialect
 type   RetryPolicy
+
+-- src/provider/file-credentials.ts (2) --
+value  CREDENTIALS_FILE
+both   FileCredentialStore
 
 -- src/provider/lazy.ts (2) --
 value  lazyApi

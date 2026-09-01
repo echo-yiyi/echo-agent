@@ -22,7 +22,18 @@ export { runTui, type TuiAppOptions } from "./app.ts";
 export { Transcript, clean, type TranscriptEntry } from "./transcript.ts";
 
 /** CLI：`echo-agent` 的解析与入口。两种形态的分叉在 `main()` 里。 */
-export { main, parseArgs, USAGE, type CliOptions } from "./cli.ts";
+export { main, parseArgs, ensureCredentials, USAGE, type CliOptions, type CredentialDecision, type MainDeps } from "./cli.ts";
+
+/** 首次运行的配置流程：缺凭据时在界面里配一个。自己写壳时用得上。 */
+export {
+  runCredentialSetup,
+  verifyApiKey,
+  type SetupChoice,
+  type SetupOptions,
+  type SetupOutcome,
+  type VerifyFn,
+  type VerifyOutcome,
+} from "./setup.ts";
 
 /** 管道形态的实质：给 Agent 一个进程与一个输入源。自己写别的输入源时用得上。 */
 export { run, type RunOptions, type Sink } from "./run.ts";

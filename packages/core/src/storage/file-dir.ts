@@ -9,6 +9,16 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve as resolvePath, sep } from "node:path";
 import type { StorageDir } from "./types.ts";
 
+/**
+ * `~` 展开——`ECHO_HOME=~/x` 这种写法很常见，不展开会建出一个名叫 `~` 的目录。
+ *
+ * **住在这里是因为它是「解析落盘根」的一部分**：`create-agent.ts` 的状态根与
+ * `FileCredentialStore` 的凭据路径都要它，各写一份就是同一条规则的两个真源。
+ */
+export function expandHome(p: string): string {
+  return p === "~" || p.startsWith("~/") ? join(homedir(), p.slice(1)) : p;
+}
+
 /** 一切落盘的系统级缺省根。 */
 export function echoHome(): string {
   const env = process.env["ECHO_HOME"];

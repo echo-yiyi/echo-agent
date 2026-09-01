@@ -198,14 +198,28 @@ export class Models {
     return errors;
   }
 
-  /** 鉴权是否配全（不刷新 OAuth）。undefined = 未配置。 */
+  /**
+   * 鉴权是否配全（不刷新 OAuth）。`undefined` = 未配置。
+   *
+   * **解析顺序与 `stream()` 逐字相同**：provider 自己的 `resolve()`（内建那几家读环境变量）
+   * 优先，`CredentialStore` 里的 api key 兜底。环境变量赢是有意的——CI 与临时覆盖要能
+   * 不改文件就生效，那是 aws / gh 的惯例。
+   *
+   * **兜底那一句不是可选的**：内建 provider 的 `resolve()` 只读环境变量、**完全不看**
+   * 传进去的 `ctx.credential`（见 `openai.ts` 的 `envApiKey`），所以少了它，
+   * 一份写在 `CredentialStore` 里的 key 会被判成「未配置」——`getAvailable()` 因此返回空，
+   * `resolveModel()` 抛「没有可用模型」，而 `stream()` 那边其实是能用这把 key 的。
+   * 同一个「配好了没」有两个答案，正是这道兜底要消灭的东西。
+   */
   async checkAuth(providerId: string): Promise<{ source: string } | undefined> {
     const p = this.providers.get(providerId);
     if (p === undefined) return undefined;
     const credential = await this.credentials.read(providerId);
     if (credential?.type === "oauth") return p.auth.oauth !== undefined ? { source: "OAuth" } : undefined;
     const resolved = await p.auth.apiKey?.resolve({ credential });
-    return resolved === undefined ? undefined : { source: resolved.env ?? "apiKey" };
+    if (resolved !== undefined) return { source: resolved.env ?? "apiKey" };
+    if (credential?.type === "api_key") return { source: "credentialStore" };
+    return undefined;
   }
 
   /** 鉴权配全的那些 provider 的模型。 */

@@ -9,7 +9,6 @@
 // `Model`，构造之前必须先拿到它；推迟到 `start()` 就得引入 placeholder 或把 model 改可空，
 // 那会变成两个类。Session/Memory/Task 等状态恢复一律归 `start()`。
 
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { Agent, type AgentOptions } from "./agent.ts";
 import { errText } from "./errors.ts";
@@ -25,7 +24,7 @@ import type { Clock } from "./schedule/clock.ts";
 import type { TaskStore } from "./task/types.ts";
 import { SessionService } from "./session/service.ts";
 import { fileStateLock } from "./storage/file-lock.ts";
-import { FileDir } from "./storage/file-dir.ts";
+import { FileDir, expandHome } from "./storage/file-dir.ts";
 import type { StateLock } from "./storage/lock.ts";
 import { assertSafePathSegment } from "./storage/path-safety.ts";
 import type { StorageDir } from "./storage/types.ts";
@@ -130,11 +129,6 @@ export function resolveStateDir(opts: { stateDir?: string; agentId?: string }): 
   const home = process.env.ECHO_HOME;
   if (home !== undefined && home !== "") return join(home, "agents", agentId);
   return join(process.cwd(), ".echo", "agents", agentId);
-}
-
-/** `~` 展开——`ECHO_HOME=~/x` 这种写法很常见，不展开会建出一个名叫 `~` 的目录。 */
-function expandHome(p: string): string {
-  return p === "~" || p.startsWith("~/") ? join(homedir(), p.slice(1)) : p;
 }
 
 /**
