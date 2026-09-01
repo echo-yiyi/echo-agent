@@ -382,7 +382,7 @@ test("main:非交互 + 缺凭据 → 退出码 1，而且是在**启动前**拦�
   }
 });
 
-test("main:交互 + 缺凭据 → **照样起来**，主界面里就是配置段；配好直接说话，不用重启", async () => {
+test("main:交互 + 缺凭据 → 引导设置：欢迎 → 选 provider → 贴 key → 选模型 → 直接进对话", async () => {
   const restore = isolate();
   const ui = fakeTui();
   try {
@@ -391,17 +391,25 @@ test("main:交互 + 缺凭据 → **照样起来**，主界面里就是配置段
       credentials: new FileCredentialStore(join(dir, "credentials.json")),
       verify: async () => ({ ok: true }),
     });
-    // 关键：**主界面先起来**（「模型 kimi-k3」（欢迎头）是主界面才有的），配置段就在它里面，不是另一屏
-    await waitFor(() => ui.screen().includes("模型 kimi-k3") && ui.screen().includes("还没有可用的凭据"), "主界面 + 配置段");
-    expect(ui.screen()).toContain("Kimi (Moonshot) 的 API key");
-    expect(ui.screen()).toContain("--provider deepseek"); // 换家怎么换，说了
+    // 第一眼是欢迎 + provider 列表（D4：样子照 Claude Code 的选择器，列表在说明下面）
+    await waitFor(() => ui.screen().includes("选择 provider"), "引导设置第一屏");
+    expect(ui.screen()).toContain("echo-agent"); // 欢迎头在上
+    expect(ui.screen()).toContain("1. Kimi (Moonshot)");
+    expect(ui.screen()).toContain("5. MiniMax");
+    expect(ui.screen()).toContain("kimi-k3"); // 描述列来自目录
 
+    ui.feed("2"); // 数字直选 DeepSeek
+    await waitFor(() => ui.screen().includes("DeepSeek 的 API key"), "收 key");
     for (const ch of "sk-GOOD") ui.feed(ch);
     ui.feed("\r");
-    await waitFor(() => ui.screen().includes("[凭据] 已保存"), "配好");
+    await waitFor(() => ui.screen().includes("选择模型"), "选模型");
+    expect(ui.screen()).toContain("✓"); // 缺省项标着、预选中
+    ui.feed("2"); // **故意不选缺省**：选缺省的话「选的模型进没进装配」根本分不出来
 
-    expect(JSON.parse(readFileSync(join(dir, "credentials.json"), "utf8"))).toEqual({ kimi: { apiKey: "sk-GOOD" } });
-    expect(ui.screen().split("Enter 发送").length - 1, "配好之后输入行没回来").toBe(2); // 欢迎头 + 输入行下的提示
+    // 直接进对话，欢迎头印着选的那家、选的那个模型——证明选择真的流进了 createEcho
+    await waitFor(() => ui.screen().includes("模型 deepseek-reasoner · deepseek"), "主界面（用选的那家那个模型）");
+    // key 按选中那家的 provider.id 落盘
+    expect(JSON.parse(readFileSync(join(dir, "credentials.json"), "utf8"))).toEqual({ deepseek: { apiKey: "sk-GOOD" } });
 
     ui.feed(String.fromCharCode(4)); // Ctrl+D 退出
     expect(await running).toBe(0);
@@ -410,7 +418,7 @@ test("main:交互 + 缺凭据 → **照样起来**，主界面里就是配置段
   }
 });
 
-test("main:交互 + 缺凭据，用户在配置段里直接 Ctrl+D → 正常退出（0），什么都没写", async () => {
+test("main:交互 + 缺凭据，引导设置里 Ctrl+D → 不启动，退出码 1，什么都没写", async () => {
   const restore = isolate();
   const ui = fakeTui();
   try {
@@ -419,12 +427,14 @@ test("main:交互 + 缺凭据，用户在配置段里直接 Ctrl+D → 正常退
       credentials: new FileCredentialStore(join(dir, "credentials.json")),
       verify: async () => ({ ok: true }),
     });
-    await waitFor(() => ui.screen().includes("还没有可用的凭据"), "配置段");
+    await waitFor(() => ui.screen().includes("选择 provider"), "引导设置第一屏");
     ui.feed(String.fromCharCode(4));
 
-    // agent 是起来过的（走到了主界面），用户选择退出——那是正常退出，不是「没配所以失败」
-    expect(await running).toBe(0);
+    // 引导设置在装配**前**：退出时什么都还没起来，1 是对的（与旧「配置段里退出 → 0」不同，
+    // 那时 agent 已经装配并启动了）
+    expect(await running).toBe(1);
     expect(existsSync(join(dir, "credentials.json")), "用户退出了却写了盘").toBe(false);
+    expect(existsSync(join(dir, "state")), "没配就退出，状态根不该被碰").toBe(false);
   } finally {
     restore();
   }

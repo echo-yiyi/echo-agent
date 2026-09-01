@@ -120,17 +120,20 @@ test(
 );
 
 test(
-  "没有凭据也照样进主界面（配置是运行态，不阻塞启动）；配置段里 Kitty 编码的 Ctrl+D 退出",
+  "没有凭据 → 引导设置（不阻塞启动）；应用光标键的 ↓ 能挪光标；Kitty 编码的 Ctrl+D 退出",
   withHome(async (home) => {
-    // **不写 credentials.json**——这正是要验的：缺 key 不是启动前置
+    // **不写 credentials.json**：应当看到欢迎 + 「选择 provider」，而不是报错退出
     const r = await drive(home, [
-      { kind: "wait", text: "模型 kimi-k3", timeout: 15 }, // 主界面起来了
-      { kind: "wait", text: "还没有可用的凭据", timeout: 5 }, // 配置段就在它里面
-      { kind: "send", bytes: KEYS.kittyCtrlD },
+      { kind: "wait", text: "选择 provider", timeout: 15 },
+      { kind: "send", bytes: [ESC, ...ascii("OB")] }, // 应用光标键的 ↓ —— 上一版只认 ESC[B 的那类 bug
+      { kind: "send", bytes: KEYS.enter },
+      // 光标真的挪到了第二家：回车之后进的是 DeepSeek 的收 key 阶段
+      { kind: "wait", text: "DeepSeek 的 API key", timeout: 5 },
+      { kind: "send", bytes: KEYS.kittyCtrlD }, // 空输入行：退出
       { kind: "exit", timeout: 5 },
     ]);
-    expect([oks(r), r.tail.slice(-300)]).toEqual([[true, true, true, true], r.tail.slice(-300)]);
-    expect(r.steps.at(-1)!.code).toBe(0); // 用户选择退出：正常退出
+    expect([oks(r), r.tail.slice(-300)]).toEqual([[true, true, true, true, true, true], r.tail.slice(-300)]);
+    expect(r.steps.at(-1)!.code).toBe(1); // 装配前退出：没配就没起
   }),
   30_000,
 );

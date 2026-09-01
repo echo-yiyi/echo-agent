@@ -7,7 +7,7 @@
 // **`fromCharCode(27)` 只许出现在本仓这一类行上**（拼 ANSI **输出**序列）；按键**输入**的判定
 // 一律走 `matchesKey()`，见 `keybindings.ts` 与 `test/key-discipline.test.ts`。
 
-import type { EditorTheme, MarkdownTheme } from "@earendil-works/pi-tui";
+import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@earendil-works/pi-tui";
 
 const ESC = String.fromCharCode(27);
 
@@ -27,16 +27,19 @@ export const italic = sgr("3", "23");
 export const underline = sgr("4", "24");
 export const strike = sgr("9", "29");
 
-/** 输入行的主题。边框走 dim；补全列表（P0 不接）给一套能看的缺省，免得将来接上时是空白。 */
+/** 选择列表的主题：选中行的前缀 / 文本，描述列，滚动提示。首次运行的两个选择器与编辑器补全共用。 */
+export const SELECT_LIST_THEME: SelectListTheme = {
+  selectedPrefix: cyan,
+  selectedText: bold,
+  description: dim,
+  scrollInfo: dim,
+  noMatch: dim,
+};
+
+/** 输入行的主题。边框走 dim；补全列表与选择器同一份。 */
 export const EDITOR_THEME: EditorTheme = {
   borderColor: dim,
-  selectList: {
-    selectedPrefix: cyan,
-    selectedText: bold,
-    description: dim,
-    scrollInfo: dim,
-    noMatch: dim,
-  },
+  selectList: SELECT_LIST_THEME,
 };
 
 /**

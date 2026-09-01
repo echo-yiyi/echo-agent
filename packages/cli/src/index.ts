@@ -24,8 +24,11 @@ export { Transcript, clean, type TranscriptEntry } from "./transcript.ts";
 /** CLI：`echo-agent` 的解析与入口。两种形态的分叉在 `main()` 里。 */
 export { main, parseArgs, USAGE, type CliOptions, type MainDeps } from "./cli.ts";
 
+/** 首次运行的引导设置（D4）：欢迎 → 选 provider → 贴 key → 选模型。跑在装配前，`main()` 在缺凭据时调它。 */
+export { runFirstRunSetup, type FirstRunChoice, type FirstRunOptions, type FirstRunOutcome } from "./first-run.ts";
+
 /**
- * 凭据配置段：缺 key 时主界面里摆出来的那一段，以及「配好了没」的判据（与请求路径同一个）。
+ * 凭据配置段：key 中途失效时主界面里摆出来的那一段，以及「配好了没」的判据（与请求路径同一个）。
  * 自己写壳时用得上。**它不是启动前置**——装配不看凭据（2026-09-01）。
  */
 export {

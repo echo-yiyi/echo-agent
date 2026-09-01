@@ -38,6 +38,7 @@ import {
 import type { TUI } from "@earendil-works/pi-tui";
 import { tuiShell } from "./extension.ts";
 import { run } from "./run.ts";
+import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
 import { isConfigured, type VerifyFn } from "./setup.ts";
 import { linesOf } from "./stdin.ts";
 
@@ -84,8 +85,9 @@ export const USAGE = `用法：echo-agent [选项]
 环境变量优先是有意的：CI 与临时覆盖要能不改文件就生效。
 
 **缺凭据不会退化成假模型，也不会挡着不让起。** 管道/重定向（脚本、CI）在启动前报错并以 1 退出，
-因为调用方需要非零退出码、也没人能回答问题；stdin 是终端时**直接进界面**，缺 key 就在界面里配
-（贴进输入行、回车验证、自动保存），配好不用重启。两者都不会静默跑一个没配好的 agent。`;
+因为调用方需要非零退出码、也没人能回答问题；stdin 是终端时进**引导设置**：欢迎 → 选 provider →
+贴 key（回车验证并保存）→ 选模型 → 直接进对话。key 中途失效也在界面里重配，不用重启。
+两者都不会静默跑一个没配好的 agent。`;
 
 /**
  * 解析 argv（**不含** node/bun 与脚本名两项）。
@@ -150,6 +152,11 @@ export type MainDeps = Readonly<{
   verify?: VerifyFn;
 }>;
 
+/** 引导设置里摆出来的可选项。**判据取自 `PROVIDERS` 本身**，加一家不会漏掉这里。 */
+function providerChoices(): readonly FirstRunChoice[] {
+  return Object.entries(PROVIDERS).map(([name, make]) => ({ name, provider: make() }));
+}
+
 /**
  * `createEcho()` 的入参，两种形态共用——**装配只有一处**，形态差别只在「装不装壳」。
  *
@@ -204,24 +211,43 @@ export async function main(
 
   try {
     const credentials = deps.credentials ?? new FileCredentialStore();
-    const provider = PROVIDERS[opts.provider]();
+    let provider = PROVIDERS[opts.provider]();
+    let model = opts.model;
 
-    // **缺凭据时形态决定策略**（2026-09-01 用户拍板：配置是运行态，不阻塞启动）：
+    // **缺凭据时形态决定策略**（D3 + D4）：
     //   · 管道 / CI：没人能回答问题，调用方要的是非零退出码 → **启动前**报错返回 1，连装配都不做；
-    //   · 终端：**照常装配、直接进主界面**，缺 key 由壳子在界面里摆出配置段（`app.ts`）。
+    //   · 终端：进**引导设置**（`first-run.ts`：欢迎 → 选 provider → 贴 key → 选模型），
+    //     它跑在装配前——选哪家、哪个模型本来就得在装配前定（模型解析在装配期，换模型是 P3）。
     // 判据是 `isConfigured()`——与请求路径同一个 `Models.checkAuth()`，不匹配错误文案。
-    // 装配本身不看凭据了（`create-agent.ts`），所以这里不做预检的话管道形态会「起来再在第一句报 auth」——
-    // 仍是退出码 1，但晚了一步，且状态根已经被碰过。所以管道形态在这里先拦。
-    if (!interactive && !(await isConfigured(provider, credentials))) {
-      process.stderr.write(
-        `provider '${provider.id}' 没有凭据：设它认的环境变量，或写 $ECHO_HOME/credentials.json（见 --help）。\n`,
-      );
-      return 1;
+    // 装配本身不看凭据（`create-agent.ts`）；key **中途**失效由主界面里的配置段兜（`app.ts`）。
+    if (!(await isConfigured(provider, credentials))) {
+      if (!interactive) {
+        process.stderr.write(
+          `provider '${provider.id}' 没有凭据：设它认的环境变量，或写 $ECHO_HOME/credentials.json（见 --help）。\n`,
+        );
+        return 1;
+      }
+      const outcome = await runFirstRunSetup({
+        choices: providerChoices(),
+        credentials,
+        preselect: opts.provider,
+        signal: controller.signal,
+        ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
+        ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
+      });
+      if (outcome.kind === "cancelled") {
+        process.stderr.write("没有配置凭据，没有启动。\n");
+        return 1;
+      }
+      provider = outcome.provider;
+      // 显式 `--model` 赢；没给的话用引导设置里选的那个
+      model = opts.model ?? outcome.modelId;
     }
 
+    const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
     return interactive
-      ? await runInteractive(opts, provider, credentials, controller.signal, deps)
-      : await runPiped(opts, provider, credentials, controller.signal);
+      ? await runInteractive(effective, provider, credentials, controller.signal, deps)
+      : await runPiped(effective, provider, credentials, controller.signal);
   } catch (e) {
     // 装配失败（锁被别的进程占着、状态根不可写、目录为空）一律**明说**并非零退出。
     process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);

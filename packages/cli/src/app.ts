@@ -52,14 +52,18 @@ export type TuiConfigureOptions = Readonly<{
   verify?: VerifyFn;
 }>;
 
+/** 前两行（是什么 / 在哪）。首次运行的引导设置（`first-run.ts`）与主界面共用，进来第一眼是同一个头。 */
+export function bannerLines(cwd: string): string[] {
+  return [`${bold("echo-agent")}  ${dim(`v${VERSION}`)}`, dim(cwd)];
+}
+
 /**
  * 欢迎头（P1，`docs/review/tui-design.md` §三）：启动时一次，在文档流最上面，跟着内容滚走。
  * 四行：是什么 / 在哪 / 用什么模型 / 键怎么按。模型来自 `AgentState.model`，cwd 是壳自己拿的。
  */
 function welcomeLines(state: Readonly<AgentState>, cwd: string): string[] {
   return [
-    `${bold("echo-agent")}  ${dim(`v${VERSION}`)}`,
-    dim(cwd),
+    ...bannerLines(cwd),
     `模型 ${state.model.id} · ${state.model.provider}`,
     dim("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史 · Ctrl+O 工具输出"),
     "",
@@ -189,7 +193,12 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
    * `setup !== null` 就是「正在配」；那时 Ctrl+D 空时退出 / Ctrl+C 清空照旧由本文件分发。
    */
   let setup: CredentialSetup | null = null;
-  const enterConfigure = (why: string): void => {
+  /**
+   * 摆出配置段。`reason` 只在**有新信息**时给（比如「这把 key 被端点拒了」）——
+   * 段头自己会说「还没有 X 的 API key」，启动时再推一条 notice 就是同一句话说两遍
+   * （2026-09-01 用户截图点名的重复）。
+   */
+  const enterConfigure = (reason?: string): void => {
     if (configure === undefined || setup !== null) return;
     setup = new CredentialSetup({
       provider: configure.provider,
@@ -212,7 +221,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         rerender();
       },
     });
-    transcript.push({ kind: "notice", text: why });
+    if (reason !== undefined) transcript.push({ kind: "notice", text: reason });
     rerender();
   };
 
@@ -499,7 +508,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     // 所以从前那个 `ready` 布尔整个删掉了：一份判据，不再有壳子自己维护的第二份。
     if (signal?.aborted !== true) {
       // 「接上了、用的什么模型」由欢迎头说（`welcomeLines`），不再单发一行 notice
-      if (needsConfigure) enterConfigure("还没有可用的凭据——先配一个，配好不用重启");
+      if (needsConfigure) enterConfigure();
       rerender();
       await exited;
     }

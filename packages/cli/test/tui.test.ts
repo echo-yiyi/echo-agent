@@ -1096,6 +1096,9 @@ test("没配 key：主界面**照样起来**，配置段顶替输入行；配好
 
     expect(ui.screen()).toContain("模型 only"); // 主界面起来了
     expect(ui.screen()).toContain("Kimi (Moonshot) 的 API key"); // 配置段就在里面
+    // 「还没有」只许说一遍（段头自己那句）——启动时再推一条 notice 就是同一句话说两遍
+    // （2026-09-01 用户截图点名的重复）
+    expect(ui.screen().split("还没有").length - 1).toBe(1);
     expect(ui.screen()).toContain("--provider deepseek"); // 换家怎么换
     // 配置段期间输入行不该在：它自己的提示行在、输入行下面那条提示不在（欢迎头里的那句不算）
     expect(ui.screen()).toContain("输入不回显");
