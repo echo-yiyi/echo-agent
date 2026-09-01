@@ -25,6 +25,11 @@ export type TuiShell = {
   readonly definition: ExtensionDefinition<void>;
   /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止。resolve 的是进程退出码。 */
   readonly exited: Promise<number>;
+  /**
+   * 往运行中的界面塞一条旁白（D6：装配诊断这类**壳外产生**的消息走这里进屏幕）。
+   * 界面还没起来时先攒着，起来后一次放行——`createEcho()` 返回在壳 mount 之后，时序天然成立。
+   */
+  notify(text: string): void;
 };
 
 /**
@@ -41,6 +46,21 @@ export function tuiShell(
     settle = resolve;
     fail = reject;
   });
+
+  // 旁白通道：界面起来前攒着，起来后（runTui 注册 sink）先放行积压、再直通。
+  const backlog: string[] = [];
+  let sink: ((text: string) => void) | null = null;
+  const notify = (text: string): void => {
+    if (sink !== null) sink(text);
+    else backlog.push(text);
+  };
+  const attachAnnouncer = (fn: (text: string) => void): (() => void) => {
+    sink = fn;
+    for (const text of backlog.splice(0)) fn(text);
+    return () => {
+      if (sink === fn) sink = null; // 换代时旧界面摘下，新一代再挂
+    };
+  };
 
   const definition = defineExtension({
     name: "echo:tui",
@@ -83,6 +103,7 @@ export function tuiShell(
           const loop = runTui({
             agent: runtime,
             signal: stopper.signal,
+            announcer: attachAnnouncer,
             ...(opts.product !== undefined ? { product: opts.product } : {}),
             ...(opts.ui !== undefined ? { ui: opts.ui } : {}),
             ...(opts.configure !== undefined ? { configure: opts.configure } : {}),
@@ -114,5 +135,5 @@ export function tuiShell(
     },
   });
 
-  return { definition, exited };
+  return { definition, exited, notify };
 }

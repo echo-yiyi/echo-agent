@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 214（value 51 · type 153 · both 10）
+符号 215（value 52 · type 153 · both 10）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -256,8 +256,9 @@ type   Skill
 type   SkillActivation
 type   SkillCreation
 
--- src/storage/file-dir.ts (2) --
+-- src/storage/file-dir.ts (3) --
 value  echoHome
+value  expandHome
 both   FileDir
 
 -- src/storage/file-lock.ts (4) --

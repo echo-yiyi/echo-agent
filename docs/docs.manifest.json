@@ -1,5 +1,5 @@
 {
-  "$comment": "文档花名册。**只登记已存在且已批准的文档**——计划中的文档放 issue,不放这里当 CI 判据。字段只有两个:path 与 bilingual。曾经有过的 sections / maxWords / tier 已撤(它们用结构近似代替内容判断,两头都不准)。 fileRefsExclude:按定义就是装「举例路径」的文件——filerefs 分不清引用与举例,这是它已知的边界,豁免必须写明理由,不许无声扩大。",
+  "$comment": "文档花名册。只登记已存在且明确纳入维护的文档;登记表示受门约束,不表示内容已经批准。计划中的文档放 issue,不放这里当 CI 判据。docs/review 只放 prompt 与未纳入维护的 scratch,整个目录不受文档门约束;有明确读者与退出条件的审阅稿必须移出并登记。字段只有两个:path 与 bilingual。曾经有过的 sections / maxWords / tier 已撤(它们用结构近似代替内容判断,两头都不准)。fileRefsExclude 按定义就是装「举例路径」的文件——filerefs 分不清引用与举例,这是它已知的边界,豁免必须写明理由,不许无声扩大。 决策记录:状态即目录(proposed / implemented / rejected),移动目录即变更状态;每条都要登记——登记的动作本身是一次人审。",
   "docs": [
     {
       "path": "CLAUDE.md",
@@ -14,7 +14,59 @@
       "bilingual": false
     },
     {
+      "path": "CONTRIBUTING.md",
+      "bilingual": false
+    },
+    {
+      "path": "SECURITY.md",
+      "bilingual": false
+    },
+    {
       "path": "packages/core/README.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/design/lifecycle-and-run-loop.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/design/context-and-message-flow.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-abort-reason.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-agent-end-barrier.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-fenced-phase.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-lifecycle-naming.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-second-prompt-policy.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-start-precondition.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-stop-continuation-limit.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-teardown-entry.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-01-tool-execution-parallel.md",
       "bilingual": false
     }
   ],

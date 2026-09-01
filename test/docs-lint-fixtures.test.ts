@@ -1,5 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { anchors, docLinks, fileRefCandidates, slug, structuralSignature, tsBlocks } from "../scripts/docs-lint.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  anchors,
+  docLinks,
+  fileRefCandidates,
+  isNestedGitRoot,
+  slug,
+  sourceLinks,
+  sourceSymbols,
+  structuralSignature,
+  testCaseAnchors,
+  tsBlocks,
+  validateSourceAnchor,
+} from "../scripts/docs-lint.ts";
 
 // **判据自检**:每个 parser 都要能分辨正例与反例。
 //
@@ -37,6 +52,72 @@ describe("docLinks", () => {
 
   test("围栏里的链接不收", () => {
     expect(docLinks("```\n[假的](nope.md)\n```\n")).toEqual([]);
+  });
+});
+
+describe("源码语义链接", () => {
+  test("只收源码目标,保留 symbol / test fragment", () => {
+    const text = [
+      "见 [方法](../src/a.ts#symbol=Agent.start) 与 [用例][case]。",
+      "[文档](a.md) 与 [外链](https://x.test/a.ts#symbol=A) 不收。",
+      "",
+      "[case]: ../test/a.test.ts#test=并发-start-共享一次启动",
+    ].join("\n");
+    expect(sourceLinks(text).map(l => `${l.target}#${l.anchor ?? ""}`).sort()).toEqual([
+      "../src/a.ts#symbol=Agent.start",
+      "../test/a.test.ts#test=并发-start-共享一次启动",
+    ]);
+  });
+
+  test("AST 只认声明:顶层符号、类成员与类型成员可锚,注释同名不能充数", () => {
+    const source = [
+      "// Ghost.onlyInComment",
+      "export const TOP = 1;",
+      "export type AgentOptions = { toolExecution?: 'sequential' };",
+      "export class Agent { private phase = 'new'; async start(): Promise<void> {} }",
+    ].join("\n");
+    expect([...sourceSymbols(source)].sort()).toEqual([
+      "Agent", "Agent.phase", "Agent.start", "AgentOptions", "AgentOptions.toolExecution", "TOP",
+    ]);
+    expect(validateSourceAnchor("symbol=Agent.start", source)).toBeNull();
+    expect(validateSourceAnchor("symbol=AgentOptions.toolExecution", source)).toBeNull();
+    expect(validateSourceAnchor("symbol=Ghost.onlyInComment", source)).toContain("源码符号不存在");
+  });
+
+  test("行号、缺 fragment 与不存在的符号都判红", () => {
+    const source = "export function runLoop(): void {}\n";
+    expect(validateSourceAnchor(null, source)).toContain("缺语义锚");
+    expect(validateSourceAnchor("L48", source)).toContain("禁止行号");
+    expect(validateSourceAnchor("symbol=runLoop", source)).toBeNull();
+    expect(validateSourceAnchor("symbol=runTurn", source)).toContain("源码符号不存在");
+  });
+
+  test("测试标题按 slug 锚定且必须唯一", () => {
+    const title = "并发两个 start() 共享同一次启动，都成功";
+    const source = `test(${JSON.stringify(title)}, () => {});\nit(\"另一条\", () => {});\n`;
+    const anchor = slug(title);
+    expect(testCaseAnchors(source).get(anchor)).toBe(1);
+    expect(validateSourceAnchor(`test=${anchor}`, source, "x.test.ts")).toBeNull();
+    expect(validateSourceAnchor("test=不存在", source, "x.test.ts")).toContain("测试用例不存在");
+    expect(validateSourceAnchor(`test=${anchor}`, `${source}\ntest(${JSON.stringify(title)}, () => {});`, "x.test.ts"))
+      .toContain("测试用例锚不唯一");
+  });
+});
+
+describe("扫描边界", () => {
+  test("带独立 .git 标记的嵌套 worktree / 仓库不属于本仓扫描面", () => {
+    const root = mkdtempSync(join(tmpdir(), "echo-docs-lint-"));
+    try {
+      const nested = join(root, "nested");
+      const ordinary = join(root, "ordinary");
+      mkdirSync(nested);
+      mkdirSync(ordinary);
+      writeFileSync(join(nested, ".git"), "gitdir: elsewhere\n");
+      expect(isNestedGitRoot(nested)).toBe(true);
+      expect(isNestedGitRoot(ordinary)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

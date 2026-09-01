@@ -39,15 +39,20 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { tuiShell } from "./extension.ts";
 import { run } from "./run.ts";
 import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
+// （FirstRunChoice 同时是装配与选择器的「一家」形状：name = --provider 短名，provider = 实例）
+import { readSettings, writeSettings } from "./settings.ts";
 import { isConfigured, type VerifyFn } from "./setup.ts";
 import { linesOf } from "./stdin.ts";
 import { ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
+
+export type ProviderName = "kimi" | "deepseek" | "openai" | "zai" | "minimax";
 
 export type CliOptions = {
   /** 状态根。不给则由 core 决定（`ECHO_HOME`，再退到 `$PWD/.echo`）。 */
   stateDir?: string;
   agentId?: string;
-  provider: "kimi" | "deepseek" | "openai" | "zai" | "minimax";
+  /** **不给 = 没说**（D7）：用设置文件记住的那家，其次 kimi。给了永远赢。 */
+  provider?: ProviderName;
   model?: string;
   /** `--no-memory`：不装记忆，也就不开 Dream 自调度。一次性跑用得上。 */
   withoutMemory: boolean;
@@ -55,7 +60,7 @@ export type CliOptions = {
   extensionDirs: string[];
 };
 
-const PROVIDERS: Record<CliOptions["provider"], () => Provider> = {
+const PROVIDERS: Record<ProviderName, () => Provider> = {
   kimi: () => kimiProvider(),
   deepseek: () => deepseekProvider(),
   openai: () => openaiProvider(),
@@ -76,11 +81,14 @@ export function usage(name: string): string {
 选项：
   --state-dir <路径>   状态根（缺省：$ECHO_HOME/agents/<id>，再退到 $PWD/.echo/agents/<id>）
   --agent-id <名字>    同一状态根下的 agent 身份（缺省 default）
-  --provider <名字>    kimi | deepseek | openai | zai | minimax（缺省 kimi）
-  --model <id>         模型 id（缺省由 provider 声明）
+  --provider <名字>    kimi | deepseek | openai | zai | minimax（缺省：上次选的，其次 kimi）
+  --model <id>         模型 id（缺省：上次选的，其次由 provider 声明）
   --extensions <目录>  去哪里找扩展，可重复（缺省 ./extensions）
   --no-memory          不装记忆与 Dream
   -h, --help           显示本帮助
+
+上次在界面里选的模型记在 $ECHO_HOME/settings.json（D7）：**显式 --provider / --model 永远赢**，
+设置只是「没说就用上次的」；文件坏了不挡启动，如实说一句然后用缺省。
 
 凭据的解析顺序是**环境变量 → 凭据文件 → 没有**：先看 provider 自己认的那些环境变量
 （MOONSHOT_API_KEY / ECHO_LLM_API_KEY 等），再看 $ECHO_HOME/credentials.json
@@ -103,7 +111,7 @@ export function usage(name: string): string {
 export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.name): CliOptions | null {
   if (argv[0] === "-h" || argv[0] === "--help") return null;
 
-  const opts: CliOptions = { provider: "kimi", withoutMemory: false, extensionDirs: [] };
+  const opts: CliOptions = { withoutMemory: false, extensionDirs: [] };
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]!;
@@ -135,7 +143,7 @@ export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.nam
         if (!Object.hasOwn(PROVIDERS, v)) {
           throw new Error(`不认识的 provider '${v}'；可选：${Object.keys(PROVIDERS).join("、")}`);
         }
-        opts.provider = v as CliOptions["provider"];
+        opts.provider = v as ProviderName;
         break;
       }
       case "--no-memory":
@@ -173,10 +181,13 @@ function echoOptions(
   form: PresetForm,
   opts: CliOptions,
   provider: Provider,
+  choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
 ): Parameters<typeof createEcho>[0] {
   return {
     provider,
+    // 五家全注册（P3b-a）：Ctrl+L 跨家换模的派发靠它；初始模型仍从 `provider` 解析
+    providers: choices.map((c) => c.provider),
     credentials,
     withoutMemory: opts.withoutMemory,
     ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
@@ -235,8 +246,26 @@ export function mainFor(product: Product): Main {
 
     try {
       const credentials = deps.credentials ?? new FileCredentialStore();
-      let provider = PROVIDERS[opts.provider]();
+      const choices = providerChoices(); // **一个 id 一份实例**：装配、向导、选择器共用，别各造各的
+      const notices: string[] = [];
+
+      // 设置（D7）：上次选的模型。**显式旗子永远赢**；设置存的是 provider **id**（目录真源），
+      // 记住的家/模型已经不在了就如实说一句、退回缺省——记忆过期不该挡启动（D3 同一原则）。
+      const settingsRead = await readSettings();
+      if (settingsRead.problem !== undefined) notices.push(`[设置] ${settingsRead.problem}`);
+      const remembered = settingsRead.settings.model;
+      let chosen = opts.provider !== undefined ? choices.find((c) => c.name === opts.provider)! : undefined;
+      if (chosen === undefined && remembered !== undefined) {
+        chosen = choices.find((c) => c.provider.id === remembered.provider);
+        if (chosen === undefined) notices.push(`[设置] 记住的 provider '${remembered.provider}' 不认识了，用缺省`);
+      }
+      chosen ??= choices[0]!; // kimi
+      let provider = chosen.provider;
       let model = opts.model;
+      if (model === undefined && remembered !== undefined && remembered.provider === provider.id) {
+        if (provider.getModels().some((m) => m.id === remembered.id)) model = remembered.id;
+        else notices.push(`[设置] 记住的模型 '${remembered.id}' 已不在 ${provider.id} 的目录里，用缺省`);
+      }
 
       // **缺凭据时形态决定策略**（D3 + D4）：
       //   · 管道 / CI：没人能回答问题，调用方要的是非零退出码 → **启动前**报错返回 1，连装配都不做；
@@ -253,9 +282,9 @@ export function mainFor(product: Product): Main {
         }
         const outcome = await runFirstRunSetup({
           product,
-          choices: providerChoices(),
+          choices,
           credentials,
-          preselect: opts.provider,
+          preselect: chosen.name,
           signal: controller.signal,
           ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
           ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
@@ -267,14 +296,17 @@ export function mainFor(product: Product): Main {
         provider = outcome.provider;
         // 显式 `--model` 赢；没给的话用引导设置里选的那个
         model = opts.model ?? outcome.modelId;
+        // 记住这次的选择（D7）：写不进去不挡启动，如实说一句
+        const w = await writeSettings({ model: { provider: outcome.provider.id, id: outcome.modelId } });
+        if (w.problem !== undefined) notices.push(`[设置] ${w.problem}`);
       }
 
       const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
       // 形态与工作目录到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
       const form: PresetForm = { interactive, cwd: process.cwd() };
       return interactive
-        ? await runInteractive(product, form, effective, provider, credentials, controller.signal, deps)
-        : await runPiped(product, form, effective, provider, credentials, controller.signal);
+        ? await runInteractive(product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, notices, controller.signal, deps)
+        : await runPiped(product, form, effective, provider, choices, credentials, notices, controller.signal);
     } catch (e) {
       // 装配失败（锁被别的进程占着、状态根不可写、目录为空）一律**明说**并非零退出。
       process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
@@ -295,11 +327,16 @@ async function runPiped(
   form: PresetForm,
   opts: CliOptions,
   provider: Provider,
+  choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
+  notices: readonly string[],
   signal: AbortSignal,
 ): Promise<number> {
   // **唯一 composition root**（§14.2）：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
-  const echo = await createEcho(echoOptions(product, form, opts, provider, credentials));
+  const echo = await createEcho(echoOptions(product, form, opts, provider, choices, credentials));
+  // 启动口信（设置读不动等）与装配诊断（坏扩展被跳过，D6）都走 stderr：说了才算没静默，但不挡启动、不改退出码
+  for (const n of notices) process.stderr.write(`${n}\n`);
+  for (const d of echo.diagnostics) process.stderr.write(`[扩展] [${d.code}] ${d.message}${d.path !== undefined ? `（${d.path}）` : ""}\n`);
   return await run({ echo, input: linesOf(process.stdin, signal), signal });
 }
 
@@ -308,8 +345,10 @@ async function runInteractive(
   product: Product,
   form: PresetForm,
   opts: CliOptions,
-  provider: Provider,
+  chosen: FirstRunChoice,
+  choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
+  notices: readonly string[],
   signal: AbortSignal,
   deps: MainDeps,
 ): Promise<number> {
@@ -317,22 +356,28 @@ async function runInteractive(
     product,
     signal,
     ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
-    // 缺 key 时壳子在界面里配的那一段要的东西。`alternatives` 只是提示「换一家怎么换」——
-    // 换家本身是 `--provider` 或 P3 `/model` 的事，界面里只能给**这次装配的这家**配 key。
+    // 壳子的凭据配置段与 Ctrl+L 跨家选择器要的东西：全部可选的家 + 凭据 + 「换模成功就写设置」的回调（D7）
     configure: {
-      provider,
+      providers: choices,
       credentials,
-      alternatives: Object.keys(PROVIDERS).filter((n) => n !== opts.provider),
+      onModelChange: (m): void => {
+        void writeSettings({ model: m }).then((w) => {
+          if (w.problem !== undefined) shell.notify(`[设置] ${w.problem}`);
+        });
+      },
       ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
     },
   });
-  const base = echoOptions(product, form, opts, provider, credentials);
+  const base = echoOptions(product, form, opts, chosen.provider, choices, credentials);
   const echo = await createEcho({
     ...base,
     // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的
     // `AgentRuntime` 由 builtin 那一代提供（`create-echo.ts`），与同代里谁先谁后无关。
     extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: shell.definition as never }],
   });
+  // 启动口信与装配诊断（D6）进界面：壳 mount 在先、这里在后，notify 直通或先攒着
+  for (const n of notices) shell.notify(n);
+  for (const d of echo.diagnostics) shell.notify(`[扩展] 没装上：${d.message}${d.path !== undefined ? `（${d.path}）` : ""}`);
   try {
     // **启停归这一层**，不归壳：协议里没有 `start`/`stop`，壳子想碰也碰不到。
     await echo.agent.start();

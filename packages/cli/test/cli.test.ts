@@ -9,7 +9,7 @@
 // 交互形态的判据在 `tui.test.ts` 与 `extension.test.ts`。
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -187,7 +187,8 @@ test("parseArgs:认识的都认得出", () => {
   // 空 argv **不再是打帮助**：两个 CLI 并成一个之后，`echo-agent` 光秃秃地敲下去
   // 就是「按缺省起来」——交互形态下那才是用户要的（原 `echo-agent start` 的 start
   // 是唯一的子命令，等于噪音，2026-08-31 一并去掉）。
-  expect(parseArgs([])).toEqual({ provider: "kimi", withoutMemory: false, extensionDirs: [] });
+  // D7 起 `provider` 不再有解析期缺省：**不给 = 没说**，缺省与「记住上次」的合成在 main() 里做
+  expect(parseArgs([])).toEqual({ withoutMemory: false, extensionDirs: [] });
   expect(parseArgs(["--provider", "deepseek", "--no-memory", "--agent-id", "a1"])).toEqual({
     provider: "deepseek",
     withoutMemory: true,
@@ -437,6 +438,162 @@ test("main:交互 + 缺凭据，引导设置里 Ctrl+D → 不启动，退出码
     expect(await running).toBe(1);
     expect(existsSync(join(dir, "credentials.json")), "用户退出了却写了盘").toBe(false);
     expect(existsSync(join(dir, "state")), "没配就退出，状态根不该被碰").toBe(false);
+  } finally {
+    restore();
+  }
+});
+
+/* ══════════════ 坏扩展不阻塞启动（D6）：跳过 + 界面里看得见 ══════════════ */
+
+test("main:交互 + 扩展目录里有坏文件 → 照样起来，屏幕上一条「[扩展] 没装上」，好的照用", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const ext = join(dir, "extensions");
+    mkdirSync(ext, { recursive: true });
+    writeFileSync(join(ext, "broken.ts"), "export const x = 1;\n"); // 没有默认导出
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+
+    const running = main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], true, {
+      ui,
+      credentials,
+    });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3"), "主界面");
+    await waitFor(() => ui.screen().includes("[扩展] 没装上"), "装配诊断上屏");
+    expect(ui.screen()).toContain("broken.ts"); // 指名道姓，用户才知道去修哪个文件
+
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0); // 坏扩展不改退出码——它没挡住任何事
+  } finally {
+    restore();
+  }
+});
+
+test("bin:管道形态 + 坏扩展 → 照样跑，诊断进 stderr，退出码不受影响", () => {
+  const ext = join(dir, "extensions");
+  mkdirSync(ext, { recursive: true });
+  writeFileSync(join(ext, "broken.ts"), "export const x = 1;\n");
+  const home = join(dir, "home");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "credentials.json"), JSON.stringify({ kimi: { apiKey: "sk-ok" } }));
+
+  const r = spawnBin(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], {
+    MOONSHOT_API_KEY: "",
+    ECHO_LLM_API_KEY: "",
+    ECHO_HOME: home,
+  });
+  // 空 stdin：一行输入都没有，起得来就 0 退出
+  expect(r.code).toBe(0);
+  expect(r.err).toContain("[扩展]");
+  expect(r.err).toContain("broken.ts");
+});
+
+/* ══════════════ 记住上次的选择（D7）：切换了之后，重启还要能用 ══════════════ */
+
+test("main:向导里选的家和模型，**下一次启动直接生效**——不再进向导、欢迎头印着上次选的", async () => {
+  const restore = isolate();
+  const ui1 = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    // 第一次：走向导，选 DeepSeek + 第二个模型
+    const first = main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui: ui1,
+      credentials,
+      verify: async () => ({ ok: true }),
+    });
+    await waitFor(() => ui1.screen().includes("选择 provider"), "向导");
+    ui1.feed("2");
+    await waitFor(() => ui1.screen().includes("DeepSeek 的 API key"), "收 key");
+    for (const ch of "sk-GOOD") ui1.feed(ch);
+    ui1.feed("\r");
+    await waitFor(() => ui1.screen().includes("选择模型"), "选模型");
+    ui1.feed("2"); // deepseek-reasoner（非缺省——选缺省的话「记没记住」分不出来）
+    await waitFor(() => ui1.screen().includes("模型 deepseek-reasoner · deepseek"), "主界面");
+    ui1.feed(String.fromCharCode(4));
+    expect(await first).toBe(0);
+
+    // 第二次：**一个旗子都不给**。配好了 + 记住了 → 不进向导，直接是上次那家那个模型
+    const ui2 = fakeTui();
+    const second = main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui: ui2,
+      credentials,
+    });
+    await waitFor(() => ui2.screen().includes("模型 deepseek-reasoner · deepseek"), "重启后直接生效");
+    expect(ui2.screen()).not.toContain("选择 provider");
+    ui2.feed(String.fromCharCode(4));
+    expect(await second).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("main:显式 --provider 永远赢过设置；设置里记的模型只在同一家时生效", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-k" });
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ model: { provider: "deepseek", id: "deepseek-reasoner" } }));
+
+    const running = main(["--provider", "kimi", "--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+    });
+    // 家听旗子的（kimi），设置里那条是 deepseek 的模型 → 不适用，回 kimi 缺省
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "旗子赢");
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("main:记住的模型已不在目录里 → 口信上屏、用缺省，**不挡启动**", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("deepseek", { type: "api_key", key: "sk-d" });
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ model: { provider: "deepseek", id: "deepseek-v99-已下架" } }));
+
+    const running = main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+    });
+    await waitFor(() => ui.screen().includes("模型 deepseek-chat · deepseek"), "家记住了、模型回缺省");
+    await waitFor(() => ui.screen().includes("[设置]"), "口信上屏");
+    expect(ui.screen()).toContain("deepseek-v99-已下架");
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("main:设置文件坏了 → 口信上屏、按没有设置起，**不挡启动**", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-k" });
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "settings.json"), "{ 坏的");
+
+    const running = main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+    });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "照样起");
+    // 断言用两个**短**词：口信一行 80 列会被折行，「不是合法 JSON」正好断在空格上，长串 includes 必然配不上（实测）
+    await waitFor(() => ui.screen().includes("[设置]") && ui.screen().includes("JSON"), "口信上屏");
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
   } finally {
     restore();
   }

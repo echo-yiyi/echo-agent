@@ -5,7 +5,7 @@
 // 真终端只在 `bin/echo-tui.ts` 里出现，测试一行都不碰它。
 
 import { test, expect } from "bun:test";
-import { Agent, InMemoryCredentialStore, kimiProvider, type CredentialStore, type ProviderEvent } from "@echo-agent/core";
+import { Agent, deepseekProvider, InMemoryCredentialStore, kimiProvider, type CredentialStore, type ProviderEvent } from "@echo-agent/core";
 import { agentRuntimeOf, type AgentRuntime } from "@echo-agent/core/extension";
 import { scriptedStreamFn, textTurn, toolTurn } from "@echo-agent/core/testing";
 import { CURSOR_MARKER, type TUI } from "@earendil-works/pi-tui";
@@ -1077,12 +1077,23 @@ function isolateKeys(): () => void {
   };
 }
 
+/** 配置段 / 选择器相关的测试要用 kimi 身份：当前家按 `state.model.provider` 现查，`"t"` 查不到。 */
+function kimiAgent(turns: ProviderEvent[][]): Agent {
+  return new Agent({
+    model: { provider: "kimi", id: "kimi-k3", api: "scripted" },
+    streamFunction: scriptedStreamFn(turns as never),
+  });
+}
+
 function configureWith(over: Partial<TuiConfigureOptions> = {}): TuiConfigureOptions {
   return {
-    provider: kimiProvider(),
+    // 两家：跨家选择器与「换到未配 key 的家」都靠第二家
+    providers: [
+      { name: "kimi", provider: kimiProvider() },
+      { name: "deepseek", provider: deepseekProvider() },
+    ],
     credentials: new InMemoryCredentialStore(),
     verify: async () => ({ ok: true }),
-    alternatives: ["deepseek"],
     ...over,
   };
 }
@@ -1091,13 +1102,13 @@ test("没配 key：主界面**照样起来**，配置段顶替输入行；配好
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("我在")]);
+    const agent = kimiAgent([textTurn("我在")]);
     const prompts = capturePrompts(agent);
     const credentials = new InMemoryCredentialStore();
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
     await flush();
 
-    expect(ui.screen()).toContain("模型 only"); // 主界面起来了
+    expect(ui.screen()).toContain("模型 kimi-k3"); // 主界面起来了
     expect(ui.screen()).toContain("Kimi (Moonshot) 的 API key"); // 配置段就在里面
     // 「还没有」只许说一遍（段头自己那句）——启动时再推一条 notice 就是同一句话说两遍
     // （2026-09-01 用户截图点名的重复）
@@ -1132,7 +1143,7 @@ test("配好了的：不摆配置段", async () => {
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
+    const agent = kimiAgent([textTurn("好")]); // 身份必须能查到家，「配好了」这句话才有内容
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
@@ -1153,7 +1164,7 @@ test("跑着的时候端点报 `auth`（key 被撤了）：配置段再摆一次
     const authTurn: ProviderEvent[] = [
       { type: "error", error: { source: "provider", code: "auth", retryable: false, message: "端点未配置凭据：kimi" } },
     ];
-    const agent = agentWith([authTurn]);
+    const agent = kimiAgent([authTurn]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-revoked" });
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
@@ -1179,7 +1190,7 @@ test("配置段里：Ctrl+C 清空、有字时 Ctrl+D 不退出、空了 Ctrl+D 
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
+    const agent = kimiAgent([textTurn("好")]);
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith() });
     await flush();
     expect(ui.screen()).toContain("的 API key");
@@ -1201,7 +1212,7 @@ test("读不了凭据文件：**不挡启动**，说一句，当成没配", asyn
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
+    const agent = kimiAgent([textTurn("好")]);
     const broken: CredentialStore = {
       read: async () => {
         throw new Error("凭据文件不是合法 JSON：/x/credentials.json");
@@ -1211,7 +1222,7 @@ test("读不了凭据文件：**不挡启动**，说一句，当成没配", asyn
     };
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials: broken }) });
     await flush();
-    expect(ui.screen()).toContain("模型 only");
+    expect(ui.screen()).toContain("模型 kimi-k3");
     expect(ui.screen()).toContain("[凭据] 读不了凭据文件");
     expect(ui.screen()).toContain("的 API key");
     quit(ui);
@@ -1285,11 +1296,12 @@ test("状态栏在配置段期间也在（它不依赖输入行）", async () =>
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
+    const agent = kimiAgent([textTurn("好")]);
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith() });
     await flush();
+    expect(ui.screen()).toContain("的 API key"); // 配置段真的在（不在的话这条判据是空的）
     const footer = ui.screen().split("\n").at(-1)!.replace(/\x1b\[[0-9;]*m/g, "");
-    expect(footer).toContain("only");
+    expect(footer).toContain("kimi-k3");
     expect(footer).toContain("空闲");
     quit(ui);
     await done;
@@ -1436,9 +1448,12 @@ test("Ctrl+L：选择器顶替输入行，当前项 ✓ 且预选中；选另一
     await flush();
 
     ui.feed(CTRL_L);
+    await flush(); // 构建是异步的：逐家问配没配 key
     const s = ui.screen();
     expect(s).toContain("选择模型");
     expect(s).toContain("→ 1. Kimi K3 ✓"); // 当前项标着、预选中
+    expect(s).toContain("DeepSeek Chat"); // 跨家平铺（P3b-a）
+    expect(s).toContain("未配 key"); // deepseek 没配，标出来
     // 「Enter 发送 · Shift+Enter」欢迎头里恒有一句；选择器顶替输入行时**只剩那一句**（输入行下的短提示没了）
     expect(s.split("Enter 发送 · Shift+Enter").length - 1, "选择器打开时输入行不该在").toBe(1);
 
@@ -1459,18 +1474,20 @@ test("Ctrl+L：Esc 收起、再按 Ctrl+L 也是收起；没给 configure 的低
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
+    const agent = kimiAgent([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
     await flush();
 
     ui.feed(CTRL_L);
+    await flush();
     expect(ui.screen()).toContain("选择模型");
     ui.feed(ESC_KEY);
     expect(ui.screen()).not.toContain("选择模型");
     ui.feed(CTRL_L);
-    ui.feed(CTRL_L); // 再按一次 = 收起
+    ui.feed(CTRL_L); // 构建中再按一次 = 收起（token 防重入，在飞构建作废）
+    await flush();
     expect(ui.screen()).not.toContain("选择模型");
     quit(ui);
     await done;
@@ -1507,6 +1524,7 @@ test("忙的时候选模型：rejected 原因上屏，装备原样不动", async
     ui.feed("跑一轮");
     ui.feed(ENTER); // 发出去的那一拍就算在跑（pendingLocal / userRunPending）
     ui.feed(CTRL_L);
+    await flush(); // 构建异步：entries 齐了数字直选才有目标
     ui.feed("2");
     await flush(300);
 
@@ -1596,4 +1614,65 @@ test("不认识的斜杠命令：报一句、原文放回输入行，不发给�
 
   quit(ui);
   await done;
+});
+
+/* ─────────────── 跨家换模（P3b-a）：选另一家的模型 → 换过去 + 主动弹配置段 + 回调写设置 ─────────────── */
+
+test("Ctrl+L 选 DeepSeek 的模型：换过去、onModelChange 拿到 provider id、没配 key 就**主动**弹配置段", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" }); // 只配了 kimi
+    const changes: { provider: string; id: string }[] = [];
+    const done = runTui({
+      agent: runtimeOf(agent),
+      ui,
+      configure: configureWith({ credentials, onModelChange: (m) => changes.push(m) }),
+    });
+    await flush();
+
+    ui.feed(CTRL_L);
+    await flush();
+    ui.feed("3"); // 平铺清单：1/2 是 kimi 的，3 = DeepSeek Chat
+    await flush(100);
+
+    expect(ui.screen()).toContain("[模型] 已换到 deepseek-chat（deepseek，下一轮生效）");
+    expect(agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-chat" });
+    expect(changes).toEqual([{ provider: "deepseek", id: "deepseek-chat" }]); // D7：cli 拿它写 settings.json
+    // deepseek 没配 key：不等第一句 prompt 撞 auth，配置段**这就**摆出来，而且对的是 DeepSeek
+    expect(ui.screen()).toContain("DeepSeek 的 API key");
+    // 状态栏跟着换
+    expect(ui.screen().split("\n").at(-1)!).toContain("deepseek-chat");
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("Ctrl+L 选已配好那家的模型：换过去就完，不弹配置段", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    ui.feed(CTRL_L);
+    await flush();
+    ui.feed("2"); // kimi-k2-turbo-preview，同一家
+    await flush(100);
+
+    expect(agent.state.model.id).toBe("kimi-k2-turbo-preview");
+    expect(ui.screen()).not.toContain("的 API key"); // 配好了就别烦人
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
 });

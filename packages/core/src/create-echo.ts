@@ -22,18 +22,27 @@
 //   - **不弹信任确认**（2026-08-28 用户拍板）：`extensions/` 下的文件按用户自己的代码对待。
 //     模块求值本来就不是 sandbox（§14.8.4），加一个确认框只是仪式，挡不住任何东西。
 //
-// ## 一个坏扩展就整体不起（fail-loud）
+// ## 坏扩展不阻塞启动（D6，2026-09-01 用户拍板：常驻 agent 的存活不以外围配置为前提）
 //
-// 发现到的文件里任何一个 import 失败 / 默认导出形状不对 / mount 失败 → **整个 `createEcho()` 抛**，
-// 并且**把已经造好的 Agent 停掉**（不然状态锁和 store 会泄漏）。不收集 diagnostic 继续跑：
-// 「装了一半的 agent」是本仓明令禁止的那种静默降级——用户以为工具在，模型却看不见它。
+// 分界线是**谁的东西坏了**：
+//   · **盘上发现的**（`extensions/` 下用户的文件）：import 失败 / 默认导出不对 / mount 失败 →
+//     记一条 `Diagnostic`（`Echo.diagnostics`）、跳过它，agent 照起、**界面里看得见**。
+//     它是运行态配置——热部署下修好文件重启（O4 之后是 reload）就好，不该把整个常驻 agent 拖死。
+//   · **显式传入的**（`opts.extensions`、`agent.tools` 的 inline）：照旧 **fail-loud** 整体不起——
+//     那是程序自己的装配，坏了是代码 bug，静默跳过才是「装了一半的 agent」那种降级。
+//
+// 「跳过一个、其余照装」的实现是**每个盘上扩展各占一个 generation**：Host 的 mount 按代
+// 全有或全无（`host.ts` 头注），分代之后一个坏 apply 只回滚它自己那代；后代照样能 inject
+// 前代已 ACTIVE 的 Service（跨代绑定，`graph.ts` 的 activeProviders）。
+// **诊断不是可选项**：跳过而不上报就是静默失败——`Echo.diagnostics` 是机器可读的那份，
+// 壳子怎么显示归壳子（CLI 在 TUI 里发 notice、管道模式写 stderr）。
 
 import { readdir } from "node:fs/promises";
 import { extname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Agent } from "./agent.ts";
 import { createAgent, type CreateAgentOptions } from "./create-agent.ts";
-import { errText } from "./errors.ts";
+import { errText, type Diagnostic } from "./errors.ts";
 import { defineExtension, type ExtensionDefinition } from "./extension/abi.ts";
 import { ExtensionHost, type ExtensionEntry } from "./extension/host.ts";
 import { agentRegistries } from "./extension/registries.ts";
@@ -43,8 +52,10 @@ import { unmountGenerations } from "./extension/cleanup.ts";
 /** 约定目录名：`<cwd>/extensions`。 */
 export const EXTENSIONS_DIR = "extensions";
 
-/** 外部那一代：磁盘发现的 + 显式传入的。换代（reload）是 §14.8/§14.9 的事。 */
+/** 显式传入那一代（`opts.extensions`，含壳）。换代（reload）是 §14.8/§14.9 的事。 */
 const BOOT_GENERATION = "boot";
+/** `agent.tools` 转成的 inline Extension 那一代：显式装配，fail-loud。 */
+const INLINE_GENERATION = "boot:inline";
 
 const MODULE_EXTS: ReadonlySet<string> = new Set([".ts", ".mts", ".js", ".mjs"]);
 /** 一层子目录的入口文件，按此顺序取第一个存在的。 */
@@ -82,8 +93,13 @@ export type LoadedExtension = Readonly<{
 
 export type Echo = Readonly<{
   agent: Agent;
-  /** 本次装上的全部 Extension，顺序即 mount 顺序。 */
+  /** 本次装上的全部 Extension，顺序即 mount 顺序。**被跳过的坏扩展不在这里**——在 `diagnostics`。 */
   extensions: readonly LoadedExtension[];
+  /**
+   * 装配期的诊断（D6）：盘上扩展 load / mount 失败，一条一个，带文件路径。
+   * 空数组 = 全部装上。**显式传入的失败不在这里**——那种直接抛。
+   */
+  diagnostics: readonly Diagnostic[];
   /** 先卸 Extension（构造的逆序），再停 Agent。 */
   stop(): Promise<void>;
 }>;
@@ -226,12 +242,21 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     }),
   });
 
-  // 从这里起 Agent 已经存在：任何失败都必须把它停掉，否则 store 与文件锁没人收。
+  // 从这里起 Agent 已经存在：任何（fail-loud 路径上的）失败都必须把它停掉，否则 store 与文件锁没人收。
+  const diagnostics: Diagnostic[] = [];
+  /** 已经 mount 上的**非 builtin** 代，按 mount 顺序。收摊与失败回滚都按它逆序卸。 */
+  const mountedGens: string[] = [];
   try {
+    // 盘上的扩展逐个加载：**坏一个记一条诊断、跳过它**（D6，头注）。`loadExtensionFile` 本身照抛
+    // ExtensionLoadError——低层调用方仍然 fail-loud，宽恕只发生在装配这一层、只对盘上的文件。
     const discovered: { entry: ExtensionEntry; file: string }[] = [];
     for (const file of files) {
-      const definition = await loadExtensionFile(file);
-      discovered.push({ entry: { entryId: resolve(file), definition }, file });
+      try {
+        const definition = await loadExtensionFile(file);
+        discovered.push({ entry: { entryId: resolve(file), definition }, file });
+      } catch (e) {
+        diagnostics.push({ code: "extension_load_failed", message: errText(e), path: file });
+      }
     }
 
     // ── ① 内部：`echo:*` builtin 表 ──────────────────────────────────────────────
@@ -255,13 +280,33 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       inlineTools.length === 0
         ? []
         : [{ entryId: "echo:inline-tools", definition: defineToolPack("echo:inline-tools") as never, config: { tools: inlineTools } }];
-    const entries: ExtensionEntry[] = [...inline, ...discovered.map((d) => d.entry), ...extra];
-    await host.mount(BOOT_GENERATION, entries);
+    // 顺序与从前一致：inline → 盘上发现的 → extra。差别只在**代的划分**：
+    //   · inline / extra 是显式装配 → 各自一代、fail-loud；
+    //   · 盘上发现的每个一代 → 坏 apply 只回滚它自己，记诊断继续（D6）。
+    if (inline.length > 0) {
+      await host.mount(INLINE_GENERATION, inline);
+      mountedGens.push(INLINE_GENERATION);
+    }
+    const mounted: { entry: ExtensionEntry; file: string }[] = [];
+    for (const d of discovered) {
+      const gen = `${BOOT_GENERATION}:${d.entry.entryId}`;
+      try {
+        await host.mount(gen, [d.entry]);
+        mountedGens.push(gen);
+        mounted.push(d);
+      } catch (e) {
+        diagnostics.push({ code: "extension_mount_failed", message: errText(e), path: d.file });
+      }
+    }
+    if (extra.length > 0) {
+      await host.mount(BOOT_GENERATION, extra);
+      mountedGens.push(BOOT_GENERATION);
+    }
 
     const loaded: LoadedExtension[] = [
       ...builtin.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
       ...inline.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
-      ...discovered.map((d) => ({ entryId: d.entry.entryId, name: d.entry.definition.name, file: d.file })),
+      ...mounted.map((d) => ({ entryId: d.entry.entryId, name: d.entry.definition.name, file: d.file })),
       ...extra.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
     ];
 
@@ -279,9 +324,9 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       // **两步都要跑到**，各收各的错：上一版是 `try { unmount } finally { agent.stop() }`，
       // 两边同时失败时 finally 里那个抛会把前一个**顶掉**（实测只剩 agent-stop-failed，
       // extension-unmount-failed 整个丢了）。丢掉一个失败原因，排查时就少了一半线索。
-      // **逆序卸两代**：外部可能 inject 了 builtin 提供的 Service，先卸外部才不会让
-      // builtin 的 provider 在还有 consumer 时消失。
-      const errors = await unmountGenerations(host, [BOOT_GENERATION, BUILTIN_GENERATION]);
+      // **按 mount 的逆序卸所有代**（外部各代 → inline → builtin）：后代可能 inject 了前代的
+      // Service，先卸后代才不会让 provider 在还有 consumer 时消失。未 mount 的代幂等跳过。
+      const errors = await unmountGenerations(host, [...[...mountedGens].reverse(), BUILTIN_GENERATION]);
       try {
         await agent.stop();
       } catch (e) {
@@ -296,6 +341,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     return Object.freeze({
       agent,
       extensions: Object.freeze(loaded),
+      diagnostics: Object.freeze(diagnostics),
       stop: (): Promise<void> => (stopPromise ??= doStop()),
     });
   } catch (e) {
@@ -307,7 +353,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     // 收摊自己也失败时**每个错都要给出去**——吞掉等于把「资源没交回去」这件事藏了。
     // 逆序卸已挂上的代。判据落在 `unmountGenerations` 自己身上（假 Host 验顺序 / 继续执行 /
     // 错误聚合），而不是隔着本函数去猜——上一版那条端到端测试证明不了它跑过（review 三轮）。
-    const errors: unknown[] = [e, ...(await unmountGenerations(host, [BOOT_GENERATION, BUILTIN_GENERATION]))];
+    const errors: unknown[] = [e, ...(await unmountGenerations(host, [...[...mountedGens].reverse(), BUILTIN_GENERATION]))];
     try {
       await agent.stop();
     } catch (stopError) {
