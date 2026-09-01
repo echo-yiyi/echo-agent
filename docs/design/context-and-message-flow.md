@@ -120,29 +120,27 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { FAKE_MODE
 
 ### 3.1 System prompt
 
-`Agent.assemblePrompt()` 每个 run 收集 identity、environment、skills、memory、产品来源和额外 sections，再交给 [`assembleSystem()`](../../packages/core/src/prompt/assemble.ts#symbol=assembleSystem)。装配规则是：
+`Agent.assemblePrompt()` 每个 run 从 `AgentPrompt` registry 的两张表（段、变量）取材，再交给 [`assembleSystem()`](../../packages/core/src/prompt/assemble.ts#symbol=assembleSystem)。**段只从 registry 来**（2026-09-01）：内建的 environment / skills / memory 由 `echo:agent` / `echo:skills` / `echo:memory` builtin 注册，产品与壳的段由各自的 extension 注册（`definePromptPack` / `defineToolPack` 的 `sections`）；构造参数上不再有 `systemPrompt` / `promptSections` / `promptSources`。装配规则是：
 
-1. `stable` 排在 `volatile` 前，同 tier 保留来源顺序；
-2. 每段单独 render 和 trim；
-3. 空段丢弃；
-4. 非空段以两个换行连接；
-5. 全空得到 `null`。
+1. 按 `order` 升序，同数保注册序。约定带见 [`PROMPT_ORDER`](../../packages/core/src/prompt/types.ts#symbol=PROMPT_ORDER)：identity 0、conduct 10、surface 20、工具习惯 100–199、environment 300、instructions 400、skills 500、memory 900——按**变化频率**排，越稳定越靠前；
+2. 每段单独 `render(ctx)` 和 trim，`ctx` 是本次装配的事实（workspace、admission 冻结的模型、agentId、sessionId）；
+3. `{{name}}` 从本次装配一次性解析出的变量表取值，**严格**：未注册、无值、畸形都不放行；
+4. 空段丢弃；非空段以两个换行连接；全空得到 `null`。
 
-这里的 `stable / volatile` **只表示排序**，core 没有 prompt cache，也不按 tier 选择刷新频率。它把更稳定的字节放在前面，给 provider 的 prefix cache 创造命中条件；是否缓存、缓存多久由 provider 决定。已有字节级判据见 [stable / volatile 顺序与空段语义](../../packages/core/test/prompt.test.ts#test=stable-在前-volatile-沉底空段丢弃全空返回-null)。
+`order` **只表示排序**，core 没有 prompt cache，也不按 order 选择刷新频率。它把更稳定的字节放在前面，给 provider 的 prefix cache 创造命中条件；是否缓存、缓存多久由 provider 决定。字节级判据见 [order 排序与空段语义](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null) 与 [严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名)。
 
-失败语义目前不一致：
+失败语义（2026-09-01 定了两档）：
 
-- `PromptSection.render()` 抛错时只省略该段并发诊断，run 继续；
-- `PromptSource.promptSections()` 自身抛错时不在 `assembleSystem()` 的 try/catch 内，整个 run 失败；
-- section 没有“必需 / 可选”属性，所以产品身份、许可边界和展示增强只能共享同一种 omit-on-error 行为。
+- `PromptSection.render()` 抛错：省略该段并发诊断，run 继续——段是增强面，运行时数据坏一段不许击穿整个 run；
+- 变量引用错：抛 `PromptVariableError`，本次 run 以 error 结束——段文本是产品 / extension 写的受信文本，写错变量名是作者错误，要响。判据见 [变量错让 run 以 error 收场](../../packages/core/test/prompt.test.ts#test=变量错-run-以-error-收场不静默发一份错的-system)。
 
-对普通 memory 提示，省略后继续可能合理；对安全或产品身份段，静默降级后调用模型可能比 fail-loud 更危险。正式设计必须按段声明失败档位，不能把所有 prompt 内容都称为“增强面”。
+仍然没有的：段上的“必需 / 可选”属性。产品身份段的 `render` 抛错依旧静默隐形；今天产品与壳的段都是字面量（`render` 不会抛），唯一读盘的段是 `echo:instructions`，它失败 = 没有项目指令，可接受。真出现「必需段」再加属性。
 
 ### 3.2 Turn injection
 
 `PromptSource.turnInjections()` 每 turn 重算，结果追加到 transcript snapshot 的末尾，不发 `message_end`，因此不进入运行时 transcript 和 session。当前 skill 正文与 task snapshot 走这条路，接线见 [`Agent.promptSources()`](../../packages/core/src/agent.ts#symbol=Agent.promptSources) 和 [`Agent.createLoopConfig()`](../../packages/core/src/agent.ts#symbol=Agent.createLoopConfig)。
 
-这个边界适合“当前有效、但不是对话事实”的材料：激活 skill、任务清单、短期运行说明。已有测试验证激活正文下一 turn 可见、system 字节不变且 injection 不入 transcript，见 [skill injection 接线](../../packages/core/test/prompt.test.ts#test=目录进-system激活后下一轮注入可见system-逐字节不变激活不打缓存)。
+这个边界适合“当前有效、但不是对话事实”的材料：激活 skill、任务清单、短期运行说明。已有测试验证激活正文下一 turn 可见、system 字节不变且 injection 不入 transcript，见 [skill injection 接线](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)。
 
 但注释中的“契约：绝不抛；没有返回 `[]`”没有调用侧兜底。任一 source 抛错会结束整个 run。这里需要的是明确选择，不是模糊承诺：
 
@@ -150,13 +148,9 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { FAKE_MODE
 - 如果它只是增强，失败应记录诊断并按该 source 返回空列表；
 - 不同来源可能需要不同档位，不能由聚合器统一猜测。
 
-### 3.3 `PromptSource.toolSchemas()` 没有消费者
+### 3.3 `PromptSource` 只剩 `turnInjections()`
 
-[`PromptSource`](../../packages/core/src/prompt/types.ts#symbol=PromptSource) 声称 `toolSchemas()` 每轮读取；`Agent.promptSources()` 也真的构造了一个工具 schema source。但 `assemblePrompt()` 只读取 `promptSections()`，`getTurnInjections()` 只读取 `turnInjections()`，实际 provider tools 在 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 中由 turn 工作集直接调用 [`toolSchemas()`](../../packages/core/src/tools/types.ts#symbol=toolSchemas) 得到。
-
-复现：给 `AgentOptions.promptSources` 注入只含 `toolSchemas()` 的 source，计数器保持 `0`，provider 收到的 tools 仍为空。仓库测试只验证 [`toolSchemasOf()`](../../packages/core/src/tools/harness.ts#symbol=toolSchemasOf) 的确定性排序，没有验证 `PromptSource.toolSchemas()` 接线。
-
-审阅结论：删除 `PromptSource.toolSchemas()`，让工具菜单继续只有 `getTools() → toolSchemas()` 一条真源。实现第二条工具 schema 供货路径会让“模型看见的工具”和“循环可执行的 turn workset”有机会分叉，不值得为了三方法对称制造第二真源。
+2026-09-01 起 [`PromptSource`](../../packages/core/src/prompt/types.ts#symbol=PromptSource) 只有 `turnInjections()` 一个方法，且只在 Agent 内部用（skill 正文、任务清单两条注入）。原先的 `toolSchemas()` 从未被消费（工具菜单一直由 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 从 turn 工作集调 [`toolSchemas()`](../../packages/core/src/tools/types.ts#symbol=toolSchemas) 得到），`promptSections()` 的职责被 `AgentPrompt` registry 接走。工具菜单因此只有 `getTools() → toolSchemas()` 一条真源；system 里也不再列工具目录——单工具语义只在 description，跨工具的习惯由拥有该工具的 extension 出段。
 
 ## 4. Working context 与对象所有权
 
@@ -268,8 +262,8 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 
 | 失败点 | 当前行为 | 注释或接口暗示 |
 | --- | --- | --- |
-| `PromptSource.promptSections()` 抛错 | run 以 internal error 结束 | 未说明 |
 | `PromptSection.render()` 抛错 | 省略该段，诊断后继续 | fail-soft enhancement |
+| 段里 `{{变量}}` 未注册 / 无值 / 畸形 | `PromptVariableError`，run 以 error 结束 | 设计如此：作者错误要响 |
 | `turnInjections()` 抛错 | run 以 internal error 结束 | “绝不抛；没有返回 []” |
 | `transformContext()` 抛错 | run 以 internal error 结束 | “失败原样返回入参” |
 | `convertToLlm()` 抛错 | run 以 internal error 结束 | “绝不抛” |
@@ -286,8 +280,8 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 | 缺省 projection 剥掉本地字段 | [账本字段不出门](../../packages/core/test/invariants.test.ts#test=投影剥壳atsourceusagemetadata-不出门) |
 | tool result 在线上合并、账本中逐条保留 | [toolResult 投影与相邻合并](../../packages/core/test/invariants.test.ts#test=投影toolresult-包回-user-角色的-toolresult-块相邻的合并成一条) |
 | 空 assistant 不进入 provider context | [空 assistant 隐形](../../packages/core/test/invariants.test.ts#test=投影空-content-的-assistant-消息整条隐形空消息是协议违规) |
-| system section 排序、空段与 render 失败 | [assembleSystem 行为](../../packages/core/test/prompt.test.ts#test=stable-在前-volatile-沉底空段丢弃全空返回-null)、[坏段隐形并留痕](../../packages/core/test/prompt.test.ts#test=坏段隐形不击穿onfailure-留痕) |
-| skill / task injection 每轮刷新且不入 transcript | [skill injection](../../packages/core/test/prompt.test.ts#test=目录进-system激活后下一轮注入可见system-逐字节不变激活不打缓存)、[task injection](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入5d7空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |
+| system section 排序、空段与 render 失败 | [assembleSystem 行为](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null)、[坏段隐形并留痕](../../packages/core/test/prompt.test.ts#test=render-抛错-该段隐形不击穿onfailure-留痕) |
+| skill / task injection 每轮刷新且不入 transcript | [skill injection](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)、[task injection](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入5d7空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |
 | session 恢复时拒绝坏内建消息 | [坏 message payload 恢复判红](../../packages/core/test/session-service.test.ts#test=坏-message-payload-在恢复时判红只有-role-是不够的)、[content block 闭合验形](../../packages/core/test/session-service.test.ts#test=内容块闭合验形缺字段与不认识的-type-都判红) |
 
 ### 当前没有门守
@@ -310,7 +304,7 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 1. **实现或移除 compaction。** 当前能力会产生摘要成本和成功事件，却不缩短 context，是最危险的假绿。
 2. **建立消息所有权边界。** admission 取得消息所有权，账本只读，working context 与 transcript 断开对象别名。
 3. **修正 `contextBeforeBuild` ABI。** 要么只允许 patch，要么兑现 block；不能保留被忽略的 decision。
-4. **删除 `PromptSource.toolSchemas()`。** 工具 schema 继续只由 turn workset 投影，避免第二真源。
+4. **删除 `PromptSource.toolSchemas()`。** 已于 2026-09-01 删除（见 §3.3）；工具 schema 只由 turn workset 投影。
 5. **在 durable ingress 前验消息形状。** 同一份 validator 同时守写入和恢复，不能让 Agent 自己产毒档。
 
 ### 需要产品语义确认

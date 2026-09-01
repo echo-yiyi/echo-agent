@@ -140,7 +140,7 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
     const verdict = await config.hooks.intercept({ type: "stop", iteration, finalText }, config.hookContext);
     if (verdict.decision === "block" && stopContinuations < MAX_STOP_CONTINUATIONS) {
       stopContinuations += 1;
-      const injected = userMessage(verdict.reason ?? "任务尚未完成，请继续。", "harness");
+      const injected = userMessage(verdict.reason ?? "The task is not finished yet. Continue.", "harness");
       context.messages.push(injected);
       await emit({ type: "message_end", message: injected });
       continue outer; // 注入即「又给了一件事」，回内层

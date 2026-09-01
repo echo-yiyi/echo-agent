@@ -143,7 +143,7 @@ export type LifecycleEvent =
   | { type: "abortRequested"; reason?: string }
   /* 任务级 */
   | { type: "agentTimeout"; elapsedMs: number; timeoutMs: number }
-  | { type: "equipmentChanged"; field: "tools" | "systemPrompt" | "model" | "timeoutMs"; source: string }
+  | { type: "equipmentChanged"; field: "tools" | "model" | "timeoutMs"; source: string }
   /* 模型调用 */
   | { type: "modelCallFailed"; error: AgentError; attempt: number }
   | { type: "retryScheduled"; attempt: number; maxAttempts: number; delayMs: number; cause: string }

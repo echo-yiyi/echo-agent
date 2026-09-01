@@ -1,36 +1,39 @@
-// prompt 组装的契约门。对应设计 docs/design/parts/prompt.md。
+// prompt 组装的契约门。对应设计 docs/design/context-and-message-flow.md §3。
 //
 // 锁的不变量:
-//   ① 装配:stable 在前 volatile 沉底(同 tier 保数组序);空段丢弃;坏段隐形 + 留痕;全空 = null
-//   ② PromptSource:SkillHarness 供目录段(门控按 skill_activate 在不在工具面)与激活正文注入;
-//      ToolHarness 供确定性 toolSchemas——**乱序注册,字节相同**(注册时序天然不稳定,尤其 MCP)
-//   ③ 通道 B:激活正文每轮注入(消息末尾、不进 transcript),启用「下一轮起可见」、停用下一轮消失;
-//      反引号中和、instructions 单行化
-//   ④ 导入:frontmatter 定 name/tier,缺省 stable;没名字 fail-loud
-//   ⑤ 缓存:run 内 system 逐字节不变(冻结时刻);激活 skill 不动 system(只动注入)
+//   ① 装配:按 order 升序(同数保注册序);空段丢弃;render 抛错 = 隐形 + 留痕;全空 = null
+//   ② 变量:{{name}} 严格插值——未注册 / 无值 / 畸形都**抛**(作者错误要响);孤立 `{{` 原样;替换值不重扫
+//   ③ registry:段与变量只经 AgentPrompt 进;同名抛;disposer 只卸自己;内建 echo:* 走同一条路
+//   ④ 通道 B:激活正文每轮注入(消息末尾、不进 transcript),启用「下一轮起可见」、停用下一轮消失;
+//      反引号中和、instructions 单行化;任务清单同款
+//   ⑤ 导入:frontmatter 定 name/order,order 缺省 0;没名字 / 写 tier / 非整数 order 都 fail-loud
+//   ⑥ 缓存:run 内 system 逐字节不变(冻结时刻);激活 skill 不动 system(只动注入)
+//   ⑦ 变量错让 run 以 error 收场,不静默发一份错的 system
 
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../src/agent.ts";
-import { mountBuiltinTools } from "../src/extension/builtin.ts";
+import { definePromptPack, defineToolPack, mountBuiltinTools } from "../src/extension/builtin.ts";
+import { ExtensionHost } from "../src/extension/host.ts";
+import { AgentPrompt, agentRegistries, type AgentPromptRegistry } from "../src/extension/registries.ts";
+import { HookRuntime } from "../src/hooks/runtime.ts";
 import type { Context } from "../src/messages.ts";
 import type { StreamFn } from "../src/provider/types.ts";
 import { FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
-import { assembleSystem } from "../src/prompt/assemble.ts";
+import { assembleSystem, interpolate, PromptVariableError } from "../src/prompt/assemble.ts";
 import { sectionFromMarkdown } from "../src/prompt/import.ts";
 import { fenceSafe } from "../src/prompt/sanitize.ts";
-import type { PromptSection } from "../src/prompt/types.ts";
+import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptVariable } from "../src/prompt/types.ts";
 import { addSkills, activateSkill, deactivateSkill, type ActiveSkillMap, type SkillMap } from "../src/skill/harness.ts";
 import { renderSkillCatalog, renderSkillInjections, SKILL_CATALOG_CAPS } from "../src/skill/compose.ts";
 import { registerTool, toolSchemasOf, type ToolMap } from "../src/tools/harness.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
-
 import type { Skill } from "../src/skill/types.ts";
 
 function skill(name: string, description: string, content = "正文", modelInvocable = true): Skill {
   return { name, description, content, dir: `/skills/${name}`, files: [], requiredTools: [], modelInvocable, frontmatter: {} };
 }
 
-function attachedSkills(opts?: { skills?: Skill[]; hasActivateTool?: boolean }): { skills: SkillMap; active: ActiveSkillMap } {
+function attachedSkills(opts?: { skills?: Skill[] }): { skills: SkillMap; active: ActiveSkillMap } {
   const skills: SkillMap = new Map();
   if (opts?.skills !== undefined && opts.skills.length > 0) addSkills(skills, opts.skills);
   return { skills, active: new Map() };
@@ -40,36 +43,133 @@ function fakeTool(name: string): ModelTool {
   return { kind: "model", name, label: name, description: `${name} 工具`, parameters: { type: "object" }, execute: async () => toolOk("") };
 }
 
+const CTX: AssembleContext = { workspace: "/repo", model: { provider: "fake", id: "m1" }, agentId: "default", sessionId: null };
+const NO_VARS = new Map<string, PromptVariable>();
+const sec = (name: string, order: number, text: string): PromptSection => ({ name, order, render: () => text });
+
+/** 记录模型每次看到的 Context 的 StreamFn。 */
+function spying(turns: Parameters<typeof scriptedStreamFn>[0]): { spy: StreamFn; seen: Context[] } {
+  const seen: Context[] = [];
+  const inner = scriptedStreamFn(turns);
+  const spy: StreamFn = (m, c, o) => {
+    seen.push(structuredClone(c));
+    return inner(m, c, o);
+  };
+  return { spy, seen };
+}
+
 /* ───────────────────────── ① 装配 ───────────────────────── */
 
 describe("assembleSystem", () => {
-  test("stable 在前 volatile 沉底;空段丢弃;全空返回 null", async () => {
-    const sections: PromptSection[] = [
-      { name: "v", tier: "volatile", render: () => "V" },
-      { name: "s1", tier: "stable", render: () => "S1" },
-      { name: "empty", tier: "stable", render: () => "" },
-      { name: "s2", tier: "stable", render: () => "S2" },
-    ];
-    expect(await assembleSystem(sections)).toBe("S1\n\nS2\n\nV");
-    expect(await assembleSystem([{ name: "e", tier: "stable", render: () => "  " }])).toBeNull();
+  test("按 order 升序、同数保注册序;空段丢弃;全空返回 null", async () => {
+    const sections: PromptSection[] = [sec("v", 900, "V"), sec("s1", 10, "S1"), sec("empty", 10, ""), sec("s2", 10, "S2"), sec("id", 0, "ID")];
+    expect(await assembleSystem(sections, NO_VARS, CTX)).toBe("ID\n\nS1\n\nS2\n\nV");
+    expect(await assembleSystem([sec("e", 0, "  ")], NO_VARS, CTX)).toBeNull();
   });
 
-  test("坏段隐形不击穿,onFailure 留痕", async () => {
+  test("render 抛错 = 该段隐形不击穿,onFailure 留痕", async () => {
     const failures: string[] = [];
     const sections: PromptSection[] = [
-      { name: "boom", tier: "stable", render: () => { throw new Error("段坏了"); } },
-      { name: "ok", tier: "stable", render: () => "OK" },
+      { name: "boom", order: 0, render: () => { throw new Error("段坏了"); } },
+      sec("ok", 1, "OK"),
     ];
-    const out = await assembleSystem(sections, (f) => failures.push(f.section));
+    const out = await assembleSystem(sections, NO_VARS, CTX, (f) => failures.push(f.section));
     expect(out).toBe("OK");
     expect(failures).toEqual(["boom"]);
   });
+
+  test("render 拿到 AssembleContext;变量从表里取值,同名同值", async () => {
+    const vars = new Map<string, PromptVariable>([["workspace", (c) => c.workspace], ["model", (c) => c.model.id]]);
+    const sections: PromptSection[] = [
+      { name: "env", order: 300, render: (c) => `Workspace: {{workspace}} / ${c.model.provider}` },
+      sec("again", 301, "{{workspace}} {{model}}"),
+    ];
+    expect(await assembleSystem(sections, vars, CTX)).toBe("Workspace: /repo / fake\n\n/repo m1");
+  });
 });
 
-/* ───────────────────────── ② PromptSource:skill 目录 + tools 确定性 ───────────────────────── */
+/* ───────────────────────── ② 变量:严格插值 ───────────────────────── */
+
+describe("interpolate(严格)", () => {
+  const values = new Map<string, string | undefined>([["ws", "/repo"], ["none", undefined]]);
+
+  test("完整引用替换;替换值不重扫;孤立 `{{` 原样", () => {
+    expect(interpolate("a {{ws}} b", values, "s")).toBe("a /repo b");
+    expect(interpolate("{{ws}}{{ws}}", values, "s")).toBe("/repo/repo");
+    expect(interpolate("x {{ 没有闭合", values, "s")).toBe("x {{ 没有闭合");
+    const v2 = new Map([["ws", "{{ws}}"]]);
+    expect(interpolate("{{ws}}", v2, "s")).toBe("{{ws}}"); // 值里的 {{ws}} 不再被解释
+  });
+
+  test("未注册 / 无值 / 畸形三种都抛 PromptVariableError,带段名", () => {
+    expect(() => interpolate("{{nope}}", values, "identity")).toThrow(PromptVariableError);
+    expect(() => interpolate("{{nope}}", values, "identity")).toThrow(/identity.*nope/);
+    expect(() => interpolate("{{none}}", values, "s")).toThrow(/本次没有值/);
+    expect(() => interpolate("{{Bad Name}}", values, "s")).toThrow(/畸形/);
+    expect(() => interpolate("{{{ws}}}", values, "s")).toThrow(/畸形/); // `{{{ws}}}`:内层是 `{ws`,不是合法名字
+  });
+});
+
+/* ───────────────────────── ③ registry ───────────────────────── */
+
+describe("AgentPrompt registry", () => {
+  function registryOf(): { sections: Map<string, PromptSection>; variables: Map<string, PromptVariable>; svc: AgentPromptRegistry } {
+    const sections = new Map<string, PromptSection>();
+    const variables = new Map<string, PromptVariable>();
+    const services = agentRegistries({ tools: new Map(), hooks: new HookRuntime(), prompt: { sections, variables } });
+    const svc = services.find(([k]) => k === AgentPrompt)![1] as AgentPromptRegistry;
+    return { sections, variables, svc };
+  }
+
+  test("段与变量注册进两张表;同名抛;disposer 只卸自己那个对象", () => {
+    const r = registryOf();
+    const svc = r.svc;
+    const a = sec("a", 0, "A");
+    const offA = svc.section(a);
+    expect(() => svc.section(sec("a", 5, "A2"))).toThrow(/已存在/);
+    expect(() => svc.section({ name: "nan", order: Number.NaN, render: () => "" })).toThrow(/有限数/);
+    const offV = svc.variable("ws", () => "/x");
+    expect(() => svc.variable("ws", () => "/y")).toThrow(/已存在/);
+    expect(() => svc.variable("Bad", () => "")).toThrow(/不合法/);
+    expect(r.sections.get("a")).toBe(a);
+    void offA();
+    void offV();
+    expect(r.sections.has("a")).toBe(false);
+    expect(r.variables.has("ws")).toBe(false);
+  });
+
+  test("definePromptPack / defineToolPack 带段:mount 进表,unmount 撤走;撞名整包回滚", async () => {
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("好")]) });
+    const host = new ExtensionHost({
+      services: agentRegistries({
+        tools: agent.tools,
+        hooks: agent.hooks,
+        prompt: { sections: agent.promptSections, variables: agent.promptVariables },
+      }),
+    });
+    const PACK = definePromptPack("t:pack");
+    const TOOLS = defineToolPack("t:tools");
+    await host.mount("g1", [
+      { entryId: "t:pack", definition: PACK as never, config: { sections: [sec("identity", 0, "I am test")] } },
+      { entryId: "t:tools", definition: TOOLS as never, config: { tools: [fakeTool("x")], sections: [sec("tool:x", 100, "use x wisely")] } },
+    ]);
+    expect([...agent.promptSections.keys()].sort()).toEqual(["identity", "tool:x"]);
+    expect(agent.tools.has("x")).toBe(true);
+    // 撞名:第二包里 "identity" 已存在 → 这包整体失败,它自己的另一段不许留下
+    await expect(
+      host.mount("g2", [{ entryId: "t:dup", definition: PACK as never, config: { sections: [sec("fresh", 1, "F"), sec("identity", 0, "dup")] } }]),
+    ).rejects.toThrow(/已存在/);
+    expect(agent.promptSections.has("fresh")).toBe(false);
+    await host.unmount("g1");
+    expect(agent.promptSections.size).toBe(0);
+    expect(agent.tools.has("x")).toBe(false);
+  });
+});
+
+/* ───────────────────────── skill 目录 / tools 投影 / 通道 B(渲染函数本身) ───────────────────────── */
 
 describe("skill 目录段", () => {
-  test("池空 → 不出段（门控「有没有 skill_activate 工具」在 Agent 那一层）", () => {
+  test("池空 → 不出段（门控「有没有 skill_activate 工具」在段的闭包里）", () => {
     expect(renderSkillCatalog(new Map())).toBe("");
   });
 
@@ -78,9 +178,9 @@ describe("skill 目录段", () => {
       skills: [skill("a", "第一行\n第二行"), skill("hidden", "看不见", "正文", false), skill("b", "x".repeat(2000))],
     });
     const out = renderSkillCatalog(h.skills);
-    expect(out).toContain("- a:第一行 第二行"); // 换行折叠
+    expect(out).toContain("- a: 第一行 第二行"); // 换行折叠
     expect(out).not.toContain("hidden");
-    expect(out).toContain("…[截断]"); // descriptionMax=1024
+    expect(out).toContain("…[truncated]"); // descriptionMax=1024
     expect(SKILL_CATALOG_CAPS.descriptionMax).toBe(1024);
   });
 });
@@ -98,8 +198,6 @@ describe("toolSchemasOf(确定性投影)", () => {
   });
 });
 
-/* ───────────────────────── ③ 通道 B:激活正文注入 ───────────────────────── */
-
 describe("renderSkillInjections", () => {
   test("激活出注入(带起止标记),停用即消失;instructions 单行化;反引号中和", () => {
     const skills = attachedSkills({ skills: [skill("h5", "做 H5 页", "步骤:\n```html\n<div>\n```")] });
@@ -109,9 +207,9 @@ describe("renderSkillInjections", () => {
     const [msg] = renderSkillInjections(skills.skills, skills.active);
     expect(msg?.role).toBe("environment");
     const text = (msg as { content: { type: string; text: string }[] }).content[0]?.text ?? "";
-    expect(text).toContain("# skill · h5(扩展指令 · 起)");
-    expect(text).toContain("# skill · h5(扩展指令 · 止)");
-    expect(text).toContain("本次要求:这次做 落地页"); // 换行折叠
+    expect(text).toContain("# Skill: h5 (instructions begin)");
+    expect(text).toContain("# Skill: h5 (instructions end)");
+    expect(text).toContain("For this task: 这次做 落地页"); // 换行折叠
     expect(text).not.toContain("```"); // 围栏被中和
     expect(fenceSafe("```")).toBe("ˋˋˋ");
 
@@ -120,123 +218,116 @@ describe("renderSkillInjections", () => {
   });
 });
 
-/* ───────────────────────── ④ 导入 ───────────────────────── */
+/* ───────────────────────── ⑤ 导入 ───────────────────────── */
 
 describe("sectionFromMarkdown", () => {
-  test("frontmatter 定 name/tier;正文原样;tier 缺省 stable", () => {
-    const s = sectionFromMarkdown("---\nname: policy\ntier: volatile\n---\n\n规矩第一条。");
+  test("frontmatter 定 name/order;正文原样;order 缺省 0", () => {
+    const s = sectionFromMarkdown("---\nname: policy\norder: 10\n---\n\n规矩第一条。");
     expect(s.name).toBe("policy");
-    expect(s.tier).toBe("volatile");
-    expect(s.render()).toBe("规矩第一条。");
-    expect(sectionFromMarkdown("裸正文", "from-file").tier).toBe("stable");
+    expect(s.order).toBe(10);
+    expect(s.render(CTX)).toBe("规矩第一条。");
+    expect(sectionFromMarkdown("裸正文", "from-file").order).toBe(0);
     expect(sectionFromMarkdown("裸正文", "from-file").name).toBe("from-file");
   });
 
-  test("没名字与坏 tier 都 fail-loud", () => {
+  test("没名字 / 写 tier / 非整数 order 都 fail-loud", () => {
     expect(() => sectionFromMarkdown("裸正文")).toThrow("缺名字");
-    expect(() => sectionFromMarkdown("---\nname: x\ntier: daily\n---\n正文")).toThrow("tier");
+    expect(() => sectionFromMarkdown("---\nname: x\ntier: stable\n---\n正文")).toThrow("tier");
+    expect(() => sectionFromMarkdown("---\nname: x\norder: high\n---\n正文")).toThrow("order");
   });
 });
 
-/* ───────────────────────── ⑤ Agent 接线与缓存语义 ───────────────────────── */
+/* ───────────────────────── ⑥⑦ Agent 接线与缓存语义 ───────────────────────── */
 
 describe("Agent 接线", () => {
-  test("目录进 system;激活后下一轮注入可见、system 逐字节不变(激活不打缓存)", async () => {
-    const seen: Context[] = [];
-    const inner = scriptedStreamFn([
-      toolTurn("t1", "skill_activate", { name: "h5", instructions: "做落地页" }),
-      textTurn("做完了"),
-    ]);
-    const spy: StreamFn = (m, c, o) => {
-      seen.push(structuredClone(c));
-      return inner(m, c, o);
-    };
+  test("内建段经 echo:* 进 system:环境段带 {{workspace}}/{{model}};skills 目录在;激活后下一轮注入可见、system 逐字节不变", async () => {
+    const { spy, seen } = spying([toolTurn("t1", "skill_activate", { name: "h5", instructions: "做落地页" }), textTurn("做完了")]);
     const agent = new Agent({
       model: FAKE_MODEL,
       streamFunction: spy,
-      systemPrompt: "你是测试员",
+      workspace: "/repo/x",
       skills: [skill("h5", "做 H5 页", "用单文件写")],
     });
-    await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
-    // 构造时给了 skills，Agent 自己就把那两件工具装上了（2026-08-23 拍板），不用再注册
+    await mountBuiltinTools(agent); // 内建工具与段经 `echo:*` builtin Extension 注册
 
     await agent.prompt("做个 H5");
-    // 第 1 轮:目录在 system,还没有注入
-    expect(seen[0]?.systemPrompt).toContain("- h5:做 H5 页");
-    expect(JSON.stringify(seen[0]?.messages)).not.toContain("扩展指令");
+    const sys = seen[0]?.systemPrompt ?? "";
+    // echo:agent 的环境段:变量从 AssembleContext 来,模型名是 admission 冻结的那个
+    expect(sys).toContain(`# Environment\nWorkspace: /repo/x\nModel: ${FAKE_MODEL.id} (${FAKE_MODEL.provider})`);
+    // echo:skills 的目录段在,且排在环境段之后(order 500 > 300)
+    expect(sys).toContain("- h5: 做 H5 页");
+    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("- h5: 做 H5 页"));
+    expect(JSON.stringify(seen[0]?.messages)).not.toContain("instructions begin");
     // 第 2 轮:激活生效,注入出现在消息里(投影成 user 角色)
     const lastMsg = JSON.stringify(seen[1]?.messages);
-    expect(lastMsg).toContain("扩展指令 · 起");
+    expect(lastMsg).toContain("# Skill: h5 (instructions begin)");
     expect(lastMsg).toContain("用单文件写");
     // system 逐字节不变——激活 skill 不打 system 缓存
-    expect(seen[1]?.systemPrompt).toBe(seen[0]?.systemPrompt ?? "");
+    expect(seen[1]?.systemPrompt).toBe(sys);
     // 注入不进 transcript
-    expect(JSON.stringify(agent.messages)).not.toContain("扩展指令");
+    expect(JSON.stringify(agent.messages)).not.toContain("instructions begin");
   });
 
   test("任务清单每轮注入(§5D.7):空清单不占位、建完下一轮就可见、不打 system 缓存、不进 transcript", async () => {
-    const seen: Context[] = [];
-    const inner = scriptedStreamFn([
+    const { spy, seen } = spying([
       toolTurn("t1", "TaskCreate", { tasks: [{ title: "把 M6 做完" }, { title: "已经做完的", status: "done" }] }),
       textTurn("建好了"),
     ]);
-    const spy: StreamFn = (m, c, o) => {
-      seen.push(structuredClone(c));
-      return inner(m, c, o);
-    };
-    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy, systemPrompt: "你是测试员" });
-    await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy });
+    await mountBuiltinTools(agent);
 
     await agent.prompt("规划一下");
 
-    // 第 1 轮:清单是空的,**一个字都不注入**——别拿「（清单是空的）」占每轮的位置
-    expect(JSON.stringify(seen[0]?.messages)).not.toContain("任务清单");
-    // 第 2 轮:模型自己建的任务,同一个 run 里下一轮就看得见(所以它必须每轮重算)。
-    // **判据只看注入那一条**(拼在最末尾):整个 messages 里搜是抓不准的——
-    // TaskCreate 的回执本来就把两条都列了,那不是注入。
+    expect(JSON.stringify(seen[0]?.messages)).not.toContain("# Task list");
     const injected = JSON.stringify(seen[1]?.messages.at(-1));
-    expect(injected, "建完的任务没进下一轮的 context").toContain("任务清单");
+    expect(injected, "建完的任务没进下一轮的 context").toContain("# Task list");
     expect(injected).toContain("把 M6 做完");
-    // 只出 ready + active:done 的不重复喂(要看全量模型自己 TaskList)
     expect(injected, "done 的任务也被喂进去了").not.toContain("已经做完的");
-    // 走 turnInjection 而非 system 段:system 逐字节不变,清单变动不打 prompt cache
     expect(seen[1]?.systemPrompt).toBe(seen[0]?.systemPrompt ?? "");
-    expect(seen[1]?.systemPrompt ?? "", "清单跑到 system 里去了").not.toContain("任务清单");
-    // 注入不进 transcript
-    expect(JSON.stringify(agent.messages)).not.toContain("任务清单");
+    expect(seen[1]?.systemPrompt ?? "", "清单跑到 system 里去了").not.toContain("# Task list");
+    expect(JSON.stringify(agent.messages)).not.toContain("# Task list");
   });
 
-  test("产品加段:import 的 md 段进 system;identity 在最前", async () => {
-    const seen: Context[] = [];
-    const inner = scriptedStreamFn([textTurn("好")]);
-    const spy: StreamFn = (m, c, o) => {
-      seen.push(structuredClone(c));
-      return inner(m, c, o);
-    };
-    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy, systemPrompt: "身份在前" });
-    await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
-    agent.promptSections = [...agent.promptSections, sectionFromMarkdown("---\nname: policy\n---\n公司规矩段")];
+  test("产品加段:md 导入的 identity 段经 registry 进 system 且在最前;tool pack 带的习惯段在环境段之前", async () => {
+    const { spy, seen } = spying([textTurn("好")]);
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy });
+    const host = await mountBuiltinTools(agent);
+    await host.mount("product", [
+      {
+        entryId: "p:identity",
+        definition: definePromptPack("p:identity") as never,
+        config: { sections: [sectionFromMarkdown("---\nname: identity\n---\nYou are Test, working in {{workspace}}.")] },
+      },
+      {
+        entryId: "p:tools",
+        definition: defineToolPack("p:tools") as never,
+        config: { tools: [fakeTool("x")], sections: [sec("tool:x", PROMPT_ORDER.tools, "Use x for x-things.")] },
+      },
+    ]);
     await agent.prompt("hi");
     const sys = seen[0]?.systemPrompt ?? "";
-    expect(sys.startsWith("身份在前")).toBe(true);
-    expect(sys).toContain("公司规矩段");
+    expect(sys.startsWith("You are Test, working in /.")).toBe(true); // order 0 最前;{{workspace}} 缺省 "/"
+    expect(sys.indexOf("Use x for x-things.")).toBeLessThan(sys.indexOf("# Environment"));
   });
 
-  test("产品经 promptSources 供货，段进 system", async () => {
-    const seen: Context[] = [];
-    const inner = scriptedStreamFn([textTurn("好")]);
-    const spy: StreamFn = (m, c, o) => {
-      seen.push(structuredClone(c));
-      return inner(m, c, o);
-    };
-    // 产品自己的 prompt 供货方经 `promptSources` 显式给——不再靠「实现了某接口就自动参与」
-    // 的鸭子判定（那要求挂件先是个 harness，而 harness 这个概念已经没了）。
-    const custom = {
-      promptSections: (): PromptSection[] => [{ name: "acme", tier: "stable", render: () => "ACME 段" }],
-    };
-    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy, promptSources: [custom] });
-    await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
-    await agent.prompt("hi");
-    expect(seen[0]?.systemPrompt).toContain("ACME 段");
+  test("变量错 = run 以 error 收场,不静默发一份错的 system", async () => {
+    const { spy, seen } = spying([textTurn("好")]);
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy });
+    const host = await mountBuiltinTools(agent);
+    await host.mount("product", [
+      { entryId: "p:bad", definition: definePromptPack("p:bad") as never, config: { sections: [sec("identity", 0, "I am {{modle}}")] } },
+    ]);
+    const r = await agent.prompt("hi");
+    expect(r.outcome.kind).toBe("error");
+    expect(seen).toHaveLength(0); // 模型一次都没被调
+    expect(agent.status).toBe("idle");
+  });
+
+  test("assemblePrompt() 缺省用当前装备的模型;{{provider}} 也在", async () => {
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]), workspace: "/w" });
+    await mountBuiltinTools(agent);
+    const sys = await agent.assemblePrompt();
+    expect(sys).toContain(`Model: ${FAKE_MODEL.id} (${FAKE_MODEL.provider})`);
+    expect(sys).toContain("Workspace: /w");
   });
 });

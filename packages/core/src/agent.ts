@@ -57,8 +57,8 @@ import {
 } from "./schedule/harness.ts";
 import { makeScheduleTools } from "./schedule/tools.ts";
 import { assembleSystem } from "./prompt/assemble.ts";
-import { environmentSection, identitySection } from "./prompt/sections.ts";
-import type { PromptSection, PromptSource } from "./prompt/types.ts";
+import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
+import { defaultSessionId } from "./session/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
 import { activeTools, registerTool, registerTools, resolveTool, toolSchemasOf, type ToolMap } from "./tools/harness.ts";
 import type { Diagnostic } from "./errors.ts";
@@ -81,7 +81,6 @@ export type AgentStatus = "idle" | "generating" | "acting" | "compacting";
 
 export type AgentState = {
   /* 装备（慢变；仅 idle 可换） */
-  readonly systemPrompt: string | null;
   readonly model: Model;
   /** **工作集**：本轮摆给模型的工具。池在 `agent.tools.list()`——读取时从 harness 算出的派生视图。 */
   readonly tools: readonly AgentTool[];
@@ -113,6 +112,11 @@ export type AgentState = {
   readonly usage: Usage;
   /* 会话指针：指向盘上那段；null = 未落盘的临时对话 */
   readonly sessionId: string | null;
+  /**
+   * 这个 session 在哪个目录里干活：文件工具的边界与起点、`{{workspace}}`。
+   * **session 级事实**（2026-09-01）：新建 session 时由宿主给，resume 时以盘上为准。
+   */
+  readonly workspace: string;
 };
 
 type MutableAgentState = { -readonly [K in keyof AgentState]: AgentState[K] };
@@ -121,7 +125,6 @@ export type AgentOptions = {
   model: Model;
   streamFunction: StreamFn;
   tools?: AgentTool[];
-  systemPrompt?: string | null;
   thinkingLevel?: ThinkingLevel;
   maxIterations?: number;
   timeoutMs?: number;
@@ -146,8 +149,13 @@ export type AgentOptions = {
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   sessions?: SessionManager;
   sessionId?: string;
-  workspaceRoot?: string;
-  cwd?: string;
+  /**
+   * 工作目录的**缺省值**：纯内存 agent 直接用它；有 session 时它只在**新建** session 那一刻写进
+   * `SessionInfo.workspace`，resume 以盘上为准。宿主给绝对路径；不给就是 "/"——
+   * **不用 process.cwd()**：core 是纯 JS（零 `node:` import），要能在浏览器 / Worker / 边缘运行时里跑，
+   * 工作目录是宿主知识，core 自己从不解释它，只透传给工具与 prompt。
+   */
+  workspace?: string;
   /** 初始 skill（加载器扫盘产出的那些）。装进来只是「可用」，**不激活**。 */
   skills?: Skill[];
   /**
@@ -179,12 +187,10 @@ export type AgentOptions = {
   mcp?: AgentMcpPort;
   /** 后台任务的闸（并发 8 / 总量 64 / 每任务 64k）。 */
   backgroundLimits?: BackgroundLimits;
-  /** 产品自己的 prompt 供货方（memory 之外的挂件）。 */
-  promptSources?: PromptSource[];
   /**
    * 持久记忆。**不传 = 没有记忆**，agent 照跑——记忆是「跨任务变好」，不是「本次任务能完成」。
-   * 传了 = 三件自动接线：memory 工具注册（source "memory"）、每次 run 把记忆段拼进
-   * systemPrompt 快照（冻结快照：run 内写盘立即可读，system 下个 run 才刷新）、dispose 链。
+   * 传了 = 三件自动接线：memory 工具与记忆段交给 `echo:memory` builtin 注册、每次 run 把记忆段拼进
+   * system 快照（冻结快照：run 内写盘立即可读，system 下个 run 才刷新）、dispose 链。
    */
   memory?: AgentMemories;
   /**
@@ -236,8 +242,6 @@ export type AgentOptions = {
    * 注入一个第二次关闭就报错的合法实现，默认 `agent.stop()` 当场失败——实测）。
    */
   finalDisposables?: readonly { dispose(): Promise<void> }[];
-  /** 产品附加的 system 段。内核机制的段由各 harness 自己供货，不用传。 */
-  promptSections?: PromptSection[];
 };
 
 type ActiveRun = { promise: Promise<void>; resolve: () => void; abortController: AbortController };
@@ -504,7 +508,6 @@ export class Agent {
   /** 正在跑的整理。**与 activeRun 分开**——它可被前台抢占，不占并发闸。 */
   private readonly disposables: readonly { dispose(): Promise<void> }[];
   private readonly finalDisposables: readonly { dispose(): Promise<void> }[];
-  private readonly extraPromptSources: readonly PromptSource[];
   private activeRun?: ActiveRun;
 
   /* 闸与策略 */
@@ -514,8 +517,6 @@ export class Agent {
   public maxRetryDelayMs?: number;
   public compaction: CompactionConfig;
   public toolExecution: "sequential" | "parallel";
-  public workspaceRoot: string;
-  public cwd: string;
 
   /* 可替换的决策点 */
   public convertToLlm: ConvertToLlm;
@@ -529,15 +530,15 @@ export class Agent {
   private currentRunId: string | null = null;
   public getApiKey?: AgentOptions["getApiKey"];
   /**
-   * 产品附加的 system 段(手写或 sectionFromMarkdown 导入)。内核机制的段**不在这里**——
-   * 它们由各 harness 实现 PromptSource 自己供货(skill 目录、memory 段),
-   * assemblePrompt() 收拢。仅 idle 时改。
+   * system prompt 的两张表：段（按名）与变量（按名）。**只经 `AgentPrompt` registry 写**
+   * （`extension/registries.ts`），内建的 `echo:*` 与产品的 extension 走同一条路；
+   * `assemblePrompt()` 每次 run 读一次。Agent 自己一行都不往里塞。
    */
-  public promptSections: PromptSection[];
+  readonly promptSections: Map<string, PromptSection> = new Map();
+  readonly promptVariables: Map<string, PromptVariable> = new Map();
 
   constructor(opts: AgentOptions) {
     this._state = {
-      systemPrompt: opts.systemPrompt ?? null,
       model: opts.model,
       tools: [],
       thinkingLevel: opts.thinkingLevel ?? "off",
@@ -552,6 +553,7 @@ export class Agent {
       lastError: null,
       usage: { inputTokens: 0, outputTokens: 0 },
       sessionId: opts.sessionId ?? null,
+      workspace: opts.workspace ?? "/",
       activeSkills: [],
       mcp: [],
       tasks: EMPTY_TASK_SNAPSHOT,
@@ -561,7 +563,6 @@ export class Agent {
     this.autoDream = opts.autoDream ?? false;
     this.disposables = opts.disposables ?? [];
     this.finalDisposables = opts.finalDisposables ?? [];
-    this.extraPromptSources = opts.promptSources ?? [];
     this.taskStore = opts.taskStore;
 
     // **回调逐个显式给,不打包**（2026-08-05 拆掉 HarnessHost 之后的形态；
@@ -654,24 +655,34 @@ export class Agent {
       this.schedule.report = report;
       scheduleTools = makeScheduleTools(this.schedule);
     }
-    this.builtinTools = { tasks: taskTools, skills: skillTools, memory: memoryTools, scheduler: scheduleTools };
+    // 每组带上它自己的 prompt 段（谁拥有工具，谁拥有讲它怎么用的段）：
+    //   · skills：目录段。字节何时变：池增删时；**激活/停用不影响本段**（激活不打 system 缓存）。
+    //     门控按真实状态：skill_activate 不在工具面，目录就是死文本（教模型用它没有的工具）。
+    //   · memory：记忆段（格式归 memory/compose.ts），沉底。
+    //   · tasks / scheduler：不出段——description 已经装下契约。
+    const skillsSection: PromptSection = {
+      name: "skills",
+      order: PROMPT_ORDER.skills,
+      render: () => (this.tools.has("skill_activate") ? renderSkillCatalog(this.skills) : ""),
+    };
+    this.builtinTools = {
+      tasks: { tools: taskTools },
+      skills: { tools: skillTools, sections: [skillsSection] },
+      memory: memoryTools === undefined || this.memory === undefined ? undefined : { tools: memoryTools, sections: memoryPromptSections(this.memory) },
+      scheduler: scheduleTools === undefined ? undefined : { tools: scheduleTools },
+    };
     this.maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     this.timeoutMs = opts.timeoutMs;
     this.retryPolicy = opts.retryPolicy ?? DEFAULT_RETRY_POLICY;
     this.maxRetryDelayMs = opts.maxRetryDelayMs;
     this.compaction = opts.compaction ?? {};
     this.toolExecution = opts.toolExecution ?? "sequential";
-    // **不用 process.cwd()**：core 是纯 JS（零 `node:` import），要能在浏览器 / Worker /
-    // 边缘运行时里跑。工作目录是宿主知识，不给就是 "/"——core 自己从不解释它，只透传给工具。
-    this.workspaceRoot = opts.workspaceRoot ?? "/";
-    this.cwd = opts.cwd ?? this.workspaceRoot;
     this.convertToLlm = opts.convertToLlm ?? defaultConvertToLlm;
     this.transformContext = opts.transformContext;
     this.streamFunction = opts.streamFunction;
     this.hooks = opts.hooks ?? new HookRuntime();
     this.permissionPolicy = validatePermissionPolicy(opts.permission);
     this.getApiKey = opts.getApiKey;
-    this.promptSections = opts.promptSections ?? [];
     // **放在最后**：attach 可能触发 report → hookContext() → this.hooks，
     // 而 hooks 是上面几行才赋的值（实测踩到：放在前面直接 TypeError）。
     this.mcp = opts.mcp;
@@ -795,14 +806,6 @@ export class Agent {
     normalizeModelSnapshot(value); // fail-loud 在这里：admission 时冻结 binding 不能再抛
     this._state.model = value;
     this.catalogRevision += 1;
-  }
-
-  get systemPrompt(): string | null {
-    return this._state.systemPrompt;
-  }
-  set systemPrompt(value: string | null) {
-    this.assertIdle("systemPrompt");
-    this._state.systemPrompt = value;
   }
 
   get thinkingLevel(): ThinkingLevel {
@@ -1200,11 +1203,13 @@ export class Agent {
       this.gate?.openLane("durable-ingress");
 
       if (this.sessionService !== undefined) {
-        const sessionId = this._state.sessionId ?? "main";
-        const data = await this.sessionService.createOrResume(sessionId);
+        // 缺省 session 按 workspace 分（2026-09-01）：一个项目一段连续对话；显式 sessionId 仍然赢
+        const sessionId = this._state.sessionId ?? defaultSessionId(this._state.workspace);
+        const data = await this.sessionService.createOrResume(sessionId, { workspace: this._state.workspace });
         this._state.messages = [...data.messages];
         this._state.checkpoint = data.checkpoint;
         this._state.sessionId = data.info.id;
+        this._state.workspace = data.info.workspace; // resume 以盘上为准
         await this.hooks.notify(
           { type: "sessionStart", sessionId: data.info.id, resumed: data.messages.length > 0 },
           this.hookContext(),
@@ -1831,11 +1836,12 @@ export class Agent {
 
   /* ───────────── 会话面 ───────────── */
 
-  async newSession(name?: string): Promise<string> {
+  async newSession(name?: string, workspace: string = this._state.workspace): Promise<string> {
     const sessions = this.requireSessions();
-    const info = await sessions.create({ name });
+    const info = await sessions.create({ name, workspace });
     this.reset();
     this._state.sessionId = info.id;
+    this._state.workspace = info.workspace;
     await this.hooks.notify({ type: "sessionStart", sessionId: info.id, resumed: false }, this.hookContext());
     return info.id;
   }
@@ -1848,6 +1854,7 @@ export class Agent {
     this._state.messages = [...data.messages];
     this._state.checkpoint = data.checkpoint;
     this._state.sessionId = data.info.id;
+    this._state.workspace = data.info.workspace;
     await this.hooks.notify({ type: "sessionStart", sessionId: data.info.id, resumed: true }, this.hookContext());
   }
 
@@ -1902,7 +1909,7 @@ export class Agent {
 
   private async runContinuation(): Promise<LoopResult> {
     return this.admitUserRun(async (scope, signal) =>
-      runAgentLoopContinue(await this.createContextSnapshot(), this.createLoopConfig(scope), (e) => this.processEvents(e), signal, scope.modelBinding.streamFunction),
+      runAgentLoopContinue(await this.createContextSnapshot(scope), this.createLoopConfig(scope), (e) => this.processEvents(e), signal, scope.modelBinding.streamFunction),
     );
   }
 
@@ -1914,7 +1921,7 @@ export class Agent {
         // 全部被拦下：**不进 transcript、不起循环**——没有 agent_start，也就没有半截 run。
         return { outcome: { kind: "aborted", reason: `userPromptSubmit（${source}）被 hook 拦下` }, messages: [] };
       }
-      return runAgentLoop(admitted, await this.createContextSnapshot(), this.createLoopConfig(scope), (e) => this.processEvents(e), signal, scope.modelBinding.streamFunction);
+      return runAgentLoop(admitted, await this.createContextSnapshot(scope), this.createLoopConfig(scope), (e) => this.processEvents(e), signal, scope.modelBinding.streamFunction);
     };
   }
 
@@ -2251,28 +2258,31 @@ export class Agent {
     }
   }
 
-  private async createContextSnapshot(): Promise<AgentContext> {
+  private async createContextSnapshot(scope: AgentAdmissionExecuteScope): Promise<AgentContext> {
     return {
-      systemPrompt: await this.assemblePrompt(),
+      // 用 admission 冻结的模型装配——{{model}} 说的必须是这次 run 真用的那个
+      systemPrompt: await this.assemblePrompt(scope.modelBinding.model),
       messages: [...this._state.messages], // 快照：循环拿的是那一刻的副本
       // 工具**不进快照**：它是装备，每轮经 config.getTools() 重取
     };
   }
 
   /**
-   * prompt 组装(2026-08-05 用户拍定的架构):Agent 收拢所有 PromptSource——
-   * 自己的 identity/environment 段 + 各 harness 供的段 + 产品附加段,交给装配器。
-   * 每次 run 调一次 = **冻结的是时刻,不是内容**:run 内 system 逐字节不变,
-   * 记忆写盘、skill 激活都动不了它。段抛错 = 该段隐形 + 诊断留痕。
+   * prompt 组装（2026-09-01 改为 extension 出段）：把 `AgentPrompt` registry 里的段按 order 拼起来，
+   * `{{变量}}` 从同一 registry 的变量表取值。每次 run 调一次 = **冻结的是时刻,不是内容**：
+   * run 内 system 逐字节不变，记忆写盘、skill 激活都动不了它。
+   * 两种失败两种档位：段 `render()` 抛错 = 该段隐形 + 诊断留痕；**变量引用错 = 抛**
+   * （`PromptVariableError`，作者错误，让这次 run 以 error 收场，不静默）。
+   * `model` 缺省取当前装备——外部（测试、诊断）直接调时用；run 内传 admission 冻结的那份。
    */
-  async assemblePrompt(): Promise<string | null> {
-    const sections: PromptSection[] = [
-      identitySection(() => this._state.systemPrompt),
-      environmentSection(() => ({ workspaceRoot: this.workspaceRoot, cwd: this.cwd })),
-    ];
-    for (const src of this.promptSources()) sections.push(...(src.promptSections?.() ?? []));
-    sections.push(...this.promptSections);
-    return assembleSystem(sections, ({ section, error }) => {
+  async assemblePrompt(model: Readonly<{ provider: string; id: string }> = this._state.model): Promise<string | null> {
+    const ctx: AssembleContext = {
+      workspace: this._state.workspace,
+      model: { provider: model.provider, id: model.id },
+      agentId: this.agentId,
+      sessionId: this._state.sessionId,
+    };
+    return assembleSystem([...this.promptSections.values()], this.promptVariables, ctx, ({ section, error }) => {
       void this.hooks.notify(
         { type: "notification", kind: "error", message: `[prompt_section_failed] ${section}: ${errText(error)}` },
         this.hookContext(),
@@ -2281,26 +2291,13 @@ export class Agent {
   }
 
   /**
-   * 会供 prompt 的来源。
-   *
-   * 工具面与 skill 面**不再是对象,只是数据**,所以它们的 PromptSource 在这里就地拼——
-   * 渲染函数仍住各自模块（`toolSchemasOf` / `renderSkillCatalog`：谁拥有数据谁拥有 format）。
+   * 每轮注入的来源（通道 B）。system 段不再从这里供货——那些经 `AgentPrompt` registry 进两张表。
+   * 渲染函数仍住各自模块（`renderSkillInjections` / `taskInjections`：谁拥有数据谁拥有 format）。
    */
   private promptSources(): PromptSource[] {
     return [
-      { toolSchemas: () => toolSchemasOf(this.tools) },
-      {
-        promptSections: () => [
-          {
-            name: "skills",
-            // 字节何时变:池增删时。**激活/停用不影响本段**——激活不打 system 缓存
-            tier: "stable" as const,
-            // 门控按真实状态:skill_activate 不在工具面,目录就是死文本（教模型用它没有的工具）
-            render: () => (this.tools.has("skill_activate") ? renderSkillCatalog(this.skills) : ""),
-          },
-        ],
-        turnInjections: () => renderSkillInjections(this.skills, this.activeSkills),
-      },
+      // 激活的 skill 正文：每轮从工作集现算，拼消息末尾、不进 transcript
+      { turnInjections: () => renderSkillInjections(this.skills, this.activeSkills) },
       // 任务清单（§5D.7）：**每轮重算**，因为 run 中途模型自己就会 TaskCreate / TaskUpdate。
       // 走 turnInjection 而非 system 段的理由写在 `renderTaskInjection` 的注释里（缓存）。
       //
@@ -2309,8 +2306,6 @@ export class Agent {
       // 之后就没了：不 mount builtin 的装法（低层 `new Agent()`）会让模型**每轮看见任务清单、
       // 却没有 TaskCreate 可调**。那正是 skills 那行注释说的「教模型用它没有的工具」，同一个病。
       { turnInjections: () => (this.tools.has("TaskList") ? taskInjections(taskSnapshot(this.tasks)) : []) },
-      ...(this.memory !== undefined ? [{ promptSections: () => memoryPromptSections(this.memory as AgentMemories) }] : []),
-      ...this.extraPromptSources,
     ];
   }
 
@@ -2357,8 +2352,7 @@ export class Agent {
       timeoutMs: this.timeoutMs,
       retryPolicy: binding.retryPolicy,
       compaction: this.compaction,
-      workspaceRoot: this.workspaceRoot,
-      cwd: this.cwd,
+      workspace: this._state.workspace,
     };
   }
 
@@ -2487,7 +2481,7 @@ export class Agent {
         // 先验形再看 kind：策略返回 null/"bogus" 时，这里要给出「非法裁决」而不是 TypeError
         const verdict = normalizeVerdict(await policy.authorize(input));
         if (verdict.kind === "ask" && policy.responder === "none") {
-          return { kind: "deny", reason: `${verdict.reason}（策略要求询问，但没有配置裁决人：ask 视为拒绝）` };
+          return { kind: "deny", reason: `${verdict.reason} (the policy asks for approval, but no responder is configured: ask counts as deny)` };
         }
         // 「宿主会回答」但此刻没有任何订阅者——不开 ask（开了就是永久 pending），当场拒。
         // 放在 stage 里而不只在 run 入口：Dream 等不经 runWithLifecycle 的路径也走这条 stage。

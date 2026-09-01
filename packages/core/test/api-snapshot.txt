@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 215（value 52 · type 153 · both 10）
+符号 221（value 56 · type 154 · both 11）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -180,10 +180,22 @@ type   PermissionSettlement
 type   PermissionStage
 type   PermissionVerdict
 
--- src/prompt/types.ts (3) --
+-- src/prompt/assemble.ts (1) --
+both   PromptVariableError
+
+-- src/prompt/import.ts (1) --
+value  sectionFromMarkdown
+
+-- src/prompt/sanitize.ts (2) --
+value  fenceSafe
+value  truncateMarked
+
+-- src/prompt/types.ts (5) --
+type   AssembleContext
+value  PROMPT_ORDER
 type   PromptSection
 type   PromptSource
-type   PromptTier
+type   PromptVariable
 
 -- src/provider/dialect.ts (4) --
 value  createProviderStreams
@@ -321,7 +333,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 46（value 20 · type 22 · both 4）
+符号 51（value 22 · type 25 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -339,12 +351,14 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (13) --
+-- src/extension/builtin.ts (16) --
 value  agentRuntimeOf
 value  BUILTIN_GENERATION
 value  builtinEntries
+type   BuiltinToolGroup
 type   BuiltinToolGroups
 type   BuiltinToolsConfig
+value  definePromptPack
 value  defineToolPack
 value  ECHO_AGENT
 value  ECHO_MEMORY
@@ -352,6 +366,7 @@ value  ECHO_SCHEDULER
 value  ECHO_SKILLS
 value  ECHO_TASKS
 value  mountBuiltinTools
+type   PromptPackConfig
 type   RuntimeSource
 
 -- src/extension/cleanup.ts (2) --
@@ -367,10 +382,12 @@ both   ExtensionHost
 both   ExtensionMountError
 type   FiberInfo
 
--- src/extension/registries.ts (8) --
+-- src/extension/registries.ts (10) --
 value  AgentBackgroundService
 value  AgentHooks
 type   AgentHooksRegistry
+value  AgentPrompt
+type   AgentPromptRegistry
 value  agentRegistries
 value  AgentSkills
 type   AgentSkillsRegistry

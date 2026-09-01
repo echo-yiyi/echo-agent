@@ -68,11 +68,11 @@ test("跑的中途换装备直接 throw（上下文与工具面不能撕裂）",
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("一")]) });
   const run = agent.prompt("做事");
   expect(() => {
-    agent.systemPrompt = "换个纲领";
+    agent.thinkingLevel = "high";
   }).toThrow(/正在运行/);
   await run;
-  agent.systemPrompt = "现在可以换"; // idle 了就行
-  expect(agent.systemPrompt).toBe("现在可以换");
+  agent.thinkingLevel = "high"; // idle 了就行
+  expect(agent.thinkingLevel).toBe("high");
 });
 
 /* ═══════════ 不变量 3：状态由事件驱动（apply 是唯一写路径） ═══════════ */

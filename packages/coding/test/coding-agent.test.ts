@@ -9,7 +9,6 @@ import { createEcho, createProvider, createProviderStreams, type Echo, type Mode
 import { makeFsTools } from "../src/tools/fs.ts";
 import { makeBashTool } from "../src/tools/bash.ts";
 import { makeSearchTools } from "../src/tools/search.ts";
-import { FileSessionManager } from "../src/sessions.ts";
 import { codingPreset } from "../src/agent.ts";
 import { loadSkills } from "@echo-agent/core";
 import type { PermissionPolicy } from "../src/permission.ts";
@@ -51,8 +50,8 @@ async function echoWith(opts: {
     stateDir: await mkdtemp(join(tmpdir(), "echo-ca-state-")),
     withoutMemory: true,
     extensionDirs: [], // 不扫盘：`<cwd>/extensions` 会让判据随运行目录漂
+    workspace: root, // session 级事实，宿主给（2026-09-01）；不再经 preset
     ...codingPreset({
-      workspaceRoot: root,
       ...(opts.permission !== undefined ? { permission: opts.permission } : {}),
       ...(skills !== undefined ? { skills } : {}),
     }),
@@ -66,8 +65,7 @@ async function echoWith(opts: {
 
 const ctx = (): ToolExecutionContext => ({
   toolCallId: "t1",
-  cwd: root,
-  workspaceRoot: root,
+  workspace: root,
   sessionId: null,
   iteration: 0,
 });
@@ -98,7 +96,7 @@ test("edit_file:匹配 0 处 / 多处都拒,replace_all 放行", async () => {
   expect(zero.isError).toBe(true);
   const multi = await tool(fs, "edit_file").execute({ path: "x.txt", old_string: "aa", new_string: "b" }, ctx());
   expect(multi.isError).toBe(true);
-  expect(multi.content).toContain("2 处");
+  expect(multi.content).toContain("2 matches");
   const all = await tool(fs, "edit_file").execute({ path: "x.txt", old_string: "aa", new_string: "b", replace_all: true }, ctx());
   expect(all.isError).toBe(false);
   expect(await readFile(join(root, "x.txt"), "utf8")).toBe("b b");
@@ -109,7 +107,7 @@ test("路径越界一律拒(../ 逃逸、绝对路径出工作区)", async () =>
   for (const path of ["../outside.txt", "/etc/passwd", "a/../../b.txt"]) {
     const r = await tool(fs, "write_file").execute({ path, content: "x" }, ctx());
     expect(r.isError).toBe(true);
-    expect(r.content).toContain("越界");
+    expect(r.content).toContain("outside the workspace");
   }
 });
 
@@ -124,7 +122,7 @@ test("bash:stdout+stderr 合并;非零退出是结果不是异常", async () => 
 
   const fail = await bash.execute({ command: "echo boom; exit 3" }, ctx());
   expect(fail.isError).toBe(true);
-  expect(fail.content).toContain("退出码 3");
+  expect(fail.content).toContain("exit code 3");
   expect(fail.content).toContain("boom"); // 模型要看到输出来决定下一步
 });
 
@@ -132,7 +130,7 @@ test("bash 超时:杀掉并说清,不挂死", async () => {
   const bash = makeBashTool();
   const r = await bash.execute({ command: "sleep 10", timeout_ms: 100 }, ctx());
   expect(r.isError).toBe(true);
-  expect(r.content).toContain("超时");
+  expect(r.content).toContain("Timed out");
 }, 10_000);
 
 /* ══════════ 搜索 ══════════ */
@@ -156,34 +154,6 @@ test("glob 找文件(排除 node_modules);grep 找内容带 文件:行号", asyn
   expect(bad.isError).toBe(true);
 });
 
-/* ══════════ 会话落盘 ══════════ */
-
-test("FileSessionManager:create → append → 重开进程(新实例)→ load 回来", async () => {
-  const dir = join(root, "sessions");
-  const a = new FileSessionManager(dir);
-  const info = await a.create({ name: "试一把" });
-  await a.append(info.id, [
-    { id: "e1", parentId: null, kind: "message", message: { role: "user", source: "human", content: [{ type: "text", text: "你好" }], at: 1 } },
-  ]);
-
-  const b = new FileSessionManager(dir); // 新实例 = 模拟重启
-  const data = await b.load(info.id);
-  expect(data.info.name).toBe("试一把");
-  expect(data.messages.length).toBe(1);
-  expect((await b.list()).map((s) => s.id)).toContain(info.id);
-
-  await b.delete(info.id);
-  await expect(b.load(info.id)).rejects.toThrow("不存在");
-});
-
-test("坏档 fail-loud:半截 JSON 拒绝加载,不给半截 session", async () => {
-  const dir = join(root, "sessions");
-  const m = new FileSessionManager(dir);
-  const info = await m.create();
-  await writeFile(join(dir, `${info.id}.jsonl`), '{"kind":"message"\n', "utf8"); // 断电现场
-  await expect(m.load(info.id)).rejects.toThrow("损坏");
-});
-
 /* ══════════ 整链装配 ══════════ */
 
 const writeTurns = (): ScriptedTurn[] => [
@@ -197,7 +167,7 @@ test("整链:模型点 write_file,缺省权限拒(没人答);permission:false �
   await denied.agent.prompt("写个文件");
   const deniedResult = denied.agent.messages.find((m) => m.role === "toolResult");
   expect((deniedResult as { isError: boolean }).isError).toBe(true);
-  expect((deniedResult as { content: string }).content).toContain("未获授权");
+  expect((deniedResult as { content: string }).content).toContain("was not authorized");
   await denied.stop();
 
   // 显式放行:文件真的落盘
@@ -245,9 +215,19 @@ test("装配面:四类工具都在(fs/bash/搜索/任务清单);skill 目录空�
   // 用户拍板接受这个变化，所以这里改成断言现状，而不是给评测另留一条装配路径。
   expect(names).toContain("skill_create");
   expect(echo.agent.skills.size).toBe(0); // 池确实是空的——工具在不等于有 skill
-  // 产品层那两条真的进了清单（不是只把工具塞进 Map）——「清单 = Host 实际挂上的那一份」
+  // 产品层那三条真的进了清单（不是只把工具塞进 Map）——「清单 = Host 实际挂上的那一份」
+  expect(echo.extensions.map((e) => e.entryId)).toContain("echo:coding");
   expect(echo.extensions.map((e) => e.entryId)).toContain("echo:workspace");
   expect(echo.extensions.map((e) => e.entryId)).toContain("echo:shell");
+  // 段跟着 extension 进了 system：产品身份在最前，工具习惯段在环境段之前，工具目录一个字不进 system
+  const sys = (await echo.agent.assemblePrompt()) ?? "";
+  expect(sys.startsWith("You are Echo Coding")).toBe(true);
+  expect(sys).toContain("# Working in code");
+  expect(sys).toContain("# Files");
+  expect(sys).toContain("# Shell");
+  expect(sys.indexOf("# Shell")).toBeLessThan(sys.indexOf("# Environment"));
+  expect(sys).toContain(`Workspace: ${root}`);
+  expect(sys).not.toMatch(/Available tools|^- (read_file|bash|glob):/m);
   await echo.stop();
 });
 

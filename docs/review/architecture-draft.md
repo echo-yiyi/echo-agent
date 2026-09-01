@@ -81,10 +81,10 @@ open ──seal()──▶ sealed ──adoptInto()──▶ adopted
 ## 四、状态落在哪
 
 ```
-stateDir(显式给)  >  $ECHO_HOME/agents/<agentId>  >  $PWD/.echo/agents/<agentId>
+stateDir(显式给)  >  $ECHO_HOME/agents/<agentId>  >  ~/.echo/agents/<agentId>
 ```
 
-**默认落在项目内而不是 `~/.echo`**:后者会让两个不相干的项目静默共用同一个 agent 的记忆,而用户不会察觉。项目内的代价是「同一项目的两个 checkout 是两个 agent」——那是看得见的代价,可接受(`create-agent.ts:117`)。
+**默认落在用户级**（2026-09-01 改）:工作目录成了 session 的字段（`SessionInfo.workspace`），缺省 session id 按 workspace 派生——一个 agent 在多个目录里各有一段对话，记忆跨项目共享；按 `$PWD` 走的状态根会让换目录 = 换 agent，与此冲突。「两个不相干项目共用记忆」由记忆分区纪律与 session 隔离承担（`create-agent.ts` 的 `resolveStateDir`）。
 
 `agentId` 与 `sessionId` 一样**是路径段,都要过 `assertSafePathSegment`**:此前只校验 sessionId,于是 `agentId="../../escaped"` 能把状态根挪出 `.echo/agents`(实测)。
 

@@ -73,7 +73,7 @@ export const defaultComposeMemory: ComposeMemory = async (m, dir) => {
       const r = m as ResidentMemory;
       const text = ((await dir.read(r.path)) ?? "").trim();
       if (text === "") return "";
-      return `## 记忆 · ${r.name}(${r.path})\n${truncateMarked(text, r.budget)}`;
+      return `## ${r.name} (${r.path})\n${truncateMarked(text, r.budget)}`;
     }
     case "indexed": {
       const im = m as IndexedMemory;
@@ -82,7 +82,7 @@ export const defaultComposeMemory: ComposeMemory = async (m, dir) => {
       const index = stored !== null && stored.trim() !== "" ? stored.trim() : renderIndex(await indexEntries(im, dir));
       if (index === "") return "";
       // 组装侧也 cap:文件可能绕过工具落进来(人手放的),超预算截尾并留标记
-      return `## 记忆 · ${im.name}(索引;正文用 memory 工具 view <path>)\n${truncateMarked(index, im.budget)}`;
+      return `## ${im.name} (index — view <path> for a file)\n${truncateMarked(index, im.budget)}`;
     }
     default:
       return ""; // 自定义种类:缺省隐形
@@ -101,18 +101,18 @@ export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
   if (regions.length === 0) return "";
   const rules = regions
     .filter((m) => m.instructions !== undefined && m.instructions !== "")
-    .map((m) => `- ${m.name}(${typeof m.path === "string" ? m.path : "?"}):${m.instructions}`);
+    .map((m) => `- ${m.name} (${typeof m.path === "string" ? m.path : "?"}): ${m.instructions}`);
   const blocks: string[] = [];
   for (const m of regions) {
     const block = await composeMemoryRegion(ctx, m);
     if (block !== "") blocks.push(block);
   }
   return [
-    "# 记忆",
-    "你有跨会话的持久记忆,经 `memory` 工具读写。分区与用途:",
+    "# Memory",
+    "You have persistent memory that survives across sessions, read and written through the memory tool. Regions:",
     rules.join("\n"),
-    "纪律:写前先 view 有没有可合并的;过时就删;超预算先整理再写;" +
-      "本次任务的进度不要记(那是会话的事),可复用的做法沉淀成经验再记。",
+    "Before writing, check for an existing entry to merge into. Delete what is outdated. When a region is over budget, consolidate before adding. " +
+      "Do not record progress on the current task — that is the session's job; record reusable lessons. Never store secrets or credentials.",
     ...blocks,
   ].join("\n\n");
 }
@@ -127,8 +127,8 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
         return {
           ok: false,
           reason:
-            `「${r.name}」超预算:写入后 ${next.length} 字符,上限 ${r.budget}。` +
-            `这份记忆要保持小而致密——先用 str_replace/delete 合并同类、删过时,再写。`,
+            `Region '${r.name}' would exceed its budget: ${next.length} characters after this write, limit ${r.budget}. ` +
+            `Keep this region small and dense: merge duplicates and delete stale entries with str_replace/delete first, then write.`,
         };
       }
       return { ok: true };
@@ -136,7 +136,7 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
     case "indexed": {
       const im = m as IndexedMemory;
       if (next.length > im.fileBudget) {
-        return { ok: false, reason: `单文件超限:${next.length} 字符,上限 ${im.fileBudget}。拆分或精简后再写。` };
+        return { ok: false, reason: `File too large: ${next.length} characters, limit ${im.fileBudget}. Split or condense it, then write.` };
       }
       const entries = await indexEntries(im, dir, { path, content: next });
       const size = renderIndex(entries).length;
@@ -144,8 +144,8 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
         return {
           ok: false,
           reason:
-            `「${im.name}」索引已满:${size} 字符,上限 ${im.budget}。` +
-            `先整理——合并同类文件、删过时的,再写新的。`,
+            `The '${im.name}' index is full: ${size} characters, limit ${im.budget}. ` +
+            `Consolidate first (merge similar files, delete stale ones), then add the new one.`,
         };
       }
       return { ok: true };
@@ -155,7 +155,7 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
       const mode = (m as { mode?: unknown }).mode;
       return {
         ok: false,
-        reason: `未知记忆种类 '${String(mode)}':缺省校验拒绝写入(上层要支持自定义种类须替换 checkWrite)`,
+        reason: `Unknown memory kind '${String(mode)}': the default check refuses to write (a host supporting custom kinds must replace checkWrite)`,
       };
     }
   }

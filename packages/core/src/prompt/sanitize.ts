@@ -4,7 +4,7 @@
 /** 超限截断留标记——截断要被看见,不许静默吞。 */
 export function truncateMarked(text: string, cap: number): string {
   if (text.length <= cap) return text;
-  return `${text.slice(0, cap)}…[截断]`;
+  return `${text.slice(0, cap)}…[truncated]`;
 }
 
 /** 折叠一切行边界为空格(\n \r \v \f 及 Unicode 行分隔符)。用于把模型或第三方写的文本

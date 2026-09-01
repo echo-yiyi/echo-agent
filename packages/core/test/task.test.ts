@@ -56,7 +56,7 @@ test("成环 → 整批不落地（不是只拒那一条）", () => {
     { ref: "b", title: "B", blocks: ["a"] },
   ]);
   expect(r.ok).toBe(false);
-  if (!r.ok) expect(r.error).toContain("会成环");
+  if (!r.ok) expect(r.error).toContain("create a cycle");
   expect(listTasks(h).length).toBe(0); // 半条都不许留
 });
 
@@ -76,7 +76,7 @@ test("update 加边成环 → 拒，且原有边不受影响", () => {
   expect(linkTasks(h, a!.id, b!.id).ok).toBe(true);
   const back = linkTasks(h, b!.id, a!.id);
   expect(back.ok).toBe(false);
-  if (!back.ok) expect(back.error).toMatch(/会成环.*→/);
+  if (!back.ok) expect(back.error).toMatch(/create a cycle.*→/);
   expect(getTask(h, b!.id)?.links).toEqual([]);
 });
 
@@ -276,7 +276,7 @@ test("模型点名 TaskCreate → 真的建上，回执里带整份清单", asyn
   const result = agent.messages.find((m) => m.role === "toolResult") as { content: string; isError: boolean };
   expect(result.isError).toBe(false);
   expect(result.content).toContain("写设计");
-  expect(result.content).toContain("可做");
+  expect(result.content).toContain("[ready]");
   expect(agent.state.tasks.total).toBe(2);
   await agent.dispose();
 });
@@ -318,16 +318,15 @@ test("renderList：状态符号 + 在等谁 + 可做标记", () => {
   if (!r.ok) throw new Error("建失败");
   const text = renderList(listTasks(h));
   expect(text).toContain("● #");
-  expect(text).toContain("[可做]");
-  expect(text).toContain(`等 #${r.tasks[1]!.id}`);
-  expect(renderList([])).toBe("（清单是空的）");
+  expect(text).toContain("[ready]");
+  expect(text).toContain(`waiting for #${r.tasks[1]!.id}`);
+  expect(renderList([])).toBe("(the task list is empty)");
 });
 
 function ctx(): Parameters<ReturnType<typeof makeTaskTools>[number]["execute"]>[1] {
   return {
     toolCallId: "t1",
-    cwd: "/",
-    workspaceRoot: "/",
+    workspace: "/",
     sessionId: null,
     iteration: 0,
   };

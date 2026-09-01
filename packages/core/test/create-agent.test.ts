@@ -1,9 +1,10 @@
 import { test, expect, afterEach } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, resolveModel, resolveStateDir } from "../src/create-agent.ts";
+import { defaultSessionId } from "../src/session/types.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { kimiProvider, deepseekProvider } from "../src/provider/openai.ts";
@@ -98,12 +99,12 @@ test("D6 ECHO_HOME 次之", () => {
   expect(resolveStateDir({ agentId: "a" })).toBe("/tmp/echo-home/agents/a");
 });
 
-test("D6 最后落项目内 $PWD/.echo —— 不是 ~/.echo", () => {
+test("D6 最后落用户级 ~/.echo —— 不是项目内 $PWD（2026-09-01：workspace 归 session，状态根跨项目）", () => {
   delete process.env.ECHO_HOME;
   const got = resolveStateDir({ agentId: "default" });
-  expect(got).toBe(join(process.cwd(), ".echo", "agents", "default"));
-  // 显式锁住「不共用用户主目录」：那会让两个不相干的项目静默共用同一份记忆
-  expect(got.startsWith(process.cwd())).toBe(true);
+  expect(got).toBe(join(homedir(), ".echo", "agents", "default"));
+  // 显式锁住「不按启动目录走」：换个目录启动仍是同一个 agent、同一份记忆；目录差异由 session 的 workspace 承担
+  expect(got.startsWith(process.cwd())).toBe(false);
 });
 
 test("D6 agentId 进路径 —— 两个 agent 不共用状态根", () => {
@@ -122,7 +123,43 @@ test("createAgent 装出的就是同一个 Agent 类（D16），且 model 已解
   });
   await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
   expect(agent.state.model.id).toBe("only"); // 非空 Model，构造时就位
-  expect(agent.state.sessionId).toBe("main"); // D5 默认会话身份
+  expect(agent.state.sessionId).toBeNull(); // 缺省会话身份在 start() 时按 workspace 派生，构造期不抢先定
+});
+
+test("缺省 session 按 workspace 派生：同一 workspace 同 id、不同 workspace 不同 id、显式 sessionId 赢", async () => {
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const a = await createAgent({ provider, store: new InMemoryDir(), lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a" });
+  await a.start();
+  expect(a.state.sessionId).toBe(defaultSessionId("/repo/a"));
+  expect(a.state.workspace).toBe("/repo/a");
+  await a.stop();
+
+  const a2 = await createAgent({ provider, store: new InMemoryDir(), lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a" });
+  await a2.start();
+  expect(a2.state.sessionId).toBe(a.state.sessionId); // 同 workspace → 同一段对话
+  await a2.stop();
+
+  const b = await createAgent({ provider, store: new InMemoryDir(), lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/b" });
+  await b.start();
+  expect(b.state.sessionId).not.toBe(a.state.sessionId);
+  await b.stop();
+
+  const explicit = await createAgent({ provider, store: new InMemoryDir(), lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", sessionId: "review" });
+  await explicit.start();
+  expect(explicit.state.sessionId).toBe("review");
+  await explicit.stop();
+});
+
+test("resume 时 workspace 以盘上为准：换个目录打开同一个 session，workspace 不跟着进程走", async () => {
+  const store = new InMemoryDir();
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const first = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", sessionId: "s" });
+  await first.start();
+  await first.stop();
+  const second = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/elsewhere", sessionId: "s" });
+  await second.start();
+  expect(second.state.workspace).toBe("/repo/a");
+  await second.stop();
 });
 
 test("start() create-or-resume，stop() 之后换个实例能读回来", async () => {
@@ -156,7 +193,7 @@ test("start() 中途失败必须释放已取得的 lease（否则状态根被死
   const provider = fakeProvider({ id: "t", models: ["only"] });
   // 让 createOrResume 炸：meta.json 是坏的
   const store = new InMemoryDir();
-  await store.write("sessions/main/meta.json", "不是 json");
+  await store.write(`sessions/${defaultSessionId("/")}/meta.json`, "不是 json"); // 没给 workspace → "/" → 派生的缺省 id
 
   const a = await createAgent({ provider, store, lock, allowNetwork: false });
   await expect(a.start()).rejects.toThrow(/meta\.json 解不开/);
@@ -210,7 +247,7 @@ test("不传 store / lock 时用 first-party 默认件（真落盘）", async ()
   await agent.prompt("落个盘");
   await agent.stop();
   expect(existsSync(join(dir, ".lock"))).toBe(false); // stop 还锁
-  expect(existsSync(join(dir, "sessions", "main", "meta.json"))).toBe(true);
+  expect(existsSync(join(dir, "sessions", defaultSessionId("/"), "meta.json"))).toBe(true); // 缺省 id 按 workspace（"/"）派生
 });
 
 test("本函数装配的件不许从 `agent` 透传口再塞一次——**判据是 tsc**", () => {
@@ -327,7 +364,7 @@ test("排队之后、真正落盘之前丢锁：那一笔也要撤回（执行�
 
 /* ───────────── OSS-1c：skill_create 的默认落盘 + start() 发现（§5A.4c / §13.6） ───────────── */
 
-const toolCtx = () => ({ toolCallId: "t1", cwd: "/", workspaceRoot: "/", sessionId: null, iteration: 0 });
+const toolCtx = () => ({ toolCallId: "t1", workspace: "/", sessionId: null, iteration: 0 });
 
 async function execTool(agent: Awaited<ReturnType<typeof createAgent>>, name: string, params: unknown) {
   const tool = [...agent.tools.values()].find((t) => t.name === name);
@@ -394,8 +431,8 @@ test("skill 落盘失败：不说成功，且如实说明「进程内已建、�
   const out = await execTool(agent, "skill_create", { name: "doomed", description: "写不进去", content: "x" });
   expect(out.isError, "落盘失败却回执成功").toBe(true);
   expect(out.content).toContain("盘满了");
-  expect(out.content, "没说清进程内已建").toContain("已经在当前进程里创建");
-  expect(out.content, "没拦住重试").toContain("不要重试");
+  expect(out.content, "没说清进程内已建").toContain("was created in this process");
+  expect(out.content, "没拦住重试").toContain("Do not retry");
   // 与措辞一致：池里确实有、activate 真的可用
   const activated = await execTool(agent, "skill_activate", { name: "doomed" });
   expect(activated.isError).toBe(false);

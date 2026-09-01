@@ -8,39 +8,33 @@
 // 更要命的是它会分家：`createEcho()` 后来补的每一条（inline 工具转 Extension、
 // 清单与真相相等、失败路径逆序卸载），这边都得再补一遍，漏一条就是两种行为。
 //
-// 现在这里只出**数据**：系统 prompt、权限策略、两条 Extension 的 Entry。
+// 现在这里只出**数据**：权限策略、三条 Extension 的 Entry（产品的 prompt 段也在其中）。
 // 装配归 `createEcho()`，一处。
 //
 // ```ts
 // const echo = await createEcho({
 //   provider: kimiProvider(),
-//   ...codingPreset({ workspaceRoot: root }),
+//   workspace: root,          // session 级事实，宿主给（2026-09-01）
+//   ...codingPreset(),
 // });
 // await echo.agent.start();
 // ```
 //
-// ⚠️ CODING_SYSTEM 是模型逐字读的 prompt 资产,临时措辞,定稿归 prompt 治理。
+// system prompt（2026-09-01）：不再有 `systemPrompt` 字符串。产品的身份与编码纪律是 `echo:coding`
+// 这条 prompt pack 的两段；文件 / shell 工具的习惯段随 `echo:workspace` / `echo:shell` 走
+// （文本都在 `prompt.ts`）。工具目录不进 system。
 
-import { DEFAULT_MAX_ITERATIONS } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
-import type { ExtensionEntry } from "@echo-agent/core/extension";
-import type { PermissionPolicy as CorePermissionPolicy, Skill } from "@echo-agent/core";
+import { DEFAULT_MAX_ITERATIONS, type AssembleContext } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
+import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extension";
+import type { PermissionPolicy as CorePermissionPolicy, PromptSection, Skill } from "@echo-agent/core";
 import { makeBashTool } from "./tools/bash.ts";
 import { makeFsTools } from "./tools/fs.ts";
 import { makeSearchTools } from "./tools/search.ts";
 import { ECHO_SHELL, ECHO_WORKSPACE } from "./extensions.ts";
 import { permissionPolicyFor, type PermissionPolicy } from "./permission.ts";
-
-const CODING_SYSTEM = `你是一个 coding agent,在用户的代码仓里干活。
-
-工作方式:
-- 动手前先看:read_file / glob / grep 把相关代码读明白,不盲改。
-- 多步任务先用 TaskCreate 列清单,做一步标一步——清单跨上下文存活,是你唯一可靠的进度记忆。
-- 改动用 edit_file 精确替换;跑 bash 验证(测试、typecheck)之后才算做完。
-- 诚实汇报:测试红就说红,没做完就说没做完。绝不谎称通过。`;
+import { codingConductSection, codingIdentitySection, shellToolsSection, workspaceToolsSection } from "./prompt.ts";
 
 export type CodingPresetOptions = {
-  /** 工作区根目录。所有文件操作被限制在它之内。 */
-  workspaceRoot: string;
   /** 权限策略;false = 全放行(评测/CI)。缺省「读随便,动手先问」——没配裁决人时动手会被拒。 */
   permission?: PermissionPolicy | false;
   /**
@@ -52,16 +46,13 @@ export type CodingPresetOptions = {
 };
 
 /**
- * 交给 `createEcho()` 的配置片段：`...codingPreset({ workspaceRoot })` 展开即可。
+ * 交给 `createEcho()` 的配置片段：`...codingPreset()` 展开即可。
  *
  * 形状对着 `CreateEchoOptions` 的两个字段，故意不多包一层——多一层就得跟着
  * `createEcho` 的入参演进，而那正是上一版「两处各写一遍」的病根。
  */
 export type CodingPreset = {
   agent: {
-    systemPrompt: string;
-    workspaceRoot: string;
-    cwd: string;
     permission?: CorePermissionPolicy;
     // `Skill[]` 而不是 `readonly Skill[]`：形状跟着 `AgentOptions` 走，
     // 自己另定一份「更严格」的类型只会在 spread 进 `createEcho()` 时打架。
@@ -73,6 +64,9 @@ export type CodingPreset = {
 
 /** 缺省模型的**唯一**出处:identity 与调用方都读它,不各手抄一份(review 五轮 #3)。 */
 export const CODING_DEFAULT_MODEL = { provider: "kimi", model: "kimi-k3" } as const;
+
+/** 产品的身份 + 编码纪律，一条 prompt pack。 */
+const ECHO_CODING_PROMPT = definePromptPack("echo:coding");
 
 /**
  * core 的 `echo:*` builtin 装上来的工具。产品层管不到它们,但它们同样决定被测行为,必须进 digest。
@@ -98,20 +92,38 @@ const AGENT_BUILTIN_TOOLS = [
   "skill_create",
 ] as const;
 
-/** 本 preset 的**行为身份快照**:把真正决定行为的东西一次性固定下来——系统 prompt 逐字、缺省模型、
+/** 产品自己出的四段（identity / conduct:coding / tool:workspace / tool:shell），按 order 排。 */
+function productSections(): PromptSection[] {
+  return [codingIdentitySection(), codingConductSection(), workspaceToolsSection(), shellToolsSection()].sort((a, b) => a.order - b.order);
+}
+
+/** digest 用的固定装配上下文：产品四段都不引用变量，所以值无关紧要，只求确定。 */
+const DIGEST_CONTEXT: AssembleContext = {
+  workspace: "/workspace",
+  model: { provider: CODING_DEFAULT_MODEL.provider, id: CODING_DEFAULT_MODEL.model },
+  agentId: "default",
+  sessionId: null,
+};
+
+/** 本 preset 的**行为身份快照**:把真正决定行为的东西一次性固定下来——产品自己出的 prompt 段逐字、缺省模型、
  *  执行预算、**完整**工具集(产品层三件套 + Agent 构造期自带)。它是可复现的 digest 材料:
- *  改 prompt / 换缺省模型 / 增删任一工具都会改 digest,两次结果一比就能判出静默漂移。
+ *  改任一段文本 / 换缺省模型 / 增删任一工具都会改 digest,两次结果一比就能判出静默漂移。
  *
  *  **不在公共面**(不从 `index.ts` 导出):本仓没有生产消费者,它现在只给 `test/identity.test.ts`
  *  当判据——手写的清单必须等于真装出来的工具集。 */
 export function codingAgentIdentity(): {
-  systemPrompt: string;
+  sections: readonly { name: string; order: number; text: string }[];
   defaultModel: string;
   maxIterations: number;
   toolNames: readonly string[];
 } {
   return {
-    systemPrompt: CODING_SYSTEM,
+    sections: productSections().map((s) => {
+      const text = s.render(DIGEST_CONTEXT);
+      // 产品段都是字面量，同步返回；真变成异步了就是有人把读盘之类塞进了段——那不该属于 identity
+      if (typeof text !== "string") throw new Error(`prompt 段 '${s.name}' 的 render 不是同步的，不能进 digest`);
+      return { name: s.name, order: s.order, text };
+    }),
     defaultModel: `${CODING_DEFAULT_MODEL.provider}/${CODING_DEFAULT_MODEL.model}`,
     // 执行预算也决定成绩(review 六轮 P1):**读 core 的常量,不手抄**——core 改默认值,digest 跟着变
     maxIterations: DEFAULT_MAX_ITERATIONS,
@@ -122,22 +134,25 @@ export function codingAgentIdentity(): {
   };
 }
 
-export function codingPreset(opts: CodingPresetOptions): CodingPreset {
-  const root = opts.workspaceRoot;
+export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
   return {
     agent: {
-      systemPrompt: CODING_SYSTEM,
-      workspaceRoot: root,
-      cwd: root,
       ...(opts.permission !== false ? { permission: permissionPolicyFor(opts.permission) } : {}),
       ...(opts.skills !== undefined && opts.skills.length > 0 ? { skills: opts.skills } : {}),
       ...(opts.maxIterations !== undefined ? { maxIterations: opts.maxIterations } : {}),
     },
     extensions: [
-      // fs / search 的工具是纯函数造出来的，可以在装配前就备好 → 走 `defineToolPack` 的 config。
-      { entryId: "echo:workspace", definition: ECHO_WORKSPACE as never, config: { tools: [...makeFsTools(), ...makeSearchTools()] } },
-      // bash 不行：它要 `agent.background`。所以 `echo:shell` 自己 inject 那条能力端口，
-      // 这里只列 definition、不给 config（见 `extensions.ts` 的注释）。
+      // 产品的身份与编码纪律
+      { entryId: "echo:coding", definition: ECHO_CODING_PROMPT as never, config: { sections: [codingIdentitySection(), codingConductSection()] } },
+      // fs / search 的工具是纯函数造出来的，可以在装配前就备好 → 走 `defineToolPack` 的 config；
+      // 它们的跨调用习惯段跟工具同一个 config 进来：工具卸了段也走
+      {
+        entryId: "echo:workspace",
+        definition: ECHO_WORKSPACE as never,
+        config: { tools: [...makeFsTools(), ...makeSearchTools()], sections: [workspaceToolsSection()] },
+      },
+      // bash 不行：它要 `agent.background`。所以 `echo:shell` 自己 inject 那条能力端口并在 apply 里
+      // 注册工具与段，这里只列 definition、不给 config（见 `extensions.ts` 的注释）。
       { entryId: "echo:shell", definition: ECHO_SHELL as never },
     ],
   };

@@ -47,7 +47,7 @@ function fixture(tools: string[] = []): { skills: SkillMap; active: ActiveSkillM
   return { skills: new Map(), active: new Map(), hasTool: (n) => tools.includes(n) };
 }
 
-const ctx = () => ({ toolCallId: "t1", cwd: "/", workspaceRoot: "/", sessionId: null, iteration: 0 });
+const ctx = () => ({ toolCallId: "t1", workspace: "/", sessionId: null, iteration: 0 });
 
 /* ══════════ 池与激活是两件事 ══════════ */
 
@@ -159,7 +159,7 @@ test("createSkill 校验不合法的名字，返回错误结果而不是抛", ()
   const f = fixture();
   const r = createSkill(f.skills, { name: "Bad Name", description: "", content: "x" });
   expect(r.ok).toBe(false);
-  if (!r.ok && r.reason === "invalid") expect(r.message).toContain("小写字母");
+  if (!r.ok && r.reason === "invalid") expect(r.message).toContain("lowercase letters");
   expect(validateSkillInput("ok-name", "有描述")).toEqual([]);
 });
 
@@ -172,7 +172,7 @@ test("skill_activate 对模型不开放的 skill 说不（方法层不查，这�
   const activate = tools.find((t) => t.name === "skill_activate")!;
   const out = await activate.execute({ name: "secret" }, ctx());
   expect(out.isError).toBe(true);
-  expect(out.content).toContain("不对模型开放");
+  expect(out.content).toContain("not available to the model");
 });
 
 test("skill_activate 缺工具时把缺哪几个说清楚", async () => {
@@ -269,9 +269,9 @@ test("skill_create：onCreate 没 settle 之前不许回执（工具说成功 = 
 });
 
 test("description 的保真约束：换行 / 首尾空白 / 成对引号一律拒绝——落盘再读会变值", () => {
-  expect(validateSkillInput("ok-name", "第一行\n第二行").join("；")).toContain("单行");
-  expect(validateSkillInput("ok-name", " 首尾有空白 ").join("；")).toContain("空白");
-  expect(validateSkillInput("ok-name", '"整个被引号包着"').join("；")).toContain("引号");
+  expect(validateSkillInput("ok-name", "第一行\n第二行").join("; ")).toContain("single line");
+  expect(validateSkillInput("ok-name", " 首尾有空白 ").join("; ")).toContain("whitespace");
+  expect(validateSkillInput("ok-name", '"整个被引号包着"').join("; ")).toContain("quotes");
   expect(validateSkillInput("ok-name", "中间有 \"引号\" 没关系")).toEqual([]);
   expect(validateSkillInput("ok-name", "单行没问题")).toEqual([]);
 });

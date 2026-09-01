@@ -38,10 +38,35 @@ export type SessionEntry = {
 export type SessionInfo = {
   readonly id: string;
   readonly name: string;
+  /**
+   * 这个 session 在哪个目录里干活（2026-09-01 起是 **session 级事实**）：文件工具的边界与起点、
+   * prompt 里的 `{{workspace}}`。新建时由宿主给（绝对路径），resume 时以盘上为准。
+   * **必填**：没有它的 meta 是坏档，resume 判红（pre-release，不留可选兼容）。
+   */
+  readonly workspace: string;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly messageCount: number;
 };
+
+/**
+ * 缺省 session id **按 workspace 派生**（2026-09-01 拍定）：状态根是用户级的（`~/.echo`），
+ * 若缺省恒为 `main`，在仓库 A 开的对话换到仓库 B 启动会被 resume——workspace 是 A、人在 B。
+ * 派生之后一个项目一段连续对话，用户级记忆仍共享；显式 sessionId 仍然赢。
+ * FNV-1a 64 位只做命名空间，不做安全：纯 JS、同步、零依赖。
+ */
+export function defaultSessionId(workspace: string): string {
+  return `main-${fnv1a64hex(workspace).slice(0, 12)}`;
+}
+
+function fnv1a64hex(input: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(input)) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
 
 export type SessionData = {
   readonly info: SessionInfo;
@@ -50,7 +75,7 @@ export type SessionData = {
 };
 
 export interface SessionManager {
-  create(opts?: { name?: string }): Promise<SessionInfo>;
+  create(opts?: { name?: string; workspace?: string }): Promise<SessionInfo>;
   /** 坏档 **fail-loud**，不给半截 session。 */
   load(id: string): Promise<SessionData>;
   /** 轻量清单，不读全量 entries。 */
@@ -67,12 +92,13 @@ export class InMemorySessionManager implements SessionManager {
   private readonly sessions = new Map<string, { info: SessionInfo; entries: SessionEntry[] }>();
   private seq = 0;
 
-  async create(opts?: { name?: string }): Promise<SessionInfo> {
+  async create(opts?: { name?: string; workspace?: string }): Promise<SessionInfo> {
     const id = `s${++this.seq}`;
     const now = Date.now();
     const info: SessionInfo = {
       id,
       name: opts?.name ?? id,
+      workspace: opts?.workspace ?? "/",
       createdAt: now,
       updatedAt: now,
       messageCount: 0,

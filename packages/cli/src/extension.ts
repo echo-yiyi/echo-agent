@@ -15,10 +15,11 @@
 // **谁收摊**：`exited` resolve 之后由进程调 `echo.stop()`，那一步会 unmount 本 Extension，
 // Fiber 的 disposer 把终端还回去。壳子自己不碰 `agent.stop()`——协议里根本没有它。
 
-import { AgentRuntimeService, defineExtension, type ExtensionDefinition } from "@echo-agent/core/extension";
+import { AgentPrompt, AgentRuntimeService, defineExtension, type ExtensionDefinition } from "@echo-agent/core/extension";
 import type { TUI } from "@earendil-works/pi-tui";
 import { runTui, type TuiConfigureOptions } from "./app.ts";
 import type { Product } from "./product.ts";
+import { surfaceSection } from "./prompt.ts";
 
 export type TuiShell = {
   /** 交给 `createEcho({ extensions: [...] })` 去 mount。 */
@@ -67,9 +68,21 @@ export function tuiShell(
     hostAbiVersion: 1,
     // 壳与 Agent 同寿：换代要在 run 之间，不能在轮中途把用户正在看的界面抽走
     reload: "agent",
-    inject: { runtime: { service: AgentRuntimeService, required: true } },
+    inject: {
+      runtime: { service: AgentRuntimeService, required: true },
+      prompt: { service: AgentPrompt, required: true },
+    },
     apply(ctx) {
       const runtime = ctx.get(AgentRuntimeService);
+      // 交互面段（2026-09-01）：「模型看到的是什么界面」这个事实归壳——壳在，段在；换壳换段。
+      const prompt = ctx.get(AgentPrompt);
+      void ctx.effect({
+        boundary: "turn",
+        start: () => {
+          const off = prompt.section(surfaceSection("terminal"));
+          return { value: "surface", dispose: () => void off() };
+        },
+      });
       // **UI 循环挂在 `ctx.effect()` 上**，disposer 负责让它停下来。
       // 直接 `void runTui(...)` 也能跑，但那样它就没有 owner——unmount 时无从收拾，
       // 而「装上就下不来」正是这一整批要消灭的东西。

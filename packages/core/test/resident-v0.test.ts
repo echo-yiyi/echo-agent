@@ -4,6 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectStateLock } from "../src/storage/file-lock.ts";
+import { defaultSessionId } from "../src/session/types.ts";
 
 // **Runtime V0 Gate**（AGENT-CORE §13.9 的 12 条 resident integration）。
 //
@@ -66,7 +67,7 @@ test(
     const a = runPhase(dir, "a");
     expect(a.ok, `phase a 挂了：\n${a.out}`).toBe(true);
     const ra = a.report!;
-    expect(ra.sessionId).toBe("main"); // 自动创建的默认会话（第 3 条）
+    expect(ra.sessionId).toBe(defaultSessionId("/")); // 自动创建的默认会话（第 3 条）：按 workspace 派生，宿主没给 workspace 就是 "/"
 
     // 第 4 条要的是「**由 Agent** 创建」——判据是工具真的被调用**且成功**，
     // 不是宿主自己调 harness 函数。工具报错会被循环转成 error result 咽掉，
@@ -101,7 +102,7 @@ test(
     // 落盘是真的：记忆文件、索引、闹钟、会话 entries
     expect(existsSync(join(dir, "memory", "项目.md"))).toBe(true);
     expect(existsSync(join(dir, "schedules.json"))).toBe(true);
-    expect(readdirSync(join(dir, "sessions", "main", "entries")).length).toBeGreaterThan(0);
+    expect(readdirSync(join(dir, "sessions", defaultSessionId("/"), "entries")).length).toBeGreaterThan(0);
 
     // ⑥ **Dream 是 Agent 自己起的**：宿主没调任何整理相关的东西，只是把门喂饱
     // （10 个记忆文件 / 10 次写入）。判据是盘上的 `lastAt` 被提交，不是「dream 跑过」。
@@ -133,7 +134,7 @@ test(
     const c = runPhase(dir, "c");
     expect(c.ok, `phase c 挂了：\n${c.out}`).toBe(true);
     const rc = c.report!;
-    expect(rc.sessionId).toBe("main"); // ⑧ 同一身份
+    expect(rc.sessionId).toBe(defaultSessionId("/")); // ⑧ 同一身份（同 workspace → 同一段对话）
     expect(rc.messages ?? 0).toBeGreaterThan(4);
 
     // ⑨ **第二轮模型调用真的用得上第一轮的东西**——判据落在模型收到的 Context 上，

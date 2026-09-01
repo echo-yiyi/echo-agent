@@ -22,8 +22,9 @@ const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", impo
 export const ECHO_CODING: Product = Object.freeze({
   name: "echo-coding",
   version: VERSION,
-  // 形态（`interactive`）本产品不看：两种形态的装配片段完全相同。
-  preset: ({ cwd }) => codingPreset({ workspaceRoot: cwd, permission: false }),
+  // 形态（`interactive`）本产品不看：两种形态的装配片段完全相同。workspace 不经 preset——
+  // 它是 session 级事实，`mainFor()` 直接交给 `createEcho()`（2026-09-01）。
+  preset: () => codingPreset({ permission: false }),
 });
 
 /** 进程入口的实质：`echo-agent` 的 `main` 绑上本产品。签名与它完全相同，退出码语义也相同。 */

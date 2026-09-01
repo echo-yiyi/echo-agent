@@ -347,8 +347,7 @@ test("退出路径 shouldStopAfterTurn（loop 级决策点，Agent 不暴露）�
     maxIterations: 5,
     retryPolicy: DEFAULT_RETRY_POLICY,
     compaction: {},
-    workspaceRoot: process.cwd(),
-    cwd: process.cwd(),
+    workspace: process.cwd(),
     shouldStopAfterTurn: () => true,
     intake: {
       openTurn: (id) => gate.openTurn(id),

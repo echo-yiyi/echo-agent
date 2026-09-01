@@ -21,47 +21,47 @@ export function makeBashTool(deps: BashDeps = {}): ModelTool<{ command: string; 
     name: "bash",
     label: "跑命令",
     description:
-      "在工作目录跑一条 bash 命令,返回 stdout+stderr(合并)。" +
-      "缺省 120s 超时;长活(dev server、watch)用 background: true 挂后台,结果以后台通知回来。",
+      "Run one bash command in the workspace and return stdout and stderr (merged). " +
+      "Times out after 120 s by default; for long-running work (dev servers, watchers) pass background: true and the result arrives later as a background notification.",
     parameters: {
       type: "object",
       properties: {
         command: { type: "string" },
-        timeout_ms: { type: "number", description: "超时毫秒,缺省 120000" },
-        background: { type: "boolean", description: "后台跑(不阻塞本轮)" },
+        timeout_ms: { type: "number", description: "Timeout in milliseconds, default 120000" },
+        background: { type: "boolean", description: "Run in the background (does not block this turn)" },
       },
       required: ["command"],
     },
     async execute({ command, timeout_ms, background }, ctx) {
       if (background === true) {
-        if (deps.background === undefined) return toolError("本 agent 未接后台队列,不支持 background: true");
+        if (deps.background === undefined) return toolError("This agent has no background queue; background: true is not supported");
         const r = startBackground(deps.background, {
           kind: "process",
           label: command.slice(0, 60),
           run: (bg) =>
             new Promise<void>((resolvePromise, rejectPromise) => {
-              const child = spawn("bash", ["-lc", command], { cwd: ctx.cwd, stdio: ["ignore", "pipe", "pipe"] });
+              const child = spawn("bash", ["-lc", command], { cwd: ctx.workspace, stdio: ["ignore", "pipe", "pipe"] });
               child.stdout.on("data", (d: Buffer) => bg.write(d.toString()));
               child.stderr.on("data", (d: Buffer) => bg.write(d.toString()));
               bg.signal.addEventListener("abort", () => child.kill("SIGKILL"), { once: true });
               child.on("error", rejectPromise);
               child.on("close", (code) => {
                 if (code === 0 || bg.signal.aborted) resolvePromise();
-                else rejectPromise(new Error(`退出码 ${code}`));
+                else rejectPromise(new Error(`exit code ${code}`));
               });
             }),
         });
         if (!r.ok) {
           return toolError(
             r.reason === "too_many_running"
-              ? `后台已有 ${r.running}/${r.max} 个在跑,先收掉一些`
-              : `后台任务总量已满(${r.tasks}/${r.max})`,
+              ? `${r.running}/${r.max} background jobs are already running; collect some first`
+              : `The background queue is full (${r.tasks}/${r.max})`,
           );
         }
-        return toolOk(`已挂后台:${r.task.id}(结束后会收到通知)`, { taskId: r.task.id });
+        return toolOk(`Started in the background: ${r.task.id} (you will be notified when it finishes)`, { taskId: r.task.id });
       }
 
-      return runForeground(command, ctx.cwd, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
+      return runForeground(command, ctx.workspace, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
     },
   };
 }
@@ -100,18 +100,18 @@ function runForeground(
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       let text = out.slice(0, OUTPUT_CAP);
-      if (truncated || out.length > OUTPUT_CAP) text += `\n…[输出截断:超过 ${OUTPUT_CAP} 字]`;
+      if (truncated || out.length > OUTPUT_CAP) text += `\n…[output truncated: over ${OUTPUT_CAP} characters]`;
       if (spawnError !== undefined) {
-        resolvePromise(toolError(`命令没能启动:${spawnError}`));
+        resolvePromise(toolError(`The command could not start: ${spawnError}`));
       } else if (timedOut) {
-        resolvePromise(toolError(`超时(${timeoutMs}ms),已杀。输出:\n${text}`));
+        resolvePromise(toolError(`Timed out after ${timeoutMs} ms and was killed. Output:\n${text}`));
       } else if (signal?.aborted === true) {
-        resolvePromise(toolError(`被中止。输出:\n${text}`));
+        resolvePromise(toolError(`Aborted. Output:\n${text}`));
       } else if (code !== 0) {
         // 非零退出是**结果**不是异常——模型要看到输出来决定下一步
-        resolvePromise(toolError(`退出码 ${code}\n${text}`, { exitCode: code }));
+        resolvePromise(toolError(`exit code ${code}\n${text}`, { exitCode: code }));
       } else {
-        resolvePromise(toolOk(text === "" ? "(无输出)" : text, { exitCode: 0 }));
+        resolvePromise(toolOk(text === "" ? "(no output)" : text, { exitCode: 0 }));
       }
     };
     child.on("error", (e) => finish(null, String(e)));

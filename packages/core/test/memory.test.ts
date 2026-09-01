@@ -34,7 +34,7 @@ import type { MemoryDir } from "../src/memory/types.ts";
 import type { ToolExecutionContext } from "../src/tools/types.ts";
 
 function ctx(): ToolExecutionContext {
-  return { toolCallId: "t", cwd: "/", workspaceRoot: "/", sessionId: null, iteration: 0 };
+  return { toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
 }
 
 async function call(h: AgentMemories, params: Record<string, unknown>) {
@@ -66,7 +66,7 @@ describe("Memory 判别联合与分区", () => {
   });
 
   test("indexed 的 path 必须以 / 结尾", () => {
-    expect(() => indexedMemory("x", { path: "x.md" })).toThrow("以 / 结尾");
+    expect(() => indexedMemory("x", { path: "x.md" })).toThrow("must end with /");
   });
 });
 
@@ -92,7 +92,7 @@ describe("INDEX.md(落盘索引)", () => {
     expect(await dir.read("memory/INDEX.md")).not.toContain("INDEX.md");
     const denied = await call(h, { command: "create", path: "memory/INDEX.md", file_text: "伪造索引" });
     expect(denied.isError).toBe(true);
-    expect(denied.content).toContain("系统维护");
+    expect(denied.content).toContain("system-maintained");
   });
 });
 
@@ -103,8 +103,8 @@ describe("组装(defaultComposeMemory / renderMemorySystem)", () => {
     const dir = new InMemoryDir();
     await dir.write("agent.md", "x".repeat(3000));
     const block = await defaultComposeMemory(agentMemory, dir);
-    expect(block).toContain("## 记忆 · agent");
-    expect(block).toContain("…[截断]");
+    expect(block).toContain("## agent (agent.md)");
+    expect(block).toContain("…[truncated]");
     expect(block.length).toBeLessThan(2400);
   });
 
@@ -149,7 +149,7 @@ describe("组装(defaultComposeMemory / renderMemorySystem)", () => {
   test("空记忆也出使用规则(模型要知道可以写)", async () => {
     const h = createAgentMemories(new InMemoryDir());
     const block = await renderMemorySystem(h);
-    expect(block).toContain("# 记忆");
+    expect(block).toContain("# Memory");
     expect(block).toContain("memory/");
   });
 });
@@ -176,7 +176,7 @@ describe("写入闸(checkWrite 经方法生效)", () => {
     const h = createAgentMemories(new InMemoryDir());
     const r = await call(h, { command: "create", path: "user.md", file_text: "x".repeat(2000) });
     expect(r.isError).toBe(true);
-    expect(r.content).toContain("超预算");
+    expect(r.content).toContain("exceed its budget");
     expect(r.content).toContain("str_replace");
   });
 
@@ -184,14 +184,14 @@ describe("写入闸(checkWrite 经方法生效)", () => {
     const h = createAgentMemories(new InMemoryDir());
     const r = await call(h, { command: "create", path: "memory/big.md", file_text: "x".repeat(5000) });
     expect(r.isError).toBe(true);
-    expect(r.content).toContain("单文件超限");
+    expect(r.content).toContain("File too large");
   });
 
   test("分区外路径拒,并告知可用分区", async () => {
     const h = createAgentMemories(new InMemoryDir());
     const r = await call(h, { command: "create", path: "elsewhere.md", file_text: "x" });
     expect(r.isError).toBe(true);
-    expect(r.content).toContain("不在任何记忆分区");
+    expect(r.content).toContain("not inside any memory region");
     expect(r.content).toContain("agent");
   });
 });
@@ -223,8 +223,8 @@ describe("memory 工具六动词", () => {
   test("str_replace:零命中与多义都拒", async () => {
     const h = createAgentMemories(new InMemoryDir());
     await call(h, { command: "create", path: "agent.md", file_text: "aa aa" });
-    expect((await call(h, { command: "str_replace", path: "agent.md", old_str: "没有", new_str: "x" })).content).toContain("没找到");
-    expect((await call(h, { command: "str_replace", path: "agent.md", old_str: "aa", new_str: "x" })).content).toContain("必须唯一");
+    expect((await call(h, { command: "str_replace", path: "agent.md", old_str: "没有", new_str: "x" })).content).toContain("old_str not found");
+    expect((await call(h, { command: "str_replace", path: "agent.md", old_str: "aa", new_str: "x" })).content).toContain("must be unique");
   });
 
   test("insert 行号语义与越界", async () => {
@@ -242,7 +242,7 @@ describe("memory 工具六动词", () => {
     await call(h, { command: "create", path: "memory/a.md", file_text: "内容" });
     const cross = await call(h, { command: "rename", path: "memory/a.md", new_path: "agent.md" });
     expect(cross.isError).toBe(true);
-    expect(cross.content).toContain("同一分区");
+    expect(cross.content).toContain("within one region");
     expect((await call(h, { command: "rename", path: "memory/a.md", new_path: "memory/b.md" })).isError).toBe(false);
     expect(await dir.read("memory/a.md")).toBeNull();
     expect(await dir.read("memory/b.md")).toBe("内容");
@@ -306,7 +306,7 @@ describe("Dream 门控", () => {
     expect(await shouldDream(h)).toBe(true);
     const task = await dreamTask(h);
     expect(task.tools.map((t) => t.name)).toEqual([MEMORY_TOOL_NAME]);
-    expect(task.prompt).toContain("整理");
+    expect(task.prompt).toContain("Consolidate your persistent memory");
     expect(await shouldDream(h)).toBe(false); // 锁住了
   });
 
@@ -343,11 +343,11 @@ describe("Agent 接线", () => {
       seen.push(c);
       return inner(m, c, o);
     };
-    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy, systemPrompt: "base" });
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy });
     await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
     await agent.prompt("hi");
-    expect(seen[0]?.systemPrompt).toContain("base");
-    expect(seen[0]?.systemPrompt).not.toContain("# 记忆");
+    expect(seen[0]?.systemPrompt).toContain("# Environment"); // echo:agent 的段在，说明 system 装配跑过
+    expect(seen[0]?.systemPrompt).not.toContain("# Memory");
     expect(agent.state.tools.map((t) => t.name)).not.toContain(MEMORY_TOOL_NAME);
   });
 
@@ -367,7 +367,6 @@ describe("Agent 接线", () => {
     const agent = new Agent({
       model: FAKE_MODEL,
       streamFunction: spy,
-      systemPrompt: "base",
       memory: createAgentMemories(dir),
     });
     await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
@@ -381,7 +380,10 @@ describe("Agent 接线", () => {
 
     await agent.prompt("下一个任务");
     expect(seen[2]?.systemPrompt).toContain("新偏好"); // 任务边界刷新
-    expect(seen[2]?.systemPrompt).toContain("base"); // 装备 systemPrompt 在前,记忆段在后
+    // 环境段（order 300）在前，记忆段（order 900）沉底
+    const sys = seen[2]?.systemPrompt ?? "";
+    expect(sys.indexOf("# Environment")).toBeGreaterThanOrEqual(0);
+    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("新偏好"));
   });
 
   test("dispose 链:close 传到 MemoryDir", async () => {

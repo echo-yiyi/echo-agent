@@ -655,7 +655,7 @@ test("responder:none：策略返回 ask 时折成 policy deny，不生成 ask、
   expect(ofType(seen, "permissionRequest")).toHaveLength(0);
   const denied = ofType(seen, "permissionDenied")[0]!;
   expect(denied.decidedBy).toBe("policy");
-  expect(denied.reason).toContain("没有配置裁决人");
+  expect(denied.reason).toContain("no responder is configured");
 });
 
 test("构造期校验：不超时又没声明 responder 直接抛；超时值不是正整数直接抛", () => {

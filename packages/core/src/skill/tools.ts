@@ -46,14 +46,14 @@ function activateTool(deps: SkillToolsDeps): ModelTool<{ name: string; instructi
     name: "skill_activate",
     label: "启用 skill",
     description:
-      "启用一个 skill：它的完整指令会从下一轮起出现在你的上下文里，直到本次任务结束。" +
-      "system 的「可用 skill」段列出了每个 skill 的名字与适用场景；当前任务命中某条描述时，先启用再动手。" +
-      "已启用的无需重复调用。可用 instructions 附一句「这次要用它做什么」。",
+      "Activate a skill: its full instructions appear in your context from the next turn on, for the rest of this session. " +
+      "The Skills section of the system prompt lists each skill's name and when it applies; when the current task matches one, activate it before acting. " +
+      "No need to call again for a skill that is already active. Optionally pass instructions saying what you need it for this time.",
     parameters: {
       type: "object",
       properties: {
-        name: { type: "string", description: "skill 名（见 system 的可用 skill 段）" },
-        instructions: { type: "string", description: "可选：这次具体要用它做什么" },
+        name: { type: "string", description: "Skill name (from the Skills section of the system prompt)" },
+        instructions: { type: "string", description: "Optional: what you need it for this time" },
       },
       required: ["name"],
     },
@@ -62,19 +62,19 @@ function activateTool(deps: SkillToolsDeps): ModelTool<{ name: string; instructi
       const skill = deps.skills.get(name);
       // 模型这条路要查 modelInvocable——方法层不查（人和 hook 有权启用任何一个）。
       if (skill !== undefined && !skill.modelInvocable) {
-        return toolError(`skill '${name}' 不对模型开放`);
+        return toolError(`Skill '${name}' is not available to the model`);
       }
       const r = activateSkill(deps.skills, deps.active, name, {
         ...(instructions !== undefined ? { instructions } : {}),
         ...(deps.hasTool !== undefined ? { hasTool: deps.hasTool } : {}),
       });
-      if (r.ok) return toolOk(`已启用 skill：${name}（指令从下一轮起可见）`);
+      if (r.ok) return toolOk(`Activated skill ${name} (its instructions are visible from the next turn)`);
       if (r.reason === "not_found") {
         const available = [...deps.skills.values()].filter((s) => s.modelInvocable).map((s) => s.name);
-        return toolError(`未知 skill '${name}'（可用：${available.join("、") || "无"}）`);
+        return toolError(`Unknown skill '${name}' (available: ${available.join(", ") || "none"})`);
       }
       // missing_tools：把缺什么说清楚，别让模型试半天
-      return toolError(`skill '${name}' 需要这些工具，当前没有：${r.missing.join("、")}`);
+      return toolError(`Skill '${name}' needs tools that are not available: ${r.missing.join(", ")}`);
     },
   };
 }
@@ -85,24 +85,24 @@ function createTool(deps: SkillToolsDeps): ModelTool<{ name: string; description
     name: "skill_create",
     label: "创建 skill",
     description:
-      "把一套做法固化成新的 skill，供以后遇到同类任务时启用。" +
-      "适合：这次摸索出的可复用流程、踩过的坑与规避方式、某类产出的固定格式。" +
-      "不适合：只对当前这一次有效的信息（那些直接说就行）。" +
-      "description 要写清「什么情况下该用它」——将来的你靠这一句判断要不要启用。",
+      "Save a way of working as a new skill so it can be activated for similar tasks later. " +
+      "Good for: a reusable procedure worked out this time, pitfalls and how to avoid them, a fixed format for a kind of output. " +
+      "Not for: information that only matters this once (just say it). " +
+      "Write the description as the situation in which the skill applies; your future self decides from that one line whether to activate it.",
     parameters: {
       type: "object",
       properties: {
-        name: { type: "string", description: "小写字母、数字、连字符；全局唯一" },
-        description: { type: "string", description: "什么情况下该用它（这句决定它以后会不会被想起来）" },
-        content: { type: "string", description: "完整指令正文（markdown）" },
+        name: { type: "string", description: "Lowercase letters, digits, and hyphens; unique" },
+        description: { type: "string", description: "When to use it (this line decides whether it gets picked up later)" },
+        content: { type: "string", description: "Full instructions (markdown)" },
       },
       required: ["name", "description", "content"],
     },
     async execute(params) {
       const r = createSkill(deps.skills, params);
       if (!r.ok) {
-        if (r.reason === "exists") return toolError(`skill '${params.name}' 已存在`);
-        return toolError(`创建失败：${r.message}`);
+        if (r.reason === "exists") return toolError(`Skill '${params.name}' already exists`);
+        return toolError(`Could not create the skill: ${r.message}`);
       }
       try {
         await deps.onCreate?.(r.skill.name);
@@ -110,12 +110,12 @@ function createTool(deps: SkillToolsDeps): ModelTool<{ name: string; description
         // **措辞与真实状态一致**（Task 面同款教训）：skill 已进池、skill_activate 已可用，
         // 只是没写到盘上。说「创建失败」的话，模型会重试——而重试只会撞「已存在」。
         return toolError(
-          `skill '${r.skill.name}' **已经在当前进程里创建**（skill_activate 已可用），` +
-            `但没能写到盘上：${e instanceof Error ? e.message : String(e)}。` +
-            `这个进程重启后它会丢失。**不要重试**——重试只会报「已存在」；请把这件事告诉用户。`,
+          `Skill '${r.skill.name}' was created in this process (skill_activate works) ` +
+            `but could not be written to disk: ${e instanceof Error ? e.message : String(e)}. ` +
+            `It will be lost when the process restarts. Do not retry: a retry only reports "already exists". Tell the user.`,
         );
       }
-      return toolOk(`已创建 skill：${r.skill.name}（可用 skill_activate 启用）`);
+      return toolOk(`Created skill ${r.skill.name} (activate it with skill_activate)`);
     },
   };
 }

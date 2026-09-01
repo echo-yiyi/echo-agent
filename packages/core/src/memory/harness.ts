@@ -17,7 +17,7 @@ import type { Diagnostic } from "../errors.ts";
 
 /** MemoryHarness 要 agent 给的**只有一件**：索引重建、写盘失败要能说出来。 */
 export type MemoryDeps = { report?: (d: Diagnostic) => void };
-import type { PromptSection, PromptSource } from "../prompt/types.ts";
+import { PROMPT_ORDER, type PromptSection } from "../prompt/types.ts";
 import { toolError, toolOk, type AgentToolResult, type ModelTool } from "../tools/types.ts";
 import { defaultCheckWrite, defaultComposeMemory, indexEntries, renderIndex, renderMemorySystem } from "./compose.ts";
 import {
@@ -150,22 +150,22 @@ export async function memoryView(ctx: AgentMemories, rawPath: string): Promise<A
     const path = normalizeMemoryPath(rawPath);
     if (path === "" || path.endsWith("/")) {
       const files = await ctx.dir.list(path);
-      if (path !== "") return toolOk(files.length > 0 ? files.join("\n") : `${path}(空目录)`);
+      if (path !== "") return toolOk(files.length > 0 ? files.join("\n") : `${path} (empty directory)`);
       const lines: string[] = [];
       for (const m of ctx.memories.values()) {
         if (typeof m.path !== "string" || m.path === "") continue;
         if (m.path.endsWith("/")) {
           const inside = files.filter((f) => f.startsWith(m.path as string));
-          lines.push(`${m.name}/(${inside.length} 个文件)`);
+          lines.push(`${m.name}/ (${inside.length} files)`);
           for (const f of inside) lines.push(`  ${f}`);
         } else {
-          lines.push(`${m.path}${files.includes(m.path) ? "" : "(空)"}`);
+          lines.push(`${m.path}${files.includes(m.path) ? "" : " (empty)"}`);
         }
       }
-      return toolOk(lines.length > 0 ? lines.join("\n") : "(还没有任何记忆)");
+      return toolOk(lines.length > 0 ? lines.join("\n") : "(no memories yet)");
     }
     const content = await ctx.dir.read(path);
-    if (content === null) return toolError(`'${path}' 不存在`);
+    if (content === null) return toolError(`'${path}' does not exist`);
     return toolOk(content.split("\n").map((l, i) => `${i + 1}\t${l}`).join("\n"));
   } catch (e) {
     return toolError(errText(e));
@@ -174,58 +174,58 @@ export async function memoryView(ctx: AgentMemories, rawPath: string): Promise<A
 
 /** 建/整文件覆写。上层自己的写入工具(remember 之类)最终都该落到这里。 */
 export async function memoryCreate(ctx: AgentMemories, rawPath: string, text: string): Promise<AgentToolResult> {
-  return writeMemory(ctx, rawPath, () => Promise.resolve(text), (path, n) => `已写入 ${path}(${n} 字符)`);
+  return writeMemory(ctx, rawPath, () => Promise.resolve(text), (path, n) => `Wrote ${path} (${n} characters)`);
 }
 
 /** 把唯一出现的 oldStr 换成 newStr。零命中/多义都拒(为 LLM 设计的寻址协议)。 */
 export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldStr: string, newStr: string): Promise<AgentToolResult> {
-  if (oldStr === "") return toolError("str_replace 缺少 old_str");
+  if (oldStr === "") return toolError("str_replace needs old_str");
   return writeMemory(ctx, 
     rawPath,
     async (path) => {
       const content = await ctx.dir.read(path);
-      if (content === null) throw new Error(`'${path}' 不存在`);
+      if (content === null) throw new Error(`'${path}' does not exist`);
       const hits = content.split(oldStr).length - 1;
-      if (hits === 0) throw new Error(`没找到 old_str(先 view '${path}' 核对原文)`);
-      if (hits > 1) throw new Error(`old_str 命中 ${hits} 处——必须唯一,请带上更多上下文`);
+      if (hits === 0) throw new Error(`old_str not found (view '${path}' first and copy the exact text)`);
+      if (hits > 1) throw new Error(`old_str occurs ${hits} times; it must be unique, include more context`);
       return content.replace(oldStr, newStr);
     },
-    (path, n) => `已替换 ${path} 中的一处(现 ${n} 字符)`,
+    (path, n) => `Replaced one occurrence in ${path} (now ${n} characters)`,
   );
 }
 
 /** 在第 line 行之后插入(0 = 文件开头)。 */
 export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: number, text: string): Promise<AgentToolResult> {
-  if (!Number.isInteger(line) || line < 0) return toolError("insert_line 须为 ≥0 的整数(0 = 文件开头)");
+  if (!Number.isInteger(line) || line < 0) return toolError("insert_line must be an integer ≥ 0 (0 = start of file)");
   return writeMemory(ctx, 
     rawPath,
     async (path) => {
       const content = await ctx.dir.read(path);
-      if (content === null) throw new Error(`'${path}' 不存在(新文件用 create)`);
+      if (content === null) throw new Error(`'${path}' does not exist (use create for a new file)`);
       const lines = content.split("\n");
-      if (line > lines.length) throw new Error(`insert_line 越界:文件只有 ${lines.length} 行`);
+      if (line > lines.length) throw new Error(`insert_line out of range: the file has only ${lines.length} lines`);
       lines.splice(line, 0, text);
       return lines.join("\n");
     },
-    (path, n) => `已在 ${path} 第 ${line} 行后插入(现 ${n} 字符)`,
+    (path, n) => `Inserted after line ${line} of ${path} (now ${n} characters)`,
   );
 }
 
 export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise<AgentToolResult> {
   try {
     const path = normalizeMemoryPath(rawPath);
-    if (path === "" || path.endsWith("/")) return toolError("delete 需要文件路径,不是目录");
+    if (path === "" || path.endsWith("/")) return toolError("delete needs a file path, not a directory");
     const guard = guardIndexFile(ctx, path);
     if (guard !== null) return guard;
     const removed = await ctx.dir.remove(path);
-    if (!removed) return toolError(`'${path}' 不存在`);
+    if (!removed) return toolError(`'${path}' does not exist`);
     try {
       await bumpDreamCounters(ctx, { writes: 1 });
     } catch (e) {
       ctx.report?.({ code: "dream_counter_persist_failed", message: errText(e) });
     }
     await refreshIndex(ctx, memoryFor(ctx, path));
-    return toolOk(`已删除 ${path}`);
+    return toolOk(`Deleted ${path}`);
   } catch (e) {
     return toolError(errText(e));
   }
@@ -236,36 +236,36 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
   try {
     const from = normalizeMemoryPath(rawFrom);
     const to = normalizeMemoryPath(rawTo);
-    if (to === "" || to.endsWith("/")) return toolError("new_path 需要文件路径");
+    if (to === "" || to.endsWith("/")) return toolError("new_path needs a file path");
     const fromOwner = memoryFor(ctx, from);
     const toOwner = memoryFor(ctx, to);
     if (fromOwner === undefined || toOwner === undefined || fromOwner.name !== toOwner.name) {
-      return toolError(`rename 两端必须在同一分区(${String(fromOwner?.name)} → ${String(toOwner?.name)})`);
+      return toolError(`rename must stay within one region (${String(fromOwner?.name)} → ${String(toOwner?.name)})`);
     }
     const guard = guardIndexFile(ctx, from) ?? guardIndexFile(ctx, to);
     if (guard !== null) return guard;
     const content = await ctx.dir.read(from);
-    if (content === null) return toolError(`'${from}' 不存在`);
-    if ((await ctx.dir.read(to)) !== null) return toolError(`目标 '${to}' 已存在`);
+    if (content === null) return toolError(`'${from}' does not exist`);
+    if ((await ctx.dir.read(to)) !== null) return toolError(`Target '${to}' already exists`);
     const created = await memoryCreate(ctx, to, content);
     if (created.isError) return created;
     await ctx.dir.remove(from);
     await refreshIndex(ctx, fromOwner);
-    return toolOk(`已把 ${from} 改名为 ${to}`);
+    return toolOk(`Renamed ${from} to ${to}`);
   } catch (e) {
     return toolError(errText(e));
   }
 }
 
-/* ───────────── PromptSource:记忆进 system 的段(格式在 compose.ts) ───────────── */
+/* ───────────── 记忆进 system 的段(格式在 compose.ts;由 echo:memory builtin 注册) ───────────── */
 
 export function memoryPromptSections(ctx: AgentMemories): readonly PromptSection[] {
   return [
     {
       name: "memory",
       // 字节何时变:记忆文件变化后的**下一次 run**(冻结快照:run 内写盘不动本 run 的 system)。
-      // volatile 沉底:它是最常变的段,变了只打掉自己之后的缓存。
-      tier: "volatile",
+      // 沉底(order 最大):它是最常变的段,变了只打掉自己之后的缓存。
+      order: PROMPT_ORDER.memory,
       render: () => renderMemorySystem(ctx),
     },
   ];
@@ -412,12 +412,12 @@ async function writeMemory(ctx: AgentMemories,
 ): Promise<AgentToolResult> {
   try {
     const path = normalizeMemoryPath(rawPath);
-    if (path === "" || path.endsWith("/")) return toolError("需要文件路径,不是目录");
+    if (path === "" || path.endsWith("/")) return toolError("a file path is required, not a directory");
     const guard = guardIndexFile(ctx, path);
     if (guard !== null) return guard;
     const owner = memoryFor(ctx, path);
     if (owner === undefined) {
-      return toolError(`路径 '${path}' 不在任何记忆分区内。可用分区:${describeRegions(ctx)}`);
+      return toolError(`Path '${path}' is not inside any memory region. Regions: ${describeRegions(ctx)}`);
     }
     const next = await nextContent(path);
     const verdict = await ctx.checkFn(owner, ctx.dir, path, next);
@@ -440,7 +440,7 @@ async function writeMemory(ctx: AgentMemories,
 /** INDEX.md 由系统维护(写方法重建),不许直接写——直接改会被下一次重建覆盖,等于白改。 */
 function guardIndexFile(ctx: AgentMemories, path: string): AgentToolResult | null {
   if (path.endsWith(`/${MEMORY_INDEX_FILE}`)) {
-    return toolError(`${MEMORY_INDEX_FILE} 是系统维护的索引,不能直接改——改记忆文件本身,索引会自动重建`);
+    return toolError(`${MEMORY_INDEX_FILE} is the system-maintained index and cannot be edited directly; edit the memory files and the index is rebuilt`);
   }
   return null;
 }
@@ -460,8 +460,8 @@ async function refreshIndex(ctx: AgentMemories, owner: AnyMemory | undefined): P
 function describeRegions(ctx: AgentMemories): string {
   return [...ctx.memories.values()]
     .filter((m) => typeof m.path === "string" && m.path !== "")
-    .map((m) => `${m.name}(${String(m.path)})`)
-    .join("、");
+    .map((m) => `${m.name} (${String(m.path)})`)
+    .join(", ");
 }
 
 /** a 覆盖 b:a 是目录且 b 落在其下,或两者同路径。 */

@@ -22,8 +22,8 @@ export type AgentToolResult<TMeta = Record<string, unknown>> = {
 export type ToolExecutionContext = {
   /** 本次调用的关联键：模型调用 = 模型给的 id；内部调用 = harness 生成的。 */
   readonly toolCallId: string;
-  readonly cwd: string;
-  readonly workspaceRoot: string;
+  /** session 的工作目录：相对路径的起点，也是文件工具的边界（2026-09-01 起一个字段，归 session）。 */
+  readonly workspace: string;
   readonly sessionId: string | null;
   readonly iteration: number;
   readonly signal?: AbortSignal;

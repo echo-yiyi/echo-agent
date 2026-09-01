@@ -123,7 +123,7 @@ export function createSkill(
 ): SkillCreation {
   if (skills.has(input.name)) return { ok: false, reason: "exists" };
   const errors = validateSkillInput(input.name, input.description);
-  if (errors.length > 0) return { ok: false, reason: "invalid", message: errors.join("；") };
+  if (errors.length > 0) return { ok: false, reason: "invalid", message: errors.join("; ") };
 
   const skill: Skill = {
     name: input.name,
@@ -149,20 +149,20 @@ export const MAX_SKILL_DESCRIPTION = 1024;
 /** 返回错误列表;空数组 = 合法。与磁盘加载器共用同一套规矩,免得两处判据漂移。 */
 export function validateSkillInput(name: string, description: string): string[] {
   const errors: string[] = [];
-  if (name.length === 0) errors.push("name 不能为空");
-  else if (name.length > MAX_SKILL_NAME) errors.push(`name 超过 ${MAX_SKILL_NAME} 字（${name.length}）`);
-  if (!NAME_RE.test(name)) errors.push("name 只能用小写字母、数字、连字符");
-  if (name.startsWith("-") || name.endsWith("-")) errors.push("name 不能以连字符开头或结尾");
-  if (name.includes("--")) errors.push("name 不能有连续连字符");
-  if (description.trim() === "") errors.push("description 必填（没有它，模型永远想不起来用这个 skill）");
+  if (name.length === 0) errors.push("name must not be empty");
+  else if (name.length > MAX_SKILL_NAME) errors.push(`name is longer than ${MAX_SKILL_NAME} characters (${name.length})`);
+  if (!NAME_RE.test(name)) errors.push("name may only use lowercase letters, digits, and hyphens");
+  if (name.startsWith("-") || name.endsWith("-")) errors.push("name must not start or end with a hyphen");
+  if (name.includes("--")) errors.push("name must not contain consecutive hyphens");
+  if (description.trim() === "") errors.push("description is required (without it the model never thinks of using this skill)");
   // 下面三条都是**保真约束不是偏好**：skill 落盘走 frontmatter 单行值（`description: …`），
   // 读回来时会 trim 首尾空白、剥掉成对的首尾引号，换行根本进不了一行。
   // 拒绝比静默变值诚实——「落盘再读 ≠ 原值」是本仓最不能接受的那种失败。
   // loader 路径不受影响：它解析出的值天然已是这个形状。
-  else if (/[\r\n]/.test(description)) errors.push("description 必须单行（落盘格式是 frontmatter 单行值）");
-  else if (description !== description.trim()) errors.push("description 首尾不能有空白（落盘再读会被 trim 掉）");
-  else if (/^(["']).*\1$/.test(description)) errors.push("description 首尾不能是成对引号（落盘再读会被剥掉）");
+  else if (/[\r\n]/.test(description)) errors.push("description must be a single line (it is stored as a single-line frontmatter value)");
+  else if (description !== description.trim()) errors.push("description must not start or end with whitespace (it is trimmed when read back)");
+  else if (/^(["']).*\1$/.test(description)) errors.push("description must not be wrapped in matching quotes (they are stripped when read back)");
   else if (description.length > MAX_SKILL_DESCRIPTION)
-    errors.push(`description 超过 ${MAX_SKILL_DESCRIPTION} 字（${description.length}）`);
+    errors.push(`description is longer than ${MAX_SKILL_DESCRIPTION} characters (${description.length})`);
   return errors;
 }

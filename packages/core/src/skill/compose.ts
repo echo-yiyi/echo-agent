@@ -23,12 +23,12 @@ export function renderSkillCatalog(skills: SkillMap): string {
   const lines: string[] = [];
   let budget = SKILL_CATALOG_CAPS.catalogTotal;
   for (const s of list) {
-    const line = `- ${s.name}:${truncateMarked(singleLine(s.description), SKILL_CATALOG_CAPS.descriptionMax)}`;
+    const line = `- ${s.name}: ${truncateMarked(singleLine(s.description), SKILL_CATALOG_CAPS.descriptionMax)}`;
     if (budget - line.length < 0 && lines.length > 0) break;
     budget -= line.length;
     lines.push(line);
   }
-  return `# 可用 skill(用 skill_activate 启用,启用后完整指令进入上下文)\n${lines.join("\n")}`;
+  return `# Skills\nSkills are packaged instructions for specific kinds of work. When a task matches one of these descriptions, activate it with skill_activate before starting; its full instructions then appear in your context.\n${lines.join("\n")}`;
 }
 
 /**
@@ -50,12 +50,12 @@ export function renderSkillInjections(skills: SkillMap, active: ActiveSkillMap):
 }
 
 function renderOneSkill(active: ActiveSkill, content: string): string {
-  const head = `# skill · ${active.name}(扩展指令 · 起)`;
-  const tail = `# skill · ${active.name}(扩展指令 · 止)`;
+  const head = `# Skill: ${active.name} (instructions begin)`;
+  const tail = `# Skill: ${active.name} (instructions end)`;
   const body = truncateMarked(fenceSafe(content), SKILL_BODY_CAP);
   const ask =
     active.instructions !== undefined && active.instructions !== ""
-      ? `\n本次要求:${truncateMarked(singleLine(active.instructions), 500)}`
+      ? `\nFor this task: ${truncateMarked(singleLine(active.instructions), 500)}`
       : "";
   return `${head}\n${body}${ask}\n${tail}`;
 }

@@ -21,6 +21,7 @@ import type { HookRuntime } from "../hooks/runtime.ts";
 import type { AgentBackground } from "../background/types.ts";
 import { addSkills, type ActiveSkillMap, type SkillMap } from "../skill/harness.ts";
 import type { Skill } from "../skill/types.ts";
+import { PROMPT_VARIABLE_NAME, type PromptSection, type PromptVariable } from "../prompt/types.ts";
 import { defineService, type Disposer, type ServiceKey } from "./abi.ts";
 
 export interface AgentToolsRegistry {
@@ -36,6 +37,18 @@ export interface AgentHooksRegistry {
 export interface AgentSkillsRegistry {
   /** 任一同名已存在 → 抛（先查后写，不留半批）。disposer 只卸注册那一刻的那批对象。 */
   add(skills: readonly Skill[]): Disposer;
+}
+
+/**
+ * system prompt 的注册口（2026-09-01）：段与变量都从这里进，**内建的 `echo:*` 也不例外**。
+ * 工具目录不进 system；单工具语义只在 description；这里放的是身份、纪律、交互面、事实、
+ * 以及工具的**跨调用习惯**——由拥有该工具的 extension 出。
+ */
+export interface AgentPromptRegistry {
+  /** 同名已存在 → 抛；order 非有限数 → 抛。返回的 disposer 只卸这个对象。 */
+  section(section: PromptSection): Disposer;
+  /** `{{name}}` 的值。名字不合 `[a-z][a-z0-9_]*` 或同名已存在 → 抛。disposer 只卸这个 provider。 */
+  variable(name: string, provider: PromptVariable): Disposer;
 }
 
 export const AgentTools: ServiceKey<AgentToolsRegistry> = defineService<AgentToolsRegistry>({
@@ -59,6 +72,16 @@ export const AgentSkills: ServiceKey<AgentSkillsRegistry> = defineService<AgentS
   version: 1,
   kind: "registry",
   scope: "agent",
+  reload: "turn",
+});
+
+/** prompt 段与变量的注册口（`AgentPromptRegistry`）：`kind:"registry"`，段的增删下个 run 生效。 */
+export const AgentPrompt: ServiceKey<AgentPromptRegistry> = defineService<AgentPromptRegistry>({
+  id: "echo.agent.prompt",
+  version: 1,
+  kind: "registry",
+  scope: "agent",
+  // `turn`：system 每次 run 装配一次，段的增删在下一个 run 才被看见——比 turn 还弱，声明 turn 已经够
   reload: "turn",
 });
 
@@ -104,6 +127,11 @@ export function agentRegistries(input: {
    * 仍是可选参数，是因为 Host 不一定由 Agent 造（测试里的假 Host 就不是）。
    */
   background?: AgentBackground;
+  /**
+   * prompt 段与变量的两张表（`agent.promptSections` / `agent.promptVariables`）。
+   * 与 `background` 同款：Agent 恒有，由 Agent 造的 Host 应当恒传；可选只为假 Host。
+   */
+  prompt?: { sections: Map<string, PromptSection>; variables: Map<string, PromptVariable> };
 }): ReadonlyArray<readonly [ServiceKey<unknown>, unknown]> {
   const tools: AgentToolsRegistry = {
     register: (tool) => {
@@ -129,5 +157,29 @@ export function agentRegistries(input: {
     out.push([AgentSkills, skills]);
   }
   if (input.background !== undefined) out.push([AgentBackgroundService, input.background]);
+  if (input.prompt !== undefined) out.push([AgentPrompt, promptRegistry(input.prompt.sections, input.prompt.variables)]);
   return out;
+}
+
+/** 两张表上的 registry：先查后写、fail-loud；disposer 认对象身份（O1a exact-reference 契约）。 */
+function promptRegistry(sections: Map<string, PromptSection>, variables: Map<string, PromptVariable>): AgentPromptRegistry {
+  return {
+    section: (section) => {
+      if (typeof section.name !== "string" || section.name === "") throw new Error("prompt 段缺 name");
+      if (!Number.isFinite(section.order)) throw new Error(`prompt 段 '${section.name}' 的 order 必须是有限数`);
+      if (sections.has(section.name)) throw new Error(`prompt 段 '${section.name}' 已存在`);
+      sections.set(section.name, section);
+      return () => {
+        if (sections.get(section.name) === section) sections.delete(section.name);
+      };
+    },
+    variable: (name, provider) => {
+      if (!PROMPT_VARIABLE_NAME.test(name)) throw new Error(`prompt 变量名 '${name}' 不合法（只能是 [a-z][a-z0-9_]*）`);
+      if (variables.has(name)) throw new Error(`prompt 变量 '${name}' 已存在`);
+      variables.set(name, provider);
+      return () => {
+        if (variables.get(name) === provider) variables.delete(name);
+      };
+    },
+  };
 }

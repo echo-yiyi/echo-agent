@@ -25,14 +25,13 @@ import type { Clock } from "./schedule/clock.ts";
 import type { TaskStore } from "./task/types.ts";
 import { SessionService } from "./session/service.ts";
 import { fileStateLock } from "./storage/file-lock.ts";
-import { FileDir, expandHome } from "./storage/file-dir.ts";
+import { FileDir, echoHome, expandHome } from "./storage/file-dir.ts";
 import type { StateLock } from "./storage/lock.ts";
 import { assertSafePathSegment } from "./storage/path-safety.ts";
 import type { StorageDir } from "./storage/types.ts";
 
 /** 默认身份（D5）。 */
 const DEFAULT_AGENT_ID = "default";
-const DEFAULT_SESSION_ID = "main";
 const LOCK_FILE = ".lock";
 const TASKS_FILE = "tasks.json";
 const SKILLS_DIR = "skills";
@@ -54,9 +53,14 @@ export type CreateAgentOptions = {
 
   /** agent 身份（D5，缺省 `"default"`）。 */
   agentId?: string;
-  /** 会话身份（D5，缺省 `"main"`）。 */
+  /** 会话身份（D5）。不给 = `start()` 时按 workspace 派生（`defaultSessionId`），一个项目一段连续对话。 */
   sessionId?: string;
-  /** 状态根。不给按 D6 解析：`$ECHO_HOME/agents/<agentId>` > `$PWD/.echo/agents/<agentId>`。 */
+  /**
+   * 工作目录（session 级事实，2026-09-01）：新建 session 时写进 `SessionInfo.workspace`，resume 以盘上为准。
+   * 宿主给绝对路径；core 不读 `process.cwd()`。`createEcho()` 缺省用它自己的 `cwd`（进程目录）。
+   */
+  workspace?: string;
+  /** 状态根。不给按 D6 解析：`$ECHO_HOME/agents/<agentId>` > `~/.echo/agents/<agentId>`。 */
   stateDir?: string;
 
   /**
@@ -121,11 +125,13 @@ export type CreateAgentOptions = {
 };
 
 /**
- * 状态根（D6）：`stateDir` 最高优先、`ECHO_HOME` 次之、最后是**项目内** `$PWD/.echo`。
+ * 状态根（D6）：`stateDir` 最高优先，其余归 `echoHome()`——`$ECHO_HOME`，再退到 `~/.echo`。
  *
- * 为什么项目内而不是 `~/.echo`：后者会让两个不相干的项目静默共用同一个 agent 的记忆，
- * 而用户不会察觉。项目内的代价是「同一项目的两个 checkout 是两个 agent」——
- * 那是看得见的代价，可接受。
+ * **用户级而不是项目内**（2026-09-01 改）：workspace 成了 session 的字段之后，一个 agent
+ * 在多个目录里各有一段 session，记忆与技能跨项目共享——状态根若按 `$PWD` 走，换个目录就换了
+ * 一个 agent，与此直接冲突。这也消掉了一处不一致：credentials.json 与 settings.json 早就在
+ * `echoHome()` 下，只有 agent 状态曾落在项目内。「两个不相干项目共用记忆」由记忆分区的纪律
+ * 与 session 隔离承担，不再靠目录隔离。
  */
 export function resolveStateDir(opts: { stateDir?: string; agentId?: string }): string {
   const agentId = opts.agentId ?? DEFAULT_AGENT_ID;
@@ -133,9 +139,7 @@ export function resolveStateDir(opts: { stateDir?: string; agentId?: string }): 
   // 照样把整个状态根挪出 `.echo/agents`（实测）——防线漏在哪一处，就从哪一处漏掉全部。
   assertSafePathSegment("agentId ", agentId);
   if (opts.stateDir !== undefined) return opts.stateDir;
-  const home = process.env.ECHO_HOME;
-  if (home !== undefined && home !== "") return join(home, "agents", agentId);
-  return join(process.cwd(), ".echo", "agents", agentId);
+  return join(echoHome(), "agents", agentId);
 }
 
 /**
@@ -281,7 +285,9 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       ...(parts.memory !== undefined ? { memory: parts.memory } : {}),
       streamFunction: opts.agent?.streamFunction ?? ((m, ctx, o) => models.stream(m, ctx, o)),
       agentId,
-      sessionId: opts.sessionId ?? DEFAULT_SESSION_ID,
+      // 不给 sessionId 就不填：`start()` 会按 workspace 派生（`defaultSessionId`），这里不该抢先定一个
+      ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+      ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),
       sessionService: parts.sessionService,
       stateLock: lock,
       taskStore: parts.taskStore,
