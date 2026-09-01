@@ -17,7 +17,7 @@ import type { Diagnostic } from "../errors.ts";
 
 /** MemoryHarness 要 agent 给的**只有一件**：索引重建、写盘失败要能说出来。 */
 export type MemoryDeps = { report?: (d: Diagnostic) => void };
-import type { PromptSection, PromptSource } from "../prompt/types.ts";
+import { PROMPT_ORDER, type PromptSection } from "../prompt/types.ts";
 import { toolError, toolOk, type AgentToolResult, type ModelTool } from "../tools/types.ts";
 import { defaultCheckWrite, defaultComposeMemory, indexEntries, renderIndex, renderMemorySystem } from "./compose.ts";
 import {
@@ -257,15 +257,15 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
   }
 }
 
-/* ───────────── PromptSource:记忆进 system 的段(格式在 compose.ts) ───────────── */
+/* ───────────── 记忆进 system 的段(格式在 compose.ts;由 echo:memory builtin 注册) ───────────── */
 
 export function memoryPromptSections(ctx: AgentMemories): readonly PromptSection[] {
   return [
     {
       name: "memory",
       // 字节何时变:记忆文件变化后的**下一次 run**(冻结快照:run 内写盘不动本 run 的 system)。
-      // volatile 沉底:它是最常变的段,变了只打掉自己之后的缓存。
-      tier: "volatile",
+      // 沉底(order 最大):它是最常变的段,变了只打掉自己之后的缓存。
+      order: PROMPT_ORDER.memory,
       render: () => renderMemorySystem(ctx),
     },
   ];

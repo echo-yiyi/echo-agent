@@ -29,7 +29,8 @@ function provider(): Provider {
 }
 
 function opts(store: StorageDir, extra: Record<string, unknown> = {}): never {
-  return { provider: provider(), store, lock: new InMemoryStateLock(), allowNetwork: false, ...extra } as never;
+  // sessionId 显式给 "main"：下面有测试直接操作 `sessions/main/…` 路径；缺省 id 现在按 workspace 派生
+  return { provider: provider(), store, lock: new InMemoryStateLock(), allowNetwork: false, sessionId: "main", ...extra } as never;
 }
 
 /* ───────────── P1：stop() 之后不能再干活 ───────────── */

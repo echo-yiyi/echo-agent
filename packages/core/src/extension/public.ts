@@ -30,24 +30,29 @@ export type { FiberStatus } from "./fiber.ts";
 export {
   AgentBackgroundService,
   AgentHooks,
+  AgentPrompt,
   AgentSkills,
   AgentTools,
   agentRegistries,
   type AgentHooksRegistry,
+  type AgentPromptRegistry,
   type AgentSkillsRegistry,
   type AgentToolsRegistry,
 } from "./registries.ts";
 export {
   BUILTIN_GENERATION,
   builtinEntries,
+  definePromptPack,
   defineToolPack,
   mountBuiltinTools,
   ECHO_MEMORY,
   ECHO_SCHEDULER,
   ECHO_SKILLS,
   ECHO_TASKS,
+  type BuiltinToolGroup,
   type BuiltinToolGroups,
   type BuiltinToolsConfig,
+  type PromptPackConfig,
 } from "./builtin.ts";
 export { unmountGenerations, type UnmountTarget } from "./cleanup.ts";
 export { AgentRuntimeService, type AgentRuntime, type EquipResult, type RuntimeTurnResult } from "./runtime.ts";

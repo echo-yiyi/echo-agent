@@ -122,7 +122,7 @@ export class SessionService {
    * 任何一条 entry 解不出来都**抛错，不返回半截**——半截 session 比没有 session 更危险，
    * 因为它看起来能用。
    */
-  async createOrResume(sessionId: string, opts?: { name?: string }): Promise<SessionData> {
+  async createOrResume(sessionId: string, opts?: { name?: string; workspace?: string }): Promise<SessionData> {
     assertSafeSessionId(sessionId);
     // 封存之后连打开都不许：新建会写 meta，恢复则会给出一份**写不进去**的 session——
     // 后者看起来能用，比拿不到更危险。实测过启动期丢锁时这里仍会把 meta 写出去。
@@ -150,6 +150,8 @@ export class SessionService {
     const info: SessionInfo = {
       id: sessionId,
       name: opts?.name ?? sessionId,
+      // 只在新建这一刻写；resume 走上面那条路，以盘上为准。缺省 "/" 与 AgentOptions.workspace 同一个缺省
+      workspace: opts?.workspace ?? "/",
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
@@ -399,8 +401,14 @@ function assertEntryShape(entry: SessionEntry, where: string): void {
 function assertSessionInfoShape(info: unknown, where: string): void {
   const i = info as Record<string, unknown> | null | undefined;
   if (i === null || i === undefined || typeof i !== "object") throw new Error(`${where} 不是对象`);
-  for (const k of ["id", "name"]) {
-    if (typeof i[k] !== "string") throw new Error(`${where} 缺 ${k}（或不是字符串）`);
+  for (const k of ["id", "name", "workspace"]) {
+    if (typeof i[k] !== "string") {
+      throw new Error(
+        k === "workspace"
+          ? `${where} 缺 workspace——2026-09-01 之前建的 session 没有这个字段；删掉旧的 sessions/<id>/ 目录或手工补上再启动`
+          : `${where} 缺 ${k}（或不是字符串）`,
+      );
+    }
   }
   for (const k of ["createdAt", "updatedAt", "messageCount"]) {
     if (typeof i[k] !== "number") throw new Error(`${where} 缺 ${k}（或不是数字）`);

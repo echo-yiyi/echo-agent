@@ -247,8 +247,7 @@ async function runOneTool(
   try {
     result = await tool.execute(params, {
       toolCallId: use.id,
-      cwd: config.cwd,
-      workspaceRoot: config.workspaceRoot,
+      workspace: config.workspace,
       sessionId: config.sessionId ?? null,
       iteration,
       signal,

@@ -279,7 +279,7 @@ test("坏 message payload 在恢复时判红——只有 role 是不够的", asy
     const dir = new InMemoryDir();
     await dir.write(
       "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", createdAt: 1, updatedAt: 1, messageCount: 1 }),
     );
     await dir.write(
       "sessions/main/entries/000001.json",
@@ -293,7 +293,7 @@ test("自定义 role 仍然放行——扩展位不能被验形关掉", async ()
   const dir = new InMemoryDir();
   await dir.write(
     "sessions/main/meta.json",
-    JSON.stringify({ id: "main", name: "main", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+    JSON.stringify({ id: "main", name: "main", workspace: "/", createdAt: 1, updatedAt: 1, messageCount: 1 }),
   );
   await dir.write(
     "sessions/main/entries/000001.json",
@@ -359,6 +359,21 @@ test("meta 缺字段 → 判红（缺字段的 info 不该以「恢复成功」�
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/缺 name/);
 });
 
+test("meta 缺 workspace → 判红（2026-09-01 之前的旧档，文案指明怎么处理）；新建写入、resume 以盘上为准", async () => {
+  const dir = new InMemoryDir();
+  await dir.write("sessions/old/meta.json", JSON.stringify({ id: "old", name: "old", createdAt: 1, updatedAt: 1, messageCount: 0 }));
+  await expect(new SessionService(dir).createOrResume("old", { workspace: "/now" })).rejects.toThrow(/缺 workspace.*2026-09-01/);
+
+  const s = new SessionService(dir);
+  const created = await s.createOrResume("fresh", { workspace: "/repo/a" });
+  expect(created.info.workspace).toBe("/repo/a");
+  const onDisk = JSON.parse((await dir.read("sessions/fresh/meta.json"))!) as { workspace: string };
+  expect(onDisk.workspace).toBe("/repo/a");
+  // 换个宿主目录 resume：盘上的赢，宿主给的不覆盖
+  const resumed = await new SessionService(dir).createOrResume("fresh", { workspace: "/elsewhere" });
+  expect(resumed.info.workspace).toBe("/repo/a");
+});
+
 test("恢复失败**不解毒**——此前抛错之后 append 仍被接受", async () => {
   // 实测破坏：createOrResume 因 entry 断链抛错，随后 append() 仍被接受、
   // settle() 还返回成功，继续往一个已确认损坏的会话里写。
@@ -396,7 +411,7 @@ test("内容块闭合验形：缺字段与不认识的 type 都判红", async ()
     const dir = new InMemoryDir();
     await dir.write(
       "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", createdAt: 1, updatedAt: 1, messageCount: 1 }),
     );
     await dir.write(
       "sessions/main/entries/000001.json",
@@ -419,7 +434,7 @@ test("compaction / error entry 缺 at 判红", async () => {
     const dir = new InMemoryDir();
     await dir.write(
       "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", createdAt: 1, updatedAt: 1, messageCount: 0 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", createdAt: 1, updatedAt: 1, messageCount: 0 }),
     );
     await dir.write("sessions/main/entries/000001.json", JSON.stringify(entry));
     await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/缺 at/);

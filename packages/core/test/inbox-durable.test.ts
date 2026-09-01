@@ -116,6 +116,10 @@ test("DurableIngressPort conformance：standalone `Agent.ingress` 必须过共�
     const dir = instrumentedDir(raw);
     const agent = await createAgent(opts(dir));
     await agent.start();
+    // 关掉自动消费：suite 验的是 ingress 的答复口径，不是消费。开着的话首投被接受后 agent 会自己跑一轮、
+    // 落盘会话——那次写与 suite 里「武装一次写失败」抢时序，谁先到取决于装配路径上有几个微任务
+    //（2026-09-01 prompt 装配少了两个空段的 await，它就先到了，把注入的失败吃掉）。证据不能靠时序保。
+    agent.autoConsumeInbox = false;
     return {
       port: agent.ingress,
       stop: () => agent.stop(),
@@ -172,6 +176,7 @@ test("反证：Store I/O 失败改成 Promise rejection 的实现必须被判红
       const dir = instrumentedDir(raw);
       const agent = await createAgent(opts(dir));
       await agent.start();
+      agent.autoConsumeInbox = false; // 同上：反证 fake 也不许让自动消费的落盘抢走注入的写失败
       return {
         // 把结构化 store-error 改写成 Promise rejection——正是契约禁止的那种表达
         port: {
@@ -201,6 +206,7 @@ test("反证：stop 完成之后仍答 stopping 的实现必须被判红", async
       const dir = instrumentedDir(raw);
       const agent = await createAgent(opts(dir));
       await agent.start();
+      agent.autoConsumeInbox = false; // 同上：反证 fake 也不许让自动消费的落盘抢走注入的写失败
       return {
         port: {
           deliverDurable: async (req) => {
@@ -228,6 +234,7 @@ test("反证：写还卡着就提前返回 accepted 的实现必须被判红（�
       const dir = instrumentedDir(raw);
       const agent = await createAgent(opts(dir));
       await agent.start();
+      agent.autoConsumeInbox = false; // 同上：反证 fake 也不许让自动消费的落盘抢走注入的写失败
       let blocked = false;
       return {
         port: {

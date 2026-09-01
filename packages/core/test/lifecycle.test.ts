@@ -29,7 +29,8 @@ function provider(): Provider {
 }
 
 function opts(store: StorageDir, extra: Record<string, unknown> = {}): never {
-  return { provider: provider(), store, lock: new InMemoryStateLock(), allowNetwork: false, ...extra } as never;
+  // sessionId 显式给 "main"：下面有测试直接操作 `sessions/main/…` 路径；缺省 id 现在按 workspace 派生
+  return { provider: provider(), store, lock: new InMemoryStateLock(), allowNetwork: false, sessionId: "main", ...extra } as never;
 }
 
 test("任务清单跨重启回来（start() 统一恢复，不用手动 loadTasks）", async () => {

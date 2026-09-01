@@ -29,7 +29,9 @@ import type { ActiveSkillMap, SkillMap } from "../skill/harness.ts";
 import type { AgentBackground } from "../background/types.ts";
 import { defineExtension, type ExtensionDefinition } from "./abi.ts";
 import { ExtensionHost, type ExtensionEntry } from "./host.ts";
-import { AgentTools, agentRegistries } from "./registries.ts";
+import { AgentPrompt, AgentTools, agentRegistries } from "./registries.ts";
+import type { PromptSection, PromptVariable } from "../prompt/types.ts";
+import { builtinVariables, environmentSection } from "../prompt/sections.ts";
 import { AgentRuntimeService, type AgentRuntime, type EquipResult } from "./runtime.ts";
 import type { ServiceKey } from "./abi.ts";
 import type { AgentMessage, ImageBlock } from "../messages.ts";
@@ -37,11 +39,47 @@ import type { AgentOutcome } from "../events.ts";
 import { errText } from "../errors.ts";
 import type { Model, ThinkingLevel } from "../provider/types.ts";
 
-/** builtin 的 config 形状：一组已经造好的工具。**构造归 core，这里只负责注册。** */
-export type BuiltinToolsConfig = { readonly tools: readonly AgentTool[] };
+/**
+ * builtin 的 config 形状：一组已经造好的工具，外加这组工具的 **prompt 段**（跨调用习惯、目录段）。
+ * **构造归 core，这里只负责注册。** 段与工具同 owner、同生命周期：工具卸了，讲它怎么用的那段也走。
+ */
+export type BuiltinToolsConfig = { readonly tools: readonly AgentTool[]; readonly sections?: readonly PromptSection[] };
 
 function isToolArray(v: unknown): v is readonly AgentTool[] {
   return Array.isArray(v) && v.every((t) => typeof t === "object" && t !== null && typeof (t as { name?: unknown }).name === "string");
+}
+
+function isSectionArray(v: unknown): v is readonly PromptSection[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (s) =>
+        typeof s === "object" &&
+        s !== null &&
+        typeof (s as { name?: unknown }).name === "string" &&
+        typeof (s as { order?: unknown }).order === "number" &&
+        typeof (s as { render?: unknown }).render === "function",
+    )
+  );
+}
+
+/**
+ * 在一个 effect 里把一组注册（工具、段、变量）**原子地**装上：中途任一失败，已装的逆序全撤再抛。
+ * `defineToolPack` / `definePromptPack` / `ECHO_AGENT` 共用——回滚逻辑只写一份。
+ */
+function registerAll(registrations: ReadonlyArray<() => () => unknown>): { value: number; dispose: () => void } {
+  const offs: (() => unknown)[] = [];
+  const undoAll = (): void => {
+    // 逆序撤销：与注册顺序对称，撞名 replace 的语义才不会错位
+    for (let i = offs.length - 1; i >= 0; i--) offs[i]!();
+  };
+  try {
+    for (const register of registrations) offs.push(register());
+  } catch (e) {
+    undoAll(); // **全有或全无**：这一步失败，registry 必须回到调用前的样子
+    throw e;
+  }
+  return { value: offs.length, dispose: undoAll };
 }
 
 /**
@@ -61,32 +99,61 @@ export function defineToolPack(name: string): ExtensionDefinition<BuiltinToolsCo
     name,
     hostAbiVersion: 1,
     // 与第三方扩展**同一个** Service、同一个 `register()`——这就是「机制只有一份」的落点
-    inject: { tools: { service: AgentTools, required: true } },
+    inject: {
+      tools: { service: AgentTools, required: true },
+      prompt: { service: AgentPrompt, required: true },
+    },
     config: (input: unknown): BuiltinToolsConfig => {
       const tools = (input as { tools?: unknown } | undefined)?.tools;
-      if (!isToolArray(tools)) throw new Error(`${name} 的 config 必须是 { tools: AgentTool[] }`);
-      return { tools };
+      const sections = (input as { sections?: unknown } | undefined)?.sections;
+      if (!isToolArray(tools)) throw new Error(`${name} 的 config 必须是 { tools: AgentTool[], sections?: PromptSection[] }`);
+      if (sections !== undefined && !isSectionArray(sections)) {
+        throw new Error(`${name} 的 config.sections 必须是 PromptSection[]（{ name, order, render }）`);
+      }
+      return sections === undefined ? { tools } : { tools, sections };
     },
     apply(ctx, config) {
-      if (config.tools.length === 0) return; // 空组不占 Fiber 的 effect 位
-      const registry = ctx.get(AgentTools);
+      const sections = config.sections ?? [];
+      if (config.tools.length === 0 && sections.length === 0) return; // 空组不占 Fiber 的 effect 位
+      const tools = ctx.get(AgentTools);
+      const prompt = ctx.get(AgentPrompt);
       void ctx.effect({
         // `turn`：工具面每轮都可能变，这是最弱的安全点——声明得比实际需要强会挡住热重载
         boundary: "turn",
-        start: () => {
-          const offs: (() => unknown)[] = [];
-          const undoAll = (): void => {
-            // 逆序撤销：与注册顺序对称，撞名 replace 的语义才不会错位
-            for (let i = offs.length - 1; i >= 0; i--) offs[i]!();
-          };
-          try {
-            for (const t of config.tools) offs.push(registry.register(t));
-          } catch (e) {
-            undoAll(); // **全有或全无**：这一步失败，registry 必须回到调用前的样子
-            throw e;
-          }
-          return { value: config.tools.length, dispose: undoAll };
-        },
+        start: () =>
+          registerAll([
+            ...config.tools.map((t) => () => tools.register(t)),
+            ...sections.map((s) => () => prompt.section(s)),
+          ]),
+      });
+    },
+  });
+}
+
+/** `definePromptPack` 的 config：只出段，不带工具（身份、纪律、交互面、项目指令）。 */
+export type PromptPackConfig = { readonly sections: readonly PromptSection[] };
+
+/**
+ * 造一条「只注册这几段 prompt」的 Extension。给产品层的身份 / 纪律段、壳的交互面段、
+ * 项目指令段用——它们没有工具，走 `defineToolPack` 会让「工具包」这个名字撒谎。
+ * 注册与回滚规则与 `defineToolPack` 同一份（`registerAll`）。
+ */
+export function definePromptPack(name: string): ExtensionDefinition<PromptPackConfig> {
+  return defineExtension<PromptPackConfig>({
+    name,
+    hostAbiVersion: 1,
+    inject: { prompt: { service: AgentPrompt, required: true } },
+    config: (input: unknown): PromptPackConfig => {
+      const sections = (input as { sections?: unknown } | undefined)?.sections;
+      if (!isSectionArray(sections)) throw new Error(`${name} 的 config 必须是 { sections: PromptSection[] }（{ name, order, render }）`);
+      return { sections };
+    },
+    apply(ctx, config) {
+      if (config.sections.length === 0) return;
+      const prompt = ctx.get(AgentPrompt);
+      void ctx.effect({
+        boundary: "turn",
+        start: () => registerAll(config.sections.map((s) => () => prompt.section(s))),
       });
     },
   });
@@ -104,11 +171,12 @@ export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
  * **`undefined` = 这个能力压根不在**（没给 memory / 没给 schedule），与「在但零工具」
  * （空数组）是两件事——见 `builtinEntries()`。
  */
+export type BuiltinToolGroup = BuiltinToolsConfig;
 export type BuiltinToolGroups = {
-  readonly tasks: readonly AgentTool[] | undefined;
-  readonly skills: readonly AgentTool[] | undefined;
-  readonly memory: readonly AgentTool[] | undefined;
-  readonly scheduler: readonly AgentTool[] | undefined;
+  readonly tasks: BuiltinToolGroup | undefined;
+  readonly skills: BuiltinToolGroup | undefined;
+  readonly memory: BuiltinToolGroup | undefined;
+  readonly scheduler: BuiltinToolGroup | undefined;
 };
 
 /**
@@ -134,7 +202,7 @@ export function builtinEntries(
     runtime === undefined
       ? []
       : [{ entryId: "echo:agent", definition: ECHO_AGENT as ExtensionDefinition<unknown>, config: { runtime } }];
-  const table: readonly [string, ExtensionDefinition<unknown>, readonly AgentTool[] | undefined][] = [
+  const table: readonly [string, ExtensionDefinition<unknown>, BuiltinToolGroup | undefined][] = [
     ["echo:tasks", ECHO_TASKS as ExtensionDefinition<unknown>, groups.tasks],
     ["echo:skills", ECHO_SKILLS as ExtensionDefinition<unknown>, groups.skills],
     ["echo:memory", ECHO_MEMORY as ExtensionDefinition<unknown>, groups.memory],
@@ -145,8 +213,8 @@ export function builtinEntries(
     // 拓扑排序会保证顺序，但把它写在前面读起来也更像那么回事。
     ...agentEntry,
     ...table
-      .filter((row): row is [string, ExtensionDefinition<unknown>, readonly AgentTool[]] => row[2] !== undefined)
-      .map(([entryId, definition, tools]) => ({ entryId, definition, config: { tools } })),
+      .filter((row): row is [string, ExtensionDefinition<unknown>, BuiltinToolGroup] => row[2] !== undefined)
+      .map(([entryId, definition, group]) => ({ entryId, definition, config: group })),
   ];
 }
 
@@ -177,6 +245,9 @@ export type BuiltinMountable = RuntimeSource & {
    * 它是 `Agent` 恒有的字段，所以放进这个结构不构成新要求。
    */
   readonly background: AgentBackground;
+  /** prompt 段与变量的两张表。与 `background` 同理：Agent 恒有，默认 Host 要把 `AgentPrompt` 提供出去。 */
+  readonly promptSections: Map<string, PromptSection>;
+  readonly promptVariables: Map<string, PromptVariable>;
 };
 
 /**
@@ -198,6 +269,7 @@ export async function mountBuiltinTools(
       skills: { pool: agent.skills, active: agent.activeSkills },
       // **能力端口也要给**：少了它，`inject` 后台队列的扩展在这条低层路径上装不上
       background: agent.background,
+      prompt: { sections: agent.promptSections, variables: agent.promptVariables },
     }),
   }),
   /** 调用方已经算好的那份。**传进来就用它**，不再自己算一份——两份就会分家。 */
@@ -224,6 +296,7 @@ export const ECHO_AGENT: ExtensionDefinition<{ runtime: AgentRuntime }> = define
   name: "echo:agent",
   hostAbiVersion: 1,
   provide: [AgentRuntimeService as ServiceKey<unknown>],
+  inject: { prompt: { service: AgentPrompt, required: true } },
   // `agent`：换代要在 run 之间——不能在轮中途把壳脚下的 Runtime 抽走
   reload: "agent",
   config: (input: unknown): { runtime: AgentRuntime } => {
@@ -233,6 +306,17 @@ export const ECHO_AGENT: ExtensionDefinition<{ runtime: AgentRuntime }> = define
   },
   apply(ctx, config) {
     ctx.provide(AgentRuntimeService, config.runtime);
+    // core 自己拥有的 prompt 事实：环境段 + 内建变量（workspace / model / provider）。
+    // 走同一个 registry——core 对自己没有特权通道。
+    const prompt = ctx.get(AgentPrompt);
+    void ctx.effect({
+      boundary: "turn",
+      start: () =>
+        registerAll([
+          ...builtinVariables().map(([name, provider]) => () => prompt.variable(name, provider)),
+          () => prompt.section(environmentSection()),
+        ]),
+    });
   },
 });
 

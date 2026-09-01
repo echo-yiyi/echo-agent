@@ -34,7 +34,7 @@ import type { MemoryDir } from "../src/memory/types.ts";
 import type { ToolExecutionContext } from "../src/tools/types.ts";
 
 function ctx(): ToolExecutionContext {
-  return { toolCallId: "t", cwd: "/", workspaceRoot: "/", sessionId: null, iteration: 0 };
+  return { toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
 }
 
 async function call(h: AgentMemories, params: Record<string, unknown>) {
@@ -343,10 +343,10 @@ describe("Agent 接线", () => {
       seen.push(c);
       return inner(m, c, o);
     };
-    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy, systemPrompt: "base" });
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy });
     await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
     await agent.prompt("hi");
-    expect(seen[0]?.systemPrompt).toContain("base");
+    expect(seen[0]?.systemPrompt).toContain("# Environment"); // echo:agent 的段在，说明 system 装配跑过
     expect(seen[0]?.systemPrompt).not.toContain("# 记忆");
     expect(agent.state.tools.map((t) => t.name)).not.toContain(MEMORY_TOOL_NAME);
   });
@@ -367,7 +367,6 @@ describe("Agent 接线", () => {
     const agent = new Agent({
       model: FAKE_MODEL,
       streamFunction: spy,
-      systemPrompt: "base",
       memory: createAgentMemories(dir),
     });
     await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
@@ -381,7 +380,10 @@ describe("Agent 接线", () => {
 
     await agent.prompt("下一个任务");
     expect(seen[2]?.systemPrompt).toContain("新偏好"); // 任务边界刷新
-    expect(seen[2]?.systemPrompt).toContain("base"); // 装备 systemPrompt 在前,记忆段在后
+    // 环境段（order 300）在前，记忆段（order 900）沉底
+    const sys = seen[2]?.systemPrompt ?? "";
+    expect(sys.indexOf("# Environment")).toBeGreaterThanOrEqual(0);
+    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("新偏好"));
   });
 
   test("dispose 链:close 传到 MemoryDir", async () => {

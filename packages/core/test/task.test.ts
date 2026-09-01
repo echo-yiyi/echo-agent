@@ -326,8 +326,7 @@ test("renderList：状态符号 + 在等谁 + 可做标记", () => {
 function ctx(): Parameters<ReturnType<typeof makeTaskTools>[number]["execute"]>[1] {
   return {
     toolCallId: "t1",
-    cwd: "/",
-    workspaceRoot: "/",
+    workspace: "/",
     sessionId: null,
     iteration: 0,
   };

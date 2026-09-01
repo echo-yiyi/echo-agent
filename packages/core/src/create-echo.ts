@@ -225,8 +225,10 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // **把 `agent.tools` 摘出来**：它不再走构造函数直注册，改成下面那条 inline Extension。
   const inlineTools = opts.agent?.tools ?? [];
   const agentOpts = opts.agent === undefined ? undefined : { ...opts.agent, tools: undefined };
+  // workspace（session 级事实）的缺省由**这一层**定：进程目录。core 的 Agent 自己不读 process.cwd()。
+  const workspace = opts.workspace ?? opts.cwd ?? process.cwd();
   const agent = await createAgent(
-    agentOpts === undefined ? opts : ({ ...opts, agent: agentOpts } as CreateAgentOptions),
+    agentOpts === undefined ? { ...opts, workspace } : ({ ...opts, workspace, agent: agentOpts } as CreateAgentOptions),
   );
 
   // **Host 在 try 外面造**：catch 要按 boot → builtin 逆序把已 mount 的代卸掉，
@@ -239,6 +241,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       // **能力端口**（2026-08-31）：扩展要挂后台任务得拿得到这个。不给的话扩展面就只有
       // 「往里注册」没有「用起来」，产品层只能绕到 `createEcho()` 外面自己造 Agent。
       background: agent.background,
+      // prompt 段与变量：内建 `echo:*` 与产品 extension 都从这条 Service 进（2026-09-01）
+      prompt: { sections: agent.promptSections, variables: agent.promptVariables },
     }),
   });
 

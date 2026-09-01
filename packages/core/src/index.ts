@@ -116,7 +116,10 @@ export type {
 export type { StorageDir } from "./storage/types.ts";
 export type { Lease, StateLock } from "./storage/lock.ts";
 export type { AgentMcpPort, McpConnectOutcome, McpServerSnapshot } from "./mcp/port.ts";
-export type { PromptSection, PromptSource, PromptTier } from "./prompt/types.ts";
+export { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
+export { PromptVariableError } from "./prompt/assemble.ts";
+export { sectionFromMarkdown } from "./prompt/import.ts";
+export { fenceSafe, truncateMarked } from "./prompt/sanitize.ts";
 
 // 各能力的容器类型——它们出现在 `AgentOptions` / `AgentState` 的签名里
 export type { AgentMemories } from "./memory/harness.ts";

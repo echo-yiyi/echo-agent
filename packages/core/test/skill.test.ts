@@ -47,7 +47,7 @@ function fixture(tools: string[] = []): { skills: SkillMap; active: ActiveSkillM
   return { skills: new Map(), active: new Map(), hasTool: (n) => tools.includes(n) };
 }
 
-const ctx = () => ({ toolCallId: "t1", cwd: "/", workspaceRoot: "/", sessionId: null, iteration: 0 });
+const ctx = () => ({ toolCallId: "t1", workspace: "/", sessionId: null, iteration: 0 });
 
 /* ══════════ 池与激活是两件事 ══════════ */
 

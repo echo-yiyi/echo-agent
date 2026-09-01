@@ -132,8 +132,8 @@ export interface AgentLoopConfig {
   retryPolicy: RetryPolicy;
   compaction: CompactionConfig;
 
-  workspaceRoot: string;
-  cwd: string;
+  /** 透传给工具的 `ToolExecutionContext.workspace`。 */
+  workspace: string;
 }
 
 export type TurnResult = {
