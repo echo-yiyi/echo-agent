@@ -66,7 +66,7 @@ test("第一眼：欢迎头在上，「选择 provider」编号列表在说明�
   expect(s.indexOf("echo-agent")).toBeLessThan(s.indexOf("选择 provider"));
   expect(s.indexOf("选择 provider")).toBeLessThan(s.indexOf("1. Kimi (Moonshot)"));
   expect(s).toContain("2. DeepSeek");
-  expect(s).toContain("kimi-k3 / kimi-k2-turbo-preview"); // 描述**派生自目录**，不是手写的
+  expect(s).toContain("kimi-k3 / kimi-k2.7-code …"); // 描述**派生自目录**，不是手写的
   expect(s).toContain("→ 1. Kimi (Moonshot)"); // 光标在第一家
   ui.feed(CTRL_D);
   expect(await done).toEqual({ kind: "cancelled" });
@@ -119,7 +119,7 @@ test("全流程：选家 → 贴 key（验过按 provider.id 落盘）→ 选模
   expect(s).toContain("选择模型");
   expect(s.indexOf("选择模型")).toBeLessThan(s.indexOf("1. Kimi K3")); // 列表在说明下面
   expect(s).toContain("→ 1. Kimi K3 ✓"); // 缺省项带 ✓ 且预选中
-  expect(s).toContain("kimi-k3 · 128k 上下文 · 推理"); // 描述来自目录
+  expect(s).toContain("kimi-k3 · 1024k 上下文 · 推理"); // 描述来自目录
   expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ kimi: { apiKey: "sk-GOOD" } });
 
   ui.feed(ENTER);
@@ -134,7 +134,7 @@ test("模型也能数字直选：按 2 → 用第二个模型", async () => {
   ui.feed(ENTER);
   await flush();
   ui.feed("2");
-  expect(await done).toMatchObject({ kind: "configured", modelId: "kimi-k2-turbo-preview" });
+  expect(await done).toMatchObject({ kind: "configured", modelId: "kimi-k2.7-code" });
 });
 
 test("验不过：停在收 key 阶段、一个字节不落盘、说清原因", async () => {

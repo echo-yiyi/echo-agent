@@ -246,7 +246,7 @@ test("Models 整链:setProvider → getModel → stream → 定稿;未配 key �
   models.setProvider(deepseekProvider({ fetchFn: fn }));
   const model = models.getModel("kimi", "kimi-k3")!;
   expect(model.capabilities?.reasoning).toBe(true);
-  expect(models.getModel("deepseek", "deepseek-reasoner")).toBeDefined();
+  expect(models.getModel("deepseek", "deepseek-v4-pro")).toBeDefined();
 
   // 没配 key:错误终结,不抛
   const noKey = await models.stream(model, CTX).result();
@@ -267,9 +267,9 @@ test("五家内置 provider 的**目录**：id / 缺省模型 / 方言 / 窗口�
   // 那是**声称验过而没验**（review 二轮 P2）。凭据归下面那条真调 resolve 的测试。
   const cases = [
     { p: kimiProvider(), id: "kimi", model: "kimi-k3", host: "api.moonshot.cn" },
-    { p: deepseekProvider(), id: "deepseek", model: "deepseek-chat", host: "api.deepseek.com" },
-    { p: openaiProvider(), id: "openai", model: "gpt-4.1", host: "api.openai.com" },
-    { p: zaiCodingProvider(), id: "zai-coding-cn", model: "glm-4.7", host: "open.bigmodel.cn" },
+    { p: deepseekProvider(), id: "deepseek", model: "deepseek-v4-flash", host: "api.deepseek.com" },
+    { p: openaiProvider(), id: "openai", model: "gpt-5.6-sol", host: "api.openai.com" },
+    { p: zaiCodingProvider(), id: "zai-coding-cn", model: "glm-5.3", host: "open.bigmodel.cn" },
     // MiniMax 2026-08-30 换成 M3 并回到 CLI 清单：M3 可以关 thinking（M2.x 关不掉，已从目录摘掉）
     { p: minimaxProvider(), id: "minimax", model: "MiniMax-M3", host: "api.minimax.io" },
   ];
@@ -431,7 +431,7 @@ test("兜底不许盖掉真思考：有 thinking 块时带的是原文，不是�
 test("DeepSeek 这家开着这个开关（pi 的探测规则就是 isDeepSeek，我们不按 URL 猜）", async () => {
   const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
   const provider = deepseekProvider({ fetchFn: fn });
-  const reasoner = provider.getModels().find((m) => m.id === "deepseek-reasoner")!;
+  const reasoner = provider.getModels().find((m) => m.id === "deepseek-v4-pro")!;
   const legacy: Context = {
     ...CTX,
     messages: [...CTX.messages, { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "t", input: {} }] }],
@@ -488,14 +488,37 @@ test("新三家的凭据变量与 ECHO_LLM_API_KEY 的优先级：**真调 resol
   // 收尾由 afterEach 按 ENV_KEYS 全量还原——这里的手动清理只是为了下一个 case 干净
 });
 
-test("OpenAI 的 GPT-4.1 / 4o 四个模型都声明 vision（消费者据此判断能不能发图）", () => {
-  // review 二轮 P2：这四个官方支持图片输入，目录里漏了 `vision: true`，
+test("OpenAI 目录五条都声明 vision（消费者据此判断能不能发图）", () => {
+  // review 二轮 P2：官方都支持图片输入，目录里漏了 `vision: true` 的话，
   // 读 `ModelCapabilities` 的消费者（投影层按它裁剪或拒绝 image 块）会误判成不支持。
   const models = openaiProvider().getModels();
-  for (const id of ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"]) {
+  for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-4.1", "gpt-4.1-mini"]) {
     const m = models.find((x) => x.id === id);
     expect([id, m?.capabilities?.vision]).toEqual([id, true]);
   }
+});
+
+test("GPT-5.6 在 chat/completions 上：请求体带 reasoning_effort:none、不带 max_tokens、不声称 reasoning", async () => {
+  // 官方迁移指南：GPT-5.4 起 Chat Completions 带工具调用时 `reasoning_effort` 只许 `none`；
+  // `max_tokens` 已 deprecated（改 `max_completion_tokens`）。判据落在**真实发出去的请求体**上。
+  const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
+  const p = openaiProvider({ fetchFn: fn });
+  for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+    const model = p.getModels().find((m) => m.id === id)!;
+    expect([id, model.capabilities?.reasoning ?? false]).toEqual([id, false]); // chat/completions 不回传任何 reasoning 文本
+    expect([id, model.capabilities?.maxOutputTokens]).toEqual([id, undefined]);
+  }
+  await collect(p.stream(p.getModels()[0]!, { ...CTX, tools: [{ name: "t", description: "d", input_schema: { type: "object", properties: {} } }] }, { apiKey: "k" }));
+  const body = calls[0]!.body as Record<string, unknown>;
+  expect(body["model"]).toBe("gpt-5.6-sol");
+  expect(body["reasoning_effort"]).toBe("none");
+  expect(Object.hasOwn(body, "max_tokens")).toBe(false);
+  // 4.1 是原生非推理模型：不带 reasoning_effort，`max_tokens` 照发
+  const legacy = p.getModels().find((m) => m.id === "gpt-4.1")!;
+  await collect(p.stream(legacy, CTX, { apiKey: "k" }));
+  const body41 = calls[1]!.body as Record<string, unknown>;
+  expect(Object.hasOwn(body41, "reasoning_effort")).toBe(false);
+  expect(body41["max_tokens"]).toBe(32_768);
 });
 
 test("MiniMax 走 M3：请求体带 thinking:disabled，且**不带 max_tokens**（上限没确认就不发）", async () => {
@@ -563,7 +586,7 @@ test("跨模型的 redacted 块**直接丢弃**：正文本来就没有，签名
       {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "", redacted: true, signature: "reasoning_content", origin: { provider: "deepseek", api: "openai-completions", model: "deepseek-reasoner" } },
+          { type: "thinking", thinking: "", redacted: true, signature: "reasoning_content", origin: { provider: "deepseek", api: "openai-completions", model: "deepseek-v4-pro" } },
           { type: "text", text: "正文" },
         ],
       },
@@ -581,7 +604,7 @@ test("同一家但**换了模型**也算跨源：reasoner 的历史切到非 rea
   // 签名是按模型发的（review 点名的第二条反例）。
   const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
   const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
-  const target: Model = { provider: "deepseek", id: "deepseek-chat", api: "openai-completions" };
+  const target: Model = { provider: "deepseek", id: "deepseek-v4-flash", api: "openai-completions" };
 
   const ctx: Context = {
     ...CTX,
@@ -589,7 +612,7 @@ test("同一家但**换了模型**也算跨源：reasoner 的历史切到非 rea
       ...CTX.messages,
       {
         role: "assistant",
-        content: [{ type: "thinking", thinking: "reasoner 的思考", signature: "reasoning_content", origin: { provider: "deepseek", api: "openai-completions", model: "deepseek-reasoner" } }],
+        content: [{ type: "thinking", thinking: "reasoner 的思考", signature: "reasoning_content", origin: { provider: "deepseek", api: "openai-completions", model: "deepseek-v4-pro" } }],
       },
     ],
   };
