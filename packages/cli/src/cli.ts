@@ -41,6 +41,7 @@ import { run } from "./run.ts";
 import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
 import { isConfigured, type VerifyFn } from "./setup.ts";
 import { linesOf } from "./stdin.ts";
+import { ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
 
 export type CliOptions = {
   /** 状态根。不给则由 core 决定（`ECHO_HOME`，再退到 `$PWD/.echo`）。 */
@@ -65,7 +66,9 @@ const PROVIDERS: Record<CliOptions["provider"], () => Provider> = {
   minimax: () => minimaxProvider(),
 };
 
-export const USAGE = `用法：echo-agent [选项]
+/** `--help` 的正文。`name` 是可执行文件名：`echo-agent` 自己，或依赖本包的产品（`product.ts`）。 */
+export function usage(name: string): string {
+  return `用法：${name} [选项]
 
   stdin 是终端 → 起交互界面；是管道/重定向 → 一行输入跑一轮，
   正文进 stdout、工具旁白进 stderr，读完就干净收摊。Ctrl-C 也是干净收摊。
@@ -88,13 +91,16 @@ export const USAGE = `用法：echo-agent [选项]
 因为调用方需要非零退出码、也没人能回答问题；stdin 是终端时进**引导设置**：欢迎 → 选 provider →
 贴 key（回车验证并保存）→ 选模型 → 直接进对话。key 中途失效也在界面里重配，不用重启。
 两者都不会静默跑一个没配好的 agent。`;
+}
 
 /**
  * 解析 argv（**不含** node/bun 与脚本名两项）。
  *
  * 返回 `null` = 该打帮助并以 0 退出。其余任何不认识的输入都 `throw`。
+ *
+ * @param name 可执行文件名，只进「不认识的选项」那条错误里附带的用法文本。
  */
-export function parseArgs(argv: readonly string[]): CliOptions | null {
+export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.name): CliOptions | null {
   if (argv[0] === "-h" || argv[0] === "--help") return null;
 
   const opts: CliOptions = { provider: "kimi", withoutMemory: false, extensionDirs: [] };
@@ -136,7 +142,7 @@ export function parseArgs(argv: readonly string[]): CliOptions | null {
         opts.withoutMemory = true;
         break;
       default:
-        throw new Error(`不认识的选项 '${flag}'\n\n${USAGE}`);
+        throw new Error(`不认识的选项 '${flag}'\n\n${usage(name)}`);
     }
   }
   return opts;
@@ -162,7 +168,13 @@ function providerChoices(): readonly FirstRunChoice[] {
  *
  * `provider` 由调用方给：同一个实例既用来装配，也交给壳子在界面里配 key（要它的 `baseUrl` 去验）。
  */
-function echoOptions(opts: CliOptions, provider: Provider, credentials: CredentialStore): Parameters<typeof createEcho>[0] {
+function echoOptions(
+  product: Product,
+  form: PresetForm,
+  opts: CliOptions,
+  provider: Provider,
+  credentials: CredentialStore,
+): Parameters<typeof createEcho>[0] {
   return {
     provider,
     credentials,
@@ -173,105 +185,128 @@ function echoOptions(opts: CliOptions, provider: Provider, credentials: Credenti
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
     // 所以这里区分「空数组」与「不传」，不能无脑展开。
     ...(opts.extensionDirs.length > 0 ? { extensionDirs: opts.extensionDirs } : {}),
+    // **产品层的装配片段**（`product.ts`）：`agent`（系统 prompt、权限策略）与 `extensions`（产品自带的）。
+    // 能来自产品的只有这两个字段——`Product.preset` 的返回类型就这么窄——所以它盖不掉上面任何一项，
+    // 尤其盖不掉 `extensionDirs`：去哪发现扩展归 `--extensions`、归用户。
+    ...(product.preset?.(form) ?? {}),
   };
 }
 
+/** `main` 的签名：argv（不含 node/bun 与脚本名）、形态、注入点 → 退出码。 */
+export type Main = (argv: readonly string[], interactive?: boolean, deps?: MainDeps) => Promise<number>;
+
 /**
- * 进程入口的实质。**返回退出码，自己不调 `process.exit`**——那样测不了，
+ * 把启动逻辑绑上一个产品，得到它的 `main`。`echo-agent` 自己是 `mainFor(ECHO_AGENT)`；
+ * 依赖本包的产品（`echo-coding`）拿自己的 `Product` 调一次——**整条启动逻辑一行不复制**，
+ * 产品之间差的只有 `Product` 那三样（名字、版本、装配片段）。
+ *
+ * 得到的函数是进程入口的实质。**返回退出码，自己不调 `process.exit`**——那样测不了，
  * 也会把还没 flush 的输出砍掉。
  *
  * `SIGINT` / `SIGTERM` 都接到同一个 `AbortController` 上：对「怎么停」只有一种回答。
  * **不装第二次强杀**——收摊本来就该在有限时间内完成，装了强杀就等于给「收不干净」发了许可证。
  *
- * @param interactive 形态。缺省看 stdin 是不是终端；测试可以直接指定。
+ * 它的第二个参数 `interactive` 是形态。缺省看 stdin 是不是终端；测试可以直接指定。
  *   **形态判据只有这一个**——不再引入第二处「有没有人坐在终端前」的判断。
- * @param deps 注入点。生产一个都不给：真凭据文件、真终端、真 HTTP 验证。
+ * 第三个参数 `deps` 是注入点。生产一个都不给：真凭据文件、真终端、真 HTTP 验证。
  */
-export async function main(
-  argv: readonly string[],
-  interactive: boolean = process.stdin.isTTY === true,
-  deps: MainDeps = {},
-): Promise<number> {
-  let opts: CliOptions | null;
-  try {
-    opts = parseArgs(argv);
-  } catch (e) {
-    process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
-    return 2;
-  }
-  if (opts === null) {
-    process.stdout.write(`${USAGE}\n`);
-    return 0;
-  }
-
-  const controller = new AbortController();
-  const stop = (): void => controller.abort();
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-
-  try {
-    const credentials = deps.credentials ?? new FileCredentialStore();
-    let provider = PROVIDERS[opts.provider]();
-    let model = opts.model;
-
-    // **缺凭据时形态决定策略**（D3 + D4）：
-    //   · 管道 / CI：没人能回答问题，调用方要的是非零退出码 → **启动前**报错返回 1，连装配都不做；
-    //   · 终端：进**引导设置**（`first-run.ts`：欢迎 → 选 provider → 贴 key → 选模型），
-    //     它跑在装配前——选哪家、哪个模型本来就得在装配前定（模型解析在装配期，换模型是 P3）。
-    // 判据是 `isConfigured()`——与请求路径同一个 `Models.checkAuth()`，不匹配错误文案。
-    // 装配本身不看凭据（`create-agent.ts`）；key **中途**失效由主界面里的配置段兜（`app.ts`）。
-    if (!(await isConfigured(provider, credentials))) {
-      if (!interactive) {
-        process.stderr.write(
-          `provider '${provider.id}' 没有凭据：设它认的环境变量，或写 $ECHO_HOME/credentials.json（见 --help）。\n`,
-        );
-        return 1;
-      }
-      const outcome = await runFirstRunSetup({
-        choices: providerChoices(),
-        credentials,
-        preselect: opts.provider,
-        signal: controller.signal,
-        ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
-        ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
-      });
-      if (outcome.kind === "cancelled") {
-        process.stderr.write("没有配置凭据，没有启动。\n");
-        return 1;
-      }
-      provider = outcome.provider;
-      // 显式 `--model` 赢；没给的话用引导设置里选的那个
-      model = opts.model ?? outcome.modelId;
+export function mainFor(product: Product): Main {
+  return async (
+    argv: readonly string[],
+    interactive: boolean = process.stdin.isTTY === true,
+    deps: MainDeps = {},
+  ): Promise<number> => {
+    let opts: CliOptions | null;
+    try {
+      opts = parseArgs(argv, product.name);
+    } catch (e) {
+      process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
+      return 2;
+    }
+    if (opts === null) {
+      process.stdout.write(`${usage(product.name)}\n`);
+      return 0;
     }
 
-    const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
-    return interactive
-      ? await runInteractive(effective, provider, credentials, controller.signal, deps)
-      : await runPiped(effective, provider, credentials, controller.signal);
-  } catch (e) {
-    // 装配失败（锁被别的进程占着、状态根不可写、目录为空）一律**明说**并非零退出。
-    process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
-    return 1;
-  } finally {
-    process.off("SIGINT", stop);
-    process.off("SIGTERM", stop);
-  }
+    const controller = new AbortController();
+    const stop = (): void => controller.abort();
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+
+    try {
+      const credentials = deps.credentials ?? new FileCredentialStore();
+      let provider = PROVIDERS[opts.provider]();
+      let model = opts.model;
+
+      // **缺凭据时形态决定策略**（D3 + D4）：
+      //   · 管道 / CI：没人能回答问题，调用方要的是非零退出码 → **启动前**报错返回 1，连装配都不做；
+      //   · 终端：进**引导设置**（`first-run.ts`：欢迎 → 选 provider → 贴 key → 选模型），
+      //     它跑在装配前——选哪家、哪个模型本来就得在装配前定（模型解析在装配期，换模型是 P3）。
+      // 判据是 `isConfigured()`——与请求路径同一个 `Models.checkAuth()`，不匹配错误文案。
+      // 装配本身不看凭据（`create-agent.ts`）；key **中途**失效由主界面里的配置段兜（`app.ts`）。
+      if (!(await isConfigured(provider, credentials))) {
+        if (!interactive) {
+          process.stderr.write(
+            `provider '${provider.id}' 没有凭据：设它认的环境变量，或写 $ECHO_HOME/credentials.json（见 --help）。\n`,
+          );
+          return 1;
+        }
+        const outcome = await runFirstRunSetup({
+          product,
+          choices: providerChoices(),
+          credentials,
+          preselect: opts.provider,
+          signal: controller.signal,
+          ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
+          ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
+        });
+        if (outcome.kind === "cancelled") {
+          process.stderr.write("没有配置凭据，没有启动。\n");
+          return 1;
+        }
+        provider = outcome.provider;
+        // 显式 `--model` 赢；没给的话用引导设置里选的那个
+        model = opts.model ?? outcome.modelId;
+      }
+
+      const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
+      // 形态与工作目录到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
+      const form: PresetForm = { interactive, cwd: process.cwd() };
+      return interactive
+        ? await runInteractive(product, form, effective, provider, credentials, controller.signal, deps)
+        : await runPiped(product, form, effective, provider, credentials, controller.signal);
+    } catch (e) {
+      // 装配失败（锁被别的进程占着、状态根不可写、目录为空）一律**明说**并非零退出。
+      process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
+      return 1;
+    } finally {
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+    }
+  };
 }
+
+/** `echo-agent` 自己的入口：`bin/echo-agent.ts` 调的就是它。 */
+export const main: Main = mainFor(ECHO_AGENT);
 
 /** 管道形态：`run()` 自己会 `echo.stop()`（它的 `finally`），所以这里不重复收摊。 */
 async function runPiped(
+  product: Product,
+  form: PresetForm,
   opts: CliOptions,
   provider: Provider,
   credentials: CredentialStore,
   signal: AbortSignal,
 ): Promise<number> {
   // **唯一 composition root**（§14.2）：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
-  const echo = await createEcho(echoOptions(opts, provider, credentials));
+  const echo = await createEcho(echoOptions(product, form, opts, provider, credentials));
   return await run({ echo, input: linesOf(process.stdin, signal), signal });
 }
 
 /** 交互形态：壳作为 extension 进装配，进程这一层只剩三件事——装配、启动、等它退出。 */
 async function runInteractive(
+  product: Product,
+  form: PresetForm,
   opts: CliOptions,
   provider: Provider,
   credentials: CredentialStore,
@@ -279,6 +314,7 @@ async function runInteractive(
   deps: MainDeps,
 ): Promise<number> {
   const shell = tuiShell({
+    product,
     signal,
     ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
     // 缺 key 时壳子在界面里配的那一段要的东西。`alternatives` 只是提示「换一家怎么换」——
@@ -290,9 +326,12 @@ async function runInteractive(
       ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
     },
   });
+  const base = echoOptions(product, form, opts, provider, credentials);
   const echo = await createEcho({
-    ...echoOptions(opts, provider, credentials),
-    extensions: [{ entryId: "echo:tui", definition: shell.definition as never }],
+    ...base,
+    // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的
+    // `AgentRuntime` 由 builtin 那一代提供（`create-echo.ts`），与同代里谁先谁后无关。
+    extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: shell.definition as never }],
   });
   try {
     // **启停归这一层**，不归壳：协议里没有 `start`/`stop`，壳子想碰也碰不到。

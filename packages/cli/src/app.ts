@@ -7,7 +7,6 @@
 // 于是这个文件**只认协议、不认 Agent**：`start` / `stop` / `deliver` 都不在协议里，
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
-import { readFileSync } from "node:fs";
 import { errText, type AgentState, type CredentialStore, type Provider, type ThinkingLevel } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
 import { decodeKittyPrintable, Editor, isKeyRelease, ProcessTerminal, SelectList, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
@@ -17,12 +16,10 @@ import { installKeybindings } from "./keybindings.ts";
 import { CredentialSetup, isConfigured, type VerifyFn } from "./setup.ts";
 import { describeModel } from "./catalog.ts";
 import { bold, dim, EDITOR_THEME, SELECT_LIST_THEME } from "./theme.ts";
+import { ECHO_AGENT, type Product } from "./product.ts";
 
 const ESC = String.fromCharCode(27);
 
-/** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置（`files: ["src", …]`）。 */
-const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
-  .version;
 /** 键位照 pi（`keybindings.ts`）。Ctrl+C 不再是退出——提示行必须写 Ctrl+D，否则用户按 Ctrl+C 只会看到输入被清掉。 */
 const HINT = `${ESC}[2mEnter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出${ESC}[22m`;
 
@@ -32,6 +29,8 @@ export type TuiAppOptions = Readonly<{
    * 因为进程级启停归装配层；没有 `deliver`，因为那是投递侧不是 UI。
    */
   agent: AgentRuntime;
+  /** 欢迎头里的名字与版本（`product.ts`）。不给 = `echo-agent` 自己。 */
+  product?: Pick<Product, "name" | "version">;
   /** 进程信号。abort = 停止收新输入并中断在飞的那一轮。 */
   signal?: AbortSignal;
   /** 注入用：测试给假的 TUI 与终端。 */
@@ -53,18 +52,21 @@ export type TuiConfigureOptions = Readonly<{
   verify?: VerifyFn;
 }>;
 
-/** 前两行（是什么 / 在哪）。首次运行的引导设置（`first-run.ts`）与主界面共用，进来第一眼是同一个头。 */
-export function bannerLines(cwd: string): string[] {
-  return [`${bold("echo-agent")}  ${dim(`v${VERSION}`)}`, dim(cwd)];
+/**
+ * 前两行（是什么 / 在哪）。首次运行的引导设置（`first-run.ts`）与主界面共用，进来第一眼是同一个头。
+ * 「是什么」来自 `product`：`echo-agent` 自己，或依赖本包的产品（`echo-coding`）。
+ */
+export function bannerLines(product: Pick<Product, "name" | "version">, cwd: string): string[] {
+  return [`${bold(product.name)}  ${dim(`v${product.version}`)}`, dim(cwd)];
 }
 
 /**
  * 欢迎头（P1，`docs/review/tui-design.md` §三）：启动时一次，在文档流最上面，跟着内容滚走。
  * 四行：是什么 / 在哪 / 用什么模型 / 键怎么按。模型来自 `AgentState.model`，cwd 是壳自己拿的。
  */
-function welcomeLines(state: Readonly<AgentState>, cwd: string): string[] {
+function welcomeLines(product: Pick<Product, "name" | "version">, state: Readonly<AgentState>, cwd: string): string[] {
   return [
-    ...bannerLines(cwd),
+    ...bannerLines(product, cwd),
     `模型 ${state.model.id} · ${state.model.provider}`,
     dim("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史 · Ctrl+O 工具输出 · Ctrl+L 模型"),
     "",
@@ -112,7 +114,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   const ui: TUI = options.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
 
   const transcript = new Transcript();
-  const welcome = welcomeLines(agent.state, process.cwd());
+  const welcome = welcomeLines(options.product ?? ECHO_AGENT, agent.state, process.cwd());
   /**
    * 能不能收下一条输入，只由 `busy()` 决定——**「起来了没」也在里面**。
    *

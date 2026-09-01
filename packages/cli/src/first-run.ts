@@ -29,6 +29,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { bannerLines } from "./app.ts";
 import { describeModel, describeProvider } from "./catalog.ts";
+import { ECHO_AGENT, type Product } from "./product.ts";
 import { CredentialSetup, type VerifyFn } from "./setup.ts";
 import { bold, dim, SELECT_LIST_THEME } from "./theme.ts";
 
@@ -42,6 +43,8 @@ export type FirstRunOutcome =
   | Readonly<{ kind: "cancelled" }>;
 
 export type FirstRunOptions = Readonly<{
+  /** 欢迎头里的名字与版本。不给 = `echo-agent` 自己。 */
+  product?: Pick<Product, "name" | "version">;
   choices: readonly FirstRunChoice[];
   /** 验过之后写进这里。 */
   credentials: CredentialStore;
@@ -59,7 +62,7 @@ export async function runFirstRunSetup(opts: FirstRunOptions): Promise<FirstRunO
   const { choices, credentials, signal } = opts;
   if (choices.length === 0) throw new Error("引导设置至少要有一个可选 provider");
   const ui: TUI = opts.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
-  const banner = bannerLines(process.cwd());
+  const banner = bannerLines(opts.product ?? ECHO_AGENT, process.cwd());
 
   let stage: Stage = "provider";
   let chosen: FirstRunChoice = choices.find((c) => c.name === opts.preselect) ?? choices[0]!;

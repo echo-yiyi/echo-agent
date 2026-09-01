@@ -28,8 +28,10 @@ import {
   type ProviderEvent,
 } from "@echo-agent/core";
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
+import { defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
-import { main, parseArgs, USAGE } from "../src/cli.ts";
+import { main, mainFor, parseArgs, usage } from "../src/cli.ts";
+import type { PresetForm } from "../src/product.ts";
 import { isConfigured } from "../src/setup.ts";
 import { fakeTui } from "./fake-tui.ts";
 import { linesOf } from "../src/stdin.ts";
@@ -239,7 +241,7 @@ function spawnBin(args: string[], env: Record<string, string> = {}): { code: num
 test("bin:--help 打用法并以 0 退出", () => {
   const r = spawnBin(["--help"]);
   expect(r.code).toBe(0);
-  expect(r.out).toContain(USAGE.split("\n")[0]!);
+  expect(r.out).toContain(usage("echo-agent").split("\n")[0]!);
 });
 
 test("bin:参数错以 2 退出,并把错因说出来", () => {
@@ -435,6 +437,91 @@ test("main:交互 + 缺凭据，引导设置里 Ctrl+D → 不启动，退出码
     expect(await running).toBe(1);
     expect(existsSync(join(dir, "credentials.json")), "用户退出了却写了盘").toBe(false);
     expect(existsSync(join(dir, "state")), "没配就退出，状态根不该被碰").toBe(false);
+  } finally {
+    restore();
+  }
+});
+
+/* ══════════════ 产品（`product.ts`）：`mainFor()` 把同一条启动逻辑绑上一个 Product ══════════════ */
+//
+// `echo-coding` 依赖本包、拿自己的 Product 调 `mainFor()`。这里守的是本包这一侧的承诺：
+//   · 名字进用法文本（`--help` 与「不认识的选项」附带的那份）与欢迎头，版本进欢迎头；
+//   · preset 在**形态定了之后**被调一次，拿到的是 `{ interactive, cwd }`；
+//   · preset 交出的 Extension **真进了装配**——装得上就 apply 过，装不上整个启动就失败。
+// 产品自己那份（coding 的两条 Extension、权限由谁答）判据在 `packages/coding/test/cli.test.ts`。
+
+test("mainFor：用法文本用产品的名字", () => {
+  expect(usage("echo-试产品").split("\n")[0]).toBe("用法：echo-试产品 [选项]");
+  expect(() => parseArgs(["--nope"], "echo-试产品")).toThrow("用法：echo-试产品");
+});
+
+test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 mount；名字与版本进欢迎头", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" }); // 有凭据 → 不进引导设置，直接装配
+    const forms: PresetForm[] = [];
+    let applied = 0;
+    const probe = defineExtension({
+      name: "test:probe",
+      hostAbiVersion: 1,
+      apply() {
+        applied++;
+      },
+    });
+    const productMain = mainFor({
+      name: "echo-试产品",
+      version: "9.9.9",
+      preset: (form) => {
+        forms.push(form);
+        return { extensions: [{ entryId: "test:probe", definition: probe as never }] };
+      },
+    });
+    const running = productMain(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+      verify: async () => ({ ok: true }),
+    });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
+    expect(ui.screen()).toContain("echo-试产品");
+    expect(ui.screen()).toContain("v9.9.9");
+    // 形态与工作目录到了 preset 手里，而且只调一次
+    expect(forms).toEqual([{ interactive: true, cwd: process.cwd() }]);
+    expect(applied, "preset 交出的 Extension 没被 mount").toBe(1);
+
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("mainFor：preset 的 Extension 装不上 → 整个启动失败、退出码 1（fail-loud，不是装了一半）", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    const broken = defineExtension({
+      name: "test:broken",
+      hostAbiVersion: 1,
+      apply() {
+        throw new Error("preset 装配探针");
+      },
+    });
+    const productMain = mainFor({
+      name: "echo-试产品",
+      version: "9.9.9",
+      preset: () => ({ extensions: [{ entryId: "test:broken", definition: broken as never }] }),
+    });
+    const code = await productMain(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+      verify: async () => ({ ok: true }),
+    });
+    expect(code).toBe(1);
+    expect(ui.screen(), "装配失败了却起了界面").not.toContain("模型 kimi-k3");
   } finally {
     restore();
   }

@@ -1,0 +1,31 @@
+{
+  "name": "echo-coding",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Echo 的 coding agent 产品：在 echo-agent 之上装 echo:workspace / echo:shell 两条 Extension（文件读写、搜索、shell）。可执行文件 echo-coding 复用 echo-agent 的启动逻辑，装配归 createEcho()。",
+  "bin": {
+    "echo-coding": "./bin/echo-coding.ts"
+  },
+  "dependencies": {
+    "@echo-agent/core": "workspace:*",
+    "echo-agent": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test"
+  },
+  "files": [
+    "src",
+    "bin",
+    "LICENSE"
+  ]
+}

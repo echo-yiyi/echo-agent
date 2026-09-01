@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-一个自主 agent 的运行时与官方 CLI：既可以使用装配好的完整 runtime，也可以直接基于底层 engine 构建；同一个 agent 既能交互运行，也能接入 Unix 管道。
+一个自主 agent 的运行时，以及基于它的两个产品：通用 agent `echo-agent` 与 coding agent `echo-coding`。既可以使用装配好的完整 runtime，也可以直接基于底层 engine 构建；同一个 agent 既能交互运行，也能接入 Unix 管道。
 
 > **状态：尚未发布。** workspace 中的 packages 目前均为 private。现阶段请从源码安装；首个 `0.x` 版本发布前，公共 API 仍可能变化。
 
@@ -23,6 +23,24 @@ printf 'Introduce yourself in one sentence.\n' |
 ```
 
 持久化状态默认写入 `$ECHO_HOME/agents/<id>`；未设置 `ECHO_HOME` 时写入 `$PWD/.echo/agents/<id>`。用 `--state-dir <path>` 可以覆盖完整的 state 目录。
+
+## 两个产品
+
+本仓库在同一个 runtime 上提供两个命令。`echo-agent` 是通用 agent，不认识任何具体产品；`echo-coding` 依赖 `echo-agent`，在它之上加了文件、搜索与 shell 工具。
+
+| | `echo-agent` | `echo-coding` |
+|---|---|---|
+| 能力 | 记忆、任务、schedule、skill（core 内建） | 上述全部，加文件读写、搜索、shell |
+| 工具 | core 的 `echo:*` builtin | builtin 之外再加 `echo:workspace` 与 `echo:shell` |
+| 命令 | `echo-agent` | `echo-coding` |
+
+文件工具和 shell 工具只属于 `echo-coding`。`echo-coding` 不改 `echo-agent` 一行代码：它把自己的 preset（系统 prompt、权限策略、那两条 extension）交给 `echo-agent` 的启动逻辑——第三方基于这个 runtime 做产品也是同一条路。
+
+```bash
+MOONSHOT_API_KEY=sk-... bun packages/coding/bin/echo-coding.ts
+```
+
+两个命令接受同一套选项（`--help`）。在 `echo-coding` 里，`bash`、`write_file`、`edit_file` 会在交互界面里请求确认；stdin 被重定向时没有人能回答，这些调用会被拒绝。
 
 ## 使用 CLI
 
@@ -76,8 +94,8 @@ try {
 | Package | 职责 |
 |---|---|
 | `@echo-agent/core` | Runtime、engine、provider adapters、持久化、记忆、任务与 extension API |
-| `echo-agent` | 官方 CLI，支持交互与管道两种形态 |
-| `@echo-agent/coding-agent` | 带 workspace 和 shell extensions 的 coding preset |
+| `echo-agent` | 通用 agent：官方 CLI，支持交互与管道两种形态；不认识任何具体产品 |
+| `echo-coding` | coding agent：依赖 `echo-agent`，加 `echo:workspace` 与 `echo:shell` 两条 extension 和 `echo-coding` 命令 |
 
 可运行的消费者在 [`examples/`](examples/) 中：真实 provider 的 hello world、无需凭据的 scripted agent，以及 extension 自动发现示例。分发测试会打包各 workspace，在干净项目中安装 tarball，再用 Bun 和 Node 运行这些公共入口。
 
@@ -87,7 +105,7 @@ try {
 |---|---|
 | [`packages/core/`](packages/core/) | `@echo-agent/core` runtime 与 SDK |
 | [`packages/cli/`](packages/cli/) | `echo-agent` CLI 与 TUI shell |
-| [`packages/coding-agent/`](packages/coding-agent/) | Coding-agent preset |
+| [`packages/coding/`](packages/coding/) | `echo-coding` CLI：coding preset、它的两条 extension 与命令 |
 | [`examples/`](examples/) | 可执行的 package consumers |
 | [`test/`](test/) | 仓库级分发门与文档检查 |
 

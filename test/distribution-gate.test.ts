@@ -87,6 +87,35 @@ function copyTracked(pkgRel: string, dest: string): number {
 }
 
 /**
+ * pack `echo-agent`（`packages/cli`）自己：拷 tracked 文件、把它对 core 的 workspace 链接换成
+ * core 的真 tarball、`bun pm pack`。返回 tarball 的绝对路径。
+ *
+ * 两处要它：`echo-agent` 自己的分发门，以及**依赖它的产品**（`echo-coding`）——后者装到别处时，
+ * `echo-agent: workspace:*` 同样解析不了，得指向一个真 tarball。
+ */
+function packCli(work: string, coreTgz: string): string {
+  const src = join(work, "tui-src");
+  expect(copyTracked("packages/cli", src)).toBeGreaterThan(5);
+  const srcPkgPath = join(src, "package.json");
+  const srcPkg = JSON.parse(readFileSync(srcPkgPath, "utf8")) as {
+    bin: Record<string, string>;
+    dependencies: Record<string, string>;
+  };
+  // bin 字段是分发门的前提：它没了，`.bin` 那条断言的失败原因会指向别处
+  expect(Object.keys(srcPkg.bin)).toEqual(["echo-agent"]);
+  srcPkg.dependencies["@echo-agent/core"] = `file:${coreTgz}`;
+  writeFileSync(srcPkgPath, JSON.stringify(srcPkg, null, 2));
+
+  const out = join(work, "tui-pack");
+  mkdirSync(out, { recursive: true });
+  const packed = sh(["bun", "pm", "pack", "--destination", out], src);
+  expect([packed.ok, packed.out.slice(-400)]).toEqual([true, packed.out.slice(-400)]);
+  const tgz = readdirSync(out).find((f) => f.endsWith(".tgz"));
+  expect([out, tgz !== undefined]).toEqual([out, true]);
+  return join(out, tgz!);
+}
+
+/**
  * **§13.11 点名的消费者，逐个验一遍**（`docs/ISSUES.md` OSS-4）。
  *
  * 它们平时靠 workspace 软链吃到 `@echo-agent/core` 的**源码**，于是「只用公开面」「产物够它用」
@@ -114,6 +143,9 @@ function isolatedConsumer(pkgRel: string, minFiles: number, extraDeps: readonly 
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { dependencies: Record<string, string> };
     expect([pkgRel, Object.keys(pkg.dependencies).sort()]).toEqual([pkgRel, ["@echo-agent/core", ...extraDeps].sort()]);
     pkg.dependencies["@echo-agent/core"] = `file:${tarball}`;
+    // 依赖 `echo-agent` 的产品（`echo-coding`）：那条 workspace 链接同样换成真 tarball——
+    // 它对 core 的依赖已经在 `packCli()` 里指向了同一个 core tarball。
+    if (pkg.dependencies["echo-agent"] === "workspace:*") pkg.dependencies["echo-agent"] = `file:${packCli(work, tarball)}`;
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
 
     const install = sh(["bun", "install"], dir);
@@ -328,7 +360,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
     },
     180_000,
   );
-  // 两个消费者（§13.11 / `docs/ISSUES.md` OSS-4）。判据同形，理由见下面 coding-agent 那条。
+  // 两个消费者（§13.11 / `docs/ISSUES.md` OSS-4）。判据同形，理由见下面 coding 那条。
   // examples 是第三个，判据在 `test/examples.test.ts`——它们不是 workspace 成员，走的路不同。
   //
   // **`旧 runner 包` 2026-08-31 删包**（拍板方案 ③：两个 CLI 并成一个，`echo-agent` 归 `echo-agent`）。
@@ -360,29 +392,11 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
     () => {
       const { work, tarball: coreTgz, cleanup } = packCore();
       try {
-        // ① 拷一份 TUI，把它对 core 的 workspace 链接换成 core 的真 tarball，
-        //    否则 pack 出来的 tui 装到别处会解析不了 `workspace:*`。
-        const src = join(work, "tui-src");
-        expect(copyTracked("packages/cli", src)).toBeGreaterThan(5);
-        const srcPkgPath = join(src, "package.json");
-        const srcPkg = JSON.parse(readFileSync(srcPkgPath, "utf8")) as {
-          bin: Record<string, string>;
-          dependencies: Record<string, string>;
-        };
-        // bin 字段是这道门的前提：它没了，下面 `.bin` 那条断言的失败原因会指向别处
-        expect(Object.keys(srcPkg.bin)).toEqual(["echo-agent"]);
-        srcPkg.dependencies["@echo-agent/core"] = `file:${coreTgz}`;
-        writeFileSync(srcPkgPath, JSON.stringify(srcPkg, null, 2));
-
-        // ② pack TUI 自己
-        const out = join(work, "tui-pack");
-        mkdirSync(out, { recursive: true });
-        const packed = sh(["bun", "pm", "pack", "--destination", out], src);
-        expect([packed.ok, packed.out.slice(-400)]).toEqual([true, packed.out.slice(-400)]);
-        const tuiTgz = readdirSync(out).find((f) => f.endsWith(".tgz"));
-        expect([out, tuiTgz !== undefined]).toEqual([out, true]);
+        // ①② 拷一份 TUI、把它对 core 的 workspace 链接换成 core 的真 tarball、pack 它自己（`packCli`）——
+        //    不换链接的话，pack 出来的 tui 装到别处会解析不了 `workspace:*`。
+        const tuiTgz = packCli(work, coreTgz);
         // tarball 里必须有 bin——`files` 字段写漏时这里当场红，而不是等用户装完发现没这个命令
-        const listed = sh(["tar", "-tzf", join(out, tuiTgz!)], out);
+        const listed = sh(["tar", "-tzf", tuiTgz], work);
         expect(listed.out).toContain("bin/echo-agent.ts");
 
         // ③ 干净项目，只依赖这一个 tarball——**用户拿到的就是这个**
@@ -390,7 +404,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         mkdirSync(consumer, { recursive: true });
         writeFileSync(
           join(consumer, "package.json"),
-          JSON.stringify({ name: "echo-cli-consumer", private: true, dependencies: { "echo-agent": `file:${join(out, tuiTgz!)}` } }),
+          JSON.stringify({ name: "echo-cli-consumer", private: true, dependencies: { "echo-agent": `file:${tuiTgz}` } }),
         );
         const install = sh(["bun", "install"], consumer);
         expect([install.ok, install.out.slice(-400)]).toEqual([true, install.out.slice(-400)]);
@@ -413,9 +427,71 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   );
 
   test(
-    "coding-agent 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
+    "coding 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
     () => {
-      isolatedConsumer("packages/coding-agent", 5);
+      // `echo-agent` 是它真实的依赖（启动逻辑从那儿复用，`packages/coding/src/cli.ts`），显式写出来——判据仍是「恰好等于」
+      isolatedConsumer("packages/coding", 5, ["echo-agent"]);
+    },
+    300_000,
+  );
+
+  // **`echo-coding` 的分发门**（2026-09-01）：与 `echo-agent` 那条同形，多一层——它依赖 `echo-agent`，
+  // 于是装出来的包要经过**两级** `file:` 依赖（coding → echo-agent → core）才谈得上「用户拿到的能用」。
+  // 拷目录跑源文件对这一条同样恒绿（workspace 软链会把两级依赖全抹平），所以照样走真路。
+  test(
+    "echo-coding 分发：pack `echo-coding` → 干净项目安装 → 从 `node_modules/.bin` 真执行",
+    () => {
+      const { work, tarball: coreTgz, cleanup } = packCore();
+      try {
+        const tuiTgz = packCli(work, coreTgz);
+
+        // ① 拷一份 coding，把它的两条 workspace 链接都换成真 tarball
+        const src = join(work, "coding-src");
+        expect(copyTracked("packages/coding", src)).toBeGreaterThan(5);
+        const srcPkgPath = join(src, "package.json");
+        const srcPkg = JSON.parse(readFileSync(srcPkgPath, "utf8")) as {
+          bin: Record<string, string>;
+          dependencies: Record<string, string>;
+        };
+        expect(Object.keys(srcPkg.bin)).toEqual(["echo-coding"]);
+        srcPkg.dependencies["@echo-agent/core"] = `file:${coreTgz}`;
+        srcPkg.dependencies["echo-agent"] = `file:${tuiTgz}`;
+        writeFileSync(srcPkgPath, JSON.stringify(srcPkg, null, 2));
+
+        // ② pack coding 自己
+        const out = join(work, "coding-pack");
+        mkdirSync(out, { recursive: true });
+        const packed = sh(["bun", "pm", "pack", "--destination", out], src);
+        expect([packed.ok, packed.out.slice(-400)]).toEqual([true, packed.out.slice(-400)]);
+        const codingTgz = readdirSync(out).find((f) => f.endsWith(".tgz"));
+        expect([out, codingTgz !== undefined]).toEqual([out, true]);
+        // `files` 漏了 `bin` 就是发出去一个没有命令的包——在 tarball 上当场红
+        const listed = sh(["tar", "-tzf", join(out, codingTgz!)], out);
+        expect(listed.out).toContain("bin/echo-coding.ts");
+
+        // ③ 干净项目，只依赖这一个 tarball——**用户拿到的就是这个**
+        const consumer = join(work, "coding-consumer");
+        mkdirSync(consumer, { recursive: true });
+        writeFileSync(
+          join(consumer, "package.json"),
+          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "echo-coding": `file:${join(out, codingTgz!)}` } }),
+        );
+        const install = sh(["bun", "install"], consumer);
+        expect([install.ok, install.out.slice(-400)]).toEqual([true, install.out.slice(-400)]);
+
+        // ④ 装出来必须有这个命令
+        const binPath = join(consumer, "node_modules", ".bin", "echo-coding");
+        expect([binPath, existsSync(binPath)]).toEqual([binPath, true]);
+
+        // ⑤ **从装出来的入口执行**。`--help` 打的必须是**本产品**的用法：名字走的是 `Product`，
+        //    所以这一步顺带证明 `echo-agent` 的 `mainFor()` 在装出来的包上真被复用了（两级依赖都解析到了）。
+        const help = sh([binPath, "--help"], consumer);
+        expect([help.ok, help.out.slice(0, 600)]).toEqual([true, help.out.slice(0, 600)]);
+        expect(help.out).toContain("用法：echo-coding");
+        expect(help.out).toContain("--provider");
+      } finally {
+        cleanup();
+      }
     },
     300_000,
   );

@@ -13,8 +13,8 @@
 | 路径 | 职责 |
 |---|---|
 | `packages/core/` | Runtime、engine、provider adapters、状态、记忆、任务与 extension API |
-| `packages/cli/` | 官方 CLI 与交互式 TUI；高层装配的消费者 |
-| `packages/coding-agent/` | Coding-agent preset |
+| `packages/cli/` | `echo-agent`：通用 agent 产品，官方 CLI 与交互式 TUI；高层装配的消费者，不认识任何具体产品 |
+| `packages/coding/` | `echo-coding`：coding agent 产品，依赖 `packages/cli`，在自己这层装 `echo:workspace` / `echo:shell` |
 | `examples/` | 从 tarball 消费公共 API 的可运行示例 |
 | `test/` | 仓库级分发门与文档门 |
 | `scripts/` | inventory、文档检查与仓库工具 |

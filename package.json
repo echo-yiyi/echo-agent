@@ -7,16 +7,16 @@
   ],
   "devDependencies": {
     "@echo-agent/core": "workspace:*",
-    "@echo-agent/coding-agent": "workspace:*",
     "@types/bun": "latest",
     "echo-agent": "workspace:*",
+    "echo-coding": "workspace:*",
     "typescript": "^5.5.0"
   },
   "scripts": {
-    "typecheck": "bun run typecheck:core && bun run typecheck:cli && bun run typecheck:coding-agent && bun run typecheck:repo",
+    "typecheck": "bun run typecheck:core && bun run typecheck:cli && bun run typecheck:coding && bun run typecheck:repo",
     "typecheck:core": "tsc -p packages/core --noEmit",
     "typecheck:cli": "tsc -p packages/cli --noEmit",
-    "typecheck:coding-agent": "tsc -p packages/coding-agent --noEmit",
+    "typecheck:coding": "tsc -p packages/coding --noEmit",
     "typecheck:repo": "tsc --noEmit",
     "test": "bun test"
   }

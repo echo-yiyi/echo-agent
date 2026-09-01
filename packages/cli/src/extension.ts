@@ -18,6 +18,7 @@
 import { AgentRuntimeService, defineExtension, type ExtensionDefinition } from "@echo-agent/core/extension";
 import type { TUI } from "@earendil-works/pi-tui";
 import { runTui, type TuiConfigureOptions } from "./app.ts";
+import type { Product } from "./product.ts";
 
 export type TuiShell = {
   /** 交给 `createEcho({ extensions: [...] })` 去 mount。 */
@@ -27,10 +28,13 @@ export type TuiShell = {
 };
 
 /**
+ * @param opts.product 欢迎头里的名字与版本——透传给 `runTui`。不给 = `echo-agent` 自己。
  * @param opts.configure 缺 key 时壳子在界面里配的那一段要的东西——透传给 `runTui`。
  *   不给 = 壳子不管凭据（自己装配、自己给 key 的场合）。
  */
-export function tuiShell(opts: { signal?: AbortSignal; ui?: TUI; configure?: TuiConfigureOptions } = {}): TuiShell {
+export function tuiShell(
+  opts: { product?: Pick<Product, "name" | "version">; signal?: AbortSignal; ui?: TUI; configure?: TuiConfigureOptions } = {},
+): TuiShell {
   let settle: (code: number) => void = () => {};
   let fail: (e: unknown) => void = () => {};
   const exited = new Promise<number>((resolve, reject) => {
@@ -79,6 +83,7 @@ export function tuiShell(opts: { signal?: AbortSignal; ui?: TUI; configure?: Tui
           const loop = runTui({
             agent: runtime,
             signal: stopper.signal,
+            ...(opts.product !== undefined ? { product: opts.product } : {}),
             ...(opts.ui !== undefined ? { ui: opts.ui } : {}),
             ...(opts.configure !== undefined ? { configure: opts.configure } : {}),
           });

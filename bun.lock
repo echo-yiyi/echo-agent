@@ -5,10 +5,10 @@
     "": {
       "name": "echo-agent-workspace",
       "devDependencies": {
-        "@echo-agent/coding-agent": "workspace:*",
         "@echo-agent/core": "workspace:*",
         "@types/bun": "latest",
         "echo-agent": "workspace:*",
+        "echo-coding": "workspace:*",
         "typescript": "^5.5.0",
       },
     },
@@ -27,11 +27,15 @@
         "typescript": "^5.7.0",
       },
     },
-    "packages/coding-agent": {
-      "name": "@echo-agent/coding-agent",
+    "packages/coding": {
+      "name": "echo-coding",
       "version": "0.0.1",
+      "bin": {
+        "echo-coding": "./bin/echo-coding.ts",
+      },
       "dependencies": {
         "@echo-agent/core": "workspace:*",
+        "echo-agent": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -50,8 +54,6 @@
   "packages": {
     "@earendil-works/pi-tui": ["@earendil-works/pi-tui@0.84.4", "", { "dependencies": { "get-east-asian-width": "1.6.0", "marked": "18.0.5" } }, "sha512-nPUnwDkLtupPXnZQYrCwPFcuTydCDqTY6ZbFqhsL4S4kVq0AT418kPa/6uXwtaCD+MjBNBltb7ScTYX65yeE1w=="],
 
-    "@echo-agent/coding-agent": ["@echo-agent/coding-agent@workspace:packages/coding-agent"],
-
     "@echo-agent/core": ["@echo-agent/core@workspace:packages/core"],
 
     "@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
@@ -61,6 +63,8 @@
     "bun-types": ["bun-types@1.4.0", "", { "dependencies": { "@types/node": "*" } }, "sha512-iIKw23BspnQQYd3prITOBxeUsxBHnwzX6YJfGMuNOZzeNcMmVqzIIVGRm1l69ogaPQmb4wB6BN8mA5bE9YuC5Q=="],
 
     "echo-agent": ["echo-agent@workspace:packages/cli"],
+
+    "echo-coding": ["echo-coding@workspace:packages/coding"],
 
     "get-east-asian-width": ["get-east-asian-width@1.6.0", "", {}, "sha512-QRbvDIbx6YklUe6RxeTeleMR0yv3cYH6PsPZHcnVn7xv7zO1BHN8r0XETu8n6Ye3Q+ahtSarc3WgtNWmehIBfA=="],
 

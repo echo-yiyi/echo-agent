@@ -1,0 +1,44 @@
+// 「产品」：一个具体产品交给 `echo-agent` 启动逻辑的全部东西（2026-09-01）。
+//
+// `echo-agent` 是通用 agent 产品，也是展示层——它**不认识任何具体产品**。`echo-coding` 这类
+// 完整产品依赖它、复用它整条启动逻辑（参数解析、凭据、引导设置、形态分叉、装配、收摊），
+// 只把自己那份不同交进来：名字、版本、装配片段。不复制 `main()`——两份 `main()` 会分家，
+// 实证见 `cli.ts` 文件头。
+//
+// **能交进来的只有这三样**。特别地，`preset` 的返回值限定为 `createEcho()` 的 `agent` 与
+// `extensions` 两个字段：扩展**发现**（`extensionDirs`）归 `--extensions` 那个 flag、归用户，
+// 产品层碰不到——产品自带的 Extension 走显式传入，不走扫盘，也不能被 flag 关掉。
+
+import { readFileSync } from "node:fs";
+import type { CreateEchoOptions } from "@echo-agent/core";
+
+/** 装配前已经定了的两件事：形态与工作目录。产品层据此决定「谁答权限询问」「工作区根在哪」。 */
+export type PresetForm = Readonly<{
+  /** `true` = 交互形态（有人坐在终端前）；`false` = 管道 / CI。判据只有 `main()` 那一个。 */
+  interactive: boolean;
+  /** 进程工作目录。 */
+  cwd: string;
+}>;
+
+export type Product = Readonly<{
+  /** 可执行文件名：进 `--help` 的「用法：」行与欢迎头。 */
+  name: string;
+  /** 欢迎头里显示的版本，各产品从自己的 `package.json` 取。 */
+  version: string;
+  /**
+   * 产品层的装配片段：系统 prompt、权限策略、自带的 Extension。形态定了之后调一次，
+   * 返回值原样展开进 `createEcho()`。不给 = 通用 agent，只有 core 的 `echo:*` builtin。
+   *
+   * 与 `--extensions` 的关系：**正交**。那个 flag 决定去哪些目录**发现**扩展；这里的
+   * `extensions` 是显式传入的。两者在 `createEcho()` 里同一代 mount，顺序是发现的在前、
+   * 显式的在后（`create-echo.ts`）；工具撞名整组失败，不静默覆盖。
+   */
+  preset?: (form: PresetForm) => Pick<CreateEchoOptions, "agent" | "extensions">;
+}>;
+
+/** 本包的版本。`../package.json` 在源码树和 tarball 里都在这个相对位置（`files: ["src", …]`）。 */
+const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
+  .version;
+
+/** `echo-agent` 自己：通用 agent，没有 preset。 */
+export const ECHO_AGENT: Product = Object.freeze({ name: "echo-agent", version: VERSION });
