@@ -122,7 +122,7 @@ export class SessionService {
    * 任何一条 entry 解不出来都**抛错，不返回半截**——半截 session 比没有 session 更危险，
    * 因为它看起来能用。
    */
-  async createOrResume(sessionId: string, opts?: { name?: string; workspace?: string }): Promise<SessionData> {
+  async createOrResume(sessionId: string, opts?: { name?: string; workspace?: string; agent?: string }): Promise<SessionData> {
     assertSafeSessionId(sessionId);
     // 封存之后连打开都不许：新建会写 meta，恢复则会给出一份**写不进去**的 session——
     // 后者看起来能用，比拿不到更危险。实测过启动期丢锁时这里仍会把 meta 写出去。
@@ -152,6 +152,8 @@ export class SessionService {
       name: opts?.name ?? sessionId,
       // 只在新建这一刻写；resume 走上面那条路，以盘上为准。缺省 "/" 与 AgentOptions.workspace 同一个缺省
       workspace: opts?.workspace ?? "/",
+      // 归哪个 agent（产品）：会话身份的第二维（2026-09-01 用户拍板）。缺省与 `agentId` 缺省同一个字
+      agent: opts?.agent ?? "default",
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
@@ -160,6 +162,35 @@ export class SessionService {
     this.cursors.set(sessionId, { nextSeq: 1, lastEntryId: null, info });
     this.poisoned.delete(sessionId);
     return { info, messages: [], checkpoint: null };
+  }
+
+  /**
+   * 盘上全部会话的清单（只读 meta，不读 entries），按 `updatedAt` 降序。
+   *
+   * 2026-09-01 用户拍板：**列表归 core**，不让产品各自去扫 meta 文件。会话身份是 workspace + agent
+   * 两维，产品要挑「本产品在本目录的最近一段」（`--continue`）、要做会话列表，都得先看得到全部。
+   * 坏 meta **判红**，与恢复同一姿态——清单里静默少一条比整个报错更危险：少的那条正好可能是用户要续的。
+   */
+  async list(): Promise<SessionInfo[]> {
+    const prefix = "sessions/";
+    const out: SessionInfo[] = [];
+    for (const p of await this.store.list(prefix)) {
+      const rel = p.startsWith(prefix) ? p.slice(prefix.length) : p;
+      if (!rel.endsWith(`/${META_FILE}`)) continue;
+      const id = rel.slice(0, -(META_FILE.length + 1));
+      if (id.includes("/")) continue; // 只认 sessions/<id>/meta.json 这一层
+      const raw = await this.store.read(`${prefix}${rel}`);
+      if (raw === null) throw new Error(`会话 ${id} 的 ${META_FILE} 在 list 里有、read 却为空`);
+      let info: SessionInfo;
+      try {
+        info = JSON.parse(raw) as SessionInfo;
+      } catch (e) {
+        throw new Error(`会话 ${id} 的 ${META_FILE} 解不开：${(e as Error).message}`);
+      }
+      assertSessionInfoShape(info, `会话 ${id} 的 ${META_FILE}`);
+      out.push(info);
+    }
+    return out.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   /**
@@ -401,11 +432,11 @@ function assertEntryShape(entry: SessionEntry, where: string): void {
 function assertSessionInfoShape(info: unknown, where: string): void {
   const i = info as Record<string, unknown> | null | undefined;
   if (i === null || i === undefined || typeof i !== "object") throw new Error(`${where} 不是对象`);
-  for (const k of ["id", "name", "workspace"]) {
+  for (const k of ["id", "name", "workspace", "agent"]) {
     if (typeof i[k] !== "string") {
       throw new Error(
-        k === "workspace"
-          ? `${where} 缺 workspace——2026-09-01 之前建的 session 没有这个字段；删掉旧的 sessions/<id>/ 目录或手工补上再启动`
+        k === "workspace" || k === "agent"
+          ? `${where} 缺 ${k}——2026-09-01 之前建的 session 没有这个字段；删掉旧的 sessions/<id>/ 目录或手工补上再启动`
           : `${where} 缺 ${k}（或不是字符串）`,
       );
     }

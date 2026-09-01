@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 221（value 56 · type 154 · both 11）
+符号 221（value 56 · type 153 · both 12）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -245,7 +245,7 @@ type   ThinkingLevel
 type   AgentSchedule
 
 -- src/session/service.ts (1) --
-type   SessionService
+both   SessionService
 
 -- src/session/types.ts (5) --
 type   SessionData

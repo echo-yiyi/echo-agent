@@ -4,7 +4,6 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectStateLock } from "../src/storage/file-lock.ts";
-import { defaultSessionId } from "../src/session/types.ts";
 
 // **Runtime V0 Gate**（AGENT-CORE §13.9 的 12 条 resident integration）。
 //
@@ -42,8 +41,13 @@ type Report = {
  * 起一次宿主。**必须给子进程自己的超时**：`spawnSync` 是同步阻塞，宿主卡死时
  * 外层 `test(..., 120_000)` 抢不进来，整个测试会挂到 runner 超时才死，还看不出是谁卡的。
  */
-function runPhase(stateDir: string, phase: string): { ok: boolean; report: Report | null; out: string } {
-  const r = Bun.spawnSync(["bun", HOST, stateDir, phase], { stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+function runPhase(stateDir: string, phase: string, sessionId?: string): { ok: boolean; report: Report | null; out: string } {
+  // `sessionId`：要**续**哪一段。缺省每次启动新建会话（2026-09-01 用户拍板），跨进程恢复对话是显式动作
+  const r = Bun.spawnSync(["bun", HOST, stateDir, phase, ...(sessionId === undefined ? [] : [sessionId])], {
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 60_000,
+  });
   const out = `${r.stdout.toString()}\n${r.stderr.toString()}`;
   const line = out.split("\n").find((l) => l.startsWith("__REPORT__"));
   return {
@@ -67,7 +71,7 @@ test(
     const a = runPhase(dir, "a");
     expect(a.ok, `phase a 挂了：\n${a.out}`).toBe(true);
     const ra = a.report!;
-    expect(ra.sessionId).toBe(defaultSessionId("/")); // 自动创建的默认会话（第 3 条）：按 workspace 派生，宿主没给 workspace 就是 "/"
+    expect(ra.sessionId).toMatch(/^s-/); // 自动创建的会话（第 3 条）：缺省每次启动新建一段（2026-09-01）
 
     // 第 4 条要的是「**由 Agent** 创建」——判据是工具真的被调用**且成功**，
     // 不是宿主自己调 harness 函数。工具报错会被循环转成 error result 咽掉，
@@ -102,7 +106,7 @@ test(
     // 落盘是真的：记忆文件、索引、闹钟、会话 entries
     expect(existsSync(join(dir, "memory", "项目.md"))).toBe(true);
     expect(existsSync(join(dir, "schedules.json"))).toBe(true);
-    expect(readdirSync(join(dir, "sessions", defaultSessionId("/"), "entries")).length).toBeGreaterThan(0);
+    expect(readdirSync(join(dir, "sessions", ra.sessionId!, "entries")).length).toBeGreaterThan(0);
 
     // ⑥ **Dream 是 Agent 自己起的**：宿主没调任何整理相关的东西，只是把门喂饱
     // （10 个记忆文件 / 10 次写入）。判据是盘上的 `lastAt` 被提交，不是「dream 跑过」。
@@ -131,10 +135,10 @@ test(
     // 顺序是特意的：第 8 条说的是「启动新的进程与新的 Agent 实例，**自动**恢复」，
     // 那就必须由**干净重启**来证——放在 crash 之后证等于把「人工删了锁」也算进「自动」，
     // 那是把运维步骤冒充成产品能力。crash 的戏份挪到下面，只证第 10 条与单写契约。
-    const c = runPhase(dir, "c");
+    const c = runPhase(dir, "c", ra.sessionId!);
     expect(c.ok, `phase c 挂了：\n${c.out}`).toBe(true);
     const rc = c.report!;
-    expect(rc.sessionId).toBe(defaultSessionId("/")); // ⑧ 同一身份（同 workspace → 同一段对话）
+    expect(rc.sessionId).toBe(ra.sessionId); // ⑧ 显式续 A 的那一段——缺省不续（2026-09-01），续是宿主给 id 的动作
     expect(rc.messages ?? 0).toBeGreaterThan(4);
 
     // ⑨ **第二轮模型调用真的用得上第一轮的东西**——判据落在模型收到的 Context 上，
@@ -175,7 +179,7 @@ test(
     // 代价就是这里——新进程必须**拒绝启动**，等人来清。**这不叫「自动恢复」**，
     // 所以第 8 条不由这条路证明（它已经由上面的干净重启证过了）。
     expect(existsSync(join(dir, ".lock")), "崩溃应当留下锁").toBe(true);
-    const blocked = runPhase(dir, "c");
+    const blocked = runPhase(dir, "c", ra.sessionId!);
     expect(blocked.ok, "陈尸锁在，新进程却启动了——单写者当场破").toBe(false);
     expect(blocked.out).toContain("已被另一个写者持有");
 
@@ -186,7 +190,7 @@ test(
     rmSync(join(dir, ".lock")); // ← 显式运维步骤
 
     /* ─── ⑩ 清锁之后：那条入站事实被 Agent 自己吃掉 ─── */
-    const replay = runPhase(dir, "c");
+    const replay = runPhase(dir, "c", ra.sessionId!);
     expect(replay.ok, `replay 挂了：\n${replay.out}`).toBe(true);
     expect(
       replay.report!.seen[0]!.texts.join("\n"),

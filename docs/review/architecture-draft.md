@@ -84,7 +84,7 @@ open ──seal()──▶ sealed ──adoptInto()──▶ adopted
 stateDir(显式给)  >  $ECHO_HOME/agents/<agentId>  >  ~/.echo/agents/<agentId>
 ```
 
-**默认落在用户级**（2026-09-01 改）:工作目录成了 session 的字段（`SessionInfo.workspace`），缺省 session id 按 workspace 派生——一个 agent 在多个目录里各有一段对话，记忆跨项目共享；按 `$PWD` 走的状态根会让换目录 = 换 agent，与此冲突。「两个不相干项目共用记忆」由记忆分区纪律与 session 隔离承担（`create-agent.ts` 的 `resolveStateDir`）。
+**默认落在用户级**（2026-09-01 改）:工作目录成了 session 的字段（`SessionInfo.workspace`），会话身份是 workspace + agent 两维（`SessionInfo.agent`），**缺省每次启动新建一段**、续上次是显式动作（`--continue` / `--resume`，靠 `SessionService.list()` 挑）——同一目录里不同产品各有各的对话，记忆跨项目共享；按 `$PWD` 走的状态根会让换目录 = 换 agent，与此冲突。「两个不相干项目共用记忆」由记忆分区纪律与 session 隔离承担（`create-agent.ts` 的 `resolveStateDir`）。
 
 `agentId` 与 `sessionId` 一样**是路径段,都要过 `assertSafePathSegment`**:此前只校验 sessionId,于是 `agentId="../../escaped"` 能把状态根挪出 `.echo/agents`(实测)。
 

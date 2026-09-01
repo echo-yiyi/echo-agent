@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, resolveModel, resolveStateDir } from "../src/create-agent.ts";
-import { defaultSessionId } from "../src/session/types.ts";
+import { SessionService } from "../src/session/service.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { kimiProvider, deepseekProvider } from "../src/provider/openai.ts";
@@ -123,31 +123,40 @@ test("createAgent 装出的就是同一个 Agent 类（D16），且 model 已解
   });
   await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
   expect(agent.state.model.id).toBe("only"); // 非空 Model，构造时就位
-  expect(agent.state.sessionId).toBeNull(); // 缺省会话身份在 start() 时按 workspace 派生，构造期不抢先定
+  expect(agent.state.sessionId).toBeNull(); // 缺省会话在 start() 时新建，构造期不抢先定
 });
 
-test("缺省 session 按 workspace 派生：同一 workspace 同 id、不同 workspace 不同 id、显式 sessionId 赢", async () => {
+test("缺省每次启动新建会话：同一状态根同一 workspace 再起一次也是新的一段；显式 sessionId 才续；meta 记 workspace 与 agent", async () => {
+  // 2026-09-01 用户拍板：**续上次是显式动作**。之前缺省按 workspace 派生 id、启动即 resume，
+  // 于是同一目录里起的任何产品都落进同一段对话（实测：coding 续了通用 agent「我没有文件工具」的结论）。
   const provider = fakeProvider({ id: "t", models: ["only"] });
-  const a = await createAgent({ provider, store: new InMemoryDir(), lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a" });
+  const store = new InMemoryDir();
+  const a = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", agentName: "echo-coding" });
   await a.start();
-  expect(a.state.sessionId).toBe(defaultSessionId("/repo/a"));
+  expect(a.state.sessionId).toMatch(/^s-/);
   expect(a.state.workspace).toBe("/repo/a");
   await a.stop();
 
-  const a2 = await createAgent({ provider, store: new InMemoryDir(), lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a" });
+  const a2 = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", agentName: "echo-coding" });
   await a2.start();
-  expect(a2.state.sessionId).toBe(a.state.sessionId); // 同 workspace → 同一段对话
+  expect(a2.state.sessionId).not.toBe(a.state.sessionId); // 同状态根、同 workspace → 仍是新的一段
   await a2.stop();
 
-  const b = await createAgent({ provider, store: new InMemoryDir(), lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/b" });
-  await b.start();
-  expect(b.state.sessionId).not.toBe(a.state.sessionId);
-  await b.stop();
-
-  const explicit = await createAgent({ provider, store: new InMemoryDir(), lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", sessionId: "review" });
+  const explicit = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", sessionId: a.state.sessionId! });
   await explicit.start();
-  expect(explicit.state.sessionId).toBe("review");
+  expect(explicit.state.sessionId).toBe(a.state.sessionId); // 给了 id 才 create-or-resume 那一段
   await explicit.stop();
+
+  // 会话身份两维都在盘上，`SessionService.list()` 读得回来——产品的 `--continue` 靠它挑「本产品在本目录的最近一段」
+  const listed = await new SessionService(store).list();
+  expect(listed.map((s) => [s.id, s.workspace, s.agent]).sort()).toEqual(
+    [
+      [a.state.sessionId!, "/repo/a", "echo-coding"],
+      [a2.state.sessionId!, "/repo/a", "echo-coding"],
+    ].sort(),
+  );
+  // 没给 agentName 的低层用户：与 agentId 同名
+  expect((await new SessionService(new InMemoryDir()).createOrResume("x", { workspace: "/w" })).info.agent).toBe("default");
 });
 
 test("resume 时 workspace 以盘上为准：换个目录打开同一个 session，workspace 不跟着进程走", async () => {
@@ -162,16 +171,18 @@ test("resume 时 workspace 以盘上为准：换个目录打开同一个 session
   await second.stop();
 });
 
-test("start() create-or-resume，stop() 之后换个实例能读回来", async () => {
+test("start() create-or-resume：stop() 之后换个实例、**显式给同一个 sessionId** 能读回来", async () => {
   const store = new InMemoryDir();
   const provider = fakeProvider({ id: "t", models: ["only"] });
 
   const first = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false });
   await first.start();
+  const sessionId = first.state.sessionId!;
   await first.prompt("你好");
   await first.stop();
 
-  const second = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false });
+  // 缺省不续（2026-09-01）：给了 id 才是「续这一段」
+  const second = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, sessionId });
   await second.start();
   expect(second.messages.length).toBeGreaterThan(0); // 上一轮的对话回来了
   await second.stop();
@@ -191,11 +202,11 @@ test("start() 拿不到 lease → fail-loud（不是等、也不是降级）", a
 test("start() 中途失败必须释放已取得的 lease（否则状态根被死进程占住）", async () => {
   const lock = new InMemoryStateLock();
   const provider = fakeProvider({ id: "t", models: ["only"] });
-  // 让 createOrResume 炸：meta.json 是坏的
+  // 让 createOrResume 炸：meta.json 是坏的。缺省会话现在每次新建（id 随机），要撞上坏档得显式点名那一段
   const store = new InMemoryDir();
-  await store.write(`sessions/${defaultSessionId("/")}/meta.json`, "不是 json"); // 没给 workspace → "/" → 派生的缺省 id
+  await store.write("sessions/bad/meta.json", "不是 json");
 
-  const a = await createAgent({ provider, store, lock, allowNetwork: false });
+  const a = await createAgent({ provider, store, lock, allowNetwork: false, sessionId: "bad" });
   await expect(a.start()).rejects.toThrow(/meta\.json 解不开/);
 
   // lease 被还回去了，所以另一个 agent 还能启动
@@ -244,10 +255,11 @@ test("不传 store / lock 时用 first-party 默认件（真落盘）", async ()
   await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
   await agent.start();
   expect(existsSync(join(dir, ".lock"))).toBe(true); // 文件锁真的建了
+  const sessionId = agent.state.sessionId!; // 缺省新建的那一段
   await agent.prompt("落个盘");
   await agent.stop();
   expect(existsSync(join(dir, ".lock"))).toBe(false); // stop 还锁
-  expect(existsSync(join(dir, "sessions", defaultSessionId("/"), "meta.json"))).toBe(true); // 缺省 id 按 workspace（"/"）派生
+  expect(existsSync(join(dir, "sessions", sessionId, "meta.json"))).toBe(true);
 });
 
 test("本函数装配的件不许从 `agent` 透传口再塞一次——**判据是 tsc**", () => {

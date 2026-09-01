@@ -137,7 +137,8 @@ export const NON_DETERMINISTIC_EVENTS: ReadonlySet<string> = new Set([
  */
 export type LifecycleEvent =
   /* 会话与命令 */
-  | { type: "sessionStart"; sessionId: string | null; resumed: boolean }
+  /** `messageCount`：续了多少条进上下文（新建为 0）。壳据此把「恢复」说出来，无声恢复是禁止的。 */
+  | { type: "sessionStart"; sessionId: string | null; resumed: boolean; messageCount: number }
   | { type: "sessionEnd"; sessionId: string | null; reason: "closed" | "process_exit" }
   | { type: "userPromptSubmit"; text: string; source: "human" | "steer" | "followUp" }
   | { type: "abortRequested"; reason?: string }

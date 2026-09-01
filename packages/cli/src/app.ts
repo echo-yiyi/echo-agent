@@ -422,6 +422,14 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
 
   const unsubscribeLifecycle = agent.subscribeLifecycle((event) => {
     switch (event.type) {
+      case "sessionStart":
+        // **续了就得说**（2026-09-01 用户拍板）：无声恢复 = 用户以为全新开始、模型脑子里却带着上一场。
+        // 只在真续了（带着条数）时说；新建一段是缺省，不值得占一行。
+        if (event.resumed) {
+          transcript.push({ kind: "notice", text: `[会话] 续 ${event.sessionId ?? "?"}：带着上一场的 ${event.messageCount} 条（/clear 从头开始）` });
+          rerender();
+        }
+        return;
       case "permissionRequest":
         takeAsk(event);
         return;

@@ -27,10 +27,14 @@
 import {
   createEcho,
   deepseekProvider,
+  expandHome,
   FileCredentialStore,
+  FileDir,
   kimiProvider,
   minimaxProvider,
   openaiProvider,
+  resolveStateDir,
+  SessionService,
   zaiCodingProvider,
   type CredentialStore,
   type Provider,
@@ -60,6 +64,12 @@ export type CliOptions = {
   withoutMemory: boolean;
   /** 可重复。一条都不给 = 走约定目录 `<cwd>/extensions`。 */
   extensionDirs: string[];
+  /**
+   * 会话（2026-09-01 用户拍板：**缺省每次启动新建一段**，续上次是显式动作）：
+   * `--continue` = 本产品在本目录的最近一段；`--resume <id>` = 指名那一段。两者互斥。
+   */
+  continueLast: boolean;
+  resume?: string;
 };
 
 const PROVIDERS: Record<ProviderName, () => Provider> = {
@@ -81,14 +91,18 @@ export function usage(name: string): string {
   正文进 stdout、工具旁白进 stderr，读完就干净收摊。Ctrl-C 也是干净收摊。
 
 选项：
-  --state-dir <路径>   状态根（缺省：$ECHO_HOME/agents/<id>，再退到 ~/.echo/agents/<id>；跨目录同一个 agent，
-                       每个目录一段自己的会话）
+  --state-dir <路径>   状态根（缺省：$ECHO_HOME/agents/<id>，再退到 ~/.echo/agents/<id>；跨目录同一个 agent）
   --agent-id <名字>    同一状态根下的 agent 身份（缺省 default）
   --provider <名字>    kimi | deepseek | openai | zai | minimax（缺省：上次选的，其次 kimi）
   --model <id>         模型 id（缺省：上次选的，其次由 provider 声明）
+  --continue           续本命令在当前目录的最近一段会话
+  --resume <id>        续指定的那一段会话
   --extensions <目录>  去哪里找扩展，可重复（缺省 ./extensions）
   --no-memory          不装记忆与 Dream
   -h, --help           显示本帮助
+
+**每次启动都是新的一段会话**，续上次是显式动作（--continue / --resume）。会话按「目录 + 命令」归属：
+在同一个目录里，${name} 与别的命令各有各的对话，互不相续；续上时界面会说明续了多少条。
 
 上次在界面里选的模型记在 $ECHO_HOME/settings.json（D7）：**显式 --provider / --model 永远赢**，
 设置只是「没说就用上次的」；文件坏了不挡启动，如实说一句然后用缺省。
@@ -114,7 +128,7 @@ export function usage(name: string): string {
 export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.name): CliOptions | null {
   if (argv[0] === "-h" || argv[0] === "--help") return null;
 
-  const opts: CliOptions = { withoutMemory: false, extensionDirs: [] };
+  const opts: CliOptions = { withoutMemory: false, extensionDirs: [], continueLast: false };
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]!;
@@ -152,10 +166,18 @@ export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.nam
       case "--no-memory":
         opts.withoutMemory = true;
         break;
+      case "--continue":
+        opts.continueLast = true;
+        break;
+      case "--resume":
+        opts.resume = value();
+        break;
       default:
         throw new Error(`不认识的选项 '${flag}'\n\n${usage(name)}`);
     }
   }
+  // 两个「续」互斥：都给了就不知道听谁的，静默取一个是「写了没生效」
+  if (opts.continueLast && opts.resume !== undefined) throw new Error("--continue 与 --resume 只能给一个");
   return opts;
 }
 
@@ -186,6 +208,8 @@ function echoOptions(
   provider: Provider,
   choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
+  /** 要续的那一段（`--continue` / `--resume` 解析出来的 id）；不给 = 新建一段。 */
+  sessionId: string | undefined,
 ): Parameters<typeof createEcho>[0] {
   // **产品层的装配片段**（`product.ts`）：`agent`（权限策略等）与 `extensions`（产品自带的，含它的 prompt 段）。
   // 能来自产品的只有这两个字段——`Product.preset` 的返回类型就这么窄——所以它盖不掉下面任何一项，
@@ -199,6 +223,9 @@ function echoOptions(
     withoutMemory: opts.withoutMemory,
     // workspace 是 session 级事实（2026-09-01）：宿主给进程目录；core 不读 process.cwd()
     workspace: process.cwd(),
+    // 会话身份的第二维：产品名。同一目录里 `echo-agent` 与 `echo-coding` 各有各的对话（2026-09-01 用户拍板）
+    agentName: product.name,
+    ...(sessionId !== undefined ? { sessionId } : {}),
     ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
     ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
@@ -210,6 +237,33 @@ function echoOptions(
     // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。
     extensions: [conductEntry(), instructionsEntry(), ...(preset.extensions ?? [])],
   };
+}
+
+/**
+ * `--continue` / `--resume` → 要续的那一段的 id；两个都没给 → `undefined`（新建一段）。
+ *
+ * 清单来自状态根上的 `SessionService.list()`（列表归 core，2026-09-01 用户拍板），状态根与装配用
+ * 同一条解析（`resolveStateDir`）。**续不到就判红**：`--resume` 点名的不存在、`--continue` 找不到
+ * 本产品在本目录的任何一段，都报错退出——静默新建一段等于把「续」这个字说了没生效。
+ * 会话身份是 workspace + agent 两维：`--continue` 只在本产品（`product.name`）、本目录（`process.cwd()`）里挑最近的。
+ */
+async function resolveSessionId(product: Product, opts: CliOptions): Promise<string | undefined> {
+  if (!opts.continueLast && opts.resume === undefined) return undefined;
+  const stateDir = expandHome(
+    resolveStateDir({
+      ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
+      ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
+    }),
+  );
+  const sessions = await new SessionService(new FileDir(stateDir)).list(); // 已按 updatedAt 降序
+  if (opts.resume !== undefined) {
+    if (!sessions.some((s) => s.id === opts.resume)) throw new Error(`会话 '${opts.resume}' 不存在（状态根 ${stateDir}）`);
+    return opts.resume;
+  }
+  const cwd = process.cwd();
+  const latest = sessions.find((s) => s.workspace === cwd && s.agent === product.name);
+  if (latest === undefined) throw new Error(`${product.name} 在 ${cwd} 还没有可续的会话（状态根 ${stateDir}）`);
+  return latest.id;
 }
 
 /** `main` 的签名：argv（不含 node/bun 与脚本名）、形态、注入点 → 退出码。 */
@@ -311,11 +365,13 @@ export function mainFor(product: Product): Main {
       }
 
       const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
+      // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
+      const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
       const form: PresetForm = { interactive };
       return interactive
-        ? await runInteractive(product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, notices, controller.signal, deps)
-        : await runPiped(product, form, effective, provider, choices, credentials, notices, controller.signal);
+        ? await runInteractive(product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, sessionId, notices, controller.signal, deps)
+        : await runPiped(product, form, effective, provider, choices, credentials, sessionId, notices, controller.signal);
     } catch (e) {
       // 装配失败（锁被别的进程占着、状态根不可写、目录为空）一律**明说**并非零退出。
       process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
@@ -338,14 +394,16 @@ async function runPiped(
   provider: Provider,
   choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
+  sessionId: string | undefined,
   notices: readonly string[],
   signal: AbortSignal,
 ): Promise<number> {
   // **唯一 composition root**（§14.2）：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
-  const base = echoOptions(product, form, opts, provider, choices, credentials);
+  const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId);
   // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥
   const echo = await createEcho({ ...base, extensions: [...(base.extensions ?? []), pipeSurfaceEntry()] });
   // 启动口信（设置读不动等）与装配诊断（坏扩展被跳过，D6）都走 stderr：说了才算没静默，但不挡启动、不改退出码
+  if (sessionId !== undefined) process.stderr.write(`[会话] 续 ${sessionId}\n`); // 续了就说，无声恢复是禁止的
   for (const n of notices) process.stderr.write(`${n}\n`);
   for (const d of echo.diagnostics) process.stderr.write(`[扩展] [${d.code}] ${d.message}${d.path !== undefined ? `（${d.path}）` : ""}\n`);
   return await run({ echo, input: linesOf(process.stdin, signal), signal });
@@ -359,6 +417,7 @@ async function runInteractive(
   chosen: FirstRunChoice,
   choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
+  sessionId: string | undefined,
   notices: readonly string[],
   signal: AbortSignal,
   deps: MainDeps,
@@ -379,7 +438,7 @@ async function runInteractive(
       ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
     },
   });
-  const base = echoOptions(product, form, opts, chosen.provider, choices, credentials);
+  const base = echoOptions(product, form, opts, chosen.provider, choices, credentials, sessionId);
   const echo = await createEcho({
     ...base,
     // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的

@@ -58,7 +58,7 @@ import {
 import { makeScheduleTools } from "./schedule/tools.ts";
 import { assembleSystem } from "./prompt/assemble.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
-import { defaultSessionId } from "./session/types.ts";
+import { newSessionId } from "./session/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
 import { activeTools, registerTool, registerTools, resolveTool, toolSchemasOf, type ToolMap } from "./tools/harness.ts";
 import type { Diagnostic } from "./errors.ts";
@@ -225,6 +225,12 @@ export type AgentOptions = {
   stateLock?: StateLock;
   /** agent 身份（D5，缺省 `"default"`）。目前只用于 lease 的 holder 标识。 */
   agentId?: string;
+  /**
+   * 会话归属名（2026-09-01 用户拍板：会话身份 = workspace + agent）。写进每个新建会话的
+   * `SessionInfo.agent`；产品（`echo-agent` / `echo-coding`）各给各的名字，同一目录里就各有各的对话。
+   * 缺省与 `agentId` 相同——低层用户不区分产品时，一个状态根一个名字。
+   */
+  agentName?: string;
   /**
    * inbox 的持久面（§13.9 第 10 条）。传了 = 投进来的入站事实先落盘，
    * run 结束后才删；**崩在半路的会在 `start()` 时重放**。不传 = 纯内存（崩了就丢）。
@@ -397,6 +403,8 @@ export class Agent {
   private readonly sessionService?: SessionService;
   private readonly stateLock?: StateLock;
   private readonly agentId: string;
+  /** 新建会话时写进 `SessionInfo.agent` 的名字（`AgentOptions.agentName`，缺省 = `agentId`）。 */
+  private readonly agentName: string;
   /** 本代 Agent 的进程内身份：写入格与 RunIntakeGate 共用同一个。 */
   private readonly agentInstanceId: string;
   /**
@@ -695,6 +703,7 @@ export class Agent {
     this.sessionService = opts.sessionService;
     this.stateLock = opts.stateLock;
     this.agentId = opts.agentId ?? "default";
+    this.agentName = opts.agentName ?? this.agentId;
     this.agentInstanceId = `${this.agentId}@${crypto.randomUUID()}`;
     this.intake = new RunIntakeGate(this.agentInstanceId);
     normalizeModelSnapshot(opts.model); // 装备期就验：binding 在 admission 时冻结 model，不能等到那时才发现它不是 JSON-like
@@ -1203,15 +1212,26 @@ export class Agent {
       this.gate?.openLane("durable-ingress");
 
       if (this.sessionService !== undefined) {
-        // 缺省 session 按 workspace 分（2026-09-01）：一个项目一段连续对话；显式 sessionId 仍然赢
-        const sessionId = this._state.sessionId ?? defaultSessionId(this._state.workspace);
-        const data = await this.sessionService.createOrResume(sessionId, { workspace: this._state.workspace });
+        // **缺省每次启动新建会话**（2026-09-01 用户拍板）：续上次是显式动作——给了 `sessionId` 才
+        // create-or-resume 那一段。之前缺省按 workspace 派生、启动即 resume，同一目录里起的任何产品
+        // 都落进同一段对话（见 `session/types.ts` 的 `newSessionId`）。
+        const sessionId = this._state.sessionId ?? newSessionId();
+        const data = await this.sessionService.createOrResume(sessionId, {
+          workspace: this._state.workspace,
+          agent: this.agentName,
+        });
         this._state.messages = [...data.messages];
         this._state.checkpoint = data.checkpoint;
         this._state.sessionId = data.info.id;
         this._state.workspace = data.info.workspace; // resume 以盘上为准
         await this.hooks.notify(
-          { type: "sessionStart", sessionId: data.info.id, resumed: data.messages.length > 0 },
+          {
+            type: "sessionStart",
+            sessionId: data.info.id,
+            resumed: data.messages.length > 0,
+            // 壳要把「续了多少」说出来：无声恢复 = 用户以为全新开始、模型脑子里却带着上一场
+            messageCount: data.messages.length,
+          },
           this.hookContext(),
         );
       }
@@ -1838,11 +1858,11 @@ export class Agent {
 
   async newSession(name?: string, workspace: string = this._state.workspace): Promise<string> {
     const sessions = this.requireSessions();
-    const info = await sessions.create({ name, workspace });
+    const info = await sessions.create({ name, workspace, agent: this.agentName });
     this.reset();
     this._state.sessionId = info.id;
     this._state.workspace = info.workspace;
-    await this.hooks.notify({ type: "sessionStart", sessionId: info.id, resumed: false }, this.hookContext());
+    await this.hooks.notify({ type: "sessionStart", sessionId: info.id, resumed: false, messageCount: 0 }, this.hookContext());
     return info.id;
   }
 
@@ -1855,7 +1875,10 @@ export class Agent {
     this._state.checkpoint = data.checkpoint;
     this._state.sessionId = data.info.id;
     this._state.workspace = data.info.workspace;
-    await this.hooks.notify({ type: "sessionStart", sessionId: data.info.id, resumed: true }, this.hookContext());
+    await this.hooks.notify(
+      { type: "sessionStart", sessionId: data.info.id, resumed: true, messageCount: data.messages.length },
+      this.hookContext(),
+    );
   }
 
   private requireSessions(): SessionManager {

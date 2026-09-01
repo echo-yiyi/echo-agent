@@ -279,7 +279,7 @@ test("坏 message payload 在恢复时判红——只有 role 是不够的", asy
     const dir = new InMemoryDir();
     await dir.write(
       "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", createdAt: 1, updatedAt: 1, messageCount: 1 }),
     );
     await dir.write(
       "sessions/main/entries/000001.json",
@@ -293,7 +293,7 @@ test("自定义 role 仍然放行——扩展位不能被验形关掉", async ()
   const dir = new InMemoryDir();
   await dir.write(
     "sessions/main/meta.json",
-    JSON.stringify({ id: "main", name: "main", workspace: "/", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+    JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", createdAt: 1, updatedAt: 1, messageCount: 1 }),
   );
   await dir.write(
     "sessions/main/entries/000001.json",
@@ -374,6 +374,47 @@ test("meta 缺 workspace → 判红（2026-09-01 之前的旧档，文案指明�
   expect(resumed.info.workspace).toBe("/repo/a");
 });
 
+test("meta 缺 agent → 判红；agent 新建写入、resume 以盘上为准；缺省 default", async () => {
+  // 会话身份 = workspace + agent（2026-09-01 用户拍板）：没有 agent 的 meta 是今天之前的旧档
+  const dir = new InMemoryDir();
+  await dir.write(
+    "sessions/old/meta.json",
+    JSON.stringify({ id: "old", name: "old", workspace: "/w", createdAt: 1, updatedAt: 1, messageCount: 0 }),
+  );
+  await expect(new SessionService(dir).createOrResume("old", { workspace: "/w", agent: "echo-coding" })).rejects.toThrow(
+    /缺 agent.*2026-09-01/,
+  );
+
+  const s = new SessionService(dir);
+  const created = await s.createOrResume("fresh", { workspace: "/w", agent: "echo-coding" });
+  expect(created.info.agent).toBe("echo-coding");
+  expect((JSON.parse((await dir.read("sessions/fresh/meta.json"))!) as { agent: string }).agent).toBe("echo-coding");
+  // 换个产品 resume 同一段：盘上的赢——续别人的对话得是显式动作，续了也不改它的归属
+  const resumed = await new SessionService(dir).createOrResume("fresh", { workspace: "/w", agent: "echo-agent" });
+  expect(resumed.info.agent).toBe("echo-coding");
+  expect((await s.createOrResume("bare", { workspace: "/w" })).info.agent).toBe("default");
+});
+
+test("list()：只读 meta 列全部会话，按 updatedAt 降序；坏 meta 判红而不是静默少一条", async () => {
+  const dir = new InMemoryDir();
+  const s = new SessionService(dir);
+  await s.createOrResume("s-1", { workspace: "/a", agent: "echo-agent" });
+  await s.createOrResume("s-2", { workspace: "/a", agent: "echo-coding" });
+  await s.append("s-1", [{ kind: "message", message: userMessage("后来又说了一句") }]);
+  await s.settle();
+  // 产品的 --continue 靠这两维挑「本产品在本目录的最近一段」
+  const listed = await s.list();
+  expect(listed.map((i) => [i.id, i.workspace, i.agent])).toEqual([
+    ["s-1", "/a", "echo-agent"],
+    ["s-2", "/a", "echo-coding"],
+  ]);
+  expect(listed[0]!.updatedAt).toBeGreaterThanOrEqual(listed[1]!.updatedAt);
+  expect(listed[0]!.messageCount).toBe(1);
+
+  await dir.write("sessions/broken/meta.json", "{ 坏的");
+  await expect(s.list()).rejects.toThrow(/broken.*解不开/);
+});
+
 test("恢复失败**不解毒**——此前抛错之后 append 仍被接受", async () => {
   // 实测破坏：createOrResume 因 entry 断链抛错，随后 append() 仍被接受、
   // settle() 还返回成功，继续往一个已确认损坏的会话里写。
@@ -411,7 +452,7 @@ test("内容块闭合验形：缺字段与不认识的 type 都判红", async ()
     const dir = new InMemoryDir();
     await dir.write(
       "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", createdAt: 1, updatedAt: 1, messageCount: 1 }),
     );
     await dir.write(
       "sessions/main/entries/000001.json",
@@ -434,7 +475,7 @@ test("compaction / error entry 缺 at 判红", async () => {
     const dir = new InMemoryDir();
     await dir.write(
       "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", createdAt: 1, updatedAt: 1, messageCount: 0 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", createdAt: 1, updatedAt: 1, messageCount: 0 }),
     );
     await dir.write("sessions/main/entries/000001.json", JSON.stringify(entry));
     await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/缺 at/);

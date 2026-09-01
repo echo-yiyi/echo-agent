@@ -35,9 +35,10 @@ type SeenCall = {
   readonly texts: readonly string[];
 };
 
-const [, , stateDir, phase] = process.argv;
+// 第三个参数：要**续**哪一段会话。缺省每次启动新建（2026-09-01），跨进程恢复对话由宿主显式给 id
+const [, , stateDir, phase, resumeSessionId] = process.argv;
 if (stateDir === undefined || phase === undefined) {
-  console.error("用法：resident-host.ts <stateDir> <phase>");
+  console.error("用法：resident-host.ts <stateDir> <phase> [sessionId]");
   process.exit(2);
 }
 
@@ -242,12 +243,13 @@ async function main(): Promise<void> {
   }
 
   if (phase === "c") {
-    // ⑧ 新进程 + 新 Agent，自动恢复同一身份与全部状态
+    // ⑧ 新进程 + 新 Agent，恢复全部状态；**会话是显式续的**（宿主给 id，2026-09-01：缺省每次启动新建一段）
     // ⑨ 第二轮模型调用要**用得上**第一轮的 Session / Memory / Task 上下文
     const agent = await createAgent({
       provider: scriptedProvider([text("我看到之前的记录了"), text("再说一次")]),
       stateDir,
       allowNetwork: false,
+      ...(resumeSessionId !== undefined ? { sessionId: resumeSessionId } : {}),
       // 真实宿主每次启动都会把自己的 skill 交进来（内容来自它的配置或盘），
       // 所以这里也给——第 9 条的「Skill 上下文」指的是**目录段进 system**，
       // 不是「上一轮激活过的那次还留着」（激活是运行态，不跨进程）。

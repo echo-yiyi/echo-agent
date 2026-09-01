@@ -17,7 +17,9 @@ import {
   createProvider,
   createProviderStreams,
   FileCredentialStore,
+  FileDir,
   kimiProvider,
+  SessionService,
   toolOk,
   type Agent,
   type Context,
@@ -188,15 +190,24 @@ test("parseArgs:认识的都认得出", () => {
   // 就是「按缺省起来」——交互形态下那才是用户要的（原 `echo-agent start` 的 start
   // 是唯一的子命令，等于噪音，2026-08-31 一并去掉）。
   // D7 起 `provider` 不再有解析期缺省：**不给 = 没说**，缺省与「记住上次」的合成在 main() 里做
-  expect(parseArgs([])).toEqual({ withoutMemory: false, extensionDirs: [] });
+  expect(parseArgs([])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false });
   expect(parseArgs(["--provider", "deepseek", "--no-memory", "--agent-id", "a1"])).toEqual({
     provider: "deepseek",
     withoutMemory: true,
     agentId: "a1",
     extensionDirs: [],
+    continueLast: false,
   });
   expect(parseArgs(["--help"])).toBeNull();
   expect(parseArgs(["-h"])).toBeNull();
+});
+
+test("parseArgs:`--continue` / `--resume <id>` 各自认得，两个一起给就报错", () => {
+  // 2026-09-01 用户拍板：缺省每次启动新建会话，续上次是显式动作
+  expect(parseArgs(["--continue"])).toMatchObject({ continueLast: true });
+  expect(parseArgs(["--resume", "s-abc"])).toMatchObject({ resume: "s-abc", continueLast: false });
+  expect(() => parseArgs(["--resume"])).toThrow("缺一个值");
+  expect(() => parseArgs(["--continue", "--resume", "s-abc"])).toThrow("只能给一个");
 });
 
 test("parseArgs:`--extensions` 可重复,给了就只用给的", () => {
@@ -679,6 +690,89 @@ test("mainFor：preset 的 Extension 装不上 → 整个启动失败、退出�
     });
     expect(code).toBe(1);
     expect(ui.screen(), "装配失败了却起了界面").not.toContain("模型 kimi-k3");
+  } finally {
+    restore();
+  }
+});
+
+/* ══════════════ 会话（2026-09-01 用户拍板）：缺省新建一段，--continue / --resume 才续，续了要说 ══════════════ */
+//
+// 起因：两个产品在同一目录里落进了同一段对话（会话 id 只按 workspace 派生、启动即 resume、壳一字不显示），
+// `echo-coding` 续了通用 agent「我没有文件工具」的结论。三条判据对应三个修法：
+//   · 会话身份 = workspace + agent（别的产品的那段不算）；
+//   · 续是显式动作，续不到就判红（不静默新建）；
+//   · 续了必须在屏幕上说明带了几条。
+
+const oldMessage = (text: string) => ({ role: "user" as const, source: "human" as const, content: [{ type: "text" as const, text }], at: 1 });
+
+test("--continue：续本产品在本目录的最近一段，屏幕上说明带了几条；别的产品的那段不算", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    const stateDir = join(dir, "state");
+    // 盘上预置两段，都在本目录：coding 的（更新，但不是本产品的）和 echo-agent 自己的（1 条消息）
+    const sessions = new SessionService(new FileDir(stateDir));
+    await sessions.createOrResume("s-mine", { workspace: process.cwd(), agent: "echo-agent" });
+    await sessions.append("s-mine", [{ kind: "message", message: oldMessage("上一场说过的") }]);
+    await sessions.createOrResume("s-coding", { workspace: process.cwd(), agent: "echo-coding" });
+    await sessions.append("s-coding", [{ kind: "message", message: oldMessage("coding 的旧话") }]);
+    await sessions.settle();
+
+    const running = main(["--continue", "--state-dir", stateDir, "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+      verify: async () => ({ ok: true }),
+    });
+    await waitFor(() => ui.screen().includes("[会话] 续 s-mine"), "续上的口信");
+    expect(ui.screen()).toContain("带着上一场的 1 条");
+    expect(ui.screen()).not.toContain("s-coding");
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("缺省不续：同一目录再起一次是新的一段（盘上多出一段，旧的原样）", async () => {
+  const restore = isolate();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    const stateDir = join(dir, "state");
+    const sessions = new SessionService(new FileDir(stateDir));
+    await sessions.createOrResume("s-old", { workspace: process.cwd(), agent: "echo-agent" });
+    await sessions.append("s-old", [{ kind: "message", message: oldMessage("上一场") }]);
+    await sessions.settle();
+
+    const ui = fakeTui();
+    const running = main(["--state-dir", stateDir, "--no-memory", "--extensions", dir], true, { ui, credentials, verify: async () => ({ ok: true }) });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
+    expect(ui.screen()).not.toContain("[会话] 续"); // 新的一段，没什么可说的
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+
+    const after = await new SessionService(new FileDir(stateDir)).list();
+    expect(after.map((s) => s.id)).toContain("s-old");
+    expect(after.length).toBe(2);
+    const fresh = after.find((s) => s.id !== "s-old")!;
+    expect([fresh.workspace, fresh.agent, fresh.messageCount]).toEqual([process.cwd(), "echo-agent", 0]);
+  } finally {
+    restore();
+  }
+});
+
+test("--resume 点名不存在的会话 / --continue 没有可续的 → 退出码 1，且不建任何状态（不静默新建）", async () => {
+  const restore = isolate();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    const stateDir = join(dir, "state");
+    const base = ["--state-dir", stateDir, "--no-memory", "--extensions", dir];
+    expect(await main(["--resume", "s-nope", ...base], false, { credentials })).toBe(1);
+    expect(await main(["--continue", ...base], false, { credentials })).toBe(1);
+    expect(existsSync(join(stateDir, "sessions")), "续不到却建了状态").toBe(false);
   } finally {
     restore();
   }

@@ -53,7 +53,15 @@ export type CreateAgentOptions = {
 
   /** agent 身份（D5，缺省 `"default"`）。 */
   agentId?: string;
-  /** 会话身份（D5）。不给 = `start()` 时按 workspace 派生（`defaultSessionId`），一个项目一段连续对话。 */
+  /**
+   * 会话归属名（2026-09-01：会话身份 = workspace + agent）。写进新建会话的 `SessionInfo.agent`，
+   * 产品各给各的名字（`echo-agent` / `echo-coding`），同一目录里就各有各的对话。缺省 = `agentId`。
+   */
+  agentName?: string;
+  /**
+   * 会话身份（D5）。**不给 = `start()` 时新建一段**（2026-09-01 用户拍板：续上次是显式动作）；
+   * 给了 = create-or-resume 那一段。产品的 `--continue` / `--resume` 用 `SessionService.list()` 挑出 id 后给这里。
+   */
   sessionId?: string;
   /**
    * 工作目录（session 级事实，2026-09-01）：新建 session 时写进 `SessionInfo.workspace`，resume 以盘上为准。
@@ -285,7 +293,8 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       ...(parts.memory !== undefined ? { memory: parts.memory } : {}),
       streamFunction: opts.agent?.streamFunction ?? ((m, ctx, o) => models.stream(m, ctx, o)),
       agentId,
-      // 不给 sessionId 就不填：`start()` 会按 workspace 派生（`defaultSessionId`），这里不该抢先定一个
+      ...(opts.agentName !== undefined ? { agentName: opts.agentName } : {}),
+      // 不给 sessionId 就不填：`start()` 会新建一段（`newSessionId`），这里不该抢先定一个
       ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
       ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),
       sessionService: parts.sessionService,

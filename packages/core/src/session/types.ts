@@ -44,28 +44,32 @@ export type SessionInfo = {
    * **必填**：没有它的 meta 是坏档，resume 判红（pre-release，不留可选兼容）。
    */
   readonly workspace: string;
+  /**
+   * 归哪个 agent（产品）：会话身份的第二维（2026-09-01 用户拍板）。`echo-agent` 与 `echo-coding`
+   * 在同一目录里各有各的对话，靠的就是这个字段——只按 workspace 分的话，谁先起谁定义那段对话，
+   * 后来的产品只能续（实测：coding 续了通用 agent「我没有文件工具」的结论）。
+   * 由宿主给（`AgentOptions.agentName`，缺省与 `agentId` 相同）；resume 时以盘上为准。
+   * **必填**：没有它的 meta 是坏档，resume 判红（pre-release，不留可选兼容）。
+   */
+  readonly agent: string;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly messageCount: number;
 };
 
 /**
- * 缺省 session id **按 workspace 派生**（2026-09-01 拍定）：状态根是用户级的（`~/.echo`），
- * 若缺省恒为 `main`，在仓库 A 开的对话换到仓库 B 启动会被 resume——workspace 是 A、人在 B。
- * 派生之后一个项目一段连续对话，用户级记忆仍共享；显式 sessionId 仍然赢。
- * FNV-1a 64 位只做命名空间，不做安全：纯 JS、同步、零依赖。
+ * 新会话的 id（2026-09-01 用户拍板：**缺省每次启动新建会话**，续上次是显式动作）。
+ *
+ * 之前缺省按 workspace 派生（`main-<hash>`）、启动即 create-or-resume——于是同一目录里起的任何
+ * 产品都落进同一段对话，而且壳一个字不显示，用户以为是全新开始、模型脑子里却带着上一场的结论。
+ * 现在一次启动一段：时间戳保证按名排序即按时间排序，随机尾巴防同一毫秒撞名。
+ * 形状受 `assertSafeSessionId` 约束（字母数字与 `-`，字母开头）。
  */
-export function defaultSessionId(workspace: string): string {
-  return `main-${fnv1a64hex(workspace).slice(0, 12)}`;
-}
-
-function fnv1a64hex(input: string): string {
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of new TextEncoder().encode(input)) {
-    hash ^= BigInt(byte);
-    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
-  }
-  return hash.toString(16).padStart(16, "0");
+export function newSessionId(now: number = Date.now()): string {
+  const rand = Math.floor(Math.random() * 36 ** 4)
+    .toString(36)
+    .padStart(4, "0");
+  return `s-${now.toString(36)}-${rand}`;
 }
 
 export type SessionData = {
@@ -75,7 +79,7 @@ export type SessionData = {
 };
 
 export interface SessionManager {
-  create(opts?: { name?: string; workspace?: string }): Promise<SessionInfo>;
+  create(opts?: { name?: string; workspace?: string; agent?: string }): Promise<SessionInfo>;
   /** 坏档 **fail-loud**，不给半截 session。 */
   load(id: string): Promise<SessionData>;
   /** 轻量清单，不读全量 entries。 */
@@ -92,13 +96,14 @@ export class InMemorySessionManager implements SessionManager {
   private readonly sessions = new Map<string, { info: SessionInfo; entries: SessionEntry[] }>();
   private seq = 0;
 
-  async create(opts?: { name?: string; workspace?: string }): Promise<SessionInfo> {
+  async create(opts?: { name?: string; workspace?: string; agent?: string }): Promise<SessionInfo> {
     const id = `s${++this.seq}`;
     const now = Date.now();
     const info: SessionInfo = {
       id,
       name: opts?.name ?? id,
       workspace: opts?.workspace ?? "/",
+      agent: opts?.agent ?? "default",
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
