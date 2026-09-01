@@ -174,8 +174,8 @@ export { agentEventTapFor } from "./observability/agent-events.ts";
 
 /* ───────────── 落盘：node-only 的 first-party 默认件 ───────────── */
 
-/** 真盘的 `StorageDir` 实现（`node:fs` / `node:os` / `node:path`）。 */
-export { FileDir, echoHome } from "./storage/file-dir.ts";
+/** 真盘的 `StorageDir` 实现（`node:fs` / `node:os` / `node:path`）。`expandHome` 是 `ECHO_HOME=~/x` 的展开——凭据与设置文件共用同一条根解析规则。 */
+export { FileDir, echoHome, expandHome } from "./storage/file-dir.ts";
 
 /**
  * 落盘的 `CredentialStore`：`$ECHO_HOME/credentials.json`（0600，跨 agent 共享）。

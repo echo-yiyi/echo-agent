@@ -240,6 +240,38 @@ test("stop() 真的 unmount 了 Extension，而且发生在 Agent 收摊之前",
   await echo.stop(); // 幂等
 });
 
+test("providers 多注册（P3b-a）：换到另一家的模型，请求真的派发到那一家", async () => {
+  // 判据不是「setModel 返回 accepted」——是**另一家的脚本被消费**：B 家应答的正文出现在会话里。
+  const b = createProvider({
+    id: "scripted-b",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "b-only",
+    models: [{ id: "b-only", api: "fake" }],
+    api: createProviderStreams(scriptedDialect([textTurn("我是 B 家")])),
+  });
+  const echo = await createEcho({
+    provider: scripted([textTurn("我是 A 家")]),
+    providers: [b],
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    extensionDirs: [],
+  });
+  try {
+    await echo.agent.start();
+    echo.agent.model = { id: "b-only", api: "fake", provider: "scripted-b" }; // 装备 setter（P3a 协议底下同一条路）
+    const result = await echo.agent.prompt("你是谁");
+    expect(result.outcome.kind).toBe("completed");
+    const texts = echo.agent.messages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((c): c is { type: "text"; text: string } => (c as { type?: string }).type === "text")
+      .map((c) => c.text);
+    expect(texts.join("")).toContain("我是 B 家");
+  } finally {
+    await echo.stop();
+  }
+});
+
 test("盘上的坏扩展**不阻塞启动**：跳过 + 诊断带路径，好的照装，agent 起得来（D6）", async () => {
   const root = await tmp();
   const dir = join(root, "extensions");

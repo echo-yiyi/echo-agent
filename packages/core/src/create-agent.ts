@@ -41,6 +41,12 @@ export type CreateAgentOptions = {
   /** 模型来源。**必需**——没有 provider 就没有可解析的目录。 */
   provider: Provider;
   /**
+   * 额外注册进 `Models` 的 provider（P3b-a，2026-09-01）：请求派发与 `setModel` 的可选目标。
+   * **初始模型仍从 `provider` 解析**（D17 不变）；这些家的凭据照旧每轮现读，
+   * 没配 key 时切过去的第一句是诚实的 `auth` 错误（壳子会接住并弹配置段）。
+   */
+  providers?: readonly Provider[];
+  /**
    * 用哪个模型（`Model["id"]`）。可省，解析顺序见 `resolveModel`。
    * 省了而 provider 又没声明 `defaultModelId`、目录里还不止一个 → **fail-loud**。
    */
@@ -195,6 +201,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
 
   const models = new Models(opts.credentials);
   models.setProvider(opts.provider);
+  for (const p of opts.providers ?? []) models.setProvider(p);
   await models.refresh({ allowNetwork: opts.allowNetwork ?? true });
   // **装配不看凭据**（2026-09-01 用户拍板：配置是运行态，不是启动前置）。
   //

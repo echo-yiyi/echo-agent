@@ -8,7 +8,7 @@
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
 import { readFileSync } from "node:fs";
-import { errText, type AgentState, type CredentialStore, type Provider, type ThinkingLevel } from "@echo-agent/core";
+import { errText, type AgentState, type CredentialStore, type Model, type Provider, type ThinkingLevel } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
 import { decodeKittyPrintable, Editor, isKeyRelease, ProcessTerminal, SelectList, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
@@ -49,11 +49,14 @@ export type TuiAppOptions = Readonly<{
 }>;
 
 export type TuiConfigureOptions = Readonly<{
-  /** 这次装配的那家。界面里只能给它配 key；换家是 `--provider` 或 P3 `/model` 的事。 */
-  provider: Provider;
+  /**
+   * 全部可选的家（P3b-a：Ctrl+L 跨家换模）。「当前家」按 `state.model.provider` 现查——
+   * 换过之后凭据段、验证、目录全都自动跟着当前家走，壳子不记第二份。
+   */
+  providers: readonly { name: string; provider: Provider }[];
   credentials: CredentialStore;
-  /** 别家的 `--provider` 短名，只用来提示「换一家怎么换」。 */
-  alternatives?: readonly string[];
+  /** 换模成功后的回调（D7：cli 拿去写 settings.json，重启还能用）。传的是 provider **id** + 模型 id。 */
+  onModelChange?: (model: { provider: string; id: string }) => void;
   /** 注入用：测试给假的验证。 */
   verify?: VerifyFn;
 }>;
@@ -214,6 +217,10 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
    *   · 跑着的时候端点报 `auth`（key 被撤了 / 过期了）——`agent_end` 那支再摆一次。
    * `setup !== null` 就是「正在配」；那时 Ctrl+D 空时退出 / Ctrl+C 清空照旧由本文件分发。
    */
+  /** 当前家 = `state.model.provider` 对应的那一项。换模之后它自动换，凭据段与目录都跟着走。 */
+  const currentChoice = (): { name: string; provider: Provider } | undefined =>
+    configure?.providers.find((c) => c.provider.id === agent.state.model.provider);
+
   let setup: CredentialSetup | null = null;
   /**
    * 摆出配置段。`reason` 只在**有新信息**时给（比如「这把 key 被端点拒了」）——
@@ -222,10 +229,12 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
    */
   const enterConfigure = (reason?: string): void => {
     if (configure === undefined || setup !== null) return;
+    const choice = currentChoice();
+    if (choice === undefined) return; // 当前模型的家不在清单里（低层用法）：没有目录可配
     setup = new CredentialSetup({
-      provider: configure.provider,
+      provider: choice.provider,
       credentials: configure.credentials,
-      ...(configure.alternatives !== undefined ? { alternatives: configure.alternatives } : {}),
+      alternatives: configure.providers.filter((c) => c !== choice).map((c) => c.name),
       ...(configure.verify !== undefined ? { verify: configure.verify } : {}),
       ...(signal !== undefined ? { signal } : {}),
       onConfigured: () => {
@@ -253,9 +262,20 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
    * 选中走协议 `setModel()`：仅 idle 可换、下一轮生效；忙时 rejected，把原因显示出来。
    */
   let modelPicker: SelectList | null = null;
+  /** 选择器里的行：模型 + 它的家 + 那家配没配 key（未配的标出来，选了会主动弹配置段）。 */
+  let pickerEntries: readonly { model: Model; configured: boolean }[] = [];
+  /**
+   * 防重入 token：构建是异步的（逐家问 `isConfigured`），期间再按 Ctrl+L 语义是「收起」——
+   * token 一变，在飞的那次构建作废。不带这个的话快速连按两次会撞出两个构建、最后停在打开态（实测）。
+   */
+  let pickerToken = 0;
+  /** 构建进行中。没有它的话「构建中再按一次」会开出第二个构建——第一次的 token 作废了，第二次的却是新 token，照样打开（实测）。 */
+  let pickerOpening = false;
   const openModelPicker = (): void => {
-    if (modelPicker !== null) {
-      modelPicker = null; // Ctrl+L 再按一次 = 收起
+    pickerToken += 1;
+    if (modelPicker !== null || pickerOpening) {
+      modelPicker = null; // Ctrl+L 再按一次 = 收起；构建中再按同理（token 已变，在飞构建作废）
+      pickerOpening = false;
       rerender();
       return;
     }
@@ -264,35 +284,51 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       rerender();
       return;
     }
-    const models = configure.provider.getModels();
-    const current = agent.state.model.id;
+    pickerOpening = true;
+    void buildModelPicker(configure, pickerToken);
+  };
+  const buildModelPicker = async (conf: NonNullable<typeof configure>, token: number): Promise<void> => {
+    // 跨家平铺（P3b-a）：每家问一次配没配 key（`isConfigured`，与请求路径同一判据），未配的标出来
+    const entries: { model: Model; configured: boolean }[] = [];
+    for (const c of conf.providers) {
+      const configured = await isConfigured(c.provider, conf.credentials);
+      for (const m of c.provider.getModels()) entries.push({ model: m, configured });
+    }
+    const current = agent.state.model;
     const picker = new SelectList(
-      models.map((m, i) => ({
-        value: m.id,
-        label: `${i + 1}. ${m.name ?? m.id}${m.id === current ? " ✓" : ""}`,
-        description: describeModel(m),
+      entries.map((e, i) => ({
+        value: String(i),
+        label: `${i + 1}. ${e.model.name ?? e.model.id}${e.model.id === current.id && e.model.provider === current.provider ? " ✓" : ""}`,
+        description: `${e.configured ? "" : "未配 key · "}${e.model.provider} · ${describeModel(e.model)}`,
       })),
-      10,
+      12,
       SELECT_LIST_THEME,
     );
-    picker.setSelectedIndex(Math.max(0, models.findIndex((m) => m.id === current)));
-    picker.onSelect = (item): void => {
-      const model = models.find((m) => m.id === item.value)!;
-      modelPicker = null;
-      void agent.setModel(model).then((result) => {
-        transcript.push({
-          kind: "notice",
-          text: result.kind === "accepted" ? `[模型] 已换到 ${model.id}（下一轮生效）` : `[模型] 没换成：${result.reason}`,
-        });
-        rerender();
-      });
-      rerender();
-    };
+    picker.setSelectedIndex(Math.max(0, entries.findIndex((e) => e.model.id === current.id && e.model.provider === current.provider)));
+    picker.onSelect = (item): void => pickModel(entries[Number(item.value)]!);
     picker.onCancel = (): void => {
       modelPicker = null;
       rerender();
     };
+    if (token !== pickerToken) return; // 构建期间被收起 / 又开了一次：这份作废
+    pickerOpening = false;
+    pickerEntries = entries;
     modelPicker = picker;
+    rerender();
+  };
+  const pickModel = (e: { model: Model; configured: boolean }): void => {
+    modelPicker = null;
+    void agent.setModel(e.model).then((result) => {
+      if (result.kind === "accepted") {
+        transcript.push({ kind: "notice", text: `[模型] 已换到 ${e.model.id}（${e.model.provider}，下一轮生效）` });
+        configure?.onModelChange?.({ provider: e.model.provider, id: e.model.id }); // D7：重启还能用
+        // 换到还没配 key 的家：**主动**把配置段摆出来，不等第一句 prompt 撞 auth
+        if (!e.configured) enterConfigure();
+      } else {
+        transcript.push({ kind: "notice", text: `[模型] 没换成：${result.reason}` });
+      }
+      rerender();
+    });
     rerender();
   };
 
@@ -540,13 +576,11 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       }
       if (modelPicker !== null) {
         // 数字直选（Kitty 下可打印字符走 CSI-u，选择器内部照样认 ↑↓/回车/Esc）
-        const models = configure?.provider.getModels() ?? [];
         const printable = decodeKittyPrintable(data) ?? data;
         if (/^[1-9]$/.test(printable)) {
           const i = Number(printable) - 1;
-          if (i < models.length) {
-            modelPicker.setSelectedIndex(i);
-            modelPicker.handleInput("\r"); // 走它自己的 confirm 路径，onSelect 收口
+          if (i < pickerEntries.length) {
+            pickModel(pickerEntries[i]!);
             return;
           }
         }
@@ -616,9 +650,10 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   // 启动时问一次「配好了没」。**读不了凭据文件也不挡着**（文件坏了、权限不对）：如实说一句，
   // 当成没配——用户在界面里重配时写盘会再撞一次并报出来，那是修文件的事，不是挡启动的理由。
   let needsConfigure = false;
-  if (configure !== undefined) {
+  const startupChoice = currentChoice();
+  if (configure !== undefined && startupChoice !== undefined) {
     try {
-      needsConfigure = !(await isConfigured(configure.provider, configure.credentials));
+      needsConfigure = !(await isConfigured(startupChoice.provider, configure.credentials));
     } catch (e) {
       transcript.push({ kind: "notice", text: `[凭据] 读不了凭据文件：${errText(e)}` });
       needsConfigure = true;
