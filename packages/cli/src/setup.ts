@@ -19,13 +19,34 @@
 // 所以这里打的是真实的等价物：`GET {baseUrl}/models` 带 Bearer。那是 OpenAI 兼容端点的
 // 标准接口，坏 key 回 401/403，而且只读、便宜。`fetchFn` 可注入，测试一行都不碰网。
 //
+// ## 按键一律走 `matchesKey()`，**不许手写字节比较**
+//
+// 同一个按键在不同终端下有多种字节形式，手写 `data === "\x1b[B"` 只认得其中一种：
+//   · 「下」既可能是 `ESC[B`，也可能是应用光标键模式的 `ESC O B`（`keys.ts` 里两条都列着）；
+//   · Ctrl+C 在传统终端是字节 `0x03`，但 pi-tui 会**探测并启用 Kitty 键盘协议**
+//     （`ProcessTerminal` 的 `queryAndEnableKittyProtocol()`），那之后它变成 `ESC[99;5u`。
+// 于是「方向键不动、Ctrl+C 退不出去」——2026-08-31 用户在真终端上撞到的就是这个。
+// 假 TUI 测不出来：它的 `feed()` 直接把字符串交给 `handleInput`，绕过了终端的编码这一层。
+// 判据落在 `setup-pty.test.ts`（真 PTY，把这几种编码逐个送进去）。
+//
+// Kitty 协议还会为同一次按键补发一条 **release**，所以每个入口都要先 `isKeyRelease()` 滤掉，
+// 否则按一下等于按两下。
+//
 // ## key 不回显、也不进任何字符串
 //
 // 输入期只画掩码；`Input` 的 `render()` **一次都不能调**（它会把明文画出来）。
 // 验证失败的原因、写盘失败的报错里也一律没有 key——它只出现在 Authorization 头里。
 
 import { errText, type CredentialStore, type Provider } from "@echo-agent/core";
-import { Input, ProcessTerminal, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
+import {
+  decodeKittyPrintable,
+  Input,
+  isKeyRelease,
+  matchesKey,
+  ProcessTerminal,
+  TuiMainScreen,
+  type TUI,
+} from "@earendil-works/pi-tui";
 
 const ESC = String.fromCharCode(27);
 const DIM = `${ESC}[2m`;
@@ -33,8 +54,6 @@ const UNDIM = `${ESC}[22m`;
 const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
 const DEFAULT_COLOR = `${ESC}[39m`;
-const CTRL_C = String.fromCharCode(3);
-const CTRL_D = String.fromCharCode(4);
 
 /** 一个可选项。`name` 是 `--provider` 认的那个短名，摆在屏幕上好让用户对得上。 */
 export type SetupChoice = Readonly<{ name: string; provider: Provider }>;
@@ -210,19 +229,26 @@ export async function runCredentialSetup(opts: SetupOptions): Promise<SetupOutco
       return lines;
     },
     handleInput: (data: string): void => {
+      // Kitty 协议给同一次按键补发的 release：不滤掉就是按一下动两格
+      if (isKeyRelease(data)) return;
       if (stage.kind === "checking") return; // 验的时候不收键，免得把回答塞进下一个阶段
       if (stage.kind === "pick") {
-        if (data === `${ESC}[A`) {
+        if (matchesKey(data, "up")) {
           cursor = (cursor - 1 + choices.length) % choices.length;
-        } else if (data === `${ESC}[B`) {
+        } else if (matchesKey(data, "down")) {
           cursor = (cursor + 1) % choices.length;
-        } else if (data === "\r" || data === "\n") {
+        } else if (matchesKey(data, "return") || matchesKey(data, "enter")) {
           stage = { kind: "key", choice: choices[cursor]! };
-        } else if (/^[1-9]$/.test(data)) {
-          const i = Number(data) - 1;
-          if (i < choices.length) {
-            cursor = i;
-            stage = { kind: "key", choice: choices[i]! };
+        } else {
+          // 数字直选。Kitty 协议下连普通可打印字符都走 CSI-u（`1` 是 `ESC[49u`），
+          // 所以先解码回字符再判——直接 `/^[1-9]$/.test(data)` 在那种终端上永远不成立。
+          const printable = decodeKittyPrintable(data) ?? data;
+          if (/^[1-9]$/.test(printable)) {
+            const i = Number(printable) - 1;
+            if (i < choices.length) {
+              cursor = i;
+              stage = { kind: "key", choice: choices[i]! };
+            }
           }
         }
         rerender();
@@ -239,7 +265,8 @@ export async function runCredentialSetup(opts: SetupOptions): Promise<SetupOutco
   // Ctrl+C / Ctrl+D：退出。走 `addInputListener` 并 `consume`，与主界面同一条路——
   // 不这么做的话按键会落进 `Input` 缓冲区，变成 key 的一部分。
   const removeListener = ui.addInputListener((data) => {
-    if (data.includes(CTRL_C) || data.includes(CTRL_D)) {
+    if (isKeyRelease(data)) return undefined;
+    if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) {
       secret.setValue("");
       finish({ kind: "cancelled" });
       return { consume: true };

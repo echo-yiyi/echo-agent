@@ -8,12 +8,15 @@
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
 import type { AgentRuntime } from "@echo-agent/core/extension";
-import { Input, ProcessTerminal, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
+import { Editor, isKeyRelease, ProcessTerminal, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { installKeybindings } from "./keybindings.ts";
+import { EDITOR_THEME } from "./theme.ts";
 
 const ESC = String.fromCharCode(27);
-const HINT = `${ESC}[2m回车发送 · Ctrl+C 退出${ESC}[22m`;
+/** 键位照 pi（`keybindings.ts`）。Ctrl+C 不再是退出——提示行必须写 Ctrl+D，否则用户按 Ctrl+C 只会看到输入被清掉。 */
+const HINT = `${ESC}[2mEnter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出${ESC}[22m`;
 
 export type TuiAppOptions = Readonly<{
   /**
@@ -65,27 +68,28 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
 
   const rerender = (): void => ui.requestRender();
 
-  // **用 pi-tui 的 `Input`，不自己写**：它已经处理了本壳子必须处理对、而手写极易写错的那些——
-  // bracketed paste（粘贴多行不能把第一行当回车提交）、grapheme 边界（emoji 退格要整个删掉，
-  // 不是删半个代理对）、kill-ring / undo、以及 `CURSOR_MARKER`（没有它就没有可靠的可见光标）。
-  // 上一版自写的 `PromptLine` 这三条全错，review 逐条实测过。
+  // **用 pi-tui 的 `Editor`，不自己写**（P0，`docs/review/tui-design.md` §二）：多行、按词移动、
+  // 撤销、kill-ring、历史、bracketed paste、grapheme 边界、`CURSOR_MARKER`——全是它本身就有的行为。
+  // 上一版用的是 `Input`（单行、无历史）；再上一版自写的 `PromptLine` 三条都错，review 逐条实测过。
   //
-  // 它不需要 `EditorTheme`——那是 `Editor` 才要的一整套主题；`Input` 是零配置的。
-  const input = new Input();
-  input.onSubmit = (text: string): void => {
+  // **键表先装、编辑器后造**：`Editor` 内部走 `getKeybindings()` 取键，装晚了它用的就是库缺省。
+  const keys = installKeybindings();
+  const editor = new Editor(ui, EDITOR_THEME, { paddingX: 1 });
+  editor.onSubmit = (text: string): void => {
     const trimmed = text.trim();
     if (trimmed === "") return;
     if (busy()) {
-      // 还没就绪 / 正在跑：**文字留在输入行里**，用户不用重打（不排队、不假装收下）。
+      // 还没就绪 / 正在跑：**文字放回输入行**，用户不用重打（不排队、不假装收下）。
+      // `Editor.submitValue()` 是**先清空再回调**（与 `Input` 相反），所以这里要主动把它放回去——
+      // 只断言「没发出去」是不够的，那样清空了也能过，用户却得重打一遍。
       // 「还没就绪」也落在 `acceptsWork` 上——未 running 时它就是 false，不需要壳子再记一个布尔。
+      editor.setText(text);
       rerender();
       return;
     }
-    // **提交成功要自己清空**：`pi-tui` 的 `Input.onSubmit` 只回调、不清空（这是它的取舍——
-    // 由调用方决定「这次算不算发出去了」）。上一版没清，于是发完一句直接再按回车会**重复发送同一句**
-    // （review 实测收到两次 `first`）。清空必须在 `submit()` **之前**：submit 是异步的，
-    // 放后面等于给用户留了一个还能再按一次回车的窗口。
-    input.setValue("");
+    // 发出去的才进历史（↑ 翻得到）；被拒的那次不进——它还留在输入行里，进了就是两份。
+    // 清空由 `Editor` 自己做完了（见上），不再需要这里 `setValue("")`；「发完直接回车不重复发」的判据仍在。
+    editor.addToHistory(trimmed);
     void submit(trimmed);
   };
 
@@ -243,16 +247,24 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     }
   };
 
-  // **root 要实现 `Focusable` 并把焦点代理给 `Input`**：pi-tui 靠组件上的 `focused` 字段决定
-  // 要不要输出 `CURSOR_MARKER`。上一版把焦点给了没有这个字段的 wrapper，于是 `Input.focused`
-  // 永远是 false、光标标记一次都没输出——硬件光标与中文 IME 候选框的定位全落空，
-  // 而「有可靠的可见光标」正是这次改用 `Input` 的理由之一（review 实测）。
+  let resolveExit: (() => void) | null = null;
+  const exited = new Promise<void>((resolve) => {
+    resolveExit = resolve;
+  });
+  const quit = (): void => {
+    resolveExit?.();
+    resolveExit = null;
+  };
+
+  // **root 要实现 `Focusable` 并把焦点代理给 `Editor`**：pi-tui 靠组件上的 `focused` 字段决定
+  // 要不要输出 `CURSOR_MARKER`。上一版把焦点给了没有这个字段的 wrapper，于是编辑器的 `focused`
+  // 永远是 false、光标标记一次都没输出——硬件光标与中文 IME 候选框的定位全落空（review 实测）。
   const root = {
     get focused(): boolean {
-      return input.focused;
+      return editor.focused;
     },
     set focused(value: boolean) {
-      input.focused = value;
+      editor.focused = value;
     },
     render: (width: number): string[] => {
       const lines = [...transcript.render(width)];
@@ -267,47 +279,52 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         }
         lines.push(`${ESC}[33m允许 ${clean(pending.toolName)}？[y/n]${ESC}[39m`);
       }
-      lines.push(...input.render(width));
+      lines.push(...editor.render(width));
       // 空闲且没打字时给一句提示；有字或在跑就不占地方
-      if (input.getValue() === "" && !busy()) lines.push(HINT);
+      if (editor.getText() === "" && !busy()) lines.push(HINT);
       return lines;
     },
+    /**
+     * 按键分发。**判定只走 `keys.matches()`，不比较字节**（`keybindings.ts` 头注说了为什么）。
+     * 顺序即优先级：
+     *   ① Kitty 协议给同一次按键补发的 release，一律丢——否则按一下等于按两下；
+     *   ② 有待答的权限问题时，`y` / `n` 先被它吃掉：那一刻用户面对的是一个是非题，不是在写下一句话。
+     *      不这么做的话按键会落进输入行，问题一直挂着——core 那边则在 `askTimeoutMs` 到点后
+     *      按策略折成 deny，用户完全不知道发生过什么；
+     *   ③ 应用级三个键（照 pi）：Ctrl+D **空时**退出 / Ctrl+C 清空 / Esc 中断在飞的那一轮；
+     *   ④ 其余全给编辑器——包括有字时的 Ctrl+D（它是向前删一个字符）和空闲时的 Esc。
+     */
     handleInput: (data: string): void => {
-      // **有待答的权限问题时，`y`/`n` 先被它吃掉**：那一刻用户面对的是一个是非题，
-      // 而不是在写下一句话。不这么做的话按键会落进输入行，问题一直挂着——
-      // core 那边则在 `askTimeoutMs` 到点后按策略折成 deny，用户完全不知道发生过什么。
+      if (isKeyRelease(data)) return;
       if (pending !== null) {
-        const key = data.toLowerCase();
-        if (key === "y") return answer("allow");
-        if (key === "n") return answer("deny");
+        if (keys.matches(data, "app.permission.allow")) return answer("allow");
+        if (keys.matches(data, "app.permission.deny")) return answer("deny");
       }
-      input.handleInput(data);
+      if (keys.matches(data, "app.exit") && editor.getText() === "") {
+        // 在飞的那一轮先 abort，让 stop() 不用等模型说完
+        if (busy()) agent.abort("用户中断");
+        quit();
+        return;
+      }
+      if (keys.matches(data, "app.clear")) {
+        editor.setText("");
+        rerender();
+        return;
+      }
+      if (keys.matches(data, "app.interrupt") && busy()) {
+        agent.abort("用户中断");
+        rerender();
+        return;
+      }
+      editor.handleInput(data);
       rerender();
     },
     invalidate: (): void => {
       transcript.invalidate();
-      input.invalidate();
+      editor.invalidate();
     },
   };
 
-  let resolveExit: (() => void) | null = null;
-  const exited = new Promise<void>((resolve) => {
-    resolveExit = resolve;
-  });
-  const quit = (): void => {
-    resolveExit?.();
-    resolveExit = null;
-  };
-
-  // Ctrl+C / Ctrl+D 退出：在飞的那一轮先 abort，让 stop() 不用等模型说完
-  const removeListener = ui.addInputListener((data) => {
-    if (data.includes(String.fromCharCode(3)) || data.includes(String.fromCharCode(4))) {
-      if (busy()) agent.abort("用户中断");
-      quit();
-      return { consume: true };
-    }
-    return undefined;
-  });
   const onAbort = (): void => {
     if (busy()) agent.abort("收到停止信号");
     quit();
@@ -332,7 +349,6 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     }
   } finally {
     signal?.removeEventListener("abort", onAbort);
-    removeListener();
     unsubscribeLifecycle();
     unsubscribe();
     ui.stop();

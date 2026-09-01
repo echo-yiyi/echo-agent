@@ -458,7 +458,7 @@ test("main:交互 + 缺凭据 → **不退出**，进配置流程；配完直接
     // 而且真的落盘了，下次启动就不会再问
     expect(JSON.parse(readFileSync(join(dir, "credentials.json"), "utf8"))).toEqual({ kimi: { apiKey: "sk-GOOD" } });
 
-    ui.feed(String.fromCharCode(3)); // Ctrl+C 退出
+    ui.feed(String.fromCharCode(4)); // Ctrl+D 退出（P0 起键位照 pi：Ctrl+C 是清空输入行）
     expect(await running).toBe(0);
   } finally {
     restore();

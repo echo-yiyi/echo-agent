@@ -24,6 +24,15 @@ async function flush(turns = 50): Promise<void> {
   for (let i = 0; i < turns; i++) await Promise.resolve();
 }
 
+/**
+ * 退出：先 Ctrl+C 清空输入行，再 Ctrl+D。**键位照 pi 之后**（P0）Ctrl+C 是清空、Ctrl+D 才是退出，
+ * 而且 Ctrl+D 只在输入行为**空**时退出——有字时它是向前删一个字符。所以两下都要按。
+ */
+function quit(ui: ReturnType<typeof fakeTui>): void {
+  ui.feed(String.fromCharCode(3));
+  ui.feed(String.fromCharCode(4));
+}
+
 function agentWith(turns: ReturnType<typeof textTurn>[]): Agent {
   return new Agent({
     model: { provider: "t", id: "only", api: "scripted" },
@@ -149,7 +158,7 @@ test("emoji 退格删掉整个字符，不是半个代理对（上一版：删�
   ui.feed(String.fromCharCode(127)); // Backspace
   expect(ui.screen()).toContain("a");
   expect(ui.screen()).not.toContain("😀");
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -164,7 +173,7 @@ test("bracketed paste 的多行内容不许被当成回车提交（上一版：�
   expect(screen).toContain("foo"); // 还在输入行里
   expect(screen).toContain("bar");
   expect(screen).not.toContain("› foo"); // 没有变成已提交的用户行
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -184,13 +193,13 @@ test("跑着的时候提交被拒，且**文字放回输入行**——不排队�
   // **而且文字要还在输入行里**：只断言「没变成用户行」是不够的——那样把输入清空也能过，
   // 用户却得重打一遍（review 点名的判据缺口）
   expect(screen).toContain("插队的");
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
 /* ─────────────── 接线：Agent 事件 → 屏幕 ─────────────── */
 
-test("端到端：输入一句 → 屏幕上出现用户行与模型正文；Ctrl+C 退出，**但不停 Agent**", async () => {
+test("端到端：输入一句 → 屏幕上出现用户行与模型正文；Ctrl+D 退出，**但不停 Agent**", async () => {
   const ui = fakeTui();
   const agent = agentWith([textTurn("我在")]);
   const done = runTui({ agent: runtimeOf(agent), ui });
@@ -205,7 +214,7 @@ test("端到端：输入一句 → 屏幕上出现用户行与模型正文；Ctr
   expect(screen).toContain("在吗"); // 用户那行
   expect(screen).toContain("我在"); // 模型正文
 
-  ui.feed(String.fromCharCode(3)); // Ctrl+C
+  quit(ui);
   expect(await done).toBe(0);
 
   // **上一版这里断言「Agent 已 stop」。壳变 extension 之后那条不成立也不该成立**：
@@ -224,7 +233,7 @@ test("模型报错要显示出来，不静默吞掉；退出码为 1", async () 
   ui.feed("\r");
   await flush(200);
   expect(ui.screen()).toContain("[错误]");
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   expect(await done).toBe(1);
 });
 
@@ -251,7 +260,7 @@ test("工具调用在屏幕上有独立一行，跑完变成 ✓", async () => {
   await flush(400);
   expect(ui.screen()).toContain("echo_back");
   expect(ui.screen()).toContain("✓ echo_back");
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -276,7 +285,7 @@ test("传进来的 signal 已经 abort：必须立刻收摊，不能永远停在
   expect(starts).toBe(0);
 });
 
-test("发完一句之后直接回车：不许重复发送同一句（pi-tui 的 Input 不会自己清空）", async () => {
+test("发完一句之后直接回车：不许重复发送同一句（换成 `Editor` 之后它会自己清空，判据不变）", async () => {
   const ui = fakeTui();
   const agent = agentWith([textTurn("收到一"), textTurn("收到二")]);
   const prompts: string[] = [];
@@ -296,18 +305,18 @@ test("发完一句之后直接回车：不许重复发送同一句（pi-tui 的 
 
   // 上一版：输入行里还留着 "first"，这一下会把它再发一遍（review 实测收到两次）
   expect(prompts).toEqual(["first"]);
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
-test("聚焦之后渲染里要有 CURSOR_MARKER（可见光标——这正是改用 Input 的理由之一）", async () => {
+test("聚焦之后渲染里要有 CURSOR_MARKER（可见光标——这正是改用 pi-tui 编辑器的理由之一）", async () => {
   const ui = fakeTui();
   const agent = agentWith([textTurn("好")]);
   const done = runTui({ agent: runtimeOf(agent), ui });
   await flush();
   // 上一版把焦点给了没有 `focused` 字段的 wrapper，Input.focused 永远 false，标记一次都不输出
   expect(ui.screen()).toContain(CURSOR_MARKER);
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -319,7 +328,7 @@ test("壳子**不停 Agent**：协议里没有 stop，收摊归装配层（壳�
   const agent = agentWith([textTurn("好")]);
   const done = runTui({ agent: runtimeOf(agent), ui });
   await flush();
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   expect(await done).toBe(0);
 
   // 壳子退出了，但 Agent 还活着——它还接得了活
@@ -334,7 +343,7 @@ test("接上那行报模型 id（启动是装配层的事，壳子只说自己�
   await flush();
   expect(ui.screen()).toContain("已接上");
   expect(ui.screen()).toContain("only"); // FAKE 模型 id
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -382,7 +391,7 @@ test("permissionRequest 摆上屏幕并按 y 放行——不订阅 lifecycle 的
   expect(answered).toEqual([{ permissionId: "p1", decision: "allow" }]);
   expect(ui.screen()).not.toContain("[y/n]"); // 答完问题就撤掉
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -418,7 +427,7 @@ test("按 n 就是 deny；`y`/`n` 在待答期间**不落进输入行**", async 
   // 问题会一直挂着，core 那边则按 askTimeoutMs 折成 deny，用户全程不知道发生过什么
   expect(ui.screen()).not.toContain("› n");
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -444,7 +453,7 @@ test("那一轮没了（permissionCancelled）：问题从屏幕上撤掉，不�
   await flush();
   expect(ui.screen()).not.toContain("[y/n]");
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -592,7 +601,7 @@ test("装配层还没把 Agent 起起来（acceptsWork=false）就提交：不�
   await flush(200);
   expect(prompts).toEqual(["等不及了"]); // 起来了就发得出去
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -624,7 +633,7 @@ test("自主 run（Inbox / Schedule）跑着的时候提交：同样不发出、
   emit({ type: "agent_end", outcome: { kind: "completed" } });
   setCoreAccepts(agent, true); // core 真正收完摊了（含 Inbox 的 ack 裁决）
   await flush();
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -664,7 +673,7 @@ test("`agent_end` 不等于空闲：循环收尾了但 core 还没 closeRun()，
   await flush(200);
   expect(prompts).toEqual(["抢跑的第二条"]);
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -685,7 +694,7 @@ test("自主 run 报错：屏幕要看得见，退出码要是 1", async () => {
   // 上一版：没有 prompt() 调用方接结果，`agent_end` 又没人听——屏幕上一个字都没有
   expect(ui.screen()).toContain("自主轮炸了");
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   expect(await done).toBe(1); // 失败退出码
 });
 
@@ -702,7 +711,7 @@ test("本地一轮出错只显示一次（`agent_end` 显示，`submit()` 不重
   const count = screen.split("[错误]").length - 1;
   expect(count).toBe(1); // 两边都显示的话这里是 2
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   expect(await done).toBe(1);
 });
 
@@ -737,7 +746,7 @@ test("Inbox 的 ack 窗口：core 报 `status = idle` 但还不接活，壳子�
   await flush(200);
   expect(prompts).toEqual(["ack 还没裁决就发"]);
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -776,7 +785,7 @@ test("参数里的终端控制序列不许注入——「请你确认」这一�
     });
     expect(rawControls).toEqual([]); // 参数那一行里一个真控制字符都不许有
     expect(payload).toContain("u001b"); // 而它以可见文本的样子留着——信息没被抹掉
-    ui.feed(String.fromCharCode(3));
+    quit(ui);
     await done;
   })();
 });
@@ -800,7 +809,7 @@ test("带着**已存在的 ask** 启动：壳子必须把它摆出来（`pending
   expect(screen).toContain("/etc/hosts"); // 参数同样要看得见
   expect(screen).toContain("[y/n]");
 
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
   await done;
 });
 
@@ -830,6 +839,219 @@ test("同一个 permissionId 不重复摆：补发的与订阅收到的会合并
 
   const screen = ui.screen();
   expect(screen.split("[权限] 要用 bash").length - 1).toBe(1); // 只摆一次
-  ui.feed(String.fromCharCode(3));
+  quit(ui);
+  await done;
+});
+
+/* ─────────────── 键位（P0，照 pi）：五个键各一条，外加编码这一层 ─────────────── */
+//
+// 键表在 `src/keybindings.ts`。这几条断言的是**行为**（发没发出去、退没退出、文字还在不在），
+// 不断言字节——因为同一个键有多种字节形式，下面专门有几条用 Kitty 编码再走一遍。
+
+const ENTER = "\r";
+const ESC_KEY = String.fromCharCode(27);
+const SHIFT_ENTER = `${ESC_KEY}[13;2u`; // Kitty 编码。传统终端里 Shift+Enter 与 Enter 不可区分，pi-tui 也只认这一种
+const CTRL_C = String.fromCharCode(3);
+const CTRL_D = String.fromCharCode(4);
+const CTRL_MINUS = String.fromCharCode(0x1f);
+const LEFT = `${ESC_KEY}[D`;
+const UP = `${ESC_KEY}[A`;
+
+/** 记下真正发出去的 prompt。走的是 `Agent.prompt` 本身，只是包一层。 */
+function capturePrompts(agent: Agent): string[] {
+  const prompts: string[] = [];
+  const realPrompt = agent.prompt.bind(agent);
+  agent.prompt = ((text: string, ...rest: never[]) => {
+    prompts.push(text);
+    return realPrompt(text, ...rest);
+  }) as Agent["prompt"];
+  return prompts;
+}
+
+/** 「还在跑」的判据：`runTui()` 在这段时间内没有结算。 */
+async function stillRunning(done: Promise<number>, ms = 50): Promise<boolean> {
+  const r = await Promise.race([done.then(() => "exited"), new Promise((r) => setTimeout(() => r("running"), ms))]);
+  return r === "running";
+}
+
+test("Enter 提交；Shift+Enter 换行——多行草稿整段发出去", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const prompts = capturePrompts(agent);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  ui.feed("第一行");
+  ui.feed(SHIFT_ENTER);
+  ui.feed("第二行");
+  expect(prompts, "Shift+Enter 把草稿发出去了——它该是换行").toEqual([]);
+  ui.feed(ENTER);
+  await flush(200);
+
+  expect(prompts).toEqual(["第一行\n第二行"]);
+  quit(ui);
+  await done;
+});
+
+test("Ctrl+C 清空输入行，**不退出**", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  ui.feed("打了一半");
+  expect(ui.screen()).toContain("打了一半");
+  ui.feed(CTRL_C);
+
+  expect(ui.screen(), "Ctrl+C 没清掉输入行").not.toContain("打了一半");
+  expect(await stillRunning(done), "Ctrl+C 把界面退了——照 pi 它是清空，退出归 Ctrl+D").toBe(true);
+  ui.feed(CTRL_D);
+  expect(await done).toBe(0);
+});
+
+test("Ctrl+D：输入行为空时退出；有字时是向前删一个字符，不退出", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  ui.feed("ab");
+  ui.feed(LEFT); // 光标挪到 b 前面
+  ui.feed(CTRL_D); // 有字：删掉光标后面那个 b
+  expect(ui.screen()).toContain("a");
+  expect(ui.screen(), "有字时 Ctrl+D 没有向前删").not.toContain("ab");
+  expect(await stillRunning(done), "有字时 Ctrl+D 把界面退了").toBe(true);
+
+  ui.feed(CTRL_C); // 清空
+  ui.feed(CTRL_D); // 空了：退出
+  expect(await done).toBe(0);
+});
+
+test("Esc 中断在飞的那一轮（走协议的 `abort`）；空闲时按 Esc 什么都不发生", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const aborts: (string | undefined)[] = [];
+  const done = runTui({ agent: runtimeOf(agent, { abort: (r) => aborts.push(r) }), ui });
+  await flush();
+
+  ui.feed(ESC_KEY); // 空闲：不该 abort
+  await flush();
+  expect(aborts).toEqual([]);
+
+  ui.feed("跑一轮");
+  ui.feed(ENTER); // 发出去的那一拍就算「在飞」（pendingLocal），不用等模型回话
+  ui.feed(ESC_KEY);
+  expect(aborts).toEqual(["用户中断"]);
+
+  await flush(200);
+  quit(ui);
+  await done;
+});
+
+test("↑ 翻出上一条输入（单行草稿），再按回车就是重发那一句", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("一"), textTurn("二")]);
+  const prompts = capturePrompts(agent);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  ui.feed("first");
+  ui.feed(ENTER);
+  await flush(300);
+  ui.feed(UP); // 空输入行 + 首行 → 翻历史
+  ui.feed(ENTER);
+  await flush(300);
+
+  expect(prompts).toEqual(["first", "first"]);
+  quit(ui);
+  await done;
+});
+
+test("被拒的那次提交不进历史：↑ 翻出来的是发出去的那句，不是被拒的", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("一"), textTurn("二")]);
+  const prompts = capturePrompts(agent);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  ui.feed("发出去的");
+  ui.feed(ENTER);
+  ui.feed("被拒的");
+  ui.feed(ENTER); // 上一条还在跑 → 被拒，文字放回输入行
+  await flush(300);
+  ui.feed(CTRL_C); // 清掉被拒的那句
+  ui.feed(UP);
+  ui.feed(ENTER);
+  await flush(300);
+
+  expect(prompts).toEqual(["发出去的", "发出去的"]);
+  quit(ui);
+  await done;
+});
+
+test("Ctrl+- 撤销", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  ui.feed("abc");
+  expect(ui.screen()).toContain("abc");
+  ui.feed(CTRL_MINUS);
+  expect(ui.screen(), "撤销没生效").not.toContain("abc");
+
+  quit(ui);
+  await done;
+});
+
+/* ─────────────── 同一个键的另一种字节形式：Kitty 键盘协议 ─────────────── */
+//
+// pi-tui 探测到终端支持就会启用它（`dist/terminal.js:120`），之后**所有**按键都换编码：
+// Ctrl+D 是 `ESC[100;5u` 不是 `0x04`，`y` 是 `ESC[121u`，而且每次按键还补发一条 release。
+// 上一版手写 `data.includes(String.fromCharCode(3))` 就是在这种终端上退不出去的。
+
+const KITTY = {
+  ctrlD: `${ESC_KEY}[100;5u`,
+  ctrlDRelease: `${ESC_KEY}[100;5:3u`,
+  y: `${ESC_KEY}[121u`,
+  yRelease: `${ESC_KEY}[121:3u`,
+};
+
+test("Kitty 编码的 Ctrl+D 也能退出", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed(KITTY.ctrlD);
+  expect(await done).toBe(0);
+});
+
+test("Kitty 的按键 release 不算一次按键：release 的 Ctrl+D 不退出，release 的 y 不答题", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const answered: string[] = [];
+  const runtime = runtimeOf(agent, {
+    answerPermission: async (a) => {
+      answered.push(a.decision);
+      return { kind: "accepted" as const, permissionId: a.permissionId, runId: "r", toolCallId: "c", decision: a.decision };
+    },
+  });
+  const done = runTui({ agent: runtime, ui });
+  await flush();
+
+  ui.feed(KITTY.ctrlDRelease);
+  expect(await stillRunning(done), "release 事件被当成按下，退出了").toBe(true);
+
+  emitLifecycle(agent, { type: "permissionRequest", permissionId: "p", runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params: {}, reason: "" });
+  await flush();
+  ui.feed(KITTY.yRelease);
+  await flush();
+  expect(answered, "release 事件被当成按下，替用户答了题").toEqual([]);
+
+  ui.feed(KITTY.y); // 真正的按下
+  await flush();
+  expect(answered).toEqual(["allow"]);
+
+  ui.feed(KITTY.ctrlD);
   await done;
 });

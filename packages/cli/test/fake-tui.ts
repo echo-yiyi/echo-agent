@@ -15,7 +15,10 @@ export function fakeTui(): TUI & { screen: () => string; feed: (data: string) =>
   const ui = {
     mode: "main" as never,
     children: [] as never[],
-    terminal: {} as never,
+    // **要给 `rows` / `columns`**：pi-tui 的 `Editor.render()` 按 `terminal.rows * 0.3` 算可见行数
+    // （`dist/components/editor.js:386-387`）。空对象 → `NaN` → 一行正文都不画，屏幕上只剩两条边框
+    // （写 P0 时当场撞到）。数值随便，但得是数。
+    terminal: { rows: 24, columns: 80 } as never,
     fullRedraws: 0,
     addChild: (c: never) => {
       root = c as unknown as typeof root;
