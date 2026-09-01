@@ -139,7 +139,7 @@ async function runOneTool(
   }
   if (!isModelVisible(tool)) {
     // 存在但不是模型可调的（InternalTool 不上模型菜单，模型不该点它的名）
-    const reason = `工具 '${use.name}' 不对模型开放`;
+    const reason = `Tool '${use.name}' is not available to the model`;
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "not_found", message: reason });
     return toolResultMessage(use.id, use.name, reason, true);
   }
@@ -153,7 +153,7 @@ async function runOneTool(
   try {
     params = deepFreezePlain(prepare(tool, use.input));
   } catch (e) {
-    const message = `参数不可用：${errText(e)}`;
+    const message = `Invalid arguments: ${errText(e)}`;
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "bad_params", message });
     return toolResultMessage(use.id, use.name, message, true);
   }
@@ -164,7 +164,7 @@ async function runOneTool(
     config.hookContext,
   );
   if (pre.decision === "block") {
-    const reason = pre.reason ?? "被 hook 拦下";
+    const reason = pre.reason ?? "Blocked by a hook";
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "hook", reason });
     return toolResultMessage(use.id, use.name, reason, true);
   }
@@ -172,7 +172,7 @@ async function runOneTool(
     try {
       params = deepFreezePlain(prepare(tool, pre.event.params));
     } catch (e) {
-      const message = `hook 改写后的参数不可用：${errText(e)}`;
+      const message = `Arguments rewritten by a hook are invalid: ${errText(e)}`;
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "bad_params", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
@@ -193,14 +193,14 @@ async function runOneTool(
     // authorizer 也受 run signal 管：永不 resolve 的 authorize() 不能拖住 abort/超时（实测）
     const raw = await raceAbort(Promise.resolve(config.permission.authorize(authInput)), signal);
     if (raw.kind === "aborted") {
-      const message = "等待 authorization 时 run 被中止";
+      const message = "The run was aborted while waiting for authorization";
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "aborted", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
     // 循环不信任任何 PermissionStage 实现：这里再验一次形（Agent 的 stage 也验，两道都是 fail-closed）
     verdict = normalizeVerdict(raw.value);
   } catch (e) {
-    verdict = { kind: "deny", reason: `authorization 抛错（fail-closed 拦下）：${errText(e)}` }; // 抛错 = 拒，不放行
+    verdict = { kind: "deny", reason: `authorization threw (denied, fail-closed): ${errText(e)}` }; // 抛错 = 拒，不放行
   }
   if (verdict.kind === "ask") {
     // 只有真正进入 ask 才有 permissionId：先登记 ledger，再恰好发一次带同一 ID 的 permissionRequest
@@ -215,7 +215,7 @@ async function runOneTool(
     const settled = await handle.settled;
     if (settled.kind === "cancelled") {
       await notify(hooks, config, { type: "permissionCancelled", permissionId: handle.permissionId, toolCallId: use.id, reason: settled.reason });
-      const message = `等待授权时被中止（${settled.reason}）`;
+      const message = `Aborted while waiting for approval (${settled.reason})`;
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "aborted", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
@@ -256,7 +256,7 @@ async function runOneTool(
       },
     });
   } catch (e) {
-    const message = `工具 '${use.name}' 抛出：${errText(e)}`;
+    const message = `Tool '${use.name}' threw: ${errText(e)}`;
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "crashed", message });
     await emit({
       type: "tool_execution_end",
@@ -293,10 +293,10 @@ async function runOneTool(
  *     本轮开始时被禁用、中途又恢复了（下一轮起可用）。**只取原因，不取对象。**
  */
 function explainMissingTool(config: AgentLoopConfig, known: ReadonlySet<string>, name: string): string {
-  if (!known.has(name)) return `未知工具 '${name}'`;
+  if (!known.has(name)) return `Unknown tool '${name}'`;
   const r = config.resolveTool(name);
-  if (!r.ok) return r.reason === "disabled" ? r.message : `工具 '${name}' 已卸载`;
-  return `工具 '${name}' 本轮开始时不可用；下一轮起可用`;
+  if (!r.ok) return r.reason === "disabled" ? r.message : `Tool '${name}' has been unloaded`;
+  return `Tool '${name}' was unavailable when this turn started; it is available from the next turn`;
 }
 
 /**
@@ -329,7 +329,7 @@ function prepare(tool: ModelTool | McpTool, raw: unknown): Record<string, unknow
     return tool.prepareArguments(raw) as Record<string, unknown>;
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error(`期望对象参数，收到 ${Array.isArray(raw) ? "数组" : typeof raw}`);
+    throw new Error(`Expected an object argument, got ${Array.isArray(raw) ? "an array" : typeof raw}`);
   }
   return raw as Record<string, unknown>;
 }

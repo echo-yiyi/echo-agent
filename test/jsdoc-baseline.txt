@@ -101,7 +101,6 @@ src/permission/types.ts#PermissionAnswerResult
 src/permission/types.ts#PermissionAskHandle
 src/permission/types.ts#PermissionAuthorizer
 src/prompt/types.ts#PromptSection
-src/prompt/types.ts#PromptTier
 src/provider/dialect.ts#DEFAULT_RETRY_POLICY
 src/provider/dialect.ts#RetryPolicy
 src/provider/dialect.ts#createProviderStreams

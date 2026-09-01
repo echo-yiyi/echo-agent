@@ -178,9 +178,9 @@ describe("skill 目录段", () => {
       skills: [skill("a", "第一行\n第二行"), skill("hidden", "看不见", "正文", false), skill("b", "x".repeat(2000))],
     });
     const out = renderSkillCatalog(h.skills);
-    expect(out).toContain("- a:第一行 第二行"); // 换行折叠
+    expect(out).toContain("- a: 第一行 第二行"); // 换行折叠
     expect(out).not.toContain("hidden");
-    expect(out).toContain("…[截断]"); // descriptionMax=1024
+    expect(out).toContain("…[truncated]"); // descriptionMax=1024
     expect(SKILL_CATALOG_CAPS.descriptionMax).toBe(1024);
   });
 });
@@ -207,9 +207,9 @@ describe("renderSkillInjections", () => {
     const [msg] = renderSkillInjections(skills.skills, skills.active);
     expect(msg?.role).toBe("environment");
     const text = (msg as { content: { type: string; text: string }[] }).content[0]?.text ?? "";
-    expect(text).toContain("# skill · h5(扩展指令 · 起)");
-    expect(text).toContain("# skill · h5(扩展指令 · 止)");
-    expect(text).toContain("本次要求:这次做 落地页"); // 换行折叠
+    expect(text).toContain("# Skill: h5 (instructions begin)");
+    expect(text).toContain("# Skill: h5 (instructions end)");
+    expect(text).toContain("For this task: 这次做 落地页"); // 换行折叠
     expect(text).not.toContain("```"); // 围栏被中和
     expect(fenceSafe("```")).toBe("ˋˋˋ");
 
@@ -255,17 +255,17 @@ describe("Agent 接线", () => {
     // echo:agent 的环境段:变量从 AssembleContext 来,模型名是 admission 冻结的那个
     expect(sys).toContain(`# Environment\nWorkspace: /repo/x\nModel: ${FAKE_MODEL.id} (${FAKE_MODEL.provider})`);
     // echo:skills 的目录段在,且排在环境段之后(order 500 > 300)
-    expect(sys).toContain("- h5:做 H5 页");
-    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("- h5:做 H5 页"));
-    expect(JSON.stringify(seen[0]?.messages)).not.toContain("扩展指令");
+    expect(sys).toContain("- h5: 做 H5 页");
+    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("- h5: 做 H5 页"));
+    expect(JSON.stringify(seen[0]?.messages)).not.toContain("instructions begin");
     // 第 2 轮:激活生效,注入出现在消息里(投影成 user 角色)
     const lastMsg = JSON.stringify(seen[1]?.messages);
-    expect(lastMsg).toContain("扩展指令 · 起");
+    expect(lastMsg).toContain("# Skill: h5 (instructions begin)");
     expect(lastMsg).toContain("用单文件写");
     // system 逐字节不变——激活 skill 不打 system 缓存
     expect(seen[1]?.systemPrompt).toBe(sys);
     // 注入不进 transcript
-    expect(JSON.stringify(agent.messages)).not.toContain("扩展指令");
+    expect(JSON.stringify(agent.messages)).not.toContain("instructions begin");
   });
 
   test("任务清单每轮注入(§5D.7):空清单不占位、建完下一轮就可见、不打 system 缓存、不进 transcript", async () => {
@@ -278,14 +278,14 @@ describe("Agent 接线", () => {
 
     await agent.prompt("规划一下");
 
-    expect(JSON.stringify(seen[0]?.messages)).not.toContain("任务清单");
+    expect(JSON.stringify(seen[0]?.messages)).not.toContain("# Task list");
     const injected = JSON.stringify(seen[1]?.messages.at(-1));
-    expect(injected, "建完的任务没进下一轮的 context").toContain("任务清单");
+    expect(injected, "建完的任务没进下一轮的 context").toContain("# Task list");
     expect(injected).toContain("把 M6 做完");
     expect(injected, "done 的任务也被喂进去了").not.toContain("已经做完的");
     expect(seen[1]?.systemPrompt).toBe(seen[0]?.systemPrompt ?? "");
-    expect(seen[1]?.systemPrompt ?? "", "清单跑到 system 里去了").not.toContain("任务清单");
-    expect(JSON.stringify(agent.messages)).not.toContain("任务清单");
+    expect(seen[1]?.systemPrompt ?? "", "清单跑到 system 里去了").not.toContain("# Task list");
+    expect(JSON.stringify(agent.messages)).not.toContain("# Task list");
   });
 
   test("产品加段:md 导入的 identity 段经 registry 进 system 且在最前;tool pack 带的习惯段在环境段之前", async () => {

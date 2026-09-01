@@ -80,17 +80,17 @@ export function defaultDreamPrompt(memories: readonly AnyMemory[]): string {
   const regions = memories
     .filter((m) => typeof m.path === "string" && m.path !== "")
     .map((m) => {
-      const budget = "budget" in m && typeof m.budget === "number" ? `,预算 ${m.budget} 字符` : "";
-      return `- ${m.name}(${String(m.path)}${budget}):${m.instructions ?? ""}`;
+      const budget = "budget" in m && typeof m.budget === "number" ? `, budget ${m.budget} characters` : "";
+      return `- ${m.name} (${String(m.path)}${budget}): ${m.instructions ?? ""}`;
     })
     .join("\n");
   return (
-    "整理你的持久记忆(只用 memory 工具,先 view 全貌再动手):\n" +
-    "1. 去重:同一件事记了多处的,合并成信息密度更高的一条;\n" +
-    "2. 淘汰:过时、被后来事实推翻、明显一次性的,删掉;\n" +
-    "3. 矛盾:两条冲突时保留有据可查的那条,存疑就都留并标注;\n" +
-    "4. 预算:每个分区收敛到预算内,resident 分区尤其要小而致密;\n" +
-    "5. 不发明:只重组已有内容,不添加记忆里没有的新事实。\n" +
-    `分区一览:\n${regions}`
+    "Consolidate your persistent memory (use only the memory tool; view everything before changing anything):\n" +
+    "1. Deduplicate: the same fact recorded in several places becomes one denser entry.\n" +
+    "2. Prune: delete what is outdated, contradicted by later facts, or clearly one-off.\n" +
+    "3. Conflicts: when two entries disagree, keep the one with evidence; if unsure, keep both and mark the doubt.\n" +
+    "4. Budget: bring every region within its budget; resident regions especially must stay small and dense.\n" +
+    "5. Do not invent: only reorganize what is already there; add no facts that are not in memory.\n" +
+    `Regions:\n${regions}`
   );
 }

@@ -78,7 +78,7 @@ export function indexedMemory(
   opts?: { path?: string; budget?: number; fileBudget?: number; instructions?: string },
 ): IndexedMemory {
   const path = opts?.path ?? `${name}/`;
-  if (!path.endsWith("/")) throw new Error(`indexed 记忆的 path 必须以 / 结尾(目录):'${path}'`);
+  if (!path.endsWith("/")) throw new Error(`an indexed memory region's path must end with / (a directory): '${path}'`);
   return {
     mode: "indexed",
     name,
@@ -92,13 +92,13 @@ export function indexedMemory(
 /** agent 自己的稳定经验(预算量级取自 Hermes MEMORY.md 的 2200 chars)。 */
 export const agentMemory: ResidentMemory = residentMemory("agent", {
   budget: 2200,
-  instructions: "你自己的稳定经验:环境事实、项目约定、工具怪癖、踩过的坑。保持致密,过时就删。",
+  instructions: "your own stable knowledge — environment facts, project conventions, tool quirks, lessons learned. Keep it dense; delete what is stale.",
 });
 
 /** 用户是谁(预算量级取自 Hermes USER.md 的 1375 chars)。 */
 export const userMemory: ResidentMemory = residentMemory("user", {
   budget: 1400,
-  instructions: "用户是谁:身份、偏好、表达方式、工作习惯、对你的纠正。保持致密。",
+  instructions: "who the user is — identity, preferences, how they communicate, corrections they gave you. Keep it dense.",
 });
 
 /** 大而稀疏的知识仓库(索引 cap 取自 Claude Code MEMORY.md 的 25KB,单文件 4096 取其注入预算)。 */
@@ -106,8 +106,8 @@ export const notesMemory: IndexedMemory = indexedMemory("memory", {
   budget: 25_000,
   fileBudget: 4096,
   instructions:
-    "跨会话仍有用的知识,一条一个 .md 文件,建议带 frontmatter(name/description——description 决定以后想不想得起来)。" +
-    "只有索引常驻,正文要用 memory 工具 view。",
+    "knowledge worth keeping across sessions, one .md file per item, with frontmatter (name, description — the description decides whether you will find it again). " +
+    "Only the index is shown in the system prompt; view a file to read it.",
 });
 
 /* ───────────────────────── 行为的函数类型(实现在 compose.ts) ───────────────────────── */

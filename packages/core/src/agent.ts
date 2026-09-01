@@ -2481,7 +2481,7 @@ export class Agent {
         // 先验形再看 kind：策略返回 null/"bogus" 时，这里要给出「非法裁决」而不是 TypeError
         const verdict = normalizeVerdict(await policy.authorize(input));
         if (verdict.kind === "ask" && policy.responder === "none") {
-          return { kind: "deny", reason: `${verdict.reason}（策略要求询问，但没有配置裁决人：ask 视为拒绝）` };
+          return { kind: "deny", reason: `${verdict.reason} (the policy asks for approval, but no responder is configured: ask counts as deny)` };
         }
         // 「宿主会回答」但此刻没有任何订阅者——不开 ask（开了就是永久 pending），当场拒。
         // 放在 stage 里而不只在 run 入口：Dream 等不经 runWithLifecycle 的路径也走这条 stage。

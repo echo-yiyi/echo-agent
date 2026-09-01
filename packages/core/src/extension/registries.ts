@@ -75,6 +75,7 @@ export const AgentSkills: ServiceKey<AgentSkillsRegistry> = defineService<AgentS
   reload: "turn",
 });
 
+/** prompt 段与变量的注册口（`AgentPromptRegistry`）：`kind:"registry"`，段的增删下个 run 生效。 */
 export const AgentPrompt: ServiceKey<AgentPromptRegistry> = defineService<AgentPromptRegistry>({
   id: "echo.agent.prompt",
   version: 1,

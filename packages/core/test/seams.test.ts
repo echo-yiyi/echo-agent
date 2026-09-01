@@ -93,7 +93,7 @@ test("本轮中途注册的工具即使被同一条消息点中也不执行；�
   const rs = toolResults(result.messages);
   expect(rs.map((r) => r.toolCallId)).toEqual(["c1", "c2", "c3"]);
   expect(rs[1]!.isError).toBe(true);
-  expect(rs[1]!.content).toContain("未知工具 'late'"); // 实时池里有也不认：它是下一轮的
+  expect(rs[1]!.content).toContain("Unknown tool 'late'"); // 实时池里有也不认：它是下一轮的
   expect(rs[2]!.isError).toBe(false);
   expect(rs[2]!.content).toBe("late ran");
 });
@@ -124,7 +124,7 @@ test("本轮开始时已禁用、中途又恢复的工具：本轮不执行但�
   const rs = toolResults(result.messages);
   expect(rs[1]!.isError).toBe(true);
   // 不是「未知工具」（本轮开始时它是已知的），也不执行——原因来自实时池，对象不来自实时池
-  expect(rs[1]!.content).toContain("本轮开始时不可用");
+  expect(rs[1]!.content).toContain("unavailable when this turn started");
   expect(rs[2]!.content).toBe("flaky ran");
   expect(calls).toEqual(["flaky"]);
 });
@@ -324,7 +324,7 @@ test("turn_start 的订阅者在事件里注册的工具：本轮不生效，下
   const result = await agent.prompt("go");
   const rs = toolResults(result.messages);
   expect(rs[0]!.isError).toBe(true);
-  expect(rs[0]!.content).toContain("未知工具 'late'"); // 工作集在 turn_start 之前就冻了
+  expect(rs[0]!.content).toContain("Unknown tool 'late'"); // 工作集在 turn_start 之前就冻了
   expect(rs[1]!.content).toBe("late ran");
   expect(calls).toEqual(["late"]);
 });

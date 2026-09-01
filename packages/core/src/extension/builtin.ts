@@ -171,13 +171,15 @@ export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
  * **`undefined` = 这个能力压根不在**（没给 memory / 没给 schedule），与「在但零工具」
  * （空数组）是两件事——见 `builtinEntries()`。
  */
-export type BuiltinToolGroup = BuiltinToolsConfig;
 export type BuiltinToolGroups = {
   readonly tasks: BuiltinToolGroup | undefined;
   readonly skills: BuiltinToolGroup | undefined;
   readonly memory: BuiltinToolGroup | undefined;
   readonly scheduler: BuiltinToolGroup | undefined;
 };
+
+/** 一组内建：工具 + 这组工具自己的 prompt 段，就是 `defineToolPack` 的 config 形状。 */
+export type BuiltinToolGroup = BuiltinToolsConfig;
 
 /**
  * builtin 表 → `ExtensionEntry[]`。**这就是「内置模块表」**：名字在这里解析成 definition，

@@ -101,10 +101,10 @@ export function createTasks(tasks: TaskMap, specs: readonly TaskSpec[]): TaskCre
   const refToId = new Map<string, string>();
 
   for (const spec of specs) {
-    if (spec.title.trim() === "") return { ok: false, error: "title 不能为空" };
+    if (spec.title.trim() === "") return { ok: false, error: "title must not be empty" };
     const id = String(++seq);
     if (spec.ref !== undefined) {
-      if (refToId.has(spec.ref)) return { ok: false, error: `ref '${spec.ref}' 在同一批里重复` };
+      if (refToId.has(spec.ref)) return { ok: false, error: `ref '${spec.ref}' is used twice in this batch` };
       refToId.set(spec.ref, id);
     }
     const item: TaskItem = {
@@ -129,19 +129,19 @@ export function createTasks(tasks: TaskMap, specs: readonly TaskSpec[]): TaskCre
     if (self === undefined) continue;
     for (const raw of spec.blocks ?? []) {
       const target = refToId.get(raw) ?? raw;
-      if (!draft.has(target)) return { ok: false, error: `blocks 指向不存在的任务 '${raw}'` };
+      if (!draft.has(target)) return { ok: false, error: `blocks points at a task that does not exist: '${raw}'` };
       addEdge(draft, self.id, target);
     }
     for (const raw of spec.blockedBy ?? []) {
       const source = refToId.get(raw) ?? raw;
-      if (!draft.has(source)) return { ok: false, error: `blockedBy 指向不存在的任务 '${raw}'` };
+      if (!draft.has(source)) return { ok: false, error: `blockedBy points at a task that does not exist: '${raw}'` };
       // 书写便利：落地时写成**对方的出边**，存储只有一个方向。
       addEdge(draft, source, self.id);
     }
   }
 
   const cycle = findCycle(draft);
-  if (cycle !== undefined) return { ok: false, error: `会成环：${cycle.join(" → ")}` };
+  if (cycle !== undefined) return { ok: false, error: `this would create a cycle: ${cycle.join(" → ")}` };
 
   commit(tasks, draft);
   return { ok: true, tasks: created.map((c) => draft.get(c.id) as TaskItem) };
@@ -149,16 +149,16 @@ export function createTasks(tasks: TaskMap, specs: readonly TaskSpec[]): TaskCre
 
 /** **唯一写入口**。语义方法（start/complete/…）一概不设——状态是开放的，写死的转移必然是错的。 */
 export function updateTask(tasks: TaskMap, id: string, patch: TaskPatch): TaskWriteResult {
-  if (!tasks.has(id)) return { ok: false, error: `未知任务 '${id}'` };
+  if (!tasks.has(id)) return { ok: false, error: `Unknown task '${id}'` };
 
   const draft = new Map<string, TaskItem>(tasks);
 
   for (const raw of patch.addBlocks ?? []) {
-    if (!draft.has(raw)) return { ok: false, error: `blocks 指向不存在的任务 '${raw}'` };
+    if (!draft.has(raw)) return { ok: false, error: `blocks points at a task that does not exist: '${raw}'` };
     addEdge(draft, id, raw);
   }
   for (const raw of patch.addBlockedBy ?? []) {
-    if (!draft.has(raw)) return { ok: false, error: `blockedBy 指向不存在的任务 '${raw}'` };
+    if (!draft.has(raw)) return { ok: false, error: `blockedBy points at a task that does not exist: '${raw}'` };
     addEdge(draft, raw, id);
   }
   for (const raw of patch.removeBlocks ?? []) removeEdge(draft, id, raw);
@@ -179,7 +179,7 @@ export function updateTask(tasks: TaskMap, id: string, patch: TaskPatch): TaskWr
   draft.set(id, next);
 
   const cycle = findCycle(draft);
-  if (cycle !== undefined) return { ok: false, error: `会成环：${cycle.join(" → ")}` };
+  if (cycle !== undefined) return { ok: false, error: `this would create a cycle: ${cycle.join(" → ")}` };
 
   // 拓扑约束**在这里真被执行**：前置没完，就不许开工。
   // 报错点名是谁卡着——模型据此能立刻做对的事，「非法状态」它只能瞎试。
@@ -187,7 +187,7 @@ export function updateTask(tasks: TaskMap, id: string, patch: TaskPatch): TaskWr
     const blockers = derive(draft).get(id)?.blockedBy ?? [];
     if (blockers.length > 0) {
       const named = blockers.map((b) => `#${b}「${draft.get(b)?.title ?? "?"}」`).join("、");
-      return { ok: false, error: `任务 #${id} 被这些未完成的前置卡着：${named}` };
+      return { ok: false, error: `Task #${id} is blocked by unfinished prerequisites: ${named}` };
     }
   }
 
@@ -210,13 +210,13 @@ export function removeTask(tasks: TaskMap, id: string): boolean {
 }
 
 export function linkTasks(tasks: TaskMap, from: string, to: string, kind: string = BLOCKS): TaskLinkResult {
-  if (!tasks.has(from)) return { ok: false, error: `未知任务 '${from}'` };
-  if (!tasks.has(to)) return { ok: false, error: `未知任务 '${to}'` };
-  if (from === to) return { ok: false, error: "任务不能指向自己" };
+  if (!tasks.has(from)) return { ok: false, error: `Unknown task '${from}'` };
+  if (!tasks.has(to)) return { ok: false, error: `Unknown task '${to}'` };
+  if (from === to) return { ok: false, error: "a task cannot depend on itself" };
   const draft = new Map<string, TaskItem>(tasks);
   addEdge(draft, from, to, kind);
   const cycle = findCycle(draft);
-  if (cycle !== undefined) return { ok: false, error: `会成环：${cycle.join(" → ")}` };
+  if (cycle !== undefined) return { ok: false, error: `this would create a cycle: ${cycle.join(" → ")}` };
   commit(tasks, draft);
   return { ok: true };
 }

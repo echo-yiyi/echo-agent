@@ -46,10 +46,12 @@ await echo.stop();                      // 先卸扩展 → 等落盘 settle →
 
 ## 状态放在哪
 
-`stateDir` > `$ECHO_HOME/agents/<agentId>` > `$PWD/.echo/agents/<agentId>`。
+`stateDir` > `$ECHO_HOME/agents/<agentId>` > `~/.echo/agents/<agentId>`。
 
-默认落在**项目内**而不是 `~/.echo`：后者会让两个不相干的项目静默共用同一份记忆，
-而用户不会察觉。
+默认落在**用户级**（2026-09-01 起）：工作目录是 **session** 的字段（`SessionInfo.workspace`），
+缺省 session id 按 workspace 派生——同一个 agent 在多个目录里各有一段连续对话，记忆与技能跨项目共享；
+状态根若按 `$PWD` 走，换个目录就换了一个 agent，与此冲突。这也让 agent 状态与 `credentials.json`、
+`settings.json` 同在 `echoHome()` 下。
 
 ## 公共面
 

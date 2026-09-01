@@ -17,7 +17,7 @@ export function makeTaskTools(tasks: TaskMap): ModelTool[] {
   return [createTool(tasks), listTool(tasks), getTool(tasks), updateTool(tasks)] as ModelTool[];
 }
 
-const STATUS_DESC = "pending（没开始）/ in_progress（在做）/ done（做完）/ cancelled（不做了）";
+const STATUS_DESC = "pending (not started) / in_progress (being worked on) / done (finished) / cancelled (dropped)";
 
 function createTool(tasks: TaskMap): ModelTool<{ tasks: TaskSpec[] }> {
   return {
@@ -25,32 +25,32 @@ function createTool(tasks: TaskMap): ModelTool<{ tasks: TaskSpec[] }> {
     name: "TaskCreate",
     label: "建任务",
     description:
-      "把接下来要做的事写成任务清单。多步任务开工前先建清单——它会跨上下文压缩、跨会话保留下来，" +
-      "是你之后判断「做到哪了、还剩什么」的依据。" +
-      "一次可以建多条：同一批里用 ref 给任务起个临时名，blocks / blockedBy 就能互相引用。" +
-      "只有一件小事时不必建。",
+      "Write the work ahead down as a task list. Create it before starting a multi-step task: the list survives context compaction and sessions, " +
+      "and it is how you later tell what is done and what remains. " +
+      "Several tasks can be created in one call; give a task a temporary name with ref so blocks / blockedBy in the same batch can reference it. " +
+      "Do not create a list for a single small step.",
     parameters: {
       type: "object",
       properties: {
         tasks: {
           type: "array",
-          description: "要建的任务（可多条，一次建完）",
+          description: "Tasks to create (one or more, in a single call)",
           items: {
             type: "object",
             properties: {
-              title: { type: "string", description: "一行说清要做什么" },
-              detail: { type: "string", description: "可选：展开的说明（TaskList 不显示，TaskGet 才给）" },
-              ref: { type: "string", description: "可选：本批内的临时名，供同批的 blocks/blockedBy 引用" },
-              status: { type: "string", description: `可选，默认 pending。${STATUS_DESC}` },
+              title: { type: "string", description: "One line saying what has to be done" },
+              detail: { type: "string", description: "Optional: expanded notes (hidden in TaskList, shown by TaskGet)" },
+              ref: { type: "string", description: "Optional: temporary name within this batch, for blocks/blockedBy of sibling tasks" },
+              status: { type: "string", description: `Optional, default pending. ${STATUS_DESC}` },
               blocks: {
                 type: "array",
                 items: { type: "string" },
-                description: "本条卡着谁（这些任务要等它做完）。写已存在的任务 id 或同批的 ref",
+                description: "Tasks this one blocks (they wait for it). Existing task ids or refs from this batch",
               },
               blockedBy: {
                 type: "array",
                 items: { type: "string" },
-                description: "谁卡着本条（要等这些做完才能开工）。写已存在的任务 id 或同批的 ref",
+                description: "Tasks that block this one (it waits for them). Existing task ids or refs from this batch",
               },
             },
             required: ["title"],
@@ -60,11 +60,11 @@ function createTool(tasks: TaskMap): ModelTool<{ tasks: TaskSpec[] }> {
       required: ["tasks"],
     },
     async execute({ tasks: specs }) {
-      if (!Array.isArray(specs) || specs.length === 0) return toolError("tasks 不能为空");
+      if (!Array.isArray(specs) || specs.length === 0) return toolError("tasks must not be empty");
       const r = createTasks(tasks, specs);
       if (!r.ok) return toolError(r.error);
       const lines = r.tasks.map((t) => `#${t.id} ${t.title}`);
-      return toolOk(`已建 ${r.tasks.length} 条任务：\n${lines.join("\n")}\n\n${renderList(listTasks(tasks))}`);
+      return toolOk(`Created ${r.tasks.length} task(s):\n${lines.join("\n")}\n\n${renderList(listTasks(tasks))}`);
     },
   };
 }
@@ -75,13 +75,13 @@ function listTool(tasks: TaskMap): ModelTool<{ status?: string[]; ready?: boolea
     name: "TaskList",
     label: "看任务清单",
     description:
-      "列出全部任务及其状态。被卡住的会标出在等谁，当前可以开工的会标 [可做]。" +
-      "不含展开说明（要看某条的细节用 TaskGet）。",
+      "List all tasks with their status. Blocked tasks show what they wait for; tasks that can start now are marked [ready]. " +
+      "Expanded notes are not included (use TaskGet for one task's details).",
     parameters: {
       type: "object",
       properties: {
-        status: { type: "array", items: { type: "string" }, description: `可选：只看这些状态。${STATUS_DESC}` },
-        ready: { type: "boolean", description: "可选：只看当前没被卡住、可以开工的" },
+        status: { type: "array", items: { type: "string" }, description: `Optional: only these statuses. ${STATUS_DESC}` },
+        ready: { type: "boolean", description: "Optional: only tasks that are not blocked and can start now" },
       },
     },
     async execute({ status, ready }) {
@@ -89,7 +89,7 @@ function listTool(tasks: TaskMap): ModelTool<{ status?: string[]; ready?: boolea
         ...(Array.isArray(status) ? { status } : {}),
         ...(ready === true ? { ready: true } : {}),
       });
-      if (items.length === 0) return toolOk("清单是空的。");
+      if (items.length === 0) return toolOk("The task list is empty.");
       return toolOk(renderList(items));
     },
   };
@@ -100,22 +100,22 @@ function getTool(tasks: TaskMap): ModelTool<{ id: string }> {
     kind: "model",
     name: "TaskGet",
     label: "看任务详情",
-    description: "看一条任务的完整内容：展开说明、状态、在等谁、卡着谁。",
+    description: "Show one task in full: expanded notes, status, what it waits for, what it blocks.",
     parameters: {
       type: "object",
-      properties: { id: { type: "string", description: "任务 id（TaskList 里 # 后面那个）" } },
+      properties: { id: { type: "string", description: "Task id (the part after # in TaskList)" } },
       required: ["id"],
     },
     async execute({ id }) {
       const t = getTask(tasks, id);
-      if (t === undefined) return toolError(`未知任务 '${id}'`);
+      if (t === undefined) return toolError(`Unknown task '${id}'`);
       const blocks = t.links.filter((l) => l.kind === "blocks").map((l) => `#${l.to}`);
       const lines = [
         `#${t.id} ${t.title}`,
-        `状态：${t.status}${t.executor !== undefined ? `（执行者：${t.executor}）` : ""}`,
-        t.derived.blockedBy.length > 0 ? `在等：${t.derived.blockedBy.map((b) => `#${b}`).join("、")}` : "在等：无",
-        blocks.length > 0 ? `卡着：${blocks.join("、")}` : "卡着：无",
-        t.derived.unreachable ? "⚠️ 有前置已取消，这条路的前提可能变了" : "",
+        `Status: ${t.status}${t.executor !== undefined ? ` (executor: ${t.executor})` : ""}`,
+        t.derived.blockedBy.length > 0 ? `Waiting for: ${t.derived.blockedBy.map((b) => `#${b}`).join(", ")}` : "Waiting for: none",
+        blocks.length > 0 ? `Blocks: ${blocks.join(", ")}` : "Blocks: none",
+        t.derived.unreachable ? "Warning: a prerequisite was cancelled; the premise of this task may have changed" : "",
         t.detail !== undefined ? `\n${t.detail}` : "",
       ].filter((l) => l !== "");
       return toolOk(lines.join("\n"));
@@ -142,29 +142,29 @@ function updateTool(tasks: TaskMap): ModelTool<UpdateParams> {
     name: "TaskUpdate",
     label: "改任务",
     description:
-      "改一条任务：开工前把它标 in_progress，做完标 done，不做了标 cancelled。" +
-      "也能改标题/说明、增删依赖关系、删掉这条。" +
-      "前置还没完成时标 in_progress 会被拒绝，并告诉你在等谁。",
+      "Change one task: mark it in_progress before starting, done when finished, cancelled when dropped. " +
+      "Also edits the title or notes, adds or removes dependencies, or deletes the task. " +
+      "Marking in_progress while prerequisites are unfinished is rejected, and the reply says what it waits for.",
     parameters: {
       type: "object",
       properties: {
-        id: { type: "string", description: "任务 id" },
+        id: { type: "string", description: "Task id" },
         status: { type: "string", description: STATUS_DESC },
         title: { type: "string" },
         detail: { type: "string" },
-        executor: { type: "string", description: "可选：谁在做这条" },
-        addBlockedBy: { type: "array", items: { type: "string" }, description: "加：要等这些任务做完" },
-        addBlocks: { type: "array", items: { type: "string" }, description: "加：这些任务要等本条" },
-        removeBlockedBy: { type: "array", items: { type: "string" }, description: "去掉对这些的等待" },
+        executor: { type: "string", description: "Optional: who is working on it" },
+        addBlockedBy: { type: "array", items: { type: "string" }, description: "Add: wait for these tasks to finish" },
+        addBlocks: { type: "array", items: { type: "string" }, description: "Add: these tasks wait for this one" },
+        removeBlockedBy: { type: "array", items: { type: "string" }, description: "Stop waiting for these tasks" },
         removeBlocks: { type: "array", items: { type: "string" } },
-        delete: { type: "boolean", description: "删掉这条任务（指向它的依赖会一并清掉）" },
+        delete: { type: "boolean", description: "Delete this task (dependencies pointing at it are removed too)" },
       },
       required: ["id"],
     },
     async execute(params) {
       const { id, delete: del, ...rest } = params;
       if (del === true) {
-        return removeTask(tasks, id) ? toolOk(`已删除任务 #${id}\n\n${renderList(listTasks(tasks))}`) : toolError(`未知任务 '${id}'`);
+        return removeTask(tasks, id) ? toolOk(`Deleted task #${id}\n\n${renderList(listTasks(tasks))}`) : toolError(`Unknown task '${id}'`);
       }
       const r = updateTask(tasks, id, rest);
       if (!r.ok) return toolError(r.error);
@@ -199,14 +199,14 @@ export function renderTaskInjection(snapshot: TaskSnapshot, limit = 10): string 
   const ready = pick(snapshot.ready);
   if (active.shown.length === 0 && ready.shown.length === 0) return "";
 
-  const parts: string[] = ["# 任务清单"];
+  const parts: string[] = ["# Task list"];
   if (active.shown.length > 0) {
-    parts.push(`正在做：\n${renderList(active.shown)}${active.rest > 0 ? `\n…另有 ${active.rest} 条` : ""}`);
+    parts.push(`In progress:\n${renderList(active.shown)}${active.rest > 0 ? `\n…and ${active.rest} more` : ""}`);
   }
   if (ready.shown.length > 0) {
-    parts.push(`可做：\n${renderList(ready.shown)}${ready.rest > 0 ? `\n…另有 ${ready.rest} 条` : ""}`);
+    parts.push(`Ready:\n${renderList(ready.shown)}${ready.rest > 0 ? `\n…and ${ready.rest} more` : ""}`);
   }
-  parts.push(`（共 ${snapshot.total} 条；全量用 TaskList，细节用 TaskGet）`);
+  parts.push(`(${snapshot.total} total; TaskList for the full list, TaskGet for details)`);
   return parts.join("\n\n");
 }
 
@@ -224,15 +224,15 @@ export function taskInjections(snapshot: TaskSnapshot, limit = 10): AgentMessage
 }
 
 export function renderList(items: readonly TaskBrief[]): string {
-  if (items.length === 0) return "（清单是空的）";
+  if (items.length === 0) return "(the task list is empty)";
   return items
     .map((t) => {
       const marks: string[] = [];
-      if (t.derived.blockedBy.length > 0) marks.push(`等 ${t.derived.blockedBy.map((b) => `#${b}`).join("、")}`);
-      else if (t.derived.ready) marks.push("可做");
-      if (t.derived.unreachable) marks.push("前置已取消");
+      if (t.derived.blockedBy.length > 0) marks.push(`waiting for ${t.derived.blockedBy.map((b) => `#${b}`).join(", ")}`);
+      else if (t.derived.ready) marks.push("ready");
+      if (t.derived.unreachable) marks.push("prerequisite cancelled");
       if (t.executor !== undefined) marks.push(`by ${t.executor}`);
-      const suffix = marks.length > 0 ? ` [${marks.join("；")}]` : "";
+      const suffix = marks.length > 0 ? ` [${marks.join("; ")}]` : "";
       return `${STATUS_MARK[t.status] ?? "•"} #${t.id} ${t.title}${suffix}`;
     })
     .join("\n");

@@ -40,15 +40,15 @@ export function normalizeMemoryPath(raw: string): string {
   if (p === "/memories") p = "";
   if (p.startsWith("/memories/")) p = p.slice("/memories/".length);
   if (p.startsWith("/")) p = p.slice(1);
-  if (p.includes("\\")) throw new Error(`路径不合法(不接受反斜杠):'${raw}'`);
+  if (p.includes("\\")) throw new Error(`Invalid path (backslashes are not accepted): '${raw}'`);
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(p)) throw new Error(`路径不合法(含控制字符):'${raw}'`);
+  if (/[\x00-\x1f]/.test(p)) throw new Error(`Invalid path (contains control characters): '${raw}'`);
   if (p === "") return "";
   const trailingSlash = p.endsWith("/");
   const segments = p.replace(/\/+$/, "").split("/");
   for (const seg of segments) {
-    if (seg === "" || seg === "." || seg === "..") throw new Error(`路径不合法(空段 / . / ..):'${raw}'`);
-    if (seg.startsWith(".")) throw new Error(`路径不合法(点开头的段是内部保留):'${raw}'`);
+    if (seg === "" || seg === "." || seg === "..") throw new Error(`Invalid path (empty segment, . or ..): '${raw}'`);
+    if (seg.startsWith(".")) throw new Error(`Invalid path (segments starting with . are reserved): '${raw}'`);
   }
   return segments.join("/") + (trailingSlash ? "/" : "");
 }
@@ -67,10 +67,10 @@ export type CreateMemoryToolOptions = {
 };
 
 const DEFAULT_DESCRIPTION =
-  "读写你的持久记忆(跨会话保留)。分区与用途见 system 里「记忆」一节。" +
-  "命令:view(看目录或文件,目录以 / 结尾或传空看全部)、create(建/整文件覆写)、" +
-  "str_replace(把唯一出现的 old_str 换成 new_str)、insert(在第 insert_line 行后插入)、" +
-  "delete、rename。写入超预算会被拒并告知现状——先整理(合并/删过时)再写。";
+  "Read and write your persistent memory (kept across sessions). The regions and what goes in each are in the Memory section of the system prompt. " +
+  "Commands: view (a directory — path ending in / or empty for everything — or a file), create (create or overwrite a whole file), " +
+  "str_replace (replace the single occurrence of old_str with new_str), insert (insert after line insert_line), " +
+  "delete, rename. A write that exceeds a region's budget is refused with the current numbers: consolidate (merge, delete stale entries) first, then write.";
 
 const PARAMETERS: Record<string, unknown> = {
   type: "object",
@@ -78,15 +78,15 @@ const PARAMETERS: Record<string, unknown> = {
     command: {
       type: "string",
       enum: ["view", "create", "str_replace", "insert", "delete", "rename"],
-      description: "要执行的操作",
+      description: "The operation to perform",
     },
-    path: { type: "string", description: "目标路径,如 agent.md / memory/xxx.md;view 传 '' 看全部" },
-    file_text: { type: "string", description: "create:文件全文" },
-    old_str: { type: "string", description: "str_replace:要替换的原文(必须唯一命中)" },
-    new_str: { type: "string", description: "str_replace:替换后的文本" },
-    insert_line: { type: "number", description: "insert:在第几行之后插入(0 = 文件开头)" },
-    insert_text: { type: "string", description: "insert:要插入的文本" },
-    new_path: { type: "string", description: "rename:新路径(须与原路径同一分区)" },
+    path: { type: "string", description: "Target path, e.g. agent.md or memory/xxx.md; for view, '' shows everything" },
+    file_text: { type: "string", description: "create: the full file content" },
+    old_str: { type: "string", description: "str_replace: the exact text to replace (must occur exactly once)" },
+    new_str: { type: "string", description: "str_replace: the replacement text" },
+    insert_line: { type: "number", description: "insert: insert after this line number (0 = start of file)" },
+    insert_text: { type: "string", description: "insert: the text to insert" },
+    new_path: { type: "string", description: "rename: the new path (must stay in the same region)" },
   },
   required: ["command", "path"],
 };
@@ -100,12 +100,12 @@ export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolO
     parameters: PARAMETERS,
     prepareArguments(raw: unknown): MemoryToolParams {
       if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-        throw new Error(`期望对象参数,收到 ${Array.isArray(raw) ? "数组" : typeof raw}`);
+        throw new Error(`Expected an object argument, got ${Array.isArray(raw) ? "an array" : typeof raw}`);
       }
       const r = raw as Record<string, unknown>;
       const command = String(r["command"] ?? "");
       if (!["view", "create", "str_replace", "insert", "delete", "rename"].includes(command)) {
-        throw new Error(`未知命令 '${command}'(可用:view/create/str_replace/insert/delete/rename)`);
+        throw new Error(`Unknown command '${command}' (available: view/create/str_replace/insert/delete/rename)`);
       }
       const params: MemoryToolParams = { command: command as MemoryCommand, path: String(r["path"] ?? "") };
       if (r["file_text"] !== undefined) params.file_text = String(r["file_text"]);
@@ -123,17 +123,17 @@ export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolO
         case "view":
           return memoryView(memory, params.path);
         case "create":
-          if (params.file_text === undefined) return { content: "create 缺少 file_text", isError: true, metadata: null };
+          if (params.file_text === undefined) return { content: "create needs file_text", isError: true, metadata: null };
           return memoryCreate(memory, params.path, params.file_text);
         case "str_replace":
           return memoryStrReplace(memory, params.path, params.old_str ?? "", params.new_str ?? "");
         case "insert":
-          if (params.insert_text === undefined) return { content: "insert 缺少 insert_text", isError: true, metadata: null };
+          if (params.insert_text === undefined) return { content: "insert needs insert_text", isError: true, metadata: null };
           return memoryInsert(memory, params.path, params.insert_line ?? -1, params.insert_text);
         case "delete":
           return memoryDelete(memory, params.path);
         case "rename":
-          if (params.new_path === undefined) return { content: "rename 缺少 new_path", isError: true, metadata: null };
+          if (params.new_path === undefined) return { content: "rename needs new_path", isError: true, metadata: null };
           return memoryRename(memory, params.path, params.new_path);
       }
     },

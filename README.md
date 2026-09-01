@@ -22,7 +22,7 @@ printf 'Introduce yourself in one sentence.\n' |
   MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
 ```
 
-By default, persistent state lives at `$ECHO_HOME/agents/<id>`, or `$PWD/.echo/agents/<id>` when `ECHO_HOME` is unset. Use `--state-dir <path>` to override the complete state directory.
+By default, persistent state lives at `$ECHO_HOME/agents/<id>`, or `~/.echo/agents/<id>` when `ECHO_HOME` is unset — one agent across all your directories, with a separate conversation per working directory. Use `--state-dir <path>` to override the complete state directory.
 
 ## Two products
 

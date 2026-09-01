@@ -431,8 +431,8 @@ test("skill 落盘失败：不说成功，且如实说明「进程内已建、�
   const out = await execTool(agent, "skill_create", { name: "doomed", description: "写不进去", content: "x" });
   expect(out.isError, "落盘失败却回执成功").toBe(true);
   expect(out.content).toContain("盘满了");
-  expect(out.content, "没说清进程内已建").toContain("已经在当前进程里创建");
-  expect(out.content, "没拦住重试").toContain("不要重试");
+  expect(out.content, "没说清进程内已建").toContain("was created in this process");
+  expect(out.content, "没拦住重试").toContain("Do not retry");
   // 与措辞一致：池里确实有、activate 真的可用
   const activated = await execTool(agent, "skill_activate", { name: "doomed" });
   expect(activated.isError).toBe(false);

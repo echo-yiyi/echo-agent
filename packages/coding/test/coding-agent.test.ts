@@ -96,7 +96,7 @@ test("edit_file:匹配 0 处 / 多处都拒,replace_all 放行", async () => {
   expect(zero.isError).toBe(true);
   const multi = await tool(fs, "edit_file").execute({ path: "x.txt", old_string: "aa", new_string: "b" }, ctx());
   expect(multi.isError).toBe(true);
-  expect(multi.content).toContain("2 处");
+  expect(multi.content).toContain("2 matches");
   const all = await tool(fs, "edit_file").execute({ path: "x.txt", old_string: "aa", new_string: "b", replace_all: true }, ctx());
   expect(all.isError).toBe(false);
   expect(await readFile(join(root, "x.txt"), "utf8")).toBe("b b");
@@ -107,7 +107,7 @@ test("路径越界一律拒(../ 逃逸、绝对路径出工作区)", async () =>
   for (const path of ["../outside.txt", "/etc/passwd", "a/../../b.txt"]) {
     const r = await tool(fs, "write_file").execute({ path, content: "x" }, ctx());
     expect(r.isError).toBe(true);
-    expect(r.content).toContain("越界");
+    expect(r.content).toContain("outside the workspace");
   }
 });
 
@@ -122,7 +122,7 @@ test("bash:stdout+stderr 合并;非零退出是结果不是异常", async () => 
 
   const fail = await bash.execute({ command: "echo boom; exit 3" }, ctx());
   expect(fail.isError).toBe(true);
-  expect(fail.content).toContain("退出码 3");
+  expect(fail.content).toContain("exit code 3");
   expect(fail.content).toContain("boom"); // 模型要看到输出来决定下一步
 });
 
@@ -130,7 +130,7 @@ test("bash 超时:杀掉并说清,不挂死", async () => {
   const bash = makeBashTool();
   const r = await bash.execute({ command: "sleep 10", timeout_ms: 100 }, ctx());
   expect(r.isError).toBe(true);
-  expect(r.content).toContain("超时");
+  expect(r.content).toContain("Timed out");
 }, 10_000);
 
 /* ══════════ 搜索 ══════════ */
@@ -167,7 +167,7 @@ test("整链:模型点 write_file,缺省权限拒(没人答);permission:false �
   await denied.agent.prompt("写个文件");
   const deniedResult = denied.agent.messages.find((m) => m.role === "toolResult");
   expect((deniedResult as { isError: boolean }).isError).toBe(true);
-  expect((deniedResult as { content: string }).content).toContain("未获授权");
+  expect((deniedResult as { content: string }).content).toContain("was not authorized");
   await denied.stop();
 
   // 显式放行:文件真的落盘

@@ -299,5 +299,5 @@ function isDue(entry: ScheduleEntry, now: number): boolean {
 }
 
 function renderFire(s: Schedule): string {
-  return `[定时任务触发:${s.id}]\n${s.prompt}`;
+  return `[Schedule fired: ${s.id}]\n${s.prompt}`;
 }

@@ -5,7 +5,8 @@
 // 越界一律拒绝(`../../etc/passwd` 这类,不管是模型手滑还是注入)。workspace 是 session 级事实（2026-09-01），
 // 既是起点也是边界,一个字段。
 //
-// ⚠️ description 是模型逐字读的 prompt 资产,临时措辞,定稿归 prompt 治理。
+// description 与结果文本是模型逐字读的资产（全英文，2026-09-01）；跨工具的用法（先读后改、glob/grep 优先）
+// 在 `prompt.ts` 的 `tool:workspace` 段，这里只讲单个工具自己的语义。
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
@@ -31,19 +32,19 @@ function readFileTool(): ModelTool<{ path: string; offset?: number; limit?: numb
     name: "read_file",
     label: "读文件",
     description:
-      "读一个文件的内容(带行号)。大文件用 offset/limit 分段读。改文件前先读它——不读就改是盲改。",
+      "Read a file with line numbers. Use offset/limit to read a large file in parts. Read a file before editing it.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "相对工作目录的路径" },
-        offset: { type: "number", description: "起始行号(1 起),缺省从头" },
-        limit: { type: "number", description: "最多读多少行,缺省 2000" },
+        path: { type: "string", description: "Path relative to the workspace" },
+        offset: { type: "number", description: "First line to read (1-based), default from the start" },
+        limit: { type: "number", description: "Maximum number of lines, default 2000" },
       },
       required: ["path"],
     },
     async execute({ path, offset, limit }, ctx) {
       const abs = resolveSafe(ctx, path);
-      if (abs === null) return toolError(`路径越界:'${path}' 不在工作区内`);
+      if (abs === null) return toolError(`Path outside the workspace: '${path}'`);
       let raw: string;
       try {
         raw = await readFile(abs, "utf8");
@@ -55,8 +56,8 @@ function readFileTool(): ModelTool<{ path: string; offset?: number; limit?: numb
       const take = Math.max(1, limit ?? 2000);
       const slice = lines.slice(from - 1, from - 1 + take);
       let text = slice.map((l, i) => `${from + i}\t${l}`).join("\n");
-      if (text.length > READ_CAP) text = `${text.slice(0, READ_CAP)}\n…[截断:超过 ${READ_CAP} 字,用 offset/limit 分段读]`;
-      const tail = from - 1 + take < lines.length ? `\n…(共 ${lines.length} 行,还有 ${lines.length - (from - 1 + take)} 行未显示)` : "";
+      if (text.length > READ_CAP) text = `${text.slice(0, READ_CAP)}\n…[truncated: over ${READ_CAP} characters, read in parts with offset/limit]`;
+      const tail = from - 1 + take < lines.length ? `\n…(${lines.length} lines in total, ${lines.length - (from - 1 + take)} not shown)` : "";
       return toolOk(text + tail, { path, lines: lines.length });
     },
   };
@@ -67,21 +68,21 @@ function writeFileTool(): ModelTool<{ path: string; content: string }> {
     kind: "model",
     name: "write_file",
     label: "写文件",
-    description: "整文件覆写(不存在则创建,自动建目录)。改已有文件优先用 edit_file——覆写会丢掉你没注意到的部分。",
+    description: "Write a whole file (created if missing, parent directories created). To change an existing file prefer edit_file; overwriting loses whatever you did not notice.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "相对工作目录的路径" },
-        content: { type: "string", description: "完整文件内容" },
+        path: { type: "string", description: "Path relative to the workspace" },
+        content: { type: "string", description: "The full file content" },
       },
       required: ["path", "content"],
     },
     async execute({ path, content }, ctx) {
       const abs = resolveSafe(ctx, path);
-      if (abs === null) return toolError(`路径越界:'${path}' 不在工作区内`);
+      if (abs === null) return toolError(`Path outside the workspace: '${path}'`);
       await mkdir(dirname(abs), { recursive: true });
       await writeFile(abs, content, "utf8");
-      return toolOk(`已写入 ${path}(${content.length} 字)`, { path, bytes: content.length });
+      return toolOk(`Wrote ${path} (${content.length} characters)`, { path, bytes: content.length });
     },
   };
 }
@@ -92,22 +93,22 @@ function editFileTool(): ModelTool<{ path: string; old_string: string; new_strin
     name: "edit_file",
     label: "改文件",
     description:
-      "精确替换:old_string 必须与文件内容逐字节匹配且唯一(含缩进)。" +
-      "匹配到多处时要么给更长的上下文,要么 replace_all: true。改前先 read_file。",
+      "Exact replacement: old_string must match the file content byte for byte (including indentation) and occur exactly once. " +
+      "If it matches several places, give more surrounding context or set replace_all: true. Read the file first.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string" },
-        old_string: { type: "string", description: "要替换的原文(逐字节,含缩进)" },
-        new_string: { type: "string", description: "替换成什么" },
-        replace_all: { type: "boolean", description: "替换全部匹配,缺省 false(要求唯一)" },
+        old_string: { type: "string", description: "The exact text to replace (byte for byte, including indentation)" },
+        new_string: { type: "string", description: "The replacement text" },
+        replace_all: { type: "boolean", description: "Replace every match; default false (the match must be unique)" },
       },
       required: ["path", "old_string", "new_string"],
     },
     async execute({ path, old_string, new_string, replace_all }, ctx) {
       const abs = resolveSafe(ctx, path);
-      if (abs === null) return toolError(`路径越界:'${path}' 不在工作区内`);
-      if (old_string === new_string) return toolError("old_string 与 new_string 相同,没有可做的改动");
+      if (abs === null) return toolError(`Path outside the workspace: '${path}'`);
+      if (old_string === new_string) return toolError("old_string and new_string are identical; nothing to change");
       let raw: string;
       try {
         raw = await readFile(abs, "utf8");
@@ -115,17 +116,17 @@ function editFileTool(): ModelTool<{ path: string; old_string: string; new_strin
         return toolError(readErrText(e, path));
       }
       const count = raw.split(old_string).length - 1;
-      if (count === 0) return toolError(`没找到匹配:old_string 必须与文件内容逐字节一致(含缩进)。先 read_file 核对`);
+      if (count === 0) return toolError("No match: old_string must equal the file content byte for byte (including indentation). Read the file with read_file and copy it exactly");
       if (count > 1 && replace_all !== true) {
-        return toolError(`匹配到 ${count} 处:给更长的上下文让它唯一,或用 replace_all: true`);
+        return toolError(`${count} matches: add surrounding context to make old_string unique, or set replace_all: true`);
       }
       const next = replace_all === true ? raw.split(old_string).join(new_string) : raw.replace(old_string, new_string);
       await writeFile(abs, next, "utf8");
-      return toolOk(`已替换 ${replace_all === true ? count : 1} 处:${path}`, { path, replaced: count });
+      return toolOk(`Replaced ${replace_all === true ? count : 1} occurrence(s) in ${path}`, { path, replaced: count });
     },
   };
 }
 
 function readErrText(e: unknown, path: string): string {
-  return (e as { code?: string }).code === "ENOENT" ? `文件不存在:${path}` : `读取失败:${String(e)}`;
+  return (e as { code?: string }).code === "ENOENT" ? `File not found: ${path}` : `Read failed: ${String(e)}`;
 }

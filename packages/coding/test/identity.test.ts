@@ -101,8 +101,8 @@ test("bash 真的接上了后台队列(能力端口装上没有)", async () => {
     { toolCallId: "t1", workspace: root, sessionId: null, iteration: 0 },
   );
   // 端口没接上时这里是 `isError:true` + 「本 agent 未接后台队列」
-  expect([result.isError, result.content.includes("未接后台队列")]).toEqual([false, false]);
-  expect(result.content).toContain("已挂后台");
+  expect([result.isError, result.content.includes("no background queue")]).toEqual([false, false]);
+  expect(result.content).toContain("Started in the background");
 
   await echo.stop();
 });

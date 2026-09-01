@@ -47,8 +47,8 @@ export function permissionPolicyFor(policy: PermissionPolicy = DEFAULT_PERMISSIO
     authorize: ({ toolName }) => {
       const rule = policy.rules?.[toolName] ?? policy.fallback ?? "allow";
       if (rule === "allow") return { kind: "allow" };
-      if (rule === "deny") return { kind: "deny", reason: `工具 '${toolName}' 被权限策略拒绝` };
-      return { kind: "ask", reason: `工具 '${toolName}' 未获授权：需要裁决人批准` };
+      if (rule === "deny") return { kind: "deny", reason: `Tool '${toolName}' was denied by the permission policy` };
+      return { kind: "ask", reason: `Tool '${toolName}' was not authorized: it needs approval from a responder` };
     },
     // 交互 CLI 等人不超时；没有裁决人就是 none——core 会把 ask 折成 deny
     askTimeoutMs: null,

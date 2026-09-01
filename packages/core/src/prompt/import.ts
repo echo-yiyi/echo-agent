@@ -12,6 +12,11 @@
 import { parseFrontmatter } from "./markdown.ts";
 import type { PromptSection } from "./types.ts";
 
+/**
+ * 把一个 markdown 文本变成一段 prompt：frontmatter 给 `name`（可用 `fallbackName` 兜底，通常是文件名）
+ * 与 `order`（整数，缺省 0），正文原样进 system（可含 `{{变量}}`）。产品层读完文件喂进来，
+ * 再经 `AgentPrompt.section()` 注册——与代码字面量的段同一条路。缺名字、写 `tier:`、非整数 order 都抛。
+ */
 export function sectionFromMarkdown(markdown: string, fallbackName?: string): PromptSection {
   const { meta, body } = parseFrontmatter(markdown);
   const name = meta["name"] !== undefined && meta["name"] !== "" ? meta["name"] : fallbackName;

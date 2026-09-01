@@ -22,7 +22,7 @@ printf 'Introduce yourself in one sentence.\n' |
   MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
 ```
 
-持久化状态默认写入 `$ECHO_HOME/agents/<id>`；未设置 `ECHO_HOME` 时写入 `$PWD/.echo/agents/<id>`。用 `--state-dir <path>` 可以覆盖完整的 state 目录。
+持久化状态默认写入 `$ECHO_HOME/agents/<id>`；未设置 `ECHO_HOME` 时写入 `~/.echo/agents/<id>`——所有目录共用同一个 agent，每个工作目录各有一段独立会话。用 `--state-dir <path>` 可以覆盖完整的 state 目录。
 
 ## 两个产品
 

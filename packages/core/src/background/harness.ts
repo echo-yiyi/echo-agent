@@ -141,9 +141,9 @@ function announce(task: BackgroundTask, spec: BackgroundSpec, ctx: AgentBackgrou
   // 只看一眼末尾，**不动游标**——读一眼不该消耗掉别人的增量
   const tail = task.buffer.tail(END_NOTICE_TAIL_CHARS);
   const text =
-    `[后台任务 ${task.label}（${task.id}）已结束：${task.status}]` +
-    (task.error !== null ? `\n错误：${task.error}` : "") +
-    (tail === "" ? "" : `\n最后输出：\n${tail}`);
+    `[Background job ${task.label} (${task.id}) finished: ${task.status}]` +
+    (task.error !== null ? `\nError: ${task.error}` : "") +
+    (tail === "" ? "" : `\nLast output:\n${tail}`);
   ctx.deliver?.(environmentMessage(text, BACKGROUND_KIND, task.id));
 }
 
