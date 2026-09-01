@@ -40,7 +40,7 @@ export function makeBashTool(deps: BashDeps = {}): ModelTool<{ command: string; 
           label: command.slice(0, 60),
           run: (bg) =>
             new Promise<void>((resolvePromise, rejectPromise) => {
-              const child = spawn("bash", ["-lc", command], { cwd: ctx.cwd, stdio: ["ignore", "pipe", "pipe"] });
+              const child = spawn("bash", ["-lc", command], { cwd: ctx.workspace, stdio: ["ignore", "pipe", "pipe"] });
               child.stdout.on("data", (d: Buffer) => bg.write(d.toString()));
               child.stderr.on("data", (d: Buffer) => bg.write(d.toString()));
               bg.signal.addEventListener("abort", () => child.kill("SIGKILL"), { once: true });
@@ -61,7 +61,7 @@ export function makeBashTool(deps: BashDeps = {}): ModelTool<{ command: string; 
         return toolOk(`已挂后台:${r.task.id}(结束后会收到通知)`, { taskId: r.task.id });
       }
 
-      return runForeground(command, ctx.cwd, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
+      return runForeground(command, ctx.workspace, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
     },
   };
 }

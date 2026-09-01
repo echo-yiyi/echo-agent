@@ -643,8 +643,8 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
     await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
     expect(ui.screen()).toContain("echo-试产品");
     expect(ui.screen()).toContain("v9.9.9");
-    // 形态与工作目录到了 preset 手里，而且只调一次
-    expect(forms).toEqual([{ interactive: true, cwd: process.cwd() }]);
+    // 形态到了 preset 手里，而且只调一次（workspace 不经 preset，`mainFor()` 直接交给 createEcho）
+    expect(forms).toEqual([{ interactive: true }]);
     expect(applied, "preset 交出的 Extension 没被 mount").toBe(1);
 
     ui.feed(String.fromCharCode(4));

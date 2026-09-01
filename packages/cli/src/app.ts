@@ -129,7 +129,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   const ui: TUI = options.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
 
   const transcript = new Transcript();
-  const welcome = welcomeLines(options.product ?? ECHO_AGENT, agent.state, process.cwd());
+  const welcome = welcomeLines(options.product ?? ECHO_AGENT, agent.state, agent.state.workspace); // 「在哪」= session 的 workspace
   /**
    * 能不能收下一条输入，只由 `busy()` 决定——**「起来了没」也在里面**。
    *

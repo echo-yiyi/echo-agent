@@ -9,7 +9,6 @@ import { createEcho, createProvider, createProviderStreams, type Echo, type Mode
 import { makeFsTools } from "../src/tools/fs.ts";
 import { makeBashTool } from "../src/tools/bash.ts";
 import { makeSearchTools } from "../src/tools/search.ts";
-import { FileSessionManager } from "../src/sessions.ts";
 import { codingPreset } from "../src/agent.ts";
 import { loadSkills } from "@echo-agent/core";
 import type { PermissionPolicy } from "../src/permission.ts";
@@ -51,8 +50,8 @@ async function echoWith(opts: {
     stateDir: await mkdtemp(join(tmpdir(), "echo-ca-state-")),
     withoutMemory: true,
     extensionDirs: [], // 不扫盘：`<cwd>/extensions` 会让判据随运行目录漂
+    workspace: root, // session 级事实，宿主给（2026-09-01）；不再经 preset
     ...codingPreset({
-      workspaceRoot: root,
       ...(opts.permission !== undefined ? { permission: opts.permission } : {}),
       ...(skills !== undefined ? { skills } : {}),
     }),
@@ -66,8 +65,7 @@ async function echoWith(opts: {
 
 const ctx = (): ToolExecutionContext => ({
   toolCallId: "t1",
-  cwd: root,
-  workspaceRoot: root,
+  workspace: root,
   sessionId: null,
   iteration: 0,
 });
@@ -156,34 +154,6 @@ test("glob 找文件(排除 node_modules);grep 找内容带 文件:行号", asyn
   expect(bad.isError).toBe(true);
 });
 
-/* ══════════ 会话落盘 ══════════ */
-
-test("FileSessionManager:create → append → 重开进程(新实例)→ load 回来", async () => {
-  const dir = join(root, "sessions");
-  const a = new FileSessionManager(dir);
-  const info = await a.create({ name: "试一把" });
-  await a.append(info.id, [
-    { id: "e1", parentId: null, kind: "message", message: { role: "user", source: "human", content: [{ type: "text", text: "你好" }], at: 1 } },
-  ]);
-
-  const b = new FileSessionManager(dir); // 新实例 = 模拟重启
-  const data = await b.load(info.id);
-  expect(data.info.name).toBe("试一把");
-  expect(data.messages.length).toBe(1);
-  expect((await b.list()).map((s) => s.id)).toContain(info.id);
-
-  await b.delete(info.id);
-  await expect(b.load(info.id)).rejects.toThrow("不存在");
-});
-
-test("坏档 fail-loud:半截 JSON 拒绝加载,不给半截 session", async () => {
-  const dir = join(root, "sessions");
-  const m = new FileSessionManager(dir);
-  const info = await m.create();
-  await writeFile(join(dir, `${info.id}.jsonl`), '{"kind":"message"\n', "utf8"); // 断电现场
-  await expect(m.load(info.id)).rejects.toThrow("损坏");
-});
-
 /* ══════════ 整链装配 ══════════ */
 
 const writeTurns = (): ScriptedTurn[] => [
@@ -245,9 +215,19 @@ test("装配面:四类工具都在(fs/bash/搜索/任务清单);skill 目录空�
   // 用户拍板接受这个变化，所以这里改成断言现状，而不是给评测另留一条装配路径。
   expect(names).toContain("skill_create");
   expect(echo.agent.skills.size).toBe(0); // 池确实是空的——工具在不等于有 skill
-  // 产品层那两条真的进了清单（不是只把工具塞进 Map）——「清单 = Host 实际挂上的那一份」
+  // 产品层那三条真的进了清单（不是只把工具塞进 Map）——「清单 = Host 实际挂上的那一份」
+  expect(echo.extensions.map((e) => e.entryId)).toContain("echo:coding");
   expect(echo.extensions.map((e) => e.entryId)).toContain("echo:workspace");
   expect(echo.extensions.map((e) => e.entryId)).toContain("echo:shell");
+  // 段跟着 extension 进了 system：产品身份在最前，工具习惯段在环境段之前，工具目录一个字不进 system
+  const sys = (await echo.agent.assemblePrompt()) ?? "";
+  expect(sys.startsWith("You are Echo Coding")).toBe(true);
+  expect(sys).toContain("# Working in code");
+  expect(sys).toContain("# Files");
+  expect(sys).toContain("# Shell");
+  expect(sys.indexOf("# Shell")).toBeLessThan(sys.indexOf("# Environment"));
+  expect(sys).toContain(`Workspace: ${root}`);
+  expect(sys).not.toMatch(/Available tools|^- (read_file|bash|glob):/m);
   await echo.stop();
 });
 

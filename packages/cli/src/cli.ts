@@ -37,6 +37,8 @@ import {
 } from "@echo-agent/core";
 import type { TUI } from "@earendil-works/pi-tui";
 import { tuiShell } from "./extension.ts";
+import { instructionsEntry } from "./instructions.ts";
+import { conductEntry, pipeSurfaceEntry } from "./prompt.ts";
 import { run } from "./run.ts";
 import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
 // （FirstRunChoice 同时是装配与选择器的「一家」形状：name = --provider 短名，provider = 实例）
@@ -48,7 +50,7 @@ import { ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
 export type ProviderName = "kimi" | "deepseek" | "openai" | "zai" | "minimax";
 
 export type CliOptions = {
-  /** 状态根。不给则由 core 决定（`ECHO_HOME`，再退到 `$PWD/.echo`）。 */
+  /** 状态根。不给则由 core 决定（`ECHO_HOME`，再退到 `~/.echo`）。 */
   stateDir?: string;
   agentId?: string;
   /** **不给 = 没说**（D7）：用设置文件记住的那家，其次 kimi。给了永远赢。 */
@@ -79,7 +81,8 @@ export function usage(name: string): string {
   正文进 stdout、工具旁白进 stderr，读完就干净收摊。Ctrl-C 也是干净收摊。
 
 选项：
-  --state-dir <路径>   状态根（缺省：$ECHO_HOME/agents/<id>，再退到 $PWD/.echo/agents/<id>）
+  --state-dir <路径>   状态根（缺省：$ECHO_HOME/agents/<id>，再退到 ~/.echo/agents/<id>；跨目录同一个 agent，
+                       每个目录一段自己的会话）
   --agent-id <名字>    同一状态根下的 agent 身份（缺省 default）
   --provider <名字>    kimi | deepseek | openai | zai | minimax（缺省：上次选的，其次 kimi）
   --model <id>         模型 id（缺省：上次选的，其次由 provider 声明）
@@ -184,22 +187,28 @@ function echoOptions(
   choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
 ): Parameters<typeof createEcho>[0] {
+  // **产品层的装配片段**（`product.ts`）：`agent`（权限策略等）与 `extensions`（产品自带的，含它的 prompt 段）。
+  // 能来自产品的只有这两个字段——`Product.preset` 的返回类型就这么窄——所以它盖不掉下面任何一项，
+  // 尤其盖不掉 `extensionDirs`：去哪发现扩展归 `--extensions`、归用户。
+  const preset = product.preset?.(form) ?? {};
   return {
     provider,
     // 五家全注册（P3b-a）：Ctrl+L 跨家换模的派发靠它；初始模型仍从 `provider` 解析
     providers: choices.map((c) => c.provider),
     credentials,
     withoutMemory: opts.withoutMemory,
+    // workspace 是 session 级事实（2026-09-01）：宿主给进程目录；core 不读 process.cwd()
+    workspace: process.cwd(),
     ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
     ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
     // 所以这里区分「空数组」与「不传」，不能无脑展开。
     ...(opts.extensionDirs.length > 0 ? { extensionDirs: opts.extensionDirs } : {}),
-    // **产品层的装配片段**（`product.ts`）：`agent`（系统 prompt、权限策略）与 `extensions`（产品自带的）。
-    // 能来自产品的只有这两个字段——`Product.preset` 的返回类型就这么窄——所以它盖不掉上面任何一项，
-    // 尤其盖不掉 `extensionDirs`：去哪发现扩展归 `--extensions`、归用户。
-    ...(product.preset?.(form) ?? {}),
+    ...(preset.agent !== undefined ? { agent: preset.agent } : {}),
+    // `echo-agent` 恒挂的两段（纪律、项目指令）在前，产品自带的在后。顺序只影响 `echo.extensions`
+    // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。
+    extensions: [conductEntry(), instructionsEntry(), ...(preset.extensions ?? [])],
   };
 }
 
@@ -302,8 +311,8 @@ export function mainFor(product: Product): Main {
       }
 
       const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
-      // 形态与工作目录到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
-      const form: PresetForm = { interactive, cwd: process.cwd() };
+      // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
+      const form: PresetForm = { interactive };
       return interactive
         ? await runInteractive(product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, notices, controller.signal, deps)
         : await runPiped(product, form, effective, provider, choices, credentials, notices, controller.signal);
@@ -333,7 +342,9 @@ async function runPiped(
   signal: AbortSignal,
 ): Promise<number> {
   // **唯一 composition root**（§14.2）：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
-  const echo = await createEcho(echoOptions(product, form, opts, provider, choices, credentials));
+  const base = echoOptions(product, form, opts, provider, choices, credentials);
+  // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥
+  const echo = await createEcho({ ...base, extensions: [...(base.extensions ?? []), pipeSurfaceEntry()] });
   // 启动口信（设置读不动等）与装配诊断（坏扩展被跳过，D6）都走 stderr：说了才算没静默，但不挡启动、不改退出码
   for (const n of notices) process.stderr.write(`${n}\n`);
   for (const d of echo.diagnostics) process.stderr.write(`[扩展] [${d.code}] ${d.message}${d.path !== undefined ? `（${d.path}）` : ""}\n`);

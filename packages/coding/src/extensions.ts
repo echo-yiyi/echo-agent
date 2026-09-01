@@ -11,8 +11,9 @@
 // 上一版这里复制了 core 的实现，于是「注册中途撞名要整组回滚」那个修复得改两处——
 // 复制一份实现就是复制一份将来会漏修的地方。
 
-import { AgentBackgroundService, AgentTools, defineExtension, defineToolPack } from "@echo-agent/core/extension";
+import { AgentBackgroundService, AgentPrompt, AgentTools, defineExtension, defineToolPack } from "@echo-agent/core/extension";
 import { makeBashTool } from "./tools/bash.ts";
+import { shellToolsSection } from "./prompt.ts";
 
 /** 工作区读写与搜索：`read_file` / `write_file` / `edit_file` / `glob` / `grep`。 */
 export const ECHO_WORKSPACE = defineToolPack("echo:workspace");
@@ -48,16 +49,32 @@ export const ECHO_SHELL = defineExtension({
   inject: {
     tools: { service: AgentTools, required: true },
     background: { service: AgentBackgroundService, required: true },
+    prompt: { service: AgentPrompt, required: true },
   },
   apply(ctx) {
     const registry = ctx.get(AgentTools);
+    const prompt = ctx.get(AgentPrompt);
     const tool = makeBashTool({ background: ctx.get(AgentBackgroundService) });
     void ctx.effect({
       // 与 `defineToolPack` 同一档：工具面每轮都可能变，声明得比实际需要强会挡住热重载
       boundary: "turn",
       start: () => {
-        const off = registry.register(tool);
-        return { value: tool.name, dispose: () => void off() };
+        // 工具与它的习惯段（`tool:shell`）同一个 effect：一起装、一起撤
+        const offTool = registry.register(tool);
+        let offSection: (() => unknown) | undefined;
+        try {
+          offSection = prompt.section(shellToolsSection());
+        } catch (e) {
+          void offTool();
+          throw e;
+        }
+        return {
+          value: tool.name,
+          dispose: () => {
+            void offSection?.();
+            void offTool();
+          },
+        };
       },
     });
   },

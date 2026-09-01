@@ -13,6 +13,5 @@ export { makeFsTools, resolveSafe } from "./tools/fs.ts";
 export { makeBashTool } from "./tools/bash.ts";
 export type { BashDeps } from "./tools/bash.ts";
 export { makeSearchTools } from "./tools/search.ts";
-export { FileSessionManager } from "./sessions.ts";
 export { permissionPolicyFor, DEFAULT_PERMISSION } from "./permission.ts";
 export type { PermissionPolicy, PermissionRule } from "./permission.ts";

@@ -32,14 +32,15 @@ function scriptedProvider(): Provider {
 }
 
 /** 起一个真 Echo：真 FileDir、真文件锁，只有模型是假的。**装完就 start**——见下方注释。 */
-async function echoFor(opts: { workspaceRoot: string; stateDir: string }): Promise<Echo> {
+async function echoFor(opts: { workspace: string; stateDir: string }): Promise<Echo> {
   const echo = await createEcho({
     provider: scriptedProvider(),
     allowNetwork: false,
     stateDir: opts.stateDir,
     withoutMemory: true,
     extensionDirs: [], // 不扫盘：`<cwd>/extensions` 会让判据随运行目录漂
-    ...codingPreset({ workspaceRoot: opts.workspaceRoot, permission: false }),
+    workspace: opts.workspace, // session 级事实，宿主给（2026-09-01）
+    ...codingPreset({ permission: false }),
   });
   // **必须 `start()`**：`createEcho()` 的 Agent 是 lifecycle-managed——只有 running 才接活，
   // 而**任务清单的恢复也在这一步**（低层装配是显式 `loadTasks()`，这里归 `start()`）。
@@ -56,7 +57,7 @@ function freshDir(prefix: string): string {
 
 test("identity 的工具集与 prompt 与真装出来的 coding agent 一致(漂移即红)", async () => {
   const root = freshDir("ca-identity-");
-  const echo = await echoFor({ workspaceRoot: root, stateDir: freshDir("ca-identity-state-") });
+  const echo = await echoFor({ workspace: root, stateDir: freshDir("ca-identity-state-") });
   const agent = echo.agent;
   const identity = codingAgentIdentity();
 
@@ -65,9 +66,16 @@ test("identity 的工具集与 prompt 与真装出来的 coding agent 一致(漂
   expect(identity.toolNames).toContain("bash");        // 产品层的 `echo:shell`
   expect(identity.toolNames).toContain("TaskCreate");  // core 的 `echo:tasks`
 
-  // 系统 prompt 逐字进 digest 材料:改 CODING_SYSTEM 必然改 digest
-  expect(identity.systemPrompt.length).toBeGreaterThan(50);
-  expect(agent.systemPrompt).toBe(identity.systemPrompt);
+  // 产品自己出的四段逐字进 digest 材料，并且**真的在**装配出来的 system 里、按 order 排
+  expect(identity.sections.map((s) => s.name)).toEqual(["identity", "conduct:coding", "tool:workspace", "tool:shell"]);
+  const sys = (await agent.assemblePrompt()) ?? "";
+  let cursor = -1;
+  for (const s of identity.sections) {
+    expect(s.text.length).toBeGreaterThan(50);
+    const at = sys.indexOf(s.text);
+    expect(at, `段 '${s.name}' 没进 system`).toBeGreaterThan(cursor);
+    cursor = at;
+  }
 
   // 执行预算同样决定成绩(review 六轮 P1):identity 必须等于真 agent 的生效值——
   // core 改 DEFAULT_MAX_ITERATIONS 而 digest 不变的话,这里立刻红
@@ -81,7 +89,7 @@ test("bash 真的接上了后台队列(能力端口装上没有)", async () => {
   // **没有这条判据，端口没接上也看不出来**：bash 照样注册、照样能前台跑，只有
   // `background: true` 那条路会悄悄退化成一句「本 agent 未接后台队列」。
   const root = freshDir("ca-bg-");
-  const echo = await echoFor({ workspaceRoot: root, stateDir: freshDir("ca-bg-state-") });
+  const echo = await echoFor({ workspace: root, stateDir: freshDir("ca-bg-state-") });
   const bash = echo.agent.tools.get("bash");
   expect(bash).toBeDefined();
 
@@ -90,7 +98,7 @@ test("bash 真的接上了后台队列(能力端口装上没有)", async () => {
   };
   const result = await run.execute(
     { command: "sleep 0.05", background: true },
-    { cwd: root, toolCallId: "t1", workspaceRoot: root, sessionId: null, iteration: 0 },
+    { toolCallId: "t1", workspace: root, sessionId: null, iteration: 0 },
   );
   // 端口没接上时这里是 `isError:true` + 「本 agent 未接后台队列」
   expect([result.isError, result.content.includes("未接后台队列")]).toEqual([false, false]);
@@ -118,12 +126,12 @@ test("状态根不在被测仓库里 → 仓库预置的 tasks 进不来(review 
   ]));
 
   // ① 反证：状态根**就是**仓库那个目录 → 预置任务确实会被读进来
-  const leaky = await echoFor({ workspaceRoot: root, stateDir: repoEcho });
+  const leaky = await echoFor({ workspace: root, stateDir: repoEcho });
   expect(leaky.agent.tasks.size).toBeGreaterThan(0);
   await leaky.stop();
 
   // ② 正例：状态根在仓库外（评测就是这么接的）→ 一条都进不来
-  const isolated = await echoFor({ workspaceRoot: root, stateDir: freshDir("ca-tasks-state-") });
+  const isolated = await echoFor({ workspace: root, stateDir: freshDir("ca-tasks-state-") });
   expect(isolated.agent.tasks.size).toBe(0);
   await isolated.stop();
 });

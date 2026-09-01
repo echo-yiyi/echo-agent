@@ -1272,7 +1272,11 @@ test("不给 configure：壳子不管凭据，什么都不摆（低层用户自�
 
 test("欢迎头：版本、cwd、模型、键位提示，在文档流最上面", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const agent = new Agent({
+    model: { provider: "t", id: "only", api: "scripted" },
+    streamFunction: scriptedStreamFn([textTurn("好")]),
+    workspace: "/tmp/echo-welcome-workspace",
+  });
   const done = runTui({ agent: runtimeOf(agent), ui });
   await flush();
 
@@ -1280,7 +1284,7 @@ test("欢迎头：版本、cwd、模型、键位提示，在文档流最上面",
   const lines = screen.split("\n");
   expect(lines[0]).toContain("echo-agent");
   expect(lines[0]).toMatch(/v\d+\.\d+\.\d+/); // 版本来自 package.json
-  expect(screen).toContain(process.cwd());
+  expect(screen).toContain("/tmp/echo-welcome-workspace"); // 「在哪」= session 的 workspace（`AgentState.workspace`），不是进程 cwd
   expect(screen).toContain("模型 only · t"); // 来自 AgentState.model
   expect(screen).toContain("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史");
   // 头在对话之前：发一句之后用户行出现在头的下面

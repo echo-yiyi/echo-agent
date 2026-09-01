@@ -1,8 +1,9 @@
 // 文件三件套:read_file / write_file / edit_file。
 //
 // 这些是**产品层工具**(对外部世界动手),所以住这儿不住 core(判据 2026-08-04 拍定)。
-// 路径纪律:相对路径以 ctx.cwd 解析,**解析结果必须落在 workspaceRoot 之内**——
-// 越界一律拒绝(`../../etc/passwd` 这类,不管是模型手滑还是注入)。
+// 路径纪律:相对路径以 ctx.workspace 解析,**解析结果必须落在 workspace 之内**——
+// 越界一律拒绝(`../../etc/passwd` 这类,不管是模型手滑还是注入)。workspace 是 session 级事实（2026-09-01），
+// 既是起点也是边界,一个字段。
 //
 // ⚠️ description 是模型逐字读的 prompt 资产,临时措辞,定稿归 prompt 治理。
 
@@ -19,8 +20,8 @@ export function makeFsTools(): ModelTool[] {
 
 /** 解析 + 越界守卫。返回 null = 越界。 */
 export function resolveSafe(ctx: ToolExecutionContext, path: string): string | null {
-  const abs = isAbsolute(path) ? resolve(path) : resolve(ctx.cwd, path);
-  const root = resolve(ctx.workspaceRoot);
+  const abs = isAbsolute(path) ? resolve(path) : resolve(ctx.workspace, path);
+  const root = resolve(ctx.workspace);
   return abs === root || abs.startsWith(root + sep) ? abs : null;
 }
 

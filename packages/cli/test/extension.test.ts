@@ -13,7 +13,13 @@ import { tuiShell } from "../src/extension.ts";
 import { fakeTui } from "./fake-tui.ts";
 
 function hostWith(agent: Agent): ExtensionHost {
-  const host = new ExtensionHost({ services: agentRegistries({ tools: agent.tools, hooks: agent.hooks }) });
+  const host = new ExtensionHost({
+    services: agentRegistries({
+      tools: agent.tools,
+      hooks: agent.hooks,
+      prompt: { sections: agent.promptSections, variables: agent.promptVariables }, // 壳注册 surface 段要它
+    }),
+  });
   return host;
 }
 

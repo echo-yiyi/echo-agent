@@ -11,13 +11,13 @@ import { ECHO_CODING } from "../src/cli.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
-test("preset：产品自带 echo:workspace / echo:shell；工作区根 = cwd；两种形态都不装权限策略（缺省全放行）", () => {
-  const cwd = join(tmpdir(), "echo-coding-workspace");
+test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；两种形态都不装权限策略（缺省全放行）", () => {
   for (const interactive of [true, false]) {
-    const preset = ECHO_CODING.preset!({ interactive, cwd });
-    // 文件读写、搜索、shell 只属于 coding（不在 echo-agent 里）——它们以两条 Extension 的形态跟着产品走
-    expect(preset.extensions?.map((e) => e.entryId)).toEqual(["echo:workspace", "echo:shell"]);
-    expect([preset.agent?.workspaceRoot, preset.agent?.cwd]).toEqual([cwd, cwd]);
+    const preset = ECHO_CODING.preset!({ interactive });
+    // 身份与纪律段、文件读写与搜索、shell 只属于 coding（不在 echo-agent 里）——它们以三条 Extension 的形态跟着产品走
+    expect(preset.extensions?.map((e) => e.entryId)).toEqual(["echo:coding", "echo:workspace", "echo:shell"]);
+    // workspace 是 session 级事实，由 `mainFor()` 直接交给 `createEcho()`，preset 不出这一项（2026-09-01）
+    expect(preset.agent).toEqual({});
     // 缺省全放行（2026-09-01 用户拍板）：不装策略，bash / write_file / edit_file 不问直接跑。
     // 「动手先问」仍在 `permission.ts`，是给评测 / 别的宿主自己传的，本产品不缺省开。
     expect([interactive, preset.agent?.permission]).toEqual([interactive, undefined]);
