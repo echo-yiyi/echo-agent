@@ -8,14 +8,15 @@
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
 import { readFileSync } from "node:fs";
-import { errText, type AgentState, type CredentialStore, type Provider } from "@echo-agent/core";
+import { errText, type AgentState, type CredentialStore, type Provider, type ThinkingLevel } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
-import { Editor, isKeyRelease, ProcessTerminal, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Editor, isKeyRelease, ProcessTerminal, SelectList, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { installKeybindings } from "./keybindings.ts";
 import { CredentialSetup, isConfigured, type VerifyFn } from "./setup.ts";
-import { bold, dim, EDITOR_THEME } from "./theme.ts";
+import { describeModel } from "./catalog.ts";
+import { bold, dim, EDITOR_THEME, SELECT_LIST_THEME } from "./theme.ts";
 
 const ESC = String.fromCharCode(27);
 
@@ -65,10 +66,13 @@ function welcomeLines(state: Readonly<AgentState>, cwd: string): string[] {
   return [
     ...bannerLines(cwd),
     `模型 ${state.model.id} · ${state.model.provider}`,
-    dim("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史 · Ctrl+O 工具输出"),
+    dim("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史 · Ctrl+O 工具输出 · Ctrl+L 模型"),
     "",
   ];
 }
+
+/** Shift+Tab 轮换的顺序。全集来自 `ThinkingLevel`；协议拒绝的档位会原样把原因显示出来。 */
+const THINKING_CYCLE: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 const STATUS_LABEL: Record<AgentState["status"], string> = {
   idle: "空闲",
@@ -93,6 +97,7 @@ function footerLine(state: Readonly<AgentState>, width: number): string {
     STATUS_LABEL[state.status],
     `↑${short(state.usage.inputTokens)} ↓${short(state.usage.outputTokens)}`,
   ];
+  if (state.thinkingLevel !== "off") parts.push(`思考 ${state.thinkingLevel}`);
   if (state.tasks.total > 0) parts.push(`任务 ${state.tasks.active.length}/${state.tasks.total}`);
   if (state.activeSkills.length > 0) parts.push(`skill ${state.activeSkills.length}`);
   if (state.mcp.length > 0) parts.push(`mcp ${state.mcp.length}`);
@@ -150,6 +155,18 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   editor.onSubmit = (text: string): void => {
     const trimmed = text.trim();
     if (trimmed === "") return;
+    // 斜杠命令：现在只有 `/clear`。不认识的**报一句并把原文放回**，不发给模型——
+    // 拼错命令静默变成一条消息，就是「写了没生效」在对话里的形态。
+    if (trimmed.startsWith("/")) {
+      if (trimmed === "/clear") {
+        clearConversation();
+        return;
+      }
+      editor.setText(text);
+      transcript.push({ kind: "notice", text: `不认识的命令 ${trimmed.split(/\s/)[0]}（现在只有 /clear）` });
+      rerender();
+      return;
+    }
     if (busy()) {
       // 还没就绪 / 正在跑：**文字放回输入行**，用户不用重打（不排队、不假装收下）。
       // `Editor.submitValue()` 是**先清空再回调**（与 `Input` 相反），所以这里要主动把它放回去——
@@ -223,6 +240,78 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     });
     if (reason !== undefined) transcript.push({ kind: "notice", text: reason });
     rerender();
+  };
+
+  /**
+   * 模型选择器（P3a，Ctrl+L）：**当前 provider 的目录内**换（跨 provider 是 P3b 的装配面）。
+   * 目录来自 `configure.provider`——没给 configure 的低层用法没有目录，如实说一句。
+   * 选中走协议 `setModel()`：仅 idle 可换、下一轮生效；忙时 rejected，把原因显示出来。
+   */
+  let modelPicker: SelectList | null = null;
+  const openModelPicker = (): void => {
+    if (modelPicker !== null) {
+      modelPicker = null; // Ctrl+L 再按一次 = 收起
+      rerender();
+      return;
+    }
+    if (configure === undefined) {
+      transcript.push({ kind: "notice", text: "[模型] 壳子没拿到目录（没给 configure 的低层用法没有选择器）" });
+      rerender();
+      return;
+    }
+    const models = configure.provider.getModels();
+    const current = agent.state.model.id;
+    const picker = new SelectList(
+      models.map((m, i) => ({
+        value: m.id,
+        label: `${i + 1}. ${m.name ?? m.id}${m.id === current ? " ✓" : ""}`,
+        description: describeModel(m),
+      })),
+      10,
+      SELECT_LIST_THEME,
+    );
+    picker.setSelectedIndex(Math.max(0, models.findIndex((m) => m.id === current)));
+    picker.onSelect = (item): void => {
+      const model = models.find((m) => m.id === item.value)!;
+      modelPicker = null;
+      void agent.setModel(model).then((result) => {
+        transcript.push({
+          kind: "notice",
+          text: result.kind === "accepted" ? `[模型] 已换到 ${model.id}（下一轮生效）` : `[模型] 没换成：${result.reason}`,
+        });
+        rerender();
+      });
+      rerender();
+    };
+    picker.onCancel = (): void => {
+      modelPicker = null;
+      rerender();
+    };
+    modelPicker = picker;
+    rerender();
+  };
+
+  /** Shift+Tab：thinking 档位轮换。协议拒了（正在跑）就把原因显示出来，档位原样不动。 */
+  const cycleThinking = (): void => {
+    const now = agent.state.thinkingLevel;
+    const next = THINKING_CYCLE[(THINKING_CYCLE.indexOf(now) + 1) % THINKING_CYCLE.length]!;
+    void agent.setThinkingLevel(next).then((result) => {
+      if (result.kind === "rejected") transcript.push({ kind: "notice", text: `[思考] 没换成：${result.reason}` });
+      rerender(); // 换成了不用说话——状态栏现读 state，档位直接变
+    });
+  };
+
+  /** `/clear`：协议 `reset()` 清会话真相，成了再清屏幕投影——只清一边就是两份真相分叉。 */
+  const clearConversation = (): void => {
+    void agent.reset().then((result) => {
+      if (result.kind === "rejected") {
+        transcript.push({ kind: "notice", text: `[清空] 没清成：${result.reason}` });
+      } else {
+        transcript.clear();
+        transcript.push({ kind: "notice", text: "[清空] 对话已清；模型与 thinking 档位不动" });
+      }
+      rerender();
+    });
   };
 
   const answer = (decision: "allow" | "deny"): void => {
@@ -403,6 +492,15 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         }
         lines.push(`${ESC}[33m允许 ${clean(pending.toolName)}？[y/n]${ESC}[39m`);
       }
+      // 模型选择器（Ctrl+L）：顶替输入行的位置，选完或 Esc 收起
+      if (modelPicker !== null) {
+        lines.push(bold("选择模型"));
+        lines.push(dim("当前 ✓。仅 idle 可换，下一轮生效；↑/↓ 选 · 数字直选 · 回车确认 · Esc 收起"));
+        lines.push("");
+        lines.push(...modelPicker.render(width));
+        lines.push(footerLine(agent.state, width));
+        return lines;
+      }
       // 正在配 key：这一段**顶替**输入行的位置，配好了输入行回来
       if (setup !== null) {
         lines.push(...setup.render(width));
@@ -430,6 +528,30 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       if (pending !== null) {
         if (keys.matches(data, "app.permission.allow")) return answer("allow");
         if (keys.matches(data, "app.permission.deny")) return answer("deny");
+      }
+      if (keys.matches(data, "app.model.select") && setup === null) {
+        openModelPicker();
+        return;
+      }
+      if (modelPicker !== null) {
+        // 数字直选（Kitty 下可打印字符走 CSI-u，选择器内部照样认 ↑↓/回车/Esc）
+        const models = configure?.provider.getModels() ?? [];
+        const printable = decodeKittyPrintable(data) ?? data;
+        if (/^[1-9]$/.test(printable)) {
+          const i = Number(printable) - 1;
+          if (i < models.length) {
+            modelPicker.setSelectedIndex(i);
+            modelPicker.handleInput("\r"); // 走它自己的 confirm 路径，onSelect 收口
+            return;
+          }
+        }
+        modelPicker.handleInput(data);
+        rerender();
+        return;
+      }
+      if (keys.matches(data, "app.thinking.cycle") && setup === null) {
+        cycleThinking();
+        return;
       }
       if (keys.matches(data, "app.tools.expand")) {
         transcript.toggleTools();

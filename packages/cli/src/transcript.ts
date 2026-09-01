@@ -103,6 +103,15 @@ export class Transcript {
     });
   }
 
+  /**
+   * 清空投影（`/clear`，P3a）。**只清屏幕这一份**：会话真相在 Agent 里，协议的 `reset()` 清那份；
+   * 两边都清才是「清空对话」，只清一边就是屏幕和真相分叉。调用顺序归 `app.ts`。
+   */
+  clear(): void {
+    this.items.length = 0;
+    this.container.clear();
+  }
+
   /** Ctrl+O：全部工具调用一起展开 / 收起。返回切换后的状态。 */
   toggleTools(): boolean {
     this.toolsExpanded = !this.toolsExpanded;

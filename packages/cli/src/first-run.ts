@@ -17,7 +17,7 @@
 // 模型选择**这次会话生效**；要固定下来用 `--model`（选不选缺省都会印在欢迎头的「模型」行里）。
 // 选完的持久化（记住上次选的模型）是另一个落盘格式决定，没拍板前不做。
 
-import type { CredentialStore, Model, Provider } from "@echo-agent/core";
+import type { CredentialStore, Provider } from "@echo-agent/core";
 import {
   decodeKittyPrintable,
   isKeyRelease,
@@ -28,6 +28,7 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 import { bannerLines } from "./app.ts";
+import { describeModel, describeProvider } from "./catalog.ts";
 import { CredentialSetup, type VerifyFn } from "./setup.ts";
 import { bold, dim, SELECT_LIST_THEME } from "./theme.ts";
 
@@ -252,20 +253,4 @@ function digitIndex(data: string, count: number): number | null {
   if (!/^[1-9]$/.test(printable)) return null;
   const i = Number(printable) - 1;
   return i < count ? i : null;
-}
-
-/** provider 行的描述列：**从目录派生**，不手写第二份（加模型、换缺省都自动跟上）。 */
-function describeProvider(p: Provider): string {
-  const ids = p.getModels().map((m) => m.id);
-  const head = ids.slice(0, 2).join(" / ");
-  return ids.length > 2 ? `${head} …` : head;
-}
-
-/** 模型行的描述列：id · 上下文窗口 · 推理与否，全部来自目录。 */
-function describeModel(m: Model): string {
-  const parts = [m.id];
-  const ctx = m.capabilities?.contextWindow;
-  if (ctx !== undefined) parts.push(`${Math.round(ctx / 1024)}k 上下文`);
-  if (m.capabilities?.reasoning === true) parts.push("推理");
-  return parts.join(" · ");
 }

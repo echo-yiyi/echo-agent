@@ -30,10 +30,12 @@ import type { AgentBackground } from "../background/types.ts";
 import { defineExtension, type ExtensionDefinition } from "./abi.ts";
 import { ExtensionHost, type ExtensionEntry } from "./host.ts";
 import { AgentTools, agentRegistries } from "./registries.ts";
-import { AgentRuntimeService, type AgentRuntime } from "./runtime.ts";
+import { AgentRuntimeService, type AgentRuntime, type EquipResult } from "./runtime.ts";
 import type { ServiceKey } from "./abi.ts";
 import type { AgentMessage, ImageBlock } from "../messages.ts";
 import type { AgentOutcome } from "../events.ts";
+import { errText } from "../errors.ts";
+import type { Model, ThinkingLevel } from "../provider/types.ts";
 
 /** builtin 的 config 形状：一组已经造好的工具。**构造归 core，这里只负责注册。** */
 export type BuiltinToolsConfig = { readonly tools: readonly AgentTool[] };
@@ -242,6 +244,15 @@ export const ECHO_AGENT: ExtensionDefinition<{ runtime: AgentRuntime }> = define
  * 「壳能碰什么」由协议说了算，而不是「Agent 上有什么壳就能调什么」。
  */
 export function agentRuntimeOf(agent: RuntimeSource): AgentRuntime {
+  /** 装备操作的统一包法：守卫抛什么（正在运行 / 形状不合格）就把原因原样带出去，**不抛不静默**。 */
+  const equip = (change: () => void): Promise<EquipResult> => {
+    try {
+      change();
+      return Promise.resolve({ kind: "accepted" });
+    } catch (e) {
+      return Promise.resolve({ kind: "rejected", reason: errText(e) });
+    }
+  };
   return {
     get state() {
       return agent.state;
@@ -256,6 +267,16 @@ export function agentRuntimeOf(agent: RuntimeSource): AgentRuntime {
       return agent.pendingPermissions;
     },
     abort: (reason) => agent.abort(reason),
+    // 换装备（P3a）：机制在 Agent 的装备 setter 与 reset() 上，这里只是接口到协议的映射
+    setModel: (model) =>
+      equip(() => {
+        agent.model = model;
+      }),
+    setThinkingLevel: (level) =>
+      equip(() => {
+        agent.thinkingLevel = level;
+      }),
+    reset: () => equip(() => agent.reset()),
     get acceptsWork() {
       return agent.acceptsWork;
     },
@@ -268,4 +289,8 @@ export type RuntimeSource = Pick<
   "state" | "subscribe" | "subscribeLifecycle" | "steer" | "followUp" | "answerPermission" | "pendingPermissions" | "abort" | "acceptsWork"
 > & {
   prompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): Promise<{ outcome: AgentOutcome }>;
+  /** 装备面（P3a）：Agent 的 get/set 属性对与 `reset()`。守 idle 的抛在 Agent 里，`equip()` 只做映射。 */
+  model: Model;
+  thinkingLevel: ThinkingLevel;
+  reset(): void;
 };

@@ -30,6 +30,7 @@
 import type { AgentListener, AgentOutcome } from "../events.ts";
 import type { LifecycleEventListener } from "../hooks/runtime.ts";
 import type { AgentState } from "../agent.ts";
+import type { Model, ThinkingLevel } from "../provider/types.ts";
 import type { AgentMessage, ImageBlock } from "../messages.ts";
 import type { FollowUpResult, SteerResult } from "../loop/intake.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionAsk } from "../permission/types.ts";
@@ -39,9 +40,18 @@ import { defineService, type ServiceKey } from "./abi.ts";
 export type RuntimeTurnResult = { readonly outcome: AgentOutcome };
 
 /**
+ * 换装备（P3a，2026-09-01 用户拍板）的显式结果：与 `steer` / `followUp` 同款——**不抛、不静默**。
+ * `rejected` 的常态是「正在运行」（装备仅 idle 可换，`agent.ts` 的 `assertIdle`）；
+ * 也可能是形状不合格（`normalizeModelSnapshot` 判红）。原因原样带出来，壳子照着显示。
+ */
+export type EquipResult = Readonly<{ kind: "accepted" }> | Readonly<{ kind: "rejected"; reason: string }>;
+
+/**
  * 壳子（TUI / Web / 任何 UI）看得到的**全部**。封闭：加一支就是改契约。
  *
- * 四组，按壳子实际要做的事分：**看**什么、**说**什么、**答**什么、**停**什么。
+ * 五组，按壳子实际要做的事分：**看**什么、**说**什么、**答**什么、**换**什么、**停**什么。
+ * 「换」那组是 P3a（2026-09-01 拍板）：setModel / setThinkingLevel / reset——机制早在 Agent 上
+ * （装备 setter 与 `reset()`），这里只开协议口；开闭仍是**封闭**，理由不变（见上）。
  */
 export interface AgentRuntime {
   /* ── 看 ───────────────────────────────────────────────────────────── */
@@ -88,6 +98,26 @@ export interface AgentRuntime {
 
   /** 中断在飞的那一轮。**不是停 Agent**——那是装配层的事。 */
   abort(reason?: string): void;
+
+  /* ── 换 ───────────────────────────────────────────────────────────── */
+
+  /**
+   * 换模型（P3a）。**慢变装备，仅 idle 可换**——core 原有的守卫（`agent.ts` `assertIdle`），
+   * 这里只是把它接到协议上。忙时 `rejected` 带原因，**不排队**：排队会让「我换了模型」
+   * 在几分钟后某个自主 run 之后突然生效，那是惊吓不是功能。
+   * 绿灯 = **下一轮**生效：每次 admission 冻结 model binding（§14.2.4 model seam），本轮不撕裂。
+   * 目录从哪来是壳子的事（P3a 只在当前 provider 的目录里选；跨 provider 是 P3b 的装配面）。
+   */
+  setModel(model: Model): Promise<EquipResult>;
+
+  /** 换 thinking 档位（P3a）。语义同 `setModel`：仅 idle，忙时 rejected，不排队。 */
+  setThinkingLevel(level: ThinkingLevel): Promise<EquipResult>;
+
+  /**
+   * 清对话与运行态，**装备与决策点不动**（core 的 `reset()`，`agent.ts`）。仅 idle。
+   * 壳子自己的投影（transcript）要自己清——协议不管渲染。
+   */
+  reset(): Promise<EquipResult>;
 
   /**
    * 现在能不能收新输入。**壳子必须读它而不是自己猜**：

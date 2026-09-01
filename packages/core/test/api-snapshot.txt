@@ -320,7 +320,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 45（value 20 · type 21 · both 4）
+符号 46（value 20 · type 22 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -376,9 +376,10 @@ type   AgentSkillsRegistry
 value  AgentTools
 type   AgentToolsRegistry
 
--- src/extension/runtime.ts (3) --
+-- src/extension/runtime.ts (4) --
 type   AgentRuntime
 value  AgentRuntimeService
+type   EquipResult
 type   RuntimeTurnResult
 
 == 入口 "./mcp" → src/mcp/port.ts ==

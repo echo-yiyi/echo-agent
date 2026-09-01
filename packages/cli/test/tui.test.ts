@@ -83,6 +83,9 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
     followUp: (m) => base.followUp(m),
     answerPermission: (a) => base.answerPermission(a),
     abort: (r) => base.abort(r),
+    setModel: (m) => base.setModel(m),
+    setThinkingLevel: (l) => base.setThinkingLevel(l),
+    reset: () => base.reset(),
   };
   // **不能用 `Object.assign`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter-only，
   // 赋值会抛 "Attempted to assign to readonly property"（实测）。覆盖项一律走 `defineProperty`，
@@ -1407,6 +1410,189 @@ test("端到端：Ctrl+O 展开 / 收起工具输出；折叠时长结果不刷�
   expect(ui.screen()).toContain("entry-99");
   ui.feed(CTRL_O);
   expect(ui.screen()).not.toContain("entry-99");
+
+  quit(ui);
+  await done;
+});
+
+/* ─────────────── 换装备（P3a）：Ctrl+L 模型选择器 · Shift+Tab 思考档位 · /clear ─────────────── */
+//
+// 协议面的判据在 core（`runtime-equip.test.ts`）；这里测壳子的接线：键 → 协议方法 → 屏幕。
+
+const CTRL_L = String.fromCharCode(12);
+const SHIFT_TAB = `${ESC_KEY}[Z`;
+
+test("Ctrl+L：选择器顶替输入行，当前项 ✓ 且预选中；选另一个 → 走协议换掉，状态栏跟着变", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = new Agent({
+      model: { provider: "kimi", id: "kimi-k3", api: "openai-completions" },
+      streamFunction: scriptedStreamFn([textTurn("好")]),
+    });
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    ui.feed(CTRL_L);
+    const s = ui.screen();
+    expect(s).toContain("选择模型");
+    expect(s).toContain("→ 1. Kimi K3 ✓"); // 当前项标着、预选中
+    // 「Enter 发送 · Shift+Enter」欢迎头里恒有一句；选择器顶替输入行时**只剩那一句**（输入行下的短提示没了）
+    expect(s.split("Enter 发送 · Shift+Enter").length - 1, "选择器打开时输入行不该在").toBe(1);
+
+    ui.feed("2"); // 数字直选 kimi-k2-turbo-preview
+    await flush();
+    expect(ui.screen()).toContain("[模型] 已换到 kimi-k2-turbo-preview");
+    expect(agent.state.model.id).toBe("kimi-k2-turbo-preview");
+    expect(ui.screen().split("\n").at(-1)!).toContain("kimi-k2-turbo-preview"); // 状态栏现读 state
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("Ctrl+L：Esc 收起、再按 Ctrl+L 也是收起；没给 configure 的低层用法如实说没有目录", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    ui.feed(CTRL_L);
+    expect(ui.screen()).toContain("选择模型");
+    ui.feed(ESC_KEY);
+    expect(ui.screen()).not.toContain("选择模型");
+    ui.feed(CTRL_L);
+    ui.feed(CTRL_L); // 再按一次 = 收起
+    expect(ui.screen()).not.toContain("选择模型");
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("没给 configure 的低层用法：Ctrl+L 如实说没有目录，不摆一个空选择器", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui }); // 不给 configure
+  await flush();
+  ui.feed(CTRL_L);
+  expect(ui.screen()).toContain("[模型] 壳子没拿到目录");
+  expect(ui.screen()).not.toContain("选择模型");
+  quit(ui);
+  await done;
+});
+
+test("忙的时候选模型：rejected 原因上屏，装备原样不动", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = new Agent({
+      model: { provider: "kimi", id: "kimi-k3", api: "openai-completions" },
+      streamFunction: scriptedStreamFn([textTurn("好")]),
+    });
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    ui.feed("跑一轮");
+    ui.feed(ENTER); // 发出去的那一拍就算在跑（pendingLocal / userRunPending）
+    ui.feed(CTRL_L);
+    ui.feed("2");
+    await flush(300);
+
+    expect(ui.screen()).toContain("[模型] 没换成");
+    expect(ui.screen()).toContain("正在运行");
+    expect(agent.state.model.id).toBe("kimi-k3");
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("Shift+Tab：thinking 档位轮换（off → minimal），状态栏出现「思考」；再轮到 off 就从状态栏消失", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  expect(ui.screen()).not.toContain("思考");
+  ui.feed(SHIFT_TAB);
+  await flush();
+  expect(agent.state.thinkingLevel).toBe("minimal");
+  expect(ui.screen().split("\n").at(-1)!).toContain("思考 minimal");
+
+  for (let i = 0; i < 6; i++) {
+    ui.feed(SHIFT_TAB);
+    await flush();
+  }
+  expect(agent.state.thinkingLevel).toBe("off"); // 轮满一圈回到 off
+  expect(ui.screen().split("\n").at(-1)!).not.toContain("思考");
+
+  quit(ui);
+  await done;
+});
+
+test("/clear：协议 reset() 清会话真相，屏幕投影一起清；装备不动", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("这句会被清掉"), textTurn("新的一句")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  ui.feed(SHIFT_TAB); // 先把 thinking 拨到 minimal，验证 /clear 不动装备
+  ui.feed("说一句");
+  ui.feed(ENTER);
+  await flush(300);
+  expect(ui.screen()).toContain("这句会被清掉");
+  expect(agent.state.messages.length).toBeGreaterThan(0);
+
+  for (const ch of "/clear") ui.feed(ch);
+  ui.feed(ENTER);
+  await flush(200);
+
+  expect(ui.screen()).toContain("[清空] 对话已清");
+  expect(ui.screen(), "屏幕投影没清").not.toContain("这句会被清掉");
+  expect(agent.state.messages, "会话真相没清").toEqual([]);
+  expect(agent.state.thinkingLevel, "/clear 把装备也清了").toBe("minimal");
+
+  // 清完还能正常说话
+  ui.feed("再来");
+  ui.feed(ENTER);
+  await flush(300);
+  expect(ui.screen()).toContain("新的一句");
+
+  quit(ui);
+  await done;
+});
+
+test("不认识的斜杠命令：报一句、原文放回输入行，不发给模型", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("不该被跑到")]);
+  const prompts = capturePrompts(agent);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  for (const ch of "/model") ui.feed(ch);
+  ui.feed(ENTER);
+  await flush();
+
+  expect(ui.screen()).toContain("不认识的命令 /model");
+  expect(prompts, "斜杠命令被当成消息发出去了").toEqual([]);
+  // 原文放回了输入行：直接再按回车，同一条提示出现第二次（放没放回，按一下就知道）
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen().split("不认识的命令").length - 1, "原文没放回输入行").toBe(2);
 
   quit(ui);
   await done;

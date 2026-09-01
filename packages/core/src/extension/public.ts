@@ -50,5 +50,5 @@ export {
   type BuiltinToolsConfig,
 } from "./builtin.ts";
 export { unmountGenerations, type UnmountTarget } from "./cleanup.ts";
-export { AgentRuntimeService, type AgentRuntime, type RuntimeTurnResult } from "./runtime.ts";
+export { AgentRuntimeService, type AgentRuntime, type EquipResult, type RuntimeTurnResult } from "./runtime.ts";
 export { ECHO_AGENT, agentRuntimeOf, type RuntimeSource } from "./builtin.ts";
