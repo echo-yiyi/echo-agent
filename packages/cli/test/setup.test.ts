@@ -91,6 +91,18 @@ test("说清给哪家配、怎么换家；不给 alternatives 就不提换家", 
   expect(screenOf(bare)).not.toContain("--provider");
 });
 
+test("掩码行长得像输入行：上下各一条与宽度等长的 `─` 边框、左边留一列（P1 视觉对齐）", () => {
+  const { setup } = setupWith();
+  type(setup, "abc");
+  const raw = setup.render(40);
+  const lines = raw.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  const i = lines.findIndex((l) => l.includes("•••"));
+  expect(i).toBeGreaterThan(0);
+  expect(lines[i - 1]).toBe("─".repeat(40));
+  expect(lines[i + 1]).toBe("─".repeat(40));
+  expect(lines[i]).toBe(" •••"); // paddingX = 1，与 Editor 同款
+});
+
 test("输入的 key **一个字符都不上屏**，只画等长掩码", () => {
   const { setup } = setupWith();
   type(setup, "sk-SECRET-9");

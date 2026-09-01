@@ -139,7 +139,6 @@ export class CredentialSetup {
   }
 
   render(width: number): string[] {
-    void width;
     const p = this.opts.provider;
     const lines: string[] = [yellow(`还没有 ${p.name} 的 API key——贴进下面这行，回车验证并保存`)];
     if (this.opts.alternatives !== undefined && this.opts.alternatives.length > 0) {
@@ -150,7 +149,10 @@ export class CredentialSetup {
       return lines;
     }
     // **只画掩码**。长度是故意露出来的：粘贴到底进没进来，看得见才判断得了。
-    lines.push(`> ${"•".repeat(this.secret.getValue().length)}`);
+    // 边框与内边距照 `Editor`（上下各一条 `─`、左右各留一列）——它顶替的是输入行的位置，
+    // 长得像输入行用户才知道「这就是要我打字的地方」（P1 视觉对齐）。
+    const border = dim("─".repeat(Math.max(1, width)));
+    lines.push(border, ` ${"•".repeat(this.secret.getValue().length)}`, border);
     if (this.error !== undefined) lines.push(red(`验不过，没有保存：${this.error}`));
     lines.push(dim("输入不回显 · 回车验证并保存 · Ctrl+C 清空 · Ctrl+D 退出"));
     return lines;

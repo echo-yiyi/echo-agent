@@ -205,7 +205,7 @@ test("端到端：输入一句 → 屏幕上出现用户行与模型正文；Ctr
   const done = runTui({ agent: runtimeOf(agent), ui });
 
   await flush();
-  expect(ui.screen()).toContain("已接上");
+  expect(ui.screen()).toContain("模型 only");
 
   ui.feed("在吗");
   ui.feed("\r");
@@ -336,12 +336,12 @@ test("壳子**不停 Agent**：协议里没有 stop，收摊归装配层（壳�
   await agent.stop(); // 由「装配层」来收
 });
 
-test("接上那行报模型 id（启动是装配层的事，壳子只说自己接上了谁）", async () => {
+test("欢迎头报模型 id（启动是装配层的事，壳子只说自己接上了谁）", async () => {
   const ui = fakeTui();
   const agent = agentWith([textTurn("好")]);
   const done = runTui({ agent: runtimeOf(agent), ui });
   await flush();
-  expect(ui.screen()).toContain("已接上");
+  expect(ui.screen()).toContain("模型 only");
   expect(ui.screen()).toContain("only"); // FAKE 模型 id
   quit(ui);
   await done;
@@ -1094,10 +1094,12 @@ test("没配 key：主界面**照样起来**，配置段顶替输入行；配好
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
     await flush();
 
-    expect(ui.screen()).toContain("已接上"); // 主界面起来了
+    expect(ui.screen()).toContain("模型 only"); // 主界面起来了
     expect(ui.screen()).toContain("Kimi (Moonshot) 的 API key"); // 配置段就在里面
     expect(ui.screen()).toContain("--provider deepseek"); // 换家怎么换
-    expect(ui.screen(), "配置段期间输入行不该在").not.toContain("Enter 发送");
+    // 配置段期间输入行不该在：它自己的提示行在、输入行下面那条提示不在（欢迎头里的那句不算）
+    expect(ui.screen()).toContain("输入不回显");
+    expect(ui.screen().split("Enter 发送").length - 1, "配置段期间输入行不该在").toBe(1);
 
     for (const ch of "sk-GOOD") ui.feed(ch);
     ui.feed(ENTER);
@@ -1105,7 +1107,8 @@ test("没配 key：主界面**照样起来**，配置段顶替输入行；配好
 
     expect(ui.screen()).toContain("[凭据] 已保存");
     expect(await credentials.read("kimi")).toEqual({ type: "api_key", key: "sk-GOOD" });
-    expect(ui.screen(), "配好之后输入行没回来").toContain("Enter 发送");
+    expect(ui.screen()).not.toContain("输入不回显");
+    expect(ui.screen().split("Enter 发送").length - 1, "配好之后输入行没回来").toBe(2); // 欢迎头 + 输入行下的提示
 
     ui.feed("在吗");
     ui.feed(ENTER);
@@ -1202,7 +1205,7 @@ test("读不了凭据文件：**不挡启动**，说一句，当成没配", asyn
     };
     const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials: broken }) });
     await flush();
-    expect(ui.screen()).toContain("已接上");
+    expect(ui.screen()).toContain("模型 only");
     expect(ui.screen()).toContain("[凭据] 读不了凭据文件");
     expect(ui.screen()).toContain("的 API key");
     quit(ui);
@@ -1220,6 +1223,68 @@ test("不给 configure：壳子不管凭据，什么都不摆（低层用户自�
     const done = runTui({ agent: runtimeOf(agent), ui });
     await flush();
     expect(ui.screen()).not.toContain("的 API key");
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+/* ─────────────── 欢迎头与状态栏（P1，`docs/review/tui-design.md` §三 §四） ─────────────── */
+
+test("欢迎头：版本、cwd、模型、键位提示，在文档流最上面", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  const screen = ui.screen();
+  const lines = screen.split("\n");
+  expect(lines[0]).toContain("echo-agent");
+  expect(lines[0]).toMatch(/v\d+\.\d+\.\d+/); // 版本来自 package.json
+  expect(screen).toContain(process.cwd());
+  expect(screen).toContain("模型 only · t"); // 来自 AgentState.model
+  expect(screen).toContain("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史");
+  // 头在对话之前：发一句之后用户行出现在头的下面
+  ui.feed("你好");
+  ui.feed(ENTER);
+  await flush(200);
+  const after = ui.screen();
+  expect(after.indexOf("echo-agent")).toBeLessThan(after.indexOf("你好"));
+
+  quit(ui);
+  await done;
+});
+
+test("状态栏：最底下一行，模型 / 状态 / 用量恒显；任务 / skill / MCP 为零不占地方", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  const lines = ui.screen().split("\n");
+  const footer = lines.at(-1)!.replace(/\x1b\[[0-9;]*m/g, "");
+  expect(footer).toContain("only"); // 模型
+  expect(footer).toContain("空闲"); // 状态（未开工）
+  expect(footer).toMatch(/↑\d+.* ↓\d+/); // 用量
+  expect(footer, "为零的项不该占地方").not.toContain("任务");
+  expect(footer).not.toContain("skill");
+  expect(footer).not.toContain("mcp");
+
+  quit(ui);
+  await done;
+});
+
+test("状态栏在配置段期间也在（它不依赖输入行）", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith() });
+    await flush();
+    const footer = ui.screen().split("\n").at(-1)!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(footer).toContain("only");
+    expect(footer).toContain("空闲");
     quit(ui);
     await done;
   } finally {

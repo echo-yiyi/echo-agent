@@ -88,7 +88,7 @@ test(
   withHome(async (home) => {
     configured(home);
     const r = await drive(home, [
-      { kind: "wait", text: "已接上", timeout: 15 },
+      { kind: "wait", text: "模型 kimi-k3", timeout: 15 },
       { kind: "send", bytes: KEYS.ctrlD },
       { kind: "exit", timeout: 5 },
     ]);
@@ -103,7 +103,7 @@ test(
   withHome(async (home) => {
     configured(home);
     const r = await drive(home, [
-      { kind: "wait", text: "已接上", timeout: 15 },
+      { kind: "wait", text: "模型 kimi-k3", timeout: 15 },
       { kind: "send", bytes: ascii("abc") },
       { kind: "send", bytes: KEYS.kittyCtrlD }, // 有字：向前删一个（光标在末尾，等于没事），**不许退出**
       { kind: "exit", timeout: 1 }, // 预期等不到退出
@@ -124,7 +124,7 @@ test(
   withHome(async (home) => {
     // **不写 credentials.json**——这正是要验的：缺 key 不是启动前置
     const r = await drive(home, [
-      { kind: "wait", text: "已接上", timeout: 15 }, // 主界面起来了
+      { kind: "wait", text: "模型 kimi-k3", timeout: 15 }, // 主界面起来了
       { kind: "wait", text: "还没有可用的凭据", timeout: 5 }, // 配置段就在它里面
       { kind: "send", bytes: KEYS.kittyCtrlD },
       { kind: "exit", timeout: 5 },

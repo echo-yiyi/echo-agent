@@ -391,8 +391,8 @@ test("main:交互 + 缺凭据 → **照样起来**，主界面里就是配置段
       credentials: new FileCredentialStore(join(dir, "credentials.json")),
       verify: async () => ({ ok: true }),
     });
-    // 关键：**主界面先起来**（「已接上」是主界面才有的），配置段就在它里面，不是另一屏
-    await waitFor(() => ui.screen().includes("已接上") && ui.screen().includes("还没有可用的凭据"), "主界面 + 配置段");
+    // 关键：**主界面先起来**（「模型 kimi-k3」（欢迎头）是主界面才有的），配置段就在它里面，不是另一屏
+    await waitFor(() => ui.screen().includes("模型 kimi-k3") && ui.screen().includes("还没有可用的凭据"), "主界面 + 配置段");
     expect(ui.screen()).toContain("Kimi (Moonshot) 的 API key");
     expect(ui.screen()).toContain("--provider deepseek"); // 换家怎么换，说了
 
@@ -401,7 +401,7 @@ test("main:交互 + 缺凭据 → **照样起来**，主界面里就是配置段
     await waitFor(() => ui.screen().includes("[凭据] 已保存"), "配好");
 
     expect(JSON.parse(readFileSync(join(dir, "credentials.json"), "utf8"))).toEqual({ kimi: { apiKey: "sk-GOOD" } });
-    expect(ui.screen(), "配好之后输入行没回来").toContain("Enter 发送");
+    expect(ui.screen().split("Enter 发送").length - 1, "配好之后输入行没回来").toBe(2); // 欢迎头 + 输入行下的提示
 
     ui.feed(String.fromCharCode(4)); // Ctrl+D 退出
     expect(await running).toBe(0);

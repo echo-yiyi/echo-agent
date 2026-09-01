@@ -7,16 +7,21 @@
 // 于是这个文件**只认协议、不认 Agent**：`start` / `stop` / `deliver` 都不在协议里，
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
-import { errText, type CredentialStore, type Provider } from "@echo-agent/core";
+import { readFileSync } from "node:fs";
+import { errText, type AgentState, type CredentialStore, type Provider } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
 import { Editor, isKeyRelease, ProcessTerminal, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { installKeybindings } from "./keybindings.ts";
 import { CredentialSetup, isConfigured, type VerifyFn } from "./setup.ts";
-import { EDITOR_THEME } from "./theme.ts";
+import { bold, dim, EDITOR_THEME } from "./theme.ts";
 
 const ESC = String.fromCharCode(27);
+
+/** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置（`files: ["src", …]`）。 */
+const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
+  .version;
 /** 键位照 pi（`keybindings.ts`）。Ctrl+C 不再是退出——提示行必须写 Ctrl+D，否则用户按 Ctrl+C 只会看到输入被清掉。 */
 const HINT = `${ESC}[2mEnter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出${ESC}[22m`;
 
@@ -47,12 +52,58 @@ export type TuiConfigureOptions = Readonly<{
   verify?: VerifyFn;
 }>;
 
+/**
+ * 欢迎头（P1，`docs/review/tui-design.md` §三）：启动时一次，在文档流最上面，跟着内容滚走。
+ * 四行：是什么 / 在哪 / 用什么模型 / 键怎么按。模型来自 `AgentState.model`，cwd 是壳自己拿的。
+ */
+function welcomeLines(state: Readonly<AgentState>, cwd: string): string[] {
+  return [
+    `${bold("echo-agent")}  ${dim(`v${VERSION}`)}`,
+    dim(cwd),
+    `模型 ${state.model.id} · ${state.model.provider}`,
+    dim("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史"),
+    "",
+  ];
+}
+
+const STATUS_LABEL: Record<AgentState["status"], string> = {
+  idle: "空闲",
+  generating: "生成中",
+  acting: "执行工具",
+  compacting: "压缩中",
+};
+
+/** `1234` → `1.2k`。状态栏一行，数字要短。 */
+function short(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n);
+}
+
+/**
+ * 状态栏（P1，§四）：最底下一行，每次重画都从 `AgentRuntime.state` 现读——它就是整个 `AgentState`
+ * （`runtime.ts:50-54`），所以这里显示的每一项都不需要壳子自己记一份。
+ * 模型 / 状态 / 用量恒显；任务 / skill / MCP 为零就不占地方。
+ */
+function footerLine(state: Readonly<AgentState>, width: number): string {
+  const parts = [
+    state.model.id,
+    STATUS_LABEL[state.status],
+    `↑${short(state.usage.inputTokens)} ↓${short(state.usage.outputTokens)}`,
+  ];
+  if (state.tasks.total > 0) parts.push(`任务 ${state.tasks.active.length}/${state.tasks.total}`);
+  if (state.activeSkills.length > 0) parts.push(`skill ${state.activeSkills.length}`);
+  if (state.mcp.length > 0) parts.push(`mcp ${state.mcp.length}`);
+  const text = parts.join(" · ");
+  // 宽字符按一列算会略溢出、被终端折成两行——状态栏不值得为此拖一套字宽库进来
+  return dim([...text].slice(0, Math.max(0, width)).join(""));
+}
+
 /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止，返回退出码。**不负责收摊 Agent**——那归装配层。 */
 export async function runTui(options: TuiAppOptions): Promise<number> {
   const { agent, signal, configure } = options;
   const ui: TUI = options.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
 
   const transcript = new Transcript();
+  const welcome = welcomeLines(agent.state, process.cwd());
   /**
    * 能不能收下一条输入，只由 `busy()` 决定——**「起来了没」也在里面**。
    *
@@ -324,7 +375,8 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       editor.focused = value;
     },
     render: (width: number): string[] => {
-      const lines = [...transcript.render(width)];
+      // 文档流：欢迎头 → 对话；然后输入行；最后状态栏。三段式（§一），P1 先按行拼，P2 换 Container。
+      const lines = [...welcome, ...transcript.render(width)];
       // 待答的权限问题**压在输入行上方**，且提示语写清按什么键——
       // 「屏幕上有个问题但没说怎么答」和没问是一样的
       if (pending !== null) {
@@ -339,11 +391,13 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       // 正在配 key：这一段**顶替**输入行的位置，配好了输入行回来
       if (setup !== null) {
         lines.push(...setup.render(width));
+        lines.push(footerLine(agent.state, width));
         return lines;
       }
       lines.push(...editor.render(width));
       // 空闲且没打字时给一句提示；有字或在跑就不占地方
       if (editor.getText() === "" && !busy()) lines.push(HINT);
+      lines.push(footerLine(agent.state, width));
       return lines;
     },
     /**
@@ -433,7 +487,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     // 「起来了没」由协议的 `acceptsWork` 说了算——它在 running 之前恒为 false，
     // 所以从前那个 `ready` 布尔整个删掉了：一份判据，不再有壳子自己维护的第二份。
     if (signal?.aborted !== true) {
-      transcript.push({ kind: "notice", text: `已接上（${agent.state.model.id}）` });
+      // 「接上了、用的什么模型」由欢迎头说（`welcomeLines`），不再单发一行 notice
       if (needsConfigure) enterConfigure("还没有可用的凭据——先配一个，配好不用重启");
       rerender();
       await exited;
