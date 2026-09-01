@@ -10,7 +10,7 @@
 // 这里只管画（理由见 `text.ts` 头注：清洗要在加 SGR 之前）。
 
 import type { AgentToolResult } from "@echo-agent/core";
-import { Markdown, type Component } from "@earendil-works/pi-tui";
+import { Markdown, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { wrap } from "./text.ts";
 import { cyan, dim, green, italic, MARKDOWN_THEME, red, yellow } from "./theme.ts";
 
@@ -109,7 +109,10 @@ export class ToolExecution implements Component {
   render(width: number): string[] {
     const mark = this.state === "running" ? "⋯" : this.state === "done" ? "✓" : "✗";
     const paint = this.state === "failed" ? red : this.state === "done" ? green : yellow;
-    const lines = [paint(`${mark} ${this.name}`) + (this.detail === "" ? "" : dim(`  ${this.detail}`))];
+    const head = paint(`${mark} ${this.name}`) + (this.detail === "" ? "" : dim(`  ${this.detail}`));
+    // 折叠行**只有一行**，摘要再长也截到宽度（全量看展开态）。不截的话 pi-tui 的渲染门直接抛——
+    // 实测 `TaskCreate` 的参数 JSON 118 列 > 终端 112 列，整个界面崩掉（2026-09-01）。
+    const lines = [truncateToWidth(head, width, "…")];
     if (this.expanded()) {
       const inner = Math.max(1, width - 2);
       const gutter = dim("│ ");

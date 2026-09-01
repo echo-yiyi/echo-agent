@@ -11,6 +11,7 @@ import { errText, type AgentState, type CredentialStore, type Model, type Provid
 import type { AgentRuntime } from "@echo-agent/core/extension";
 import { decodeKittyPrintable, Editor, isKeyRelease, ProcessTerminal, SelectList, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
+import { wrap } from "./text.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { installKeybindings } from "./keybindings.ts";
 import { CredentialSetup, isConfigured, type VerifyFn } from "./setup.ts";
@@ -529,7 +530,9 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     },
     render: (width: number): string[] => {
       // 文档流：欢迎头 → 对话；然后输入行；最后状态栏。三段式（§一），P1 先按行拼，P2 换 Container。
-      const lines = [...welcome, ...transcript.render(width)];
+      // 欢迎头也按宽度折：那几行是固定文案，但键位提示 95 列、cwd 可以任意长——
+      // 终端比它窄时 pi-tui 的渲染门一样会抛，启动即崩（与工具折叠行同一类，2026-09-01）。
+      const lines = [...welcome.flatMap((l) => wrap(l, width)), ...transcript.render(width)];
       // 待答的权限问题**压在输入行上方**，且提示语写清按什么键——
       // 「屏幕上有个问题但没说怎么答」和没问是一样的
       if (pending !== null) {
@@ -558,7 +561,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       }
       lines.push(...editor.render(width));
       // 空闲且没打字时给一句提示；有字或在跑就不占地方
-      if (editor.getText() === "" && !busy()) lines.push(HINT);
+      if (editor.getText() === "" && !busy()) lines.push(...wrap(HINT, width)); // 54 列，窄终端要折
       lines.push(footerLine(agent.state, width));
       return lines;
     },
