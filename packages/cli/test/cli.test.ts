@@ -9,7 +9,7 @@
 // 交互形态的判据在 `tui.test.ts` 与 `extension.test.ts`。
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -438,4 +438,50 @@ test("main:交互 + 缺凭据，引导设置里 Ctrl+D → 不启动，退出码
   } finally {
     restore();
   }
+});
+
+/* ══════════════ 坏扩展不阻塞启动（D6）：跳过 + 界面里看得见 ══════════════ */
+
+test("main:交互 + 扩展目录里有坏文件 → 照样起来，屏幕上一条「[扩展] 没装上」，好的照用", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const ext = join(dir, "extensions");
+    mkdirSync(ext, { recursive: true });
+    writeFileSync(join(ext, "broken.ts"), "export const x = 1;\n"); // 没有默认导出
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+
+    const running = main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], true, {
+      ui,
+      credentials,
+    });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3"), "主界面");
+    await waitFor(() => ui.screen().includes("[扩展] 没装上"), "装配诊断上屏");
+    expect(ui.screen()).toContain("broken.ts"); // 指名道姓，用户才知道去修哪个文件
+
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0); // 坏扩展不改退出码——它没挡住任何事
+  } finally {
+    restore();
+  }
+});
+
+test("bin:管道形态 + 坏扩展 → 照样跑，诊断进 stderr，退出码不受影响", () => {
+  const ext = join(dir, "extensions");
+  mkdirSync(ext, { recursive: true });
+  writeFileSync(join(ext, "broken.ts"), "export const x = 1;\n");
+  const home = join(dir, "home");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "credentials.json"), JSON.stringify({ kimi: { apiKey: "sk-ok" } }));
+
+  const r = spawnBin(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], {
+    MOONSHOT_API_KEY: "",
+    ECHO_LLM_API_KEY: "",
+    ECHO_HOME: home,
+  });
+  // 空 stdin：一行输入都没有，起得来就 0 退出
+  expect(r.code).toBe(0);
+  expect(r.err).toContain("[扩展]");
+  expect(r.err).toContain("broken.ts");
 });
