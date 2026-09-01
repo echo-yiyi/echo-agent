@@ -171,15 +171,23 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   editor.onSubmit = (text: string): void => {
     const trimmed = text.trim();
     if (trimmed === "") return;
-    // 斜杠命令：现在只有 `/clear`。不认识的**报一句并把原文放回**，不发给模型——
+    // 斜杠命令（P3 的最小集）：`/clear`、`/model`。不认识的**报一句并把原文放回**，不发给模型——
     // 拼错命令静默变成一条消息，就是「写了没生效」在对话里的形态。
     if (trimmed.startsWith("/")) {
       if (trimmed === "/clear") {
         clearConversation();
         return;
       }
+      if (trimmed === "/model") {
+        openModelPicker(); // 与 Ctrl+L 同一个选择器
+        return;
+      }
+      if (trimmed.startsWith("/model ")) {
+        void setModelById(trimmed.slice("/model ".length).trim());
+        return;
+      }
       editor.setText(text);
-      transcript.push({ kind: "notice", text: `不认识的命令 ${trimmed.split(/\s/)[0]}（现在只有 /clear）` });
+      transcript.push({ kind: "notice", text: `不认识的命令 ${trimmed.split(/\s/)[0]}（有 /clear、/model [模型id]）` });
       rerender();
       return;
     }
@@ -324,6 +332,25 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     modelPicker = picker;
     rerender();
   };
+  /** `/model <id>`：跨五家目录按 id 直切，走与选择器同一条 `pickModel` 路（协议、写设置、主动弹配置段全一样）。 */
+  const setModelById = async (id: string): Promise<void> => {
+    if (configure === undefined) {
+      transcript.push({ kind: "notice", text: "[模型] 壳子没拿到目录（没给 configure 的低层用法没有选择器）" });
+      rerender();
+      return;
+    }
+    for (const c of configure.providers) {
+      const model = c.provider.getModels().find((m) => m.id === id);
+      if (model !== undefined) {
+        const configured = await isConfigured(c.provider, configure.credentials);
+        pickModel({ model, configured });
+        return;
+      }
+    }
+    transcript.push({ kind: "notice", text: `[模型] 目录里没有 '${id}'——敲 /model 或 Ctrl+L 看有哪些` });
+    rerender();
+  };
+
   const pickModel = (e: { model: Model; configured: boolean }): void => {
     modelPicker = null;
     void agent.setModel(e.model).then((result) => {
