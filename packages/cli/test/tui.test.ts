@@ -1676,3 +1676,55 @@ test("Ctrl+L 选已配好那家的模型：换过去就完，不弹配置段", a
     restore();
   }
 });
+
+/* ─────────────── 状态栏的缓存那一格（2026-09-01：token 就够，但要看到缓存情况） ─────────────── */
+
+test("provider 报了缓存：状态栏出现「缓存 <数> (<百分比>%)」；没报就不占地方（没报 ≠ 0%）", async () => {
+  const withCache: ProviderEvent[] = [
+    {
+      type: "done",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "好" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 1000, outputTokens: 5, cachedInputTokens: 600 },
+      },
+    },
+  ];
+  const ui = fakeTui();
+  const agent = agentWith([withCache]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("说");
+  ui.feed(ENTER);
+  await flush(300);
+
+  const footer = ui.screen().split("\n").at(-1)!.replace(/\x1b\[[0-9;]*m/g, "");
+  expect(footer).toContain("缓存 600 (60%)");
+  quit(ui);
+  await done;
+
+  // 对照：**报了 usage 但没报缓存**——状态栏不出现「缓存」，0% 冒充「没命中」是另一种假账。
+  // 对照必须有 inputTokens > 0：用 textTurn（usage 为 null）的话「显示 0%」那类错根本走不到显示分支
+  const noCache: ProviderEvent[] = [
+    {
+      type: "done",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "好" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 10, outputTokens: 2 },
+      },
+    },
+  ];
+  const ui2 = fakeTui();
+  const agent2 = agentWith([noCache]);
+  const done2 = runTui({ agent: runtimeOf(agent2), ui: ui2 });
+  await flush();
+  ui2.feed("说");
+  ui2.feed(ENTER);
+  await flush(300);
+  expect(ui2.screen().split("\n").at(-1)!).not.toContain("缓存");
+  quit(ui2);
+  await done2;
+});

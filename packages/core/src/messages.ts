@@ -54,6 +54,12 @@ export type ContentBlock = TextBlock | ThinkingBlock | ImageBlock | ToolUseBlock
 export type Usage = {
   inputTokens: number;
   outputTokens: number;
+  /**
+   * 输入里由 prompt 缓存命中的那部分（≤ inputTokens）。**provider 没报就没有这个字段**——
+   * 不填 0 冒充报了账，与 `usage: null` 同一条纪律。OpenAI 系报在
+   * `prompt_tokens_details.cached_tokens`，DeepSeek 报在 `prompt_cache_hit_tokens`。
+   */
+  cachedInputTokens?: number;
 };
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "aborted" | "error";

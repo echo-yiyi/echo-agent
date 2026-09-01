@@ -648,3 +648,47 @@ test("thinking 流到一半就报错：失败消息里**仍带着已经流出的
   expect(Object.hasOwn(assistant, "reasoning_content")).toBe(false); // 不可回放就一个字段都不发
   expect(String(assistant["content"])).toContain("想了一半"); // 但内容不丢：降级进正文，下一轮仍有上下文
 });
+
+/* ─────────────── 缓存命中（2026-09-01：状态栏要看到缓存情况） ─────────────── */
+
+test("OpenAI 系的 prompt_tokens_details.cached_tokens → usage.cachedInputTokens", async () => {
+  const { fn } = fakeFetch(() =>
+    new Response(
+      sse([
+        { choices: [{ delta: { content: "嗯" }, finish_reason: "stop" }] },
+        { choices: [], usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 64 } } },
+      ]),
+    ),
+  );
+  const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
+  const events = await collect(d.request(MODEL, CTX, { apiKey: "k" }));
+  const done = events.at(-1) as Extract<ProviderEvent, { type: "done" }>;
+  expect(done.message.usage).toEqual({ inputTokens: 100, outputTokens: 5, cachedInputTokens: 64 });
+});
+
+test("DeepSeek 的 prompt_cache_hit_tokens 也认；两种都没报 → **字段缺席**（没报 ≠ 0）", async () => {
+  const { fn } = fakeFetch(
+    () =>
+      new Response(
+        sse([
+          { choices: [{ delta: { content: "a" }, finish_reason: "stop" }] },
+          { choices: [], usage: { prompt_tokens: 50, completion_tokens: 1, prompt_cache_hit_tokens: 30 } },
+        ]),
+      ),
+    () =>
+      new Response(
+        sse([
+          { choices: [{ delta: { content: "b" }, finish_reason: "stop" }] },
+          { choices: [], usage: { prompt_tokens: 7, completion_tokens: 1 } },
+        ]),
+      ),
+  );
+  const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
+
+  const hit = (await collect(d.request(MODEL, CTX, { apiKey: "k" }))).at(-1) as Extract<ProviderEvent, { type: "done" }>;
+  expect(hit.message.usage).toEqual({ inputTokens: 50, outputTokens: 1, cachedInputTokens: 30 });
+
+  const none = (await collect(d.request(MODEL, CTX, { apiKey: "k" }))).at(-1) as Extract<ProviderEvent, { type: "done" }>;
+  expect(none.message.usage).toEqual({ inputTokens: 7, outputTokens: 1 });
+  expect(Object.hasOwn(none.message.usage!, "cachedInputTokens"), "没报却带了字段——0 冒充报了账").toBe(false);
+});

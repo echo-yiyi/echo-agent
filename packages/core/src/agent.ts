@@ -2573,6 +2573,10 @@ export class Agent {
         this._state.usage = {
           inputTokens: this._state.usage.inputTokens + input.usage.inputTokens,
           outputTokens: this._state.usage.outputTokens + input.usage.outputTokens,
+          // 只要有一边报过缓存就带着累计值；两边都没报过则字段保持缺席（没报≠0）
+          ...(this._state.usage.cachedInputTokens !== undefined || input.usage.cachedInputTokens !== undefined
+            ? { cachedInputTokens: (this._state.usage.cachedInputTokens ?? 0) + (input.usage.cachedInputTokens ?? 0) }
+            : {}),
         };
         break;
       case "agent_end":
