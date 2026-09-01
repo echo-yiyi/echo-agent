@@ -16,21 +16,23 @@
 export { tuiShell, type TuiShell } from "./extension.ts";
 
 /** 渲染循环本体。自己写壳、或要换一套终端实现时用得上。 */
-export { runTui, type TuiAppOptions } from "./app.ts";
+export { runTui, type TuiAppOptions, type TuiConfigureOptions } from "./app.ts";
 
 /** 会话投影（含终端控制序列清洗与字素折行）。 */
 export { Transcript, clean, type TranscriptEntry } from "./transcript.ts";
 
 /** CLI：`echo-agent` 的解析与入口。两种形态的分叉在 `main()` 里。 */
-export { main, parseArgs, ensureCredentials, USAGE, type CliOptions, type CredentialDecision, type MainDeps } from "./cli.ts";
+export { main, parseArgs, USAGE, type CliOptions, type MainDeps } from "./cli.ts";
 
-/** 首次运行的配置流程：缺凭据时在界面里配一个。自己写壳时用得上。 */
+/**
+ * 凭据配置段：缺 key 时主界面里摆出来的那一段，以及「配好了没」的判据（与请求路径同一个）。
+ * 自己写壳时用得上。**它不是启动前置**——装配不看凭据（2026-09-01）。
+ */
 export {
-  runCredentialSetup,
+  CredentialSetup,
+  isConfigured,
   verifyApiKey,
-  type SetupChoice,
-  type SetupOptions,
-  type SetupOutcome,
+  type CredentialSetupOptions,
   type VerifyFn,
   type VerifyOutcome,
 } from "./setup.ts";

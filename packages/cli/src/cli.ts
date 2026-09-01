@@ -30,7 +30,6 @@ import {
   FileCredentialStore,
   kimiProvider,
   minimaxProvider,
-  Models,
   openaiProvider,
   zaiCodingProvider,
   type CredentialStore,
@@ -39,7 +38,7 @@ import {
 import type { TUI } from "@earendil-works/pi-tui";
 import { tuiShell } from "./extension.ts";
 import { run } from "./run.ts";
-import { runCredentialSetup, type SetupChoice, type VerifyFn } from "./setup.ts";
+import { isConfigured, type VerifyFn } from "./setup.ts";
 import { linesOf } from "./stdin.ts";
 
 export type CliOptions = {
@@ -84,9 +83,9 @@ export const USAGE = `用法：echo-agent [选项]
 （未设 ECHO_HOME 则 ~/.echo/credentials.json，权限 0600，跨 agent 共享）。
 环境变量优先是有意的：CI 与临时覆盖要能不改文件就生效。
 
-**缺凭据不会退化成假模型。** 两种形态两种答法：管道/重定向（脚本、CI）报错并以 1 退出，
-因为调用方需要非零退出码、也没人能回答问题；stdin 是终端时**起来并进配置流程**，
-配完直接继续启动。两者都不会静默跑一个没配好的 agent。`;
+**缺凭据不会退化成假模型，也不会挡着不让起。** 管道/重定向（脚本、CI）在启动前报错并以 1 退出，
+因为调用方需要非零退出码、也没人能回答问题；stdin 是终端时**直接进界面**，缺 key 就在界面里配
+（贴进输入行、回车验证、自动保存），配好不用重启。两者都不会静默跑一个没配好的 agent。`;
 
 /**
  * 解析 argv（**不含** node/bun 与脚本名两项）。
@@ -145,71 +144,16 @@ export function parseArgs(argv: readonly string[]): CliOptions | null {
 export type MainDeps = Readonly<{
   /** 凭据来源。缺省 `FileCredentialStore()` —— `$ECHO_HOME/credentials.json`。 */
   credentials?: CredentialStore;
-  /** 测试注入：假终端。配置流程与主界面共用它。 */
+  /** 测试注入：假终端。 */
   ui?: TUI;
   /** 测试注入：验 key 的方式。缺省真打一次 `GET {baseUrl}/models`。 */
   verify?: VerifyFn;
 }>;
 
-/** 配置流程里摆出来的可选项。**判据取自 `PROVIDERS` 本身**，加一家不会漏掉这里。 */
-function setupChoices(): readonly SetupChoice[] {
-  return Object.entries(PROVIDERS).map(([name, make]) => ({ name, provider: make() }));
-}
-
-export type CredentialDecision =
-  /** 已经配好（本来就配好，或刚在配置流程里配完）。`provider` 是这次要用的那个实例。 */
-  | Readonly<{ kind: "ready"; provider: Provider }>
-  /** 缺凭据，而这个形态下问不了人。**调用方什么都不用做**——照旧装配，让它 fail-loud。 */
-  | Readonly<{ kind: "missing" }>
-  /** 人在，但他选择了退出。 */
-  | Readonly<{ kind: "cancelled" }>;
-
-/**
- * 缺凭据时怎么办：**形态决定策略**，一张表两行。
- *
- * | stdin | 缺凭据时 |
- * |---|---|
- * | 管道 / 重定向（脚本、CI） | `missing` —— 调用方照旧装配，报错并以 1 退出。调用方需要非零退出码，也没人能回答问题 |
- * | 终端（人在前面） | 进配置流程，配完 `ready`、退出则 `cancelled` |
- *
- * ## 怎么判「缺的是凭据」——不匹配错误文案
- *
- * `createEcho()` 缺凭据时抛的是一个**普通 `Error`**（文案「provider 'x' 没有可用模型……」），
- * 拿文案做判据是字符串耦合，改一次文案就断。所以这里**不 catch、不猜**，改成**装配前先问一句**：
- * `Models.checkAuth(id)` 的契约就是「`undefined` = 未配置」。
- *
- * 它为什么不会漂：`Models.getAvailable()` 里的判据**就是同一个函数**
- *（`checkAuth(p.id) === undefined → continue`），而「没有可用模型」正是它返回空导致的。
- * 预检说缺、装配因缺凭据而炸，是同一句话的两次回答。
- *
- * 而且它比「catch 了再猜」**更准**：凭据配好了但目录仍然是空的（`filterModels` 滤光之类）
- * 是另一种失败，这里不会把它误认成缺凭据——那种情况照旧走装配层原来的报错。
- *
- * 代价只是多造一个 `Models`：它不造 Agent、不碰状态根、不联网，是一次前置查询，
- * **不是第二个装配现场**。
- */
-export async function ensureCredentials(input: {
-  provider: Provider;
-  credentials: CredentialStore;
-  interactive: boolean;
-  setup: () => Promise<Awaited<ReturnType<typeof runCredentialSetup>>>;
-}): Promise<CredentialDecision> {
-  const models = new Models(input.credentials);
-  models.setProvider(input.provider);
-  if ((await models.checkAuth(input.provider.id)) !== undefined) {
-    return { kind: "ready", provider: input.provider };
-  }
-  if (!input.interactive) return { kind: "missing" };
-
-  const outcome = await input.setup();
-  return outcome.kind === "configured" ? { kind: "ready", provider: outcome.provider } : { kind: "cancelled" };
-}
-
 /**
  * `createEcho()` 的入参，两种形态共用——**装配只有一处**，形态差别只在「装不装壳」。
  *
- * `provider` 由调用方给（而不是在这里现造）：交互形态下用户可能在配置流程里选了另一家，
- * 那时**要用他选的那个实例**，在这里按 `opts.provider` 再造一个就等于把他的选择丢了。
+ * `provider` 由调用方给：同一个实例既用来装配，也交给壳子在界面里配 key（要它的 `baseUrl` 去验）。
  */
 function echoOptions(opts: CliOptions, provider: Provider, credentials: CredentialStore): Parameters<typeof createEcho>[0] {
   return {
@@ -260,35 +204,26 @@ export async function main(
 
   try {
     const credentials = deps.credentials ?? new FileCredentialStore();
-    let provider = PROVIDERS[opts.provider]();
+    const provider = PROVIDERS[opts.provider]();
 
-    // **缺凭据时形态决定策略**（见 `ensureCredentials`）。这一步不装配、不碰状态根。
-    const decision = await ensureCredentials({
-      provider,
-      credentials,
-      interactive,
-      setup: () =>
-        runCredentialSetup({
-          choices: setupChoices(),
-          credentials,
-          preselect: opts.provider,
-          signal: controller.signal,
-          ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
-          ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
-        }),
-    });
-    if (decision.kind === "cancelled") {
-      process.stderr.write("没有配置凭据，没有启动。\n");
+    // **缺凭据时形态决定策略**（2026-09-01 用户拍板：配置是运行态，不阻塞启动）：
+    //   · 管道 / CI：没人能回答问题，调用方要的是非零退出码 → **启动前**报错返回 1，连装配都不做；
+    //   · 终端：**照常装配、直接进主界面**，缺 key 由壳子在界面里摆出配置段（`app.ts`）。
+    // 判据是 `isConfigured()`——与请求路径同一个 `Models.checkAuth()`，不匹配错误文案。
+    // 装配本身不看凭据了（`create-agent.ts`），所以这里不做预检的话管道形态会「起来再在第一句报 auth」——
+    // 仍是退出码 1，但晚了一步，且状态根已经被碰过。所以管道形态在这里先拦。
+    if (!interactive && !(await isConfigured(provider, credentials))) {
+      process.stderr.write(
+        `provider '${provider.id}' 没有凭据：设它认的环境变量，或写 $ECHO_HOME/credentials.json（见 --help）。\n`,
+      );
       return 1;
     }
-    // `missing`（非交互且缺凭据）**什么都不做**：往下走，让装配抛出和从前一模一样的那个错。
-    if (decision.kind === "ready") provider = decision.provider;
 
     return interactive
-      ? await runInteractive(opts, provider, credentials, controller.signal, deps.ui)
+      ? await runInteractive(opts, provider, credentials, controller.signal, deps)
       : await runPiped(opts, provider, credentials, controller.signal);
   } catch (e) {
-    // 装配失败（缺凭据、锁被别的进程占着、状态根不可写）一律**明说**并非零退出。
+    // 装配失败（锁被别的进程占着、状态根不可写、目录为空）一律**明说**并非零退出。
     process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
     return 1;
   } finally {
@@ -315,9 +250,20 @@ async function runInteractive(
   provider: Provider,
   credentials: CredentialStore,
   signal: AbortSignal,
-  ui?: TUI,
+  deps: MainDeps,
 ): Promise<number> {
-  const shell = tuiShell({ signal, ...(ui !== undefined ? { ui } : {}) });
+  const shell = tuiShell({
+    signal,
+    ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
+    // 缺 key 时壳子在界面里配的那一段要的东西。`alternatives` 只是提示「换一家怎么换」——
+    // 换家本身是 `--provider` 或 P3 `/model` 的事，界面里只能给**这次装配的这家**配 key。
+    configure: {
+      provider,
+      credentials,
+      alternatives: Object.keys(PROVIDERS).filter((n) => n !== opts.provider),
+      ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
+    },
+  });
   const echo = await createEcho({
     ...echoOptions(opts, provider, credentials),
     extensions: [{ entryId: "echo:tui", definition: shell.definition as never }],

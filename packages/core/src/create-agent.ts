@@ -8,6 +8,7 @@
 // **只做一件 IO：解析模型**。理由是 `AgentState.model` 与 `AgentOptions.model` 都是非空
 // `Model`，构造之前必须先拿到它；推迟到 `start()` 就得引入 placeholder 或把 model 改可空，
 // 那会变成两个类。Session/Memory/Task 等状态恢复一律归 `start()`。
+// **解析模型不看凭据**：目录里有它就能装，key 有没有是运行态（见 `createAgent` 里的说明）。
 
 import { join } from "node:path";
 import { Agent, type AgentOptions } from "./agent.ts";
@@ -153,7 +154,9 @@ export function resolveModel(provider: Provider, available: readonly Model[], wa
   }
 
   if (available.length === 0) {
-    throw new Error(`provider '${provider.id}' 没有可用模型——检查凭据与目录刷新是否成功`);
+    // 目录本身是空的：provider 定义没给模型、或动态目录刷新失败。**与凭据无关**——
+    // 装配不看凭据（见 `createAgent`），缺 key 是运行态，由请求路径报 `auth`。
+    throw new Error(`provider '${provider.id}' 没有可用模型——目录是空的，检查 provider 定义或目录刷新`);
   }
 
   const declared = provider.defaultModelId;
@@ -192,10 +195,19 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
 
   const models = new Models(opts.credentials);
   models.setProvider(opts.provider);
-  // 走 Models / CredentialStore，**不裸调 provider.refreshModels()**——那条绕过 filterModels
-  // 的凭据过滤，会把用户其实用不了的模型也算进候选。
   await models.refresh({ allowNetwork: opts.allowNetwork ?? true });
-  const available = await models.getAvailable(opts.provider.id);
+  // **装配不看凭据**（2026-09-01 用户拍板：配置是运行态，不是启动前置）。
+  //
+  // 上一版这里用 `models.getAvailable()`——按凭据过滤过的目录——于是没 key 就没有候选、
+  // Agent 造不出来、壳也没地方挂，用户一启动就被按在配置向导上。pi 与 Claude Code 都不这样：
+  // 界面先起来，key 是进去之后的事。**常驻 agent 的存活不能以任何外围配置为前提**——
+  // 缺 key、缺扩展、文件坏了，都该是「起来了但告诉你」，不是「起不来」。
+  //
+  // 这仍然是 fail-loud，只是挪到了它该在的地方：请求路径**每轮重解析 key**，缺了就出一条诚实的
+  // `auth` 错误（`Models.stream()`：「端点未配置凭据」），壳子据此把配置流程摆出来；
+  // 配好之后下一句 prompt 自然就通，不用重启——因为模型早就解析好了，缺的只是 key。
+  // 管道 / CI 那头仍然在启动前报错退出，那是 CLI 按形态做的事（`cli.ts`），不是装配的事。
+  const available = models.getModels(opts.provider.id);
   const model = resolveModel(opts.provider, available, opts.model);
 
   // **store 与 lock 必须成对**：默认文件锁只在默认 `FileDir` 下才有意义。

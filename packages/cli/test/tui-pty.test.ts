@@ -4,11 +4,10 @@
 // 终端编码这一层（raw mode、StdinBuffer 切包、Kitty 协议探测）全绕过了。
 // 这里起一个真的 pty（`pty-driver.py`），把**另一种字节形式**的同一个键送进去：
 //   · `ESC[100;5u`  Kitty 协议的 Ctrl+D          · `ESC[99;5u`  Kitty 协议的 Ctrl+C
-//   · `ESC O B`     应用光标键模式的 ↓
-// 断言的是**行为**（退没退出、光标到没到下一项），不是屏幕字节——差分渲染下旧帧还在缓冲里，
+// 断言的是**行为**（退没退出），不是屏幕字节——差分渲染下旧帧还在缓冲里，
 // 抓屏会把「清掉了」误判成「还在」。
 //
-// 2026-08-31 用户在真终端撞到的就是这两条：方向键不动、Ctrl+C 退不出去。
+// 2026-08-31 用户在真终端撞到的就是这一类：方向键不动、Ctrl+C 退不出去。
 
 import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -25,7 +24,6 @@ const KEYS = {
   ctrlD: [4],
   kittyCtrlD: [ESC, ...ascii("[100;5u")],
   kittyCtrlC: [ESC, ...ascii("[99;5u")],
-  appCursorDown: [ESC, ...ascii("OB")],
   enter: [13],
 };
 
@@ -122,19 +120,17 @@ test(
 );
 
 test(
-  "配置流程：应用光标键的 ↓ 能把光标挪到下一家；Kitty 编码的 Ctrl+C 能退出",
+  "没有凭据也照样进主界面（配置是运行态，不阻塞启动）；配置段里 Kitty 编码的 Ctrl+D 退出",
   withHome(async (home) => {
+    // **不写 credentials.json**——这正是要验的：缺 key 不是启动前置
     const r = await drive(home, [
-      { kind: "wait", text: "还没有可用的凭据", timeout: 15 },
-      { kind: "send", bytes: KEYS.appCursorDown }, // `ESC O B`——上一版只认 `ESC[B`
-      { kind: "send", bytes: KEYS.enter },
-      // 光标真的挪到了第二家（DeepSeek），回车之后进的就是它的收 key 阶段
-      { kind: "wait", text: "DeepSeek 的 API key", timeout: 5 },
-      { kind: "send", bytes: KEYS.kittyCtrlC },
+      { kind: "wait", text: "已接上", timeout: 15 }, // 主界面起来了
+      { kind: "wait", text: "还没有可用的凭据", timeout: 5 }, // 配置段就在它里面
+      { kind: "send", bytes: KEYS.kittyCtrlD },
       { kind: "exit", timeout: 5 },
     ]);
-    expect([oks(r), r.tail.slice(-300)]).toEqual([[true, true, true, true, true, true], r.tail.slice(-300)]);
-    expect(r.steps.at(-1)!.code).toBe(1); // 没配凭据就退了：非零
+    expect([oks(r), r.tail.slice(-300)]).toEqual([[true, true, true, true], r.tail.slice(-300)]);
+    expect(r.steps.at(-1)!.code).toBe(0); // 用户选择退出：正常退出
   }),
   30_000,
 );

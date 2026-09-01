@@ -5,11 +5,11 @@
 // 真终端只在 `bin/echo-tui.ts` 里出现，测试一行都不碰它。
 
 import { test, expect } from "bun:test";
-import { Agent } from "@echo-agent/core";
+import { Agent, InMemoryCredentialStore, kimiProvider, type CredentialStore, type ProviderEvent } from "@echo-agent/core";
 import { agentRuntimeOf, type AgentRuntime } from "@echo-agent/core/extension";
 import { scriptedStreamFn, textTurn, toolTurn } from "@echo-agent/core/testing";
 import { CURSOR_MARKER, type TUI } from "@earendil-works/pi-tui";
-import { runTui } from "../src/app.ts";
+import { runTui, type TuiConfigureOptions } from "../src/app.ts";
 import { fakeTui } from "./fake-tui.ts";
 import { Transcript } from "../src/transcript.ts";
 
@@ -1054,4 +1054,175 @@ test("Kitty 的按键 release 不算一次按键：release 的 Ctrl+D 不退出�
 
   ui.feed(KITTY.ctrlD);
   await done;
+});
+
+/* ─────────────── 凭据配置段：配置是运行态，不阻塞启动（2026-09-01 用户拍板） ─────────────── */
+//
+// 上一版是启动前弹一屏向导。现在装配不看凭据（core `create-agent.ts`），主界面照样起来，
+// 缺 key 时把配置段摆在输入行的位置上——配好就撤、输入行回来，**不用重启**。
+
+/** 两个 key 环境变量都清掉；跑测试那台机器上真配了 key 的话这一组全是假绿。 */
+function isolateKeys(): () => void {
+  const keys = ["MOONSHOT_API_KEY", "ECHO_LLM_API_KEY"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
+  return () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+}
+
+function configureWith(over: Partial<TuiConfigureOptions> = {}): TuiConfigureOptions {
+  return {
+    provider: kimiProvider(),
+    credentials: new InMemoryCredentialStore(),
+    verify: async () => ({ ok: true }),
+    alternatives: ["deepseek"],
+    ...over,
+  };
+}
+
+test("没配 key：主界面**照样起来**，配置段顶替输入行；配好之后输入行回来、直接就能发", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("我在")]);
+    const prompts = capturePrompts(agent);
+    const credentials = new InMemoryCredentialStore();
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    expect(ui.screen()).toContain("已接上"); // 主界面起来了
+    expect(ui.screen()).toContain("Kimi (Moonshot) 的 API key"); // 配置段就在里面
+    expect(ui.screen()).toContain("--provider deepseek"); // 换家怎么换
+    expect(ui.screen(), "配置段期间输入行不该在").not.toContain("Enter 发送");
+
+    for (const ch of "sk-GOOD") ui.feed(ch);
+    ui.feed(ENTER);
+    await flush(100);
+
+    expect(ui.screen()).toContain("[凭据] 已保存");
+    expect(await credentials.read("kimi")).toEqual({ type: "api_key", key: "sk-GOOD" });
+    expect(ui.screen(), "配好之后输入行没回来").toContain("Enter 发送");
+
+    ui.feed("在吗");
+    ui.feed(ENTER);
+    await flush(200);
+    expect(prompts).toEqual(["在吗"]); // 不用重启，直接说话
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("配好了的：不摆配置段", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+    expect(ui.screen()).not.toContain("的 API key");
+    expect(ui.screen()).toContain("Enter 发送");
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("跑着的时候端点报 `auth`（key 被撤了）：配置段再摆一次，而不是让用户对着 [错误] 猜", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const authTurn: ProviderEvent[] = [
+      { type: "error", error: { source: "provider", code: "auth", retryable: false, message: "端点未配置凭据：kimi" } },
+    ];
+    const agent = agentWith([authTurn]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-revoked" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+    expect(ui.screen()).not.toContain("的 API key"); // 启动时是配好的
+
+    ui.feed("hi");
+    ui.feed(ENTER);
+    await flush(300);
+
+    expect(ui.screen()).toContain("[错误]");
+    expect(ui.screen()).toContain("重新配一个");
+    expect(ui.screen()).toContain("Kimi (Moonshot) 的 API key");
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("配置段里：Ctrl+C 清空、有字时 Ctrl+D 不退出、空了 Ctrl+D 退出", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith() });
+    await flush();
+    expect(ui.screen()).toContain("的 API key");
+
+    for (const ch of "sk-half") ui.feed(ch);
+    expect(ui.screen()).toContain("•".repeat("sk-half".length));
+    ui.feed(CTRL_D); // 有字：不退出
+    expect(await stillRunning(done), "配置段里有字时 Ctrl+D 把界面退了").toBe(true);
+    ui.feed(CTRL_C); // 清空
+    expect(ui.screen()).not.toContain("•");
+    ui.feed(CTRL_D); // 空了：退出
+    expect(await done).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("读不了凭据文件：**不挡启动**，说一句，当成没配", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const broken: CredentialStore = {
+      read: async () => {
+        throw new Error("凭据文件不是合法 JSON：/x/credentials.json");
+      },
+      write: async () => undefined,
+      delete: async () => undefined,
+    };
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials: broken }) });
+    await flush();
+    expect(ui.screen()).toContain("已接上");
+    expect(ui.screen()).toContain("[凭据] 读不了凭据文件");
+    expect(ui.screen()).toContain("的 API key");
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("不给 configure：壳子不管凭据，什么都不摆（低层用户自己装配的场合）", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const done = runTui({ agent: runtimeOf(agent), ui });
+    await flush();
+    expect(ui.screen()).not.toContain("的 API key");
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
 });

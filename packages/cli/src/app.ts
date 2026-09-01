@@ -7,11 +7,13 @@
 // 于是这个文件**只认协议、不认 Agent**：`start` / `stop` / `deliver` 都不在协议里，
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
+import { errText, type CredentialStore, type Provider } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
 import { Editor, isKeyRelease, ProcessTerminal, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { installKeybindings } from "./keybindings.ts";
+import { CredentialSetup, isConfigured, type VerifyFn } from "./setup.ts";
 import { EDITOR_THEME } from "./theme.ts";
 
 const ESC = String.fromCharCode(27);
@@ -28,11 +30,26 @@ export type TuiAppOptions = Readonly<{
   signal?: AbortSignal;
   /** 注入用：测试给假的 TUI 与终端。 */
   ui?: TUI;
+  /**
+   * 缺 key 时在界面里配的那一段要的东西（2026-09-01：配置是运行态，不阻塞启动）。
+   * 不给 = 壳子不管凭据——低层用户自己装配、自己给 key 的场合。
+   */
+  configure?: TuiConfigureOptions;
+}>;
+
+export type TuiConfigureOptions = Readonly<{
+  /** 这次装配的那家。界面里只能给它配 key；换家是 `--provider` 或 P3 `/model` 的事。 */
+  provider: Provider;
+  credentials: CredentialStore;
+  /** 别家的 `--provider` 短名，只用来提示「换一家怎么换」。 */
+  alternatives?: readonly string[];
+  /** 注入用：测试给假的验证。 */
+  verify?: VerifyFn;
 }>;
 
 /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止，返回退出码。**不负责收摊 Agent**——那归装配层。 */
 export async function runTui(options: TuiAppOptions): Promise<number> {
-  const { agent, signal } = options;
+  const { agent, signal, configure } = options;
   const ui: TUI = options.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
 
   const transcript = new Transcript();
@@ -109,6 +126,44 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   // 与 Tool `execute()` 收到的是同一份对象。只显示「允许 bash？」而不显示 `rm -rf /`，
   // 就是让用户**盲批**：他批准的和实际要跑的，屏幕上看不出是不是一回事。
   let pending: { permissionId: string; toolName: string; params: unknown } | null = null;
+
+  /**
+   * **凭据配置段**（2026-09-01 用户拍板：配置是运行态，不阻塞启动）。
+   *
+   * 上一版是启动前弹一屏向导，用户一起来就被按在上面。现在装配不看凭据（`create-agent.ts`），
+   * Agent 与壳照常起来；缺 key 时把这一段摆在输入行的位置上，配好就撤掉、输入行回来——
+   * **不用重启**，因为模型早就解析好了，key 是每轮重读的。两个入口：
+   *   · 启动时 `isConfigured()` 说没配；
+   *   · 跑着的时候端点报 `auth`（key 被撤了 / 过期了）——`agent_end` 那支再摆一次。
+   * `setup !== null` 就是「正在配」；那时 Ctrl+D 空时退出 / Ctrl+C 清空照旧由本文件分发。
+   */
+  let setup: CredentialSetup | null = null;
+  const enterConfigure = (why: string): void => {
+    if (configure === undefined || setup !== null) return;
+    setup = new CredentialSetup({
+      provider: configure.provider,
+      credentials: configure.credentials,
+      ...(configure.alternatives !== undefined ? { alternatives: configure.alternatives } : {}),
+      ...(configure.verify !== undefined ? { verify: configure.verify } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+      onConfigured: () => {
+        setup?.dispose();
+        setup = null;
+        transcript.push({ kind: "notice", text: "[凭据] 已保存。直接说话就行，不用重启。" });
+        rerender();
+      },
+      onError: (e) => {
+        // 写盘失败不是 key 的问题：如实报出来，撤掉这一段，别让用户对着它重输
+        setup?.dispose();
+        setup = null;
+        failed = true;
+        transcript.push({ kind: "notice", text: `[凭据] 没存上：${errText(e)}` });
+        rerender();
+      },
+    });
+    transcript.push({ kind: "notice", text: why });
+    rerender();
+  };
 
   const answer = (decision: "allow" | "deny"): void => {
     const ask = pending;
@@ -202,6 +257,8 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         if (event.outcome.kind === "error") {
           failed = true;
           transcript.push({ kind: "notice", text: `[错误] ${event.outcome.error.message}` });
+          // 端点说 key 不对（没配 / 被撤 / 过期）：把配置段摆出来，而不是让用户对着一句 `[错误]` 猜
+          if (event.outcome.error.code === "auth") enterConfigure("[凭据] 这把 key 不能用了——重新配一个");
         }
         rerender();
         return;
@@ -279,6 +336,11 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         }
         lines.push(`${ESC}[33m允许 ${clean(pending.toolName)}？[y/n]${ESC}[39m`);
       }
+      // 正在配 key：这一段**顶替**输入行的位置，配好了输入行回来
+      if (setup !== null) {
+        lines.push(...setup.render(width));
+        return lines;
+      }
       lines.push(...editor.render(width));
       // 空闲且没打字时给一句提示；有字或在跑就不占地方
       if (editor.getText() === "" && !busy()) lines.push(HINT);
@@ -299,6 +361,21 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       if (pending !== null) {
         if (keys.matches(data, "app.permission.allow")) return answer("allow");
         if (keys.matches(data, "app.permission.deny")) return answer("deny");
+      }
+      // 正在配 key：应用级键的语义不变（Ctrl+D 空时退出 / Ctrl+C 清空），只是「空不空」问的是它
+      if (setup !== null) {
+        if (keys.matches(data, "app.exit") && setup.isEmpty()) {
+          quit();
+          return;
+        }
+        if (keys.matches(data, "app.clear")) {
+          setup.clear();
+          rerender();
+          return;
+        }
+        setup.handleInput(data);
+        rerender();
+        return;
       }
       if (keys.matches(data, "app.exit") && editor.getText() === "") {
         // 在飞的那一轮先 abort，让 stop() 不用等模型说完
@@ -322,6 +399,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     invalidate: (): void => {
       transcript.invalidate();
       editor.invalidate();
+      setup?.invalidate();
     },
   };
 
@@ -334,6 +412,18 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   // 光靠监听器会永远停在下面那个 `await exited`（review 实测）。所以注册完再主动看一眼。
   if (signal?.aborted === true) onAbort();
 
+  // 启动时问一次「配好了没」。**读不了凭据文件也不挡着**（文件坏了、权限不对）：如实说一句，
+  // 当成没配——用户在界面里重配时写盘会再撞一次并报出来，那是修文件的事，不是挡启动的理由。
+  let needsConfigure = false;
+  if (configure !== undefined) {
+    try {
+      needsConfigure = !(await isConfigured(configure.provider, configure.credentials));
+    } catch (e) {
+      transcript.push({ kind: "notice", text: `[凭据] 读不了凭据文件：${errText(e)}` });
+      needsConfigure = true;
+    }
+  }
+
   ui.addChild(root);
   ui.setFocus(root);
   ui.start();
@@ -344,6 +434,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     // 所以从前那个 `ready` 布尔整个删掉了：一份判据，不再有壳子自己维护的第二份。
     if (signal?.aborted !== true) {
       transcript.push({ kind: "notice", text: `已接上（${agent.state.model.id}）` });
+      if (needsConfigure) enterConfigure("还没有可用的凭据——先配一个，配好不用重启");
       rerender();
       await exited;
     }
@@ -351,6 +442,8 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     signal?.removeEventListener("abort", onAbort);
     unsubscribeLifecycle();
     unsubscribe();
+    // `setup` 只在闭包里被赋值，TS 在这个作用域把它收窄成了 null——显式标回类型再调
+    (setup as CredentialSetup | null)?.dispose(); // 缓冲区里不留 key
     ui.stop();
     // **不收摊 Agent**：协议里没有 `stop`，那是装配层（`echo.stop()`）的事。
     // 壳子自己停 Agent 就等于两个所有者——那正是把 `start`/`stop` 挡在协议外面要防的。

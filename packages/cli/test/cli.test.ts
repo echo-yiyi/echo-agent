@@ -29,7 +29,8 @@ import {
 } from "@echo-agent/core";
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { PassThrough } from "node:stream";
-import { ensureCredentials, main, parseArgs, USAGE } from "../src/cli.ts";
+import { main, parseArgs, USAGE } from "../src/cli.ts";
+import { isConfigured } from "../src/setup.ts";
 import { fakeTui } from "./fake-tui.ts";
 import { linesOf } from "../src/stdin.ts";
 import { run, type Sink } from "../src/run.ts";
@@ -326,14 +327,13 @@ test("已经 abort 过的 signal：run() 也不进输入循环，且照样干净
   expect(existsSync(join(dir, ".lock")), "没收摊").toBe(false);
 });
 
-/* ══════════════ 缺凭据：形态决定策略（2026-08-31 首次运行体验） ══════════════ */
+/* ══════════════ 缺凭据：形态决定策略（2026-09-01：配置是运行态，不阻塞启动） ══════════════ */
 //
 // 一张表两行，两行**各有一条判据**，而且都造得出反例：
-//   · 管道 / 重定向 → 退出码 1 + 报错（现有行为，一行不改）
-//   · 终端         → 不退出，进配置流程，配完继续启动
+//   · 管道 / 重定向 → **启动前**报错、退出码 1（连装配都不做）
+//   · 终端         → **照样起来**，缺 key 在主界面里配；配好不用重启
 //
-// 「怎么识别缺凭据」用的是**装配前预检**（`Models.checkAuth`），不匹配错误文案——
-// 判据本身的说明在 `ensureCredentials` 的注释里。
+// 判据是 `isConfigured()`——与请求路径同一个 `Models.checkAuth()`，不匹配错误文案。
 
 /** 干净的环境：两个 key 都清掉，`ECHO_HOME` 指到本次的临时目录。 */
 function isolate(): () => void {
@@ -358,85 +358,31 @@ async function waitFor(check: () => boolean, what: string, ms = 5000): Promise<v
   throw new Error(`等不到：${what}`);
 }
 
-test("ensureCredentials:非交互 + 缺凭据 → missing，**配置流程一次都没被调用**", async () => {
-  const restore = isolate();
-  try {
-    let setupCalls = 0;
-    const decision = await ensureCredentials({
-      provider: kimiProvider(),
-      credentials: new FileCredentialStore(join(dir, "credentials.json")),
-      interactive: false,
-      setup: async () => {
-        setupCalls += 1;
-        return { kind: "cancelled" };
-      },
-    });
-
-    expect(decision).toEqual({ kind: "missing" });
-    expect(setupCalls, "非交互形态下把问题问出去了——那头没人能回答").toBe(0);
-  } finally {
-    restore();
-  }
-});
-
-test("ensureCredentials:交互 + 缺凭据 → 进配置流程，配完就 ready", async () => {
-  const restore = isolate();
-  try {
-    let setupCalls = 0;
-    const chosen = kimiProvider();
-    const decision = await ensureCredentials({
-      provider: kimiProvider(),
-      credentials: new FileCredentialStore(join(dir, "credentials.json")),
-      interactive: true,
-      setup: async () => {
-        setupCalls += 1;
-        return { kind: "configured", provider: chosen };
-      },
-    });
-
-    expect(setupCalls).toBe(1);
-    // **用配置流程里选的那个实例**：用户可能在界面里换了一家
-    expect(decision).toEqual({ kind: "ready", provider: chosen });
-  } finally {
-    restore();
-  }
-});
-
-test("ensureCredentials:凭据文件里有 key 就不问——环境变量空着也算配好了", async () => {
+test("isConfigured：环境变量空着、文件里没有 → false；文件里有 → true", async () => {
   const restore = isolate();
   try {
     const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    expect(await isConfigured(kimiProvider(), credentials)).toBe(false);
     await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
-
-    let setupCalls = 0;
-    const decision = await ensureCredentials({
-      provider: kimiProvider(),
-      credentials,
-      interactive: true,
-      setup: async () => {
-        setupCalls += 1;
-        return { kind: "cancelled" };
-      },
-    });
-
-    expect(setupCalls, "文件里明明配过，却还是问了一遍").toBe(0);
-    expect(decision.kind).toBe("ready");
+    expect(await isConfigured(kimiProvider(), credentials)).toBe(true);
   } finally {
     restore();
   }
 });
 
-test("main:非交互 + 缺凭据 → 退出码 1（现有行为不许被改坏）", async () => {
+test("main:非交互 + 缺凭据 → 退出码 1，而且是在**启动前**拦下的（状态根没被碰过）", async () => {
   const restore = isolate();
   try {
     const code = await main(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], false);
     expect(code).toBe(1);
+    // 装配本身不看凭据了——不在这里先拦，管道形态会「起来再在第一句报 auth」，状态根就被碰过了
+    expect(existsSync(join(dir, "state")), "缺凭据的管道形态把 agent 装起来了").toBe(false);
   } finally {
     restore();
   }
 });
 
-test("main:交互 + 缺凭据 → **不退出**，进配置流程；配完直接继续启动，不用重敲命令", async () => {
+test("main:交互 + 缺凭据 → **照样起来**，主界面里就是配置段；配好直接说话，不用重启", async () => {
   const restore = isolate();
   const ui = fakeTui();
   try {
@@ -445,27 +391,26 @@ test("main:交互 + 缺凭据 → **不退出**，进配置流程；配完直接
       credentials: new FileCredentialStore(join(dir, "credentials.json")),
       verify: async () => ({ ok: true }),
     });
-    // 关键的一条：它**没有**以 1 退出，而是把问题摆到了屏幕上
-    await waitFor(() => ui.screen().includes("还没有可用的凭据"), "配置流程的第一屏");
-    expect(ui.screen()).toContain("Kimi (Moonshot)");
+    // 关键：**主界面先起来**（「已接上」是主界面才有的），配置段就在它里面，不是另一屏
+    await waitFor(() => ui.screen().includes("已接上") && ui.screen().includes("还没有可用的凭据"), "主界面 + 配置段");
+    expect(ui.screen()).toContain("Kimi (Moonshot) 的 API key");
+    expect(ui.screen()).toContain("--provider deepseek"); // 换家怎么换，说了
 
-    ui.feed("1"); // 选 kimi
     for (const ch of "sk-GOOD") ui.feed(ch);
     ui.feed("\r");
+    await waitFor(() => ui.screen().includes("[凭据] 已保存"), "配好");
 
-    // 配完**直接进正常界面**——`已接上` 是主界面挂上来才有的那一行
-    await waitFor(() => ui.screen().includes("已接上"), "配完之后的主界面");
-    // 而且真的落盘了，下次启动就不会再问
     expect(JSON.parse(readFileSync(join(dir, "credentials.json"), "utf8"))).toEqual({ kimi: { apiKey: "sk-GOOD" } });
+    expect(ui.screen(), "配好之后输入行没回来").toContain("Enter 发送");
 
-    ui.feed(String.fromCharCode(4)); // Ctrl+D 退出（P0 起键位照 pi：Ctrl+C 是清空输入行）
+    ui.feed(String.fromCharCode(4)); // Ctrl+D 退出
     expect(await running).toBe(0);
   } finally {
     restore();
   }
 });
 
-test("main:交互 + 缺凭据，用户在配置流程里退出 → 不启动，退出码 1", async () => {
+test("main:交互 + 缺凭据，用户在配置段里直接 Ctrl+D → 正常退出（0），什么都没写", async () => {
   const restore = isolate();
   const ui = fakeTui();
   try {
@@ -474,12 +419,12 @@ test("main:交互 + 缺凭据，用户在配置流程里退出 → 不启动，�
       credentials: new FileCredentialStore(join(dir, "credentials.json")),
       verify: async () => ({ ok: true }),
     });
-    await waitFor(() => ui.screen().includes("还没有可用的凭据"), "配置流程的第一屏");
-    ui.feed(String.fromCharCode(3));
+    await waitFor(() => ui.screen().includes("还没有可用的凭据"), "配置段");
+    ui.feed(String.fromCharCode(4));
 
-    expect(await running).toBe(1);
-    // 没配就没启动：状态根里不该有会话落盘
-    expect(existsSync(join(dir, "state", "sessions")), "没配凭据却把 agent 起起来了").toBe(false);
+    // agent 是起来过的（走到了主界面），用户选择退出——那是正常退出，不是「没配所以失败」
+    expect(await running).toBe(0);
+    expect(existsSync(join(dir, "credentials.json")), "用户退出了却写了盘").toBe(false);
   } finally {
     restore();
   }

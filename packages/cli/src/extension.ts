@@ -17,7 +17,7 @@
 
 import { AgentRuntimeService, defineExtension, type ExtensionDefinition } from "@echo-agent/core/extension";
 import type { TUI } from "@earendil-works/pi-tui";
-import { runTui } from "./app.ts";
+import { runTui, type TuiConfigureOptions } from "./app.ts";
 
 export type TuiShell = {
   /** 交给 `createEcho({ extensions: [...] })` 去 mount。 */
@@ -26,7 +26,11 @@ export type TuiShell = {
   readonly exited: Promise<number>;
 };
 
-export function tuiShell(opts: { signal?: AbortSignal; ui?: TUI } = {}): TuiShell {
+/**
+ * @param opts.configure 缺 key 时壳子在界面里配的那一段要的东西——透传给 `runTui`。
+ *   不给 = 壳子不管凭据（自己装配、自己给 key 的场合）。
+ */
+export function tuiShell(opts: { signal?: AbortSignal; ui?: TUI; configure?: TuiConfigureOptions } = {}): TuiShell {
   let settle: (code: number) => void = () => {};
   let fail: (e: unknown) => void = () => {};
   const exited = new Promise<number>((resolve, reject) => {
@@ -76,6 +80,7 @@ export function tuiShell(opts: { signal?: AbortSignal; ui?: TUI } = {}): TuiShel
             agent: runtime,
             signal: stopper.signal,
             ...(opts.ui !== undefined ? { ui: opts.ui } : {}),
+            ...(opts.configure !== undefined ? { configure: opts.configure } : {}),
           });
           // 用户自己按 Ctrl+C 退出时 `runTui` 也会返回——那同样是「真要退出」
           loop.then(

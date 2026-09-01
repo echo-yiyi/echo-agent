@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { CREDENTIALS_FILE, FileCredentialStore } from "../src/provider/file-credentials.ts";
 import { Models } from "../src/provider/models.ts";
 import { kimiProvider } from "../src/provider/openai.ts";
+import { createEcho } from "../src/create-echo.ts";
 
 let home: string;
 const ENV_KEYS = ["ECHO_HOME", "MOONSHOT_API_KEY", "ECHO_LLM_API_KEY"] as const;
@@ -253,4 +254,33 @@ test("`checkAuth` 与请求路径口径一致：文件里的 key 也算「配好
   // 环境变量也设上 → source 变成那个环境变量的名字（谁赢看得见）
   process.env["MOONSHOT_API_KEY"] = "sk-FROM-ENV";
   expect(await models.checkAuth("kimi")).toEqual({ source: "MOONSHOT_API_KEY" });
+});
+
+/* ──────────── 装配不看凭据：配置是运行态（2026-09-01 用户拍板） ──────────── */
+
+test("没 key 也能 createEcho；缺 key 是第一句 prompt 报 `auth`，不是装配期抛", async () => {
+  // 上一版这里会在 `createEcho()` 抛「没有可用模型」——于是用户一启动就被按在配置向导上。
+  // pi / Claude Code 都是界面先起来、key 是进去之后的事：常驻 agent 的存活不以外围配置为前提。
+  const echo = await createEcho({
+    provider: kimiProvider(),
+    credentials: new FileCredentialStore(join(home, CREDENTIALS_FILE)), // 空的
+    stateDir: join(home, "state"),
+    withoutMemory: true,
+    extensionDirs: [],
+    allowNetwork: false,
+  });
+  try {
+    expect(echo.agent.state.model.id).toBe("kimi-k3"); // 模型照常解析——目录里有它就够
+    await echo.agent.start();
+    let code: string | undefined;
+    const off = echo.agent.subscribe((ev) => {
+      if (ev.type === "agent_end" && ev.outcome.kind === "error") code = ev.outcome.error.code;
+    });
+    await echo.agent.prompt("你好");
+    off();
+    // fail-loud 挪到了它该在的地方：请求路径每轮重解析 key，缺了就是一条诚实的 auth 错误
+    expect(code).toBe("auth");
+  } finally {
+    await echo.stop();
+  }
 });
