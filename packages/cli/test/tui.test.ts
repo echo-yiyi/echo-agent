@@ -1622,11 +1622,12 @@ test("不认识的斜杠命令：报一句、原文放回输入行，不发给�
   const done = runTui({ agent: runtimeOf(agent), ui });
   await flush();
 
-  for (const ch of "/model") ui.feed(ch);
+  for (const ch of "/foo") ui.feed(ch);
   ui.feed(ENTER);
   await flush();
 
-  expect(ui.screen()).toContain("不认识的命令 /model");
+  expect(ui.screen()).toContain("不认识的命令 /foo");
+  expect(ui.screen()).toContain("/model"); // 报错里说清有哪些命令
   expect(prompts, "斜杠命令被当成消息发出去了").toEqual([]);
   // 原文放回了输入行：直接再按回车，同一条提示出现第二次（放没放回，按一下就知道）
   ui.feed(ENTER);
@@ -1748,4 +1749,68 @@ test("provider 报了缓存：状态栏出现「缓存 <数> (<百分比>%)」�
   expect(ui2.screen().split("\n").at(-1)!).not.toContain("缓存");
   quit(ui2);
   await done2;
+});
+
+/* ─────────────── /model 斜杠命令（P3 最小集补齐；用户实敲被顶回来过） ─────────────── */
+
+test("`/model` 开选择器（与 Ctrl+L 同一个）；`/model <id>` 跨家直切，走同一条路（写设置、主动弹配置段）", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const changes: { provider: string; id: string }[] = [];
+    const done = runTui({
+      agent: runtimeOf(agent),
+      ui,
+      configure: configureWith({ credentials, onModelChange: (m) => changes.push(m) }),
+    });
+    await flush();
+
+    for (const ch of "/model") ui.feed(ch);
+    ui.feed(ENTER);
+    await flush();
+    expect(ui.screen()).toContain("选择模型"); // 开的就是那个选择器
+    ui.feed(ESC_KEY); // 收起
+
+    for (const ch of "/model deepseek-chat") ui.feed(ch);
+    ui.feed(ENTER);
+    await flush(100);
+    expect(agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-chat" });
+    expect(changes).toEqual([{ provider: "deepseek", id: "deepseek-chat" }]); // 写设置那条回调同样走到
+    expect(ui.screen()).toContain("DeepSeek 的 API key"); // deepseek 没配 key：主动弹配置段
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("`/model 不存在的id`：如实报、装备不动、不发给模型", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("不该被跑到")]);
+    const prompts = capturePrompts(agent);
+    // kimi 预先配好 key：让输入行在场（否则配置段顶替输入行，敲的字全进了密钥框）
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    for (const ch of "/model gpt-99-并不存在") ui.feed(ch);
+    ui.feed(ENTER);
+    await flush(100);
+
+    expect(ui.screen()).toContain("目录里没有 'gpt-99-并不存在'");
+    expect(agent.state.model.id).toBe("kimi-k3");
+    expect(prompts).toEqual([]);
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
 });
