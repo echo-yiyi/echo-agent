@@ -506,7 +506,15 @@ function readEnv(name: string): string | undefined {
 
 /**
  * Kimi(moonshot)。key:`MOONSHOT_API_KEY` / `ECHO_LLM_API_KEY` 择一(与 EDD 同口径)。
- * ⚠️ contextWindow 是**保守口径**(128k),官方数字待核——错小了触发早压缩,不会炸窗口。
+ *
+ * 目录按 2026-09-01 官方文档（platform.kimi.com；`platform.moonshot.cn/docs` 已 301 过去，API 域名没变）：
+ * 现役四款；`kimi-k2` 整个系列 2026-05-25 下线（含上一版表里的 `kimi-k2-turbo-preview`，调用回 404）。
+ * 四款都收图、思考都走 `reasoning_content`：K3 与 K2.7-code 思考常开（K3 的深度走 `reasoning_effort`，
+ * 缺省 `max`），K2.6 缺省开、可关。`.cn` 与 `.ai` 两站模型 id 相同，key 不通用。
+ *
+ * **不填 `maxOutputTokens`**：官方只给缺省输出（K3 131,072、K2.x 32,768），上限没有明确数字，
+ * 而且 K3 的 `max_tokens` 已标 deprecated（改 `max_completion_tokens`）。方言只在该字段有值时才发
+ * `max_tokens`（见 `buildRequest`），留空即不发、由服务端用缺省——与 MiniMax 那条同一规矩：没确认的数宁可不发。
  */
 export function kimiProvider(opts: BuiltinProviderOptions = {}): Provider {
   const baseUrl = opts.baseUrl ?? readEnv("ECHO_LLM_BASE_URL") ?? "https://api.moonshot.cn/v1";
@@ -515,37 +523,40 @@ export function kimiProvider(opts: BuiltinProviderOptions = {}): Provider {
     name: "Kimi (Moonshot)",
     baseUrl,
     auth: envApiKey("MOONSHOT_API_KEY", "ECHO_LLM_API_KEY"),
-    // 目录里有两个模型，不声明缺省的话 `await createAgent({ provider })` 会 fail-loud（D17 第 4 级）
+    // 目录里不止一个模型，不声明缺省的话 `await createAgent({ provider })` 会 fail-loud（D17 第 4 级）。
+    // 选 K3 是官方口径：「建议优先从 Kimi K3 开始」；追求出字速度的编程场景官方推 k2.7-code-highspeed。
     defaultModelId: "kimi-k3",
     models: [
-      {
-        id: "kimi-k3",
-        api: OPENAI_COMPLETIONS_API,
-        name: "Kimi K3",
-        capabilities: { reasoning: true, contextWindow: 131_072 },
-      },
-      {
-        id: "kimi-k2-turbo-preview",
-        api: OPENAI_COMPLETIONS_API,
-        name: "Kimi K2 Turbo",
-        capabilities: { contextWindow: 131_072 },
-      },
+      { id: "kimi-k3", api: OPENAI_COMPLETIONS_API, name: "Kimi K3", capabilities: { reasoning: true, vision: true, contextWindow: 1_048_576 } },
+      { id: "kimi-k2.7-code", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.7 Code", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
+      { id: "kimi-k2.7-code-highspeed", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.7 Code HighSpeed", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
+      { id: "kimi-k2.6", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.6", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
     ],
     api: createProviderStreams(openAiDialect({ baseUrl, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) })),
   });
 }
 
 /**
- * OpenAI 本家。key:`OPENAI_API_KEY`。
+ * GPT-5.x 在 Chat Completions 上带工具调用时，`reasoning_effort` 只许 `none`——官方迁移指南原话：
+ * 「Starting with GPT-5.4, Chat Completions does not support tool calling with `reasoning_effort`
+ * values other than `none`」。本仓只有 chat/completions 方言、每个请求都带工具，所以 GPT-5.x 进目录
+ * 就得把推理关掉：它们在这里是**高配的非推理模型**，因此不标 `reasoning`（chat/completions 本来也
+ * 不回传任何 reasoning 文本，标了就是许诺一个不存在的思考通道）。要推理 + 工具，得先有 Responses 方言。
+ */
+const OPENAI_REASONING_OFF = { reasoning_effort: "none" } as const;
+
+/**
+ * OpenAI 本家。key:`OPENAI_API_KEY`。目录按 2026-09-01 官方文档（developers.openai.com，
+ * `platform.openai.com/docs` 已 301 过去）。
  *
- * **目录是保守的四条**：`gpt-4.1` / `gpt-4.1-mini` / `gpt-4o` / `gpt-4o-mini`——它们在
- * `/v1/chat/completions` 上是原生形态，本仓只有这一种方言。
- * **gpt-5 家族没进目录**：pi 那边把它们挂在 `openai-responses`（Responses API）上，
- * reasoning effort 的参数面与 chat completions 不同；照抄 id 却走错端点，等于给用户一个
- * 「看着支持、跑起来行为不对」的选项——那是本仓最忌讳的假绿。要它们得先有 Responses 方言，
- * 已登记在 `docs/ISSUES.md`。
+ * GPT-5.6 三档（Sol / Terra / Luna，2026-07-09 发布）是现役旗舰、Chat Completions 支持，但见
+ * `OPENAI_REASONING_OFF`。`gpt-4.1` / `gpt-4.1-mini` 是原生非推理模型、`max_tokens` 原生可用，保留。
+ * `gpt-4o` / `gpt-4o-mini` 摘掉：2024 的一代，已被 4.1-mini / 5.6 Luna 覆盖，且 `gpt-4o-2024-05-13`
+ * 快照 2026-10-23 关停。`gpt-5` / `gpt-5-mini` / `gpt-5-nano` 不进：2026-12-11 关停。
+ * `gpt-5.3-codex` 等 Responses-only 的模型不进：本仓没有那个方言。
  *
- * 取值来源：`@earendil-works/pi-ai` 的 `openai.models.js`（构建期生成的静态目录），不是我编的。
+ * **GPT-5.6 不填 `maxOutputTokens`**：官方把 `max_tokens` 标成 deprecated（改 `max_completion_tokens`，
+ * 且上限含 reasoning token），方言只发 `max_tokens`（见 `buildRequest`），留空即不发。
  */
 export function openaiProvider(opts: BuiltinProviderOptions = {}): Provider {
   const baseUrl = opts.baseUrl ?? "https://api.openai.com/v1";
@@ -554,12 +565,14 @@ export function openaiProvider(opts: BuiltinProviderOptions = {}): Provider {
     name: "OpenAI",
     baseUrl,
     auth: envApiKey("OPENAI_API_KEY", "ECHO_LLM_API_KEY"),
-    defaultModelId: "gpt-4.1",
+    // 官方 Codex 模型文档：「If you are unsure, start with Sol」；Terra 给子代理类轻活，Luna 最便宜
+    defaultModelId: "gpt-5.6-sol",
     models: [
+      { id: "gpt-5.6-sol", api: OPENAI_COMPLETIONS_API, name: "GPT-5.6 Sol", capabilities: { vision: true, contextWindow: 1_050_000 }, params: OPENAI_REASONING_OFF },
+      { id: "gpt-5.6-terra", api: OPENAI_COMPLETIONS_API, name: "GPT-5.6 Terra", capabilities: { vision: true, contextWindow: 1_050_000 }, params: OPENAI_REASONING_OFF },
+      { id: "gpt-5.6-luna", api: OPENAI_COMPLETIONS_API, name: "GPT-5.6 Luna", capabilities: { vision: true, contextWindow: 1_050_000 }, params: OPENAI_REASONING_OFF },
       { id: "gpt-4.1", api: OPENAI_COMPLETIONS_API, name: "GPT-4.1", capabilities: { contextWindow: 1_047_576, maxOutputTokens: 32_768, vision: true } },
       { id: "gpt-4.1-mini", api: OPENAI_COMPLETIONS_API, name: "GPT-4.1 mini", capabilities: { contextWindow: 1_047_576, maxOutputTokens: 32_768, vision: true } },
-      { id: "gpt-4o", api: OPENAI_COMPLETIONS_API, name: "GPT-4o", capabilities: { contextWindow: 128_000, maxOutputTokens: 16_384, vision: true } },
-      { id: "gpt-4o-mini", api: OPENAI_COMPLETIONS_API, name: "GPT-4o mini", capabilities: { contextWindow: 128_000, maxOutputTokens: 16_384, vision: true } },
     ],
     api: createProviderStreams(openAiDialect({ baseUrl, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) })),
   });
@@ -568,8 +581,16 @@ export function openaiProvider(opts: BuiltinProviderOptions = {}): Provider {
 /**
  * 智谱 GLM 的 coding 端点（pi 那边叫 `zai-coding-cn`）。key:`ZAI_CODING_CN_API_KEY`。
  *
- * base URL 与目录都取自 `@earendil-works/pi-ai` 的 `zai-coding-cn.js` / `.models.js`——
- * 它是 OpenAI 兼容方言，所以本仓直接能用。
+ * 目录按 2026-09-01 官方 Coding Plan 文档（docs.bigmodel.cn/cn/coding-plan/overview）：该端点**只真正
+ * 服务两个模型** `glm-5.3` / `glm-5.3-flash`；旧 id 服务端静默改路由（`glm-5.1` / `glm-5.2` → 5.3，
+ * `glm-4.7` / `glm-5-turbo` → 5.3-flash），`glm-4.5-air` 文档已不提。上一版那四条留着就是
+ * 「选的是 A、跑的是 B」，所以整表换掉。该端点按订阅额度计费，不是按 token。
+ *
+ * **thinking 开着，且 `clear_thinking: false`**（2026-08-28：`ThinkingBlock` 落地之后的正解）。
+ * 5.3 系 thinking **关不掉**（`type: "disabled"` 被拒，深度走 `reasoning_effort` low / high / max，缺省 max）；
+ * preserved thinking 要求工具结果回来时原样带回上一轮 `reasoning_content`——方言两侧都做到了
+ * （收时记来源字段进 `ThinkingBlock.signature`，发时写回同一个字段）。
+ * `maxOutputTokens` 官方口径「128K」，沿用上一版（取自 pi 同一端点的目录）的 131_072。
  */
 export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
   const baseUrl = opts.baseUrl ?? "https://open.bigmodel.cn/api/coding/paas/v4";
@@ -578,16 +599,11 @@ export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
     name: "Z.AI Coding CN (GLM)",
     baseUrl,
     auth: envApiKey("ZAI_CODING_CN_API_KEY", "ZHIPU_API_KEY", "ECHO_LLM_API_KEY"),
-    defaultModelId: "glm-4.7",
-    // **thinking 开着，且 `clear_thinking: false`**（2026-08-28：`ThinkingBlock` 落地之后的正解）。
-    // Z.AI Coding Plan 缺省开 preserved thinking，要求工具结果回来时原样带回上一轮 `reasoning_content`；
-    // 现在方言两侧都做到了（收时记来源字段进 `ThinkingBlock.signature`，发时写回同一个字段），
-    // 所以这里把它正经打开，而不是像上一版那样关掉了事。
+    // 官方旗舰；flash 是 1/10 价、唯一收图的那个
+    defaultModelId: "glm-5.3",
     models: [
-      { id: "glm-4.7", api: OPENAI_COMPLETIONS_API, name: "GLM-4.7", capabilities: { reasoning: true, contextWindow: 204_800, maxOutputTokens: 131_072 }, params: THINKING_ENABLED },
-      { id: "glm-4.5-air", api: OPENAI_COMPLETIONS_API, name: "GLM-4.5-Air", capabilities: { reasoning: true, contextWindow: 131_072, maxOutputTokens: 98_304 }, params: THINKING_ENABLED },
-      { id: "glm-5.1", api: OPENAI_COMPLETIONS_API, name: "GLM-5.1", capabilities: { reasoning: true, contextWindow: 204_800, maxOutputTokens: 131_072 }, params: THINKING_ENABLED },
-      { id: "glm-5-turbo", api: OPENAI_COMPLETIONS_API, name: "GLM-5-Turbo", capabilities: { reasoning: true, contextWindow: 204_800, maxOutputTokens: 131_072 }, params: THINKING_ENABLED },
+      { id: "glm-5.3", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3", capabilities: { reasoning: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED },
+      { id: "glm-5.3-flash", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3-Flash", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED },
     ],
     api: createProviderStreams(openAiDialect({ baseUrl, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) })),
   });
@@ -596,21 +612,22 @@ export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
 /**
  * MiniMax。key:`MINIMAX_API_KEY`。目录**只有 `MiniMax-M3`**，走 OpenAI 兼容端点。
  *
- * **为什么只有 M3、为什么 M2.x 被摘掉**（2026-08-30 用户拍板，review 二轮 P1）：
- * M2.x 的 thinking **关不掉**——不传 `reasoning_split` 时它混在正文的 `<think>` 里被当用户可见
- * 文本输出，传了则要求多轮工具调用时原样回传上一轮 reasoning。留着它就是导出一个已知跑不对的模型。
- * **M3 官方明确可以关 thinking**，所以这一批不必先改消息契约：`params` 直发
- * `thinking: { type: "disabled" }`（形状与 GLM 那边**恰好相同**，共用同一个常量只是省一份字面量，
- * 不是在声称两家是同一套协议——各自依据各自厂商文档）。
+ * **为什么只有 M3、为什么 M2.x 不进来**（2026-08-30 用户拍板，review 二轮 P1；2026-09-01 按官方文档复核仍成立，
+ * 含现役的 `MiniMax-M2.7` / `-highspeed`）：M2.x 的 thinking **关不掉**——不传 `reasoning_split` 时它混在正文的
+ * `<think>` 里被当用户可见文本输出，传了则思考走 `reasoning_details` 字段（本方言只认 `REASONING_FIELDS` 那三个）
+ * 且要求多轮工具调用时原样回传。留着它就是导出一个已知跑不对的模型。
+ * **M3 官方明确可以关 thinking**（`thinking: { type: "disabled" }`；不传 = `adaptive`，开着），所以这一批不必先改
+ * 消息契约：`params` 直发 disabled（形状与 GLM 那边**恰好相同**，共用同一个常量只是省一份字面量，
+ * 不是在声称两家是同一套协议——各自依据各自厂商文档）。M3 收图（`image_url` / `video_url`），1M 上下文（官方保底 512K）。
  *
- * **`maxOutputTokens` 故意留空**：上一版填的 131072 来自 pi 的 **Anthropic 目录**，不是这个
- * OpenAI 兼容端点的请求上限；而方言只在该字段有值时才发 `max_tokens`（见 `buildBody`），
- * 留空即不发，由服务端用自己的默认值。**没确认准确上限之前，宁可不发也不发一个抄错的数**——
- * 上一版那个值被「假 fetch 无条件收下请求」的测试测成了绿。
+ * **`maxOutputTokens` 故意留空**：官方上限 524,288 是 `max_completion_tokens` 的口径，`max_tokens` 已标 legacy；
+ * 而方言只在该字段有值时才发 `max_tokens`（见 `buildRequest`），留空即不发，由服务端用自己的默认值（官方建议 131,072）。
+ * 上一版填的 131072 来自 pi 的 **Anthropic 目录**，被「假 fetch 无条件收下请求」的测试测成了绿——
+ * **没确认准确上限之前，宁可不发也不发一个抄错的数**。
  *
  * **仍未经真 key 实跑验证**：本仓只有 OpenAI 兼容方言（pi 那边 minimax 走 `anthropic-messages`），
  * 假 fetch 只能证明请求体长什么样，证明不了端点接受它。base URL 按账号所在区可能要调
- * （国内站传 `minimaxProvider({ baseUrl: "https://api.minimaxi.com/v1" })`；CLI 没有 `--base-url`）。
+ * （国内站官方文档现在写的是 `https://api.minimax.cn/v1`，传 `minimaxProvider({ baseUrl })`；CLI 没有 `--base-url`）。
  * 这一条如实登记在 `docs/ISSUES.md`，不因为进了 CLI 清单就当它验证过。
  */
 export function minimaxProvider(opts: BuiltinProviderOptions = {}): Provider {
@@ -624,18 +641,24 @@ export function minimaxProvider(opts: BuiltinProviderOptions = {}): Provider {
     models: [
       // 不标 `reasoning: true`：thinking 是关掉的，标了就是许诺一个本批并不打开的通道。
       // 不填 `maxOutputTokens`：理由见上，宁可不发 `max_tokens`。
-      { id: "MiniMax-M3", api: OPENAI_COMPLETIONS_API, name: "MiniMax-M3", capabilities: { contextWindow: 1_000_000 }, params: THINKING_DISABLED },
+      { id: "MiniMax-M3", api: OPENAI_COMPLETIONS_API, name: "MiniMax-M3", capabilities: { vision: true, contextWindow: 1_000_000 }, params: THINKING_DISABLED },
     ],
     api: createProviderStreams(openAiDialect({ baseUrl, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) })),
   });
 }
 
 /**
- * DeepSeek。key:`DEEPSEEK_API_KEY`。窗口按官方 64k 口径。
+ * DeepSeek。key:`DEEPSEEK_API_KEY`。目录按 2026-09-01 官方文档（api-docs.deepseek.com）+ 实测 `GET /models`：只有 V4 三款。
  *
- * **`alwaysSendReasoningField` 只在这一家开**：DeepSeek 在 reasoning 打开时要求每条回放的
- * assistant 消息都带 `reasoning_content`，缺了会被拒（pi 的探测规则就是 `isDeepSeek`）。
- * 自建网关指向 DeepSeek 的话，调用方要自己传这个选项——**我们不按 URL 猜**。
+ * `deepseek-chat` / `deepseek-reasoner` 官方 2026-04-24 宣布、2026-07-24 退役（分别路由到 v4-flash 的非思考 / 思考
+ * 模式；实测今天还能打通，但 `/models` 已不列、文档已不提——没文档的余量不当正式 id）。
+ * 三款都是 1M 上下文、思考缺省**开**（`thinking: { type: "enabled" }`，可传 `disabled` 关掉；深度 `reasoning_effort`
+ * low / high / max，缺省 high），思考走 `reasoning_content`；只有 `-vision-exp` 收图，别的模型给图回 400。
+ *
+ * **`alwaysSendReasoningField` 只在这一家开**：官方明文——带 `tools` 的请求，后续每一轮都必须把 `reasoning_content`
+ * 原样回传（**包括没发生工具调用的轮次**），缺了回 400。自建网关指向 DeepSeek 的话，调用方要自己传这个选项——**我们不按 URL 猜**。
+ *
+ * **不填 `maxOutputTokens`**：官方只给上限「384K」、没给精确数字和缺省值，按「没确认的数宁可不发」留空。
  */
 export function deepseekProvider(opts: BuiltinProviderOptions = {}): Provider {
   const baseUrl = opts.baseUrl ?? "https://api.deepseek.com";
@@ -644,20 +667,12 @@ export function deepseekProvider(opts: BuiltinProviderOptions = {}): Provider {
     name: "DeepSeek",
     baseUrl,
     auth: envApiKey("DEEPSEEK_API_KEY"),
-    defaultModelId: "deepseek-chat",
+    // 旧缺省 `deepseek-chat` 官方就是路由到 v4-flash，价格连续；pro 是 3 倍价，官方自己的 agent 配置把它当主模型、flash 给子代理
+    defaultModelId: "deepseek-v4-flash",
     models: [
-      {
-        id: "deepseek-chat",
-        api: OPENAI_COMPLETIONS_API,
-        name: "DeepSeek Chat",
-        capabilities: { contextWindow: 65_536, maxOutputTokens: 8192 },
-      },
-      {
-        id: "deepseek-reasoner",
-        api: OPENAI_COMPLETIONS_API,
-        name: "DeepSeek Reasoner",
-        capabilities: { reasoning: true, contextWindow: 65_536, maxOutputTokens: 8192 },
-      },
+      { id: "deepseek-v4-flash", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Flash", capabilities: { reasoning: true, contextWindow: 1_000_000 } },
+      { id: "deepseek-v4-pro", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Pro", capabilities: { reasoning: true, contextWindow: 1_000_000 } },
+      { id: "deepseek-v4-flash-vision-exp", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Flash Vision (exp)", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000 } },
     ],
     api: createProviderStreams(
       openAiDialect({ baseUrl, alwaysSendReasoningField: true, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) }),

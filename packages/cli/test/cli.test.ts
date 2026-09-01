@@ -410,7 +410,7 @@ test("main:交互 + 缺凭据 → 引导设置：欢迎 → 选 provider → 贴
     ui.feed("2"); // **故意不选缺省**：选缺省的话「选的模型进没进装配」根本分不出来
 
     // 直接进对话，欢迎头印着选的那家、选的那个模型——证明选择真的流进了 createEcho
-    await waitFor(() => ui.screen().includes("模型 deepseek-reasoner · deepseek"), "主界面（用选的那家那个模型）");
+    await waitFor(() => ui.screen().includes("模型 deepseek-v4-pro · deepseek"), "主界面（用选的那家那个模型）");
     // key 按选中那家的 provider.id 落盘
     expect(JSON.parse(readFileSync(join(dir, "credentials.json"), "utf8"))).toEqual({ deepseek: { apiKey: "sk-GOOD" } });
 
@@ -508,8 +508,8 @@ test("main:向导里选的家和模型，**下一次启动直接生效**——�
     for (const ch of "sk-GOOD") ui1.feed(ch);
     ui1.feed("\r");
     await waitFor(() => ui1.screen().includes("选择模型"), "选模型");
-    ui1.feed("2"); // deepseek-reasoner（非缺省——选缺省的话「记没记住」分不出来）
-    await waitFor(() => ui1.screen().includes("模型 deepseek-reasoner · deepseek"), "主界面");
+    ui1.feed("2"); // deepseek-v4-pro（非缺省——选缺省的话「记没记住」分不出来）
+    await waitFor(() => ui1.screen().includes("模型 deepseek-v4-pro · deepseek"), "主界面");
     ui1.feed(String.fromCharCode(4));
     expect(await first).toBe(0);
 
@@ -519,7 +519,7 @@ test("main:向导里选的家和模型，**下一次启动直接生效**——�
       ui: ui2,
       credentials,
     });
-    await waitFor(() => ui2.screen().includes("模型 deepseek-reasoner · deepseek"), "重启后直接生效");
+    await waitFor(() => ui2.screen().includes("模型 deepseek-v4-pro · deepseek"), "重启后直接生效");
     expect(ui2.screen()).not.toContain("选择 provider");
     ui2.feed(String.fromCharCode(4));
     expect(await second).toBe(0);
@@ -536,7 +536,7 @@ test("main:显式 --provider 永远赢过设置；设置里记的模型只在同
     await credentials.write("kimi", { type: "api_key", key: "sk-k" });
     const home = join(dir, "home");
     mkdirSync(home, { recursive: true });
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ model: { provider: "deepseek", id: "deepseek-reasoner" } }));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ model: { provider: "deepseek", id: "deepseek-v4-pro" } }));
 
     const running = main(["--provider", "kimi", "--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
       ui,
@@ -565,7 +565,7 @@ test("main:记住的模型已不在目录里 → 口信上屏、用缺省，**�
       ui,
       credentials,
     });
-    await waitFor(() => ui.screen().includes("模型 deepseek-chat · deepseek"), "家记住了、模型回缺省");
+    await waitFor(() => ui.screen().includes("模型 deepseek-v4-flash · deepseek"), "家记住了、模型回缺省");
     await waitFor(() => ui.screen().includes("[设置]"), "口信上屏");
     expect(ui.screen()).toContain("deepseek-v99-已下架");
     ui.feed(String.fromCharCode(4));

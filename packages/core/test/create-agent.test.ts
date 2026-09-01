@@ -70,14 +70,14 @@ test("零模型 → fail-loud", () => {
 });
 
 test("官方两个 provider 都声明了 defaultModelId —— 否则一行启动对它们不成立", () => {
-  // 实测过：kimi 有 kimi-k3 / kimi-k2-turbo-preview，deepseek 有 chat / reasoner，
-  // 都是两个。不声明缺省的话 `createAgent({ provider })` 会走到 D17-4 判红。
+  // 实测过：kimi 有 kimi-k3 / kimi-k2.7-code / …，deepseek 有 v4-flash / v4-pro / v4-flash-vision-exp，
+  // 都不止一个。不声明缺省的话 `createAgent({ provider })` 会走到 D17-4 判红。
   const kimi = kimiProvider();
   const ds = deepseekProvider();
   expect(kimi.getModels().length).toBeGreaterThan(1);
   expect(ds.getModels().length).toBeGreaterThan(1);
   expect(resolveModel(kimi, kimi.getModels()).id).toBe("kimi-k3");
-  expect(resolveModel(ds, ds.getModels()).id).toBe("deepseek-chat");
+  expect(resolveModel(ds, ds.getModels()).id).toBe("deepseek-v4-flash");
 });
 
 /* ───────────── D6：状态根 ───────────── */
