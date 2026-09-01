@@ -61,7 +61,7 @@ function welcomeLines(state: Readonly<AgentState>, cwd: string): string[] {
     `${bold("echo-agent")}  ${dim(`v${VERSION}`)}`,
     dim(cwd),
     `模型 ${state.model.id} · ${state.model.provider}`,
-    dim("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史"),
+    dim("Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史 · Ctrl+O 工具输出"),
     "",
   ];
 }
@@ -273,9 +273,8 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       case "message_update": {
         // **用事件带的权威 partial，不自己攒 delta**：`message_update` 就带着此刻的完整 `message`。
         // 自己累加等于在 TUI 里维护第二份真相，重试 / 丢包 / 定稿修正时两边会分叉。
-        const partial = textOf(event.message.content);
         if (streamingIndex === null) streamingIndex = transcript.push({ kind: "assistant", text: "", streaming: true });
-        transcript.setAssistantText(streamingIndex, partial);
+        transcript.setAssistantContent(streamingIndex, contentOf(event.message.content));
         rerender();
         return;
       }
@@ -284,12 +283,19 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         // **无条件以定稿为准**，包括定稿为空（只带 tool_use 的那一轮、错误轮）：
         // 只发 done 的 provider 一个 delta 都没有，被修正的定稿也要覆盖旧 partial。
         if (streamingIndex === null) streamingIndex = transcript.push({ kind: "assistant", text: "", streaming: true });
-        transcript.finishAssistant(streamingIndex, textOf(event.message.content));
+        transcript.finishAssistant(streamingIndex, contentOf(event.message.content));
         streamingIndex = null;
         rerender();
         return;
       case "tool_execution_start": {
-        const row = transcript.push({ kind: "tool", name: event.toolName, detail: "", state: "running" });
+        // 参数整份交给条目（展开时看全量），摘要一行折叠时看
+        const row = transcript.push({
+          kind: "tool",
+          name: event.toolName,
+          detail: summaryOf(event.params),
+          state: "running",
+          params: event.params,
+        });
         toolRows.set(event.toolCallId, row);
         rerender();
         return;
@@ -316,7 +322,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       case "tool_execution_end": {
         const row = toolRows.get(event.toolCallId);
         if (row !== undefined) {
-          transcript.updateTool(row, { state: event.result.isError ? "failed" : "done" });
+          transcript.updateTool(row, { state: event.result.isError ? "failed" : "done", result: event.result });
           toolRows.delete(event.toolCallId);
           rerender();
         }
@@ -416,6 +422,11 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         if (keys.matches(data, "app.permission.allow")) return answer("allow");
         if (keys.matches(data, "app.permission.deny")) return answer("deny");
       }
+      if (keys.matches(data, "app.tools.expand")) {
+        transcript.toggleTools();
+        rerender();
+        return;
+      }
       // 正在配 key：应用级键的语义不变（Ctrl+D 空时退出 / Ctrl+C 清空），只是「空不空」问的是它
       if (setup !== null) {
         if (keys.matches(data, "app.exit") && setup.isEmpty()) {
@@ -505,14 +516,33 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   return failed ? 1 : 0;
 }
 
-/** 定稿消息里的纯文本。线上形状里 content 可能是字符串或块数组。 */
-function textOf(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((b): b is { type: "text"; text: string } => typeof b === "object" && b !== null && (b as { type?: unknown }).type === "text")
-    .map((b) => b.text)
-    .join("");
+/**
+ * 消息内容 → 正文 + thinking。线上形状里 content 可能是字符串或块数组；
+ * 被安全过滤器抹掉的 thinking（`redacted`）正文没有，不显示。
+ */
+function contentOf(content: unknown): { text: string; thinking: string } {
+  if (typeof content === "string") return { text: content, thinking: "" };
+  if (!Array.isArray(content)) return { text: "", thinking: "" };
+  let text = "";
+  let thinking = "";
+  for (const b of content as { type?: unknown; text?: unknown; thinking?: unknown; redacted?: unknown }[]) {
+    if (typeof b !== "object" || b === null) continue;
+    if (b.type === "text" && typeof b.text === "string") text += b.text;
+    else if (b.type === "thinking" && typeof b.thinking === "string" && b.redacted !== true) thinking += b.thinking;
+  }
+  return { text, thinking };
+}
+
+/** 工具参数的一行摘要（折叠时看）。JSON 压成一行、截到 80 列；展开时看的是全量，见 `messages.ts`。 */
+function summaryOf(params: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(params) ?? "";
+  } catch {
+    return "(参数无法序列化)";
+  }
+  if (text === "{}" || text === "") return "";
+  return text.length > 80 ? `${text.slice(0, 79)}…` : text;
 }
 
 /**

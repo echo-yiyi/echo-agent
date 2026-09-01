@@ -24,6 +24,8 @@ export const APP_KEYBINDINGS = {
   "app.interrupt": { defaultKeys: "escape", description: "中断当前这一轮" },
   "app.clear": { defaultKeys: "ctrl+c", description: "清空输入行" },
   "app.exit": { defaultKeys: "ctrl+d", description: "输入行为空时退出" },
+  // P2：工具调用默认折叠，Ctrl+O 全局展开 / 收起（pi 的 `app.tools.expand`，`:112`）
+  "app.tools.expand": { defaultKeys: "ctrl+o", description: "展开 / 收起工具输出" },
   // 权限询问的答法。pi 没有这一对——它的权限 UI 是另一套；名字沿用 `app.*` 前缀只是为了归类。
   "app.permission.allow": { defaultKeys: "y", description: "放行待答的权限询问" },
   "app.permission.deny": { defaultKeys: "n", description: "拒绝待答的权限询问" },
@@ -35,6 +37,7 @@ declare module "@earendil-works/pi-tui" {
     "app.interrupt": true;
     "app.clear": true;
     "app.exit": true;
+    "app.tools.expand": true;
     "app.permission.allow": true;
     "app.permission.deny": true;
   }

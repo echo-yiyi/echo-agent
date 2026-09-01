@@ -1291,3 +1291,120 @@ test("状态栏在配置段期间也在（它不依赖输入行）", async () =>
     restore();
   }
 });
+
+/* ─────────────── 消息渲染（P2，`docs/review/tui-design.md` §五） ─────────────── */
+//
+// 每条消息是一个组件（`messages.ts`）：助手正文走 pi-tui 的 `Markdown`，工具调用默认折叠、
+// Ctrl+O 全局展开，thinking 暗色斜体。清洗仍在 `Transcript` 入口（上面那组判据没动）。
+
+const ITALIC = `${ESC_KEY}[3m`;
+const CTRL_O = String.fromCharCode(15);
+const stripSgr = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+test("Markdown：代码块、列表、表格由 `Markdown` 组件渲染，不是原样吐字", () => {
+  const t = new Transcript();
+  t.push({
+    kind: "assistant",
+    text: "说明：\n```ts\nconst a = 1;\n```\n- 甲\n- 乙\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+    streaming: false,
+  });
+  const lines = t.render(40).map(stripSgr);
+  expect(lines).toContain("```ts");
+  expect(lines.some((l) => l.includes("const a = 1;"))).toBe(true);
+  expect(lines).toContain("- 甲");
+  expect(lines.some((l) => l.startsWith("┌"))).toBe(true); // 表格画了框
+  expect(lines).toContain("│ 1 │ 2 │");
+});
+
+test("thinking：暗色斜体、在正文前面，与正文区分", () => {
+  const t = new Transcript();
+  const row = t.push({ kind: "assistant", text: "", streaming: true });
+  t.setAssistantContent(row, { text: "结论在此", thinking: "先想一想" });
+  const raw = t.render(40);
+  const think = raw.find((l) => l.includes("先想一想"))!;
+  const body = raw.find((l) => l.includes("结论在此"))!;
+  expect(think).toContain(ITALIC);
+  expect(body).not.toContain(ITALIC);
+  expect(raw.indexOf(think)).toBeLessThan(raw.indexOf(body));
+});
+
+test("工具调用默认折叠：一行「标记 + 名字 + 摘要」；toggleTools() 展开看参数与结果，再切回去收起", () => {
+  const t = new Transcript();
+  const row = t.push({ kind: "tool", name: "read_file", detail: '{"path":"a.ts"}', state: "running", params: { path: "a.ts" } });
+  t.updateTool(row, { state: "done", result: { content: "第一行内容\n第二行内容", isError: false, metadata: null } });
+
+  const folded = t.render(60).map(stripSgr);
+  expect(folded[0]).toBe('✓ read_file  {"path":"a.ts"}');
+  expect(folded.join("\n"), "折叠时结果不该在").not.toContain("第二行内容");
+
+  expect(t.toggleTools()).toBe(true);
+  const open = t.render(60).map(stripSgr);
+  expect(open.join("\n")).toContain('"path": "a.ts"'); // 参数（多行 JSON）
+  expect(open.join("\n")).toContain("第二行内容"); // 结果
+  expect(open.some((l) => l.startsWith("│ "))).toBe(true); // 缩在竖线后面
+
+  expect(t.toggleTools()).toBe(false);
+  expect(t.render(60).map(stripSgr).join("\n")).not.toContain("第二行内容");
+});
+
+test("长输出不刷屏：200 行结果折叠时只占一行（加一个空行）", () => {
+  const t = new Transcript();
+  const row = t.push({ kind: "tool", name: "bash", detail: "ls", state: "running" });
+  const content = Array.from({ length: 200 }, (_, i) => `line-${i}`).join("\n");
+  t.updateTool(row, { state: "done", result: { content, isError: false, metadata: null } });
+  expect(t.render(80).length).toBe(2);
+  t.toggleTools();
+  expect(t.render(80).length).toBeGreaterThan(200);
+});
+
+test("工具结果也要洗：展开时结果里的控制序列不许进终端", () => {
+  const t = new Transcript();
+  const row = t.push({ kind: "tool", name: "bash", detail: "", state: "running" });
+  const BEL7 = String.fromCharCode(7);
+  t.updateTool(row, { state: "done", result: { content: `${ESC_KEY}]52;c;aGFjaw==${BEL7}真正的输出`, isError: false, metadata: null } });
+  t.toggleTools();
+  const screen = t.render(80).join("\n");
+  expect(screen).toContain("真正的输出");
+  expect(screen).not.toContain("]52;");
+  expect(screen).not.toContain("aGFjaw==");
+});
+
+test("端到端：Ctrl+O 展开 / 收起工具输出；折叠时长结果不刷屏", async () => {
+  const ui = fakeTui();
+  const agent = new Agent({
+    model: { provider: "t", id: "only", api: "scripted" },
+    streamFunction: scriptedStreamFn([toolTurn("call-1", "list", { dir: "/" }), textTurn("列完了")]),
+    tools: [
+      {
+        kind: "model" as const,
+        name: "list",
+        label: "列目录",
+        description: "列目录",
+        parameters: { type: "object", properties: { dir: { type: "string" } } },
+        execute: async () => ({
+          content: Array.from({ length: 100 }, (_, i) => `entry-${i}`).join("\n"),
+          isError: false,
+          metadata: null,
+        }),
+      },
+    ],
+  });
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("列一下");
+  ui.feed(ENTER);
+  await flush(300);
+
+  const folded = ui.screen();
+  expect(folded).toContain("✓ list");
+  expect(folded).toContain('{"dir":"/"}'); // 一行摘要
+  expect(folded, "折叠时长结果刷出来了").not.toContain("entry-99");
+
+  ui.feed(CTRL_O);
+  expect(ui.screen()).toContain("entry-99");
+  ui.feed(CTRL_O);
+  expect(ui.screen()).not.toContain("entry-99");
+
+  quit(ui);
+  await done;
+});
