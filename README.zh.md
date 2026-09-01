@@ -40,7 +40,7 @@ printf 'Introduce yourself in one sentence.\n' |
 MOONSHOT_API_KEY=sk-... bun packages/coding/bin/echo-coding.ts
 ```
 
-两个命令接受同一套选项（`--help`）。在 `echo-coding` 里，`bash`、`write_file`、`edit_file` 会在交互界面里请求确认；stdin 被重定向时没有人能回答，这些调用会被拒绝。
+两个命令接受同一套选项（`--help`）。在 `echo-coding` 里，`bash`、`write_file`、`edit_file` 会在交互界面里请求确认；stdin 被重定向时没有人能回答，所有工具都不再询问、直接执行——管道形态的 `echo-coding` 就当作一个会改文件的脚本来用。
 
 ## 使用 CLI
 

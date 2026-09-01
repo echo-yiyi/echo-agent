@@ -5,11 +5,12 @@
 // 做产品」的样板。参数解析、凭据、引导设置、形态分叉、装配、收摊全在 `echo-agent` 的
 // `mainFor()` 里，这里一行都不复制。
 //
-// 本文件只有一个决定要做：**权限询问由谁答**。
-//   · 交互形态：壳（`echo:tui`）会摆出来问 y/n → `responder: "host"`；
-//   · 管道 / CI：没人能答 → `responder: "none"`，ask 在 authorize 阶段折成 deny
-//     （`permission.ts`：没有裁决人时宁可拦下，不可默默放行）。
-// 规则本身用 `DEFAULT_PERMISSION`：读随便，动手（bash / write_file / edit_file）先问。
+// 本文件只有一个决定要做：**权限策略随形态走**（2026-09-01 用户拍板）。
+//   · 交互形态：`DEFAULT_PERMISSION`——读随便，动手（bash / write_file / edit_file）先问，
+//     壳（`echo:tui`）摆出来问 y/n → `responder: "host"`；
+//   · 管道 / CI：没人在终端前，问不出去——**全放行**（`permission: false`）。
+//     不选「ask 折成 deny」：那样管道形态只能读不能改，等于没用；`echo x | echo-coding`
+//     就当作一个会改文件的脚本来用，是否交给它由调用方在管道外面决定。
 
 import { readFileSync } from "node:fs";
 import { mainFor, type Product } from "echo-agent";
@@ -26,7 +27,7 @@ export const ECHO_CODING: Product = Object.freeze({
   preset: ({ interactive, cwd }) =>
     codingPreset({
       workspaceRoot: cwd,
-      permission: { ...DEFAULT_PERMISSION, responder: interactive ? "host" : "none" },
+      permission: interactive ? { ...DEFAULT_PERMISSION, responder: "host" } : false,
     }),
 });
 

@@ -11,7 +11,7 @@ import { ECHO_CODING } from "../src/cli.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
-test("preset：产品自带 echo:workspace / echo:shell；工作区根 = cwd；权限询问交互形态有人答、管道形态没人答", async () => {
+test("preset：产品自带 echo:workspace / echo:shell；工作区根 = cwd；权限交互形态动手先问、管道形态全放行", async () => {
   const cwd = join(tmpdir(), "echo-coding-workspace");
   const tui = ECHO_CODING.preset!({ interactive: true, cwd });
   // 文件读写、搜索、shell 只属于 coding（不在 echo-agent 里）——它们以两条 Extension 的形态跟着产品走
@@ -25,9 +25,11 @@ test("preset：产品自带 echo:workspace / echo:shell；工作区根 = cwd；�
   expect((await ask("bash")).kind).toBe("ask");
   expect((await ask("write_file")).kind).toBe("ask");
 
-  // 交互形态：壳（`echo:tui`）会摆出来问 → host；管道 / CI：没人答 → none，ask 在 authorize 阶段折成 deny
+  // 交互形态：壳（`echo:tui`）会摆出来问 → host
   expect(policy.responder).toBe("host");
-  expect(ECHO_CODING.preset!({ interactive: false, cwd }).agent?.permission?.responder).toBe("none");
+  // 管道 / CI：没人在终端前，问不出去 → 不装权限策略（全放行）。反例是「ask 折成 deny」：
+  // 那样管道形态只能读不能改，等于没用（2026-09-01 用户拍板）。
+  expect(ECHO_CODING.preset!({ interactive: false, cwd }).agent?.permission).toBeUndefined();
 });
 
 /* ─────────────────────────── 可执行文件本身 ─────────────────────────── */
