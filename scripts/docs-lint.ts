@@ -6,7 +6,7 @@
 // ## 只守五件事,每件都是硬事实
 //
 //   roster    花名册里的文档存在;全仓没有没登记的野 md;没有孤儿 .zh.md / .i18n.yaml
-//   links     相对 Markdown 链接与锚点(含同页、引用式)指向真实位置
+//   links     相对 Markdown 链接与锚点指向真实位置;源码链接指向仍存在的符号 / 测试名
 //   code      文档里的 ts 围栏能**独立**编译
 //   filerefs  注释与散文里引用的文件路径真实存在
 //   pairing   双语三文件成组、两侧 blob hash 与记录一致、结构签名一致
@@ -25,12 +25,14 @@
 //     **正文长度与标题含义都不进签名**——中文侧可以只有骨架没有肉而全绿。
 //   · code 只证明示例能编译,证明不了它示范的用法是对的。
 //   · filerefs 只证明路径存在,证明不了那份文件说的是引用者以为的事。
+//   · 源码符号链接只证明声明 / 测试名仍存在,防的是行号漂到别处;同一符号内部语义变了仍要人审。
 //
 // 每个 parser 都必须在 `test/docs-lint-fixtures.test.ts` 里有正反例:
 // **判据本身要能分辨对错,否则零输入下的绿毫无意义**(链接门就这么空绿过一轮)。
 
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import ts from "typescript";
 
 export const REPO_ROOT = resolve(import.meta.dir, "..");
 const MANIFEST_PATH = join(REPO_ROOT, "docs", "docs.manifest.json");
@@ -126,10 +128,13 @@ export function anchors(text: string): Set<string> {
 }
 
 export type DocLink = { readonly target: string | null; readonly anchor: string | null; readonly line: number };
+export type SourceLink = { readonly target: string; readonly anchor: string | null; readonly line: number };
 
-/** 行内、引用式、同页锚点三种都收;只收 `.md` 目标与同页锚点,外链与图片不管。 */
-export function docLinks(text: string): DocLink[] {
-  const out: DocLink[] = [];
+type MarkdownHref = { readonly href: string; readonly line: number };
+
+/** 行内与引用式 Markdown 链接的原始目标;围栏和外链在这里统一排除。 */
+function markdownHrefs(text: string): MarkdownHref[] {
+  const out: MarkdownHref[] = [];
   const refs = new Map<string, string>();
   const lines = scanLines(text);
   for (const { line, inFence } of lines) {
@@ -139,12 +144,7 @@ export function docLinks(text: string): DocLink[] {
   }
   const push = (href: string, line: number): void => {
     if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("//")) return;
-    const hash = href.indexOf("#");
-    const target = hash === -1 ? href : href.slice(0, hash);
-    const anchor = hash === -1 ? "" : href.slice(hash + 1);
-    if (target === "") { if (anchor !== "") out.push({ target: null, anchor, line }); return; }
-    if (!target.endsWith(".md")) return;
-    out.push({ target, anchor: anchor === "" ? null : anchor, line });
+    out.push({ href, line });
   };
   for (const { line, lineNo, inFence } of lines) {
     if (inFence) continue;
@@ -156,6 +156,131 @@ export function docLinks(text: string): DocLink[] {
     }
   }
   return out;
+}
+
+/** 行内、引用式、同页锚点三种都收;只收 `.md` 目标与同页锚点,外链与图片不管。 */
+export function docLinks(text: string): DocLink[] {
+  const out: DocLink[] = [];
+  const push = (href: string, line: number): void => {
+    const hash = href.indexOf("#");
+    const target = hash === -1 ? href : href.slice(0, hash);
+    const anchor = hash === -1 ? "" : href.slice(hash + 1);
+    if (target === "") { if (anchor !== "") out.push({ target: null, anchor, line }); return; }
+    if (!target.endsWith(".md")) return;
+    out.push({ target, anchor: anchor === "" ? null : anchor, line });
+  };
+  for (const { href, line } of markdownHrefs(text)) push(href, line);
+  return out;
+}
+
+/** 源码链接必须带语义锚:`#symbol=Qualified.name` 或 `#test=<测试标题 slug>`。 */
+export function sourceLinks(text: string): SourceLink[] {
+  const out: SourceLink[] = [];
+  for (const { href, line } of markdownHrefs(text)) {
+    const hash = href.indexOf("#");
+    const target = hash === -1 ? href : href.slice(0, hash);
+    if (!/\.[cm]?[jt]sx?$/i.test(target)) continue;
+    out.push({ target, anchor: hash === -1 ? null : href.slice(hash + 1), line });
+  }
+  return out;
+}
+
+function declarationName(name: ts.DeclarationName | ts.BindingName | undefined): string | null {
+  if (name === undefined) return null;
+  if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) return name.text;
+  return null;
+}
+
+function addMembers(out: Set<string>, owner: string, members: ts.NodeArray<ts.TypeElement | ts.ClassElement>): void {
+  for (const member of members) {
+    const name = declarationName(member.name);
+    if (name !== null) out.add(`${owner}.${name}`);
+  }
+}
+
+function scriptKind(fileName: string): ts.ScriptKind {
+  if (/\.tsx$/i.test(fileName)) return ts.ScriptKind.TSX;
+  if (/\.jsx$/i.test(fileName)) return ts.ScriptKind.JSX;
+  if (/\.[cm]?js$/i.test(fileName)) return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
+/** 只收声明,不拿注释 / 调用点 / 字符串里的同名充数。 */
+export function sourceSymbols(text: string, fileName = "source.ts"): Set<string> {
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind(fileName));
+  const out = new Set<string>();
+  for (const statement of source.statements) {
+    if (
+      ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement) ||
+      ts.isTypeAliasDeclaration(statement) || ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)
+    ) {
+      const name = declarationName(statement.name);
+      if (name === null) continue;
+      out.add(name);
+      if (ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement)) addMembers(out, name, statement.members);
+      if (ts.isTypeAliasDeclaration(statement) && ts.isTypeLiteralNode(statement.type)) addMembers(out, name, statement.type.members);
+      if (ts.isEnumDeclaration(statement)) {
+        for (const member of statement.members) {
+          const memberName = declarationName(member.name);
+          if (memberName !== null) out.add(`${name}.${memberName}`);
+        }
+      }
+      continue;
+    }
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        const name = declarationName(declaration.name);
+        if (name !== null) out.add(name);
+      }
+    }
+  }
+  return out;
+}
+
+/** `test()` / `it()` 的字面量标题按与 Markdown 标题相同的 slug 规则变成稳定锚。 */
+export function testCaseAnchors(text: string, fileName = "source.test.ts"): Map<string, number> {
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind(fileName));
+  const out = new Map<string, number>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      let callee: string | null = null;
+      if (ts.isIdentifier(node.expression)) callee = node.expression.text;
+      else if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
+        callee = node.expression.expression.text;
+      }
+      const title = node.arguments[0];
+      if ((callee === "test" || callee === "it") && title !== undefined && (ts.isStringLiteral(title) || ts.isNoSubstitutionTemplateLiteral(title))) {
+        const anchor = slug(title.text);
+        if (anchor !== "") out.set(anchor, (out.get(anchor) ?? 0) + 1);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return out;
+}
+
+function decodeAnchorPart(raw: string): string {
+  try { return decodeURIComponent(raw); } catch { return raw; }
+}
+
+/** 返回 null = 语义锚成立;字符串 = 精确的失败原因。 */
+export function validateSourceAnchor(anchor: string | null, source: string, fileName = "source.ts"): string | null {
+  if (anchor === null || anchor === "") return "源码链接缺语义锚——必须用 #symbol=Qualified.name 或 #test=<测试标题-slug>";
+  if (anchor.startsWith("symbol=")) {
+    const name = decodeAnchorPart(anchor.slice("symbol=".length));
+    if (!/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(name)) return `源码符号锚格式错误:${anchor}`;
+    if (!sourceSymbols(source, fileName).has(name)) return `源码符号不存在:${name}`;
+    return null;
+  }
+  if (anchor.startsWith("test=")) {
+    const name = decodeAnchorPart(anchor.slice("test=".length));
+    const count = testCaseAnchors(source, fileName).get(name) ?? 0;
+    if (count === 0) return `测试用例不存在:${name}`;
+    if (count > 1) return `测试用例锚不唯一:${name}(${count} 处)`;
+    return null;
+  }
+  return `源码链接禁止行号或无语义 fragment:${anchor}——改用 #symbol= 或 #test=`;
 }
 
 /**
@@ -201,13 +326,23 @@ export function structuralSignature(text: string): string[] {
 
 const ALWAYS_SKIP = ["node_modules", ".git", "dist"];
 
+/** 嵌套仓库、submodule 与 worktree 都有自己的 `.git` 文件或目录,不属于本仓扫描面。 */
+export function isNestedGitRoot(abs: string): boolean {
+  return existsSync(join(abs, ".git"));
+}
+
 function walk(exclude: readonly string[], pred: (p: string) => boolean, dir = REPO_ROOT, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     if (ALWAYS_SKIP.includes(name) || name.startsWith(".docs-typecheck-")) continue;
     const abs = join(dir, name);
     const rel = relative(REPO_ROOT, abs);
     if (exclude.some(x => rel === x || rel.startsWith(`${x}/`))) continue;
-    if (statSync(abs).isDirectory()) walk(exclude, pred, abs, out);
+    if (statSync(abs).isDirectory()) {
+      // 仓库内可能出现 Claude/Codex worktree 或 submodule；它们有自己的 `.git` 文件/目录，
+      // 不是本仓内容。继续递归会把同一批文档扫第二遍，还会拿另一条分支的旧链接制造假红。
+      if (isNestedGitRoot(abs)) continue;
+      walk(exclude, pred, abs, out);
+    }
     else if (pred(abs)) out.push(rel);
   }
   return out;
@@ -249,6 +384,7 @@ export function checkRoster(m: Manifest): Violation[] {
 
 export function checkLinks(m: Manifest): Violation[] {
   const v: Violation[] = [];
+  const sourceCache = new Map<string, string>();
   for (const rel of allMarkdown(m)) {
     const abs = join(REPO_ROOT, rel);
     const text = readFileSync(abs, "utf8");
@@ -265,6 +401,25 @@ export function checkLinks(m: Manifest): Violation[] {
       if (anchor !== null && !anchors(readFileSync(targetAbs, "utf8")).has(anchor.toLowerCase())) {
         v.push({ gate: "links", path: `${rel}:${line}`, message: `锚点不存在:${target}#${anchor}` });
       }
+    }
+    for (const { target, anchor, line } of sourceLinks(text)) {
+      const targetAbs = resolve(dirname(abs), target);
+      const fromRoot = relative(REPO_ROOT, targetAbs);
+      if (fromRoot === ".." || fromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
+        v.push({ gate: "links", path: `${rel}:${line}`, message: `源码链接逃出仓库:${target}` });
+        continue;
+      }
+      if (!existsSync(targetAbs)) {
+        v.push({ gate: "links", path: `${rel}:${line}`, message: `源码文件不存在:${target}` });
+        continue;
+      }
+      let source = sourceCache.get(targetAbs);
+      if (source === undefined) {
+        source = readFileSync(targetAbs, "utf8");
+        sourceCache.set(targetAbs, source);
+      }
+      const error = validateSourceAnchor(anchor, source, targetAbs);
+      if (error !== null) v.push({ gate: "links", path: `${rel}:${line}`, message: `${error} (${target})` });
     }
   }
   return v;
