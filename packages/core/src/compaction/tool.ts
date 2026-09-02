@@ -136,10 +136,10 @@ export function compactionSection(): PromptSection {
     name: "compaction",
     order: PROMPT_ORDER.tools + 50,
     render: () =>
-      "## Context compaction\n" +
-      "When this conversation outgrows the model's context window, older messages are summarized, sections are condensed, " +
-      "and old tool results are cleared. Those notices carry message index ranges such as #12–#40. A summary keeps decisions and state, " +
-      "not exact text: when the work needs exact code, file contents, error messages, or something you produced earlier, " +
-      "call transcript_read with that range instead of reconstructing it from memory. The task list survives compaction unchanged; keep it current.",
+      "## Compacted context\n" +
+      "As this conversation grows, older parts get compacted: some are replaced by a summary, some stretches are condensed, " +
+      "and old tool results are cleared. Each notice states the message range it covers, for example #12–#40. " +
+      "A summary keeps decisions and state, not wording: when the task needs exact code, file contents, error output, or text you produced earlier, " +
+      "call transcript_read with that range instead of reconstructing it. The task list is not affected by compaction; keep it current.",
   };
 }

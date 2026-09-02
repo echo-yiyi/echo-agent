@@ -83,6 +83,8 @@ system                       不变，每 run 装配一次，不含摘要
 **预算**（`compactionBudget()`）：
 
 - `used`：以本 run 最近一次 `usage` 的 `inputTokens + outputTokens` 为基准（它量的是那条 assistant 之前的视图加它自己的输出），之后入账的消息按字符估；压缩一发生基准作废，回到「system + 视图」字符估，直到下一轮 usage 回来。provider 没报 usage 的路径（FakeProvider、测试）只有字符估。
+- **校准比**：字符估（4 字符 ≈ 1 token）对中文低 2–4 倍，而阶段之间只能重新字符估——两个量纲直接比，中文会话会在第一段就「够了」。所以每次 usage 到达时算一次 `真 token / 同一份视图的字符估`，之后流水线里的 `used`、给阶段的 `input.estimate`、压完报出去的 `contextTokens` 都乘它（范围夹在 0.2–10）。判据：同一段对话的 ASCII 版与中文版，跑过的阶段一致。
+- 图片按固定 `IMAGE_TOKEN_ESTIMATE`（1 200）估，绝不按 base64 长度；`toolResult.images` 也算进去。
 - `target = contextWindow − reserveTokens`，`reserveTokens` 缺省 `max(maxOutputTokens, 16 000)`。
 - `goal`：auto / manual 是 `target − 10% window`（免得下一轮又碰线），overflow 是半窗。
 
@@ -114,9 +116,9 @@ system                       不变，每 run 装配一次，不含摘要
 | 30 | `summary` | 三种 | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点 | 1 次 |
 | 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`）——总好过再撞一次窗 | 0 |
 
-**摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`）：先 `<analysis>` 草稿再 `<summary>` 正文，运行时 `stripAnalysis()` 只留正文；九节按 primary request and intent、key technical concepts、files and code、errors and fixes、problem solving、all user messages（逐字）、pending tasks、current work、next step；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。
+**摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，措辞与节名都是自己写的）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节：goal、ground rules、touched files、failures and fixes、findings、the user's messages（逐字）、open work、in progress、resume with；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。
 
-**框定**：`frameFull()` 给整段摘要加来历（"This session is being continued from an earlier conversation that ran out of context…"）、范围（`#0–#k`）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
+**框定**：`frameFull()` 给整段摘要加来历（这段对话被压缩过）、范围（`#0–#k`）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
 
 **`transcript_read({ from, to?, query? })`**（[`transcriptReadTool()`](../../packages/core/src/compaction/tool.ts#symbol=transcriptReadTool)）：按下标读**内存里的完整 transcript**——不走磁盘、不进 workspace jail，没有文件工具的通用 agent 也能用；下标与压缩通知里的 `#12–#40` 同一套；单条 4 000 字符、一次 24 000 字符封顶，超了告诉模型从哪续。同组还有一个 prompt 段（`compactionSection()`，order 150）告诉模型压缩之后细节去哪拿。
 

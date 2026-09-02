@@ -69,6 +69,11 @@ export type CompactionInput = {
   /** `/compact <指令>` 带的附加要求；只有 manual 会有。 */
   readonly instructions?: string;
   readonly callModel: CompactionModelCall;
+  /**
+   * **阶段算字节一律用它**，别直接调 `estimateTokens()`：它已按本 run 的 provider usage 校准过
+   * （真 token / 字符估），与 `budget.used` / `budget.goal` 同一个量纲。裸字符估对中文低 2–4 倍。
+   */
+  readonly estimate: (messages: readonly AgentMessage[]) => number;
 };
 
 /**

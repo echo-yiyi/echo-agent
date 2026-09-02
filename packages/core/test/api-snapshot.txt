@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 271（value 95 · type 164 · both 12）
+符号 273（value 97 · type 164 · both 12）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -43,11 +43,11 @@ value  COLLAPSE_SYSTEM
 value  collapseStage
 type   CompactionPackConfig
 value  defaultCompactionStages
+value  extractSummary
 value  frameFull
 value  frameSection
 value  OVERFLOW_KEEP_TOKENS
 value  snipStage
-value  stripAnalysis
 value  SUMMARY_INSTRUCTION
 value  SUMMARY_SYSTEM
 value  summaryStage
@@ -76,13 +76,15 @@ value  DEFAULT_SECTION_TOKENS
 value  EMPTY_COMPACTION
 value  isEmptyCompaction
 
--- src/compaction/view.ts (15) --
+-- src/compaction/view.ts (17) --
 value  assertCompactionFits
 value  buildWorkingMessages
 value  clearedNotice
 type   ContextAnchor
+value  estimateMessage
 value  estimateText
 value  estimateTokens
+value  IMAGE_TOKEN_ESTIMATE
 value  isLegalCut
 value  isTurnStart
 value  measureContext

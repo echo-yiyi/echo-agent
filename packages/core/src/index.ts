@@ -178,9 +178,11 @@ export type {
   CompactionState,
 } from "./compaction/types.ts";
 export {
+  IMAGE_TOKEN_ESTIMATE,
   assertCompactionFits,
   buildWorkingMessages,
   clearedNotice,
+  estimateMessage,
   estimateText,
   estimateTokens,
   isLegalCut,
@@ -204,10 +206,10 @@ export {
   chooseTailStart,
   collapseStage,
   defaultCompactionStages,
+  extractSummary,
   frameFull,
   frameSection,
   snipStage,
-  stripAnalysis,
   summaryStage,
   toolResultsStage,
 } from "./compaction/builtin.ts";

@@ -8,6 +8,11 @@
 //
 // 阶段只产状态。校验吸附、投影、事件、落盘都在 core（`view.ts` / `pipeline.ts`）。
 // 这一组与第三方扩展走**同一条** `AgentCompaction.stage()`，同一份所有权账本；`compaction.builtin = false` 就不装它。
+//
+// **算字节一律用 `input.estimate`**（已按 usage 校准），不直接调 `estimateTokens`——量纲要与 `budget` 一致。
+//
+// 提示词是**自己写的**（措辞、节名、框定），不抄任何专有产品的文案；结构上的「先草稿再正文」「按固定小节写」
+// 是通用做法。全英文（2026-09-01 模型面全英文），但要求摘要**用用户主要使用的语言写**——用户说中文就得到中文摘要。
 
 import { userMessage, type AgentMessage } from "../messages.ts";
 import type { PromptSection } from "../prompt/types.ts";
@@ -23,7 +28,7 @@ import {
   type CompactionStage,
   type CompactionState,
 } from "./types.ts";
-import { estimateText, estimateTokens, isLegalCut, isTurnStart, projectRange, viewAt } from "./view.ts";
+import { estimateTokens, isLegalCut, isTurnStart, projectRange, viewAt } from "./view.ts";
 
 /** 应急时尾巴只留这么多（再吸到轮边界）：撞窗了，先活下来。 */
 export const OVERFLOW_KEEP_TOKENS = 2_000;
@@ -35,14 +40,21 @@ export const COLLAPSE_MAX_SECTIONS = 8;
 /**
  * 尾巴从哪条起：从末尾向前累加视图里的字节，找**最靠前**的轮起点 j（j ≥ min）使尾巴 ≤ keep；
  * 没有轮起点满足（在飞的一轮本身就超预算）→ 退到满足预算的最靠前合法切点；连那也没有 → n（不留尾）。
+ * `estimate` 给校准过的估算器（阶段传 `input.estimate`）；缺省裸字符估只供测试与离线计算。
  */
-export function chooseTailStart(messages: readonly AgentMessage[], state: CompactionState, keep: number, min: number): number {
+export function chooseTailStart(
+  messages: readonly AgentMessage[],
+  state: CompactionState,
+  keep: number,
+  min: number,
+  estimate: (messages: readonly AgentMessage[]) => number = estimateTokens,
+): number {
   const n = messages.length;
   let acc = 0;
   let bestTurn = -1;
   let bestLegal = -1;
   for (let j = n; j >= min; j--) {
-    if (j < n) acc += estimateTokens(viewAt(messages, state, j));
+    if (j < n) acc += estimate(viewAt(messages, state, j));
     if (acc > keep) break;
     if (isTurnStart(messages, j)) bestTurn = j;
     else if (isLegalCut(messages, j)) bestLegal = j;
@@ -74,63 +86,65 @@ function inSpan(state: CompactionState, i: number): boolean {
 
 /* ───────────────────────── prompt ───────────────────────── */
 
-/** summary 阶段的 system prompt：写给「要接着干活的那个 agent」，精确、不评价、不发明。 */
+/** summary 阶段的 system prompt：写给「要接着干活的那个 agent」，只保真、不发挥。 */
 export const SUMMARY_SYSTEM =
-  "You are compacting the working context of an AI agent that is in the middle of a session. Your output replaces the original messages in the agent's context, " +
-  "so it must let the same agent continue the work without re-reading them. Write for that agent. Be precise: keep file paths, identifiers, commands, numbers, " +
-  "and error text verbatim. Do not invent, evaluate, or advise beyond what the conversation contains.";
+  "You are writing a compaction summary for an agent whose conversation no longer fits its context window. " +
+  "The summary takes the place of the original messages, and the same agent will carry on from it. " +
+  "Preserve what the work depends on: the user's words, decisions, identifiers, paths, commands, numbers, and error output, quoted exactly. " +
+  "Do not add opinions, advice, or anything the conversation does not contain.";
 
-/** summary 阶段末尾那条 harness 指令：先 `<analysis>` 草稿再 `<summary>` 九节正文；manual 的附加要求接在它后面。 */
+/** summary 阶段末尾那条 harness 指令：先 `<scratchpad>` 草稿再 `<summary>` 正文（九个小节）；manual 的附加要求接在它后面。 */
 export const SUMMARY_INSTRUCTION =
-  "Summarize the conversation above so far.\n\n" +
-  "First, inside <analysis></analysis>, work through the conversation chronologically and note for each part what the user asked, what was done, " +
-  "which files and tools were involved, and what was found or decided. This block is a scratchpad and will be discarded.\n\n" +
-  "Then, inside <summary></summary>, write the summary with exactly these sections:\n" +
-  "1. Primary request and intent: what the user is trying to get done, in detail.\n" +
-  "2. Key technical concepts: technologies, frameworks, conventions, and constraints that matter for the work.\n" +
-  "3. Files and code: files that were read or changed and why; include the important snippets verbatim.\n" +
-  "4. Errors and fixes: every error hit and how it was resolved, including feedback from the user.\n" +
-  "5. Problem solving: what was solved and how; ongoing troubleshooting.\n" +
-  "6. All user messages: every message the user sent (not tool results), verbatim, in order.\n" +
-  "7. Pending tasks: work the user asked for that is not done yet.\n" +
-  "8. Current work: precisely what was being done right before this summary, with file names and snippets.\n" +
-  "9. Next step: the immediate next action, only if it follows directly from the user's most recent request; quote the request it comes from.\n\n" +
-  "If an earlier summary or condensed section appears in the conversation, integrate it: keep what is still true, drop what has been superseded, " +
-  "and do not repeat it verbatim.";
+  "Write the compaction summary for the conversation above.\n\n" +
+  "Draft first inside <scratchpad></scratchpad>: walk through the conversation in order and note, for each stretch, " +
+  "what the user asked for, what happened, which files and tools were involved, and what was learned or decided. The scratchpad is discarded.\n\n" +
+  "Then write the summary inside <summary></summary>, in the language the user has mostly been writing in, with these headings in this order:\n" +
+  "1. Goal: what the user wants, in full.\n" +
+  "2. Ground rules: constraints, conventions, and technical context the work must respect.\n" +
+  "3. Touched files: files read or changed, why, and the snippets that matter, quoted exactly.\n" +
+  "4. Failures and fixes: every error that came up, how it was resolved, and any correction the user gave.\n" +
+  "5. Findings: what was established, what was ruled out, what is still being investigated.\n" +
+  "6. The user's messages: every message from the user, quoted exactly and in order (tool output excluded).\n" +
+  "7. Open work: requested but not finished.\n" +
+  "8. In progress: precisely what was happening at the moment of compaction, with file names and snippets.\n" +
+  "9. Resume with: the very next action, only if the latest user request calls for it; quote that request.\n\n" +
+  "If the conversation already contains a compaction summary or condensed stretches, fold them in: keep what still holds, " +
+  "drop what has been superseded, and never paste them back verbatim.";
 
 /** collapse 阶段的 system prompt：只折一段，其余对话还在，所以只留后续会依赖的东西。 */
 export const COLLAPSE_SYSTEM =
-  "You are condensing one section of an AI agent's session so the agent can keep working with less context. The section's summary replaces those messages; " +
-  "the rest of the conversation stays as it is. Keep exactly what later work may depend on: user requests verbatim, decisions, file paths, identifiers, " +
-  "commands, results, and error text. Do not add advice or evaluation.";
+  "You are condensing one stretch of an agent's conversation so the agent keeps working with less context. " +
+  "Only this stretch is replaced; everything after it stays. Keep what later work may need, quoted exactly: " +
+  "the user's words, decisions, paths, identifiers, commands, results, error output. No opinions, no advice.";
 
 /** collapse 阶段末尾那条 harness 指令。 */
 export const COLLAPSE_INSTRUCTION =
-  "Condense the section above. You may use <analysis></analysis> first as a scratchpad; it will be discarded. " +
-  "Then, inside <summary></summary>, write a dense chronological account: what the user asked, what was done and with which files or tools, " +
-  "what was found, and what was decided. Keep user messages verbatim. Leave out reasoning that led nowhere unless it rules something out.";
+  "Condense the stretch above. Use <scratchpad></scratchpad> first if it helps; it is discarded. " +
+  "Then write inside <summary></summary>, in the language the user has mostly been writing in, a tight account in order: " +
+  "what was asked, what was done and with which files or tools, what came out of it, what was decided. " +
+  "Quote the user's messages exactly. Drop dead ends unless they rule something out.";
 
-/** 摘要调用的回复 → 正文：剥掉 <analysis>，取 <summary> 里面的；都没有就整段。 */
-export function stripAnalysis(text: string): string {
-  const withoutAnalysis = text.replace(/<analysis>[\s\S]*?<\/analysis>/gi, "");
-  const m = /<summary>([\s\S]*?)<\/summary>/i.exec(withoutAnalysis);
-  return (m !== null ? m[1]! : withoutAnalysis).trim();
+/** 摘要调用的回复 → 正文：剥掉 `<scratchpad>`，取 `<summary>` 里面的；都没有就整段。 */
+export function extractSummary(text: string): string {
+  const withoutScratch = text.replace(/<scratchpad>[\s\S]*?<\/scratchpad>/gi, "");
+  const m = /<summary>([\s\S]*?)<\/summary>/i.exec(withoutScratch);
+  return (m !== null ? m[1]! : withoutScratch).trim();
 }
 
 /** 整段折叠（summary 阶段）送模时的框定：来历、范围、怎么取回原文、正文。 */
 export function frameFull(from: number, to: number, body: string): string {
   return (
-    "This session is being continued from an earlier conversation that ran out of context. " +
-    `Messages #${from}–#${to - 1} are summarized below; the messages after this one are the original recent conversation.\n` +
-    "If you need specific details from before compaction (exact code, file contents, error messages, or content you generated), " +
-    "call transcript_read with a message index range instead of guessing.\n\n" +
+    "Earlier parts of this conversation were compacted to fit the context window. " +
+    `Messages #${from}–#${to - 1} are replaced by the compaction summary below; everything after this message is the unchanged recent conversation.\n` +
+    "A summary keeps decisions and state, not exact text. For verbatim code, file contents, error output, or anything you wrote earlier, " +
+    "call transcript_read with the index range instead of reconstructing it.\n\n" +
     `<summary>\n${body}\n</summary>`
   );
 }
 
 /** 一段折叠（collapse 阶段）的框定。 */
 export function frameSection(from: number, to: number, body: string): string {
-  return `[Messages #${from}–#${to - 1} were condensed to save context. For exact details call transcript_read with from=${from}, to=${to}.]\n<summary>\n${body}\n</summary>`;
+  return `[Condensed: messages #${from}–#${to - 1}. Exact text: transcript_read from=${from} to=${to}.]\n<summary>\n${body}\n</summary>`;
 }
 
 /* ───────────────────────── 阶段 ───────────────────────── */
@@ -180,19 +194,19 @@ export function collapseStage(opts: { sectionTokens?: number; keepRecentTokens?:
     async run(input, signal) {
       // 渐进折叠只服务 auto：应急要一步到位（一次大调用而不是十几次小的），manual 由 summary 整段重做
       if (input.reason !== "auto") return null;
-      const { messages, state, budget } = input;
-      const tailStart = chooseTailStart(messages, state, keepRecent, lastSpanEnd(state));
+      const { messages, state, budget, estimate } = input;
+      const tailStart = chooseTailStart(messages, state, keepRecent, lastSpanEnd(state), estimate);
       const spans: CompactionSpan[] = [...state.spans];
       let start = lastSpanEnd(state);
       let used = budget.used;
       let sections = 0;
       while (used > budget.goal && sections < COLLAPSE_MAX_SECTIONS && start < tailStart) {
         if (signal.aborted) break;
-        // 段尾：从 start 累到 sectionTokens，再吸到轮起点；一整段里没有轮起点就向后到下一个合法切点
+        // 段尾：从 start 累到 sectionTokens
         let end = start;
         let acc = 0;
         while (end < tailStart && acc < sectionTokens) {
-          acc += estimateTokens(viewAt(messages, state, end));
+          acc += estimate(viewAt(messages, state, end));
           end += 1;
         }
         // 段只在轮起点上收口：先往回找 (start, end] 里最近的轮起点；一整段都在一轮里就往后到下一个轮起点
@@ -202,11 +216,11 @@ export function collapseStage(opts: { sectionTokens?: number; keepRecentTokens?:
         if (cut <= start) break;
         const section = projectRange(messages, state, start, cut);
         const text = await input.callModel({ systemPrompt: COLLAPSE_SYSTEM, messages: [...section, userMessage(COLLAPSE_INSTRUCTION, "harness")] }, signal);
-        const body = stripAnalysis(text);
+        const body = extractSummary(text);
         if (body === "") throw new Error(`collapse: model returned no summary for #${start}–#${cut - 1}`);
         const summary = frameSection(start, cut, body);
         spans.push({ from: start, to: cut, summary });
-        used -= estimateTokens(section) - estimateText(summary);
+        used -= estimate(section) - estimate([userMessage(summary, "harness")]);
         start = cut;
         sections += 1;
       }
@@ -223,9 +237,9 @@ export function summaryStage(opts: { keepRecentTokens?: number } = {}): Compacti
     name: "summary",
     order: 30,
     async run(input, signal) {
-      const { messages, state, reason } = input;
+      const { messages, state, reason, estimate } = input;
       const keep = reason === "overflow" ? Math.min(keepRecent, OVERFLOW_KEEP_TOKENS) : keepRecent;
-      const tailStart = chooseTailStart(messages, state, keep, lastSpanEnd(state));
+      const tailStart = chooseTailStart(messages, state, keep, lastSpanEnd(state), estimate);
       if (tailStart <= 0) return null;
       const already = state.spans.length === 1 && state.spans[0]!.from === 0 && state.spans[0]!.to === tailStart;
       // 已经是一整段覆盖到同一个尾巴：auto / overflow 无事可做；manual 只在带了新指令时重做
@@ -233,9 +247,9 @@ export function summaryStage(opts: { keepRecentTokens?: number } = {}): Compacti
       const prefix = projectRange(messages, state, 0, tailStart);
       const ask =
         SUMMARY_INSTRUCTION +
-        (input.instructions !== undefined ? `\n\nAdditional instructions from the user for this summary:\n${input.instructions}` : "");
+        (input.instructions !== undefined ? `\n\nThe user also asks, for this summary:\n${input.instructions}` : "");
       const text = await input.callModel({ systemPrompt: SUMMARY_SYSTEM, messages: [...prefix, userMessage(ask, "harness")] }, signal);
-      const body = stripAnalysis(text);
+      const body = extractSummary(text);
       if (body === "") throw new Error("summary: model returned no summary");
       return { spans: [{ from: 0, to: tailStart, summary: frameFull(0, tailStart, body) }], clearedBefore: state.clearedBefore };
     },
@@ -249,8 +263,8 @@ export function snipStage(): CompactionStage {
     order: 40,
     run(input): CompactionState | null {
       if (input.reason !== "overflow") return null;
-      const { messages, state } = input;
-      const tailStart = chooseTailStart(messages, state, OVERFLOW_KEEP_TOKENS, lastSpanEnd(state));
+      const { messages, state, estimate } = input;
+      const tailStart = chooseTailStart(messages, state, OVERFLOW_KEEP_TOKENS, lastSpanEnd(state), estimate);
       if (tailStart <= 0) return null;
       const already = state.spans.length === 1 && state.spans[0]!.from === 0 && state.spans[0]!.to === tailStart;
       if (already) return null;

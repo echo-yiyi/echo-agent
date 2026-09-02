@@ -18,7 +18,7 @@
 
 ## 决定
 
-**A**(2026-09-02 用户拍板)。并定:阶段写全 `summary` 正文(框定 + 正文 + 取回提示);`summary === null` 的段与被清的工具结果用 core 的固定文案,**不提任何工具**——怎么取回原文由拥有 `transcript_read` 的 `echo:compaction` 出 prompt 段说明。`transcript_read` 读内存里的完整 transcript(不走磁盘、不进 workspace jail),支持范围与 query。摘要 prompt 采用「analysis 草稿 + summary 正文」九节结构,manual 的指令追加在末尾。
+**A**(2026-09-02 用户拍板)。并定:阶段写全 `summary` 正文(框定 + 正文 + 取回提示);`summary === null` 的段与被清的工具结果用 core 的固定文案,**不提任何工具**——怎么取回原文由拥有 `transcript_read` 的 `echo:compaction` 出 prompt 段说明。`transcript_read` 读内存里的完整 transcript(不走磁盘、不进 workspace jail),支持范围与 query。摘要 prompt 采用「scratchpad 草稿 + summary 正文」九个小节的结构,manual 的指令追加在末尾;**措辞与节名自己写**(2026-09-02 review:专有产品的提示词与它的源码同一类,不抄),prompt 全英文但要求摘要用用户主要使用的语言写。
 
 ## 验收
 

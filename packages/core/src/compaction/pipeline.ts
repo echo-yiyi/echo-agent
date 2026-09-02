@@ -4,11 +4,16 @@
 // core 在这里拥有四件事：**触发判断、阶段的校验吸附、事件与 hook、状态落到 context**。
 // 阶段（内建的、扩展的）只产 `CompactionState`。摘要要调模型，所以给阶段一个 `callModel`——
 // 用本 run 冻结的 model 与 streamFn，一次、无工具、不进 transcript。
+//
+// **量纲**：触发以 provider usage 为准，阶段之间只能重新字符估——两者不是一个尺子（中文会话字符估低 2–4 倍）。
+// 所以从 usage 算一个校准比（真 token / 字符估），之后所有字符估都乘它：流水线里的 `used`、给阶段的 `estimate`、
+// 压完报出去的 `contextTokens`，全在 usage 的量纲上。校准比随本 run 最近一次 usage 走（`createCompactor`）。
 
 import type { CompactionReason, CompactionBudget, CompactionModelCall, CompactionState } from "./types.ts";
 import { COMPACTION_SLACK_RATIO, DEFAULT_RESERVE_TOKENS } from "./types.ts";
-import { measureContext, normalizeCompaction, sameCompaction, type ContextAnchor } from "./view.ts";
+import { estimateText, estimateTokens, buildWorkingMessages, measureContext, normalizeCompaction, sameCompaction, type ContextAnchor } from "./view.ts";
 import type { LoopDeps, TurnResult } from "../loop/types.ts";
+import type { AgentMessage } from "../messages.ts";
 import { errText } from "../errors.ts";
 
 export type CompactionOutcome = {
@@ -17,9 +22,18 @@ export type CompactionOutcome = {
   readonly state: CompactionState;
   /** 真正改了状态的阶段名，按跑的顺序。 */
   readonly stages: readonly string[];
-  /** 跑完之后的估算。 */
+  /** 跑完之后的估算（usage 量纲）。 */
   readonly contextTokens: number;
 };
+
+/** 校准比的合理范围：超出多半是 usage 报错了（比如把缓存算了两遍），别让一个坏数把估算放大百倍。 */
+const CALIBRATION_MIN = 0.2;
+const CALIBRATION_MAX = 10;
+
+function clampCalibration(x: number): number {
+  if (!Number.isFinite(x) || x <= 0) return 1;
+  return Math.min(CALIBRATION_MAX, Math.max(CALIBRATION_MIN, x));
+}
 
 export function compactionBudget(input: {
   window: number | undefined;
@@ -69,10 +83,13 @@ export function modelCallFor(deps: LoopDeps): CompactionModelCall {
 /**
  * 跑一次流水线。返回 `null` = 没触发（auto 未碰线 / 目录没标窗口 / 没有阶段 / preCompact 拦下），
  * 什么事件都没发；否则 compaction_start / compaction_end 成对，状态已写进 `deps.context.compaction`。
+ *
+ * `anchor` 是本 run 最近一次 usage；`calibration` 是从更早的 usage 算出的校准比（没有就 1）。
+ * 有 anchor 时以它为准并据它重算校准比；没有（run 刚开始、刚压过、上一轮报错没 usage）就用传进来的校准比乘字符估。
  */
 export async function runCompaction(
   deps: LoopDeps,
-  opts: { reason: CompactionReason; instructions?: string; anchor: ContextAnchor | null },
+  opts: { reason: CompactionReason; instructions?: string; anchor: ContextAnchor | null; calibration?: number },
 ): Promise<CompactionOutcome | null> {
   const { context, config, emit, signal } = deps;
   const { reason } = opts;
@@ -81,9 +98,19 @@ export async function runCompaction(
   if (stages.length === 0) return null;
   if (reason === "auto" && window === undefined) return null;
 
-  const measure = (state: CompactionState, anchor: ContextAnchor | null): number =>
-    measureContext({ messages: context.messages, state, systemPrompt: context.systemPrompt, anchor });
-  let used = measure(context.compaction, opts.anchor);
+  /** 纯字符估（system + 视图），未校准。 */
+  const raw = (state: CompactionState): number =>
+    measureContext({ messages: context.messages, state, systemPrompt: context.systemPrompt, anchor: null });
+  let calibration = clampCalibration(opts.calibration ?? 1);
+  let used: number;
+  if (opts.anchor !== null) {
+    used = measureContext({ messages: context.messages, state: context.compaction, systemPrompt: context.systemPrompt, anchor: opts.anchor, calibration });
+    const r = raw(context.compaction);
+    if (r > 0) calibration = clampCalibration(used / r);
+  } else {
+    used = Math.ceil(raw(context.compaction) * calibration);
+  }
+  const estimate = (messages: readonly AgentMessage[]): number => Math.ceil(estimateTokens(messages) * calibration);
   const budget = compactionBudget({
     window,
     maxOutputTokens: config.model.capabilities?.maxOutputTokens,
@@ -106,7 +133,15 @@ export async function runCompaction(
     let next: CompactionState | null;
     try {
       next = await stage.run(
-        { messages: context.messages, state, budget: { ...budget, used }, reason, ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}), callModel },
+        {
+          messages: context.messages,
+          state,
+          budget: { ...budget, used },
+          reason,
+          ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}),
+          callModel,
+          estimate,
+        },
         signal,
       );
       if (next === null) continue;
@@ -118,7 +153,8 @@ export async function runCompaction(
     if (sameCompaction(next, state)) continue;
     state = next;
     applied.push(stage.name);
-    used = measure(state, null);
+    // 同一把尺子：字符估乘校准比，与触发时的 usage 同量纲
+    used = Math.ceil(raw(state) * calibration);
   }
 
   const changed = applied.length > 0;
@@ -130,7 +166,7 @@ export async function runCompaction(
 }
 
 /**
- * 一个 run 里的压缩簿记：provider 报的 usage 当基准、应急只准一次。
+ * 一个 run 里的压缩簿记：provider 报的 usage 当基准并算校准比、应急只准一次。
  * 循环在轮首调 `maybeCompact()`、轮末调 `noteTurn()`、撞窗时调 `recover()`。
  */
 export function createCompactor(deps: LoopDeps): {
@@ -139,22 +175,29 @@ export function createCompactor(deps: LoopDeps): {
   recover(): Promise<boolean>;
 } {
   let anchor: ContextAnchor | null = null;
+  let calibration = 1;
   let recovered = false;
   return {
     async maybeCompact() {
-      const r = await runCompaction(deps, { reason: "auto", anchor });
+      const r = await runCompaction(deps, { reason: "auto", anchor, calibration });
       if (r?.changed === true) anchor = null;
     },
     noteTurn(turn) {
       const usage = turn.message.usage;
       if (usage === null) return;
       // usage 量的是「那条 assistant 之前的视图 + 它自己的输出」；它之后入账的 toolResult 按字符估
-      anchor = { index: deps.context.messages.length - turn.toolResults.length, tokens: usage.inputTokens + usage.outputTokens };
+      const index = deps.context.messages.length - turn.toolResults.length;
+      const tokens = usage.inputTokens + usage.outputTokens;
+      anchor = { index, tokens };
+      // 校准比：同一份视图（system + 到那条 assistant 为止的投影）的字符估，与 provider 说的真值之比。
+      // 记住它——压缩之后 anchor 作废、上一轮报错没 usage 时，字符估还能按本会话的语言密度换算。
+      const raw = estimateText(deps.context.systemPrompt) + estimateTokens(buildWorkingMessages(deps.context.messages.slice(0, index), deps.context.compaction));
+      if (raw > 0) calibration = clampCalibration(tokens / raw);
     },
     async recover() {
       if (recovered) return false;
       recovered = true;
-      const r = await runCompaction(deps, { reason: "overflow", anchor });
+      const r = await runCompaction(deps, { reason: "overflow", anchor, calibration });
       if (r?.changed === true) anchor = null;
       return r?.changed === true;
     },

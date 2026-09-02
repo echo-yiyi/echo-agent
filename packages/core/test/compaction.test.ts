@@ -17,6 +17,7 @@ import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { InMemorySessionManager } from "../src/session/types.ts";
 import { EMPTY_COMPACTION, type CompactionInput, type CompactionStage, type CompactionState } from "../src/compaction/types.ts";
 import {
+  IMAGE_TOKEN_ESTIMATE,
   buildWorkingMessages,
   clearedNotice,
   estimateTokens,
@@ -29,9 +30,9 @@ import {
 import {
   chooseTailStart,
   collapseStage,
+  extractSummary,
   frameFull,
   snipStage,
-  stripAnalysis,
   summaryStage,
   toolResultsStage,
 } from "../src/compaction/builtin.ts";
@@ -106,8 +107,20 @@ function input(messages: readonly AgentMessage[], over: Partial<CompactionInput>
     budget: { window: 400, used: 500, target: 300, goal: 260 },
     reason: "auto",
     callModel: fakeCall("<summary>S</summary>"),
+    estimate: estimateTokens,
     ...over,
   };
+}
+
+/** 带 usage 的工具调用轮：压缩的触发与校准比都从这里的 usage 来。 */
+function toolTurnUsage(toolCallId: string, usage: { inputTokens: number; outputTokens: number }): ScriptedTurn {
+  return [
+    { type: "start" },
+    { type: "toolcall_start", toolCallId, name: "echo" },
+    { type: "toolcall_delta", argsText: "{}" },
+    { type: "toolcall_end" },
+    { type: "done", message: { role: "assistant", content: [{ type: "tool_use", id: toolCallId, name: "echo", input: {} }], stopReason: "tool_use", usage } },
+  ];
 }
 
 /* ═══════════════ 视图层 ═══════════════ */
@@ -145,7 +158,7 @@ test("投影：段 → 一条 user/harness；清掉的 toolResult 换占位但 t
   if (cleared.role !== "toolResult") throw new Error("expected toolResult");
   expect(cleared.toolCallId).toBe("c2");
   expect(cleared.isError).toBe(false);
-  expect(cleared.content).toBe(clearedNotice(6, "result two".length));
+  expect(cleared.content).toBe(clearedNotice(6, "result two".length, 0));
   // 未动的消息是同一个对象（不复制），动过的是新对象；transcript 本身与之前逐字节相同
   expect(view[1]).toBe(m[4]);
   expect(view[2]).toBe(m[5]);
@@ -156,12 +169,32 @@ test("投影：段 → 一条 user/harness；清掉的 toolResult 换占位但 t
   expect(omitted.role === "user" && omitted.content[0]!.type === "text" && omitted.content[0]!.text).toBe(omissionNotice(0, 4));
 });
 
-test("measureContext：有 usage 基准 = 基准 + 基准之后的字符估；没有 = system + 整个视图的字符估", () => {
+test("measureContext：有 usage 基准 = 基准 + 基准之后的字符估；没有 = system + 整个视图的字符估；校准比只乘字符估的部分", () => {
   const m = twoTurns();
   const noAnchor = measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: "s".repeat(40), anchor: null });
   expect(noAnchor).toBe(10 + estimateTokens(m));
   const anchored = measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: "s".repeat(40), anchor: { index: 6, tokens: 1000 } });
   expect(anchored).toBe(1000 + estimateTokens(m.slice(6)));
+  expect(measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: null, anchor: null, calibration: 3 })).toBe(Math.ceil(estimateTokens(m) * 3));
+  expect(measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: null, anchor: { index: 6, tokens: 1000 }, calibration: 3 })).toBe(1000 + Math.ceil(estimateTokens(m.slice(6)) * 3));
+});
+
+test("估算：图片按固定值不按 base64 长度；toolResult 挂在 images 上的图也算进去", () => {
+  const png = "A".repeat(1_000_000); // 1MB base64：按字符估会算成二十多万 token
+  const withImage = userMessage("look", "human", [{ type: "image", mimeType: "image/png", data: png }]);
+  expect(estimateTokens([withImage])).toBe(estimateTokens([userMessage("look")]) + IMAGE_TOKEN_ESTIMATE);
+  const result = toolResultMessage("c9", "shot", "ok", false, null, [
+    { type: "image", mimeType: "image/png", data: png },
+    { type: "image", mimeType: "image/png", data: png },
+  ]);
+  expect(estimateTokens([result])).toBe(Math.ceil("ok".length / 4) + 2 * IMAGE_TOKEN_ESTIMATE);
+  // 清掉带图的工具结果：占位要说有几张图没了，不能让模型以为它本来就没图
+  const m = [userMessage("q"), assistantMessage([{ type: "tool_use", id: "c9", name: "shot", input: {} }], "tool_use"), result, assistantMessage([{ type: "text", text: "done" }], "end_turn")];
+  const view = buildWorkingMessages(m, { spans: [], clearedBefore: 3 });
+  const cleared = view[2]!;
+  expect(cleared.role === "toolResult" && cleared.content).toBe(clearedNotice(2, 2, 2));
+  expect(clearedNotice(2, 2, 2)).toContain("2 images");
+  expect(cleared.role === "toolResult" && cleared.images).toBeUndefined();
 });
 
 /* ═══════════════ 阶梯层 ═══════════════ */
@@ -193,7 +226,7 @@ test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提�
   const m = twoTurns();
   const seen: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
   const keep = tokensOf(m.slice(4));
-  const s = await summaryStage({ keepRecentTokens: keep }).run(input(m, { callModel: fakeCall("<analysis>think</analysis><summary>THE SUMMARY</summary>", seen) }), new AbortController().signal);
+  const s = await summaryStage({ keepRecentTokens: keep }).run(input(m, { callModel: fakeCall("<scratchpad>think</scratchpad><summary>THE SUMMARY</summary>", seen) }), new AbortController().signal);
   expect(s).toEqual({ spans: [{ from: 0, to: 4, summary: frameFull(0, 4, "THE SUMMARY") }], clearedBefore: 0 });
   expect(s!.spans[0]!.summary).toContain("transcript_read");
   expect(s!.spans[0]!.summary).not.toContain("think");
@@ -237,10 +270,10 @@ test("snip：只在 overflow；产物是 summary=null 的一段；整个 transcr
   expect(snipStage().run(input(m, { reason: "overflow" }), SIG)).toEqual({ spans: [{ from: 0, to: 1, summary: null }], clearedBefore: 0 });
 });
 
-test("stripAnalysis：剥 analysis、取 summary 里面的；都没有就整段", () => {
-  expect(stripAnalysis("<analysis>a</analysis>\n<summary>\nS\n</summary>")).toBe("S");
-  expect(stripAnalysis("plain")).toBe("plain");
-  expect(stripAnalysis("<analysis>only</analysis>")).toBe("");
+test("extractSummary：剥 scratchpad、取 summary 里面的；都没有就整段", () => {
+  expect(extractSummary("<scratchpad>a</scratchpad>\n<summary>\nS\n</summary>")).toBe("S");
+  expect(extractSummary("plain")).toBe("plain");
+  expect(extractSummary("<scratchpad>only</scratchpad>")).toBe("");
 });
 
 /* ═══════════════ 循环层 ═══════════════ */
@@ -337,6 +370,32 @@ test("撞窗应急：context_overflow → 同一条流水线以 overflow 跑一�
   await agent2.prompt("x".repeat(12_000));
   const r2 = await agent2.prompt("second");
   expect(r2.outcome.kind === "error" && r2.outcome.error.code).toBe("context_overflow");
+});
+
+/**
+ * 量纲：触发看 provider usage，阶段之间只能重新字符估。中文 1 字约 0.6–1 token，chars/4 低估 2–4 倍——
+ * 不校准的话中文会话清完第一段就「够了」，collapse / summary 永远轮不到；英文会话恰好对得上所以看不出来。
+ * 判据：同一段对话的 ASCII 版与中文版，usage 一样，压缩跑过的阶段必须一样。
+ */
+test("校准比：ASCII 与中文同一段对话、同一份 usage，压缩跑过的阶段一致（中文不会在第一段就停）", async () => {
+  const window: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000 } };
+  const run = async (text: string): Promise<readonly string[]> => {
+    // 轮 1 usage 300（不触发）；轮 2 usage 950（> target 900）→ 轮 3 轮首触发；之后每次模型调用都回同一段摘要
+    const { fn } = capturing([toolTurnUsage("t1", { inputTokens: 300, outputTokens: 0 }), toolTurnUsage("t2", { inputTokens: 950, outputTokens: 0 }), ...Array.from({ length: 4 }, () => reply("<summary>S</summary>"))]);
+    const agent = await agentWithBuiltins(fn, { model: window, compaction: { reserveTokens: 100, keepRecentTokens: 40, keepRecentToolResults: 1 } });
+    const { events } = collect(agent);
+    await agent.prompt(text);
+    const ends = events.filter((e): e is Extract<AgentEvent, { type: "compaction_end" }> => e.type === "compaction_end");
+    expect(ends.length).toBe(1);
+    return ends[0]!.stages;
+  };
+  // 同一份 usage（950）。估算里还有 system（内建段约 140 token）。ASCII 2800 字符按 chars/4 ≈ 700：第一轮不会靠字符估
+  // 误触发（700 + 140 < 900），清完工具结果后仍 > goal 800，不校准也会继续跑 collapse；中文 1200 字按 chars/4 只有 300，
+  // 不校准的话清完第一段就「够了」（300 + 140 < 800）——真值却还是 950
+  const ascii = await run("word ".repeat(560));
+  const cjk = await run("汉字".repeat(600));
+  expect(ascii).toEqual(["tool-results", "collapse"]);
+  expect(cjk).toEqual(ascii);
 });
 
 test("没有任何阶段（builtin=false、没别的策略）：不压、撞窗直接 error、compaction 事件一个都没有", async () => {

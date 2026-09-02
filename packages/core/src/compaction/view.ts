@@ -13,18 +13,48 @@ import type { CompactionSpan, CompactionState } from "./types.ts";
 
 /* ───────────────────────── 估算 ───────────────────────── */
 
-/** 粗估：4 字符 ≈ 1 token（CJK 更密，这里偏低）。只用于尾巴与无 usage 的兜底；有 provider usage 时以它为基准。 */
-export function estimateTokens(messages: readonly AgentMessage[]): number {
-  let chars = 0;
-  for (const m of messages) {
-    if ("content" in m) chars += JSON.stringify(m.content).length;
-  }
-  return Math.ceil(chars / 4);
-}
+/**
+ * 一张图固定按这么多 token 算——**绝不按 base64 长度**：一张 1MB 的图按字符估会算成三十多万 token，
+ * 压缩会被它疯狂提前触发；各家 provider 对图的计费本来就是按尺寸分档的固定值，这里取一个中档。
+ */
+export const IMAGE_TOKEN_ESTIMATE = 1_200;
 
-/** 一段文本的粗估（同 `estimateTokens` 的 4 字符 ≈ 1 token）；system prompt 与摘要正文用它。 */
+/** 一段文本的粗估：4 字符 ≈ 1 token（对 CJK 偏低——所以真跑时要乘 usage 校准比，见 `pipeline.ts`）。 */
 export function estimateText(text: string | null | undefined): number {
   return text === null || text === undefined ? 0 : Math.ceil(text.length / 4);
+}
+
+/**
+ * 一条消息的粗估，**按块**：文本 / 思考按字符，图片固定 `IMAGE_TOKEN_ESTIMATE`，tool_use 按名字加参数 JSON，
+ * toolResult 的正文按字符、`images` 逐张固定值（它们挂在 `.images` 不在 `.content`，按 JSON 估会一张都不算）。
+ */
+export function estimateMessage(m: AgentMessage): number {
+  switch (m.role) {
+    case "toolResult":
+      return estimateText(m.content) + (m.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
+    case "user":
+    case "assistant":
+    case "environment": {
+      let tokens = 0;
+      for (const b of m.content) {
+        if (b.type === "text") tokens += estimateText(b.text);
+        else if (b.type === "thinking") tokens += estimateText(b.thinking);
+        else if (b.type === "image") tokens += IMAGE_TOKEN_ESTIMATE;
+        else if (b.type === "tool_use") tokens += estimateText(b.name) + estimateText(JSON.stringify(b.input));
+      }
+      return tokens;
+    }
+    default:
+      // 自定义种类：缺省不送模（投影隐形），但还是给个数——按 JSON 估，图片按字符算就算了，它本来就不该塞图
+      return estimateText(JSON.stringify(m));
+  }
+}
+
+/** 一批消息的粗估 = 逐条 `estimateMessage` 求和。只用于尾巴与无 usage 的兜底；有 provider usage 时以它为基准。 */
+export function estimateTokens(messages: readonly AgentMessage[]): number {
+  let tokens = 0;
+  for (const m of messages) tokens += estimateMessage(m);
+  return tokens;
 }
 
 /** provider 报过的账：`index` 之前的视图折算成 `tokens`（含那条 assistant 自己的输出）。之后的按字符估。 */
@@ -33,18 +63,22 @@ export type ContextAnchor = { readonly index: number; readonly tokens: number };
 /**
  * 当前送模上下文的估算。有基准（本 run 最近一次 usage）就用基准 + 基准之后新入账消息的字符估；
  * 没有（run 刚开始、或刚压缩过）就按 system + 整个视图的字符估。
+ * `calibration` 是「真 token / 字符估」的校准比（`pipeline.ts` 从 usage 算出来），字符估的部分都乘它——
+ * 不乘的话中文会话低估 2–4 倍，阶段循环的「够了就停」会在第一段就停。
  */
 export function measureContext(input: {
   readonly messages: readonly AgentMessage[];
   readonly state: CompactionState;
   readonly systemPrompt: string | null;
   readonly anchor: ContextAnchor | null;
+  readonly calibration?: number;
 }): number {
   const { messages, state, systemPrompt, anchor } = input;
+  const calibration = input.calibration ?? 1;
   if (anchor !== null && anchor.index <= messages.length) {
-    return anchor.tokens + estimateTokens(messages.slice(anchor.index));
+    return anchor.tokens + Math.ceil(estimateTokens(messages.slice(anchor.index)) * calibration);
   }
-  return estimateText(systemPrompt) + estimateTokens(buildWorkingMessages(messages, state));
+  return Math.ceil((estimateText(systemPrompt) + estimateTokens(buildWorkingMessages(messages, state))) * calibration);
 }
 
 /* ───────────────────────── 切点 ───────────────────────── */
@@ -110,7 +144,10 @@ export function normalizeCompaction(messages: readonly AgentMessage[], state: Co
     if (to <= from) continue;
     out.push({ from, to, summary: s.summary });
   }
-  return { spans: out, clearedBefore };
+  const normalized: CompactionState = { spans: out, clearedBefore };
+  // 上面的吸附靠 `snapBack` 的 min 契约成立；这里对自己的产物再跑一次严格验形，把「靠人守」变成「不可能」
+  assertCompactionFits(messages, normalized, "normalizeCompaction");
+  return normalized;
 }
 
 /**
@@ -154,9 +191,10 @@ export function omissionNotice(from: number, to: number): string {
   return `[Messages #${from}–#${to - 1} were omitted to save context.]`;
 }
 
-/** 被清掉的工具结果在送模时的占位正文：说明省了多少字符、是第几条，同样不提任何工具。 */
-export function clearedNotice(index: number, chars: number): string {
-  return `[Tool result cleared to save context: ${chars} characters omitted (message #${index}).]`;
+/** 被清掉的工具结果在送模时的占位正文：说明省了多少字符、几张图、是第几条，同样不提任何工具。 */
+export function clearedNotice(index: number, chars: number, images: number): string {
+  const what = images > 0 ? `${chars} characters and ${images} image${images === 1 ? "" : "s"}` : `${chars} characters`;
+  return `[Tool result cleared to save context: ${what} omitted (message #${index}).]`;
 }
 
 function spanMessage(span: CompactionSpan, messages: readonly AgentMessage[]): AgentMessage {
@@ -165,9 +203,9 @@ function spanMessage(span: CompactionSpan, messages: readonly AgentMessage[]): A
 }
 
 function clearedCopy(m: ToolResultMessage & { readonly at: number }, index: number): AgentMessage {
-  // 新对象：transcript 里那条一个字都不动（所有权边界）；images 一并去掉——清的就是体积
-  const { images: _images, ...rest } = m;
-  return { ...rest, content: clearedNotice(index, m.content.length) };
+  // 新对象：transcript 里那条一个字都不动（所有权边界）；images 一并去掉——清的就是体积，占位里要说有几张
+  const { images, ...rest } = m;
+  return { ...rest, content: clearedNotice(index, m.content.length, images?.length ?? 0) };
 }
 
 /**
