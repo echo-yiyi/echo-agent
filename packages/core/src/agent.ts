@@ -32,7 +32,8 @@ import type { AgentAdmissionExecuteScope, AgentAdmissionTicket, RunModelBinding,
 import type { AgentContext, AgentLoopConfig, LoopResult, TransformContext } from "./loop/types.ts";
 import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
-import { runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
+import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
+import { buildWorkingMessages, estimateText, estimateTokens } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
 import { InMemorySessionManager, type SessionEntry, type SessionManager } from "./session/types.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
@@ -543,6 +544,12 @@ export class Agent {
    * `echo:compaction` 与产品 / 第三方的策略走同一条路；流水线每次跑之前从这里重取（热插拔在轮边界生效）。
    */
   readonly compactionStages: Map<string, CompactionStage> = new Map();
+  /**
+   * 上一次 usage 算出的校准比（真 token / 字符估）与当时 system prompt 的字符估。手动压缩发生在 run 之外、
+   * 新 run 的首轮还没有 usage——这两处没有基准，裸字符估对中文会低 2–4 倍，就沿用这份。`reset()` 归 1。
+   */
+  private lastCalibration = 1;
+  private lastSystemEstimate = 0;
   public toolExecution: "sequential" | "parallel";
 
   /* 可替换的决策点 */
@@ -1118,6 +1125,7 @@ export class Agent {
     this._state.lastError = null;
     this._state.compaction = EMPTY_COMPACTION;
     this._state.contextTokens = null;
+    this.lastCalibration = 1;
     this._state.iteration = 0;
     this._state.usage = { inputTokens: 0, outputTokens: 0 };
     this.clearAllQueues();
@@ -1142,7 +1150,7 @@ export class Agent {
         const config = this.createLoopConfig(scope);
         box.outcome = await runCompaction(
           { context, config, emit: (e) => this.processEvents(e), signal, streamFn: scope.modelBinding.streamFunction },
-          { reason: "manual", ...(instructions !== undefined ? { instructions } : {}), anchor: null },
+          { reason: "manual", ...(instructions !== undefined ? { instructions } : {}), anchor: null, calibration: this.lastCalibration },
         );
         return { outcome: { kind: "completed" }, messages: [] };
       });
@@ -2337,9 +2345,11 @@ export class Agent {
   }
 
   private async createContextSnapshot(scope: AgentAdmissionExecuteScope): Promise<AgentContext> {
+    // 用 admission 冻结的模型装配——{{model}} 说的必须是这次 run 真用的那个
+    const systemPrompt = await this.assemblePrompt(scope.modelBinding.model);
+    this.lastSystemEstimate = estimateText(systemPrompt); // usage 到达时算校准比要用同一份 system 的字符估
     return {
-      // 用 admission 冻结的模型装配——{{model}} 说的必须是这次 run 真用的那个
-      systemPrompt: await this.assemblePrompt(scope.modelBinding.model),
+      systemPrompt,
       messages: [...this._state.messages], // 快照：循环拿的是那一刻的副本
       compaction: this._state.compaction, // 视图状态随快照走；流水线改了它会经 compaction_end 写回 _state
       // 工具**不进快照**：它是装备，每轮经 config.getTools() 重取
@@ -2436,6 +2446,7 @@ export class Agent {
       compaction: {
         ...(this.compaction.reserveTokens !== undefined ? { reserveTokens: this.compaction.reserveTokens } : {}),
         getStages: () => [...this.compactionStages.values()],
+        calibration: this.lastCalibration,
       },
       workspace: this._state.workspace,
     };
@@ -2649,9 +2660,14 @@ export class Agent {
       case "retry_scheduled":
         this._state.retryCount = input.attempt;
         break;
-      case "usage":
+      case "usage": {
         // 这一轮送模的上下文有多大，provider 说了算（输入 + 它自己的输出 = 下一轮至少这么大）
-        this._state.contextTokens = input.usage.inputTokens + input.usage.outputTokens;
+        const tokens = input.usage.inputTokens + input.usage.outputTokens;
+        this._state.contextTokens = tokens;
+        // 校准比：真值 / 同一份视图（system + 到这条 assistant 为止的投影；usage 事件紧跟它的 message_end）的字符估。
+        // 记下来给手动压缩与下一个 run 的首轮用——那两处没有 usage 基准
+        const raw = this.lastSystemEstimate + estimateTokens(buildWorkingMessages(this._state.messages, this._state.compaction));
+        if (raw > 0) this.lastCalibration = clampCalibration(tokens / raw);
         this._state.usage = {
           inputTokens: this._state.usage.inputTokens + input.usage.inputTokens,
           outputTokens: this._state.usage.outputTokens + input.usage.outputTokens,
@@ -2661,6 +2677,7 @@ export class Agent {
             : {}),
         };
         break;
+      }
       case "agent_end":
         this._state.streamingMessage = undefined;
         this._state.lastError = input.outcome.kind === "error" ? input.outcome.error : null;

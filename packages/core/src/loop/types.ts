@@ -50,6 +50,8 @@ export type LoopIntake = {
 export type LoopCompactionConfig = {
   reserveTokens?: number;
   getStages: () => readonly CompactionStage[];
+  /** 本 run 拿到第一次 usage 之前用的校准比（真 token / 字符估）：Agent 从上一次 usage 记下来的；不给 = 1。 */
+  calibration?: number;
 };
 
 export type TransformContext = (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;

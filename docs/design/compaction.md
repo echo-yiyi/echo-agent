@@ -83,7 +83,7 @@ system                       不变，每 run 装配一次，不含摘要
 **预算**（`compactionBudget()`）：
 
 - `used`：以本 run 最近一次 `usage` 的 `inputTokens + outputTokens` 为基准（它量的是那条 assistant 之前的视图加它自己的输出），之后入账的消息按字符估；压缩一发生基准作废，回到「system + 视图」字符估，直到下一轮 usage 回来。provider 没报 usage 的路径（FakeProvider、测试）只有字符估。
-- **校准比**：字符估（4 字符 ≈ 1 token）对中文低 2–4 倍，而阶段之间只能重新字符估——两个量纲直接比，中文会话会在第一段就「够了」。所以每次 usage 到达时算一次 `真 token / 同一份视图的字符估`，之后流水线里的 `used`、给阶段的 `input.estimate`、压完报出去的 `contextTokens` 都乘它（范围夹在 0.2–10）。判据：同一段对话的 ASCII 版与中文版，跑过的阶段一致。
+- **校准比**：字符估（4 字符 ≈ 1 token）对中文低 2–4 倍，而阶段之间只能重新字符估——两个量纲直接比，中文会话会在第一段就「够了」。所以每次 usage 到达时算一次 `真 token / 同一份视图的字符估`，之后流水线里的 `used`、给阶段的 `input.estimate`、压完报出去的 `contextTokens` 都乘它（范围夹在 0.2–10）。Agent 记住最近一次算出的比值：手动压缩（run 之外）与新 run 的首轮没有 usage 基准，就沿用它；`reset()` 归 1。判据：同一段对话的 ASCII 版与中文版，跑过的阶段一致；手动压缩报出的值明显高于裸字符估。
 - 图片按固定 `IMAGE_TOKEN_ESTIMATE`（1 200）估，绝不按 base64 长度；`toolResult.images` 也算进去。
 - `target = contextWindow − reserveTokens`，`reserveTokens` 缺省 `max(maxOutputTokens, 16 000)`。
 - `goal`：auto / manual 是 `target − 10% window`（免得下一轮又碰线），overflow 是半窗。
@@ -113,7 +113,7 @@ system                       不变，每 run 装配一次，不含摘要
 | --- | --- | --- | --- | --- |
 | 10 | `tool-results` | 三种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`） | 0 |
 | 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；`used ≤ goal` 就停；一次最多 8 段 | 每段 1 次 |
-| 30 | `summary` | 三种 | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点 | 1 次 |
+| 30 | `summary` | 三种 | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
 | 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`）——总好过再撞一次窗 | 0 |
 
 **摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，措辞与节名都是自己写的）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节：goal、ground rules、touched files、failures and fixes、findings、the user's messages（逐字）、open work、in progress、resume with；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。

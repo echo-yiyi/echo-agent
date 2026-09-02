@@ -20,6 +20,7 @@ import {
   IMAGE_TOKEN_ESTIMATE,
   buildWorkingMessages,
   clearedNotice,
+  estimateText,
   estimateTokens,
   isLegalCut,
   measureContext,
@@ -233,6 +234,11 @@ test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提�
   expect(seen[0]!.messages.map((x) => x.role)).toEqual(["user", "assistant", "toolResult", "assistant", "user"]);
   const last = seen[0]!.messages[4]!;
   expect(last.role === "user" && last.source).toBe("harness");
+  // 尾巴（#4–#7）以只读文本附在指令里：摘要器据它把「现在在干什么」写对，但它不在被总结的消息里
+  const askText = last.role === "user" && last.content[0]!.type === "text" ? last.content[0]!.text : "";
+  expect(askText).toContain("<recent>");
+  expect(askText).toContain("#7 [assistant] answer two");
+  expect(askText).not.toContain("#3 [assistant] answer one");
   // manual + 指令
   const seen2: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
   await summaryStage({ keepRecentTokens: keep }).run(input(m, { reason: "manual", instructions: "keep only TODOs", callModel: fakeCall("<summary>x</summary>", seen2) }), new AbortController().signal);
@@ -396,6 +402,22 @@ test("校准比：ASCII 与中文同一段对话、同一份 usage，压缩跑�
   const cjk = await run("汉字".repeat(600));
   expect(ascii).toEqual(["tool-results", "collapse"]);
   expect(cjk).toEqual(ascii);
+});
+
+test("手动压缩沿用上一次 usage 的校准比：中文会话压完报出的 contextTokens 不是裸字符估", async () => {
+  const withUsage: ScriptedTurn = [
+    { type: "start" },
+    { type: "done", message: { role: "assistant", content: [{ type: "text", text: "好" }], stopReason: "end_turn", usage: { inputTokens: 900, outputTokens: 50 } } },
+  ];
+  const agent = await agentWithBuiltins(scriptedStreamFn([withUsage, reply("<summary>S</summary>")]), { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
+  await agent.prompt("汉字".repeat(600)); // 字符估 300，provider 说 950 → 校准比 ≈ 2
+  const r = await agent.compact();
+  expect(r.kind === "done" && r.stages).toEqual(["summary"]);
+  const rawAfter = estimateText(await agent.assemblePrompt()) + estimateTokens(buildWorkingMessages(agent.messages, agent.state.compaction));
+  expect(r.kind === "done" && r.contextTokens!).toBeGreaterThan(Math.ceil(rawAfter * 1.8));
+  expect(agent.state.contextTokens).toBe(r.kind === "done" ? r.contextTokens : -1);
+  agent.reset(); // 归 1：换了会话不能带着上一场的语言密度
+  expect(agent.state.contextTokens).toBeNull();
 });
 
 test("没有任何阶段（builtin=false、没别的策略）：不压、撞窗直接 error、compaction 事件一个都没有", async () => {

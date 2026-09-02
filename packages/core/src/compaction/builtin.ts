@@ -17,7 +17,7 @@
 import { userMessage, type AgentMessage } from "../messages.ts";
 import type { PromptSection } from "../prompt/types.ts";
 import type { AgentTool } from "../tools/types.ts";
-import { compactionSection, transcriptReadTool } from "./tool.ts";
+import { compactionSection, renderTranscriptMessage, transcriptReadTool } from "./tool.ts";
 import {
   DEFAULT_KEEP_RECENT_TOKENS,
   DEFAULT_KEEP_RECENT_TOOL_RESULTS,
@@ -110,6 +110,36 @@ export const SUMMARY_INSTRUCTION =
   "9. Resume with: the very next action, only if the latest user request calls for it; quote that request.\n\n" +
   "If the conversation already contains a compaction summary or condensed stretches, fold them in: keep what still holds, " +
   "drop what has been superseded, and never paste them back verbatim.";
+
+/** 尾巴给摘要器看的上限：单条 1 500 字符、总共 10 000 字符——它只是让「现在在干什么」写对，不是要总结的对象。 */
+export const RECENT_MESSAGE_CAP = 1_500;
+export const RECENT_TOTAL_CAP = 10_000;
+
+const RECENT_PREAMBLE =
+  "The conversation continues after the summarized range with the messages below. They stay in the context verbatim and come right after your summary, " +
+  "so do not summarize them; use them only so that \"Open work\", \"In progress\", and \"Resume with\" describe the state as it is now.";
+
+/**
+ * 尾巴在视图里的样子，渲染成带下标的文本（去掉 thinking）。摘要器不看它就会把「当前状态」写成尾巴之前那一刻的：
+ * 用户答完一轮再 `/compact`，摘要会说「尚未回答」，而答案就在后面（2026-09-02 真机记录）。
+ */
+export function renderRecent(messages: readonly AgentMessage[], state: CompactionState, from: number): string {
+  const lines: string[] = [];
+  let size = 0;
+  for (let i = from; i < messages.length; i++) {
+    const [m] = viewAt(messages, state, i);
+    if (m === undefined) continue;
+    let line = renderTranscriptMessage(m, i).replace(/<thinking>[\s\S]*?<\/thinking>\n?/g, "");
+    if (line.length > RECENT_MESSAGE_CAP) line = `${line.slice(0, RECENT_MESSAGE_CAP)}…`;
+    if (size + line.length > RECENT_TOTAL_CAP) {
+      lines.push("…");
+      break;
+    }
+    lines.push(line);
+    size += line.length;
+  }
+  return lines.join("\n");
+}
 
 /** collapse 阶段的 system prompt：只折一段，其余对话还在，所以只留后续会依赖的东西。 */
 export const COLLAPSE_SYSTEM =
@@ -245,8 +275,10 @@ export function summaryStage(opts: { keepRecentTokens?: number } = {}): Compacti
       // 已经是一整段覆盖到同一个尾巴：auto / overflow 无事可做；manual 只在带了新指令时重做
       if (already && (reason !== "manual" || input.instructions === undefined)) return null;
       const prefix = projectRange(messages, state, 0, tailStart);
+      const recent = renderRecent(messages, state, tailStart);
       const ask =
         SUMMARY_INSTRUCTION +
+        (recent !== "" ? `\n\n${RECENT_PREAMBLE}\n<recent>\n${recent}\n</recent>` : "") +
         (input.instructions !== undefined ? `\n\nThe user also asks, for this summary:\n${input.instructions}` : "");
       const text = await input.callModel({ systemPrompt: SUMMARY_SYSTEM, messages: [...prefix, userMessage(ask, "harness")] }, signal);
       const body = extractSummary(text);
