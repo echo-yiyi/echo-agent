@@ -20,7 +20,7 @@
 
 **A**(2026-09-02 用户拍板)。`target = window − reserveTokens`,auto 的 `goal` 再减 10% 窗口以免下一轮又碰线;目录没标窗口就不自动压。`AgentState.contextTokens` 每轮以 usage 刷新、压缩后以估算刷新,状态栏据它显示占用百分比。
 
-补(2026-09-02 review):usage 与字符估不是一个量纲——中文低 2–4 倍,阶段循环的「够了就停」跨着这道坎。每次 usage 到达算一次校准比(真 token / 同一份视图的字符估),之后流水线里的 `used`、给阶段的 `estimate`、报出去的 `contextTokens` 都乘它。图片按固定值估(`IMAGE_TOKEN_ESTIMATE`),不按 base64 长度,`toolResult.images` 也算。
+补(2026-09-02 review):usage 与字符估不是一个量纲——中文低 2–4 倍,阶段循环的「够了就停」跨着这道坎。每次 usage 到达算一次校准比(真 token / 同一份视图的字符估),之后流水线里的 `used`、给阶段的 `estimate`、报出去的 `contextTokens` 都乘它。图片按固定值估(`IMAGE_TOKEN_ESTIMATE`),不按 base64 长度,`toolResult.images` 也算。手动压缩与新 run 的首轮没有 usage 基准,沿用 Agent 记住的上一次校准比(真机记录:中文会话 `/compact` 之后报「约 6.4k」,真值约 10k)。
 
 ## 验收
 

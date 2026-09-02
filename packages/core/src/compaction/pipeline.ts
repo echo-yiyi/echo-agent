@@ -30,7 +30,8 @@ export type CompactionOutcome = {
 const CALIBRATION_MIN = 0.2;
 const CALIBRATION_MAX = 10;
 
-function clampCalibration(x: number): number {
+/** 校准比夹到合理范围；非数 / 非正 → 1。Agent 记「上一次 usage 的校准比」时也用它。 */
+export function clampCalibration(x: number): number {
   if (!Number.isFinite(x) || x <= 0) return 1;
   return Math.min(CALIBRATION_MAX, Math.max(CALIBRATION_MIN, x));
 }
@@ -175,7 +176,8 @@ export function createCompactor(deps: LoopDeps): {
   recover(): Promise<boolean>;
 } {
   let anchor: ContextAnchor | null = null;
-  let calibration = 1;
+  // 起点用 Agent 记住的上一次校准比：新 run 的首轮还没有 usage，裸字符估对中文会低估
+  let calibration = clampCalibration(deps.config.compaction.calibration ?? 1);
   let recovered = false;
   return {
     async maybeCompact() {
