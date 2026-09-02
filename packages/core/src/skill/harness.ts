@@ -12,6 +12,7 @@
 // 兼容外部生态要真的 YAML 解析器。加载器产出 `Skill[]`,`addSkills()` 收下即可。
 
 import type { ActiveSkill, Skill, SkillActivation, SkillCreation } from "./types.ts";
+import { activeSkillCost, SKILL_ACTIVE_TOTAL_CAP } from "./compose.ts";
 
 /** 池:装进来的全部。 */
 export type SkillMap = Map<string, Skill>;
@@ -91,6 +92,14 @@ export function activateSkill(
 
   const missing = skill.requiredTools.filter((t) => opts?.hasTool?.(t) !== true);
   if (missing.length > 0) return { ok: false, reason: "missing_tools", missing };
+
+  // 总预算闸（2026-09-01）：重复激活同一个不重复计费；池里已卸掉的激活项不计（渲染时也会跳过它）
+  const others = [...active.keys()].filter((n) => n !== name);
+  const used = others.reduce((sum, n) => sum + activeSkillCost(skills.get(n)?.content ?? ""), 0);
+  const needed = activeSkillCost(skill.content);
+  if (used + needed > SKILL_ACTIVE_TOTAL_CAP) {
+    return { ok: false, reason: "budget", used, needed, cap: SKILL_ACTIVE_TOTAL_CAP, active: others };
+  }
 
   const prev = active.get(name);
   active.set(name, {

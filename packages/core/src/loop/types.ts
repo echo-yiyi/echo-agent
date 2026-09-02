@@ -102,7 +102,8 @@ export interface AgentLoopConfig {
    * 每轮重算,拼在 working 副本**末尾**——前缀(真实对话)字节不动,不破缓存;不进 transcript。
    * 与 getTools 同构:工具每轮重取,注入每轮重算。契约:绝不抛;没有返回 []。
    */
-  getTurnInjections?: () => Promise<AgentMessage[]> | AgentMessage[];
+  /** 每轮注入。`visibleTools` 是本轮冻结的、模型菜单上的工具名——注入里的工具门控只许读它，不读活池。 */
+  getTurnInjections?: (visibleTools: ReadonlySet<string>) => Promise<AgentMessage[]> | AgentMessage[];
   /**
    * §14 RunIntakeGate 的循环侧：turn / run 的开关门与 drain。Agent 实现；drain 出来的消息已过 userPromptSubmit 准入。
    * 不给 = 这条 run 不吃 steer / followUp（Dream）。

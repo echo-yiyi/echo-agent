@@ -21,7 +21,7 @@
 
 1. **compaction 只生成并持久化摘要，不替换送模上下文。** 超预算后 provider 仍收到全部原文；下一 turn 还会再次摘要同一批历史。
 2. **消息没有所有权隔离。** `prompt(message)`、`Agent.messages`、context snapshot 与 `transformContext` 共享嵌套对象；调用方或 transform 能在没有新事件、没有新 session entry 的情况下改写已经入账的历史。
-3. **`contextBeforeBuild` 的 block 是假能力。** hook runtime 返回 `block`，调用点却忽略 decision，模型仍然被调用。
+3. ~~**`contextBeforeBuild` 的 block 是假能力。**~~ 已修（2026-09-01）：block 让 run 以 `aborted` 结束、模型不被调用，见 §6。
 4. **`followUp` 的来源只在 hook event 中如实，账本里仍记成 `human`。** 现有测试标题声称 transcript 来源如实，但没有断言消息的 `source`。
 5. **`PromptSource.toolSchemas()` 是死接口。** 类型和注释声称每轮读取，实际工具菜单来自 `getTools() → toolSchemas()`，这个方法从未被调用。
 6. **上下文扩展点的失败契约与实现相反。** 注释要求 `transformContext`、`convertToLlm` 和 turn injection “绝不抛、失败安全回退”；实际任一抛错都会让整个 run 以 internal error 结束。
@@ -142,6 +142,10 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { FAKE_MODE
 
 这个边界适合“当前有效、但不是对话事实”的材料：激活 skill、任务清单、短期运行说明。已有测试验证激活正文下一 turn 可见、system 字节不变且 injection 不入 transcript，见 [skill injection 接线](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)。
 
+injection 里的**工具门控读本轮冻结的菜单**（`runTurn` 把冻结的工具名集传给 `getTurnInjections`），不读活池：`turn_start` 里才注册的工具，这轮菜单上没有，注入也不许提它——菜单与注入永远是同一份 turn 快照。判据见 [冻结菜单门控](../../packages/core/test/prompt.test.ts#test=注入的工具门控读本轮冻结的菜单turnstart-里才注册的-tasklist本轮菜单与清单都没有下一轮一起出现)。
+
+激活 skill 的注入有**总预算**（`SKILL_ACTIVE_TOTAL_CAP`，64 000 字符，各条正文按单条上限计）：闸在 `activateSkill`，超了拒绝并把现状告诉模型；不在渲染末端静默截掉已声明激活的指令。判据见 [激活总预算](../../packages/core/test/skill.test.ts#test=激活总预算合计超过-skillactivetotalcap-就拒回执带现状重复激活不重复计费超长正文按单条上限计)。
+
 但注释中的“契约：绝不抛；没有返回 `[]`”没有调用侧兜底。任一 source 抛错会结束整个 run。这里需要的是明确选择，不是模糊承诺：
 
 - 如果 injection 是完成任务所必需的上下文，失败应使 run fail-loud；
@@ -194,19 +198,17 @@ transformContext 内修改 messages[0].content[0].text
 
 但“投影绝不回写”当前只对缺省实现自己的代码成立，不对可替换的 `Agent.convertToLlm` 成立。它收到的仍是与 transcript 共享嵌套对象的数组。正式契约应把输入定义为不可变 working copy，并把返回值验到 provider context 所需的最小形状；否则第三方 converter 可以同时破坏账本并产出坏线上协议。
 
-## 6. `contextBeforeBuild` 的 block 不生效
+## 6. `contextBeforeBuild` 的 block（2026-09-01 起生效）
 
-`contextBeforeBuild` 被列入 hook runtime 的可拦截事件，类型允许 `continue / block / patch`，见 [`INTERCEPTABLE`](../../packages/core/src/hooks/runtime.ts#symbol=INTERCEPTABLE)。但 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 调用 `hooks.intercept(...)` 后只取 `r.event.messages`，完全不读取 `r.decision`。
+`contextBeforeBuild` 被列入 hook runtime 的可拦截事件，类型允许 `continue / block / patch`，见 [`INTERCEPTABLE`](../../packages/core/src/hooks/runtime.ts#symbol=INTERCEPTABLE)。2026-09-01 之前 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 只取 `r.event.messages`、不读 `r.decision`——hook 说别调模型，模型照调，run 还是 `completed`。
 
-复现：
+现在的语义：block = **这一轮不发**。`runTurn` 抛 [`ContextBuildBlocked`](../../packages/core/src/loop/run-turn.ts#symbol=ContextBuildBlocked)，`runLoop` 把它折成 `{ kind: "aborted", reason }`（reason 透传自 hook），模型不被调用，transcript 里**不合成** assistant 消息（什么都没说过，账本里就不该有一条）。选 aborted 而不是 error：这不是故障，是有人在送模前叫停，和 `userPromptSubmit` 的 block 同一档。判据见 [block 不调模型](../../packages/core/test/prompt.test.ts#test=contextbeforebuild-返回-block不调模型run-以-aborted-收场reason-透传transcript-不多一条)。
+
+复现（现在应打印 `{ kind: "aborted", reason: "DO_NOT_CALL_MODEL" } 0`）：
 
 ```bash
 bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRuntime } from "./packages/core/src/hooks/runtime.ts"; import { FAKE_MODEL, scriptedStreamFn, textTurn } from "./packages/core/src/testing.ts"; const h=new HookRuntime(); h.on("contextBeforeBuild",()=>({decision:"block",reason:"DO_NOT_CALL_MODEL"})); let calls=0; const base=scriptedStreamFn([textTurn("done")]); const a=new Agent({model:FAKE_MODEL,hooks:h,streamFunction:(m,c,o)=>{calls++;return base(m,c,o)}}); console.log((await a.prompt("go")).outcome,calls);'
 ```
-
-当前结果是 `completed` 且 provider 调用一次。这不是边界条件，而是 hook 协议与调用点直接矛盾。
-
-审阅结论：如果该挂点只允许 patch，就把它从可 block 集移除，类型与文档只暴露 patch/continue；如果它真是最后一道送模门，block 必须阻止 provider 调用并形成明确 terminal outcome。倾向前者：context 构建失败或拒绝不等同于用户取消、权限拒绝或工具拒绝，硬塞进统一的 `block` 语义反而不清楚。
 
 ## 7. Compaction 与恢复
 
@@ -267,7 +269,7 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 | `turnInjections()` 抛错 | run 以 internal error 结束 | “绝不抛；没有返回 []” |
 | `transformContext()` 抛错 | run 以 internal error 结束 | “失败原样返回入参” |
 | `convertToLlm()` 抛错 | run 以 internal error 结束 | “绝不抛” |
-| `contextBeforeBuild` 返回 block | 忽略 block，继续调用 provider | interceptable / block |
+| `contextBeforeBuild` 返回 block | run 以 `aborted` 结束、reason 透传，provider 不被调用 | interceptable / block（2026-09-01 起一致） |
 
 三个抛错探针都得到结构化 `outcome.kind === "error"`；Agent 的 terminal normalizer 保住了完整封口，但它不是安全回退。这里要先按“缺失这项上下文后继续调用模型是否安全”分类，再让类型、实现和测试使用同一个答案。
 
