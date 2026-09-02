@@ -44,6 +44,7 @@ import { tuiShell } from "./extension.ts";
 import { instructionsEntry } from "./instructions.ts";
 import { conductEntry, pipeSurfaceEntry } from "./prompt.ts";
 import { run } from "./run.ts";
+import { runObserve } from "./observe.ts";
 import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
 // （FirstRunChoice 同时是装配与选择器的「一家」形状：name = --provider 短名，provider = 实例）
 import { readSettings, writeSettings } from "./settings.ts";
@@ -100,6 +101,11 @@ export function usage(name: string): string {
   --extensions <目录>  去哪里找扩展，可重复（缺省 ./extensions）
   --no-memory          不装记忆与 Dream
   -h, --help           显示本帮助
+
+子命令：
+  observe <last|show <run-id>|export <run-id>|health>
+                       看已落盘的 run 观测记录：不启动 agent、不取锁（详见 ${name} observe --help）。
+                       管道形态每轮结束会在 stderr 打一行 \`[run] <run-id> …\`，拿它去 observe show。
 
 **每次启动都是新的一段会话**，续上次是显式动作（--continue / --resume）。会话按「目录 + 命令」归属：
 在同一个目录里，${name} 与别的命令各有各的对话，互不相续；续上时界面会说明续了多少条。
@@ -290,6 +296,8 @@ export function mainFor(product: Product): Main {
     interactive: boolean = process.stdin.isTTY === true,
     deps: MainDeps = {},
   ): Promise<number> => {
+    // `observe` 是只读子命令：不装配、不取锁、不看凭据——在一切启动逻辑之前分走（§15.6）
+    if (argv[0] === "observe") return runObserve(argv.slice(1), product.name);
     let opts: CliOptions | null;
     try {
       opts = parseArgs(argv, product.name);
