@@ -73,6 +73,13 @@ function activateTool(deps: SkillToolsDeps): ModelTool<{ name: string; instructi
         const available = [...deps.skills.values()].filter((s) => s.modelInvocable).map((s) => s.name);
         return toolError(`Unknown skill '${name}' (available: ${available.join(", ") || "none"})`);
       }
+      if (r.reason === "budget") {
+        // 总预算满了：说清现状。没有 deactivate 工具，所以是「用已激活的干活」，不是「先停掉一个」
+        return toolError(
+          `Activating '${name}' would exceed the active skill budget: ${r.used} characters already active (${r.active.join(", ")}), ` +
+            `this skill needs ${r.needed}, limit ${r.cap}. Active skills stay active for the rest of the session; work with the ones already active.`,
+        );
+      }
       // missing_tools：把缺什么说清楚，别让模型试半天
       return toolError(`Skill '${name}' needs tools that are not available: ${r.missing.join(", ")}`);
     },

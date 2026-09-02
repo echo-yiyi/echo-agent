@@ -10,7 +10,7 @@
 import { agentError, type AgentError } from "../errors.ts";
 import type { AgentOutcome } from "../events.ts";
 import { userMessage, type AgentMessage } from "../messages.ts";
-import { runTurn } from "./run-turn.ts";
+import { ContextBuildBlocked, runTurn } from "./run-turn.ts";
 import type { AgentContext, AgentLoopConfig, Emit, LoopDeps, LoopResult, TurnResult } from "./types.ts";
 import type { StreamFn } from "../provider/types.ts";
 
@@ -87,7 +87,15 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
       await maybeCompact(deps);
 
       iteration += 1;
-      const turn = await runTurn(turnDeps, iteration);
+      let turn: TurnResult;
+      try {
+        turn = await runTurn(turnDeps, iteration);
+      } catch (e) {
+        if (!(e instanceof ContextBuildBlocked)) throw e;
+        // hook 在送模前说「别发」：不是用户取消、不是错误，是明确的 aborted（reason 透传给 agent_end 的读者）
+        outcome = { kind: "aborted", reason: e.reason ?? "contextBeforeBuild blocked the turn" };
+        break outer;
+      }
       // deadline 在轮内到了：轮内的等待已被它中止，这里按超时封口（不是「aborted」——调用方没有取消）
       if (deadline?.signal.aborted === true && !signal.aborted) {
         const elapsedMs = Date.now() - startedAt;

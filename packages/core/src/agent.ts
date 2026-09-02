@@ -2317,7 +2317,7 @@ export class Agent {
    * 每轮注入的来源（通道 B）。system 段不再从这里供货——那些经 `AgentPrompt` registry 进两张表。
    * 渲染函数仍住各自模块（`renderSkillInjections` / `taskInjections`：谁拥有数据谁拥有 format）。
    */
-  private promptSources(): PromptSource[] {
+  private promptSources(hasTool: (name: string) => boolean): PromptSource[] {
     return [
       // 激活的 skill 正文：每轮从工作集现算，拼消息末尾、不进 transcript
       { turnInjections: () => renderSkillInjections(this.skills, this.activeSkills) },
@@ -2328,7 +2328,9 @@ export class Agent {
       // 「task 恒装，所以这条不带条件」——那个前提在工具注册搬进 `echo:tasks` builtin Extension
       // 之后就没了：不 mount builtin 的装法（低层 `new Agent()`）会让模型**每轮看见任务清单、
       // 却没有 TaskCreate 可调**。那正是 skills 那行注释说的「教模型用它没有的工具」，同一个病。
-      { turnInjections: () => (this.tools.has("TaskList") ? taskInjections(taskSnapshot(this.tasks)) : []) },
+      // `hasTool` 读的是**本轮冻结的菜单**（run-turn 传进来），不是活池：turn_start 里才注册的 TaskList
+      // 这轮菜单上没有，清单也就不许这轮出现（2026-09-01 review P2）。
+      { turnInjections: () => (hasTool("TaskList") ? taskInjections(taskSnapshot(this.tasks)) : []) },
     ];
   }
 
@@ -2350,7 +2352,7 @@ export class Agent {
       resolveTool: (name) => resolveTool(this.tools, name),
       // 通道 B:run 中途会变的内容(激活 skill 正文),每轮从各 PromptSource 重算、
       // 拼在消息末尾、不进 transcript。
-      getTurnInjections: () => this.promptSources().flatMap((s) => s.turnInjections?.() ?? []),
+      getTurnInjections: (visibleTools) => this.promptSources((n) => visibleTools.has(n)).flatMap((s) => s.turnInjections?.() ?? []),
       // RunIntakeGate 的循环侧。两条队列出来的消息同样要过 userPromptSubmit 准入（§14.7.5 第 3 条），source 如实标；
       // 开关门本身是 gate 里的同步步，准入在 drain 之后才 await。
       intake: {

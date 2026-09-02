@@ -10,6 +10,17 @@ import type { ActiveSkill } from "./types.ts";
 /** 目录预算:描述单条 1024、目录总量 8000;正文注入单条 16000。 */
 export const SKILL_CATALOG_CAPS = { descriptionMax: 1024, catalogTotal: 8000 } as const;
 export const SKILL_BODY_CAP = 16_000;
+/**
+ * 激活集合的**总**预算（2026-09-01）：所有激活 skill 的正文（各自按 SKILL_BODY_CAP 截后）合计上限。
+ * 单条上限管不住「模型连续激活 100 个」——每轮注入无界、后续请求持续超 context window（review 实测 1.6M 字符）。
+ * 闸在**激活时**（`activateSkill`），拒绝并告诉模型现状；不在渲染末端静默截掉已声明激活的指令。
+ */
+export const SKILL_ACTIVE_TOTAL_CAP = 64_000;
+
+/** 一个 skill 激活后占多少预算：正文按单条上限截后的长度（与渲染时一致）。 */
+export function activeSkillCost(content: string): number {
+  return Math.min(content.length, SKILL_BODY_CAP);
+}
 
 /**
  * 目录(通道 A,进 system):池里 modelInvocable 的每个一行「- 名字:描述」。

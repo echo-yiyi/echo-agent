@@ -75,4 +75,6 @@ export type SkillCreation =
 export type SkillActivation =
   | { ok: true; skill: Skill }
   | { ok: false; reason: "not_found" }
-  | { ok: false; reason: "missing_tools"; missing: readonly string[] };
+  | { ok: false; reason: "missing_tools"; missing: readonly string[] }
+  /** 激活集合总预算不够（`SKILL_ACTIVE_TOTAL_CAP`）：`used` 是已激活的合计，`needed` 是这一个的开销。 */
+  | { ok: false; reason: "budget"; used: number; needed: number; cap: number; active: readonly string[] };
