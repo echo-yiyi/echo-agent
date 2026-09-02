@@ -722,6 +722,27 @@ test("自主 run 报错：屏幕要看得见，退出码要是 1", async () => {
   expect(await done).toBe(1); // 失败退出码
 });
 
+test("迭代上限不是坏了，是预算用完：错误后面跟着「输入继续」的提示；别的错误不跟", async () => {
+  // 实测 `[错误] 迭代上限 20` 这一行没告诉用户下一步能做什么（2026-09-02）
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const emit = tapEvents(agent);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  emit({ type: "agent_start" });
+  emit({
+    type: "agent_end",
+    outcome: { kind: "error", error: { source: "internal", code: "max_iterations", retryable: false, message: "迭代上限 20" } },
+  });
+  await flush();
+  expect(ui.screen()).toContain("[错误] 迭代上限 20（已做的都在，输入「继续」接着跑）");
+  expect(ui.screen().split("输入「继续」").length - 1).toBe(1); // 上一条测试那种普通错误不带这句
+
+  quit(ui);
+  await done;
+});
+
 test("本地一轮出错只显示一次（`agent_end` 显示，`submit()` 不重复显示）", async () => {
   const ui = fakeTui();
   const agent = agentWith([]); // 脚本用尽 → provider 报错，走真的 agent_end(error)

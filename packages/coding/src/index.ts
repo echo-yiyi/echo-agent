@@ -10,7 +10,7 @@ export { codingPreset, CODING_DEFAULT_MODEL } from "./agent.ts";
 export type { CodingPreset, CodingPresetOptions } from "./agent.ts";
 export { ECHO_SHELL, ECHO_WORKSPACE } from "./extensions.ts";
 export { makeFsTools, resolveSafe } from "./tools/fs.ts";
-export { makeBashTool } from "./tools/bash.ts";
+export { makeBashTool, makeShellTools } from "./tools/bash.ts";
 export type { BashDeps } from "./tools/bash.ts";
 export { makeSearchTools } from "./tools/search.ts";
 export { permissionPolicyFor, DEFAULT_PERMISSION } from "./permission.ts";

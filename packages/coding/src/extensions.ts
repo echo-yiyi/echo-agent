@@ -12,7 +12,7 @@
 // 复制一份实现就是复制一份将来会漏修的地方。
 
 import { AgentBackgroundService, AgentPrompt, AgentTools, defineExtension, defineToolPack } from "@echo-agent/core/extension";
-import { makeBashTool } from "./tools/bash.ts";
+import { makeShellTools } from "./tools/bash.ts";
 import { shellToolsSection } from "./prompt.ts";
 
 /** 工作区读写与搜索：`read_file` / `write_file` / `edit_file` / `glob` / `grep`。 */
@@ -54,25 +54,26 @@ export const ECHO_SHELL = defineExtension({
   apply(ctx) {
     const registry = ctx.get(AgentTools);
     const prompt = ctx.get(AgentPrompt);
-    const tool = makeBashTool({ background: ctx.get(AgentBackgroundService) });
+    // bash + job_output / job_stop：同一张后台任务表（`agent.background`），一起装、一起撤
+    const tools = makeShellTools({ background: ctx.get(AgentBackgroundService) });
     void ctx.effect({
       // 与 `defineToolPack` 同一档：工具面每轮都可能变，声明得比实际需要强会挡住热重载
       boundary: "turn",
       start: () => {
-        // 工具与它的习惯段（`tool:shell`）同一个 effect：一起装、一起撤
-        const offTool = registry.register(tool);
-        let offSection: (() => unknown) | undefined;
+        // 工具与它们的习惯段（`tool:shell`）同一个 effect：一起装、一起撤。
+        // 中途撞名要把已注册的撤回去——半组工具在、半组不在，比整组不在更难排查
+        const offs: (() => unknown)[] = [];
         try {
-          offSection = prompt.section(shellToolsSection());
+          for (const tool of tools) offs.push(registry.register(tool));
+          offs.push(prompt.section(shellToolsSection()));
         } catch (e) {
-          void offTool();
+          for (const off of offs.reverse()) void off();
           throw e;
         }
         return {
-          value: tool.name,
+          value: tools.map((t) => t.name),
           dispose: () => {
-            void offSection?.();
-            void offTool();
+            for (const off of offs.reverse()) void off();
           },
         };
       },

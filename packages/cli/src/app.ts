@@ -496,7 +496,9 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         // 两边都显示又会让本地那一轮出现两条一模一样的 `[错误]`。
         if (event.outcome.kind === "error") {
           failed = true;
-          transcript.push({ kind: "notice", text: `[错误] ${event.outcome.error.message}` });
+          // 迭代上限不是「坏了」，是预算用完：说清下一步——已经做的都在上下文里，一句「继续」就接着跑
+          const hint = event.outcome.error.code === "max_iterations" ? "（已做的都在，输入「继续」接着跑）" : "";
+          transcript.push({ kind: "notice", text: `[错误] ${event.outcome.error.message}${hint}` });
           // 端点说 key 不对（没配 / 被撤 / 过期）：把配置段摆出来，而不是让用户对着一句 `[错误]` 猜
           if (event.outcome.error.code === "auth") enterConfigure("[凭据] 这把 key 不能用了——重新配一个");
         }

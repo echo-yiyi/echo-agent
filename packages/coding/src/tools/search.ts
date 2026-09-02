@@ -8,7 +8,7 @@
 // **结果路径一律相对工作区**：read_file / edit_file 收的是工作区相对路径，搜索若按 `path` 相对报
 // （在 `packages/core/src` 里搜到 `agent.ts:260`），模型拿着 `agent.ts` 去读就找不到。工作区之外的报绝对路径。
 
-import { readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { toolError, toolOk, type ModelTool, type ToolExecutionContext } from "@echo-agent/core";
 
@@ -16,11 +16,13 @@ const GLOB_CAP = 500;
 const GREP_CAP = 200;
 const GREP_FILE_MAX = 1_000_000; // >1MB 的文件跳过(多半是产物/数据,不是代码)
 const LINE_CAP = 250;
+const LIST_CAP = 500;
 
 const EXCLUDED = /(^|\/)(node_modules|\.git)(\/|$)/;
 
+/** 搜索三件：glob / grep / list_dir。`list_dir` 是 2026-09-02 补的——glob 只出文件，模型看不到目录结构，只能 `bash ls`。 */
 export function makeSearchTools(): ModelTool[] {
-  return [globTool(), grepTool()] as ModelTool[];
+  return [globTool(), grepTool(), listDirTool()] as ModelTool[];
 }
 
 function baseDir(ctx: ToolExecutionContext, path?: string): string {
@@ -85,6 +87,40 @@ function globTool(): ModelTool<{ pattern: string; path?: string }> {
       out.sort();
       const cap = out.length >= GLOB_CAP ? `\n…[hit the ${GLOB_CAP}-result limit; narrow the pattern]` : "";
       return toolOk(out.length === 0 ? "(no matches)" : out.join("\n") + cap, { count: out.length });
+    },
+  };
+}
+
+function listDirTool(): ModelTool<{ path?: string }> {
+  return {
+    kind: "model",
+    name: "list_dir",
+    label: "列目录",
+    description:
+      "List the entries of one directory, not recursive: subdirectories first and marked with a trailing '/'. Default the workspace root. To find files by pattern use glob.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Directory to list, default the workspace" },
+      },
+    },
+    async execute({ path }, ctx) {
+      const target = await resolveTarget(ctx, path);
+      if (!target.ok) return toolError(target.error);
+      if (target.kind === "file") return toolError(`path is a file, list_dir needs a directory: ${path}. Use read_file to read it.`);
+      let entries: { name: string; isDirectory(): boolean }[];
+      try {
+        entries = await readdir(target.abs, { withFileTypes: true });
+      } catch (e) {
+        return toolError(`list_dir failed: ${String(e)}`);
+      }
+      // 目录在前、各自按名排：一眼分得出结构。node_modules / .git 照列——这是目录的真相，不是搜索结果
+      const dirs = entries.filter((e) => e.isDirectory()).map((e) => `${e.name}/`).sort();
+      const files = entries.filter((e) => !e.isDirectory()).map((e) => e.name).sort();
+      const all = [...dirs, ...files];
+      const shown = all.slice(0, LIST_CAP);
+      const cap = all.length > LIST_CAP ? `\n…[${all.length - LIST_CAP} more entries not shown]` : "";
+      return toolOk(shown.length === 0 ? "(empty directory)" : shown.join("\n") + cap, { count: all.length });
     },
   };
 }
