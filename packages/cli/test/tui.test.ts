@@ -86,6 +86,7 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
     setModel: (m) => base.setModel(m),
     setThinkingLevel: (l) => base.setThinkingLevel(l),
     reset: () => base.reset(),
+    compact: (i) => base.compact(i),
   };
   // **不能用 `Object.assign`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter-only，
   // 赋值会抛 "Attempted to assign to readonly property"（实测）。覆盖项一律走 `defineProperty`，
