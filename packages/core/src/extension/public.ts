@@ -29,11 +29,13 @@ export { ExtensionHost, ExtensionMountError, type ExtensionEntry, type FiberInfo
 export type { FiberStatus } from "./fiber.ts";
 export {
   AgentBackgroundService,
+  AgentCompaction,
   AgentHooks,
   AgentPrompt,
   AgentSkills,
   AgentTools,
   agentRegistries,
+  type AgentCompactionRegistry,
   type AgentHooksRegistry,
   type AgentPromptRegistry,
   type AgentSkillsRegistry,
@@ -45,6 +47,7 @@ export {
   definePromptPack,
   defineToolPack,
   mountBuiltinTools,
+  ECHO_COMPACTION,
   ECHO_MEMORY,
   ECHO_SCHEDULER,
   ECHO_SKILLS,
@@ -55,5 +58,5 @@ export {
   type PromptPackConfig,
 } from "./builtin.ts";
 export { unmountGenerations, type UnmountTarget } from "./cleanup.ts";
-export { AgentRuntimeService, type AgentRuntime, type EquipResult, type RuntimeTurnResult } from "./runtime.ts";
+export { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult, type RuntimeTurnResult } from "./runtime.ts";
 export { ECHO_AGENT, agentRuntimeOf, type RuntimeSource } from "./builtin.ts";

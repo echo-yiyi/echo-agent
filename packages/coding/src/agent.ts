@@ -90,6 +90,7 @@ const AGENT_BUILTIN_TOOLS = [
   "schedule_list",
   "skill_activate",
   "skill_create",
+  "transcript_read",
 ] as const;
 
 /** 产品自己出的四段（identity / conduct:coding / tool:workspace / tool:shell），按 order 排。 */

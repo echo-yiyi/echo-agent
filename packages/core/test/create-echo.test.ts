@@ -34,7 +34,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "fixtures/extensions");
 
 /** §14 owner 表里本批搬进来的四条，顺序即 `builtinEntries()` 的顺序。 */
-const BUILTIN_NAMES = ["echo:agent", "echo:tasks", "echo:skills", "echo:memory", "echo:scheduler"] as const;
+const BUILTIN_NAMES = ["echo:agent", "echo:tasks", "echo:skills", "echo:memory", "echo:scheduler", "echo:compaction"] as const;
 
 const temps: string[] = [];
 const running: Echo[] = [];
@@ -600,7 +600,7 @@ test("能力不在就不出条目：`withoutMemory` 的 agent 清单里**没有*
   running.push(without);
   expect(without.extensions.map((e) => e.name)).not.toContain("echo:memory");
   // 别的能力照在——判据要能区分「这一条没了」和「整张表塌了」
-  expect(without.extensions.map((e) => e.name)).toEqual(["echo:agent", "echo:tasks", "echo:skills", "echo:scheduler"]);
+  expect(without.extensions.map((e) => e.name)).toEqual(["echo:agent", "echo:tasks", "echo:skills", "echo:scheduler", "echo:compaction"]);
 });
 
 test("构造失败：**已 mount 的 builtin 那一代也要卸**（review 三轮：上一版是假判据）", async () => {

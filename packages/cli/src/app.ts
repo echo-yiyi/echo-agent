@@ -114,6 +114,12 @@ function footerLine(state: Readonly<AgentState>, width: number): string {
   if (cached !== undefined && state.usage.inputTokens > 0) {
     parts.push(`缓存 ${short(cached)} (${Math.round((cached / state.usage.inputTokens) * 100)}%)`);
   }
+  // 上下文占用（2026-09-02）：provider 每轮报的 usage 与压缩后的估算，配目录里的窗口；两边缺一个都不显示——
+  // 只显示 token 数而没有分母，用户仍不知道离撞窗还有多远
+  const window = state.model.capabilities?.contextWindow;
+  if (state.contextTokens !== null && window !== undefined && window > 0) {
+    parts.push(`上下文 ${short(state.contextTokens)}/${short(window)} (${Math.round((state.contextTokens / window) * 100)}%)`);
+  }
   if (state.thinkingLevel !== "off") parts.push(`思考 ${state.thinkingLevel}`);
   if (state.tasks.total > 0) parts.push(`任务 ${state.tasks.active.length}/${state.tasks.total}`);
   if (state.activeSkills.length > 0) parts.push(`skill ${state.activeSkills.length}`);
@@ -187,8 +193,12 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         void setModelById(trimmed.slice("/model ".length).trim());
         return;
       }
+      if (trimmed === "/compact" || trimmed.startsWith("/compact ")) {
+        void compactNow(trimmed.slice("/compact".length).trim());
+        return;
+      }
       editor.setText(text);
-      transcript.push({ kind: "notice", text: `不认识的命令 ${trimmed.split(/\s/)[0]}（有 /clear、/model [模型id]）` });
+      transcript.push({ kind: "notice", text: `不认识的命令 ${trimmed.split(/\s/)[0]}（有 /clear、/model [模型id]、/compact [指令]）` });
       rerender();
       return;
     }
@@ -389,6 +399,20 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       }
       rerender();
     });
+  };
+
+  /** `/compact [指令]`：协议 `compact()`——与自动压缩同一条流水线。结果如实显示：压了哪些阶段 / 没什么可压 / 被拒（正在跑、没策略）。 */
+  const compactNow = async (instructions: string): Promise<void> => {
+    transcript.push({ kind: "notice", text: "[压缩] 开始…" });
+    rerender();
+    const result = await agent.compact(instructions === "" ? undefined : instructions);
+    if (result.kind === "rejected") transcript.push({ kind: "notice", text: `[压缩] 没压成：${result.reason}` });
+    else if (result.stages.length === 0) transcript.push({ kind: "notice", text: "[压缩] 没有可压的内容" });
+    else {
+      const size = result.contextTokens !== null ? `，上下文约 ${short(result.contextTokens)} token` : "";
+      transcript.push({ kind: "notice", text: `[压缩] 完成：${result.stages.join(" → ")}${size}；原文仍可经 transcript_read 读取` });
+    }
+    rerender();
   };
 
   const answer = (decision: "allow" | "deny"): void => {

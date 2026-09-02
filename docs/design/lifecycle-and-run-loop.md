@@ -154,7 +154,7 @@ flowchart TD
     M --> N["状态回到 idle，调度 inbox / dream"]
 ```
 
-主实现见 [`runLoop()`](../../packages/core/src/loop/run-loop.ts#symbol=runLoop)。它在每次 turn 边界检查 abort、最大迭代数和 deadline；重试型 provider 错误在循环内重试，一次成功 turn 会重置 retry count。上下文压缩也只发生在 turn 边界，失败只报告诊断，不终止 run，见 [`maybeCompact()`](../../packages/core/src/loop/run-loop.ts#symbol=maybeCompact)。
+主实现见 [`runLoop()`](../../packages/core/src/loop/run-loop.ts#symbol=runLoop)。它在每次 turn 边界检查 abort、最大迭代数和 deadline；重试型 provider 错误在循环内重试，一次成功 turn 会重置 retry count。上下文压缩也只发生在 turn 边界（撞窗后的应急压缩是例外：同一条流水线在 turn 失败后跑一次再重跑本 turn），失败只报告诊断，不终止 run，见 [`runCompaction()`](../../packages/core/src/compaction/pipeline.ts#symbol=runCompaction) 与 [Compaction](compaction.md)。
 
 ### 3.1 Inner loop 与 outer loop
 

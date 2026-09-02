@@ -21,23 +21,42 @@ function svc(dir: StorageDir = new InMemoryDir()): { s: SessionService; dir: Sto
   return { s: new SessionService(dir), dir };
 }
 
-test("不变量① 恢复后 messages 与 checkpoint 同源（同一份 entries 投影出来）", async () => {
+test("不变量① 恢复后 messages 与 compaction 同源（同一份 entries 投影出来，取最后一次压缩的状态）", async () => {
   const dir = new InMemoryDir();
   const first = new SessionService(dir);
   await first.createOrResume("main");
   await first.append("main", [
     { kind: "message", message: userMessage("一") },
-    { kind: "compaction", at: 1, summary: "压过一次", coveredUpTo: "main-e1" },
     { kind: "message", message: userMessage("二") },
+    { kind: "compaction", at: 1, reason: "auto", compaction: { spans: [{ from: 0, to: 1, summary: "压过一次" }], clearedBefore: 0 } },
+    { kind: "message", message: userMessage("三") },
+    { kind: "compaction", at: 2, reason: "manual", compaction: { spans: [{ from: 0, to: 2, summary: "压过两次" }], clearedBefore: 0 } },
   ]);
   await first.settle();
 
   // 换一个进程（新 Service 实例、同一个 store）
   const resumed = await new SessionService(dir).createOrResume("main");
-  expect(resumed.messages.map((m) => m.role)).toEqual(["user", "user"]);
-  // checkpoint 指向那条 compaction entry，不是凭空的字符串
-  expect(resumed.checkpoint).toBe("main-e2");
-  expect(resumed.info.messageCount).toBe(2);
+  expect(resumed.messages.map((m) => m.role)).toEqual(["user", "user", "user"]);
+  // 状态是最后一条 compaction entry 里的那份，下标直接落在恢复出来的 messages 上
+  expect(resumed.compaction).toEqual({ spans: [{ from: 0, to: 2, summary: "压过两次" }], clearedBefore: 0 });
+  expect(resumed.info.messageCount).toBe(3);
+});
+
+test("compaction 状态在恢复出来的 messages 上不成立 → 坏档判红（越界 / 切在配对中间）", async () => {
+  for (const compaction of [
+    { spans: [{ from: 0, to: 5, summary: "越界" }], clearedBefore: 0 },
+    { spans: [], clearedBefore: 9 },
+  ]) {
+    const dir = new InMemoryDir();
+    const s = new SessionService(dir);
+    await s.createOrResume("main");
+    await s.append("main", [
+      { kind: "message", message: userMessage("一") },
+      { kind: "compaction", at: 1, reason: "auto", compaction },
+    ]);
+    await s.settle();
+    await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/compaction/);
+  }
 });
 
 test("不变量② 同一 entry id 不重复——跨进程续写也接着排", async () => {
@@ -469,7 +488,7 @@ test("内容块闭合验形：缺字段与不认识的 type 都判红", async ()
 
 test("compaction / error entry 缺 at 判红", async () => {
   for (const entry of [
-    { kind: "compaction", id: "main-e1", parentId: null, summary: "s", coveredUpTo: "x" },
+    { kind: "compaction", id: "main-e1", parentId: null, reason: "auto", compaction: { spans: [], clearedBefore: 0 } },
     { kind: "error", id: "main-e1", parentId: null, error: { message: "boom" } },
   ]) {
     const dir = new InMemoryDir();

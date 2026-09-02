@@ -100,6 +100,8 @@ test(
         "schedule_list",
         "skill_activate",
         "skill_create",
+        // 2026-09-02 起 `echo:compaction` 在默认装配里：压缩之后模型靠它取回原文
+        "transcript_read",
       ].sort(),
     );
 

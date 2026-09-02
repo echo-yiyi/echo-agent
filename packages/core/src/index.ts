@@ -156,7 +156,66 @@ export type {
 } from "./task/types.ts";
 
 // `prompt()` 的返回值与它认的几个配置形状
-export type { AgentContext, CompactionConfig, LoopResult, TransformContext } from "./loop/types.ts";
+export type { AgentContext, LoopCompactionConfig, LoopResult, TransformContext } from "./loop/types.ts";
+/* 压缩（2026-09-02）：状态与阶段契约给写策略的人；视图与估算给他们算字节；缺省阶梯与 prompt 给想改一段的人 */
+export {
+  COMPACTION_SLACK_RATIO,
+  DEFAULT_KEEP_RECENT_TOKENS,
+  DEFAULT_KEEP_RECENT_TOOL_RESULTS,
+  DEFAULT_RESERVE_TOKENS,
+  DEFAULT_SECTION_TOKENS,
+  EMPTY_COMPACTION,
+  isEmptyCompaction,
+} from "./compaction/types.ts";
+export type {
+  CompactionBudget,
+  CompactionInput,
+  CompactionModelCall,
+  CompactionOptions,
+  CompactionReason,
+  CompactionSpan,
+  CompactionStage,
+  CompactionState,
+} from "./compaction/types.ts";
+export {
+  IMAGE_TOKEN_ESTIMATE,
+  assertCompactionFits,
+  buildWorkingMessages,
+  clearedNotice,
+  estimateMessage,
+  estimateText,
+  estimateTokens,
+  isLegalCut,
+  isTurnStart,
+  measureContext,
+  normalizeCompaction,
+  omissionNotice,
+  projectRange,
+  sameCompaction,
+  snapBack,
+  snapForward,
+} from "./compaction/view.ts";
+export type { ContextAnchor } from "./compaction/view.ts";
+export {
+  COLLAPSE_INSTRUCTION,
+  COLLAPSE_MAX_SECTIONS,
+  COLLAPSE_SYSTEM,
+  OVERFLOW_KEEP_TOKENS,
+  SUMMARY_INSTRUCTION,
+  SUMMARY_SYSTEM,
+  chooseTailStart,
+  collapseStage,
+  defaultCompactionStages,
+  extractSummary,
+  frameFull,
+  frameSection,
+  snipStage,
+  summaryStage,
+  toolResultsStage,
+} from "./compaction/builtin.ts";
+export type { CompactionPackConfig } from "./compaction/builtin.ts";
+export { TRANSCRIPT_READ_TOOL, renderTranscript, transcriptReadTool } from "./compaction/tool.ts";
+export type { TranscriptReadParams } from "./compaction/tool.ts";
 // §14.2.3：steer / followUp 的显式结果（accepted 或带原因的 rejected；不抛、不静默入队）
 export type { FollowUpResult, SteerResult } from "./loop/intake.ts";
 // §14.2.4：run admission 的 host port 面——request / ticket / result / execute scope，与每次 admission 冻结的 model seam。

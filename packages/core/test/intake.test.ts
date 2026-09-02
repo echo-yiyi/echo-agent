@@ -13,6 +13,7 @@ import { runAgentLoop } from "../src/loop/run-loop.ts";
 import type { AgentLoopConfig } from "../src/loop/types.ts";
 import { DEFAULT_RETRY_POLICY } from "../src/provider/dialect.ts";
 import { InMemorySessionManager, type SessionEntry } from "../src/session/types.ts";
+import { EMPTY_COMPACTION } from "../src/compaction/types.ts";
 
 function tool(name: string, execute: ModelTool["execute"]): ModelTool {
   return { kind: "model", name, label: name, description: name, parameters: { type: "object", properties: {} }, execute };
@@ -346,7 +347,7 @@ test("退出路径 shouldStopAfterTurn（loop 级决策点，Agent 不暴露）�
     },
     maxIterations: 5,
     retryPolicy: DEFAULT_RETRY_POLICY,
-    compaction: {},
+    compaction: { getStages: () => [] },
     workspace: process.cwd(),
     shouldStopAfterTurn: () => true,
     intake: {
@@ -359,7 +360,7 @@ test("退出路径 shouldStopAfterTurn（loop 级决策点，Agent 不暴露）�
   };
   const result = await runAgentLoop(
     [userMessage("go", "human")],
-    { systemPrompt: null, messages: [] },
+    { systemPrompt: null, messages: [], compaction: EMPTY_COMPACTION },
     config,
     async (e) => {
       if (e.type === "agent_end") seen.push(gate.followUp(userMessage("晚到", "human")).kind, gate.steer(userMessage("晚到", "steer")).kind);
