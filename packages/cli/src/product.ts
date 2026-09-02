@@ -45,6 +45,15 @@ const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", impo
   .version;
 
 /** `echo-agent` 自己：通用 agent。preset 只交一样——它的身份段。 */
+/**
+ * 缺省延迟的工具（2026-09-02 用户拍板：延迟与否**由配置给**、所有工具一视同仁，这里是那批缺省）。
+ * 挑的是「一次会话里多半用不到」的：闹钟三件、造 skill、读 transcript、单查任务；
+ * 常驻的是文件 / 搜索 / shell / 任务清单 / 记忆 / 激活 skill，再加 `tool_search` 自己。
+ * 名单进 `createEcho({ agent: { deferredTools } })`；产品 preset 的 `agent.deferredTools` 给了就覆盖这份。
+ * 将来让用户在 settings.json 里改，也是覆盖这一层，core 不认识任何名单。
+ */
+export const DEFAULT_DEFERRED_TOOLS: readonly string[] = ["schedule_create", "schedule_list", "schedule_cancel", "skill_create", "transcript_read", "TaskGet"];
+
 export const ECHO_AGENT: Product = Object.freeze({
   name: "echo-agent",
   version: VERSION,

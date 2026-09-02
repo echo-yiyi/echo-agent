@@ -315,7 +315,8 @@ async function runOneTool(
 function explainMissingTool(config: AgentLoopConfig, known: ReadonlySet<string>, name: string): string {
   if (!known.has(name)) return `Unknown tool '${name}'`;
   const r = config.resolveTool(name);
-  if (!r.ok) return r.reason === "disabled" ? r.message : `Tool '${name}' has been unloaded`;
+  // 禁用 / 延迟未加载都带着来源给的话；只有真从池里没了才说「已卸载」
+  if (!r.ok) return r.reason === "not_found" ? `Tool '${name}' has been unloaded` : r.message;
   return `Tool '${name}' was unavailable when this turn started; it is available from the next turn`;
 }
 

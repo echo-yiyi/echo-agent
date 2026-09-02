@@ -78,6 +78,25 @@ export function activeTools(tools: ToolMap): readonly AgentTool[] {
   return [...tools.values()].filter((t) => t.disabled === undefined);
 }
 
+/**
+ * 渐进式披露（2026-09-02 用户拍板）：**哪些工具延迟由配置给**（`AgentOptions.deferredTools`），
+ * 所有工具一视同仁、不是工具自己的属性。延迟工具注册在池里、能被点名解析（`resolveTool` 给准确原因），
+ * 但**不上模型菜单**——直到经 `tool_search` 取过 schema（进 `loaded`）。schema 全塞进每轮请求会先把
+ * 上下文吃掉；接 MCP 之后工具一多，这就是唯一的止损。
+ */
+export type ToolDisclosure = {
+  readonly deferred: ReadonlySet<string>;
+  /** 已经取过 schema 的延迟工具。按 agent 进程记，不持久化、`reset()` 也不清（用户拍板）。 */
+  readonly loaded: ReadonlySet<string>;
+};
+
+/** **本轮摆给模型的菜单**：没被禁用、且（不延迟 或 已加载）。`getTools()` 的实现，循环契约不变。 */
+export function visibleTools(tools: ToolMap, disclosure?: ToolDisclosure): readonly AgentTool[] {
+  const active = activeTools(tools);
+  if (disclosure === undefined) return active;
+  return active.filter((t) => !disclosure.deferred.has(t.name) || disclosure.loaded.has(t.name));
+}
+
 /** 禁用一批（MCP 断线时它自己知道给过哪些名字）。返回真禁掉的个数。 */
 export function disableTools(tools: ToolMap, names: readonly string[], reason: string): number {
   let n = 0;
@@ -105,16 +124,21 @@ export function enableTools(tools: ToolMap, names: readonly string[]): number {
 export type ToolResolution =
   | { ok: true; tool: AgentTool }
   | { ok: false; reason: "not_found" }
-  | { ok: false; reason: "disabled"; message: string };
+  | { ok: false; reason: "disabled"; message: string }
+  /** 延迟工具、还没经 tool_search 取过 schema：模型直接点名时要看到这句，而不是「未知工具」 */
+  | { ok: false; reason: "deferred"; message: string };
 
 /**
  * 执行时解析一个工具名。**给准确原因**，不是含糊的「未知工具」——
- * 模型点了一个刚断线的 MCP 工具，它该看到「服务器已断开」。
+ * 模型点了一个刚断线的 MCP 工具，它该看到「服务器已断开」；点了一个没加载的延迟工具，该看到「先 tool_search」。
  */
-export function resolveTool(tools: ToolMap, name: string): ToolResolution {
+export function resolveTool(tools: ToolMap, name: string, disclosure?: ToolDisclosure): ToolResolution {
   const tool = tools.get(name);
   if (tool === undefined) return { ok: false, reason: "not_found" };
   if (tool.disabled !== undefined) return { ok: false, reason: "disabled", message: tool.disabled };
+  if (disclosure !== undefined && disclosure.deferred.has(name) && !disclosure.loaded.has(name)) {
+    return { ok: false, reason: "deferred", message: `Tool '${name}' is deferred: load it with tool_search first, then call it` };
+  }
   return { ok: true, tool };
 }
 
