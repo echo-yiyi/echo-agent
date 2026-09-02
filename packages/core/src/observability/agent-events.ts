@@ -354,9 +354,15 @@ export function projectAgentEvent(event: AgentEvent, policy: ObservationCaptureP
     case "compaction_start":
       return { ...base, kind: "span_start", name: SPAN_CONTEXT_COMPACT, scope: {}, attributes: { reason: event.reason }, body: { reason: event.reason } };
     case "compaction_end": {
-      const body: Record<string, unknown> = { summaryChars: event.summary.length, coveredUpTo: event.coveredUpTo };
-      if (content) body.summary = event.summary;
-      return { ...base, kind: "span_end", name: SPAN_CONTEXT_COMPACT, scope: {}, attributes: {}, body };
+      // metadata 档：只有形状（段数、清到哪、哪些阶段动了、压完多大）；content 档才带各段摘要正文
+      const body: Record<string, unknown> = {
+        reason: event.reason,
+        stages: [...event.stages],
+        spans: event.compaction.spans.map((s) => (content ? { from: s.from, to: s.to, summary: s.summary } : { from: s.from, to: s.to, summaryChars: s.summary?.length ?? 0 })),
+        clearedBefore: event.compaction.clearedBefore,
+        contextTokens: event.contextTokens,
+      };
+      return { ...base, kind: "span_end", name: SPAN_CONTEXT_COMPACT, scope: {}, attributes: { reason: event.reason, changed: event.stages.length > 0 }, body };
     }
     case "retry_scheduled":
       return {

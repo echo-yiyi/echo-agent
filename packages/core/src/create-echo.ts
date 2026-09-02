@@ -243,6 +243,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       background: agent.background,
       // prompt 段与变量：内建 `echo:*` 与产品 extension 都从这条 Service 进（2026-09-01）
       prompt: { sections: agent.promptSections, variables: agent.promptVariables },
+      // 压缩阶段：`echo:compaction` 与产品自己的策略同一条 Service（2026-09-02）
+      compaction: agent.compactionStages,
     }),
   });
 

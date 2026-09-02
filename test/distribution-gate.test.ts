@@ -524,17 +524,19 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
           toolOutput: string;
           toolErrored: boolean;
         };
-        // ① 内建五条在前、扫到的 `extensions/current-year.ts` 在后——
+        // ① 内建六条在前、扫到的 `extensions/current-year.ts` 在后——
         //    这就是「内部 extension 先、外部 extension 后」那条顺序在**装出来的包上**的样子。
         //    内建也走 extension 机制（§14 owner 表），所以它们出现在清单里不是噪音，是契约。
         //    `echo:agent`（provide `AgentRuntime`）2026-08-31 起也在这份清单里：**清单就是 Host
         //    实际挂上的那一份**，它挂了却不报，清单与真相就分了家（review 二轮 P1）。
+        //    `echo:compaction`（缺省压缩阶梯 + transcript_read）2026-09-02 起同理。
         expect(got.extensions).toEqual([
           "echo:agent",
           "echo:tasks",
           "echo:skills",
           "echo:memory",
           "echo:scheduler",
+          "echo:compaction",
           "current-year",
         ]);
         // ② 工具**进了模型看得见的那一面**（样例一个工具都没显式传，全靠扩展）

@@ -8,16 +8,21 @@ import type { RetryPolicy } from "../provider/dialect.ts";
 import type { AgentTool } from "../tools/types.ts";
 import type { ToolResolution } from "../tools/harness.ts";
 import type { PermissionStage } from "../permission/types.ts";
+import type { CompactionStage, CompactionState } from "../compaction/types.ts";
 
 /**
  * 循环拿到的**对话快照**：进来那一刻的 messages，循环内部只往里 push。
  *
  * **工具不在这里**——它是装备不是对话，每轮经 `AgentLoopConfig.getTools()` 重取。
  * 这样跑的中途注册的工具下一轮就能被模型看见，不必等下次 run。
+ *
+ * `compaction` 是作用在 `messages` 上的视图状态（`compaction/types.ts`）：messages 永远全量原文，
+ * 送模前经 `buildWorkingMessages()` 投影。只有压缩流水线会改它。
  */
 export type AgentContext = {
   systemPrompt: string | null;
   messages: AgentMessage[];
+  compaction: CompactionState;
 };
 
 export type Emit = (event: AgentEventInput) => Promise<void>;
@@ -38,11 +43,15 @@ export type LoopIntake = {
   closeRun(): void;
 };
 
-export type CompactionConfig = {
-  /** 触发压缩的 token 预算；不给则从 model.capabilities.contextWindow 推。 */
-  budget?: number;
-  /** 压缩要调模型，所以它是装备的一部分。返回摘要正文。 */
-  summarize?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<string>;
+/**
+ * 循环侧的压缩配置：触发面的一个数 + 阶段从哪取。
+ * `getStages` **每次流水线跑之前重取**——阶段是 `AgentCompaction` registry 的条目，装卸在轮边界生效（热插拔）。
+ */
+export type LoopCompactionConfig = {
+  reserveTokens?: number;
+  getStages: () => readonly CompactionStage[];
+  /** 本 run 拿到第一次 usage 之前用的校准比（真 token / 字符估）：Agent 从上一次 usage 记下来的；不给 = 1。 */
+  calibration?: number;
 };
 
 export type TransformContext = (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -131,7 +140,7 @@ export interface AgentLoopConfig {
   maxIterations: number;
   timeoutMs?: number;
   retryPolicy: RetryPolicy;
-  compaction: CompactionConfig;
+  compaction: LoopCompactionConfig;
 
   /** 透传给工具的 `ToolExecutionContext.workspace`。 */
   workspace: string;

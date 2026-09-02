@@ -22,6 +22,7 @@ import type { AgentBackground } from "../background/types.ts";
 import { addSkills, type ActiveSkillMap, type SkillMap } from "../skill/harness.ts";
 import type { Skill } from "../skill/types.ts";
 import { PROMPT_VARIABLE_NAME, type PromptSection, type PromptVariable } from "../prompt/types.ts";
+import type { CompactionStage } from "../compaction/types.ts";
 import { defineService, type Disposer, type ServiceKey } from "./abi.ts";
 
 export interface AgentToolsRegistry {
@@ -49,6 +50,16 @@ export interface AgentPromptRegistry {
   section(section: PromptSection): Disposer;
   /** `{{name}}` 的值。名字不合 `[a-z][a-z0-9_]*` 或同名已存在 → 抛。disposer 只卸这个 provider。 */
   variable(name: string, provider: PromptVariable): Disposer;
+}
+
+/**
+ * 压缩阶段的注册口（2026-09-02）：**压缩策略是 extension**。内建的 `echo:compaction` 与产品 / 第三方的阶段
+ * 走同一个 `stage()`，同一份所有权账本；流水线每次跑之前从 Agent 的阶段表重取，装卸在轮边界生效。
+ * core 只拥有状态、校验、投影、事件与落盘（`compaction/`），阶段只产状态。
+ */
+export interface AgentCompactionRegistry {
+  /** 同名已存在 → 抛；order 非有限数 → 抛。返回的 disposer 只卸这个对象。 */
+  stage(stage: CompactionStage): Disposer;
 }
 
 export const AgentTools: ServiceKey<AgentToolsRegistry> = defineService<AgentToolsRegistry>({
@@ -82,6 +93,15 @@ export const AgentPrompt: ServiceKey<AgentPromptRegistry> = defineService<AgentP
   kind: "registry",
   scope: "agent",
   // `turn`：system 每次 run 装配一次，段的增删在下一个 run 才被看见——比 turn 还弱，声明 turn 已经够
+  reload: "turn",
+});
+
+/** 压缩阶段的注册口（`AgentCompactionRegistry`）：`kind:"registry"`，阶段的增删在下一次流水线跑时生效（轮边界）。 */
+export const AgentCompaction: ServiceKey<AgentCompactionRegistry> = defineService<AgentCompactionRegistry>({
+  id: "echo.agent.compaction",
+  version: 1,
+  kind: "registry",
+  scope: "agent",
   reload: "turn",
 });
 
@@ -132,6 +152,8 @@ export function agentRegistries(input: {
    * 与 `background` 同款：Agent 恒有，由 Agent 造的 Host 应当恒传；可选只为假 Host。
    */
   prompt?: { sections: Map<string, PromptSection>; variables: Map<string, PromptVariable> };
+  /** 压缩阶段表（`agent.compactionStages`）。与 `prompt` 同款：Agent 恒有，由 Agent 造的 Host 应当恒传。 */
+  compaction?: Map<string, CompactionStage>;
 }): ReadonlyArray<readonly [ServiceKey<unknown>, unknown]> {
   const tools: AgentToolsRegistry = {
     register: (tool) => {
@@ -158,7 +180,24 @@ export function agentRegistries(input: {
   }
   if (input.background !== undefined) out.push([AgentBackgroundService, input.background]);
   if (input.prompt !== undefined) out.push([AgentPrompt, promptRegistry(input.prompt.sections, input.prompt.variables)]);
+  if (input.compaction !== undefined) out.push([AgentCompaction, compactionRegistry(input.compaction)]);
   return out;
+}
+
+/** 阶段表上的 registry：先查后写、fail-loud；disposer 认对象身份（与 prompt 段同款）。 */
+function compactionRegistry(stages: Map<string, CompactionStage>): AgentCompactionRegistry {
+  return {
+    stage: (stage) => {
+      if (typeof stage.name !== "string" || stage.name === "") throw new Error("压缩阶段缺 name");
+      if (!Number.isFinite(stage.order)) throw new Error(`压缩阶段 '${stage.name}' 的 order 必须是有限数`);
+      if (typeof stage.run !== "function") throw new Error(`压缩阶段 '${stage.name}' 缺 run()`);
+      if (stages.has(stage.name)) throw new Error(`压缩阶段 '${stage.name}' 已存在`);
+      stages.set(stage.name, stage);
+      return () => {
+        if (stages.get(stage.name) === stage) stages.delete(stage.name);
+      };
+    },
+  };
 }
 
 /** 两张表上的 registry：先查后写、fail-loud；disposer 认对象身份（O1a exact-reference 契约）。 */

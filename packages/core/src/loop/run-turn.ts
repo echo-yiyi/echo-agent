@@ -16,6 +16,7 @@ import type { PermissionVerdict } from "../permission/types.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage, ToolSchema, ToolUseBlock } from "../messages.ts";
 import { toolResultMessage, toolUsesFromMessage } from "../messages.ts";
 import { isModelTool, isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type McpTool, type ModelTool } from "../tools/types.ts";
+import { buildWorkingMessages } from "../compaction/view.ts";
 import type { AgentLoopConfig, Emit, LoopDeps, TurnResult } from "./types.ts";
 
 /** 本轮工作集：开头冻一次，整轮只看它。 */
@@ -55,13 +56,15 @@ export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnRe
   config.intake?.openTurn(`${config.runId}#${iteration}`);
   await emit({ type: "turn_start", iteration });
 
-  /* ① AgentMessage 层变换。先拼每轮注入（激活 skill 正文，末尾、不进 transcript），
+  /* ① AgentMessage 层变换。先按压缩状态投影 transcript（段 → 摘要、旧工具结果 → 占位；transcript 本身不动），
+     再拼每轮注入（激活 skill 正文，末尾、不进 transcript），
      再过 transformContext 与 contextBeforeBuild——上层能看到注入后的全貌，有最终话语权。
      注入的**工具门控读本轮冻结的工具集**（与模型菜单同一份快照）：turn_start 里才注册的工具，
      菜单里没有，注入也不许提——否则末尾一段清单要模型用一个它这轮点不到的工具。 */
   const visibleTools: ReadonlySet<string> = new Set(tools.map((t) => t.name));
   const injections = (await config.getTurnInjections?.(visibleTools)) ?? [];
-  let working: AgentMessage[] = injections.length > 0 ? [...context.messages, ...injections] : context.messages;
+  let working: AgentMessage[] = buildWorkingMessages(context.messages, context.compaction);
+  if (injections.length > 0) working.push(...injections);
   if (config.transformContext !== undefined) {
     working = await config.transformContext(working, signal);
   }
