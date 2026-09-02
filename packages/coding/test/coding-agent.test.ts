@@ -154,6 +154,31 @@ test("glob 找文件(排除 node_modules);grep 找内容带 文件:行号", asyn
   expect(bad.isError).toBe(true);
 });
 
+test("grep 的 path 指到单个文件就只搜它（相对、绝对都行）；结果路径一律相对工作区；glob 拿到文件明说要目录", async () => {
+  // 实测 bug（2026-09-01）：模型把 grep 当 `grep <pattern> <file>` 用，此前拿到的是一句 `ENOTDIR: not a directory`
+  await mkdir(join(root, "src/deep"), { recursive: true });
+  await writeFile(join(root, "src/deep/a.ts"), "const x = 1;\nconst hit = 2;\n", "utf8");
+  await writeFile(join(root, "src/b.ts"), "const hit = 3;\n", "utf8");
+
+  const s = makeSearchTools();
+  for (const path of ["src/deep/a.ts", join(root, "src/deep/a.ts")]) {
+    const r = await tool(s, "grep").execute({ pattern: "hit", path }, ctx());
+    expect([path, r.isError, r.content]).toEqual([path, false, "src/deep/a.ts:2:const hit = 2;"]);
+  }
+  // 子目录里搜，报的仍是工作区相对路径——read_file / edit_file 收的就是它，不是 `a.ts` 这种相对 path 的
+  const inDir = await tool(s, "grep").execute({ pattern: "hit", path: "src/deep" }, ctx());
+  expect(inDir.content).toBe("src/deep/a.ts:2:const hit = 2;");
+  const globbed = await tool(s, "glob").execute({ pattern: "*.ts", path: "src/deep" }, ctx());
+  expect(globbed.content).toBe("src/deep/a.ts");
+
+  // glob 的 path 是文件：不静默返回 0 个，明说要目录、指回 grep
+  const fileGlob = await tool(s, "glob").execute({ pattern: "*.ts", path: "src/b.ts" }, ctx());
+  expect([fileGlob.isError, fileGlob.content]).toEqual([true, expect.stringContaining("use grep")]);
+  // 不存在：说是哪个 path，不是 ENOTDIR / ENOENT 原文
+  const missing = await tool(s, "grep").execute({ pattern: "hit", path: "src/nope" }, ctx());
+  expect([missing.isError, missing.content]).toEqual([true, "path not found: src/nope"]);
+});
+
 /* ══════════ 整链装配 ══════════ */
 
 const writeTurns = (): ScriptedTurn[] => [
