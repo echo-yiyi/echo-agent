@@ -6,7 +6,7 @@
 // （`agent.ts` 的 persist 决定哪些事件入账、loadSession 决定恢复顺序），**语义被劈成了两半**。
 // 本 Service 把那半截收回来；注入的 `SessionStore` 只剩字节面。
 //
-// **纯的**：只依赖 `StorageDir`，不碰 `node:`，所以能进 `/engine` 面。
+// **纯的**：只依赖 `StorageDir`，不碰 `node:`。
 //
 // 盘上布局（属于本 Service，不是端口契约的一部分，可改）：
 //

@@ -2,7 +2,7 @@
 //
 // **为什么不用 Web Crypto**：`crypto.subtle.digest` 是异步的，而 §15.4.2 要求 `offer()` 同步、无 Promise
 // ——recordId / blob digest / canonical digest 都在同步 critical section 里算。`node:crypto` 有同步
-// `createHash`，但这份代码要能从 `/engine` 与 `/testing` 到达（engine 纯度门禁止 `node:`），所以自己写。
+// `createHash`，但 `./observability` 公共子路径与 `/testing` 要保持纯 Web-standard（不碰 `node:`），所以自己写。
 // 输入上限由调用方保证（§15.4.2：单条 canonical ≤ 64 KiB、blob chunk ≤ 1 MiB），这个体量下纯 JS 足够。
 //
 // 实现对照 FIPS 180-4；测试用 NIST/RFC 4231 已知向量锁住。

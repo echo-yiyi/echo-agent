@@ -598,11 +598,9 @@ export const OBSERVATION_SYNC_LIMITS = {
  * canonical envelope 的**框架**（recordId / seq / lane / observedAt / correlation / generation / owner /
  * instrumentation …）在 body 之外占的预算。
  *
- * 它存在只为一件事：让 ephemeral `EngineObservationFact` 与 canonical record **共用同一个 admission
- * boundary**。ephemeral fact 不背这些框架字段，若两边用同一个 64 KiB 数字，同一条事实就会在评测面进、
- * 在 Runtime 面成 gap（实测 body 65,248 时正是如此）。于是：`/engine` 一侧按「同步预算减去这份保留」量自己
- * 的 fact，Sequencer 一侧断言实际框架不超过这份保留——**engine 因此永不比 Runtime 宽**，最多在一个保留宽度内
- * 更严。
+ * producer 侧（AgentEvent projector 的正文预算）按「同步预算减去这份保留」量自己的投影，Sequencer 一侧断言
+ * 实际框架不超过这份保留——于是 projector 认为装得下的记录，落库时不会因为框架开销变成 gap
+ * （实测 body 65,248 时正是那种错位）。
  */
 export const OBSERVATION_ENVELOPE_RESERVE = {
   bytes: 8 * 1024,
@@ -612,11 +610,10 @@ export const OBSERVATION_ENVELOPE_RESERVE = {
 /**
  * 身份/框架字符串的**构造期**上限。
  *
- * 光有 `OBSERVATION_ENVELOPE_RESERVE` 证明不了「engine 永不比 Runtime 宽」：runtimeId / generation /
- * owner / instrumentation / subject 这些只出现在 canonical envelope、不出现在 ephemeral fact 的字段，
- * 若长度无约束，一个 5,000 字节的 `instrumentation.name` 就能让 Runtime 成 gap 而 `/engine` 照收
- * （review 实测）。于是它们全部按这里的上限**在构造时 fail-loud**——Sequencer 建的时候校 runtimeId /
- * generation，fact sink 建的时候校 descriptor 的 instrumentation 与 owner。
+ * 光有 `OBSERVATION_ENVELOPE_RESERVE` 兜不住框架：runtimeId / generation / owner / instrumentation / subject
+ * 这些框架字段若长度无约束，一个 5,000 字节的 `instrumentation.name` 就能让每条记录都成 gap（review 实测）。
+ * 于是它们全部按这里的上限**在构造时 fail-loud**——Sequencer 建的时候校 runtimeId / generation，
+ * fact sink 建的时候校 descriptor 的 instrumentation 与 owner。
  * 字段数固定 + 每个有上限 ⇒ 额外框架的总量有可算的上界，保留额才真的兜得住。
  */
 export const OBSERVATION_IDENTITY_LIMITS = {

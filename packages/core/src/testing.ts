@@ -8,9 +8,6 @@ import type { ProviderEvent } from "./events.ts";
 import type { Context } from "./messages.ts";
 import type { Model, ProviderStreams, StreamFn, StreamOptions } from "./provider/types.ts";
 
-// §15.6（OR14）：评测 / `/engine` 纯 loop fixture 用的 in-memory 观测 collector——只会接收、有界、no-throw。
-export { createInMemoryEngineObservationCollector, DEFAULT_COLLECTOR_CAPACITY } from "./observability/collector.ts";
-export type { EngineObservationCollector } from "./observability/collector.ts";
 
 export type ScriptedTurn = ProviderEvent[];
 

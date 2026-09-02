@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 239（value 58 · type 162 · both 19）
+符号 234（value 57 · type 158 · both 19）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -66,10 +66,9 @@ both   EventStream
 value  finalizeError
 value  withPartial
 
--- src/events.ts (14) --
+-- src/events.ts (13) --
 type   AgentEvent
 type   AgentEventInput
-type   AgentEventTap
 type   AgentListener
 type   AgentOutcome
 type   CoreAgentEvent
@@ -159,14 +158,6 @@ value  toolUsesFromMessage
 type   Usage
 value  userMessage
 type   UserMessage
-
--- src/observability/agent-events.ts (1) --
-value  agentEventTapFor
-
--- src/observability/engine-tap.ts (3) --
-type   EngineObservationFact
-type   EngineObservationScope
-type   EngineObservationTap
 
 -- src/observability/query.ts (4) --
 both   ObservationCursorError
@@ -437,7 +428,7 @@ type   McpHost
 type   McpServerSnapshot
 
 == 入口 "./observability" → src/observability/public.ts ==
-符号 79（value 15 · type 62 · both 2）
+符号 76（value 15 · type 59 · both 2）
 
 -- src/admission/types.ts (1) --
 type   RunSource
@@ -455,11 +446,6 @@ type   RunAssemblyBodyV1
 type   RunBoundaryName
 type   RunObservationHeaderSeed
 type   RunStartedBodyV1
-
--- src/observability/engine-tap.ts (3) --
-type   EngineObservationFact
-type   EngineObservationScope
-type   EngineObservationTap
 
 -- src/observability/materialize.ts (4) --
 value  decodeObservationEnvelope
@@ -566,7 +552,7 @@ value  taskInjections
 value  fileTaskStore
 
 == 入口 "./testing" → src/testing.ts ==
-符号 24（value 15 · type 9 · both 0）
+符号 21（value 13 · type 8 · both 0）
 
 -- src/admission/testing.ts (7) --
 type   AdmissionUnderTest
@@ -583,11 +569,6 @@ type   DurableIngressControls
 type   DurableIngressUnderTest
 value  runDedupeKeyProducerConformance
 value  runDurableIngressConformance
-
--- src/observability/collector.ts (3) --
-value  createInMemoryEngineObservationCollector
-value  DEFAULT_COLLECTOR_CAPACITY
-type   EngineObservationCollector
 
 -- src/testing.ts (9) --
 value  bareDoneTurn

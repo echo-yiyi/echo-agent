@@ -110,14 +110,6 @@ export type AgentEventInput = CoreAgentEvent | CustomAgentEvents[keyof CustomAge
 export type AgentListener = (event: AgentEvent, signal: AbortSignal) => Promise<void> | void;
 
 /**
- * §15 O1：AgentEvent 的**被动 tap**。在 state apply 与 required persistence 之后被同步调用，
- * 拿到的是**严格按 seq 顺序**、已落业务状态的事件；不被 await——同步 throw 与（若返回了 Promise）异步 reject
- * 都只成 `observation_tap_failed` 诊断、不进 Agent 控制流。
- * 它不是第二个 `subscribe()`——listener 是被 await 的控制面，tap 是给 collector/journal 的投影口。
- */
-export type AgentEventTap = (event: AgentEvent) => void;
-
-/**
  * golden 判据面：**时序性观测事件排除在外**。
  * message_update / tool_execution_update 什么时候来、来几条取决于网络与调度——
  * 把它们放进确定性判据面，回归必然 flaky。

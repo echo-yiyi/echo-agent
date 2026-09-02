@@ -1,7 +1,7 @@
 // 任务清单的文件落盘 —— **node-only，住子路径 `@echo-agent/core/task/fs`**。
 //
-// 为什么单独一个入口：它 import `node:fs/promises`。一旦进 core 主入口，
-// `/engine` 那条 Web-standard 承诺当场作废——与 `mcp/stdio` 同一个先例。
+// 为什么单独一个入口：它 import `node:fs/promises`。落盘默认件按子路径分开住，
+// 能力模块本身不拖 `node:`——与 `mcp/stdio` 同一个先例。
 //
 // **它只搬字节**（D3 / §13.12.2）：JSON 编解码、逐条验形、「不存在算空清单」这些语义
 // 收在 `loadTasks()` 里。这里剩下的唯一职责是**原子写**——那是存储介质的事，

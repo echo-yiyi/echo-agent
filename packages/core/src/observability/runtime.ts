@@ -7,7 +7,7 @@
 //   · `run.started` / `run.closed` 落不下去 → 业务 run 照跑、照返回真实 outcome，只有 persistence 降级 + 诊断；
 //   · 观测层任何异常都不进 Agent 控制流——这里每个公开方法都不抛。
 //
-// 由 `createAgent()` 构造并经 `attachObservationHost()` 挂到 Agent 上；`/engine` 的 `new Agent()` 没有它。
+// 由 `createAgent()` 构造并经 `attachObservationHost()` 挂到 Agent 上；低层 `new Agent()` 没有它。
 
 import type { Clock } from "../schedule/clock.ts";
 import type { Diagnostic } from "../errors.ts";

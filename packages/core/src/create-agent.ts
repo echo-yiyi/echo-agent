@@ -1,7 +1,7 @@
 // `createAgent` —— 完整默认装配（D2 / D4 / D5 / D6 / D17，见 AGENT-CORE §13.12.3）。
 //
 // **node-only**：解析 `$PWD` / `$ECHO_HOME`、建 `FileDir` 与文件锁，所以只在根入口，
-// 不进 `/engine`。engine 面的消费者走 `new Agent()`，自己给已解析好的 Model 与端口。
+// 低层用法走 `new Agent()`，自己给已解析好的 Model 与端口。
 //
 // **它是装配函数，不是第二个 Agent 类**（D16）：出来的就是同一个 `Agent`。
 //
@@ -212,7 +212,7 @@ export function resolveModel(provider: Provider, available: readonly Model[], wa
  * **不是公共面**（2026-08-31 收）：§14.2 的标题是「一个包、两个使用高度、**一个** composition root」，
  * 而这个函数曾经和 `createEcho()` 一起挂在根入口上——那就是两个装配现场，
  * 「CLI 与 SDK 不得各自装配」那条也就名存实亡。现在它只被 `createEcho()` 调用：
- * 装配现场唯一，低层用户走 `/engine` 的 `new Agent()`（自己给端口、自己注册工具）。
+ * 装配现场唯一，低层用户走 `new Agent()`（自己给端口、自己注册工具）。
  *
  * 名字保留 `createAgent` 而不是改成 `assembleAgent`：它在几十处注释与决策记录里被引用，
  * 改名换来的是一次全仓改词，换不来任何判据。

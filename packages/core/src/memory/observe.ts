@@ -8,8 +8,7 @@
 // （`HMAC-SHA256(observationPathKey, normalizedPath)`，跨 run 可关联、不可枚举明文）；错误原文只投 reasonCode + digest。
 // content 档才带 normalized path 与原文。**digest 放 body 不放 attributes**——它是高基数值。
 
-import type { CapabilityFactDescriptor } from "../observability/fact-sink.ts";
-import type { ObservationFactProjection } from "../observability/engine-tap.ts";
+import type { CapabilityFactDescriptor, ObservationFactProjection } from "../observability/fact-sink.ts";
 import { hmacSha256Hex, sha256Hex } from "../observability/hash.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
 
@@ -54,7 +53,7 @@ export type MemoryFact =
 export const MEMORY_INSTRUMENTATION = { name: "echo.memory", version: "1" } as const;
 
 export type MemoryFactDescriptorOptions = Readonly<{
-  /** observation SQLite 首建时生成的 32 字节 key；`/engine` 的 collector 由 Host 给（评测用固定 key）。 */
+  /** observation SQLite 首建时生成的 32 字节 key（`ObservationRuntime.pathDigestKey`）；测试可给固定 key。 */
   pathDigestKey: Uint8Array | string;
 }>;
 

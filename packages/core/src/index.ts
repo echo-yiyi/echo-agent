@@ -174,11 +174,6 @@ export type {
 } from "./admission/types.ts";
 export { normalizeModelSnapshot, ModelSnapshotError } from "./admission/model-snapshot.ts";
 
-// §15.6（OR14）：构造期只读观测口——consumer seam，不暴露 canonical writer / identity / 查询 / renderer。
-// `agentEventTapFor(tap)` 把它接到 `AgentOptions.observationTap`（O1a 的被动 tap 接缝）。
-export type { EngineObservationFact, EngineObservationScope, EngineObservationTap } from "./observability/engine-tap.ts";
-export { agentEventTapFor } from "./observability/agent-events.ts";
-
 /**
  * §15.6 完整 Runtime 的观测公共面（O3a）：`createEcho()` 出来的 `echo.send()` / `echo.observations`，
  * 以及 observe CLI 的唯一离线入口 `openObservationReader()`（read-only SQLite，不取 StateLock、不起 Runtime）。

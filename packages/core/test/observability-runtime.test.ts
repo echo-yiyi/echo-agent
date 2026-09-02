@@ -120,6 +120,10 @@ describe("send → getRun → render（completed）", () => {
     expect(n).toContain("span_end:tool.execute");
     // 每条 run 内记录都带 runId；turn 内的 model / tool span 带 turnId
     for (const r of o.records) expect(r.scope.runId).toBe(result.runId);
+    // AgentEvent 经 tap 缓冲**严格按 seq** 释放（慢持久化时后到的 seq 不许抢先）：投影记录的 sourceSeq 随 canonical seq 单调递增
+    const sourceSeqs = o.records.filter((r) => r.sourceSeq !== undefined).map((r) => r.sourceSeq!);
+    expect(sourceSeqs.length).toBeGreaterThan(5);
+    for (let i = 1; i < sourceSeqs.length; i++) expect(sourceSeqs[i]!).toBeGreaterThan(sourceSeqs[i - 1]!);
     expect(o.records.find((r) => r.name === "model.generate")?.scope.turnId).toBe("t1");
     expect(o.records.find((r) => r.name === "tool.execute")?.scope.toolCallId).toBe("c1");
 

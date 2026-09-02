@@ -5,8 +5,7 @@
 //   · missed：补跑判定错过（超窗的一次性任务被删、every 跳过欠账对齐到下次）。
 // 这些多发生在 run 之外：没有 runId 就是 runtime activity，经 snapshot → subscribe 取得（§15.9）。
 
-import type { CapabilityFactDescriptor } from "../observability/fact-sink.ts";
-import type { ObservationFactProjection } from "../observability/engine-tap.ts";
+import type { CapabilityFactDescriptor, ObservationFactProjection } from "../observability/fact-sink.ts";
 import { sha256Hex } from "../observability/hash.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
 import type { Schedule } from "./types.ts";

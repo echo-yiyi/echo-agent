@@ -6,8 +6,7 @@
 // harness.ts 是一袋函数、没有 ctx 对象：sink 按 `TaskMap` 实例登记在 WeakMap 里（与 host-wiring 同一个做法），
 // 公开签名一个不改。
 
-import type { CapabilityFactDescriptor, CapabilityFactSink } from "../observability/fact-sink.ts";
-import type { ObservationFactProjection } from "../observability/engine-tap.ts";
+import type { CapabilityFactDescriptor, CapabilityFactSink, ObservationFactProjection } from "../observability/fact-sink.ts";
 import { sha256Hex } from "../observability/hash.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
 import type { TaskItem } from "./types.ts";

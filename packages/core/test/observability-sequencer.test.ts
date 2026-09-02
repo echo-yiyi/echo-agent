@@ -594,7 +594,7 @@ describe("review 修复：sink 隔离、尾部 gap、batch 上限", () => {
     expect(sink.droppedGapCount).toBeGreaterThan(0);
   });
 
-  test("超长 subject 在 bounded lane 成 hole + gap（与 /engine 同一把尺）；links 超条数同样", async () => {
+  test("超长 subject 在 bounded lane 成 hole + gap（与 producer 侧同一把尺）；links 超条数同样", async () => {
     const h = harness();
     const over = "x".repeat(OBSERVATION_IDENTITY_LIMITS.maxIdentifierBytes + 1);
     h.seq.offer(bounded({ ok: 1 }, { subject: { kind: "memory", id: over } }));

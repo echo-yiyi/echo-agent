@@ -1,6 +1,6 @@
 # @echo-agent/core 公共符号缺 JSDoc 的存量。由 test/export-jsdoc.test.ts --write-baseline 生成。
 # 这个列表【只许缩不许涨】:补完一个就从这里删一行,门会替你确认。
-# 当前:163 / 325
+# 当前:156 / 415
 src/admission/model-snapshot.ts#ModelSnapshotError
 src/admission/testing.ts#FakeAgentAdmission
 src/admission/testing.ts#FakePendingRequest
@@ -91,12 +91,6 @@ src/messages.ts#textFromMessage
 src/messages.ts#toolResultMessage
 src/messages.ts#toolUsesFromMessage
 src/messages.ts#userMessage
-src/observability/collector.ts#DEFAULT_COLLECTOR_CAPACITY
-src/observability/collector.ts#EngineObservationCollector
-src/observability/collector.ts#createInMemoryEngineObservationCollector
-src/observability/engine-tap.ts#EngineObservationFact
-src/observability/engine-tap.ts#EngineObservationScope
-src/observability/engine-tap.ts#EngineObservationTap
 src/permission/types.ts#PermissionAnswerResult
 src/permission/types.ts#PermissionAskHandle
 src/permission/types.ts#PermissionAuthorizer

@@ -9,7 +9,7 @@
 
 import { redactedLabel } from "./observability/redact.ts";
 import { errText, type AgentError } from "./errors.ts";
-import type { AgentEvent, AgentEventInput, AgentEventTap, AgentListener, AgentOutcome } from "./events.ts";
+import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import { builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
 import { memoryFactDescriptor } from "./memory/observe.ts";
@@ -149,11 +149,6 @@ export type AgentOptions = {
    * "none" = 诚实缺席，ask 当 policy deny）——两者都不给，构造期 fail-loud。
    */
   permission?: PermissionPolicy;
-  /**
-   * §15 O1：AgentEvent 被动 tap（给 collector / journal 的投影口）。在 state apply 与 required persistence
-   * 之后同步调用，不被 await；抛错只成诊断，不进 Agent 控制流。评测可装 in-memory collector。
-   */
-  observationTap?: AgentEventTap;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   sessions?: SessionManager;
   sessionId?: string;
@@ -274,18 +269,6 @@ const EMPTY_TASK_SNAPSHOT: TaskSnapshot = { total: 0, counts: {}, ready: [], act
 export const DEFAULT_MAX_ITERATIONS = 20;
 
 /**
- * 会通知的 `TaskMap`。**唯一目的**：让「谁改了任务清单」这件事有一个统一的出口，
- * 而不是只有那四个内核工具被包了一层。
- *
- * 它是 `Map` 的子类而不是新接口——`TaskMap` 就是 `Map<string, TaskItem>`，
- * `createTasks()` / `updateTask()` / `removeTask()` / `loadTasks()` 全都直接对它 `set`/`delete`，
- * 换个子类它们一行都不用改，也不会有第二种「任务清单」的类型在公共面上。
- */
-function isThenable(v: unknown): v is PromiseLike<unknown> {
-  return typeof v === "object" && v !== null && typeof (v as { then?: unknown }).then === "function";
-}
-
-/**
  * `deliver()` 与 schedule adapter 的 dedupeKey 派生：有稳定事实身份（environment 的 source + ref，比如
  * schedule incarnation、background 任务 id）就用它；**没有自然身份的每次都生成唯一 UUID**——那等价于
  * 主动关闭跨调用去重，比复用一个固定常量诚实（后者会让互不相干的事实互相吞掉）。
@@ -307,6 +290,14 @@ const NO_LEASE_MESSAGE =
  */
 type TaskWriteOutcome = "written" | "cancelled";
 
+/**
+ * 会通知的 `TaskMap`。**唯一目的**：让「谁改了任务清单」这件事有一个统一的出口，
+ * 而不是只有那四个内核工具被包了一层。
+ *
+ * 它是 `Map` 的子类而不是新接口——`TaskMap` 就是 `Map<string, TaskItem>`，
+ * `createTasks()` / `updateTask()` / `removeTask()` / `loadTasks()` 全都直接对它 `set`/`delete`，
+ * 换个子类它们一行都不用改，也不会有第二种「任务清单」的类型在公共面上。
+ */
 class ObservedTaskMap extends Map<string, TaskItem> {
   /** 由 Agent 在构造期接上；在此之前（字段初始化顺序）改动不通知，那时也还没有 store。 */
   onChange: () => void = () => {};
@@ -399,10 +390,9 @@ export class Agent {
    * 装了持久 inbox 就是那一份；没装则是同一个类的纯内存模式——语义一致，只差写不写盘。
    */
   private readonly inbox: InboxStore;
-  private readonly observationTap?: AgentEventTap;
   /**
    * Host-internal canonical writer（`attachObservationHost`，只有 `createAgent()` 会挂）：首次用到时从 WeakMap 解析，
-   * 顺手把它的诊断接到本 Agent 的诊断通道。`/engine` 的 `new Agent()` 没有它——那条路只有 `observationTap`，没有 journal。
+   * 顺手把它的诊断接到本 Agent 的诊断通道。低层 `new Agent()` 没有它——那条路没有 journal，也没有观测面。
    */
   private observation: ObservationRuntime | undefined;
   private observationResolved = false;
@@ -739,7 +729,6 @@ export class Agent {
         closed: (input) => this.observeRunClosed(input),
       },
     });
-    this.observationTap = opts.observationTap;
     this.inbox = opts.inboxStore ?? new InboxStore(null);
     this.inbox.attachDiagnostics((d) => this.reportDiagnostic(d));
     // 公开面走严格闸（受生命周期管的 Agent 只有 running 才开放）；schedule 补跑走 internal（见 deliverForSchedule）
@@ -2665,12 +2654,12 @@ export class Agent {
   }
 
   /**
-   * tap 的按 seq 释放缓冲。seq 在 processEvents 入口分配、persist 是 await 的：早一条 message_end 还在慢持久化时，
-   * 外部 steer() fire-and-forget 的 queue_update 拿到更大的 seq，若直接交给 tap 就先到了（实测 [9,queue_update]
+   * canonical sink 的按 seq 释放缓冲。seq 在 processEvents 入口分配、persist 是 await 的：早一条 message_end 还在慢持久化时，
+   * 外部 steer() fire-and-forget 的 queue_update 拿到更大的 seq，若直接交给 sink 就先到了（实测 [9,queue_update]
    * 早于 [8,message_end]）。所以每条先进缓冲，只放行 seq 连续的前缀。
    */
   private releaseToTap(event: AgentEvent): void {
-    if (this.observationTap === undefined && this.observationRuntime() === undefined) return;
+    if (this.observationRuntime() === undefined) return;
     this.tapPending.set(event.seq, event);
     for (;;) {
       const next = this.tapPending.get(this.tapNextSeq);
@@ -2682,30 +2671,16 @@ export class Agent {
   }
 
   /**
-   * 同步调用 tap，**不 await**。类型写的是返回 void，但 TypeScript 放行 `async () => {}`：返回了 thenable 就挂
-   * `.then(undefined, fail)` 把 reject 转成诊断——否则它是 unhandled rejection，Node 下能直接终结常驻进程
-   * （实测 11 条 unhandled、0 条诊断）。同步 throw 与异步 reject 都不进 Agent 控制流。
+   * 同步交给 canonical sink，**不 await**。sink 自身 never-throw（fact-sink.ts），这里再兜一层：
+   * 异常原文不进诊断（§15.11 采集边界）——只留分类 + 稳定 hash；观测层任何异常都不进 Agent 控制流。
    */
   private deliverToTap(event: AgentEvent): void {
-    const fail = (e: unknown): void =>
-      // 第三方 tap 的异常原文不进诊断（§15.11 采集边界）——它可能夹着凭据；只留分类 + 稳定 hash。
-      this.reportDiagnostic({ code: "observation_tap_failed", message: `observationTap 抛错（seq ${event.seq}，${event.type}）：${redactedLabel(e)}` });
-    // canonical 那条路先走：sink 自身 never-throw（fact-sink.ts），这里再兜一层——观测层任何异常都不进 Agent 控制流
     const sink = this.observationSink;
-    if (sink !== undefined) {
-      try {
-        sink.offer(event);
-      } catch (e) {
-        fail(e);
-      }
-    }
-    const tap = this.observationTap;
-    if (tap === undefined) return;
+    if (sink === undefined) return;
     try {
-      const r: unknown = tap(event);
-      if (isThenable(r)) r.then(undefined, fail);
+      sink.offer(event);
     } catch (e) {
-      fail(e);
+      this.reportDiagnostic({ code: "observation_tap_failed", message: `observation sink 抛错（seq ${event.seq}，${event.type}）：${redactedLabel(e)}` });
     }
   }
 
@@ -2715,7 +2690,7 @@ export class Agent {
   private observationRuntime(): ObservationRuntime | undefined {
     if (this.observationResolved) return this.observation;
     const wiring = observationHostOf(this);
-    if (wiring === undefined) return undefined; // 还没挂（构造期）或根本不会挂（/engine）：不记忆，下次再看
+    if (wiring === undefined) return undefined; // 还没挂（构造期）或根本不会挂（低层 `new Agent()`）：不记忆，下次再看
     this.observationResolved = true;
     this.observation = wiring.runtime;
     const rt = wiring.runtime;

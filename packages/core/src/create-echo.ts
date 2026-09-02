@@ -4,7 +4,7 @@
 // **把磁盘上的 Extension 发现出来、装进这个 Agent**。所以出来的不是第二个 Agent 类，
 // 是一个 `Echo` 句柄：`{ agent, extensions, stop() }`。
 //
-// **node-only**（`node:fs/promises` + `node:url`），和 `create-agent.ts` 一样只在根入口，不进 `/engine`。
+// **node-only**（`node:fs/promises` + `node:url`），和 `create-agent.ts` 一样只在根入口。
 //
 // ## 与 §14.8 完整 Loader 的诚实边界
 //

@@ -58,7 +58,7 @@ export function syncEncodingLimits(): EncodingLimits {
 
 /**
  * 观测投影的共享预算：同步预算扣掉 canonical envelope 的框架保留。
- * `/engine` 的 ephemeral fact 按它量；Sequencer 那边框架另有断言，两面因此同一个 admission boundary。
+ * AgentEvent projector 的正文预算按它量；Sequencer 那边框架另有断言，投影与落库因此同一个 admission boundary。
  */
 export function projectionEncodingLimits(): EncodingLimits {
   return {

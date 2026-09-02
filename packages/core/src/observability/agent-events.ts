@@ -7,12 +7,11 @@
 // run 边界（run.accepted / started / closed）**不在这里**：它们只有 admission / executor / finalizer 一个
 // emission owner（§15.3.5）；tap 只提供 turn / message / tool / status 这些 finalizer 形成终态所需的事实。
 //
-// 纯 Web-standard；可从 `/engine` 到达。
+// 纯 Web-standard（不碰 `node:`）。
 
-import type { AgentEvent, AgentEventTap, AgentOutcome } from "../events.ts";
+import type { AgentEvent, AgentOutcome } from "../events.ts";
 import type { AgentMessage, ContentBlock } from "../messages.ts";
-import type { EngineObservationTap, ObservationFactProjection } from "./engine-tap.ts";
-import { factSinkToEngineTap, type CapabilityFactDescriptor, type FactSinkOptions } from "./fact-sink.ts";
+import type { CapabilityFactDescriptor, ObservationFactProjection } from "./fact-sink.ts";
 import { ObservationEncodingError, encodeCanonical, projectionEncodingLimits } from "./normalize.ts";
 import type { ObservationCapturePolicy } from "./types.ts";
 import { OBSERVATION_SYNC_LIMITS } from "./types.ts";
@@ -46,10 +45,10 @@ const MAX_CONTENT_BLOCK_SCAN = 1_024;
 /**
  * content 档拼出的正文上限，单位是**canonical 字节**，且是从**整条 fact 的预算**里扣出来的。
  *
- * 起因（2026-08-27 review P2 实测）：上一版把它定成 64 KiB **code unit**，而 `/engine` 整条 fact 的预算是
+ * 起因（2026-08-27 review P2 实测）：上一版把它定成 64 KiB **code unit**，而整条投影的预算是
  * 64 KiB − 8 KiB envelope reserve，Runtime envelope 自己还有开销——50,000 chars accepted、60,000 dropped、
  * **70,000 被 projector 截断后照样 dropped**。也就是说 `textTruncated:true` 的记录必然过不了后续编码，
- * 那个标记只在 `projectAgentEvent()` 的单测里成立，穿过 `factSinkToEngineTap` / Sequencer 就是假的。
+ * 那个标记只在 `projectAgentEvent()` 的单测里成立，穿过 Sequencer 就是假的。
  *
  * 保留额留给 body 其余字段（stopReason / 计数 / usage / model）与 fact 框架（name / scope / attributes）。
  * **仍不是整条 body 的保证**：content 档的 `toolUseBlocks[].input` 大小不可预估，它超预算时整条照样被拒——
@@ -405,12 +404,3 @@ export const agentEventDescriptor: CapabilityFactDescriptor<AgentEvent> = {
   instrumentation: AGENT_EVENT_INSTRUMENTATION,
   project: projectAgentEvent,
 };
-
-/**
- * 把 `EngineObservationTap` 接到 `AgentOptions.observationTap` 上：Agent 在 state apply + required persistence 之后
- * 同步调它，抛错只成 `observation_tap_failed` 诊断（#18 的接缝）。这里再包一层 no-throw，两道都在。
- */
-export function agentEventTapFor(tap: EngineObservationTap, opts: FactSinkOptions = {}): AgentEventTap {
-  const sink = factSinkToEngineTap(agentEventDescriptor, tap, opts);
-  return (event) => sink.offer(event);
-}
