@@ -19,6 +19,7 @@ import {
   type SkillMap,
 } from "../src/skill/harness.ts";
 import { makeSkillTools } from "../src/skill/tools.ts";
+import { SKILL_ACTIVE_TOTAL_CAP, SKILL_BODY_CAP } from "../src/skill/compose.ts";
 import { Agent } from "../src/agent.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import { registerTool } from "../src/tools/harness.ts";
@@ -316,5 +317,42 @@ test("Agent 自己拥有 skill 机制：给了 skillStore，零池也装两件�
   await (create.execute as (p: unknown, c: unknown) => Promise<unknown>)({ name: "made", description: "新建的", content: "x" }, ctx());
   expect(await dir.read("made/SKILL.md")).toContain("新建的");
   await agent.dispose();
+});
+
+/* ══════════ 激活总预算（2026-09-01 review P1：单条上限管不住连续激活 100 个） ══════════ */
+
+test("激活总预算：合计超过 SKILL_ACTIVE_TOTAL_CAP 就拒、回执带现状；重复激活不重复计费；超长正文按单条上限计", async () => {
+  const f = fixture();
+  const big = "x".repeat(SKILL_BODY_CAP); // 单条顶格
+  addSkills(f.skills, [
+    skill("a", { content: big }),
+    skill("b", { content: big }),
+    skill("c", { content: big }),
+    skill("d", { content: big }),
+    skill("e", { content: "小" }),
+  ]);
+  for (const n of ["a", "b", "c", "d"]) expect(activateSkill(f.skills, f.active, n).ok).toBe(true); // 4 × 16k = 64k，正好到顶
+  const r = activateSkill(f.skills, f.active, "e");
+  expect(r.ok).toBe(false);
+  if (!r.ok && r.reason === "budget") {
+    expect([r.used, r.needed, r.cap]).toEqual([4 * SKILL_BODY_CAP, 1, SKILL_ACTIVE_TOTAL_CAP]);
+    expect(r.active).toEqual(["a", "b", "c", "d"]);
+  } else {
+    throw new Error(`期望 budget 拒绝，收到 ${JSON.stringify(r)}`);
+  }
+  // 重复激活已激活的：不算新开销，仍然成功（只更新 instructions）
+  expect(activateSkill(f.skills, f.active, "a", { instructions: "again" }).ok).toBe(true);
+  expect(f.active.size).toBe(4);
+  // 模型那条路：拒绝文案说清「已激活多少、这个要多少、上限」，不让它试半天
+  const [activate] = makeSkillTools({ skills: f.skills, active: f.active, hasTool: f.hasTool });
+  const out = await (activate!.execute as (p: unknown, c: unknown) => Promise<{ isError: boolean; content: string }>)({ name: "e" }, ctx());
+  expect(out.isError).toBe(true);
+  expect(out.content).toContain("active skill budget");
+  expect(out.content).toContain(`limit ${SKILL_ACTIVE_TOTAL_CAP}`);
+
+  // 超长正文按单条上限（渲染时也只注入这么多）计费：一个 100k 的 skill 只算 16k，能激活
+  const g = fixture();
+  addSkills(g.skills, [skill("huge", { content: "y".repeat(100_000) })]);
+  expect(activateSkill(g.skills, g.active, "huge").ok).toBe(true);
 });
 

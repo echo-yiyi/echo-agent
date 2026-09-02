@@ -86,6 +86,7 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
     setModel: (m) => base.setModel(m),
     setThinkingLevel: (l) => base.setThinkingLevel(l),
     reset: () => base.reset(),
+    compact: (i) => base.compact(i),
   };
   // **不能用 `Object.assign`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter-only，
   // 赋值会抛 "Attempted to assign to readonly property"（实测）。覆盖项一律走 `defineProperty`，
@@ -720,6 +721,27 @@ test("自主 run 报错：屏幕要看得见，退出码要是 1", async () => {
 
   quit(ui);
   expect(await done).toBe(1); // 失败退出码
+});
+
+test("迭代上限不是坏了，是预算用完：错误后面跟着「输入继续」的提示；别的错误不跟", async () => {
+  // 实测 `[错误] 迭代上限 20` 这一行没告诉用户下一步能做什么（2026-09-02）
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const emit = tapEvents(agent);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+
+  emit({ type: "agent_start" });
+  emit({
+    type: "agent_end",
+    outcome: { kind: "error", error: { source: "internal", code: "max_iterations", retryable: false, message: "迭代上限 20" } },
+  });
+  await flush();
+  expect(ui.screen()).toContain("[错误] 迭代上限 20（已做的都在，输入「继续」接着跑）");
+  expect(ui.screen().split("输入「继续」").length - 1).toBe(1); // 上一条测试那种普通错误不带这句
+
+  quit(ui);
+  await done;
 });
 
 test("本地一轮出错只显示一次（`agent_end` 显示，`submit()` 不重复显示）", async () => {
@@ -1811,6 +1833,121 @@ test("`/model 不存在的id`：如实报、装备不动、不发给模型", asy
     expect(ui.screen()).toContain("目录里没有 'gpt-99-并不存在'");
     expect(agent.state.model.id).toBe("kimi-k3");
     expect(prompts).toEqual([]);
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+/* ─────────────── 斜杠命令菜单：敲 / 出候选、边敲边过滤，Tab 补全，Enter 直接执行（键位照 pi） ─────────────── */
+
+const TAB = "\t";
+
+test("敲 `/cl`：菜单弹出且过滤掉不匹配的命令；Tab 补全成 /clear、菜单收起；Enter 直接执行", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("不该被跑到")]);
+    const prompts = capturePrompts(agent);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    for (const ch of "/cl") ui.feed(ch);
+    await flush();
+    expect(ui.screen()).toContain("清空对话"); // clear 的描述行在菜单里
+    expect(ui.screen()).not.toContain("选模型"); // model 被 fuzzy 过滤掉
+
+    ui.feed(TAB);
+    await flush();
+    expect(ui.screen()).not.toContain("清空对话"); // 菜单收起
+    expect(ui.screen()).toContain("/clear"); // 只敲了 /cl，全名上屏说明补全生效
+
+    ui.feed(ENTER);
+    await flush();
+    expect(prompts).toEqual([]); // 是命令不是消息
+    expect(ui.screen()).not.toContain("不认识"); // 派发到了 /clear
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("`/mo` 菜单开着按 Enter：补全并**直接执行**——模型选择器弹出", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    for (const ch of "/mo") ui.feed(ch);
+    await flush();
+    expect(ui.screen()).toContain("选模型"); // 菜单里只剩 model 的描述
+
+    ui.feed(ENTER);
+    await flush(100);
+    expect(ui.screen()).toContain("选择模型"); // Enter 落进 /model 的执行体：选择器开了
+
+    ui.feed(ESC_KEY);
+    await flush();
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("`/model dee`：模型 id 参数补全弹出；Tab 补全整个 id；Enter 直切到该模型", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    for (const ch of "/model dee") ui.feed(ch);
+    await flush();
+    expect(ui.screen()).toContain("deepseek-v4-flash"); // 参数菜单在，fuzzy 首选
+
+    ui.feed(TAB);
+    await flush();
+    ui.feed(ENTER);
+    await flush(100);
+    expect(agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" }); // 只敲了 dee，Tab 补全后直切成功
+    expect(ui.screen()).toContain("DeepSeek 的 API key"); // 未配 key 的家：主动弹配置段
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("`/zz` 什么都不匹配：不弹菜单", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+
+    for (const ch of "/zz") ui.feed(ch);
+    await flush();
+    expect(ui.screen()).not.toContain("清空对话");
+    expect(ui.screen()).not.toContain("选模型");
+    expect(ui.screen()).not.toContain("压缩上下文");
 
     quit(ui);
     await done;

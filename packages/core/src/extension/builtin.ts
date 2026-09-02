@@ -29,10 +29,12 @@ import type { ActiveSkillMap, SkillMap } from "../skill/harness.ts";
 import type { AgentBackground } from "../background/types.ts";
 import { defineExtension, type ExtensionDefinition } from "./abi.ts";
 import { ExtensionHost, type ExtensionEntry } from "./host.ts";
-import { AgentPrompt, AgentTools, agentRegistries } from "./registries.ts";
+import { AgentCompaction, AgentPrompt, AgentTools, agentRegistries } from "./registries.ts";
 import type { PromptSection, PromptVariable } from "../prompt/types.ts";
 import { builtinVariables, environmentSection } from "../prompt/sections.ts";
-import { AgentRuntimeService, type AgentRuntime, type EquipResult } from "./runtime.ts";
+import { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult } from "./runtime.ts";
+import type { CompactionStage } from "../compaction/types.ts";
+import type { CompactionPackConfig } from "../compaction/builtin.ts";
 import type { ServiceKey } from "./abi.ts";
 import type { AgentMessage, ImageBlock } from "../messages.ts";
 import type { AgentOutcome } from "../events.ts";
@@ -165,6 +167,64 @@ export const ECHO_SKILLS = defineToolPack("echo:skills");
 export const ECHO_MEMORY = defineToolPack("echo:memory");
 export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
 
+function isStageArray(v: unknown): v is readonly CompactionStage[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (s) =>
+        typeof s === "object" &&
+        s !== null &&
+        typeof (s as { name?: unknown }).name === "string" &&
+        typeof (s as { order?: unknown }).order === "number" &&
+        typeof (s as { run?: unknown }).run === "function",
+    )
+  );
+}
+
+/**
+ * `echo:compaction`（2026-09-02）：缺省的压缩阶梯 + `transcript_read` + 它的习惯段。
+ *
+ * **与第三方策略同一条路**：阶段经 `AgentCompaction.stage()`、工具经 `AgentTools.register()`、段经
+ * `AgentPrompt.section()`，三者同一个 effect、`boundary: "turn"`——整组一起装、一起撤，热插拔在轮边界生效
+ * （流水线每次跑之前重取阶段表）。产品要换策略：`compaction.builtin = false` 不装这组，再挂自己的扩展注册阶段。
+ *
+ * 不用 `defineToolPack`：它的 inject 只有 tools / prompt；给它加 required 的 `AgentCompaction` 会让
+ * 所有 tool pack（含 `echo:workspace`）都依赖压缩 registry，假 Host 就装不上了。
+ */
+export const ECHO_COMPACTION: ExtensionDefinition<CompactionPackConfig> = defineExtension<CompactionPackConfig>({
+  name: "echo:compaction",
+  hostAbiVersion: 1,
+  inject: {
+    tools: { service: AgentTools, required: true },
+    prompt: { service: AgentPrompt, required: true },
+    compaction: { service: AgentCompaction, required: true },
+  },
+  config: (input: unknown): CompactionPackConfig => {
+    const tools = (input as { tools?: unknown } | undefined)?.tools;
+    const sections = (input as { sections?: unknown } | undefined)?.sections ?? [];
+    const stages = (input as { stages?: unknown } | undefined)?.stages;
+    if (!isToolArray(tools) || !isSectionArray(sections) || !isStageArray(stages)) {
+      throw new Error("echo:compaction 的 config 必须是 { tools: AgentTool[], sections?: PromptSection[], stages: CompactionStage[] }");
+    }
+    return { tools, sections, stages };
+  },
+  apply(ctx, config) {
+    if (config.tools.length === 0 && config.sections.length === 0 && config.stages.length === 0) return;
+    const tools = ctx.get(AgentTools);
+    const prompt = ctx.get(AgentPrompt);
+    const compaction = ctx.get(AgentCompaction);
+    void ctx.effect({
+      boundary: "turn",
+      start: () =>
+        registerAll([
+          ...config.tools.map((t) => () => tools.register(t)),
+          ...config.sections.map((s) => () => prompt.section(s)),
+          ...config.stages.map((s) => () => compaction.stage(s)),
+        ]),
+    });
+  },
+});
+
 /**
  * 内建工具按能力分的四组。`Agent` 造好它们，装配层拿去 mount。
  *
@@ -176,6 +236,8 @@ export type BuiltinToolGroups = {
   readonly skills: BuiltinToolGroup | undefined;
   readonly memory: BuiltinToolGroup | undefined;
   readonly scheduler: BuiltinToolGroup | undefined;
+  /** `undefined` = `compaction.builtin === false`：不装缺省阶梯（流水线与 registry 仍在，等别的扩展注册阶段）。 */
+  readonly compaction: CompactionPackConfig | undefined;
 };
 
 /** 一组内建：工具 + 这组工具自己的 prompt 段，就是 `defineToolPack` 的 config 形状。 */
@@ -204,18 +266,19 @@ export function builtinEntries(
     runtime === undefined
       ? []
       : [{ entryId: "echo:agent", definition: ECHO_AGENT as ExtensionDefinition<unknown>, config: { runtime } }];
-  const table: readonly [string, ExtensionDefinition<unknown>, BuiltinToolGroup | undefined][] = [
+  const table: readonly [string, ExtensionDefinition<unknown>, BuiltinToolGroup | CompactionPackConfig | undefined][] = [
     ["echo:tasks", ECHO_TASKS as ExtensionDefinition<unknown>, groups.tasks],
     ["echo:skills", ECHO_SKILLS as ExtensionDefinition<unknown>, groups.skills],
     ["echo:memory", ECHO_MEMORY as ExtensionDefinition<unknown>, groups.memory],
     ["echo:scheduler", ECHO_SCHEDULER as ExtensionDefinition<unknown>, groups.scheduler],
+    ["echo:compaction", ECHO_COMPACTION as ExtensionDefinition<unknown>, groups.compaction],
   ];
   return [
     // **`echo:agent` 排在最前**：它 provide 的 `AgentRuntime` 是别人 inject 的东西，
     // 拓扑排序会保证顺序，但把它写在前面读起来也更像那么回事。
     ...agentEntry,
     ...table
-      .filter((row): row is [string, ExtensionDefinition<unknown>, BuiltinToolGroup] => row[2] !== undefined)
+      .filter((row): row is [string, ExtensionDefinition<unknown>, BuiltinToolGroup | CompactionPackConfig] => row[2] !== undefined)
       .map(([entryId, definition, group]) => ({ entryId, definition, config: group })),
   ];
 }
@@ -250,6 +313,8 @@ export type BuiltinMountable = RuntimeSource & {
   /** prompt 段与变量的两张表。与 `background` 同理：Agent 恒有，默认 Host 要把 `AgentPrompt` 提供出去。 */
   readonly promptSections: Map<string, PromptSection>;
   readonly promptVariables: Map<string, PromptVariable>;
+  /** 压缩阶段表。同理：Agent 恒有，默认 Host 要把 `AgentCompaction` 提供出去，否则 `echo:compaction` 装不上。 */
+  readonly compactionStages: Map<string, CompactionStage>;
 };
 
 /**
@@ -272,6 +337,7 @@ export async function mountBuiltinTools(
       // **能力端口也要给**：少了它，`inject` 后台队列的扩展在这条低层路径上装不上
       background: agent.background,
       prompt: { sections: agent.promptSections, variables: agent.promptVariables },
+      compaction: agent.compactionStages,
     }),
   }),
   /** 调用方已经算好的那份。**传进来就用它**，不再自己算一份——两份就会分家。 */
@@ -363,6 +429,7 @@ export function agentRuntimeOf(agent: RuntimeSource): AgentRuntime {
         agent.thinkingLevel = level;
       }),
     reset: () => equip(() => agent.reset()),
+    compact: (instructions) => agent.compact(instructions),
     get acceptsWork() {
       return agent.acceptsWork;
     },
@@ -379,4 +446,6 @@ export type RuntimeSource = Pick<
   model: Model;
   thinkingLevel: ThinkingLevel;
   reset(): void;
+  /** 手动压缩：Agent 自己不抛、返回结果（忙 / 没阶段都是 rejected），这里只转发。 */
+  compact(instructions?: string): Promise<CompactResult>;
 };

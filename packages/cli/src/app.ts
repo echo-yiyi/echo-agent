@@ -9,12 +9,13 @@
 
 import { errText, type AgentState, type CredentialStore, type Model, type Provider, type ThinkingLevel } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
-import { decodeKittyPrintable, Editor, isKeyRelease, ProcessTerminal, SelectList, TuiMainScreen, type TUI } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Editor, fuzzyFilter, isKeyRelease, ProcessTerminal, SelectList, TuiMainScreen, type AutocompleteItem, type TUI } from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
 import { wrap } from "./text.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { installKeybindings } from "./keybindings.ts";
 import { CredentialSetup, isConfigured, type VerifyFn } from "./setup.ts";
+import { SlashCommandProvider, type SlashSpec } from "./slash.ts";
 import { describeModel } from "./catalog.ts";
 import { bold, dim, EDITOR_THEME, SELECT_LIST_THEME } from "./theme.ts";
 import { ECHO_AGENT, type Product } from "./product.ts";
@@ -114,6 +115,12 @@ function footerLine(state: Readonly<AgentState>, width: number): string {
   if (cached !== undefined && state.usage.inputTokens > 0) {
     parts.push(`缓存 ${short(cached)} (${Math.round((cached / state.usage.inputTokens) * 100)}%)`);
   }
+  // 上下文占用（2026-09-02）：provider 每轮报的 usage 与压缩后的估算，配目录里的窗口；两边缺一个都不显示——
+  // 只显示 token 数而没有分母，用户仍不知道离撞窗还有多远
+  const window = state.model.capabilities?.contextWindow;
+  if (state.contextTokens !== null && window !== undefined && window > 0) {
+    parts.push(`上下文 ${short(state.contextTokens)}/${short(window)} (${Math.round((state.contextTokens / window) * 100)}%)`);
+  }
   if (state.thinkingLevel !== "off") parts.push(`思考 ${state.thinkingLevel}`);
   if (state.tasks.total > 0) parts.push(`任务 ${state.tasks.active.length}/${state.tasks.total}`);
   if (state.activeSkills.length > 0) parts.push(`skill ${state.activeSkills.length}`);
@@ -172,23 +179,19 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   editor.onSubmit = (text: string): void => {
     const trimmed = text.trim();
     if (trimmed === "") return;
-    // 斜杠命令（P3 的最小集）：`/clear`、`/model`。不认识的**报一句并把原文放回**，不发给模型——
-    // 拼错命令静默变成一条消息，就是「写了没生效」在对话里的形态。
+    // 斜杠命令：从 `slashCommands` 表派发（表见 compactNow 之后——菜单、派发、文案同一张表）。
+    // 不认识的**报一句并把原文放回**，不发给模型——拼错命令静默变成一条消息，
+    // 就是「写了没生效」在对话里的形态。
     if (trimmed.startsWith("/")) {
-      if (trimmed === "/clear") {
-        clearConversation();
-        return;
-      }
-      if (trimmed === "/model") {
-        openModelPicker(); // 与 Ctrl+L 同一个选择器
-        return;
-      }
-      if (trimmed.startsWith("/model ")) {
-        void setModelById(trimmed.slice("/model ".length).trim());
+      const spaceIndex = trimmed.indexOf(" ");
+      const name = (spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex)).slice(1);
+      const command = slashCommands.find((c) => c.name === name);
+      if (command !== undefined) {
+        command.run(spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim());
         return;
       }
       editor.setText(text);
-      transcript.push({ kind: "notice", text: `不认识的命令 ${trimmed.split(/\s/)[0]}（有 /clear、/model [模型id]）` });
+      transcript.push({ kind: "notice", text: `不认识的命令 /${name}（有 ${slashMenuText}）` });
       rerender();
       return;
     }
@@ -391,6 +394,53 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     });
   };
 
+  /** `/compact [指令]`：协议 `compact()`——与自动压缩同一条流水线。结果如实显示：压了哪些阶段 / 没什么可压 / 被拒（正在跑、没策略）。 */
+  const compactNow = async (instructions: string): Promise<void> => {
+    transcript.push({ kind: "notice", text: "[压缩] 开始…" });
+    rerender();
+    const result = await agent.compact(instructions === "" ? undefined : instructions);
+    if (result.kind === "rejected") transcript.push({ kind: "notice", text: `[压缩] 没压成：${result.reason}` });
+    else if (result.stages.length === 0) transcript.push({ kind: "notice", text: "[压缩] 没有可压的内容" });
+    else {
+      const size = result.contextTokens !== null ? `，上下文约 ${short(result.contextTokens)} token` : "";
+      transcript.push({ kind: "notice", text: `[压缩] 完成：${result.stages.join(" → ")}${size}；原文仍可经 transcript_read 读取` });
+    }
+    rerender();
+  };
+
+  /** `/model <id>` 的参数补全：全目录（不分家）按 id fuzzy 过滤；低层用法没给 configure 就没有菜单。 */
+  const modelIdCompletions = (prefix: string): AutocompleteItem[] | null => {
+    if (configure === undefined) return null;
+    const items = configure.providers.flatMap((c) =>
+      c.provider.getModels().map((m) => ({ value: m.id, label: m.id, description: `${c.name} · ${m.name ?? m.id}` })),
+    );
+    const filtered = fuzzyFilter(items, prefix, (i) => i.value);
+    return filtered.length === 0 ? null : filtered;
+  };
+
+  // 斜杠命令：**一张表喂三处**——编辑器的补全菜单、onSubmit 的派发、报错文案里的清单。
+  // 加命令只改这里；三处各写一份就是漂移的起点。
+  const slashCommands: readonly SlashSpec[] = [
+    { name: "clear", description: "清空对话，重新开始", run: () => clearConversation() },
+    {
+      name: "model",
+      argumentHint: "[模型id]",
+      description: "选模型：不带参数开选择器，带 id 直切",
+      getArgumentCompletions: (prefix) => modelIdCompletions(prefix),
+      run: (rest) => (rest === "" ? openModelPicker() : void setModelById(rest)),
+    },
+    {
+      name: "compact",
+      argumentHint: "[指令]",
+      description: "手动压缩上下文，可带侧重指令",
+      run: (rest) => void compactNow(rest),
+    },
+  ];
+  const slashMenuText = slashCommands
+    .map((c) => `/${c.name}${c.argumentHint === undefined ? "" : ` ${c.argumentHint}`}`)
+    .join("、");
+  editor.setAutocompleteProvider(new SlashCommandProvider(slashCommands));
+
   const answer = (decision: "allow" | "deny"): void => {
     const ask = pending;
     if (ask === null) return;
@@ -496,7 +546,9 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         // 两边都显示又会让本地那一轮出现两条一模一样的 `[错误]`。
         if (event.outcome.kind === "error") {
           failed = true;
-          transcript.push({ kind: "notice", text: `[错误] ${event.outcome.error.message}` });
+          // 迭代上限不是「坏了」，是预算用完：说清下一步——已经做的都在上下文里，一句「继续」就接着跑
+          const hint = event.outcome.error.code === "max_iterations" ? "（已做的都在，输入「继续」接着跑）" : "";
+          transcript.push({ kind: "notice", text: `[错误] ${event.outcome.error.message}${hint}` });
           // 端点说 key 不对（没配 / 被撤 / 过期）：把配置段摆出来，而不是让用户对着一句 `[错误]` 猜
           if (event.outcome.error.code === "auth") enterConfigure("[凭据] 这把 key 不能用了——重新配一个");
         }

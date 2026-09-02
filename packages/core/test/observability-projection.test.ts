@@ -62,7 +62,7 @@ describe("CoreAgentEvent 逐 type 固定投影（metadata 档）", () => {
     [ev(7, { type: "tool_execution_end", toolCallId: "c1", toolName: "echo", result: { content: "ok", isError: false, metadata: null } }), "span_end", "tool.execute"],
     [ev(8, { type: "turn_end", iteration: 1, message: { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 }, toolResults: [] }), "span_end", "turn.execute"],
     [ev(9, { type: "compaction_start", reason: "auto" }), "span_start", "context.compact"],
-    [ev(10, { type: "compaction_end", summary: "s", coveredUpTo: "m3" }), "span_end", "context.compact"],
+    [ev(10, { type: "compaction_end", reason: "auto", compaction: { spans: [{ from: 0, to: 2, summary: "s" }], clearedBefore: 0 }, stages: ["summary"], contextTokens: 12 }), "span_end", "context.compact"],
     [ev(11, { type: "retry_scheduled", attempt: 1, maxAttempts: 3, delayMs: 10, cause: "rate_limit" }), "event", "model.retry.scheduled"],
     [ev(12, { type: "usage", usage: { inputTokens: 3, outputTokens: 4 } }), "event", "model.usage"],
     [ev(13, { type: "resource_changed", kind: "tool", action: "added", name: "x", source: "test" }), "event", "agent.resource.changed"],

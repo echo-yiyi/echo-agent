@@ -16,6 +16,7 @@ import type { PermissionVerdict } from "../permission/types.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage, ToolSchema, ToolUseBlock } from "../messages.ts";
 import { toolResultMessage, toolUsesFromMessage } from "../messages.ts";
 import { isModelTool, isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type McpTool, type ModelTool } from "../tools/types.ts";
+import { buildWorkingMessages } from "../compaction/view.ts";
 import type { AgentLoopConfig, Emit, LoopDeps, TurnResult } from "./types.ts";
 
 /** 本轮工作集：开头冻一次，整轮只看它。 */
@@ -26,6 +27,18 @@ type TurnWorkset = {
   readonly knownToolNames: ReadonlySet<string>;
   readonly hooks: HookWorkset;
 };
+
+/**
+ * `contextBeforeBuild` 返回 block：**不调模型**。这是本文件唯一的提前出口——block 的含义是「这一轮不该发生」，
+ * 没有 assistant 消息可以挂 TurnResult，所以用异常出去，由 runLoop 折成 `aborted` outcome（reason 透传）。
+ * 不合成假的 assistant 消息进 transcript：什么都没说过，账本里就不该有一条。
+ */
+export class ContextBuildBlocked extends Error {
+  constructor(readonly reason: string | undefined) {
+    super(`contextBeforeBuild blocked the turn${reason !== undefined ? `: ${reason}` : ""}`);
+    this.name = "ContextBuildBlocked";
+  }
+}
 
 export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnResult> {
   const { context, config, emit, signal, streamFn } = deps;
@@ -43,15 +56,22 @@ export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnRe
   config.intake?.openTurn(`${config.runId}#${iteration}`);
   await emit({ type: "turn_start", iteration });
 
-  /* ① AgentMessage 层变换。先拼每轮注入（激活 skill 正文，末尾、不进 transcript），
-     再过 transformContext 与 contextBeforeBuild——上层能看到注入后的全貌，有最终话语权 */
-  const injections = (await config.getTurnInjections?.()) ?? [];
-  let working: AgentMessage[] = injections.length > 0 ? [...context.messages, ...injections] : context.messages;
+  /* ① AgentMessage 层变换。先按压缩状态投影 transcript（段 → 摘要、旧工具结果 → 占位；transcript 本身不动），
+     再拼每轮注入（激活 skill 正文，末尾、不进 transcript），
+     再过 transformContext 与 contextBeforeBuild——上层能看到注入后的全貌，有最终话语权。
+     注入的**工具门控读本轮冻结的工具集**（与模型菜单同一份快照）：turn_start 里才注册的工具，
+     菜单里没有，注入也不许提——否则末尾一段清单要模型用一个它这轮点不到的工具。 */
+  const visibleTools: ReadonlySet<string> = new Set(tools.map((t) => t.name));
+  const injections = (await config.getTurnInjections?.(visibleTools)) ?? [];
+  let working: AgentMessage[] = buildWorkingMessages(context.messages, context.compaction);
+  if (injections.length > 0) working.push(...injections);
   if (config.transformContext !== undefined) {
     working = await config.transformContext(working, signal);
   }
   if (hooks.has("contextBeforeBuild")) {
     const r = await hooks.intercept({ type: "contextBeforeBuild", messages: working }, config.hookContext);
+    // block = 这轮不发（2026-09-01 前这里只取 patch 后的 messages、无视 decision——hook 说别调模型，模型照调）
+    if (r.decision === "block") throw new ContextBuildBlocked(r.reason);
     working = r.event.messages;
   }
 

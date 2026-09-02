@@ -21,6 +21,8 @@
 import type { AgentError } from "../errors.ts";
 import type { AgentMessage } from "../messages.ts";
 import { assertMessageShape } from "../message-shape.ts";
+import { EMPTY_COMPACTION, type CompactionReason, type CompactionState } from "../compaction/types.ts";
+import { assertCompactionFits } from "../compaction/view.ts";
 import { assertSafePathSegment } from "../storage/path-safety.ts";
 import type { SessionData, SessionEntry, SessionInfo, SessionStore } from "./types.ts";
 
@@ -60,7 +62,7 @@ type Loaded = {
 /** 调用方给的内容——**没有 id / parentId**，那两个由 Service 生成。 */
 export type SessionEntryInput =
   | { kind: "message"; message: AgentMessage }
-  | { kind: "compaction"; at: number; summary: string; coveredUpTo: string }
+  | { kind: "compaction"; at: number; reason: CompactionReason; compaction: CompactionState }
   | { kind: "error"; at: number; error: AgentError };
 
 /**
@@ -161,7 +163,7 @@ export class SessionService {
     await this.writeMeta(info);
     this.cursors.set(sessionId, { nextSeq: 1, lastEntryId: null, info });
     this.poisoned.delete(sessionId);
-    return { info, messages: [], checkpoint: null };
+    return { info, messages: [], compaction: EMPTY_COMPACTION };
   }
 
   /**
@@ -409,12 +411,20 @@ function assertEntryShape(entry: SessionEntry, where: string): void {
     case "message":
       assertMessageShape((entry as { message?: unknown }).message, where);
       return;
-    case "compaction":
-      if (typeof entry.summary !== "string" || typeof entry.coveredUpTo !== "string") {
-        throw new Error(`${where} 是 compaction 但缺 summary / coveredUpTo`);
-      }
+    case "compaction": {
       if (typeof entry.at !== "number") throw new Error(`${where} 是 compaction 但缺 at`);
+      if (!COMPACTION_REASONS.has(entry.reason)) throw new Error(`${where} 是 compaction 但 reason 不认识：${String(entry.reason)}`);
+      const c = entry.compaction as { spans?: unknown; clearedBefore?: unknown } | undefined;
+      if (typeof c !== "object" || c === null || !Array.isArray(c.spans) || typeof c.clearedBefore !== "number") {
+        throw new Error(`${where} 是 compaction 但缺 compaction.spans / clearedBefore`);
+      }
+      for (const s of c.spans as { from?: unknown; to?: unknown; summary?: unknown }[]) {
+        if (typeof s?.from !== "number" || typeof s?.to !== "number" || (s.summary !== null && typeof s.summary !== "string")) {
+          throw new Error(`${where} 的 compaction span 形状不对（要 { from, to, summary: string | null }）`);
+        }
+      }
       return;
+    }
     case "error":
       if (entry.error === undefined) throw new Error(`${where} 是 error 但缺 error`);
       if (typeof entry.at !== "number") throw new Error(`${where} 是 error 但缺 at`);
@@ -448,13 +458,19 @@ function assertSessionInfoShape(info: unknown, where: string): void {
 
 
 
-/** entries → 运行时视图。**恢复顺序在这里定死**：messages 按入账序，checkpoint 取最后一次压缩。 */
+/**
+ * entries → 运行时视图。**恢复顺序在这里定死**：messages 按入账序，compaction 取最后一次压缩的状态。
+ * 状态的下标必须在这份 messages 上成立（切点合法、不越界）——不成立就是坏档，判红不修。
+ */
 function project(loaded: Loaded): SessionData {
   const messages: AgentMessage[] = [];
-  let checkpoint: string | null = null;
+  let compaction: CompactionState = EMPTY_COMPACTION;
   for (const e of loaded.entries) {
     if (e.kind === "message") messages.push(e.message);
-    else if (e.kind === "compaction") checkpoint = e.id;
+    else if (e.kind === "compaction") compaction = e.compaction;
   }
-  return { info: loaded.info, messages, checkpoint };
+  assertCompactionFits(messages, compaction, `会话 ${loaded.info.id} 的 compaction`);
+  return { info: loaded.info, messages, compaction };
 }
+
+const COMPACTION_REASONS: ReadonlySet<unknown> = new Set<CompactionReason>(["auto", "overflow", "manual"]);

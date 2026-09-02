@@ -10,9 +10,10 @@
 import { agentError, type AgentError } from "../errors.ts";
 import type { AgentOutcome } from "../events.ts";
 import { userMessage, type AgentMessage } from "../messages.ts";
-import { runTurn } from "./run-turn.ts";
+import { ContextBuildBlocked, runTurn } from "./run-turn.ts";
 import type { AgentContext, AgentLoopConfig, Emit, LoopDeps, LoopResult, TurnResult } from "./types.ts";
 import type { StreamFn } from "../provider/types.ts";
+import { createCompactor } from "../compaction/pipeline.ts";
 
 const MAX_STOP_CONTINUATIONS = 3;
 
@@ -64,6 +65,8 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
   let retryCount = 0;
   let stopContinuations = 0;
   let outcome: AgentOutcome = { kind: "completed" };
+  // 压缩簿记（`compaction/pipeline.ts`）：轮首按阈值压、轮末记 provider 的 usage 当基准、撞窗后应急一次
+  const compactor = createCompactor(turnDeps);
 
   outer: while (true) {
     inner: while (true) {
@@ -84,10 +87,18 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
       }
 
       /* 压缩在轮边界上做，不把一轮劈成两半 */
-      await maybeCompact(deps);
+      await compactor.maybeCompact();
 
       iteration += 1;
-      const turn = await runTurn(turnDeps, iteration);
+      let turn: TurnResult;
+      try {
+        turn = await runTurn(turnDeps, iteration);
+      } catch (e) {
+        if (!(e instanceof ContextBuildBlocked)) throw e;
+        // hook 在送模前说「别发」：不是用户取消、不是错误，是明确的 aborted（reason 透传给 agent_end 的读者）
+        outcome = { kind: "aborted", reason: e.reason ?? "contextBeforeBuild blocked the turn" };
+        break outer;
+      }
       // deadline 在轮内到了：轮内的等待已被它中止，这里按超时封口（不是「aborted」——调用方没有取消）
       if (deadline?.signal.aborted === true && !signal.aborted) {
         const elapsedMs = Date.now() - startedAt;
@@ -96,9 +107,16 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
         break outer;
       }
 
+      compactor.noteTurn(turn);
+
       /* 失败：可重试且额度未尽 → **重跑本轮**（消耗 retryCount，不消耗 iteration） */
       if (turn.stopReason === "error") {
         const err = turn.message.error ?? agentError("provider", "internal", "未标注的失败", false);
+        // 撞窗（provider 说上下文超了）：**应急压缩一次**再重跑本轮。压不动 / 第二次撞 → 按 error 收场
+        if (err.code === "context_overflow" && (await compactor.recover())) {
+          iteration -= 1;
+          continue inner;
+        }
         if (err.retryable && retryCount < config.retryPolicy.maxAttempts) {
           retryCount += 1;
           const delayMs = config.retryPolicy.backoffMs(retryCount);
@@ -225,44 +243,6 @@ async function absorb(context: AgentContext, messages: readonly AgentMessage[], 
     context.messages.push(m);
     await emit({ type: "message_end", message: m });
   }
-}
-
-/* ─────────────── 压缩：轮边界上的一次模型调用 ─────────────── */
-
-async function maybeCompact(deps: LoopDeps): Promise<void> {
-  const { context, config, emit, signal } = deps;
-  const summarize = config.compaction.summarize;
-  if (summarize === undefined) return;
-
-  const budget = config.compaction.budget ?? config.model.capabilities?.contextWindow;
-  if (budget === undefined) return;
-  if (estimateTokens(context.messages) <= budget) return;
-
-  const pre = await config.hooks.intercept({ type: "preCompact", reason: "auto" }, config.hookContext);
-  if (pre.decision === "block") return;
-
-  await emit({ type: "compaction_start", reason: "auto" });
-  try {
-    const summary = await summarize(context.messages, signal);
-    const coveredUpTo = String(context.messages.length);
-    await emit({ type: "compaction_end", summary, coveredUpTo });
-    await config.hooks.notify({ type: "postCompact", summary, coveredUpTo }, config.hookContext);
-  } catch (e) {
-    // 压缩失败不该杀掉整个任务：如实告警，让这一轮照常发出去（超预算由模型端报错兜底）。
-    await config.hooks.notify(
-      { type: "compactionFailed", message: e instanceof Error ? e.message : String(e) },
-      config.hookContext,
-    );
-  }
-}
-
-/** 粗估：4 字符 ≈ 1 token（CJK 更密，这里保守）。真实预算由 provider 的 usage 校准，见待办。 */
-export function estimateTokens(messages: AgentMessage[]): number {
-  let chars = 0;
-  for (const m of messages) {
-    if ("content" in m) chars += JSON.stringify(m.content).length;
-  }
-  return Math.ceil(chars / 4);
 }
 
 function lastText(context: AgentContext): string {

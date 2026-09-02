@@ -24,7 +24,11 @@ export const ECHO_CODING: Product = Object.freeze({
   version: VERSION,
   // 形态（`interactive`）本产品不看：两种形态的装配片段完全相同。workspace 不经 preset——
   // 它是 session 级事实，`mainFor()` 直接交给 `createEcho()`（2026-09-01）。
-  preset: () => codingPreset({ permission: false }),
+  //
+  // **执行预算 200**（2026-09-02 用户拍板）：core 缺省 20 是通用 agent / 评测的预算，coding 在仓库里
+  // grep / read 几下就撞顶（实测 `[错误] 迭代上限 20`），每 20 步要人说一次「继续」。
+  // 评测的 identity 仍按 `codingPreset()` 缺省（20）算——产品与评测的预算不同，是否让 identity 跟产品走另议。
+  preset: () => codingPreset({ permission: false, maxIterations: 200 }),
 });
 
 /** 进程入口的实质：`echo-agent` 的 `main` 绑上本产品。签名与它完全相同，退出码语义也相同。 */

@@ -47,6 +47,14 @@ export type RuntimeTurnResult = { readonly outcome: AgentOutcome };
 export type EquipResult = Readonly<{ kind: "accepted" }> | Readonly<{ kind: "rejected"; reason: string }>;
 
 /**
+ * `/compact` 的结果（2026-09-02）：`done` 带真正改了状态的阶段名（空 = 没什么可压）；
+ * `rejected` 的常态是「正在运行」或「没有注册任何压缩阶段」。同 `EquipResult` 一样不抛、不静默。
+ */
+export type CompactResult =
+  | Readonly<{ kind: "done"; stages: readonly string[]; contextTokens: number | null }>
+  | Readonly<{ kind: "rejected"; reason: string }>;
+
+/**
  * 壳子（TUI / Web / 任何 UI）看得到的**全部**。封闭：加一支就是改契约。
  *
  * 五组，按壳子实际要做的事分：**看**什么、**说**什么、**答**什么、**换**什么、**停**什么。
@@ -118,6 +126,12 @@ export interface AgentRuntime {
    * 壳子自己的投影（transcript）要自己清——协议不管渲染。
    */
   reset(): Promise<EquipResult>;
+
+  /**
+   * 手动压缩（2026-09-02 用户拍板，TUI 的 `/compact [指令]`）：跑与自动压缩**同一条**流水线，reason 为 manual，
+   * 无视阈值；`instructions` 交给摘要阶段作为附加要求。仅 idle；忙时 rejected，不排队。
+   */
+  compact(instructions?: string): Promise<CompactResult>;
 
   /**
    * 现在能不能收新输入。**壳子必须读它而不是自己猜**：

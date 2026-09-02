@@ -92,6 +92,7 @@ test("read/write/edit 整套:写 → 读(带行号)→ 精确替换", async () =
 test("edit_file:匹配 0 处 / 多处都拒,replace_all 放行", async () => {
   const fs = makeFsTools();
   await writeFile(join(root, "x.txt"), "aa aa", "utf8");
+  await tool(fs, "read_file").execute({ path: "x.txt" }, ctx()); // 改前必读（2026-09-02 起是门，见下一条）
   const zero = await tool(fs, "edit_file").execute({ path: "x.txt", old_string: "zzz", new_string: "y" }, ctx());
   expect(zero.isError).toBe(true);
   const multi = await tool(fs, "edit_file").execute({ path: "x.txt", old_string: "aa", new_string: "b" }, ctx());
@@ -100,6 +101,48 @@ test("edit_file:匹配 0 处 / 多处都拒,replace_all 放行", async () => {
   const all = await tool(fs, "edit_file").execute({ path: "x.txt", old_string: "aa", new_string: "b", replace_all: true }, ctx());
   expect(all.isError).toBe(false);
   expect(await readFile(join(root, "x.txt"), "utf8")).toBe("b b");
+});
+
+test("改前必读、读后未变：没读过拒、盘上被别人改过拒、自己写过的算读过；新建文件不用读", async () => {
+  // 2026-09-02 用户拍板（照 Claude Code 的 Edit / Write 门）：此前只是 description 里一句「先读」，
+  // 模型没读就改、或按旧内容盖掉用户刚在编辑器里改的文件，都拦不住
+  const fs = makeFsTools();
+  await writeFile(join(root, "g.txt"), "one\n", "utf8");
+
+  const blind = await tool(fs, "edit_file").execute({ path: "g.txt", old_string: "one", new_string: "two" }, ctx());
+  expect([blind.isError, blind.content]).toEqual([true, "Read g.txt with read_file before changing it"]);
+  const blindWrite = await tool(fs, "write_file").execute({ path: "g.txt", content: "x" }, ctx());
+  expect(blindWrite.isError).toBe(true);
+  expect(await readFile(join(root, "g.txt"), "utf8")).toBe("one\n"); // 一个字没动
+
+  await tool(fs, "read_file").execute({ path: "g.txt" }, ctx());
+  const ok = await tool(fs, "edit_file").execute({ path: "g.txt", old_string: "one", new_string: "two" }, ctx());
+  expect(ok.isError).toBe(false);
+  // 自己刚写过的算读过：连续两次 edit 不用中间重读
+  const again = await tool(fs, "edit_file").execute({ path: "g.txt", old_string: "two", new_string: "three" }, ctx());
+  expect(again.isError).toBe(false);
+
+  // 别人（编辑器、另一个进程）改了盘上的文件：mtime 变了 → 拒，读一遍才能再改
+  await new Promise((r) => setTimeout(r, 15)); // mtime 至少差 1ms
+  await writeFile(join(root, "g.txt"), "three\nuser edit\n", "utf8");
+  const stale = await tool(fs, "edit_file").execute({ path: "g.txt", old_string: "three", new_string: "four" }, ctx());
+  expect([stale.isError, stale.content]).toEqual([true, "g.txt changed on disk since you read it; read it again before changing it"]);
+  expect(await readFile(join(root, "g.txt"), "utf8")).toBe("three\nuser edit\n"); // 用户的改动没被盖
+  await tool(fs, "read_file").execute({ path: "g.txt" }, ctx());
+  expect((await tool(fs, "edit_file").execute({ path: "g.txt", old_string: "three", new_string: "four" }, ctx())).isError).toBe(false);
+
+  // 新建不用先读
+  const fresh = await tool(fs, "write_file").execute({ path: "new/n.txt", content: "hi" }, ctx());
+  expect(fresh.isError).toBe(false);
+});
+
+test("edit_file 的替换文本里带 `$` 原样落盘（不解释 $& / $$ 这类模式）", async () => {
+  const fs = makeFsTools();
+  await writeFile(join(root, "d.ts"), "const price = COST;\n", "utf8");
+  await tool(fs, "read_file").execute({ path: "d.ts" }, ctx());
+  const r = await tool(fs, "edit_file").execute({ path: "d.ts", old_string: "COST", new_string: "`$${n}` + $& + $$" }, ctx());
+  expect(r.isError).toBe(false);
+  expect(await readFile(join(root, "d.ts"), "utf8")).toBe("const price = `$${n}` + $& + $$;\n");
 });
 
 test("路径越界一律拒(../ 逃逸、绝对路径出工作区)", async () => {
@@ -133,6 +176,38 @@ test("bash 超时:杀掉并说清,不挂死", async () => {
   expect(r.content).toContain("Timed out");
 }, 10_000);
 
+test("后台作业：bash background 起 → job_output 看得到状态与最近输出 → job_stop 杀掉 → 再看是 killed；丢了 id 也找得回", async () => {
+  // 2026-09-02 补的两件：此前 background: true 之后模型中途看不到输出、也停不掉——「跑起来看日志再改」走不通。
+  // 走真装配：`echo:shell` 从 `AgentBackgroundService` 拿的就是 agent.background，三件工具共用同一张表。
+  const echo = await echoWith({ permission: false });
+  const run = (name: string, params: unknown): Promise<{ isError: boolean; content: string }> =>
+    (echo.agent.tools.get(name) as unknown as { execute: (p: unknown, c: unknown) => Promise<{ isError: boolean; content: string }> }).execute(params, ctx());
+  const started = await run("bash", { command: "echo started; sleep 30", background: true });
+  expect(started.isError).toBe(false);
+  const id = /Started in the background: (\S+)/.exec(started.content)![1]!;
+
+  // 等 echo 的输出进缓冲，再看：running + 最近输出
+  const deadline = Date.now() + 5000;
+  let seen = await run("job_output", { id });
+  while (!seen.content.includes("started") && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 20));
+    seen = await run("job_output", { id });
+  }
+  expect([seen.isError, seen.content.startsWith(`${id} [running]`), seen.content.includes("started")]).toEqual([false, true, true]);
+
+  const stopped = await run("job_stop", { id });
+  expect([stopped.isError, stopped.content]).toEqual([false, expect.stringContaining(`Stopped ${id}`)]);
+  // 杀了之后状态吸收成 killed（终态），再停一次不报错、如实说已结束
+  const after = await run("job_output", { id });
+  expect(after.content.startsWith(`${id} [killed]`)).toBe(true);
+  expect((await run("job_stop", { id })).content).toContain("already ended (killed)");
+
+  // 丢了 id（压缩之后常见）：错误里列出已知作业，不用第三件 job_list
+  const lost = await run("job_output", { id: "nope" });
+  expect([lost.isError, lost.content]).toEqual([true, expect.stringContaining(id)]);
+  await echo.stop();
+}, 15_000);
+
 /* ══════════ 搜索 ══════════ */
 
 test("glob 找文件(排除 node_modules);grep 找内容带 文件:行号", async () => {
@@ -152,6 +227,48 @@ test("glob 找文件(排除 node_modules);grep 找内容带 文件:行号", asyn
 
   const bad = await tool(s, "grep").execute({ pattern: "[unclosed" }, ctx());
   expect(bad.isError).toBe(true);
+});
+
+test("grep 的 path 指到单个文件就只搜它（相对、绝对都行）；结果路径一律相对工作区；glob 拿到文件明说要目录", async () => {
+  // 实测 bug（2026-09-01）：模型把 grep 当 `grep <pattern> <file>` 用，此前拿到的是一句 `ENOTDIR: not a directory`
+  await mkdir(join(root, "src/deep"), { recursive: true });
+  await writeFile(join(root, "src/deep/a.ts"), "const x = 1;\nconst hit = 2;\n", "utf8");
+  await writeFile(join(root, "src/b.ts"), "const hit = 3;\n", "utf8");
+
+  const s = makeSearchTools();
+  for (const path of ["src/deep/a.ts", join(root, "src/deep/a.ts")]) {
+    const r = await tool(s, "grep").execute({ pattern: "hit", path }, ctx());
+    expect([path, r.isError, r.content]).toEqual([path, false, "src/deep/a.ts:2:const hit = 2;"]);
+  }
+  // 子目录里搜，报的仍是工作区相对路径——read_file / edit_file 收的就是它，不是 `a.ts` 这种相对 path 的
+  const inDir = await tool(s, "grep").execute({ pattern: "hit", path: "src/deep" }, ctx());
+  expect(inDir.content).toBe("src/deep/a.ts:2:const hit = 2;");
+  const globbed = await tool(s, "glob").execute({ pattern: "*.ts", path: "src/deep" }, ctx());
+  expect(globbed.content).toBe("src/deep/a.ts");
+
+  // glob 的 path 是文件：不静默返回 0 个，明说要目录、指回 grep
+  const fileGlob = await tool(s, "glob").execute({ pattern: "*.ts", path: "src/b.ts" }, ctx());
+  expect([fileGlob.isError, fileGlob.content]).toEqual([true, expect.stringContaining("use grep")]);
+  // 不存在：说是哪个 path，不是 ENOTDIR / ENOENT 原文
+  const missing = await tool(s, "grep").execute({ pattern: "hit", path: "src/nope" }, ctx());
+  expect([missing.isError, missing.content]).toEqual([true, "path not found: src/nope"]);
+});
+
+test("list_dir：一层目录，子目录在前带 /；缺省工作区根；拿到文件明说要目录", async () => {
+  // 2026-09-02 补：glob 只出文件，模型看不到目录结构，只能 bash ls
+  await mkdir(join(root, "src/deep"), { recursive: true });
+  await mkdir(join(root, "node_modules/pkg"), { recursive: true });
+  await writeFile(join(root, "src/a.ts"), "", "utf8");
+  await writeFile(join(root, "README.md"), "", "utf8");
+
+  const s = makeSearchTools();
+  const top = await tool(s, "list_dir").execute({}, ctx());
+  expect([top.isError, top.content]).toEqual([false, "node_modules/\nsrc/\nREADME.md"]); // 目录真相：node_modules 也列
+  const sub = await tool(s, "list_dir").execute({ path: "src" }, ctx());
+  expect(sub.content).toBe("deep/\na.ts");
+  expect((await tool(s, "list_dir").execute({ path: "src/deep" }, ctx())).content).toBe("(empty directory)");
+  const file = await tool(s, "list_dir").execute({ path: "src/a.ts" }, ctx());
+  expect([file.isError, file.content]).toEqual([true, expect.stringContaining("needs a directory")]);
 });
 
 /* ══════════ 整链装配 ══════════ */

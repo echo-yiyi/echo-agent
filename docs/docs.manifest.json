@@ -34,6 +34,34 @@
       "bilingual": false
     },
     {
+      "path": "docs/design/compaction.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-02-compaction-as-extension.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-02-compaction-state-is-a-view.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-02-compaction-ladder.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-02-compaction-summary-message.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-02-compaction-threshold.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-02-compaction-manual-and-state.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/proposed/2026-09-01-abort-reason.md",
       "bilingual": false
     },

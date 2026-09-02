@@ -10,6 +10,8 @@
 import type { StorageDir } from "../storage/types.ts";
 import type { AgentError } from "../errors.ts";
 import type { AgentMessage } from "../messages.ts";
+import { EMPTY_COMPACTION, type CompactionReason, type CompactionState } from "../compaction/types.ts";
+import { assertCompactionFits } from "../compaction/view.ts";
 
 /**
  * Session 的存储端口：**与 `StorageDir` 同形，就是它**。
@@ -31,7 +33,8 @@ export type SessionEntry = {
   readonly parentId: string | null;
 } & (
   | { kind: "message"; message: AgentMessage }
-  | { kind: "compaction"; at: number; summary: string; coveredUpTo: string }
+  /** 一次压缩之后的**整个**状态（不是增量）：恢复只取最后一条。下标与运行时同一套。 */
+  | { kind: "compaction"; at: number; reason: CompactionReason; compaction: CompactionState }
   | { kind: "error"; at: number; error: AgentError }
 );
 
@@ -75,7 +78,8 @@ export function newSessionId(now: number = Date.now()): string {
 export type SessionData = {
   readonly info: SessionInfo;
   readonly messages: AgentMessage[];
-  readonly checkpoint: string | null;
+  /** 最后一次压缩之后的视图状态；没压过 = `EMPTY_COMPACTION`。 */
+  readonly compaction: CompactionState;
 };
 
 export interface SessionManager {
@@ -116,12 +120,13 @@ export class InMemorySessionManager implements SessionManager {
     const s = this.sessions.get(id);
     if (s === undefined) throw new Error(`会话不存在：${id}`);
     const messages: AgentMessage[] = [];
-    let checkpoint: string | null = null;
+    let compaction: CompactionState = EMPTY_COMPACTION;
     for (const e of s.entries) {
       if (e.kind === "message") messages.push(e.message);
-      else if (e.kind === "compaction") checkpoint = e.id;
+      else if (e.kind === "compaction") compaction = e.compaction;
     }
-    return { info: s.info, messages, checkpoint };
+    assertCompactionFits(messages, compaction, `会话 ${id} 的 compaction`);
+    return { info: s.info, messages, compaction };
   }
 
   async list(): Promise<SessionInfo[]> {

@@ -19,15 +19,15 @@
 
 但是“账本是事实、context 是投影”这句话目前还不能成立为公开契约。源码里有七个必须先处理或明确接受的问题：
 
-1. **compaction 只生成并持久化摘要，不替换送模上下文。** 超预算后 provider 仍收到全部原文；下一 turn 还会再次摘要同一批历史。
+1. ~~**compaction 只生成并持久化摘要，不替换送模上下文。**~~ 已修（2026-09-02）：压缩成为作用在 transcript 上的视图状态，策略走 extension 阶梯，撞窗有应急，见 [Compaction](compaction.md) 与 §7。
 2. **消息没有所有权隔离。** `prompt(message)`、`Agent.messages`、context snapshot 与 `transformContext` 共享嵌套对象；调用方或 transform 能在没有新事件、没有新 session entry 的情况下改写已经入账的历史。
-3. **`contextBeforeBuild` 的 block 是假能力。** hook runtime 返回 `block`，调用点却忽略 decision，模型仍然被调用。
+3. ~~**`contextBeforeBuild` 的 block 是假能力。**~~ 已修（2026-09-01）：block 让 run 以 `aborted` 结束、模型不被调用，见 §6。
 4. **`followUp` 的来源只在 hook event 中如实，账本里仍记成 `human`。** 现有测试标题声称 transcript 来源如实，但没有断言消息的 `source`。
 5. **`PromptSource.toolSchemas()` 是死接口。** 类型和注释声称每轮读取，实际工具菜单来自 `getTools() → toolSchemas()`，这个方法从未被调用。
 6. **上下文扩展点的失败契约与实现相反。** 注释要求 `transformContext`、`convertToLlm` 和 turn injection “绝不抛、失败安全回退”；实际任一抛错都会让整个 run 以 internal error 结束。
 7. **消息只在恢复时严格验形，prompt 入站不验。** 一个 JavaScript 调用方可以让 Agent 自己把坏消息写进 session，本次 run 成功，下一次恢复才判坏档。
 
-前两项直接破坏长会话正确性和审计可信度，第三、第四、第五项是公开接口或测试声称的行为并不存在，后两项是失败发生位置与承诺不一致。它们都不是靠改文案可以解决的问题。
+第二项直接破坏长会话正确性和审计可信度，第四、第五项是公开接口或测试声称的行为并不存在，后两项是失败发生位置与承诺不一致。它们都不是靠改文案可以解决的问题。
 
 ## 术语与分层
 
@@ -40,7 +40,7 @@
 | working context | transcript 快照、injection 和 hook/transform 处理后的 `AgentMessage[]` | 否 | 否 |
 | provider context | `systemPrompt + ProviderMessage[] + ToolSchema[]` | 否 | 是 |
 | projection | `AgentMessage[] → ProviderMessage[]` 的单向转换 | 否 | 产物送模型 |
-| compaction | 用摘要替代已覆盖历史、使后续送模上下文真正缩短的过程 | 摘要与游标应持久化 | 替代后的上下文送模型 |
+| compaction | 作用在 transcript 上的视图状态（哪些段被摘要 / 省略、旧工具结果清到哪），送模前投影；transcript 本身不动 | 状态持久化（session 的 compaction entry） | 投影后的上下文送模型 |
 
 `AgentContext` 目前只含 `systemPrompt` 与 `messages`，工具故意每 turn 重取，见 [`AgentContext`](../../packages/core/src/loop/types.ts#symbol=AgentContext)。“context”在源码里有时指这个 Agent 层工作对象，有时指最终 provider 请求；正式文档应始终带上层级，避免把账本、工作副本和线上电报叫成同一个东西。
 
@@ -142,6 +142,10 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { FAKE_MODE
 
 这个边界适合“当前有效、但不是对话事实”的材料：激活 skill、任务清单、短期运行说明。已有测试验证激活正文下一 turn 可见、system 字节不变且 injection 不入 transcript，见 [skill injection 接线](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)。
 
+injection 里的**工具门控读本轮冻结的菜单**（`runTurn` 把冻结的工具名集传给 `getTurnInjections`），不读活池：`turn_start` 里才注册的工具，这轮菜单上没有，注入也不许提它——菜单与注入永远是同一份 turn 快照。判据见 [冻结菜单门控](../../packages/core/test/prompt.test.ts#test=注入的工具门控读本轮冻结的菜单turnstart-里才注册的-tasklist本轮菜单与清单都没有下一轮一起出现)。
+
+激活 skill 的注入有**总预算**（`SKILL_ACTIVE_TOTAL_CAP`，64 000 字符，各条正文按单条上限计）：闸在 `activateSkill`，超了拒绝并把现状告诉模型；不在渲染末端静默截掉已声明激活的指令。判据见 [激活总预算](../../packages/core/test/skill.test.ts#test=激活总预算合计超过-skillactivetotalcap-就拒回执带现状重复激活不重复计费超长正文按单条上限计)。
+
 但注释中的“契约：绝不抛；没有返回 `[]`”没有调用侧兜底。任一 source 抛错会结束整个 run。这里需要的是明确选择，不是模糊承诺：
 
 - 如果 injection 是完成任务所必需的上下文，失败应使 run fail-loud；
@@ -194,67 +198,32 @@ transformContext 内修改 messages[0].content[0].text
 
 但“投影绝不回写”当前只对缺省实现自己的代码成立，不对可替换的 `Agent.convertToLlm` 成立。它收到的仍是与 transcript 共享嵌套对象的数组。正式契约应把输入定义为不可变 working copy，并把返回值验到 provider context 所需的最小形状；否则第三方 converter 可以同时破坏账本并产出坏线上协议。
 
-## 6. `contextBeforeBuild` 的 block 不生效
+## 6. `contextBeforeBuild` 的 block（2026-09-01 起生效）
 
-`contextBeforeBuild` 被列入 hook runtime 的可拦截事件，类型允许 `continue / block / patch`，见 [`INTERCEPTABLE`](../../packages/core/src/hooks/runtime.ts#symbol=INTERCEPTABLE)。但 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 调用 `hooks.intercept(...)` 后只取 `r.event.messages`，完全不读取 `r.decision`。
+`contextBeforeBuild` 被列入 hook runtime 的可拦截事件，类型允许 `continue / block / patch`，见 [`INTERCEPTABLE`](../../packages/core/src/hooks/runtime.ts#symbol=INTERCEPTABLE)。2026-09-01 之前 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 只取 `r.event.messages`、不读 `r.decision`——hook 说别调模型，模型照调，run 还是 `completed`。
 
-复现：
+现在的语义：block = **这一轮不发**。`runTurn` 抛 [`ContextBuildBlocked`](../../packages/core/src/loop/run-turn.ts#symbol=ContextBuildBlocked)，`runLoop` 把它折成 `{ kind: "aborted", reason }`（reason 透传自 hook），模型不被调用，transcript 里**不合成** assistant 消息（什么都没说过，账本里就不该有一条）。选 aborted 而不是 error：这不是故障，是有人在送模前叫停，和 `userPromptSubmit` 的 block 同一档。判据见 [block 不调模型](../../packages/core/test/prompt.test.ts#test=contextbeforebuild-返回-block不调模型run-以-aborted-收场reason-透传transcript-不多一条)。
+
+复现（现在应打印 `{ kind: "aborted", reason: "DO_NOT_CALL_MODEL" } 0`）：
 
 ```bash
 bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRuntime } from "./packages/core/src/hooks/runtime.ts"; import { FAKE_MODEL, scriptedStreamFn, textTurn } from "./packages/core/src/testing.ts"; const h=new HookRuntime(); h.on("contextBeforeBuild",()=>({decision:"block",reason:"DO_NOT_CALL_MODEL"})); let calls=0; const base=scriptedStreamFn([textTurn("done")]); const a=new Agent({model:FAKE_MODEL,hooks:h,streamFunction:(m,c,o)=>{calls++;return base(m,c,o)}}); console.log((await a.prompt("go")).outcome,calls);'
 ```
 
-当前结果是 `completed` 且 provider 调用一次。这不是边界条件，而是 hook 协议与调用点直接矛盾。
+## 7. Compaction 与恢复（2026-09-02 起见独立设计）
 
-审阅结论：如果该挂点只允许 patch，就把它从可 block 集移除，类型与文档只暴露 patch/continue；如果它真是最后一道送模门，block 必须阻止 provider 调用并形成明确 terminal outcome。倾向前者：context 构建失败或拒绝不等同于用户取消、权限拒绝或工具拒绝，硬塞进统一的 `block` 语义反而不清楚。
+正式设计与实现见 [Compaction](compaction.md)。本节原先记录的四个问题（只摘要不缩上下文、checkpoint 运行前后两种语义、字符估不是上界、重复摘要）都已按那份设计落地；当时列出的六条机器判据现在各有测试：
 
-## 7. Compaction 与恢复
+| 判据 | 测试 |
+| --- | --- |
+| 触发后紧接着的 provider request 不含已覆盖原文、含摘要与尾巴 | [auto 触发](../../packages/core/test/compaction.test.ts#test=auto超阈值-轮首压缩-紧接着的-provider-请求只含摘要不含原文压完下一轮不重复压状态与-session-都记下) |
+| 摘要带 harness 来源，不伪装成人或 assistant 原话 | [投影](../../packages/core/test/compaction.test.ts#test=投影段-一条-userharness清掉的-toolresult-换占位但-toolcallid-iserror-不动transcript-原对象一个字不改) |
+| tool_use / tool_result 配对不被切断 | [切点](../../packages/core/test/compaction.test.ts#test=切点toolresult-前面不能切snapback-优先轮起点其次合法切点都没有回-min) |
+| 压缩后立即续与恢复后续，下一次 provider context 逐字节相同 | [恢复一致](../../packages/core/test/compaction.test.ts#test=压缩后立即续跑-vs-重启恢复后续跑下一次送模消息逐字节相同74-第-4-条) |
+| 游标只有一种：transcript 下标，运行时与盘上同一套 | [session 恢复](../../packages/core/test/session-service.test.ts#test=不变量①-恢复后-messages-与-compaction-同源同一份-entries-投影出来取最后一次压缩的状态) |
+| 压到预算内之后下一轮不重复摘要 | 同第一条 |
 
-### 7.1 当前 compaction 没有压缩 context
-
-[`maybeCompact()`](../../packages/core/src/loop/run-loop.ts#symbol=maybeCompact) 在粗估超过 budget 时：
-
-1. 发 `preCompact` 和 `compaction_start`；
-2. 调 `summarize(context.messages)`；
-3. 令 `coveredUpTo = String(context.messages.length)`；
-4. 发 `compaction_end` 并持久化 summary / coveredUpTo。
-
-它没有删除 covered messages、没有把 summary 插入 working context，也没有让 projection 读取 summary。provider 因此仍看到全部原文。用 budget `1` 的探针得到：
-
-```json
-{"summarized":1,"checkpoint":"1","providerMessages":[{"role":"user","content":[{"type":"text","text":"abcdefgh"}]}]}
-```
-
-如果第一 turn 因 `max_tokens` 继续，第二 turn 又会因为同一 context 仍超预算而再次 summarize；两 turn 探针输出 `{"summaries":2,"checkpoint":"2"}`。当前行为既不能避免 provider 超窗，还会重复支付摘要成本。
-
-### 7.2 checkpoint 在运行中与恢复后不是同一种东西
-
-运行中，`processEvents(compaction_end)` 把 `coveredUpTo` 写进 `AgentState.checkpoint`；当前 `coveredUpTo` 是十进制消息数量。恢复时，[`SessionService.project()`](../../packages/core/src/session/service.ts#symbol=project) 忽略 `coveredUpTo` 和 summary，把最后一条 compaction entry 自身的 id 作为 checkpoint。
-
-同一 session 的探针结果：
-
-```json
-{"duringRun":"1","afterRestore":"main-e2","messages":["user","assistant"]}
-```
-
-这意味着 `checkpoint` 在一次重启前后改变语义。盘上 summary 虽然保留，却没有任何恢复路径把它还原成下一次 provider context；[恢复测试](../../packages/core/test/session-service.test.ts#test=不变量①-恢复后-messages-与-checkpoint-同源同一份-entries-投影出来) 只保护“checkpoint 等于 compaction entry id”，没有保护恢复后的送模内容与压缩前一致。
-
-### 7.3 token budget 也不是可靠上界
-
-[`estimateTokens()`](../../packages/core/src/loop/run-loop.ts#symbol=estimateTokens) 用 JSON 字符数除以四，并把它称为“CJK 更密，这里保守”。这个算法没有绑定任何 provider tokenizer，因而不可能构成 token 数上界；对许多 CJK 输入，四个字符远不止一个 token，触发会偏晚。它可以作为低成本启发式，不能被写成“确保不超 context window”的门。
-
-### 7.4 一个可验收的 compaction 契约
-
-正式 compaction 至少要满足以下机器判据：
-
-1. 触发后，紧接着的 provider request 不含已覆盖 raw prefix，而含摘要和未覆盖 tail。
-2. 摘要本身带明确的 harness 来源，不伪装成人或 assistant 原话。
-3. tool-use / tool-result 配对不能被切断；压缩边界只落在可重放的消息边界。
-4. 同一 session 在 compaction 后立即继续与重启恢复后继续，产出的下一次 provider context 逐字节相同。
-5. checkpoint 始终使用同一种稳定 cursor；不能一会儿是消息数量，一会儿是 entry id。
-6. 已经压缩到预算内的 context 不会在下一 turn 无变化时重复摘要。
-
-在这些判据落地前，公开面应移除或明确禁用 `compaction.summarize`，不能把现在的 summary side effect 称为上下文压缩。
+`AgentState.checkpoint` 已删除，换成 `compaction`（视图状态）与 `contextTokens`。
 
 ## 8. 失败语义
 
@@ -267,7 +236,7 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 | `turnInjections()` 抛错 | run 以 internal error 结束 | “绝不抛；没有返回 []” |
 | `transformContext()` 抛错 | run 以 internal error 结束 | “失败原样返回入参” |
 | `convertToLlm()` 抛错 | run 以 internal error 结束 | “绝不抛” |
-| `contextBeforeBuild` 返回 block | 忽略 block，继续调用 provider | interceptable / block |
+| `contextBeforeBuild` 返回 block | run 以 `aborted` 结束、reason 透传，provider 不被调用 | interceptable / block（2026-09-01 起一致） |
 
 三个抛错探针都得到结构化 `outcome.kind === "error"`；Agent 的 terminal normalizer 保住了完整封口，但它不是安全回退。这里要先按“缺失这项上下文后继续调用模型是否安全”分类，再让类型、实现和测试使用同一个答案。
 
@@ -291,9 +260,9 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 - `contextBeforeBuild` 的 decision 被调用点正确消费。
 - `followUp` 在 transcript 中保留真实 admission 来源。
 - `PromptSource` 的每个公开方法都有消费者。
-- compaction 真正缩短下一次 provider context，且恢复前后一致。
-- `checkpoint` 在运行中与恢复后保持同一种语义。
 - programmatic prompt source 的失败档位与 section 重要性一致。
+
+（compaction 缩短下一次 provider context、恢复前后一致、游标只有一种语义：2026-09-02 起有机器判据，见 §7。）
 
 这些都可以写出确定的行为判据，应该进入相关单测；不能把它们留成文档纪律。
 
@@ -301,7 +270,7 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 
 ### 必须在发布前解决
 
-1. **实现或移除 compaction。** 当前能力会产生摘要成本和成功事件，却不缩短 context，是最危险的假绿。
+1. ~~**实现或移除 compaction。**~~ 已实现（2026-09-02），见 [Compaction](compaction.md) 与六条决策记录。
 2. **建立消息所有权边界。** admission 取得消息所有权，账本只读，working context 与 transcript 断开对象别名。
 3. **修正 `contextBeforeBuild` ABI。** 要么只允许 patch，要么兑现 block；不能保留被忽略的 decision。
 4. **删除 `PromptSource.toolSchemas()`。** 已于 2026-09-01 删除（见 §3.3）；工具 schema 只由 turn workset 投影。
@@ -313,7 +282,7 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 2. 哪些 prompt sections 属于关键策略，渲染失败必须阻止模型调用；哪些只是增强，可以省略。
 3. turn injection、transform 与 converter 失败时，是 fail-loud 结束 run，还是使用明确的 fallback；每个扩展点分别决定。
 4. 自定义 AgentMessage 是否默认永远 model-invisible，还是注册自定义 role 时必须同时注册 projection。
-5. compaction summary 在账本中采用独立 role、environment role，还是只作为 session entry 经恢复投影；无论选哪种，都不能伪装成用户或模型原话。
+5. ~~compaction summary 在账本中采用独立 role、environment role，还是只作为 session entry 经恢复投影。~~ 已决（2026-09-02）：只作为 session entry，送模时投影成 user/harness 消息带固定框定，见 [决策记录](../decisions/implemented/2026-09-02-compaction-summary-message.md)。
 
 ### 本轮明确延期
 
@@ -339,7 +308,7 @@ bun test packages/core/test/prompt.test.ts \
 核实死接口和 compaction 消费路径：
 
 ```bash
-rg -n 'toolSchemas|PromptSource|coveredUpTo|checkpoint' \
+rg -n 'toolSchemas|PromptSource|compactionStages|buildWorkingMessages' \
   packages/core/src packages/core/test
 ```
 

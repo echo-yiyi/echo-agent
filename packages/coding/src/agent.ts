@@ -27,7 +27,7 @@
 import { DEFAULT_MAX_ITERATIONS, type AssembleContext } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
 import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extension";
 import type { PermissionPolicy as CorePermissionPolicy, PromptSection, Skill } from "@echo-agent/core";
-import { makeBashTool } from "./tools/bash.ts";
+import { makeBashTool, makeShellTools } from "./tools/bash.ts";
 import { makeFsTools } from "./tools/fs.ts";
 import { makeSearchTools } from "./tools/search.ts";
 import { ECHO_SHELL, ECHO_WORKSPACE } from "./extensions.ts";
@@ -90,6 +90,7 @@ const AGENT_BUILTIN_TOOLS = [
   "schedule_list",
   "skill_activate",
   "skill_create",
+  "transcript_read",
 ] as const;
 
 /** 产品自己出的四段（identity / conduct:coding / tool:workspace / tool:shell），按 order 排。 */
@@ -127,9 +128,10 @@ export function codingAgentIdentity(): {
     defaultModel: `${CODING_DEFAULT_MODEL.provider}/${CODING_DEFAULT_MODEL.model}`,
     // 执行预算也决定成绩(review 六轮 P1):**读 core 的常量,不手抄**——core 改默认值,digest 跟着变
     maxIterations: DEFAULT_MAX_ITERATIONS,
-    toolNames: [...makeFsTools(), ...makeSearchTools()]
+    // shell 一组也从工厂取名（bash / job_output / job_stop）：`echo:shell` 注册的就是这份，不手写
+    toolNames: [...makeFsTools(), ...makeSearchTools(), ...makeShellTools()]
       .map((t) => t.name)
-      .concat("bash", ...AGENT_BUILTIN_TOOLS)
+      .concat(...AGENT_BUILTIN_TOOLS)
       .sort(),
   };
 }

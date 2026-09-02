@@ -331,3 +331,38 @@ describe("Agent 接线", () => {
     expect(sys).toContain("Workspace: /w");
   });
 });
+
+/* ───────────────────────── 送模前的两道闸（2026-09-01 review） ───────────────────────── */
+
+describe("送模前", () => {
+  test("contextBeforeBuild 返回 block：不调模型，run 以 aborted 收场、reason 透传，transcript 不多一条", async () => {
+    const h = new HookRuntime();
+    h.on("contextBeforeBuild", () => ({ decision: "block", reason: "DO_NOT_CALL_MODEL" }));
+    const { spy, seen } = spying([textTurn("done")]);
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy, hooks: h });
+    const r = await agent.prompt("go");
+    expect(r.outcome).toEqual({ kind: "aborted", reason: "DO_NOT_CALL_MODEL" });
+    expect(seen, "block 之后模型仍被调用").toHaveLength(0);
+    expect(agent.messages.map((m) => m.role)).toEqual(["user"]); // 没有合成的 assistant 消息
+    expect(agent.status).toBe("idle");
+  });
+
+  test("注入的工具门控读本轮冻结的菜单：turn_start 里才注册的 TaskList，本轮菜单与清单都没有、下一轮一起出现", async () => {
+    const { spy, seen } = spying([toolTurn("t1", "TaskList", {}), textTurn("ok")]);
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy, tasks: [{ title: "把 M6 做完" }] });
+    let registered = false;
+    agent.subscribe((e) => {
+      if (e.type === "turn_start" && !registered) {
+        registered = true;
+        registerTool(agent.tools, fakeTool("TaskList"));
+      }
+    });
+    await agent.prompt("go");
+    // 第 1 轮：工作集在 turn_start 之前就冻了 → 菜单里没有 TaskList → 清单也不许注入（否则要模型用它点不到的工具）
+    expect(seen[0]?.tools.map((t) => t.name)).toEqual([]);
+    expect(JSON.stringify(seen[0]?.messages)).not.toContain("# Task list");
+    // 第 2 轮：菜单里有了，清单跟着出现——两者永远是同一份快照
+    expect(seen[1]?.tools.map((t) => t.name)).toEqual(["TaskList"]);
+    expect(JSON.stringify(seen[1]?.messages.at(-1))).toContain("# Task list");
+  });
+});

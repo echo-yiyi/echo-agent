@@ -12,6 +12,7 @@
 import type { AgentError } from "./errors.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage, Usage } from "./messages.ts";
 import type { AgentToolResult } from "./tools/types.ts";
+import type { CompactionReason, CompactionState } from "./compaction/types.ts";
 
 /* ══════════════════ 1. ProviderEvent ══════════════════ */
 
@@ -79,9 +80,9 @@ export type CoreAgentEvent =
   | { type: "tool_execution_start"; toolCallId: string; toolName: string; params: unknown }
   | { type: "tool_execution_update"; toolCallId: string; partial: string }
   | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: AgentToolResult }
-  /* 压缩 */
-  | { type: "compaction_start"; reason: "auto" | "overflow" }
-  | { type: "compaction_end"; summary: string; coveredUpTo: string }
+  /* 压缩（`compaction/pipeline.ts`）：start / end 成对；end 带跑完的状态、真正改了状态的阶段名（空 = 没压动）与估算 */
+  | { type: "compaction_start"; reason: CompactionReason }
+  | { type: "compaction_end"; reason: CompactionReason; compaction: CompactionState; stages: readonly string[]; contextTokens: number }
   /* 重试与账 */
   | { type: "retry_scheduled"; attempt: number; maxAttempts: number; delayMs: number; cause: string }
   | { type: "usage"; usage: Usage }
@@ -161,9 +162,10 @@ export type LifecycleEvent =
   /* 收尾与上下文 */
   | { type: "stop"; iteration: number; finalText: string }
   | { type: "contextBeforeBuild"; messages: AgentMessage[] }
-  | { type: "preCompact"; reason: "auto" | "overflow" }
-  | { type: "postCompact"; summary: string; coveredUpTo: string }
-  | { type: "compactionFailed"; message: string }
+  | { type: "preCompact"; reason: CompactionReason }
+  | { type: "postCompact"; reason: CompactionReason; compaction: CompactionState; stages: readonly string[] }
+  /** 某个阶段抛错（带 `stage`），或整条流水线跑完没有一段改了状态（不带）。 */
+  | { type: "compactionFailed"; reason: CompactionReason; stage?: string; message: string }
   /* 权限（§14.10.3 固定 stage）：只有真正进入 ask 才有 permissionId；policy 直接 allow/deny 没有 ask、也就没有 ID。
      这四种全部 notify-only——hook 只能观察，回答只能来自可信宿主的 answerPermission()。 */
   | {

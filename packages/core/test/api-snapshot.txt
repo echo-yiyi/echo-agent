@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 234（value 57 · type 158 · both 19）
+符号 286（value 98 · type 169 · both 19）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -35,6 +35,66 @@ value  DEFAULT_MAX_ITERATIONS
 -- src/background/types.ts (2) --
 type   AgentBackground
 type   BackgroundLimits
+
+-- src/compaction/builtin.ts (16) --
+value  chooseTailStart
+value  COLLAPSE_INSTRUCTION
+value  COLLAPSE_MAX_SECTIONS
+value  COLLAPSE_SYSTEM
+value  collapseStage
+type   CompactionPackConfig
+value  defaultCompactionStages
+value  extractSummary
+value  frameFull
+value  frameSection
+value  OVERFLOW_KEEP_TOKENS
+value  snipStage
+value  SUMMARY_INSTRUCTION
+value  SUMMARY_SYSTEM
+value  summaryStage
+value  toolResultsStage
+
+-- src/compaction/tool.ts (4) --
+value  renderTranscript
+value  TRANSCRIPT_READ_TOOL
+type   TranscriptReadParams
+value  transcriptReadTool
+
+-- src/compaction/types.ts (15) --
+value  COMPACTION_SLACK_RATIO
+type   CompactionBudget
+type   CompactionInput
+type   CompactionModelCall
+type   CompactionOptions
+type   CompactionReason
+type   CompactionSpan
+type   CompactionStage
+type   CompactionState
+value  DEFAULT_KEEP_RECENT_TOKENS
+value  DEFAULT_KEEP_RECENT_TOOL_RESULTS
+value  DEFAULT_RESERVE_TOKENS
+value  DEFAULT_SECTION_TOKENS
+value  EMPTY_COMPACTION
+value  isEmptyCompaction
+
+-- src/compaction/view.ts (17) --
+value  assertCompactionFits
+value  buildWorkingMessages
+value  clearedNotice
+type   ContextAnchor
+value  estimateMessage
+value  estimateText
+value  estimateTokens
+value  IMAGE_TOKEN_ESTIMATE
+value  isLegalCut
+value  isTurnStart
+value  measureContext
+value  normalizeCompaction
+value  omissionNotice
+value  projectRange
+value  sameCompaction
+value  snapBack
+value  snapForward
 
 -- src/create-agent.ts (2) --
 value  resolveModel
@@ -117,7 +177,7 @@ type   SteerResult
 
 -- src/loop/types.ts (4) --
 type   AgentContext
-type   CompactionConfig
+type   LoopCompactionConfig
 type   LoopResult
 type   TransformContext
 
@@ -350,7 +410,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 51（value 22 · type 25 · both 4）
+符号 55（value 24 · type 27 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -368,7 +428,7 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (16) --
+-- src/extension/builtin.ts (17) --
 value  agentRuntimeOf
 value  BUILTIN_GENERATION
 value  builtinEntries
@@ -378,6 +438,7 @@ type   BuiltinToolsConfig
 value  definePromptPack
 value  defineToolPack
 value  ECHO_AGENT
+value  ECHO_COMPACTION
 value  ECHO_MEMORY
 value  ECHO_SCHEDULER
 value  ECHO_SKILLS
@@ -399,8 +460,10 @@ both   ExtensionHost
 both   ExtensionMountError
 type   FiberInfo
 
--- src/extension/registries.ts (10) --
+-- src/extension/registries.ts (12) --
 value  AgentBackgroundService
+value  AgentCompaction
+type   AgentCompactionRegistry
 value  AgentHooks
 type   AgentHooksRegistry
 value  AgentPrompt
@@ -411,9 +474,10 @@ type   AgentSkillsRegistry
 value  AgentTools
 type   AgentToolsRegistry
 
--- src/extension/runtime.ts (4) --
+-- src/extension/runtime.ts (5) --
 type   AgentRuntime
 value  AgentRuntimeService
+type   CompactResult
 type   EquipResult
 type   RuntimeTurnResult
 

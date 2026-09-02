@@ -37,7 +37,12 @@ import { RunIntakeGate, type FollowUpResult, type IntakeLeftovers, type SteerRes
 import { StandaloneRunAdmission } from "./admission/standalone.ts";
 import { normalizeModelSnapshot } from "./admission/model-snapshot.ts";
 import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTicket, RunModelBinding, RunSource } from "./admission/types.ts";
-import type { AgentContext, AgentLoopConfig, CompactionConfig, LoopResult, TransformContext } from "./loop/types.ts";
+import type { AgentContext, AgentLoopConfig, LoopResult, TransformContext } from "./loop/types.ts";
+import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
+import { defaultCompactionPack } from "./compaction/builtin.ts";
+import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
+import { buildWorkingMessages, estimateText, estimateTokens } from "./compaction/view.ts";
+import type { CompactResult } from "./extension/runtime.ts";
 import { InMemorySessionManager, type SessionEntry, type SessionManager } from "./session/types.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
@@ -115,7 +120,16 @@ export type AgentState = {
   readonly streamingMessage?: AgentMessage;
   readonly pendingToolCalls: ReadonlySet<string>;
   readonly retryCount: number;
-  readonly checkpoint: string | null;
+  /**
+   * 压缩状态（`compaction/types.ts`）：作用在 `messages` 上的视图——messages 永远全量原文，送模时按它投影。
+   * 运行时与盘上同一个形状、同一套下标；只有压缩流水线（compaction_end）会改它。
+   */
+  readonly compaction: CompactionState;
+  /**
+   * 当前送模上下文大约多大（token）：每轮以 provider 报的 usage 刷新，压缩后以估算刷新；null = 还没有过任何依据。
+   * 状态栏的「上下文占用」读它配 `model.capabilities.contextWindow`。
+   */
+  readonly contextTokens: number | null;
   readonly lastError: AgentError | null;
   readonly usage: Usage;
   /* 会话指针：指向盘上那段；null = 未落盘的临时对话 */
@@ -138,7 +152,8 @@ export type AgentOptions = {
   timeoutMs?: number;
   retryPolicy?: RetryPolicy;
   maxRetryDelayMs?: number;
-  compaction?: CompactionConfig;
+  /** 压缩：触发阈值、内建阶梯的参数、要不要内建那组（`compaction/types.ts`）。策略本身经 `AgentCompaction` registry 注册。 */
+  compaction?: CompactionOptions;
   toolExecution?: "sequential" | "parallel";
   convertToLlm?: ConvertToLlm;
   transformContext?: TransformContext;
@@ -535,7 +550,18 @@ export class Agent {
   public timeoutMs?: number;
   public retryPolicy: RetryPolicy;
   public maxRetryDelayMs?: number;
-  public compaction: CompactionConfig;
+  public compaction: CompactionOptions;
+  /**
+   * 压缩阶段表（按名）。**只经 `AgentCompaction` registry 写**（`extension/registries.ts`），内建的
+   * `echo:compaction` 与产品 / 第三方的策略走同一条路；流水线每次跑之前从这里重取（热插拔在轮边界生效）。
+   */
+  readonly compactionStages: Map<string, CompactionStage> = new Map();
+  /**
+   * 上一次 usage 算出的校准比（真 token / 字符估）与当时 system prompt 的字符估。手动压缩发生在 run 之外、
+   * 新 run 的首轮还没有 usage——这两处没有基准，裸字符估对中文会低 2–4 倍，就沿用这份。`reset()` 归 1。
+   */
+  private lastCalibration = 1;
+  private lastSystemEstimate = 0;
   public toolExecution: "sequential" | "parallel";
 
   /* 可替换的决策点 */
@@ -569,7 +595,8 @@ export class Agent {
       streamingMessage: undefined,
       pendingToolCalls: new Set(),
       retryCount: 0,
-      checkpoint: null,
+      compaction: EMPTY_COMPACTION,
+      contextTokens: null,
       lastError: null,
       usage: { inputTokens: 0, outputTokens: 0 },
       sessionId: opts.sessionId ?? null,
@@ -690,6 +717,9 @@ export class Agent {
       skills: { tools: skillTools, sections: [skillsSection] },
       memory: memoryTools === undefined || this.memory === undefined ? undefined : { tools: memoryTools, sections: memoryPromptSections(this.memory) },
       scheduler: scheduleTools === undefined ? undefined : { tools: scheduleTools },
+      // 压缩阶梯 + transcript_read + 习惯段：与 memory 同款——`builtin: false` 就是「这组不在」，
+      // 流水线与 registry 仍在，等别的扩展注册阶段。`transcript_read` 读的是活的 transcript。
+      compaction: opts.compaction?.builtin === false ? undefined : defaultCompactionPack(opts.compaction ?? {}, () => this._state.messages),
     };
     this.maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     this.timeoutMs = opts.timeoutMs;
@@ -1109,10 +1139,43 @@ export class Agent {
     this._state.streamingMessage = undefined;
     this._state.pendingToolCalls = new Set();
     this._state.lastError = null;
-    this._state.checkpoint = null;
+    this._state.compaction = EMPTY_COMPACTION;
+    this._state.contextTokens = null;
+    this.lastCalibration = 1;
     this._state.iteration = 0;
     this._state.usage = { inputTokens: 0, outputTokens: 0 };
     this.clearAllQueues();
+  }
+
+  /**
+   * 手动压缩（TUI 的 `/compact [指令]`，2026-09-02）：跑与自动压缩**同一条**流水线（`compaction/pipeline.ts`），
+   * reason 为 manual、无视阈值，`instructions` 交给摘要阶段。走 admission 拿 permit——忙时 rejected、
+   * 模型 binding 冻结——但**不是一个 run**：不发 agent_start / agent_end，只有 compaction_start / compaction_end。
+   * 不抛：忙、没注册任何阶段、admission 拒绝，都以 rejected 带原因返回。
+   */
+  async compact(instructions?: string): Promise<CompactResult> {
+    const refuse = this.refuseWorkReason();
+    if (refuse !== null) return { kind: "rejected", reason: refuse };
+    if (this.compactionStages.size === 0) {
+      return { kind: "rejected", reason: "没有注册任何压缩阶段（echo:compaction 未装，也没有别的策略）" };
+    }
+    const box: { outcome: CompactionOutcome | null } = { outcome: null };
+    try {
+      await this.admitUserRun(async (scope, signal) => {
+        const context = await this.createContextSnapshot(scope);
+        const config = this.createLoopConfig(scope);
+        box.outcome = await runCompaction(
+          { context, config, emit: (e) => this.processEvents(e), signal, streamFn: scope.modelBinding.streamFunction },
+          { reason: "manual", ...(instructions !== undefined ? { instructions } : {}), anchor: null, calibration: this.lastCalibration },
+        );
+        return { outcome: { kind: "completed" }, messages: [] };
+      });
+    } catch (e) {
+      return { kind: "rejected", reason: errText(e) };
+    }
+    const outcome = box.outcome;
+    if (outcome === null) return { kind: "done", stages: [], contextTokens: this._state.contextTokens };
+    return { kind: "done", stages: outcome.stages, contextTokens: outcome.contextTokens };
   }
 
   /* ───────────── 生命周期（D4 / §13.12.3） ───────────── */
@@ -1239,7 +1302,7 @@ export class Agent {
           agent: this.agentName,
         });
         this._state.messages = [...data.messages];
-        this._state.checkpoint = data.checkpoint;
+        this._state.compaction = data.compaction;
         this._state.sessionId = data.info.id;
         this._state.workspace = data.info.workspace; // resume 以盘上为准
         await this.hooks.notify(
@@ -1890,7 +1953,7 @@ export class Agent {
     const data = await sessions.load(id);
     this.reset();
     this._state.messages = [...data.messages];
-    this._state.checkpoint = data.checkpoint;
+    this._state.compaction = data.compaction;
     this._state.sessionId = data.info.id;
     this._state.workspace = data.info.workspace;
     await this.hooks.notify(
@@ -2272,7 +2335,7 @@ export class Agent {
         result = await runAgentLoop(
         [userMessage(task.prompt)],
         // **独立 context**：整理不进主 transcript——它是 agent 对自己记忆的操作，不是这次任务的一部分。主 messages 一个字都不动。
-        { systemPrompt: null, messages: [] },
+        { systemPrompt: null, messages: [], compaction: EMPTY_COMPACTION },
         {
           ...this.createLoopConfig(scope),
           // D7：只给 memory 工具。不是「过滤掉危险的」，是**只给这一件**。
@@ -2313,10 +2376,13 @@ export class Agent {
   }
 
   private async createContextSnapshot(scope: AgentAdmissionExecuteScope): Promise<AgentContext> {
+    // 用 admission 冻结的模型装配——{{model}} 说的必须是这次 run 真用的那个
+    const systemPrompt = await this.assemblePrompt(scope.modelBinding.model);
+    this.lastSystemEstimate = estimateText(systemPrompt); // usage 到达时算校准比要用同一份 system 的字符估
     return {
-      // 用 admission 冻结的模型装配——{{model}} 说的必须是这次 run 真用的那个
-      systemPrompt: await this.assemblePrompt(scope.modelBinding.model),
+      systemPrompt,
       messages: [...this._state.messages], // 快照：循环拿的是那一刻的副本
+      compaction: this._state.compaction, // 视图状态随快照走；流水线改了它会经 compaction_end 写回 _state
       // 工具**不进快照**：它是装备，每轮经 config.getTools() 重取
     };
   }
@@ -2348,7 +2414,7 @@ export class Agent {
    * 每轮注入的来源（通道 B）。system 段不再从这里供货——那些经 `AgentPrompt` registry 进两张表。
    * 渲染函数仍住各自模块（`renderSkillInjections` / `taskInjections`：谁拥有数据谁拥有 format）。
    */
-  private promptSources(): PromptSource[] {
+  private promptSources(hasTool: (name: string) => boolean): PromptSource[] {
     return [
       // 激活的 skill 正文：每轮从工作集现算，拼消息末尾、不进 transcript
       { turnInjections: () => renderSkillInjections(this.skills, this.activeSkills) },
@@ -2359,7 +2425,9 @@ export class Agent {
       // 「task 恒装，所以这条不带条件」——那个前提在工具注册搬进 `echo:tasks` builtin Extension
       // 之后就没了：不 mount builtin 的装法（低层 `new Agent()`）会让模型**每轮看见任务清单、
       // 却没有 TaskCreate 可调**。那正是 skills 那行注释说的「教模型用它没有的工具」，同一个病。
-      { turnInjections: () => (this.tools.has("TaskList") ? taskInjections(taskSnapshot(this.tasks)) : []) },
+      // `hasTool` 读的是**本轮冻结的菜单**（run-turn 传进来），不是活池：turn_start 里才注册的 TaskList
+      // 这轮菜单上没有，清单也就不许这轮出现（2026-09-01 review P2）。
+      { turnInjections: () => (hasTool("TaskList") ? taskInjections(taskSnapshot(this.tasks)) : []) },
     ];
   }
 
@@ -2381,7 +2449,7 @@ export class Agent {
       resolveTool: (name) => resolveTool(this.tools, name),
       // 通道 B:run 中途会变的内容(激活 skill 正文),每轮从各 PromptSource 重算、
       // 拼在消息末尾、不进 transcript。
-      getTurnInjections: () => this.promptSources().flatMap((s) => s.turnInjections?.() ?? []),
+      getTurnInjections: (visibleTools) => this.promptSources((n) => visibleTools.has(n)).flatMap((s) => s.turnInjections?.() ?? []),
       // RunIntakeGate 的循环侧。两条队列出来的消息同样要过 userPromptSubmit 准入（§14.7.5 第 3 条），source 如实标；
       // 开关门本身是 gate 里的同步步，准入在 drain 之后才 await。
       intake: {
@@ -2405,7 +2473,12 @@ export class Agent {
       maxIterations: this.maxIterations,
       timeoutMs: this.timeoutMs,
       retryPolicy: binding.retryPolicy,
-      compaction: this.compaction,
+      // 阶段每次流水线跑之前重取——registry 里装卸的策略在轮边界生效
+      compaction: {
+        ...(this.compaction.reserveTokens !== undefined ? { reserveTokens: this.compaction.reserveTokens } : {}),
+        getStages: () => [...this.compactionStages.values()],
+        calibration: this.lastCalibration,
+      },
       workspace: this._state.workspace,
     };
   }
@@ -2612,12 +2685,20 @@ export class Agent {
         break;
       case "compaction_end":
         this._state.status = "generating";
-        this._state.checkpoint = input.coveredUpTo;
+        if (input.stages.length > 0) this._state.compaction = input.compaction;
+        this._state.contextTokens = input.contextTokens;
         break;
       case "retry_scheduled":
         this._state.retryCount = input.attempt;
         break;
-      case "usage":
+      case "usage": {
+        // 这一轮送模的上下文有多大，provider 说了算（输入 + 它自己的输出 = 下一轮至少这么大）
+        const tokens = input.usage.inputTokens + input.usage.outputTokens;
+        this._state.contextTokens = tokens;
+        // 校准比：真值 / 同一份视图（system + 到这条 assistant 为止的投影；usage 事件紧跟它的 message_end）的字符估。
+        // 记下来给手动压缩与下一个 run 的首轮用——那两处没有 usage 基准
+        const raw = this.lastSystemEstimate + estimateTokens(buildWorkingMessages(this._state.messages, this._state.compaction));
+        if (raw > 0) this.lastCalibration = clampCalibration(tokens / raw);
         this._state.usage = {
           inputTokens: this._state.usage.inputTokens + input.usage.inputTokens,
           outputTokens: this._state.usage.outputTokens + input.usage.outputTokens,
@@ -2627,6 +2708,7 @@ export class Agent {
             : {}),
         };
         break;
+      }
       case "agent_end":
         this._state.streamingMessage = undefined;
         this._state.lastError = input.outcome.kind === "error" ? input.outcome.error : null;
@@ -2819,7 +2901,8 @@ export class Agent {
     if (input.type === "message_end") {
       parts.push({ kind: "message", message: input.message });
     } else if (input.type === "compaction_end") {
-      parts.push({ kind: "compaction", at: Date.now(), summary: input.summary, coveredUpTo: input.coveredUpTo });
+      // 没压动的不入账：账本只记事实，一条「什么都没变」的 entry 只会让恢复多验一次同样的状态
+      if (input.stages.length > 0) parts.push({ kind: "compaction", at: Date.now(), reason: input.reason, compaction: input.compaction });
     } else if (input.type === "agent_end" && input.outcome.kind === "error") {
       parts.push({ kind: "error", at: Date.now(), error: input.outcome.error });
     }
