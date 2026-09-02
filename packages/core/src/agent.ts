@@ -11,7 +11,10 @@ import { redactedLabel } from "./observability/redact.ts";
 import { errText, type AgentError } from "./errors.ts";
 import type { AgentEvent, AgentEventInput, AgentEventTap, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
-import type { ObservationRuntime } from "./observability/runtime.ts";
+import { builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
+import { memoryFactDescriptor } from "./memory/observe.ts";
+import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
+import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import type { CapabilityFactSink } from "./observability/fact-sink.ts";
 import { ObservationStoreUnavailableError } from "./observability/store.ts";
 import type { EchoObservableState, RuntimePhase } from "./observability/types.ts";
@@ -1153,6 +1156,8 @@ export class Agent {
    * 等 composition/handoff 在 atomic swap 之后调 `activate()`（§14 的窄接缝，不是重写恢复逻辑）。
    */
   async start(options: { activation?: "immediate" | "deferred" } = {}): Promise<void> {
+    // canonical writer 在 start 入口就接上：恢复期的 Schedule 补跑（catchUp）已经会发领域事实，不能等到第一个 run 才挂 sink
+    this.observationRuntime();
     const activation = options.activation ?? "immediate";
     // **外层只做同操作的 in-flight 共享**——一切 phase 判断都在 actor 内（见 `startInActor`）。
     // 在外层判相位等于「读的是入队那一刻的旧相位」：`stop()` 之后同一 tick 调 `start()`，
@@ -2713,8 +2718,14 @@ export class Agent {
     if (wiring === undefined) return undefined; // 还没挂（构造期）或根本不会挂（/engine）：不记忆，下次再看
     this.observationResolved = true;
     this.observation = wiring.runtime;
-    wiring.runtime.attachDiagnostics((d) => this.reportDiagnostic(d));
-    this.observationSink = wiring.runtime.eventSink(() => this.observationScope());
+    const rt = wiring.runtime;
+    rt.attachDiagnostics((d) => this.reportDiagnostic(d));
+    rt.bindScope(() => this.observationScope());
+    this.observationSink = rt.eventSink();
+    // §15.9 的三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
+    if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID));
+    attachTaskObserver(this.tasks, rt.capabilitySink(taskFactDescriptor, builtinOwner(TASKS_ENTRY_ID)));
+    if (this.schedule !== undefined) this.schedule.observe = rt.capabilitySink(scheduleFactDescriptor, builtinOwner(SCHEDULER_ENTRY_ID));
     return this.observation;
   }
 

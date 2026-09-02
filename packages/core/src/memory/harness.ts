@@ -14,6 +14,8 @@
 import { errText } from "../errors.ts";
 import type { AgentEvent, AgentListener } from "../events.ts";
 import type { Diagnostic } from "../errors.ts";
+import type { CapabilityFactSink } from "../observability/fact-sink.ts";
+import type { MemoryFact, MemoryIndexOutcome, MemoryMutationStage, MemoryOperation } from "./observe.ts";
 
 /** MemoryHarness 要 agent 给的**只有一件**：索引重建、写盘失败要能说出来。 */
 export type MemoryDeps = { report?: (d: Diagnostic) => void };
@@ -78,6 +80,11 @@ export type AgentMemories = MemoryDeps & {
   /** 距上次 dream 的写次数 / 轮次——闸靠它判。 */
   writesSinceDream: number;
   turnsSinceDream: number;
+  /**
+   * §15.9 领域观测 sink（module-local、永不抛）：五种 mutation 的最外层与 compose 各发一次事实。
+   * 没挂 = 不发。由 composition root / Agent 挂；工具与上层复写看不见它，也不该碰它。
+   */
+  observe?: CapabilityFactSink<MemoryFact>;
 };
 
 /** `dir` 必给（2026-08-17 起）：能力层不自带落盘默认件，理由见下方 doc comment。评测/单测传 InMemoryDir。 */
@@ -174,21 +181,25 @@ export async function memoryView(ctx: AgentMemories, rawPath: string): Promise<A
 
 /** 建/整文件覆写。上层自己的写入工具(remember 之类)最终都该落到这里。 */
 export async function memoryCreate(ctx: AgentMemories, rawPath: string, text: string): Promise<AgentToolResult> {
-  return writeMemory(ctx, rawPath, () => Promise.resolve(text), (path, n) => `Wrote ${path} (${n} characters)`);
+  return writeMemory(ctx, "create", rawPath, async () => ({ ok: true, content: text }), (path, n) => `Wrote ${path} (${n} characters)`);
 }
 
 /** 把唯一出现的 oldStr 换成 newStr。零命中/多义都拒(为 LLM 设计的寻址协议)。 */
 export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldStr: string, newStr: string): Promise<AgentToolResult> {
-  if (oldStr === "") return toolError("str_replace needs old_str");
-  return writeMemory(ctx, 
+  if (oldStr === "") {
+    return finishMemoryMutation(ctx, { operation: "replace", path: pathForFact(rawPath), at: Date.now() }, rejected("empty_old_str", "str_replace needs old_str"));
+  }
+  return writeMemory(
+    ctx,
+    "replace",
     rawPath,
     async (path) => {
       const content = await ctx.dir.read(path);
-      if (content === null) throw new Error(`'${path}' does not exist`);
+      if (content === null) return reject("not_found", `'${path}' does not exist`);
       const hits = content.split(oldStr).length - 1;
-      if (hits === 0) throw new Error(`old_str not found (view '${path}' first and copy the exact text)`);
-      if (hits > 1) throw new Error(`old_str occurs ${hits} times; it must be unique, include more context`);
-      return content.replace(oldStr, newStr);
+      if (hits === 0) return reject("old_str_not_found", `old_str not found (view '${path}' first and copy the exact text)`);
+      if (hits > 1) return reject("old_str_ambiguous", `old_str occurs ${hits} times; it must be unique, include more context`);
+      return { ok: true, content: content.replace(oldStr, newStr) };
     },
     (path, n) => `Replaced one occurrence in ${path} (now ${n} characters)`,
   );
@@ -196,65 +207,100 @@ export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldS
 
 /** 在第 line 行之后插入(0 = 文件开头)。 */
 export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: number, text: string): Promise<AgentToolResult> {
-  if (!Number.isInteger(line) || line < 0) return toolError("insert_line must be an integer ≥ 0 (0 = start of file)");
-  return writeMemory(ctx, 
+  if (!Number.isInteger(line) || line < 0) {
+    return finishMemoryMutation(ctx, { operation: "insert", path: pathForFact(rawPath), at: Date.now() }, rejected("bad_line", "insert_line must be an integer ≥ 0 (0 = start of file)"));
+  }
+  return writeMemory(
+    ctx,
+    "insert",
     rawPath,
     async (path) => {
       const content = await ctx.dir.read(path);
-      if (content === null) throw new Error(`'${path}' does not exist (use create for a new file)`);
+      if (content === null) return reject("not_found", `'${path}' does not exist (use create for a new file)`);
       const lines = content.split("\n");
-      if (line > lines.length) throw new Error(`insert_line out of range: the file has only ${lines.length} lines`);
+      if (line > lines.length) return reject("line_out_of_range", `insert_line out of range: the file has only ${lines.length} lines`);
       lines.splice(line, 0, text);
-      return lines.join("\n");
+      return { ok: true, content: lines.join("\n") };
     },
     (path, n) => `Inserted after line ${line} of ${path} (now ${n} characters)`,
   );
 }
 
 export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise<AgentToolResult> {
+  const at = Date.now();
+  const norm = normalizeOrReject(rawPath);
+  if (!norm.ok) return finishMemoryMutation(ctx, { operation: "delete", path: pathForFact(rawPath), at }, norm.verdict);
+  const path = norm.path;
+  const frame: MutationFrame = { operation: "delete", path, owner: memoryFor(ctx, path), at };
+  if (path === "" || path.endsWith("/")) return finishMemoryMutation(ctx, frame, rejected("not_a_file", "delete needs a file path, not a directory"));
+  const guard = guardIndexFile(path);
+  if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
+  let removed: boolean;
   try {
-    const path = normalizeMemoryPath(rawPath);
-    if (path === "" || path.endsWith("/")) return toolError("delete needs a file path, not a directory");
-    const guard = guardIndexFile(ctx, path);
-    if (guard !== null) return guard;
-    const removed = await ctx.dir.remove(path);
-    if (!removed) return toolError(`'${path}' does not exist`);
-    try {
-      await bumpDreamCounters(ctx, { writes: 1 });
-    } catch (e) {
-      ctx.report?.({ code: "dream_counter_persist_failed", message: errText(e) });
-    }
-    await refreshIndex(ctx, memoryFor(ctx, path));
-    return toolOk(`Deleted ${path}`);
+    removed = await ctx.dir.remove(path);
   } catch (e) {
-    return toolError(errText(e));
+    return finishMemoryMutation(ctx, frame, failed("remove", errText(e)));
   }
+  if (!removed) return finishMemoryMutation(ctx, frame, rejected("not_found", `'${path}' does not exist`));
+  await bumpWriteCounter(ctx);
+  const indexOutcome = await refreshIndex(ctx, frame.owner);
+  return finishMemoryMutation(ctx, frame, committed(undefined, indexOutcome, `Deleted ${path}`));
 }
 
-/** 同分区内改名。跨分区 = 换预算域,不许静默发生——读出来在目标分区重新 create。 */
+/**
+ * 同分区内改名。跨分区 = 换预算域,不许静默发生——读出来在目标分区重新 create。
+ *
+ * **不复用公开的 `memoryCreate()`**：那会在 rename 之外再发一条 create 事实（§15.9「rename 内部不得双发」）。
+ * 目标写成功、源删失败是 **partial**（带 stage），不能谎报 committed，也不能像从前那样报成整体失败。
+ */
 export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: string): Promise<AgentToolResult> {
-  try {
-    const from = normalizeMemoryPath(rawFrom);
-    const to = normalizeMemoryPath(rawTo);
-    if (to === "" || to.endsWith("/")) return toolError("new_path needs a file path");
-    const fromOwner = memoryFor(ctx, from);
-    const toOwner = memoryFor(ctx, to);
-    if (fromOwner === undefined || toOwner === undefined || fromOwner.name !== toOwner.name) {
-      return toolError(`rename must stay within one region (${String(fromOwner?.name)} → ${String(toOwner?.name)})`);
-    }
-    const guard = guardIndexFile(ctx, from) ?? guardIndexFile(ctx, to);
-    if (guard !== null) return guard;
-    const content = await ctx.dir.read(from);
-    if (content === null) return toolError(`'${from}' does not exist`);
-    if ((await ctx.dir.read(to)) !== null) return toolError(`Target '${to}' already exists`);
-    const created = await memoryCreate(ctx, to, content);
-    if (created.isError) return created;
-    await ctx.dir.remove(from);
-    await refreshIndex(ctx, fromOwner);
-    return toolOk(`Renamed ${from} to ${to}`);
-  } catch (e) {
-    return toolError(errText(e));
+  const at = Date.now();
+  const normFrom = normalizeOrReject(rawFrom);
+  if (!normFrom.ok) return finishMemoryMutation(ctx, { operation: "rename", path: pathForFact(rawFrom), toPath: pathForFact(rawTo), at }, normFrom.verdict);
+  const normTo = normalizeOrReject(rawTo);
+  if (!normTo.ok) return finishMemoryMutation(ctx, { operation: "rename", path: normFrom.path, toPath: pathForFact(rawTo), at }, normTo.verdict);
+  const from = normFrom.path;
+  const to = normTo.path;
+  const fromOwner = memoryFor(ctx, from);
+  const frame: MutationFrame = { operation: "rename", path: from, toPath: to, owner: fromOwner, at };
+  if (to === "" || to.endsWith("/")) return finishMemoryMutation(ctx, frame, rejected("not_a_file", "new_path needs a file path"));
+  const toOwner = memoryFor(ctx, to);
+  if (fromOwner === undefined || toOwner === undefined || fromOwner.name !== toOwner.name) {
+    return finishMemoryMutation(ctx, frame, rejected("cross_region", `rename must stay within one region (${String(fromOwner?.name)} → ${String(toOwner?.name)})`));
   }
+  const guard = guardIndexFile(from) ?? guardIndexFile(to);
+  if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
+  let content: string | null;
+  let existing: string | null;
+  try {
+    content = await ctx.dir.read(from);
+    existing = content === null ? null : await ctx.dir.read(to);
+  } catch (e) {
+    return finishMemoryMutation(ctx, frame, failed("read", errText(e)));
+  }
+  if (content === null) return finishMemoryMutation(ctx, frame, rejected("not_found", `'${from}' does not exist`));
+  if (existing !== null) return finishMemoryMutation(ctx, frame, rejected("target_exists", `Target '${to}' already exists`));
+  let verdict: Awaited<ReturnType<CheckWrite>>;
+  try {
+    verdict = await ctx.checkFn(fromOwner, ctx.dir, to, content);
+  } catch (e) {
+    return finishMemoryMutation(ctx, frame, failed("check", errText(e)));
+  }
+  if (!verdict.ok) return finishMemoryMutation(ctx, frame, rejected("budget_exceeded", verdict.reason));
+  try {
+    await ctx.dir.write(to, content);
+  } catch (e) {
+    return finishMemoryMutation(ctx, frame, failed("write", errText(e)));
+  }
+  await bumpWriteCounter(ctx);
+  try {
+    await ctx.dir.remove(from);
+  } catch (e) {
+    const indexOutcome = await refreshIndex(ctx, fromOwner);
+    return finishMemoryMutation(ctx, frame, partial("remove-source", indexOutcome, `Renamed ${from} to ${to} but failed to remove the source: ${errText(e)}`));
+  }
+  const indexOutcome = await refreshIndex(ctx, fromOwner);
+  return finishMemoryMutation(ctx, frame, committed(content.length, indexOutcome, `Renamed ${from} to ${to}`));
 }
 
 /* ───────────── 记忆进 system 的段(格式在 compose.ts;由 echo:memory builtin 注册) ───────────── */
@@ -402,58 +448,163 @@ export async function disposeMemory(ctx: AgentMemories): Promise<void> {
   await ctx.dir.close?.();
 }
 
-/* ───────────── 私有 ───────────── */
+/* ───────────── 私有：mutation 骨架（typed outcome → 观测事实 → AgentToolResult） ─────────────
+   §15.9：先形成 typed outcome，再投影成现有 AgentToolResult；不能靠解析成功 / 错误字符串猜阶段。
+   semantic guard / not-found = rejected；primary I/O 抛错且未改数据 = failed；改了一半 = partial（带 stage）。 */
 
-/** 写入的公共骨架:jail → 路由分区 → 索引文件保护 → checkWrite → 落盘 → 计数 + 重建索引。 */
-async function writeMemory(ctx: AgentMemories, 
-  rawPath: string,
-  nextContent: (path: string) => Promise<string>,
-  okText: (path: string, chars: number) => string,
-): Promise<AgentToolResult> {
+type MutationFrame = {
+  operation: MemoryOperation;
+  path: string;
+  toPath?: string;
+  owner?: AnyMemory;
+  at: number;
+};
+
+type MutationVerdict =
+  | { outcome: "committed"; chars: number | undefined; indexOutcome: MemoryIndexOutcome; text: string }
+  | { outcome: "rejected"; reasonCode: string; message: string }
+  | { outcome: "failed"; stage: MemoryMutationStage; message: string }
+  | { outcome: "partial"; stage: MemoryMutationStage; indexOutcome: MemoryIndexOutcome; message: string };
+
+type Prepared = { ok: true; content: string } | { ok: false; reasonCode: string; message: string };
+
+function reject(reasonCode: string, message: string): Prepared {
+  return { ok: false, reasonCode, message };
+}
+function rejected(reasonCode: string, message: string): MutationVerdict {
+  return { outcome: "rejected", reasonCode, message };
+}
+function failed(stage: MemoryMutationStage, message: string): MutationVerdict {
+  return { outcome: "failed", stage, message };
+}
+function partial(stage: MemoryMutationStage, indexOutcome: MemoryIndexOutcome, message: string): MutationVerdict {
+  return { outcome: "partial", stage, indexOutcome, message };
+}
+function committed(chars: number | undefined, indexOutcome: MemoryIndexOutcome, text: string): MutationVerdict {
+  return { outcome: "committed", chars, indexOutcome, text };
+}
+
+/** jail 校验：非法路径是 semantic reject，不是 I/O failure。 */
+function normalizeOrReject(raw: string): { ok: true; path: string } | { ok: false; verdict: MutationVerdict } {
   try {
-    const path = normalizeMemoryPath(rawPath);
-    if (path === "" || path.endsWith("/")) return toolError("a file path is required, not a directory");
-    const guard = guardIndexFile(ctx, path);
-    if (guard !== null) return guard;
-    const owner = memoryFor(ctx, path);
-    if (owner === undefined) {
-      return toolError(`Path '${path}' is not inside any memory region. Regions: ${describeRegions(ctx)}`);
-    }
-    const next = await nextContent(path);
-    const verdict = await ctx.checkFn(owner, ctx.dir, path, next);
-    if (!verdict.ok) return toolError(verdict.reason);
-    await ctx.dir.write(path, next);
-    // 计数落盘（与轮次同一个理由：只在内存的话重启就归零）。
-    // 落盘失败不该把这次**已经成功的写**变成失败，所以只报诊断。
-    try {
-      await bumpDreamCounters(ctx, { writes: 1 });
-    } catch (e) {
-      ctx.report?.({ code: "dream_counter_persist_failed", message: errText(e) });
-    }
-    await refreshIndex(ctx, owner);
-    return toolOk(okText(path, next.length));
+    return { ok: true, path: normalizeMemoryPath(raw) };
   } catch (e) {
-    return toolError(errText(e));
+    return { ok: false, verdict: rejected("invalid_path", errText(e)) };
   }
 }
 
-/** INDEX.md 由系统维护(写方法重建),不许直接写——直接改会被下一次重建覆盖,等于白改。 */
-function guardIndexFile(ctx: AgentMemories, path: string): AgentToolResult | null {
+/** 还没走到 jail 就拒了的 mutation：事实里的 path 尽力 normalize，normalize 不了就原样（只进 digest / content）。 */
+function pathForFact(raw: string): string {
+  try {
+    return normalizeMemoryPath(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * **唯一 emission point**（§15.9）：五种 mutation 在 semantic reject、primary storage settle、index refresh outcome
+ * 都已知之后到这里，恰发一次事实，再投影成 `AgentToolResult`。sink 按契约永不抛，这里再兜一层。
+ */
+function finishMemoryMutation(ctx: AgentMemories, frame: MutationFrame, verdict: MutationVerdict): AgentToolResult {
+  const fact: MemoryFact = {
+    kind: "mutation",
+    operation: frame.operation,
+    outcome: verdict.outcome,
+    path: frame.path,
+    ...(frame.toPath === undefined ? {} : { toPath: frame.toPath }),
+    ...(frame.owner === undefined ? {} : { partition: frame.owner.name, mode: String(frame.owner.mode) }),
+    ...(verdict.outcome === "committed" && verdict.chars !== undefined ? { chars: verdict.chars } : {}),
+    ...(verdict.outcome === "failed" || verdict.outcome === "partial" ? { stage: verdict.stage } : {}),
+    ...(verdict.outcome === "committed" || verdict.outcome === "partial" ? { indexOutcome: verdict.indexOutcome } : {}),
+    ...(verdict.outcome === "rejected" ? { reasonCode: verdict.reasonCode } : {}),
+    ...(verdict.outcome === "committed" ? {} : { message: verdict.message }),
+    occurredAt: frame.at,
+  };
+  try {
+    ctx.observe?.offer(fact);
+  } catch {
+    // sink 契约是 never-throw；真抛了也不能改变 mutation 的结果
+  }
+  return verdict.outcome === "committed" ? toolOk(verdict.text) : toolError(verdict.message);
+}
+
+/** 计数落盘（与轮次同一个理由：只在内存的话重启就归零）。落盘失败不该把已经成功的写变成失败，只报诊断。 */
+async function bumpWriteCounter(ctx: AgentMemories): Promise<void> {
+  try {
+    await bumpDreamCounters(ctx, { writes: 1 });
+  } catch (e) {
+    ctx.report?.({ code: "dream_counter_persist_failed", message: errText(e) });
+  }
+}
+
+/** 写入的公共骨架:jail → 索引文件保护 → 路由分区 → 备内容 → checkWrite → 落盘 → 计数 + 重建索引 → 发事实。 */
+async function writeMemory(
+  ctx: AgentMemories,
+  operation: MemoryOperation,
+  rawPath: string,
+  prepare: (path: string) => Promise<Prepared>,
+  okText: (path: string, chars: number) => string,
+): Promise<AgentToolResult> {
+  const at = Date.now();
+  const norm = normalizeOrReject(rawPath);
+  if (!norm.ok) return finishMemoryMutation(ctx, { operation, path: pathForFact(rawPath), at }, norm.verdict);
+  const path = norm.path;
+  const frame: MutationFrame = { operation, path, at };
+  if (path === "" || path.endsWith("/")) return finishMemoryMutation(ctx, frame, rejected("not_a_file", "a file path is required, not a directory"));
+  const guard = guardIndexFile(path);
+  if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
+  const owner = memoryFor(ctx, path);
+  if (owner === undefined) {
+    return finishMemoryMutation(ctx, frame, rejected("outside_regions", `Path '${path}' is not inside any memory region. Regions: ${describeRegions(ctx)}`));
+  }
+  frame.owner = owner;
+  let prepared: Prepared;
+  try {
+    prepared = await prepare(path);
+  } catch (e) {
+    return finishMemoryMutation(ctx, frame, failed("read", errText(e)));
+  }
+  if (!prepared.ok) return finishMemoryMutation(ctx, frame, rejected(prepared.reasonCode, prepared.message));
+  let verdict: Awaited<ReturnType<CheckWrite>>;
+  try {
+    verdict = await ctx.checkFn(owner, ctx.dir, path, prepared.content);
+  } catch (e) {
+    return finishMemoryMutation(ctx, frame, failed("check", errText(e)));
+  }
+  if (!verdict.ok) return finishMemoryMutation(ctx, frame, rejected("budget_exceeded", verdict.reason));
+  try {
+    await ctx.dir.write(path, prepared.content);
+  } catch (e) {
+    return finishMemoryMutation(ctx, frame, failed("write", errText(e)));
+  }
+  await bumpWriteCounter(ctx);
+  const indexOutcome = await refreshIndex(ctx, owner);
+  return finishMemoryMutation(ctx, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length)));
+}
+
+/** INDEX.md 由系统维护(写方法重建),不许直接写——直接改会被下一次重建覆盖,等于白改。返回拒绝原文。 */
+function guardIndexFile(path: string): string | null {
   if (path.endsWith(`/${MEMORY_INDEX_FILE}`)) {
-    return toolError(`${MEMORY_INDEX_FILE} is the system-maintained index and cannot be edited directly; edit the memory files and the index is rebuilt`);
+    return `${MEMORY_INDEX_FILE} is the system-maintained index and cannot be edited directly; edit the memory files and the index is rebuilt`;
   }
   return null;
 }
 
-/** indexed 分区的落盘索引:每次写方法成功后重建(CC 的 MEMORY.md 同款)。 */
-async function refreshIndex(ctx: AgentMemories, owner: AnyMemory | undefined): Promise<void> {
-  if (owner === undefined || owner.mode !== "indexed") return;
+/**
+ * indexed 分区的落盘索引:每次写方法成功后重建(CC 的 MEMORY.md 同款)。
+ * 保持 no-throw + report，但把结果交出去：主 mutation 仍 committed，`indexOutcome:"failed"` 必须可见（§15.9）。
+ */
+async function refreshIndex(ctx: AgentMemories, owner: AnyMemory | undefined): Promise<MemoryIndexOutcome> {
+  if (owner === undefined || owner.mode !== "indexed") return "not-applicable";
   const im = owner as IndexedMemory;
   try {
     const entries = await indexEntries(im, ctx.dir);
     await ctx.dir.write(`${im.path}${MEMORY_INDEX_FILE}`, renderIndex(entries));
+    return "ok";
   } catch (e) {
     ctx.report?.({ code: "memory_index_rebuild_failed", message: errText(e), path: im.path });
+    return "failed";
   }
 }
 

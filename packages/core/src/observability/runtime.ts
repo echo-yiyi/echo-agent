@@ -19,7 +19,7 @@ import { agentEventDescriptor } from "./agent-events.ts";
 import { snapshotRunModelBinding } from "./assembly.ts";
 import { RUN_ASSEMBLY_RECORD, type BoundaryObservationDraft, type RunAcceptedBodyV1, type RunAssemblyBodyV1, type RunObservationHeaderSeed, type RunStartedBodyV1 } from "./draft.ts";
 import { LiveEchoObservations } from "./query.ts";
-import { factSinkToIngest, type CapabilityFactSink } from "./fact-sink.ts";
+import { factSinkToIngest, type CapabilityFactDescriptor, type CapabilityFactSink } from "./fact-sink.ts";
 import { sha256Hex } from "./hash.ts";
 import { redactedLabel } from "./redact.ts";
 import { ObservationSequencer, type SequencerLimits } from "./sequencer.ts";
@@ -40,8 +40,17 @@ import { OBSERVATION_BOUNDARY_LIMITS as BOUNDARY_LIMITS } from "./types.ts";
 /** run 边界与装配快照记录的 instrumentation：admission 这条路，与 AgentEvent tap（`echo.agent-event`）分开。 */
 export const RUN_ADMISSION_INSTRUMENTATION = { name: "echo.run-admission", version: "1" } as const;
 
+/** builtin Entry 的 owner（OR13 known）。按需构造而不是模块顶层常量：避免与 extension/builtin.ts 的环状 import 在求值期撞 TDZ。 */
+export function builtinOwner(entryId: string): ObservationOwner {
+  return { status: "known", entryId, entryGeneration: BUILTIN_GENERATION, via: "assembly" };
+}
+
 /** Agent 循环自己发的事实（run 边界、turn / model / tool span）都归 `echo:agent` 这一 builtin Entry。 */
-export const AGENT_OWNER: ObservationOwner = Object.freeze({ status: "known", entryId: "echo:agent", entryGeneration: BUILTIN_GENERATION, via: "assembly" });
+export const AGENT_ENTRY_ID = "echo:agent";
+/** §15.9 三个 O3a 领域行的 owner：与 extension/builtin.ts 的 tool pack 同名。 */
+export const MEMORY_ENTRY_ID = "echo:memory";
+export const TASKS_ENTRY_ID = "echo:tasks";
+export const SCHEDULER_ENTRY_ID = "echo:scheduler";
 
 export type ObservationRuntimeOptions = Readonly<{
   runtimeId: string;
@@ -104,7 +113,10 @@ export class ObservationRuntime {
   /** live 查询面（`echo.observations`）：同一个 Sequencer + 同一条 SQLite connection 的只读查询。 */
   readonly observations: LiveEchoObservations;
   private readonly clock: Clock;
+  /** 随库首建、永不改写（§15.9）；库关了之后挂 sink（stop 后再 start 的拒绝路径）也不能再去读它。 */
+  private readonly pathDigestKeyBytes: Uint8Array;
   private report: (d: Diagnostic) => void = () => {};
+  private scopeSupplier: ObservationScopeSupplier = () => ({});
   private phase: RuntimePhase = "ready";
   private disposing: Promise<void> | undefined;
 
@@ -115,6 +127,7 @@ export class ObservationRuntime {
     this.assembly = opts.assembly;
     this.store = opts.store;
     this.clock = opts.clock;
+    this.pathDigestKeyBytes = opts.store.readPathDigestKey();
     this.sequencer = new ObservationSequencer({
       runtimeId: opts.runtimeId,
       runtimeGeneration: opts.runtimeGeneration,
@@ -154,17 +167,38 @@ export class ObservationRuntime {
   }
 
   /**
-   * AgentEvent → bounded lane 的 sink。`scope` 在每条事实到达时刻读一次（runId / turnId 只有 Agent 知道）。
+   * Agent 把「此刻的 run / turn 归属」供给挂进来（`observationScope()`）：所有 sink 在事实到达时刻读一次它。
+   * 没挂之前供给返回 `{}`（runtime-scoped）——供给必须返回对象，返回 undefined 会被 sink 判成归属不可知而开 gap。
+   */
+  bindScope(supplier: ObservationScopeSupplier): void {
+    this.scopeSupplier = supplier;
+  }
+
+  /** 本 state root 的 Memory path HMAC key（§15.9）：只给 writer 侧的 descriptor，永不进 envelope。构造期读一次，之后不碰库。 */
+  get pathDigestKey(): Uint8Array {
+    return this.pathDigestKeyBytes;
+  }
+
+  /**
+   * AgentEvent → bounded lane 的 sink。`scope` 缺省用 `bindScope()` 挂上的供给（runId / turnId 只有 Agent 知道）。
    * 由 Agent 在 `processEvents()` 的 state apply + required persistence 之后同步调用（§15.12）。
    */
-  eventSink(scope: ObservationScopeSupplier): CapabilityFactSink<AgentEvent> {
-    return factSinkToIngest(agentEventDescriptor, this.sequencer, {
+  eventSink(scope?: ObservationScopeSupplier): CapabilityFactSink<AgentEvent> {
+    return this.capabilitySink(agentEventDescriptor, builtinOwner(AGENT_ENTRY_ID), scope);
+  }
+
+  /**
+   * 内建 Capability（Memory / Task / Schedule …）的 module-local sink（§15.9）：descriptor 归语义 owner，
+   * 这里只把它转成 `ObservationIngest.offer()`，identity / owner / runtime 身份在构造期钉住。
+   */
+  capabilitySink<T>(descriptor: CapabilityFactDescriptor<T>, owner: ObservationOwner, scope?: ObservationScopeSupplier): CapabilityFactSink<T> {
+    return factSinkToIngest(descriptor, this.sequencer, {
       runtimeId: this.runtimeId,
       runtimeGeneration: this.runtimeGeneration,
       capturePolicy: this.capturePolicy,
-      owner: AGENT_OWNER,
+      owner,
       report: (d) => this.report(d),
-      scope,
+      scope: scope ?? (() => this.scopeSupplier()),
     });
   }
 
@@ -267,7 +301,7 @@ export class ObservationRuntime {
       scope: scope as BoundaryObservationDraft["scope"],
       correlation: {},
       generation: { runtime: this.runtimeGeneration, agentAssembly: this.assembly.digest },
-      owner: AGENT_OWNER,
+      owner: builtinOwner(AGENT_ENTRY_ID),
       instrumentation: RUN_ADMISSION_INSTRUMENTATION,
       attributes: {},
       body,
