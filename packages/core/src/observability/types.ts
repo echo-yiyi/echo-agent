@@ -9,13 +9,16 @@
 
 /* ══════════════════ §15.4.1 值与 envelope ══════════════════ */
 
+/** JSON-safe 标量：canonical envelope 里能出现的叶子值。 */
 export type ObservationScalar = null | boolean | number | string;
 
+/** JSON-safe 值（§15.4.1）：body / attributes / snapshot 都先成为它，才能进 canonical journal 与 renderer。 */
 export type ObservationValue =
   | ObservationScalar
   | readonly ObservationValue[]
   | { readonly [key: string]: ObservationValue };
 
+/** Error 的安全投影：name / message / code 与 stack 的 digest，不带原始 stack（§15.11 采集边界）。 */
 export type ObservationError = Readonly<{
   name: string;
   message: string;
@@ -31,22 +34,26 @@ export type ObservationError = Readonly<{
   stackChars?: number;
 }>;
 
+/** 大正文的 content-addressed 引用（§15.4.2.4）；O3a 只定形状，真正的 blob CAS 接线在 O3b。 */
 export type ObservationBlobRef = Readonly<{
   digest: string;
   mediaType?: string;
   size: number;
 }>;
 
+/** 指向某条 canonical record（runtimeId + recordId）。 */
 export type ObservationRef = Readonly<{
   runtimeId: string;
   recordId: string;
 }>;
 
+/** 指向一次 run 的观测记录（runtimeId + runId）；`EchoRunResult.observation` 就是它。 */
 export type RunObservationRef = Readonly<{
   runtimeId: string;
   runId: string;
 }>;
 
+/** 事实归谁（OR13）：known = 某个 Entry@generation；unknown 带理由；not-applicable = Runtime 自身。 */
 export type ObservationOwner =
   | Readonly<{
       status: "known";
@@ -58,9 +65,12 @@ export type ObservationOwner =
   | Readonly<{ status: "unknown"; reason: string }>
   | Readonly<{ status: "not-applicable" }>;
 
+/** 两条 lane：boundary 同步等 COMMIT（run 边界、gap），bounded 进有界 ring 批量提交（高频事实）。 */
 export type ObservationLane = "boundary" | "bounded";
+/** 四种原始信号（§15.3）加 health。 */
 export type ObservationRecordKind = "event" | "span_start" | "span_end" | "snapshot" | "health";
 
+/** canonical record 的 envelope（§15.4.1）：identity（recordId / seq / observedAt）由 Sequencer 分配，producer 只给 body 与 descriptor。 */
 export type ObservationEnvelope<T extends ObservationValue = ObservationValue> = Readonly<{
   schemaVersion: 1;
   recordId: string;
@@ -106,6 +116,7 @@ export type ObservationEnvelope<T extends ObservationValue = ObservationValue> =
 
 /* ══════════════════ §15.3.3 Snapshot ══════════════════ */
 
+/** 此刻权威状态的只读投影（§15.3.3）：`throughSeq` 说明它相对 journal 的新鲜度。 */
 export type ObservationSnapshot<T extends ObservationValue> = Readonly<{
   throughSeq: number;
   at: number;
@@ -116,23 +127,29 @@ export type ObservationSnapshot<T extends ObservationValue> = Readonly<{
 // 这三个的定义权在 §14.2（EchoRuntime）。O3a 落 `createEcho()` 时从 runtime 模块导出并在这里 re-export；
 // 现在先住这里，避免两份定义漂移。
 
+/** §14 Runtime 生命周期 phase；与 observation persistence 正交（§15.12）。 */
 export type RuntimePhase = "bootstrapping" | "ready" | "reconfiguring" | "failed" | "disposing" | "disposed";
 
-// 兼容的人读投影；内部真相始终是 phase + observation persistence 两轴。
+/** 兼容的人读投影：phase，或 phase=ready 且 persistence 非 healthy 时的 `"degraded"`；内部真相始终是两轴。 */
 export type EchoRuntimeStatus = RuntimePhase | "degraded";
 
 // `RunSource` 的定义权归 §14.2.4 admission（`../admission/types.ts`）——这里只转发，不留第二份定义。
 import type { RunSource } from "../admission/types.ts";
+import type { AgentOutcome } from "../events.ts";
 export type { RunSource };
 
 /* ══════════════════ §15.5.1 RunObservation 家族 ══════════════════ */
 
+/** 采集档位（OR9）：off 只留身份骨架与安全 outcome；metadata 缺省；content 才带正文（需显式打开）。 */
 export type ObservationCapturePolicy = "off" | "metadata" | "content";
 
+/** run 的业务终态；`interrupted` 只由跨进程 recovery 封（O3b）。 */
 export type RunObservationStatus = "running" | "completed" | "aborted" | "error" | "interrupted";
 
+/** canonical 记录完整性：本 run 有任何 CanonicalObservationGap 即 partial；与业务 status 正交。 */
 export type ObservationIntegrity = "complete" | "partial";
 
+/** sealed AgentAssembly 的只读快照：只有槽 / Entry / 代 / owner / digest，不含对象本体。 */
 export type AgentAssemblyObservationSnapshot = Readonly<{
   digest: string;
   slots: readonly Readonly<{
@@ -144,6 +161,7 @@ export type AgentAssemblyObservationSnapshot = Readonly<{
   }>[];
 }>;
 
+/** run 冻结的模型绑定：provider / model id、目录 revision 与安全配置 digest，绝无凭据。 */
 export type RunModelBindingObservationSnapshot = Readonly<{
   providerId: string;
   modelId: string;
@@ -151,6 +169,7 @@ export type RunModelBindingObservationSnapshot = Readonly<{
   configDigest: string;
 }>;
 
+/** run 期间生效的 Entry@generation；O2b 接上正式 Entry owner 才填，O3a 恒空。 */
 export type ActiveEntrySnapshot = Readonly<{
   entryId: string;
   generation: string;
@@ -160,6 +179,7 @@ export type ActiveEntrySnapshot = Readonly<{
   configDigest: string;
 }>;
 
+/** 每个 turn 真正拿到的 Tool / Hook / Prompt 注入及 owner（O1b workset）；O3a 恒空。 */
 export type TurnWorksetObservation = Readonly<{
   turnId: string;
   tools: readonly Readonly<{ id: string; digest: string; owner: ObservationOwner }>[];
@@ -167,6 +187,7 @@ export type TurnWorksetObservation = Readonly<{
   promptSources: readonly Readonly<{ id: string; digest: string; owner: ObservationOwner }>[];
 }>;
 
+/** 聚合层的业务 outcome：从 `run.closed` 的有界 outcome 派生；`output` 只在 content 档从更早的 bounded record 还原。 */
 export type AgentOutcomeObservation = Readonly<{
   status: "completed" | "aborted" | "error";
   // RunObservation 聚合层可从更早的 bounded content record 还原；run.closed body 不直接携带该正文。
@@ -175,6 +196,7 @@ export type AgentOutcomeObservation = Readonly<{
   error?: ObservationError;
 }>;
 
+/** `run.closed` body 里的有界 outcome：状态、有限 finish / error code 与正文 digest，绝不带 message / stack。 */
 export type RunClosedOutcomeObservation = Readonly<{
   status: "completed" | "aborted" | "error";
   finishReason?: string; // UTF-8 <= maxSafeStringBytes
@@ -184,6 +206,7 @@ export type RunClosedOutcomeObservation = Readonly<{
   errorDigest?: string;
 }>;
 
+/** 单个 Capability 的固定 counters / flags / digest 摘要（各有上限，§15.5.1）；正文与列表不进这里。 */
 export type CapabilityObservationSummary = Readonly<{
   schemaVersion: 1;
   stateDigest: string;
@@ -193,6 +216,7 @@ export type CapabilityObservationSummary = Readonly<{
   detailTruncated: boolean;
 }>;
 
+/** finalSnapshot 的状态形状：Runtime 两轴 + Agent 低基数字段 + Capability 摘要（按 id 排序、有上限）。 */
 export type EchoObservableState = Readonly<{
   runtime: Readonly<{
     phase: RuntimePhase;
@@ -233,6 +257,7 @@ export type RunClosedBodyV1 = RunClosedBodyInput &
     captureGapDigest?: string;
   }>;
 
+/** 从 records 确定性派生的 run 摘要：时长、记录数、gap 数、模型与 Tool 聚合。 */
 export type RunObservationSummary = Readonly<{
   durationMs: number | null;
   recordCount: number;
@@ -257,6 +282,7 @@ export type RunObservationSummary = Readonly<{
   }>[];
 }>;
 
+/** run 的 header：唯一持久真相是 RunIndex 里 materialized 的那份，不是某条会被原地改的 record。 */
 export type RunObservationHeader = Readonly<{
   schemaVersion: 1;
   runId: string;
@@ -276,6 +302,7 @@ export type RunObservationHeader = Readonly<{
   persistence: "stored" | "degraded";
 }>;
 
+/** RunIndex 行（`observation_run_index`，§15.4.2.2）：retention 之后 header 的唯一真相源；与 records 同事务更新。 */
 export type RunIndexEntryV1 = Readonly<{
   schemaVersion: 1;
   runtimeId: string;
@@ -290,6 +317,7 @@ export type RunIndexEntryV1 = Readonly<{
   prunedAt?: number;
 }>;
 
+/** 一次 run 的硬产物（§15.5.1）：header + 冻结快照 + records + 派生的 gaps / summary；整体可按 canonical JSON round-trip。 */
 export type RunObservation = RunObservationHeader &
   Readonly<{
     agentAssembly: AgentAssemblyObservationSnapshot;
@@ -306,6 +334,7 @@ export type RunObservation = RunObservationHeader &
     summary: RunObservationSummary;
   }>;
 
+/** `getRun()` / `lastRun()` 的三态：found / pruned（header 还在、body 已清）/ unknown（从未有过或已出 header 窗口）。 */
 export type RunLookupResult =
   | Readonly<{ kind: "found"; observation: RunObservation }>
   | Readonly<{
@@ -317,6 +346,7 @@ export type RunLookupResult =
 
 /* ══════════════════ §15.12 gap 三族与 sink / persistence health ══════════════════ */
 
+/** canonical gap 的原因（§15.12）。 */
 export type ObservationGapReason =
   | "buffer_overflow"
   | "encoding_error"
@@ -326,6 +356,7 @@ export type ObservationGapReason =
   | "lease_lost"
   | "retention";
 
+/** 缺失区间：`(afterSeq, beforeSeq)` 两端 exclusive，`dropped === beforeSeq - afterSeq - 1`。 */
 export type ObservationGap = Readonly<{
   afterSeq: number;
   beforeSeq: number;
@@ -356,6 +387,7 @@ export type SinkDeliveryGap = Readonly<{
   reason: "subscriber_slow" | "exporter_timeout" | "shutdown_timeout" | "sink_failure";
 }>;
 
+/** 单个 subscriber / exporter 的交付健康：慢、超时、关闭只进这里，不污染 canonical integrity。 */
 export type SinkHealth = Readonly<{
   sinkId: string;
   status: "healthy" | "degraded" | "closed";
@@ -366,8 +398,10 @@ export type SinkHealth = Readonly<{
   lastErrorDigest?: string;
 }>;
 
+/** canonical persistence 的五态（§15.12）；与 RuntimePhase 正交。 */
 export type ObservationPersistenceStatus = "healthy" | "degraded" | "recovering" | "sealed" | "lost-lease";
 
+/** persistence 状态带证据：非 healthy 时必有 since / lastErrorDigest / reopenAttempts。 */
 export type ObservationPersistenceState =
   | Readonly<{ status: "healthy" }>
   | Readonly<{
@@ -394,6 +428,7 @@ export type ObservationPersistenceState =
       reopenAttempts: number;
     }>;
 
+/** persistence × capture × sinks 三面的 health；live `snapshot()` 用，不回填进历史 run。 */
 export type ObservationHealth = Readonly<{
   persistence: Readonly<{
     status: ObservationPersistenceStatus;
@@ -410,6 +445,143 @@ export type ObservationHealth = Readonly<{
     canonicalGapCount: number;
   }>;
   sinks: readonly SinkHealth[];
+}>;
+
+/* ══════════════════ §15.6 用户取得与渲染的公共面 ══════════════════ */
+
+/**
+ * 完整 Runtime `send()` 的返回（OR5）：业务 outcome 与观测三元组正交——
+ * `observationIntegrity` 来自 RunIndex（canonical gap 派生），`observationPersistence` 是**当前 Runtime** 对这次
+ * terminal COMMIT 的投影（stored = 已 COMMIT 且 read-back 可见；degraded = 尾写失败，磁盘 index 仍 running）。
+ */
+export type EchoRunResult = Readonly<{
+  runId: string;
+  outcome: AgentOutcome;
+  observation: RunObservationRef;
+  observationIntegrity: ObservationIntegrity;
+  observationPersistence: "stored" | "degraded";
+}>;
+
+/** submission 级观测（Inbox / Extension source，O2b）；O3a 的 `getSubmission()` 恒 null。 */
+export type SubmissionObservation = Readonly<{
+  schemaVersion: 1;
+  submissionId: string;
+  status: "accepted" | "waiting-admission" | "running" | "completed" | "cancelled" | "error";
+  runId: string | null;
+  outcome: AgentOutcomeObservation | null;
+  records: readonly ObservationEnvelope[];
+}>;
+
+/** 完整 Runtime 此刻的观测快照：phase × persistence 两轴、committed head、活动 run。 */
+export type EchoObservationSnapshot = Readonly<{
+  schemaVersion: 1;
+  runtimeId: string;
+  phase: RuntimePhase;
+  /** phase + health.persistence.status 的派生投影。 */
+  status: EchoRuntimeStatus;
+  throughSeq: number;
+  at: number;
+  health: ObservationHealth;
+  activeRuns: readonly RunObservationHeader[];
+  activeSubmissions: readonly SubmissionObservation[];
+}>;
+
+/** `listRuns()` 的分页参数；缺省 20 条，上限 200。 */
+export type ListRunsOptions = Readonly<{
+  limit?: number;
+  /** 上一页的 `nextCursor`；opaque，过期 / 篡改 fail-loud。 */
+  cursor?: string;
+}>;
+
+/** `listRuns()` 的一页：按 `(acceptedAt, runId)` 倒序的 header 与下一页游标（null = 没有下一页）。 */
+export type RunObservationPage = Readonly<{
+  items: readonly RunObservationHeader[];
+  nextCursor: string | null;
+}>;
+
+/** `subscribe()`：`afterSeq` 是 exclusive，回放 `(afterSeq, head]` 再接 live；`snapshot().throughSeq` 可直接当 afterSeq。 */
+export type ObservationSubscribeOptions = Readonly<{
+  afterSeq: number;
+  runId?: string;
+  submissionId?: string;
+  listener: (record: ObservationEnvelope | ObservationReplayGap | SinkDeliveryGap) => void;
+}>;
+
+/** 完整 Runtime 的 live 查询面（`echo.observations`）。 */
+export interface EchoObservations {
+  getRun(runId: string): Promise<RunLookupResult>;
+  getSubmission(submissionId: string): Promise<SubmissionObservation | null>;
+  lastRun(): Promise<RunLookupResult>;
+  listRuns(options?: ListRunsOptions): Promise<RunObservationPage>;
+  snapshot(): Promise<EchoObservationSnapshot>;
+  subscribe(options: ObservationSubscribeOptions): Promise<() => void>;
+}
+
+/** 离线 reader（observe CLI 的唯一入口）：read-only 连接，不取 StateLock、不起 Runtime；用完必须 `close()`。 */
+export interface EchoObservationReader {
+  getRun(runId: string): Promise<RunLookupResult>;
+  getSubmission(submissionId: string): Promise<SubmissionObservation | null>;
+  lastRun(): Promise<RunLookupResult>;
+  listRuns(options?: ListRunsOptions): Promise<RunObservationPage>;
+  snapshot(): Promise<EchoObservationSnapshot>;
+  close(): Promise<void>;
+}
+
+/* ══════════════════ §15.7 renderer ViewModel ══════════════════ */
+
+/** Timeline 的一行：相对 acceptedAt 的时间、层级与（span_end 才有的）耗时。 */
+export type RunObservationTimelineItem = Readonly<{
+  seq: number;
+  relativeMs: number;
+  kind: ObservationRecordKind;
+  name: string;
+  depth: number;
+  durationMs?: number;
+  attributes: Readonly<Record<string, string | number | boolean>>;
+  body?: ObservationValue;
+}>;
+
+/** 人读 / HTML / JSON 都消费这一份；由 `buildRunObservationViewModel()` 从 RunObservation 确定性派生。 */
+export type RunObservationViewModel = Readonly<{
+  schemaVersion: 1;
+  rendererVersion: 1;
+  header: RunObservationHeader;
+  identity: Readonly<{
+    agentId: string;
+    agentInstanceId: string;
+    sessionId: string | null;
+    runtimeGeneration: string;
+    assemblyDigest: string;
+    activeEntries: readonly ActiveEntrySnapshot[];
+  }>;
+  assembly: AgentAssemblyObservationSnapshot;
+  modelBinding: RunModelBindingObservationSnapshot;
+  outcome: AgentOutcomeObservation | null;
+  timeline: readonly RunObservationTimelineItem[];
+  finalState: EchoObservableState | null;
+  /** finalState 为 null 的原因：policy off / capture_limit gap / 尚未封口。renderer 据此选文案，不猜数组空不空。 */
+  finalStateAbsence: "captured" | "not-captured-by-policy" | "omitted-by-capture-limit" | "not-closed";
+  summary: RunObservationSummary;
+  health: Readonly<{
+    canonicalGaps: readonly ObservationGap[];
+    persistence: "stored" | "degraded";
+    redacted: boolean;
+  }>;
+}>;
+
+/** `renderRunObservation()` 的选项：text 给人读，json 是 ViewModel 的 canonical JSON；body 与 timeline 上限只影响 text。 */
+export type RenderRunObservationOptions = Readonly<{
+  format: "text" | "json";
+  includeBody?: boolean;
+  maxTimelineRecords?: number;
+}>;
+
+/** 渲染结果：带 rendererVersion 与 mediaType 的一段 content。 */
+export type RenderedRunObservation = Readonly<{
+  rendererVersion: 1;
+  format: "text" | "json";
+  mediaType: "text/plain" | "application/json";
+  content: string;
 }>;
 
 /* ══════════════════ §15.4.2 同步预算（硬门，不是建议） ══════════════════ */

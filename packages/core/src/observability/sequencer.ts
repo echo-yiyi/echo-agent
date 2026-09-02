@@ -388,6 +388,23 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     return new Promise((resolve) => this.idleResolvers.push(resolve));
   }
 
+  /**
+   * 收摊前排空：把 ring 里还没到批量阈值的 candidate 立刻提交，等到 flush 全部 settle。
+   * 不是 close——writer 状态不变，之后仍可 offer；只是 Runtime 关 SQLite 之前必须先把尾巴写完。
+   * writer 已 terminal 时直接返回（没有可提交的东西，也不再有定时器）。
+   */
+  async flushPending(): Promise<void> {
+    for (;;) {
+      const s = this.persistence.status;
+      if (s === "sealed" || s === "lost-lease") return;
+      if (this.slots.size === 0 && !this.flushing) return;
+      this.scheduleFlush("now");
+      await this.idle();
+      // flush 结束后 ring 可能又被填了一批（flush 期间到达）：再来一轮，直到彻底空
+      if (this.slots.size === 0 && !this.flushing) return;
+    }
+  }
+
   /* ───────── bounded lane ───────── */
 
   /**
@@ -1181,6 +1198,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       recordId: s.envelope.recordId,
       runtimeId: this.runtimeId,
       seq: s.seq,
+      ...(s.envelope.scope.runId === undefined ? {} : { runId: s.envelope.scope.runId }),
       canonicalEnvelopeBytes: s.bytes,
     }));
     return {

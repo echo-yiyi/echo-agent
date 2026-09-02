@@ -38,6 +38,17 @@ export type AdmissionDeps = Readonly<{
   assertReserved?(reservationId: string, orderedRecordIds: readonly string[]): void;
   /** runId 生成（缺省 `run:<uuid>` / `dream:<uuid>`）。 */
   runId?(source: RunSource): string;
+  /**
+   * §15.5.2 的 run 边界（Host-internal，非 throwing）：
+   *   · `accepted` 在 binding 冻结之后、execute 之前——返回 false = canonical store 不可写，**不颁发 permit**，
+   *     ticket 以 `rejected(observation-unavailable)` 结算，execute 零次（§15.12）；
+   *   · `closed` 在 result 形成之后、ticket 结算之前 await——terminal record 先 COMMIT（或明确失败）再放行下一份 permit。
+   * 两个都由 Host 保证不抛；这里再兜一层，观测层的异常不改变业务结算。
+   */
+  observe?: Readonly<{
+    accepted(input: { runId: string; source: RunSource; purpose: "foreground" | "maintenance"; modelBinding: RunModelBinding }): Promise<boolean>;
+    closed(input: { runId: string; result: AgentAdmissionResult }): Promise<void>;
+  }>;
 }>;
 
 type Priority = "foreground" | "maintenance";
@@ -213,12 +224,28 @@ export class StandaloneRunAdmission implements AgentAdmissionPort {
       runId = this.deps.runId?.(slot.source) ?? defaultRunId(slot.source);
       this.active = { slot, runId, controller, done };
       let failure: { readonly error: unknown } | null = null;
+      let admitted = true;
       try {
         const binding = this.deps.binding({ source: slot.source, purpose: slot.purpose });
-        const scope: AgentAdmissionExecuteScope = Object.freeze({ runId, signal: controller.signal, modelBinding: binding });
-        // execute 同步 throw 也落进这个 catch（await 一个同步抛错的调用 = rejection）
-        const r = await slot.execute(scope);
-        result = { kind: "executed", runId, result: r };
+        // run.accepted 落不下去就不颁发 permit：execute 零次，ticket 走 rejected（§15.12 fail-closed）
+        if (this.deps.observe !== undefined) {
+          let ok = false;
+          try {
+            ok = await this.deps.observe.accepted({ runId, source: slot.source, purpose: slot.purpose, modelBinding: binding });
+          } catch {
+            ok = false;
+          }
+          if (!ok) {
+            admitted = false;
+            result = { kind: "rejected", reason: "observation-unavailable" };
+          }
+        }
+        if (admitted) {
+          const scope: AgentAdmissionExecuteScope = Object.freeze({ runId, signal: controller.signal, modelBinding: binding });
+          // execute 同步 throw 也落进这个 catch（await 一个同步抛错的调用 = rejection）
+          const r = await slot.execute(scope);
+          result = { kind: "executed", runId, result: r };
+        }
       } catch (e) {
         failure = { error: e };
       }
@@ -232,6 +259,14 @@ export class StandaloneRunAdmission implements AgentAdmissionPort {
           normalized = minimalFailureResult(aborted, failure.error, sinkError);
         }
         result = { kind: "callback-error", runId, result: normalized, error: toAgentError(failure.error, aborted) };
+      }
+      // 封口：terminal record 先落（或明确失败）再结算 ticket、再放行下一份 permit（§15.5.2 第 5–6 步）
+      if (admitted && result !== null && this.deps.observe !== undefined) {
+        try {
+          await this.deps.observe.closed({ runId, result });
+        } catch {
+          // Host 保证不抛；真抛了也不能改变业务结算
+        }
       }
     } catch (e) {
       // runId() 抛、或上面兜底之外的任何意外：仍按 callback-error 封口，绝不留 pending

@@ -9,6 +9,7 @@
 import { canonicalDigest, encodeCanonical } from "./normalize.ts";
 import type { ObservationPersistenceState, RunIndexEntryV1 } from "./types.ts";
 
+/** canonical store 的不变量被破坏（同 ID 不同 bytes、半批可见、index digest 漂移…）：writer 立即 seal，reader 不「修复」。 */
 export class ObservationCorruptionError extends Error {
   readonly code = "observation_corruption";
   constructor(message: string) {
@@ -32,6 +33,8 @@ export type CanonicalRecordCandidate = Readonly<{
   recordId: string;
   runtimeId: string;
   seq: number;
+  /** envelope 的 `scope.runId`（有则给）：SQLite 的 `run_id` 列靠它按 run 取记录；不是第二份 identity。 */
+  runId?: string;
   canonicalEnvelopeBytes: Uint8Array;
 }>;
 

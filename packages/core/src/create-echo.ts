@@ -48,6 +48,9 @@ import { ExtensionHost, type ExtensionEntry } from "./extension/host.ts";
 import { agentRegistries } from "./extension/registries.ts";
 import { BUILTIN_GENERATION, builtinEntriesFor, defineToolPack, mountBuiltinTools } from "./extension/builtin.ts";
 import { unmountGenerations } from "./extension/cleanup.ts";
+import type { AgentMessage } from "./messages.ts";
+import { observationHostOf } from "./observability/host-wiring.ts";
+import type { EchoObservations, EchoRunResult } from "./observability/types.ts";
 
 /** 约定目录名：`<cwd>/extensions`。 */
 export const EXTENSIONS_DIR = "extensions";
@@ -93,6 +96,13 @@ export type LoadedExtension = Readonly<{
 
 export type Echo = Readonly<{
   agent: Agent;
+  /**
+   * 完整 Runtime 的一次 user run（§15.6 / OR5）：`agent.prompt()` 加上观测三元组。
+   * canonical store 在 admission 时不可写 → reject `ObservationStoreUnavailableError`，不颁发 permit（§15.12）。
+   */
+  send(input: string | AgentMessage): Promise<EchoRunResult>;
+  /** live 查询面：`getRun(result.runId)` → `renderRunObservation()`。只有 `createEcho()` 出来的 Runtime 承诺 canonical persistence。 */
+  observations: EchoObservations;
   /** 本次装上的全部 Extension，顺序即 mount 顺序。**被跳过的坏扩展不在这里**——在 `diagnostics`。 */
   extensions: readonly LoadedExtension[];
   /**
@@ -230,6 +240,9 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   const agent = await createAgent(
     agentOpts === undefined ? { ...opts, workspace } : ({ ...opts, workspace, agent: agentOpts } as CreateAgentOptions),
   );
+  // canonical writer 是 `createAgent()` 挂上的 Host-internal 接线；这里只把查询面与 `send()` 露出去
+  const observation = observationHostOf(agent)?.runtime;
+  if (observation === undefined) throw new Error("createAgent() 没有挂观测接线：composition root 装配不完整");
 
   // **Host 在 try 外面造**：catch 要按 boot → builtin 逆序把已 mount 的代卸掉，
   // 声明在 try 里的话它在 catch 里根本不可见（上一版就是这样，于是 builtin 那代永远没人卸）。
@@ -342,8 +355,26 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       }
     };
 
+    /**
+     * `send()` = user source 的调用方适配器（§15.5.2）：outcome 来自 loop，观测三元组来自 admission 已 COMMIT 的 RunIndex。
+     * `observationPersistence` 是**当前 Runtime** 的投影：terminal 已进 index 才 stored；尾写失败磁盘仍 running → degraded。
+     */
+    const send = async (input: string | AgentMessage): Promise<EchoRunResult> => {
+      const result = await agent.prompt(input);
+      const index = observation.runIndexOf(result.runId);
+      return {
+        runId: result.runId,
+        outcome: result.outcome,
+        observation: { runtimeId: observation.runtimeId, runId: result.runId },
+        observationIntegrity: index?.header.integrity ?? "partial",
+        observationPersistence: observation.persistenceOf(result.runId),
+      };
+    };
+
     return Object.freeze({
       agent,
+      send,
+      observations: observation.observations,
       extensions: Object.freeze(loaded),
       diagnostics: Object.freeze(diagnostics),
       stop: (): Promise<void> => (stopPromise ??= doStop()),

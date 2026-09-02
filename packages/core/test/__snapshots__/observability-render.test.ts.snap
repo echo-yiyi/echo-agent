@@ -1,0 +1,33 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`renderRunObservation text golden：六块结构、层级、相对时间、summary、health 1`] = `
+"Run run:fixed · completed · observation complete · 131ms
+Agent/Session       agent agent-default · instance agent-default@fixed · session s-1 · generation boot · capture metadata
+Assembly/Extensions assembly 84ed6894be81 · model scripted/only (catalog standalone:1)
+                    memory ← echo:memory@builtin
+                    store ← echo:persistence-local@builtin
+                    active entries: not captured (O2b)
+Timeline
+  +0ms      run.accepted
+  +0ms      run.assembly
+  +1ms      run.started
+  +1ms        agent.loop.started
+  +2ms        turn.execute …  iteration=1
+  +3ms          model.generate …  role=assistant
+  +10ms         model.generate 7ms  hasError=false role=assistant stopReason=tool_use
+  +11ms         tool.execute …  toolCallId=c1 toolName=ping
+  +25ms         tool.execute 14ms  isError=false toolCallId=c1 toolName=ping
+  +30ms       turn.execute 28ms  iteration=1 stopReason=tool_use toolResultCount=1
+  +31ms       turn.execute …  iteration=2
+  +32ms         model.generate …  role=assistant
+  +120ms        model.generate 88ms  hasError=false role=assistant stopReason=end_turn
+  +121ms      turn.execute 90ms  iteration=2 stopReason=end_turn toolResultCount=0
+  +122ms      agent.loop.ended  status=completed
+  +131ms    run.closed
+Final State         status generating · iteration 2 · messages 5 · runtime ready/ready · capabilities 0
+Outcome             completed
+Tool Analysis       ping calls=1 ok=1 err=0 denied=0 total=14ms args=7B result=4ch
+Model               calls=2 in=20 out=10 total=95ms
+Observation Health  integrity complete · gaps 0 · persistence stored · redacted yes · records 16
+"
+`;

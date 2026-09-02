@@ -35,6 +35,12 @@
       "import": "./dist/mcp/port.js",
       "default": "./dist/mcp/port.js"
     },
+    "./observability": {
+      "bun": "./src/observability/public.ts",
+      "types": "./dist/observability/public.d.ts",
+      "import": "./dist/observability/public.js",
+      "default": "./dist/observability/public.js"
+    },
     "./package.json": "./package.json",
     "./task": {
       "bun": "./src/task/public.ts",

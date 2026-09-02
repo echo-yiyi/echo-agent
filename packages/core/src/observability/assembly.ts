@@ -10,6 +10,7 @@ import { canonicalDigest, encodeCanonical } from "./normalize.ts";
 import type { Model } from "../provider/types.ts";
 import type { AgentAssemblyObservationSnapshot, RunModelBindingObservationSnapshot } from "./types.ts";
 
+/** composition root 对一个 builtin 槽的贡献：槽名、Entry id、代与安全配置摘要输入——`sealAgentAssemblyObservation()` 的入参。 */
 export type BuiltinSlotContribution = Readonly<{
   /** 槽名：与 `createAgent()` 的构造槽一一对应（如 "store" / "lock" / "session" / "memory"）。 */
   slot: string;

@@ -10,6 +10,11 @@
 import { redactedLabel } from "./observability/redact.ts";
 import { errText, type AgentError } from "./errors.ts";
 import type { AgentEvent, AgentEventInput, AgentEventTap, AgentListener, AgentOutcome } from "./events.ts";
+import { observationHostOf } from "./observability/host-wiring.ts";
+import type { ObservationRuntime } from "./observability/runtime.ts";
+import type { CapabilityFactSink } from "./observability/fact-sink.ts";
+import { ObservationStoreUnavailableError } from "./observability/store.ts";
+import type { EchoObservableState, RuntimePhase } from "./observability/types.ts";
 import { HookRuntime, type HookContext, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
@@ -28,7 +33,7 @@ import { runAgentLoop, runAgentLoopContinue } from "./loop/run-loop.ts";
 import { RunIntakeGate, type FollowUpResult, type IntakeLeftovers, type SteerResult } from "./loop/intake.ts";
 import { StandaloneRunAdmission } from "./admission/standalone.ts";
 import { normalizeModelSnapshot } from "./admission/model-snapshot.ts";
-import type { AgentAdmissionExecuteScope, AgentAdmissionTicket, RunModelBinding, RunSource } from "./admission/types.ts";
+import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTicket, RunModelBinding, RunSource } from "./admission/types.ts";
 import type { AgentContext, AgentLoopConfig, CompactionConfig, LoopResult, TransformContext } from "./loop/types.ts";
 import { InMemorySessionManager, type SessionEntry, type SessionManager } from "./session/types.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
@@ -254,6 +259,12 @@ type ActiveRun = { promise: Promise<void>; resolve: () => void; abortController:
 /** 拿到 permit 之后真正跑循环的那段：scope 给 runId / binding，signal 是本 Agent 的（scope 的 abort 会级联进来）。 */
 type RunExecutor = (scope: AgentAdmissionExecuteScope, signal: AbortSignal) => Promise<LoopResult>;
 
+/**
+ * `prompt()` / `continue()` 的返回：LoopResult 加上 admission 分配的 `runId`——完整 Runtime 的 `send()` 靠它把
+ * outcome 与 RunObservation 关联（§15.6 `EchoRunResult`）。纯增量：期望 `LoopResult` 的调用方照旧可用。
+ */
+export type AgentRunResult = LoopResult & Readonly<{ runId: string }>;
+
 /** `_state.tasks` 只是占位——真值在 `get state()` 里从 harness 现算（派生视图，不存第二份）。 */
 const EMPTY_TASK_SNAPSHOT: TaskSnapshot = { total: 0, counts: {}, ready: [], active: [] };
 
@@ -386,6 +397,14 @@ export class Agent {
    */
   private readonly inbox: InboxStore;
   private readonly observationTap?: AgentEventTap;
+  /**
+   * Host-internal canonical writer（`attachObservationHost`，只有 `createAgent()` 会挂）：首次用到时从 WeakMap 解析，
+   * 顺手把它的诊断接到本 Agent 的诊断通道。`/engine` 的 `new Agent()` 没有它——那条路只有 `observationTap`，没有 journal。
+   */
+  private observation: ObservationRuntime | undefined;
+  private observationResolved = false;
+  /** AgentEvent → bounded lane 的 sink（`factSinkToIngest(agentEventDescriptor)`），与 `observation` 同时解析。 */
+  private observationSink: CapabilityFactSink<AgentEvent> | undefined;
   /** tap 的按 seq 释放缓冲（见 releaseToTap）。 */
   private tapNextSeq = 0;
   private readonly tapPending = new Map<number, AgentEvent>();
@@ -711,6 +730,11 @@ export class Agent {
       binding: (input) => this.modelBinding(input),
       normalizeFailure: (input) => this.normalizeAdmittedCallbackFailure(input),
       assertReserved: (id, ids) => this.inbox.assertReserved(id, ids),
+      // §15.5.2：run.accepted / run.closed 的唯一 emission owner 是 admission；没挂 canonical writer 时 accepted 恒 true
+      observe: {
+        accepted: (input) => this.observeRunAccepted(input),
+        closed: (input) => this.observeRunClosed(input),
+      },
     });
     this.observationTap = opts.observationTap;
     this.inbox = opts.inboxStore ?? new InboxStore(null);
@@ -838,7 +862,7 @@ export class Agent {
    * 开一轮新任务。重入直接 throw；「一次只跑一个」由 admission 的单 permit 保证（§14.2.4），
    * 这里的重入检查只是给调用方一个即时的答复。
    */
-  async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): Promise<LoopResult> {
+  async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): Promise<AgentRunResult> {
     // 同步段：拒绝新工作的检查全在 enqueue 之前，之间不许有 await——让出微任务，两个并发 prompt 就都穿过去了（实测踩到过）。
     // 重入那条以前在这里单独写一遍，现在并进 `refuseWorkReason()`（顺序不变，报文不变）：
     // 判据只有一份，外面的 `acceptsWork` 才可能与它永远一致。
@@ -847,7 +871,7 @@ export class Agent {
   }
 
   /** 从现有 transcript 续跑：末条是 user / toolResult 才有得续。 */
-  async continue(): Promise<LoopResult> {
+  async continue(): Promise<AgentRunResult> {
     if (this.activeRun !== undefined || this.userRunPending) throw new Error("Agent 正在处理；等它跑完再 continue");
     const last = this._state.messages[this._state.messages.length - 1];
     if (last === undefined) throw new Error("没有可续跑的消息");
@@ -1926,11 +1950,11 @@ export class Agent {
   private async runPromptMessages(
     messages: AgentMessage[],
     options: { source?: "human" | "steer" | "followUp" } = {},
-  ): Promise<LoopResult> {
+  ): Promise<AgentRunResult> {
     return this.admitUserRun(this.foregroundExecutor(messages, options.source ?? "human"));
   }
 
-  private async runContinuation(): Promise<LoopResult> {
+  private async runContinuation(): Promise<AgentRunResult> {
     return this.admitUserRun(async (scope, signal) =>
       runAgentLoopContinue(await this.createContextSnapshot(scope), this.createLoopConfig(scope), (e) => this.processEvents(e), signal, scope.modelBinding.streamFunction),
     );
@@ -2027,17 +2051,26 @@ export class Agent {
   }
 
   /** 用户 run：经 admission 取 permit、等 ticket 结算。rejected 只来自关门（stopping / lease-lost），抛出来。 */
-  private async admitUserRun(executor: RunExecutor): Promise<LoopResult> {
+  private async admitUserRun(executor: RunExecutor): Promise<AgentRunResult> {
     this.userRunPending = true;
     try {
       const ticket = this.admission.admitUser((scope) => this.executeAdmitted(scope, executor));
       const settled = await ticket.settled;
-      if (settled.kind === "rejected") throw new Error(`run 被 admission 拒绝：${settled.reason}`);
+      if (settled.kind === "rejected") {
+        // canonical store 在 admission 时不可写：user `send()` 收到的是带 persistence 证据的类型化错误（§15.12）
+        if (settled.reason === "observation-unavailable") {
+          throw new ObservationStoreUnavailableError(
+            "run 被 admission 拒绝：canonical observation store 不可写（run.accepted 落不下去）",
+            this.observation?.sequencer.persistenceState ?? { status: "healthy" },
+          );
+        }
+        throw new Error(`run 被 admission 拒绝：${settled.reason}`);
+      }
       // permit 已 close、ticket 已结算——这时才归 idle、才排 Inbox / Dream。
       // 先清 pending 标记再 finishRun：它里面的 consumeInbox() 看到 userRunPending 还是 true 就会直接返回（实测漏消费）。
       this.userRunPending = false;
       this.finishRun();
-      return settled.result;
+      return { ...settled.result, runId: settled.runId };
     } finally {
       this.userRunPending = false;
     }
@@ -2067,6 +2100,8 @@ export class Agent {
     this._state.startedAt = Date.now();
     this._state.lastError = null;
     try {
+      // §15.5.2 第 4 步：permit executor 进入 loop 的那一拍 await `run.started`；落不下去只降级，不取消 run
+      await this.observeRunStarted(runId);
       const result = await executor(scope, abortController.signal);
       this.terminalByRun.set(runId, result); // 终态已出：之后 callback 再抛，normalizer 复用它
       return result;
@@ -2228,6 +2263,8 @@ export class Agent {
   private async executeDream(scope: AgentAdmissionExecuteScope): Promise<LoopResult> {
     const memory = this.memory;
     const idle: LoopResult = { outcome: { kind: "completed" }, messages: [] };
+    // Dream 也是一次 accepted run：executor 进入即 `run.started`（门控没过也封口成 completed，不留半截）
+    await this.observeRunStarted(scope.runId);
     if (memory === undefined || !this.dreamAllowed) return idle;
     try {
       // 门控：间隔、写入数、轮数、文件数四道，全满足才跑
@@ -2628,7 +2665,7 @@ export class Agent {
    * 早于 [8,message_end]）。所以每条先进缓冲，只放行 seq 连续的前缀。
    */
   private releaseToTap(event: AgentEvent): void {
-    if (this.observationTap === undefined) return;
+    if (this.observationTap === undefined && this.observationRuntime() === undefined) return;
     this.tapPending.set(event.seq, event);
     for (;;) {
       const next = this.tapPending.get(this.tapNextSeq);
@@ -2645,16 +2682,123 @@ export class Agent {
    * （实测 11 条 unhandled、0 条诊断）。同步 throw 与异步 reject 都不进 Agent 控制流。
    */
   private deliverToTap(event: AgentEvent): void {
-    const tap = this.observationTap;
-    if (tap === undefined) return;
     const fail = (e: unknown): void =>
       // 第三方 tap 的异常原文不进诊断（§15.11 采集边界）——它可能夹着凭据；只留分类 + 稳定 hash。
       this.reportDiagnostic({ code: "observation_tap_failed", message: `observationTap 抛错（seq ${event.seq}，${event.type}）：${redactedLabel(e)}` });
+    // canonical 那条路先走：sink 自身 never-throw（fact-sink.ts），这里再兜一层——观测层任何异常都不进 Agent 控制流
+    const sink = this.observationSink;
+    if (sink !== undefined) {
+      try {
+        sink.offer(event);
+      } catch (e) {
+        fail(e);
+      }
+    }
+    const tap = this.observationTap;
+    if (tap === undefined) return;
     try {
       const r: unknown = tap(event);
       if (isThenable(r)) r.then(undefined, fail);
     } catch (e) {
       fail(e);
+    }
+  }
+
+  /* ───────────── §15 canonical writer 接线（Host-internal） ───────────── */
+
+  /** 首次调用解析 `attachObservationHost` 挂上的 runtime，并接上诊断与 AgentEvent sink；没挂就永远 undefined。 */
+  private observationRuntime(): ObservationRuntime | undefined {
+    if (this.observationResolved) return this.observation;
+    const wiring = observationHostOf(this);
+    if (wiring === undefined) return undefined; // 还没挂（构造期）或根本不会挂（/engine）：不记忆，下次再看
+    this.observationResolved = true;
+    this.observation = wiring.runtime;
+    wiring.runtime.attachDiagnostics((d) => this.reportDiagnostic(d));
+    this.observationSink = wiring.runtime.eventSink(() => this.observationScope());
+    return this.observation;
+  }
+
+  /**
+   * AgentEvent 到达时刻的 scope（fact-sink 的 scope 供给）：run 归属只在 permit 期间有效（`activeRun` 落位到 `closeRun()`），
+   * turn 归属跟 `_state.iteration`，与 `projectAgentEvent` 里 turn span 自带的 `t<iteration>` 同一格式。**必须返回对象**：
+   * 供给返回 undefined 会被 sink 判成「run 归属不可知」而开 gap。
+   */
+  private observationScope(): Readonly<Record<string, string>> {
+    const runId = this.activeRun !== undefined && this.currentRunId !== null ? this.currentRunId : undefined;
+    return {
+      agentId: this.agentId,
+      agentInstanceId: this.agentInstanceId,
+      ...(this._state.sessionId === null ? {} : { sessionId: this._state.sessionId }),
+      ...(runId === undefined ? {} : { runId }),
+      // turn 归属只在 turn 开着时补：agent_end 这类 turn 之外的事实不能被记成「最后一个 turn 里的」
+      ...(runId !== undefined && this.intake.activeTurnId !== null && this._state.iteration > 0 ? { turnId: `t${this._state.iteration}` } : {}),
+    };
+  }
+
+  private observationIdentity(): Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }> {
+    return { agentId: this.agentId, agentInstanceId: this.agentInstanceId, sessionId: this._state.sessionId };
+  }
+
+  /** admission 颁发 permit 前：没挂 canonical writer 一律放行；挂了就要 `run.accepted` 真 COMMIT。 */
+  private async observeRunAccepted(input: { runId: string; source: RunSource; modelBinding: RunModelBinding }): Promise<boolean> {
+    const rt = this.observationRuntime();
+    if (rt === undefined) return true;
+    const r = await rt.acceptRun({ runId: input.runId, source: input.source, ...this.observationIdentity(), modelBinding: input.modelBinding });
+    return r === "accepted";
+  }
+
+  private async observeRunStarted(runId: string): Promise<void> {
+    const rt = this.observationRuntime();
+    if (rt === undefined) return;
+    await rt.startRun(runId, this.observationIdentity());
+  }
+
+  /** permit finalizer：业务 outcome 已冻结（executed / callback-error 都是）；finalSnapshot 由本 Agent 此刻的状态投影。 */
+  private async observeRunClosed(input: { runId: string; result: AgentAdmissionResult }): Promise<void> {
+    const rt = this.observationRuntime();
+    if (rt === undefined || input.result.kind === "rejected") return;
+    await rt.closeRun({ runId: input.runId, outcome: input.result.result.outcome, finalState: this.observableState(rt, input.runId) }, this.observationIdentity());
+  }
+
+  /** `EchoObservableState`（§15.5.1）：只放固定的低基数字段；Capability summary 随 §15.9 埋点进来（O3a 第二刀）。 */
+  private observableState(rt: ObservationRuntime, runId: string): EchoObservableState {
+    const phase = this.observationPhase();
+    const persistence = rt.sequencer.persistenceState.status;
+    return {
+      runtime: {
+        phase,
+        status: phase === "ready" && persistence !== "healthy" ? "degraded" : phase,
+        observationPersistence: persistence,
+        generation: rt.runtimeGeneration,
+        activeEntryCount: 0,
+      },
+      agent: {
+        status: this._state.status,
+        activeRunId: runId,
+        activeTurnId: this._state.iteration > 0 ? `t${this._state.iteration}` : null,
+        iteration: this._state.iteration,
+        messageCount: this._state.messages.length,
+      },
+      capabilities: [],
+      omittedCapabilitySummaryCount: 0,
+    };
+  }
+
+  /** Agent 生命周期 phase → §14 RuntimePhase 的固定投影。 */
+  private observationPhase(): RuntimePhase {
+    switch (this.phase) {
+      case "running":
+        return "ready";
+      case "pausing":
+        return "reconfiguring";
+      case "stopping":
+        return "disposing";
+      case "stopped":
+        return "disposed";
+      case "lost":
+        return "failed";
+      default:
+        return "bootstrapping";
     }
   }
 
