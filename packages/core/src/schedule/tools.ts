@@ -20,6 +20,7 @@ function createTool(ctx: AgentSchedule): ModelTool<{ prompt: string; at?: string
   return {
     kind: "model",
     name: "schedule_create",
+    deferred: true, // 冷门：不上菜单，模型 tool_search 取过再用（2026-09-02，缺省那一批）
     label: "定时任务",
     description:
       "Set an alarm for yourself: when it fires, prompt is delivered to you as a new message. Give exactly one of: " +
@@ -63,6 +64,7 @@ function listTool(ctx: AgentSchedule): ModelTool<Record<string, never>> {
   return {
     kind: "model",
     name: "schedule_list",
+    deferred: true, // 冷门：不上菜单，模型 tool_search 取过再用（2026-09-02，缺省那一批）
     label: "定时任务列表",
     description: "List all schedules (id, trigger rule, prompt, last fired).",
     parameters: { type: "object", properties: {} },
@@ -84,6 +86,7 @@ function cancelTool(ctx: AgentSchedule): ModelTool<{ id: string }> {
   return {
     kind: "model",
     name: "schedule_cancel",
+    deferred: true, // 冷门：不上菜单，模型 tool_search 取过再用（2026-09-02，缺省那一批）
     label: "取消定时任务",
     description: "Cancel a schedule (ids from schedule_list).",
     parameters: {

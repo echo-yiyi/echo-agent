@@ -140,13 +140,6 @@ export type AgentOptions = {
   model: Model;
   streamFunction: StreamFn;
   tools?: AgentTool[];
-  /**
-   * 渐进式披露（2026-09-02 用户拍板）：这些名字的工具**不上模型菜单**，直到模型经 `tool_search` 取过
-   * 它们的 schema。**由配置给、所有工具一视同仁**（内建、产品、MCP 都可以点名），不是工具自己的属性。
-   * 名单非空才装 `tool_search`（`echo:tool-search` 那组）；空 = 全部常驻，菜单与从前一样。
-   * 已加载的集合按 agent 进程记：不持久化，`reset()` 也不清。
-   */
-  deferredTools?: readonly string[];
   thinkingLevel?: ThinkingLevel;
   maxIterations?: number;
   timeoutMs?: number;
@@ -428,8 +421,8 @@ export class Agent {
   private readonly agentId: string;
   /** 新建会话时写进 `SessionInfo.agent` 的名字（`AgentOptions.agentName`，缺省 = `agentId`）。 */
   private readonly agentName: string;
-  /** 渐进式披露的两张名单（`AgentOptions.deferredTools`）：`loaded` 只有 `tool_search` 会写。 */
-  private readonly toolDisclosure: { readonly deferred: ReadonlySet<string>; readonly loaded: Set<string> };
+  /** 经 `tool_search` 取过 schema 的延迟工具名（`ToolBase.deferred`）。按 agent 进程记；只有 `tool_search` 会写。 */
+  private readonly loadedTools = new Set<string>();
   /** 本代 Agent 的进程内身份：写入格与 RunIntakeGate 共用同一个。 */
   private readonly agentInstanceId: string;
   /**
@@ -627,8 +620,6 @@ export class Agent {
 
     // 初始数据直接进集合。**都是数据,不是实现**。
     if (opts.tools !== undefined) registerTools(this.tools, opts.tools);
-    // 披露名单要先于 builtinTools 就位：`tool_search` 那组按它决定装不装
-    this.toolDisclosure = { deferred: new Set(opts.deferredTools ?? []), loaded: new Set() };
     if (opts.skills !== undefined) addSkills(this.skills, opts.skills);
     this.skillStore = opts.skillStore;
     if (opts.tasks !== undefined) createTasks(this.tasks, opts.tasks);
@@ -717,11 +708,9 @@ export class Agent {
       skills: { tools: skillTools, sections: [skillsSection] },
       memory: memoryTools === undefined || this.memory === undefined ? undefined : { tools: memoryTools, sections: memoryPromptSections(this.memory) },
       scheduler: scheduleTools === undefined ? undefined : { tools: scheduleTools },
-      // 渐进式披露的入口：延迟名单为空就没有这组（与 memory 同一条规矩：能力不在就不出条目）
-      toolSearch:
-        this.toolDisclosure.deferred.size === 0
-          ? undefined
-          : { tools: [makeToolSearchTool({ tools: this.tools, deferred: this.toolDisclosure.deferred, loaded: this.toolDisclosure.loaded })] },
+      // 渐进式披露的入口，恒装：延迟工具是标记、随时可能被 extension / MCP 注册进来；
+      // 池里没有待取的延迟工具时它自己不上菜单（`visibleTools`），不多占一格
+      toolSearch: { tools: [makeToolSearchTool({ tools: this.tools, loaded: this.loadedTools })] },
       // 压缩阶梯 + transcript_read + 习惯段：与 memory 同款——`builtin: false` 就是「这组不在」，
       // 流水线与 registry 仍在，等别的扩展注册阶段。`transcript_read` 读的是活的 transcript。
       compaction: opts.compaction?.builtin === false ? undefined : defaultCompactionPack(opts.compaction ?? {}, () => this._state.messages),
@@ -2430,9 +2419,9 @@ export class Agent {
       convertToLlm: this.convertToLlm,
       transformContext: this.transformContext,
       getApiKey: binding.getApiKey,
-      getTools: () => visibleTools(this.tools, this.toolDisclosure), // 菜单 = 常驻 + 已加载的延迟工具
+      getTools: () => visibleTools(this.tools, this.loadedTools), // 菜单 = 常驻 + 已加载的延迟工具
       knownToolNames: () => [...this.tools.keys()],
-      resolveTool: (name) => resolveTool(this.tools, name, this.toolDisclosure),
+      resolveTool: (name) => resolveTool(this.tools, name, this.loadedTools),
       // 通道 B:run 中途会变的内容(激活 skill 正文),每轮从各 PromptSource 重算、
       // 拼在消息末尾、不进 transcript。
       getTurnInjections: (visibleTools) => this.promptSources((n) => visibleTools.has(n)).flatMap((s) => s.turnInjections?.() ?? []),

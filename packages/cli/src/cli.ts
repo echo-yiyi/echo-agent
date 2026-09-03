@@ -49,7 +49,7 @@ import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
 import { readSettings, writeSettings } from "./settings.ts";
 import { isConfigured, type VerifyFn } from "./setup.ts";
 import { linesOf } from "./stdin.ts";
-import { DEFAULT_DEFERRED_TOOLS, ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
+import { ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
 
 export type ProviderName = "kimi" | "deepseek" | "openai" | "zai" | "minimax";
 
@@ -232,8 +232,7 @@ function echoOptions(
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
     // 所以这里区分「空数组」与「不传」，不能无脑展开。
     ...(opts.extensionDirs.length > 0 ? { extensionDirs: opts.extensionDirs } : {}),
-    // 渐进式披露的缺省名单在前、产品 preset 的 `agent` 在后：preset 给了 `deferredTools` 就覆盖
-    agent: { deferredTools: DEFAULT_DEFERRED_TOOLS, ...preset.agent },
+    ...(preset.agent !== undefined ? { agent: preset.agent } : {}),
     // `echo-agent` 恒挂的两段（纪律、项目指令）在前，产品自带的在后。顺序只影响 `echo.extensions`
     // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。
     extensions: [conductEntry(), instructionsEntry(), ...(preset.extensions ?? [])],

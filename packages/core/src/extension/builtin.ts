@@ -166,7 +166,7 @@ export const ECHO_TASKS = defineToolPack("echo:tasks");
 export const ECHO_SKILLS = defineToolPack("echo:skills");
 export const ECHO_MEMORY = defineToolPack("echo:memory");
 export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
-/** 渐进式披露的入口 `tool_search`（2026-09-02）。只在 `AgentOptions.deferredTools` 非空时出条目。 */
+/** 渐进式披露的入口 `tool_search`（2026-09-02）：恒装；延迟是工具自己的标记（`ToolBase.deferred`）。 */
 export const ECHO_TOOL_SEARCH = defineToolPack("echo:tool-search");
 
 function isStageArray(v: unknown): v is readonly CompactionStage[] {
@@ -238,7 +238,7 @@ export type BuiltinToolGroups = {
   readonly skills: BuiltinToolGroup | undefined;
   readonly memory: BuiltinToolGroup | undefined;
   readonly scheduler: BuiltinToolGroup | undefined;
-  /** `undefined` = 没有延迟工具：菜单全常驻，不装 `tool_search`。 */
+  /** 渐进式披露的入口（`tool_search`），恒在；上不上菜单由 `visibleTools()` 按池里有没有待取的延迟工具决定。 */
   readonly toolSearch: BuiltinToolGroup | undefined;
   /** `undefined` = `compaction.builtin === false`：不装缺省阶梯（流水线与 registry 仍在，等别的扩展注册阶段）。 */
   readonly compaction: CompactionPackConfig | undefined;

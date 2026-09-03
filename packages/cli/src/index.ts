@@ -28,7 +28,7 @@ export { main, mainFor, parseArgs, usage, type CliOptions, type Main, type MainD
  * 「产品」：依赖本包做完整产品（`echo-coding`）时交给 `mainFor()` 的东西——名字、版本、装配片段。
  * 本包不认识任何具体产品；`ECHO_AGENT` 是缺省那个。
  */
-export { DEFAULT_DEFERRED_TOOLS, ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
+export { ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
 
 /** 首次运行的引导设置（D4）：欢迎 → 选 provider → 贴 key → 选模型。跑在装配前，`main()` 在缺凭据时调它。 */
 export { runFirstRunSetup, type FirstRunChoice, type FirstRunOptions, type FirstRunOutcome } from "./first-run.ts";

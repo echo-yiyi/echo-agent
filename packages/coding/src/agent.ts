@@ -90,6 +90,7 @@ const AGENT_BUILTIN_TOOLS = [
   "schedule_list",
   "skill_activate",
   "skill_create",
+  "tool_search", // 2026-09-02 渐进式披露的入口，core 恒装（在不在菜单上另算，这里是池）
   "transcript_read",
 ] as const;
 

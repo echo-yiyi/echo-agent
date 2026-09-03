@@ -536,6 +536,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
           "echo:skills",
           "echo:memory",
           "echo:scheduler",
+          "echo:tool-search",
           "echo:compaction",
           "current-year",
         ]);

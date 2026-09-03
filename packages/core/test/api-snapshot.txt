@@ -542,9 +542,9 @@ value  textTurn
 value  toolTurn
 
 == 入口 "./tools" → src/tools/public.ts ==
-符号 16（value 13 · type 3 · both 0）
+符号 15（value 13 · type 2 · both 0）
 
--- src/tools/harness.ts (16) --
+-- src/tools/harness.ts (15) --
 value  activeTools
 value  disableTools
 value  enableTools
@@ -553,7 +553,6 @@ value  listTools
 value  registerTool
 value  registerTools
 value  resolveTool
-type   ToolDisclosure
 type   ToolMap
 type   ToolResolution
 value  toolSchemasOf
