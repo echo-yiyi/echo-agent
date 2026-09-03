@@ -43,6 +43,16 @@ const LOCK_FILE = ".lock";
 const RUNTIME_GENERATION = "boot";
 /** §15 OR9 的缺省 capture policy：metadata。content 要显式打开，O3a 不开这个口子。 */
 const OBSERVATION_CAPTURE_POLICY = "metadata" as const;
+/**
+ * 观测层唯一还会让 agent 等的地方是 `run.closed` 的有界等待（2026-09-03 用户拍板：观测不得影响 agent 主线）。
+ * 正常一次 COMMIT 亚毫秒；磁盘卡住时最多等这么久就降级返回，不用 Sequencer 缺省的 5 s。
+ */
+const OBSERVATION_BOUNDARY_DEADLINE_MS = 500;
+/**
+ * SQLite 的 busy_timeout 是**同步等待**（占着事件循环）。状态根有单写者锁、WAL 下 reader 不挡 writer，
+ * 正常永远不该等；真等到了就是接线错误，快点失败让 Sequencer 降级，别拖主线 5 s。
+ */
+const OBSERVATION_BUSY_TIMEOUT_MS = 250;
 const TASKS_FILE = "tasks.json";
 const SKILLS_DIR = "skills";
 
@@ -257,8 +267,9 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   const lock = opts.lock ?? fileStateLock(join(stateDir, LOCK_FILE));
 
   // canonical observation store（§15.4.2.2）：固定在状态根下，与自定义 `store` 无关——它是 Runtime 基础设施，不是可换的 Entry。
-  // open / PRAGMA / migrate 任一失败 = 不进 READY（fail-loud），不静默退到「没有 journal」的纯内存 admission（§15.12）。
-  const observationStore = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir) });
+  // open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——那是状态根坏了 / 文件系统不支持，启动时就该看见。
+  // 起来之后的写失败**不再**影响 run（观测层只降级，见 observability/runtime.ts 头注）。
+  const observationStore = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir), busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
 
   // 装配现场（§14.5.1）：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
   // 它撑住的是「值已经造好、`new Agent()` 还没成功」那个窗口——上一版那时抛错，root store 就再没人关过。
@@ -309,6 +320,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       capturePolicy: OBSERVATION_CAPTURE_POLICY,
       store: observationStore,
       clock: opts.clock ?? systemClock,
+      limits: { boundaryDeadlineMs: OBSERVATION_BOUNDARY_DEADLINE_MS },
       assembly: sealAgentAssemblyObservation(
         builtinSlotContributions({
           customStore: opts.store !== undefined,

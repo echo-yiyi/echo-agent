@@ -34,7 +34,7 @@ export type FakeAgentAdmission = Readonly<{
    */
   grantNext(binding?: RunModelBinding): Promise<AgentAdmissionResult | null>;
   /** 拒下一个：ticket 以 rejected(reason) fulfill，execute 零次。 */
-  rejectNext(reason: "paused" | "stopping" | "lease-lost" | "superseded" | "observation-unavailable"): boolean;
+  rejectNext(reason: "paused" | "stopping" | "lease-lost" | "superseded"): boolean;
   /** abort 正在跑的那个的 scope signal。 */
   abortActive(): void;
   /** 让下一次 callback failure 的规范化自己也抛：fake 必须像真 actor 一样兜底出最小 LoopResult、ticket 照样结算。 */

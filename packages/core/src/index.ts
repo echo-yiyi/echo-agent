@@ -240,7 +240,7 @@ export { normalizeModelSnapshot, ModelSnapshotError } from "./admission/model-sn
  */
 export { openObservationReader, SqliteEchoObservationReader, ObservationCursorError, ObservationNotPersistedError } from "./observability/query.ts";
 export { ObservationDatabaseMissingError, ObservationStoreOpenError, observationDatabasePath } from "./observability/sqlite-store.ts";
-export { ObservationStoreUnavailableError, ObservationCorruptionError } from "./observability/store.ts";
+export { ObservationCorruptionError } from "./observability/store.ts";
 export type { EchoRunResult, EchoObservations, EchoObservationReader, RunLookupResult, RunObservation, RunObservationHeader, ListRunsOptions, RunObservationPage } from "./observability/types.ts";
 export type { AgentRunResult } from "./agent.ts";
 

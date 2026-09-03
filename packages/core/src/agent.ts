@@ -16,7 +16,6 @@ import { memoryFactDescriptor } from "./memory/observe.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import type { CapabilityFactSink } from "./observability/fact-sink.ts";
-import { ObservationStoreUnavailableError } from "./observability/store.ts";
 import type { EchoObservableState, RuntimePhase } from "./observability/types.ts";
 import { HookRuntime, type HookContext, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
@@ -753,7 +752,7 @@ export class Agent {
       binding: (input) => this.modelBinding(input),
       normalizeFailure: (input) => this.normalizeAdmittedCallbackFailure(input),
       assertReserved: (id, ids) => this.inbox.assertReserved(id, ids),
-      // §15.5.2：run.accepted / run.closed 的唯一 emission owner 是 admission；没挂 canonical writer 时 accepted 恒 true
+      // §15.5.2：run.accepted / run.closed 的唯一 emission owner 是 admission。accepted 只预留不等、永不拒 run；closed 有界等 COMMIT
       observe: {
         accepted: (input) => this.observeRunAccepted(input),
         closed: (input) => this.observeRunClosed(input),
@@ -2113,16 +2112,7 @@ export class Agent {
     try {
       const ticket = this.admission.admitUser((scope) => this.executeAdmitted(scope, executor));
       const settled = await ticket.settled;
-      if (settled.kind === "rejected") {
-        // canonical store 在 admission 时不可写：user `send()` 收到的是带 persistence 证据的类型化错误（§15.12）
-        if (settled.reason === "observation-unavailable") {
-          throw new ObservationStoreUnavailableError(
-            "run 被 admission 拒绝：canonical observation store 不可写（run.accepted 落不下去）",
-            this.observation?.sequencer.persistenceState ?? { status: "healthy" },
-          );
-        }
-        throw new Error(`run 被 admission 拒绝：${settled.reason}`);
-      }
+      if (settled.kind === "rejected") throw new Error(`run 被 admission 拒绝：${settled.reason}`);
       // permit 已 close、ticket 已结算——这时才归 idle、才排 Inbox / Dream。
       // 先清 pending 标记再 finishRun：它里面的 consumeInbox() 看到 userRunPending 还是 true 就会直接返回（实测漏消费）。
       this.userRunPending = false;
@@ -2157,8 +2147,8 @@ export class Agent {
     this._state.startedAt = Date.now();
     this._state.lastError = null;
     try {
-      // §15.5.2 第 4 步：permit executor 进入 loop 的那一拍 await `run.started`；落不下去只降级，不取消 run
-      await this.observeRunStarted(runId);
+      // §15.5.2 第 4 步：permit executor 进入 loop 的那一拍发 `run.started`——只预留不等，落不下去只降级
+      this.observeRunStarted(runId);
       const result = await executor(scope, abortController.signal);
       this.terminalByRun.set(runId, result); // 终态已出：之后 callback 再抛，normalizer 复用它
       return result;
@@ -2321,7 +2311,7 @@ export class Agent {
     const memory = this.memory;
     const idle: LoopResult = { outcome: { kind: "completed" }, messages: [] };
     // Dream 也是一次 accepted run：executor 进入即 `run.started`（门控没过也封口成 completed，不留半截）
-    await this.observeRunStarted(scope.runId);
+    this.observeRunStarted(scope.runId);
     if (memory === undefined || !this.dreamAllowed) return idle;
     try {
       // 门控：间隔、写入数、轮数、文件数四道，全满足才跑
@@ -2807,18 +2797,14 @@ export class Agent {
     return { agentId: this.agentId, agentInstanceId: this.agentInstanceId, sessionId: this._state.sessionId };
   }
 
-  /** admission 颁发 permit 前：没挂 canonical writer 一律放行；挂了就要 `run.accepted` 真 COMMIT。 */
-  private async observeRunAccepted(input: { runId: string; source: RunSource; modelBinding: RunModelBinding }): Promise<boolean> {
-    const rt = this.observationRuntime();
-    if (rt === undefined) return true;
-    const r = await rt.acceptRun({ runId: input.runId, source: input.source, ...this.observationIdentity(), modelBinding: input.modelBinding });
-    return r === "accepted";
+  /** admission 颁发 permit 时：`run.accepted` 只同步预留、不等落盘——观测层永远拦不住也拖不住 run。 */
+  private observeRunAccepted(input: { runId: string; source: RunSource; modelBinding: RunModelBinding }): void {
+    this.observationRuntime()?.acceptRun({ runId: input.runId, source: input.source, ...this.observationIdentity(), modelBinding: input.modelBinding });
   }
 
-  private async observeRunStarted(runId: string): Promise<void> {
-    const rt = this.observationRuntime();
-    if (rt === undefined) return;
-    await rt.startRun(runId, this.observationIdentity());
+  /** executor 进入 loop 那一拍：同样只预留、不等。 */
+  private observeRunStarted(runId: string): void {
+    this.observationRuntime()?.startRun(runId, this.observationIdentity());
   }
 
   /** permit finalizer：业务 outcome 已冻结（executed / callback-error 都是）；finalSnapshot 由本 Agent 此刻的状态投影。 */
