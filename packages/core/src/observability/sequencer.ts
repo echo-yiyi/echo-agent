@@ -74,8 +74,7 @@ export interface ObservationIngest {
    * 归到 `encoding_error`：从 canonical 记录的角度，投影失败与 normalize/序列化失败是同一件事
    * ——**没能把这条事实变成可提交的 bytes**。细分类进诊断，不为它加一个新的公共 gap reason。
    *
-   * 只有 Host 拥有的 adapter 会调它（Capability 拿到的是 `CapabilityFactSink`，看不见这个方法）；
-   * `/engine` 那条路没有 canonical journal，仍然只丢记录 + 诊断。
+   * 只有 Host 拥有的 adapter 会调它（Capability 拿到的是 `CapabilityFactSink`，看不见这个方法）。
    *
    * **writer 进入 terminal 后这条保证不再可能兑现**：gap 也是要提交的记录。那时返回
    * `"writer-unavailable"`，什么都不预留，调用方只发一次安全的 live 诊断。
@@ -388,6 +387,23 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     return new Promise((resolve) => this.idleResolvers.push(resolve));
   }
 
+  /**
+   * 收摊前排空：把 ring 里还没到批量阈值的 candidate 立刻提交，等到 flush 全部 settle。
+   * 不是 close——writer 状态不变，之后仍可 offer；只是 Runtime 关 SQLite 之前必须先把尾巴写完。
+   * writer 已 terminal 时直接返回（没有可提交的东西，也不再有定时器）。
+   */
+  async flushPending(): Promise<void> {
+    for (;;) {
+      const s = this.persistence.status;
+      if (s === "sealed" || s === "lost-lease") return;
+      if (this.slots.size === 0 && !this.flushing) return;
+      this.scheduleFlush("now");
+      await this.idle();
+      // flush 结束后 ring 可能又被填了一批（flush 期间到达）：再来一轮，直到彻底空
+      if (this.slots.size === 0 && !this.flushing) return;
+    }
+  }
+
   /* ───────── bounded lane ───────── */
 
   /**
@@ -630,7 +646,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     const body = draft.body;
     if (lane !== "bounded" && lane !== "boundary") throw new ObservationEncodingError("unsupported_value", "$.lane", "非法取值");
 
-    // 与 `/engine` adapter 调**同一个** frame 物化：kind / occurredAt / sourceSeq / attributes / identity 同一把尺。
+    // frame 物化只有 `materializeRecordFrame` 这一处：kind / occurredAt / sourceSeq / attributes / identity 同一把尺。
     const framing = materializeRecordFrame({
       kind: draft.kind,
       occurredAt: draft.occurredAt,
@@ -1181,6 +1197,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       recordId: s.envelope.recordId,
       runtimeId: this.runtimeId,
       seq: s.seq,
+      ...(s.envelope.scope.runId === undefined ? {} : { runId: s.envelope.scope.runId }),
       canonicalEnvelopeBytes: s.bytes,
     }));
     return {

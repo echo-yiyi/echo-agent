@@ -52,6 +52,10 @@ export class RunIntakeGate {
   get activeRunId(): string | null {
     return this.run?.runId ?? null;
   }
+  /** 当前开着的 turn（`openTurn` 到 `closeTurn` 之间）；观测 scope 供给据此决定事实要不要挂 turn 归属。 */
+  get activeTurnId(): string | null {
+    return this.turn?.turnId ?? null;
+  }
 
   /* ───────── 命令侧：同步裁决 + 入队 ───────── */
 

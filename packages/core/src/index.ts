@@ -233,10 +233,16 @@ export type {
 } from "./admission/types.ts";
 export { normalizeModelSnapshot, ModelSnapshotError } from "./admission/model-snapshot.ts";
 
-// §15.6（OR14）：构造期只读观测口——consumer seam，不暴露 canonical writer / identity / 查询 / renderer。
-// `agentEventTapFor(tap)` 把它接到 `AgentOptions.observationTap`（O1a 的被动 tap 接缝）。
-export type { EngineObservationFact, EngineObservationScope, EngineObservationTap } from "./observability/engine-tap.ts";
-export { agentEventTapFor } from "./observability/agent-events.ts";
+/**
+ * §15.6 完整 Runtime 的观测公共面（O3a）：`createEcho()` 出来的 `echo.send()` / `echo.observations`，
+ * 以及 observe CLI 的唯一离线入口 `openObservationReader()`（read-only SQLite，不取 StateLock、不起 Runtime）。
+ * 类型与纯函数 renderer 从 `@echo-agent/core/observability` 子路径拿；这里只放会碰盘的入口与其错误类。
+ */
+export { openObservationReader, SqliteEchoObservationReader, ObservationCursorError, ObservationNotPersistedError } from "./observability/query.ts";
+export { ObservationDatabaseMissingError, ObservationStoreOpenError, observationDatabasePath } from "./observability/sqlite-store.ts";
+export { ObservationStoreUnavailableError, ObservationCorruptionError } from "./observability/store.ts";
+export type { EchoRunResult, EchoObservations, EchoObservationReader, RunLookupResult, RunObservation, RunObservationHeader, ListRunsOptions, RunObservationPage } from "./observability/types.ts";
+export type { AgentRunResult } from "./agent.ts";
 
 /* ───────────── 落盘：node-only 的 first-party 默认件 ───────────── */
 

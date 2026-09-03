@@ -14,6 +14,8 @@ import { errText, type Diagnostic } from "../errors.ts";
 import { environmentMessage, type AgentMessage } from "../messages.ts";
 import { systemClock, type Clock } from "./clock.ts";
 import type { StorageDir } from "../storage/types.ts";
+import type { CapabilityFactSink } from "../observability/fact-sink.ts";
+import type { ScheduleFact } from "./observe.ts";
 import { cronMatches, latestMatchBefore, validateCron } from "./cron.ts";
 import {
   DEFAULT_SCHEDULE_LIMITS,
@@ -36,7 +38,18 @@ export const SCHEDULE_FILE = "schedules.json";
 export type ScheduleDeps = {
   deliver?: (m: AgentMessage) => Promise<void> | void;
   report?: (d: Diagnostic) => void;
+  /** §15.9 领域观测 sink（module-local、永不抛）：created / cancelled / delivered / bookkeeping-failed / missed 各在唯一 settle 点发一次。 */
+  observe?: CapabilityFactSink<ScheduleFact>;
 };
+
+/** sink 按契约永不抛；这里再兜一层，观测层的异常不进 schedule 状态机。 */
+function observe(ctx: ScheduleDeps, fact: Omit<ScheduleFact, "occurredAt">, at: number): void {
+  try {
+    ctx.observe?.offer({ ...fact, occurredAt: at });
+  } catch {
+    // 见上
+  }
+}
 
 export type ScheduleOptions = {
   maxSchedules?: number;
@@ -92,12 +105,17 @@ export async function addSchedule(ctx: AgentSchedule, schedule: Schedule, at?: n
   }
   ctx.entries.set(schedule.id, { schedule, lastFiredAt: null });
   await save(ctx);
+  observe(ctx, { kind: "created", id: schedule.id, scheduleKind: schedule.kind }, now);
 }
 
 export async function cancelSchedule(ctx: AgentSchedule, id: string): Promise<boolean> {
   await ensureLoaded(ctx);
+  const kind = ctx.entries.get(id)?.schedule.kind;
   const removed = ctx.entries.delete(id);
-  if (removed) await save(ctx);
+  if (removed) {
+    await save(ctx);
+    observe(ctx, { kind: "cancelled", id, ...(kind === undefined ? {} : { scheduleKind: kind }) }, ctx.clock.now());
+  }
   return removed;
 }
 
@@ -146,11 +164,15 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
   requireDeliver(ctx);
   await ensureLoaded(ctx);
   let dirty = false;
+  const fired: Schedule[] = [];
   for (const entry of [...ctx.entries.values()]) {
     try {
       if (!isDue(entry, now)) continue;
       // **等接受成功再簿记**：投递抛错时下面几行不执行，条目原样留着，下一 tick 重来。
       await ctx.deliver?.(environmentMessage(renderFire(entry.schedule), SCHEDULE_KIND, entry.schedule.id));
+      // deliver 返回 = 投递被接受：这是 delivered 的唯一 emission point（§15.9）
+      observe(ctx, { kind: "delivered", id: entry.schedule.id, scheduleKind: entry.schedule.kind, via: "tick" }, now);
+      fired.push(entry.schedule);
       if (entry.schedule.kind === "at") {
         ctx.entries.delete(entry.schedule.id); // 一次性:触发即删
       } else {
@@ -161,7 +183,17 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
       ctx.report?.({ code: "schedule_fire_failed", message: `${entry.schedule.id}: ${errText(e)}` });
     }
   }
-  if (dirty) await save(ctx);
+  if (dirty) await saveAfterFire(ctx, fired, now);
+}
+
+/** 投递之后的簿记落盘：失败 = 每条已投递的都记一次 bookkeeping-failed（下次 tick 会再投），错照抛。 */
+async function saveAfterFire(ctx: AgentSchedule, fired: readonly Schedule[], now: number): Promise<void> {
+  try {
+    await save(ctx);
+  } catch (e) {
+    for (const s of fired) observe(ctx, { kind: "bookkeeping-failed", id: s.id, scheduleKind: s.kind, message: errText(e) }, now);
+    throw e;
+  }
 }
 
 /**
@@ -209,6 +241,7 @@ export async function disposeSchedule(ctx: AgentSchedule): Promise<void> {
 async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
   await ensureLoaded(ctx);
   let dirty = false;
+  const fired: Schedule[] = [];
   for (const entry of [...ctx.entries.values()]) {
     const s = entry.schedule;
     try {
@@ -217,6 +250,7 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
           // 错过太久的一次性任务:不补、删除并留痕(永远不会再触发,留着是死条目)
           ctx.entries.delete(s.id);
           ctx.report?.({ code: "schedule_expired", message: `一次性任务 '${s.id}' 错过触发窗口,已删除` });
+          observe(ctx, { kind: "missed", id: s.id, scheduleKind: s.kind, via: "catch-up", reason: "expired" }, now);
           dirty = true;
         }
         continue; // 窗口内的交给首次 tick 正常触发
@@ -225,6 +259,7 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
         const due = (entry.lastFiredAt ?? s.createdAt) + s.everyMs;
         if (due <= now && now - due > graceMs(s.everyMs)) {
           ctx.entries.set(s.id, { ...entry, lastFiredAt: now }); // 超窗:跳过欠账,对齐下次
+          observe(ctx, { kind: "missed", id: s.id, scheduleKind: s.kind, via: "catch-up", reason: "skipped-backlog" }, now);
           dirty = true;
         }
         continue; // 窗口内的交给首次 tick(isDue 为真)正常触发
@@ -234,6 +269,8 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
       if (missed !== null && (entry.lastFiredAt === null || entry.lastFiredAt < missed) && now - missed >= 60_000) {
         // 补跑同样：接受成功才记 fired，否则下次启动还会补
         await ctx.deliver?.(environmentMessage(renderFire(s), SCHEDULE_KIND, s.id));
+        observe(ctx, { kind: "delivered", id: s.id, scheduleKind: s.kind, via: "catch-up" }, now);
+        fired.push(s);
         ctx.entries.set(s.id, { ...entry, lastFiredAt: now });
         dirty = true;
       }
@@ -241,7 +278,7 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
       ctx.report?.({ code: "schedule_catchup_failed", message: `${s.id}: ${errText(e)}` });
     }
   }
-  if (dirty) await save(ctx);
+  if (dirty) await saveAfterFire(ctx, fired, now);
 }
 
 async function ensureLoaded(ctx: AgentSchedule): Promise<void> {

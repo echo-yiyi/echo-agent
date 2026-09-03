@@ -27,6 +27,7 @@ import {
   type TaskView,
   type TaskWriteResult,
 } from "./types.ts";
+import { taskObserverOf, type TaskFact, type TaskStateOperation } from "./observe.ts";
 
 /** agent 的任务清单。键是 `task.id`,值就是任务本体。 */
 export type TaskMap = Map<string, TaskItem>;
@@ -143,7 +144,7 @@ export function createTasks(tasks: TaskMap, specs: readonly TaskSpec[]): TaskCre
   const cycle = findCycle(draft);
   if (cycle !== undefined) return { ok: false, error: `this would create a cycle: ${cycle.join(" → ")}` };
 
-  commit(tasks, draft);
+  commit(tasks, draft, { operation: "create", ids: created.map((c) => c.id) });
   return { ok: true, tasks: created.map((c) => draft.get(c.id) as TaskItem) };
 }
 
@@ -191,7 +192,7 @@ export function updateTask(tasks: TaskMap, id: string, patch: TaskPatch): TaskWr
     }
   }
 
-  commit(tasks, draft);
+  commit(tasks, draft, { operation: "update", ids: [id], before: (tasks.get(id) as TaskItem).status, after: next.status });
   return { ok: true, task: next };
 }
 
@@ -205,7 +206,7 @@ export function removeTask(tasks: TaskMap, id: string): boolean {
       draft.set(key, { ...item, links: item.links.filter((l) => l.to !== id), updatedAt: Date.now() });
     }
   }
-  commit(tasks, draft);
+  commit(tasks, draft, { operation: "remove", ids: [id], before: (tasks.get(id) as TaskItem).status });
   return true;
 }
 
@@ -217,7 +218,7 @@ export function linkTasks(tasks: TaskMap, from: string, to: string, kind: string
   addEdge(draft, from, to, kind);
   const cycle = findCycle(draft);
   if (cycle !== undefined) return { ok: false, error: `this would create a cycle: ${cycle.join(" → ")}` };
-  commit(tasks, draft);
+  commit(tasks, draft, { operation: "link", ids: [from, to] });
   return { ok: true };
 }
 
@@ -226,13 +227,22 @@ export function unlinkTasks(tasks: TaskMap, from: string, to: string, kind: stri
   if (item === undefined || !item.links.some((l) => l.to === to && l.kind === kind)) return false;
   const draft = new Map<string, TaskItem>(tasks);
   removeEdge(draft, from, to, kind);
-  commit(tasks, draft);
+  commit(tasks, draft, { operation: "unlink", ids: [from, to] });
   return true;
 }
 
-function commit(tasks: TaskMap, draft: Map<string, TaskItem>): void {
+/**
+ * Map swap 之后发 `task.state.committed`（§15.9 Task 行的唯一 state emission point）。
+ * 它只说明内存态已变，**不说明已持久化**——store 事实在 `saveTasks()` 那一头。sink 永不抛，这里再兜一层。
+ */
+function commit(tasks: TaskMap, draft: Map<string, TaskItem>, fact: { operation: TaskStateOperation; ids: readonly string[]; before?: string; after?: string }): void {
   tasks.clear();
   for (const [k, v] of draft) tasks.set(k, v);
+  try {
+    taskObserverOf(tasks)?.offer({ kind: "state", ...fact, total: tasks.size, occurredAt: Date.now() });
+  } catch {
+    // 观测层的异常不进任务状态机
+  }
 }
 
 /* ─────────────── 落盘（端口在 types.ts，实现在调用方） ─────────────── */
@@ -305,7 +315,23 @@ function assertTaskItem(v: unknown, where: string): asserts v is TaskItem {
 /** 写回端口。调用方决定时机（每次改完、轮边界、dispose）。 */
 /** 一次完整快照。序列化在 core；**「要么整份生效」是 Store 的 conformance**，不在这里做。 */
 export async function saveTasks(tasks: TaskMap, store: TaskStore): Promise<void> {
-  await store.write(`${JSON.stringify([...tasks.values()], null, 2)}\n`);
+  const text = `${JSON.stringify([...tasks.values()], null, 2)}\n`;
+  const count = tasks.size;
+  // `task.store.saved / failed` 只在这里、只在真实 `TaskStore.write()` settle 之后发（§15.9）：state commit 不等于已落盘
+  const emit = (fact: TaskFact): void => {
+    try {
+      taskObserverOf(tasks)?.offer(fact);
+    } catch {
+      // 观测层的异常不改变落盘结果
+    }
+  };
+  try {
+    await store.write(text);
+  } catch (e) {
+    emit({ kind: "store", outcome: "failed", count, message: e instanceof Error ? e.message : String(e), occurredAt: Date.now() });
+    throw e;
+  }
+  emit({ kind: "store", outcome: "saved", count, bytes: new TextEncoder().encode(text).byteLength, occurredAt: Date.now() });
 }
 
 /* ─────────────── 纯函数：派生与图 ─────────────── */

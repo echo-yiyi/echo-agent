@@ -24,6 +24,9 @@ export { Transcript, clean, type TranscriptEntry } from "./transcript.ts";
 /** CLI：`echo-agent` 的解析与入口。两种形态的分叉在 `main()` 里。 */
 export { main, mainFor, parseArgs, usage, type CliOptions, type Main, type MainDeps } from "./cli.ts";
 
+/** `echo-agent observe`：只读已落盘的 run 观测记录（不装配、不取锁）。`mainFor()` 已经分发它；单独暴露是给产品复用帮助与解析。 */
+export { runObserve, parseObserveArgs, observeUsage, type ObserveCommand, type ObserveOptions, type ObserveIo } from "./observe.ts";
+
 /**
  * 「产品」：依赖本包做完整产品（`echo-coding`）时交给 `mainFor()` 的东西——名字、版本、装配片段。
  * 本包不认识任何具体产品；`ECHO_AGENT` 是缺省那个。

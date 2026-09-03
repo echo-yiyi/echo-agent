@@ -3,19 +3,42 @@
 //
 //   · 每个 Capability 自己拥有窄 fact union 与 descriptor（descriptor 与语义 owner 共址，不住中央 switch）；
 //   · sink 是 module-local、同步、**永不抛**；Capability 不 import Sequencer，也不知道 tap 长什么样；
-//   · 完整 Runtime 注入的 adapter 转成 `ObservationIngest.offer()`；standalone `/engine` 的 adapter 转给构造期
-//     host-owned `EngineObservationTap`；两个都没提供时才是 no-op。
+//   · 完整 Runtime 注入的 adapter 转成 `ObservationIngest.offer()`；没注入时是 no-op。
 //
 // 它不是 public AgentEvent、不是 Extension ABI、不是第二套状态机。
 
 import type { Diagnostic } from "../errors.ts";
 import type { BoundedObservationDraft } from "./draft.ts";
-import type { EngineObservationFact, EngineObservationTap, ObservationFactProjection } from "./engine-tap.ts";
-import { encodeCanonical, projectionEncodingLimits } from "./normalize.ts";
 import { redactedLabel } from "./redact.ts";
-import { assertIdentifier, freezeInstrumentation, freezeOwner, materializeRecordFrame, materializeScope, type ScopeMaterialization } from "./identity.ts";
+import { assertIdentifier, freezeInstrumentation, freezeOwner, materializeScope, type ScopeMaterialization } from "./identity.ts";
 import type { ObservationIngest, ProjectionFailureOutcome } from "./sequencer.ts";
-import type { ObservationCapturePolicy, ObservationOwner } from "./types.ts";
+import type { ObservationCapturePolicy, ObservationOwner, ObservationRecordKind } from "./types.ts";
+
+/** descriptor 投影出的 scope：envelope scope 的子集（`runtimeId` 由 Sequencer 盖，不由 producer 给）。 */
+export type ObservationFactScope = Readonly<{
+  agentId?: string;
+  agentInstanceId?: string;
+  sessionId?: string;
+  runId?: string;
+  turnId?: string;
+  activityId?: string;
+  toolCallId?: string;
+}>;
+
+/**
+ * descriptor 的产出：**body 尚未 normalize**——原 body 交给 Sequencer 做唯一一次 `normalizeObservationValue()`
+ * （失败 → hole + gap）。identity 字段（name / scope / subject）同样由 Sequencer 再物化一次。
+ */
+export type ObservationFactProjection = Readonly<{
+  kind: ObservationRecordKind;
+  name: string;
+  occurredAt: number;
+  sourceSeq?: number;
+  scope: ObservationFactScope;
+  attributes: Readonly<Record<string, string | number | boolean>>;
+  body: unknown;
+  subject?: Readonly<{ kind: string; id: string }>;
+}>;
 
 export interface CapabilityFactSink<T> {
   /** 同步、永不抛、没有 Promise。 */
@@ -75,11 +98,6 @@ function suppliedScope(supply: FactSinkOptions["scope"]): ScopeMaterialization {
   return materializeScope(raw);
 }
 
-/** 与 Sequencer / Agent 同一份判据：只认 `then` 是函数，不做 instanceof。 */
-function isThenable(v: unknown): v is PromiseLike<unknown> {
-  return typeof v === "object" && v !== null && typeof (v as { then?: unknown }).then === "function";
-}
-
 const NOOP: CapabilityFactSink<unknown> = Object.freeze({ offer(): void {} });
 
 export function noopFactSink<T>(): CapabilityFactSink<T> {
@@ -89,108 +107,8 @@ export function noopFactSink<T>(): CapabilityFactSink<T> {
 export type FactSinkOptions = Readonly<{
   report?: (d: Diagnostic) => void;
   /** 调用时刻补的 scope（agentId / sessionId / runId …）；descriptor 自带的 scope 字段优先。 */
-  scope?: () => EngineObservationFact["scope"];
+  scope?: () => ObservationFactScope;
 }>;
-
-/**
- * `/engine`：descriptor → **整条 fact** 按 `projectionEncodingLimits()`（同步预算减去 envelope 框架保留）
- * 编码 → `EngineObservationTap.offer()`。与 canonical 路径共用同一 admission boundary，评测面与 Runtime 面
- * 不分叉（review P1）；超限或 normalize 失败只丢这一条 + 诊断。
- *
- * descriptor 的 `instrumentation` 在**这里**就校长度并 fail-loud：它只进 canonical envelope、不进 ephemeral
- * fact，若不设上限，一个超长 name 能让 Runtime 成 gap 而这边照收——两条路都建不起来才谈得上「不分叉」。
- */
-export function factSinkToEngineTap<T>(descriptor: CapabilityFactDescriptor<T>, tap: EngineObservationTap, opts: FactSinkOptions = {}): CapabilityFactSink<T> {
-  // 构造期**冻结副本**，之后再也不读 descriptor / tap 的字段：只校验不复制的话，adapter 构造完
-  // 把 `instrumentation.name` 改成 9,000 字节，这边照收而 Runtime 成 gap（review 实测）。
-  const instrumentation = freezeInstrumentation(descriptor.instrumentation, "descriptor.instrumentation");
-  const capturePolicy = tap.capturePolicy;
-  const project = descriptor.project;
-  const report = safeReporter(opts.report);
-  // tap 返回 thenable（`async offer()`）时停用它，见下。
-  let tapDisabled = false;
-  return {
-    offer(fact: T): void {
-      if (tapDisabled) return;
-      // 与 canonical 那条路同一把尺：scope 先物化成稳定快照，失败即拒。
-      // `/engine` 没有 canonical journal，所以这里只能丢记录 + 诊断——差别是有没有账本，不是纪律松紧。
-      const s = suppliedScope(opts.scope);
-      if (!s.ok) {
-        report({ code: "observation_fact_dropped", message: `${instrumentation.name}：scope 物化失败：${s.violation}` });
-        return;
-      }
-      const callScope = s.scope;
-      try {
-        const p = project(fact, capturePolicy);
-        if (p === null) return;
-        // 每个字段**只读一次**存进局部量；之后只用局部量与物化快照，绝不回头碰 p
-        // （否则 check 与 encode 之间就有 TOCTOU 窗口：Proxy 第二次读能换成别的内容或类型）。
-        // 与 Sequencer 调**同一个** frame 物化：kind / occurredAt / sourceSeq / attributes / identity 一把尺量到底。
-        // 只对齐 identity 不够——之前 kind 只有 Sequencer 校验，descriptor 返回 `kind:"bogus"` 时这边收下、
-        // Runtime 成 gap（review 实测）。
-        const m = materializeRecordFrame({
-          kind: p.kind,
-          occurredAt: p.occurredAt,
-          ...(p.sourceSeq === undefined ? {} : { sourceSeq: p.sourceSeq }),
-          name: p.name,
-          scope: { ...callScope, ...p.scope },
-          attributes: p.attributes,
-          ...(p.subject === undefined ? {} : { subject: p.subject }),
-        });
-        if (!m.ok) {
-          report({ code: "observation_fact_dropped", message: `${instrumentation.name}：${m.violation}` });
-          return;
-        }
-        const f = m.frame;
-        const id = f.identity;
-        const raw: Omit<EngineObservationFact, "body"> & { body: unknown } = {
-          schemaVersion: 1,
-          kind: f.kind,
-          name: id.name,
-          occurredAt: f.occurredAt,
-          ...(f.sourceSeq === undefined ? {} : { sourceSeq: f.sourceSeq }),
-          scope: id.scope ?? {},
-          // subject 必须随 fact 一起走，两边的 admission boundary 才对得齐
-          ...(id.subject === undefined ? {} : { subject: id.subject }),
-          attributes: f.attributes,
-          body: p.body,
-        };
-        const encoded = encodeCanonical(raw, projectionEncodingLimits());
-        // `/engine` 也没有 blob CAS seam：BlobRef 在这条路上同样无人可解，别写一个假装可解析的 digest。
-        // 与 Sequencer 同一裁决（O3b 落 seam 前 binary 一律拒），两面才谈得上同一 admission boundary。
-        if (encoded.blobs.length > 0) {
-          report({ code: "observation_fact_dropped", message: `${instrumentation.name}：binary 需要 blob CAS seam（O3b），O2a 不得产出 BlobRef` });
-          return;
-        }
-        // **thenable 必须在 adapter 里接住**（2026-08-27 review P0）：`EngineObservationTap.offer` 声明返回
-        // void，但 TypeScript 放行 `async offer()`。丢掉返回值后，外层 `Agent.deliverToTap()` 只看得见
-        // 本 sink 返回的 void，它那道 thenable 防护完全失效——exporter 的 async reject 又变回进程级
-        // unhandled rejection（实测 unhandled=1、reported=0），正是 O1a/O2a 要消灭的东西。
-        // 接口明确要求同步，所以除了接住 rejection，还要**立刻停用这个 tap**：否则 pending Promise 无界累积。
-        const r: unknown = tap.offer(encoded.value as unknown as EngineObservationFact);
-        if (isThenable(r)) {
-          tapDisabled = true;
-          // **「报一次」要真的是一次**（2026-08-27 review P1）：上一版「返回了 thenable」与「它 reject 了」
-          // 各报一条，native rejecting Promise 就是 2 条；而自定义 thenable 可以把 reject 回调**调 1000 次**，
-          // 于是一条 fact 产出 1001 条诊断——诊断通道自己又成了无界增长面。
-          // 规矩：one-shot guard + `Promise.resolve()` 同化（同化后只可能 settle 一次，
-          // 后续 reject 调用被丢弃，但仍被消费掉、不会变成 unhandled rejection）。
-          // **诊断必须当场发**（2026-08-27 review P1）：上一版把它放进 settle 回调里，于是 tap 返回一个
-          // **永不 settle** 的 Promise 时 `calls=1, diagnostics=0`——tap 被停用了，故障却完全不可见。
-          // 规矩：发现 thenable 就立刻报一条通用诊断（不含成因，那时还不知道），随后**静默消费**
-          // eventual rejection（只为不产生 unhandled rejection，不再报第二条）。
-          report({ code: "observation_tap_failed", message: `${instrumentation.name}：EngineObservationTap.offer 必须同步，返回了 thenable——已停用该 tap` });
-          Promise.resolve(r).then(
-            () => {},
-            () => {},
-          );
-        }
-      } catch (e) {
-        report({ code: "observation_fact_dropped", message: `${instrumentation.name}：${redactedLabel(e)}` });
-      }
-    },
-  };
-}
 
 export type IngestFactSinkContext = Readonly<{
   runtimeId: string;
@@ -201,8 +119,9 @@ export type IngestFactSinkContext = Readonly<{
   FactSinkOptions;
 
 /**
- * 完整 Runtime：descriptor → `ObservationIngest.offer()`（bounded lane）。body 原样交给 Sequencer normalize。
- * 与 engine adapter 同样在构造期钉住 instrumentation / owner / runtime 身份（见上）。
+ * descriptor → `ObservationIngest.offer()`（bounded lane）。body 原样交给 Sequencer normalize。
+ * instrumentation / owner / runtime 身份在构造期**冻结副本**并校长度：只校验不复制的话，adapter 构造完
+ * 把 `instrumentation.name` 改成 9,000 字节，之后每条事实都成 gap（review 实测）。
  */
 export function factSinkToIngest<T>(descriptor: CapabilityFactDescriptor<T>, ingest: ObservationIngest, ctx: IngestFactSinkContext): CapabilityFactSink<T> {
   // 同上：构造期冻结副本，之后不再读 descriptor / ctx

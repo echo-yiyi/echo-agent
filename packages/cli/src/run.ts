@@ -89,11 +89,14 @@ export async function run(opts: RunOptions): Promise<number> {
       if (aborted()) break;
       const text = line.trim();
       if (text === "") continue;
-      const result = await agent.prompt(text);
+      // 走 `send()` 而不是 `agent.prompt()`：完整 Runtime 的 run 结果带 runId 与观测三元组（§15.6 OR5）
+      const result = await echo.send(text);
       if (result.outcome.kind === "error") {
         failed = true;
         err.write(`[错误] ${result.outcome.error.message}\n`);
       }
+      // 每轮结束打 runId（§15.6「结束时打印 runId」）：进 err 不进正文；拿它去 `observe show <run-id>`
+      err.write(`[run] ${result.runId} · observation ${result.observationIntegrity} · ${result.observationPersistence}\n`);
       if (aborted()) break;
     }
   } finally {

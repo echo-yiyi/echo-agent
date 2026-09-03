@@ -1,21 +1,16 @@
 import { test, expect, describe } from "bun:test";
-import { Agent } from "../src/agent.ts";
-import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import type { AgentEvent } from "../src/events.ts";
-import { FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
-import { MAX_PROJECTED_TEXT_BYTES, agentEventDescriptor, agentEventTapFor, estimatePayloadBytes, projectAgentEvent } from "../src/observability/agent-events.ts";
-import { createInMemoryEngineObservationCollector } from "../src/observability/collector.ts";
-import { factSinkToEngineTap, factSinkToIngest, noopFactSink, type CapabilityFactDescriptor } from "../src/observability/fact-sink.ts";
+import { MAX_PROJECTED_TEXT_BYTES, agentEventDescriptor, estimatePayloadBytes, projectAgentEvent } from "../src/observability/agent-events.ts";
+import { factSinkToIngest, noopFactSink, type CapabilityFactDescriptor } from "../src/observability/fact-sink.ts";
 import { InMemoryCanonicalObservationStore } from "../src/observability/store.ts";
 import { ObservationIdentityError } from "../src/observability/identity.ts";
 import { ObservationSequencer } from "../src/observability/sequencer.ts";
-import type { EngineObservationFact, EngineObservationTap } from "../src/observability/engine-tap.ts";
 import type { Diagnostic } from "../src/errors.ts";
-import { OBSERVATION_ENVELOPE_RESERVE, OBSERVATION_SYNC_LIMITS, type ObservationRecordKind } from "../src/observability/types.ts";
+import { OBSERVATION_SYNC_LIMITS, type ObservationRecordKind } from "../src/observability/types.ts";
 
-// §15.3.5 / §15.9 / §15.6 / OR2 / OR14：AgentEvent 的固定投影、custom event 的 generic 投影、
-// `/engine` collector 与完整 Runtime ingest 两条路径看到**同一 descriptor / body**。
+// §15.3.5 / §15.9 / OR2：AgentEvent 的固定投影、custom event 的 generic 投影，以及 descriptor → Sequencer 这条
+// 唯一 adapter 的失败语义（投影抛错 / scope 失败 / 身份超长 → hole + gap 或构造期拒，绝不静默丢、绝不击穿 no-throw）。
 
 const ev = <T extends object>(seq: number, e: T): AgentEvent => ({ seq, at: 1_000 + seq, ...e }) as unknown as AgentEvent;
 
@@ -47,6 +42,14 @@ async function establishRun(seq: ObservationSequencer, runId: string, runtimeId 
     },
   } as never);
 }
+
+function sequencerWith(capturePolicy: "metadata" | "content" = "metadata"): { seq: ObservationSequencer; clock: FakeClock } {
+  const clock = new FakeClock(0);
+  const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy, store: new InMemoryCanonicalObservationStore(), clock });
+  return { seq, clock };
+}
+
+const NA = { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", owner: { status: "not-applicable" } } as const;
 
 describe("CoreAgentEvent 逐 type 固定投影（metadata 档）", () => {
   const cases: [AgentEvent, ObservationRecordKind, string][] = [
@@ -108,6 +111,10 @@ describe("CoreAgentEvent 逐 type 固定投影（metadata 档）", () => {
     expect(JSON.stringify(meta.body)).not.toContain("429 secret");
     expect((projectAgentEvent(e, "content")!.body as Record<string, unknown>).errorMessage).toBe("429 secret");
   });
+
+  test("descriptor 与 projector 是同一份投影：agentEventDescriptor.project === projectAgentEvent", () => {
+    expect(agentEventDescriptor.project).toBe(projectAgentEvent);
+  });
 });
 
 describe("agent.custom_event（OR2 / §15.11）", () => {
@@ -141,133 +148,90 @@ describe("agent.custom_event（OR2 / §15.11）", () => {
   });
 });
 
-describe("collector：有界、no-throw、只读快照", () => {
-  test("超过 capacity 只计 overflow + 一条诊断；快照是拷贝", () => {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata", capacity: 2 });
-    const fact = (n: number): EngineObservationFact => ({ schemaVersion: 1, kind: "event", name: `f${n}`, occurredAt: n, scope: {}, attributes: {}, body: {} });
-    c.tap.offer(fact(1));
-    c.tap.offer(fact(2));
-    expect(() => c.tap.offer(fact(3))).not.toThrow();
-    expect(c.snapshot().map((f) => f.name)).toEqual(["f1", "f2"]);
-    expect(c.overflowCount).toBe(1);
-    expect(c.diagnostics.map((d) => d.code)).toEqual(["collector_overflow"]);
-    const snap = c.snapshot();
-    c.clear();
-    expect(snap).toHaveLength(2);
-    expect(c.snapshot()).toHaveLength(0);
-  });
-});
-
-describe("engine fact 与 canonical 共用同一 admission boundary（review P1，两轮）", () => {
-  const fact = (body: unknown): EngineObservationFact => ({ schemaVersion: 1, kind: "event", name: "big", occurredAt: 1, scope: {}, attributes: {}, body: body as never });
+describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏身份成 gap 而不是静默收下", () => {
   const descriptorFor = (body: unknown): CapabilityFactDescriptor<unknown> => ({
     instrumentation: { name: "t", version: "1" },
     project: () => ({ kind: "event", name: "big", occurredAt: 1, scope: {}, attributes: {}, body }),
   });
 
-  /** 同一条事实两条路各跑一遍，返回各自的裁决。 */
-  async function bothVerdicts(body: unknown): Promise<{ engine: "accepted" | "rejected"; runtime: "accepted" | "gap" }> {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "content" });
-    factSinkToEngineTap(descriptorFor(body), c.tap).offer({});
-    const clock = new FakeClock(0);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "content", store: new InMemoryCanonicalObservationStore(), clock });
-    factSinkToIngest(descriptorFor(body), seq, { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "content", owner: { status: "not-applicable" } }).offer({});
+  async function verdict(body: unknown): Promise<"accepted" | "gap"> {
+    const { seq, clock } = sequencerWith("content");
+    factSinkToIngest(descriptorFor(body), seq, { ...NA, capturePolicy: "content" }).offer({});
     clock.advance(1_000);
     await seq.idle();
-    const names = seq.committedRecords().map((r) => r.name);
-    return { engine: c.snapshot().length === 1 ? "accepted" : "rejected", runtime: names.includes("observation.gap") ? "gap" : "accepted" };
+    return seq.committedRecords().some((r) => r.name === "observation.gap") ? "gap" : "accepted";
   }
 
-  test("review 复现的那条（body 65,248）：两面都拒——不再一个 accepted 一个 gap", async () => {
-    expect(await bothVerdicts({ s: "x".repeat(65_248) })).toEqual({ engine: "rejected", runtime: "gap" });
+  test("超同步预算的 body（65,248）→ gap；预算内 → accepted", async () => {
+    expect(await verdict({ s: "x".repeat(65_248) })).toBe("gap");
+    expect(await verdict({ ok: 1 })).toBe("accepted");
   });
 
-  test("engine 接受的，Runtime 一定接受（保留额兜住框架差）", async () => {
-    // 贴着 projection 预算的下沿：engine 过得去，envelope 加上框架仍在 64 KiB 内
-    const n = OBSERVATION_SYNC_LIMITS.maxCanonicalDraftBytes - OBSERVATION_ENVELOPE_RESERVE.bytes - 512;
-    expect(await bothVerdicts({ s: "x".repeat(n) })).toEqual({ engine: "accepted", runtime: "accepted" });
-    expect(await bothVerdicts({ ok: 1 })).toEqual({ engine: "accepted", runtime: "accepted" });
-  });
-
-  test("超长 instrumentation.name：两条路都在构造期拒，不会一边收一边成 gap", () => {
+  test("超长 instrumentation.name：构造期拒（ObservationIdentityError），不会每条都成 gap", () => {
     const oversized: CapabilityFactDescriptor<unknown> = {
       instrumentation: { name: "x".repeat(5_000), version: "1" },
       project: () => ({ kind: "event", name: "small", occurredAt: 1, scope: {}, attributes: {}, body: { ok: 1 } }),
     };
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    // review 复现：body 很小、instrumentation 5,000 字节 → engine 收下 "small"、runtime 成 gap
-    expect(() => factSinkToEngineTap(oversized, c.tap)).toThrow(ObservationIdentityError);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", store: new InMemoryCanonicalObservationStore(), clock: new FakeClock(0) });
-    expect(() => factSinkToIngest(oversized, seq, { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", owner: { status: "not-applicable" } })).toThrow(ObservationIdentityError);
+    const { seq } = sequencerWith();
+    expect(() => factSinkToIngest(oversized, seq, NA)).toThrow(ObservationIdentityError);
   });
 
-  test("构造后再改 descriptor.instrumentation.name：两条路都用构造期冻结的副本，不受影响", async () => {
+  test("构造后再改 descriptor.instrumentation.name：用的是构造期冻结的副本，不受影响", async () => {
     const mutable = { name: "t", version: "1" };
     const d: CapabilityFactDescriptor<unknown> = {
       instrumentation: mutable,
       project: () => ({ kind: "event", name: "small", occurredAt: 1, scope: {}, attributes: {}, body: { ok: 1 } }),
     };
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    const engineSink = factSinkToEngineTap(d, c.tap);
-    const clock = new FakeClock(0);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", store: new InMemoryCanonicalObservationStore(), clock });
-    const ingestSink = factSinkToIngest(d, seq, { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", owner: { status: "not-applicable" } });
-
-    // 构造完再改成 9,000 字节——之前 /engine 照收、Runtime 成 gap
+    const { seq, clock } = sequencerWith();
+    const sink = factSinkToIngest(d, seq, NA);
     mutable.name = "x".repeat(9_000);
-    engineSink.offer({});
-    ingestSink.offer({});
+    sink.offer({});
     clock.advance(1_000);
     await seq.idle();
-
-    expect(c.snapshot().map((f) => f.name)).toEqual(["small"]);
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["small"]);
     expect(seq.committedRecords()[0]?.instrumentation).toEqual({ name: "t", version: "1" });
   });
 
   test("超长 owner.entryId 同样在构造期拒", () => {
-    const d = descriptorFor({ ok: 1 });
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", store: new InMemoryCanonicalObservationStore(), clock: new FakeClock(0) });
+    const { seq } = sequencerWith();
     const owner = { status: "known", entryId: "x".repeat(5_000), entryGeneration: "1", via: "assembly" } as const;
-    expect(() => factSinkToIngest(d, seq, { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", owner })).toThrow(ObservationIdentityError);
+    expect(() => factSinkToIngest(descriptorFor({ ok: 1 }), seq, { ...NA, owner })).toThrow(ObservationIdentityError);
   });
 
-  test("9,000 字节 subject：两面都拒——subject 现在随 fact 一起走，并共用同一把尺", async () => {
+  test("9,000 字节 subject：随 fact 一起量，成 gap", async () => {
     const withSubject: CapabilityFactDescriptor<unknown> = {
       instrumentation: { name: "t", version: "1" },
       project: () => ({ kind: "event", name: "small", occurredAt: 1, scope: {}, attributes: {}, body: { ok: 1 }, subject: { kind: "k", id: "x".repeat(9_000) } }),
     };
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    const diags: string[] = [];
-    factSinkToEngineTap(withSubject, c.tap, { report: (d) => diags.push(d.code) }).offer({});
-    expect(c.snapshot()).toHaveLength(0); // 之前这里会收下一条 "small"
-    expect(diags).toEqual(["observation_fact_dropped"]);
-
-    const clock = new FakeClock(0);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", store: new InMemoryCanonicalObservationStore(), clock });
-    factSinkToIngest(withSubject, seq, { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", owner: { status: "not-applicable" } }).offer({});
+    const { seq, clock } = sequencerWith();
+    factSinkToIngest(withSubject, seq, NA).offer({});
     clock.advance(1_000);
     await seq.idle();
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["observation.gap"]);
   });
 
-  test("合法 subject 随 fact 一起进 collector 快照", () => {
+  test("合法 subject 随记录落库", async () => {
     const d: CapabilityFactDescriptor<unknown> = {
       instrumentation: { name: "t", version: "1" },
       project: () => ({ kind: "event", name: "ok", occurredAt: 1, scope: {}, attributes: {}, body: {}, subject: { kind: "memory", id: "people/alice" } }),
     };
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    factSinkToEngineTap(d, c.tap).offer({});
-    expect(c.snapshot()[0]?.subject).toEqual({ kind: "memory", id: "people/alice" });
+    const { seq, clock } = sequencerWith();
+    factSinkToIngest(d, seq, NA).offer({});
+    clock.advance(1_000);
+    await seq.idle();
+    expect(seq.committedRecords()[0]?.subject).toEqual({ kind: "memory", id: "people/alice" });
   });
 
   test("fact sink 的 reporter 抛错击穿不了 offer() 的 no-throw", () => {
     const bad: CapabilityFactDescriptor<unknown> = {
       instrumentation: { name: "t", version: "1" },
-      project: () => ({ kind: "event", name: "x", occurredAt: 1, scope: {}, attributes: {}, body: { n: NaN } }),
+      project: () => {
+        throw new Error("projection boom");
+      },
     };
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    const sink = factSinkToEngineTap(bad, c.tap, {
+    const { seq } = sequencerWith();
+    const sink = factSinkToIngest(bad, seq, {
+      ...NA,
       report: () => {
         throw new Error("reporter boom");
       },
@@ -275,151 +239,34 @@ describe("engine fact 与 canonical 共用同一 admission boundary（review P1�
     expect(() => sink.offer({})).not.toThrow();
   });
 
-  test("collector 直接 offer 超预算的 fact → 拒收 + 诊断，不入快照", () => {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "content", capacity: 1 });
-    expect(() => c.tap.offer(fact({ s: "x".repeat(65_248) }))).not.toThrow();
-    expect(c.snapshot()).toHaveLength(0);
-    expect(c.rejectedCount).toBe(1);
-    expect(c.diagnostics.map((d) => d.code)).toEqual(["collector_fact_rejected"]);
-    c.tap.offer(fact({ ok: 1 }));
-    expect(c.snapshot()).toHaveLength(1);
-  });
-
-  test("被拒的 fact 不撑大 diagnostics：5000 次拒收只留一条样本 + 计数；clear() 一并重置", () => {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "content" });
-    const oversized = fact({ s: "x".repeat(65_248) });
-    for (let i = 0; i < 5_000; i++) c.tap.offer(oversized);
-    expect(c.snapshot()).toHaveLength(0);
-    expect(c.rejectedCount).toBe(5_000);
-    expect(c.diagnostics).toHaveLength(1); // 之前是 5000——「bounded」当场作废
-    expect(c.diagnostics[0]?.message).not.toContain("xxxx");
-    c.clear();
-    expect(c.rejectedCount).toBe(0);
-    expect(c.diagnostics).toHaveLength(0);
-    c.tap.offer(fact({ ok: 1 }));
-    expect(c.snapshot()).toHaveLength(1);
-  });
-
-  test("engine adapter 超限只丢 + 诊断，诊断不带原文", () => {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "content" });
-    const diags: string[] = [];
-    factSinkToEngineTap(descriptorFor({ s: "x".repeat(65_248) }), c.tap, { report: (d) => diags.push(`${d.code}:${d.message}`) }).offer({});
-    expect(c.snapshot()).toHaveLength(0);
-    expect(diags).toHaveLength(1);
-    expect(diags[0]).toContain("observation_fact_dropped");
-    expect(diags[0]).not.toContain("xxxx");
-  });
-});
-
-describe("fact sink 两条 adapter", () => {
-  type Fact = { op: "write"; path: string; chars: number };
-  const descriptor: CapabilityFactDescriptor<Fact> = {
-    instrumentation: { name: "echo.memory", version: "1" },
-    project: (f, policy) => ({
-      kind: "event",
-      name: "memory.mutation.committed",
-      occurredAt: 5,
-      scope: {},
-      attributes: { operation: f.op },
-      body: policy === "content" ? { chars: f.chars, path: f.path } : { chars: f.chars },
-    }),
-  };
-
-  test("noop sink 永不抛；engine adapter 把 descriptor 投影成 fact；normalize 失败只丢 + 诊断", () => {
+  test("noop sink 永不抛；descriptor 的 name / attributes / body / instrumentation / owner 原样进 canonical record", async () => {
+    type Fact = { op: "write"; path: string; chars: number };
+    const descriptor: CapabilityFactDescriptor<Fact> = {
+      instrumentation: { name: "echo.memory", version: "1" },
+      project: (f, policy) => ({
+        kind: "event",
+        name: "memory.mutation.committed",
+        occurredAt: 5,
+        scope: {},
+        attributes: { operation: f.op },
+        body: policy === "content" ? { chars: f.chars, path: f.path } : { chars: f.chars },
+      }),
+    };
     expect(() => noopFactSink<Fact>().offer({ op: "write", path: "p", chars: 1 })).not.toThrow();
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    const diags: string[] = [];
-    const sink = factSinkToEngineTap(descriptor, c.tap, { report: (d) => diags.push(d.code), scope: () => ({ agentId: "a1" }) });
-    sink.offer({ op: "write", path: "people/alice.md", chars: 12 });
-    const [f] = c.snapshot();
-    expect(f?.name).toBe("memory.mutation.committed");
-    expect(f?.scope).toEqual({ agentId: "a1" });
-    expect(f?.body).toEqual({ chars: 12 });
-    expect(JSON.stringify(f)).not.toContain("alice");
-    // 坏 body：descriptor 返回 NaN → 只丢这一条
-    const badDesc: CapabilityFactDescriptor<Fact> = { ...descriptor, project: () => ({ kind: "event", name: "x", occurredAt: 1, scope: {}, attributes: {}, body: { n: NaN } }) };
-    expect(() => factSinkToEngineTap(badDesc, c.tap, { report: (d) => diags.push(d.code) }).offer({ op: "write", path: "p", chars: 0 })).not.toThrow();
-    expect(diags).toEqual(["observation_fact_dropped"]);
-    expect(c.snapshot()).toHaveLength(1);
-  });
-
-  test("同一事实经 collector 与经 Sequencer，name / kind / attributes / body 完全相同（O3a 门 9 的两路对齐）", async () => {
-    const fact: Fact = { op: "write", path: "projects/echo.md", chars: 40 };
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    factSinkToEngineTap(descriptor, c.tap).offer(fact);
-
-    const clock = new FakeClock(0);
-    const store = new InMemoryCanonicalObservationStore();
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", store, clock });
-    factSinkToIngest(descriptor, seq, { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", owner: { status: "known", entryId: "echo:memory", entryGeneration: "1", via: "assembly" } }).offer(fact);
+    const { seq, clock } = sequencerWith();
+    const owner = { status: "known", entryId: "echo:memory", entryGeneration: "1", via: "assembly" } as const;
+    factSinkToIngest(descriptor, seq, { ...NA, owner, scope: () => ({ agentId: "a1" }) }).offer({ op: "write", path: "people/alice.md", chars: 12 });
     clock.advance(1_000);
     await seq.idle();
-
-    const engineFact = c.snapshot()[0]!;
-    const canonical = seq.committedRecords()[0]!;
-    expect(canonical.name).toBe(engineFact.name);
-    expect(canonical.kind).toBe(engineFact.kind);
-    expect(canonical.attributes).toEqual(engineFact.attributes);
-    expect(canonical.body).toEqual(engineFact.body);
-    expect(canonical.instrumentation).toEqual({ name: "echo.memory", version: "1" });
-    expect(canonical.owner).toEqual({ status: "known", entryId: "echo:memory", entryGeneration: "1", via: "assembly" });
-  });
-});
-
-describe("真 Agent + scripted provider + builtin 工具：tap 看见完整一次执行，且不改 outcome", () => {
-  const echo: ModelTool = {
-    kind: "model",
-    name: "echo",
-    label: "回声",
-    description: "把输入原样返回",
-    parameters: { type: "object", properties: { text: { type: "string" } } },
-    execute: async (params) => toolOk(`echo:${String((params as { text: string }).text)}`),
-  };
-  const turns = () => [toolTurn("c1", "echo", { text: "hi" }), textTurn("done")];
-
-  test("collector 收到 loop / turn / model / tool 的 span 与事件，顺序按 seq", async () => {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn(turns()), tools: [echo], observationTap: agentEventTapFor(c.tap) });
-    const result = await agent.prompt("说 hi");
-    expect(result.outcome.kind).toBe("completed");
-    const names = c.snapshot().map((f) => `${f.kind}:${f.name}`);
-    // prompt() 先把用户消息 append（单一 append 路径），再发 agent_start
-    expect(names[0]).toBe("event:agent.message.appended");
-    expect(names.indexOf("event:agent.loop.started")).toBeLessThan(names.indexOf("span_start:turn.execute"));
-    expect(names).toContain("span_start:turn.execute");
-    expect(names).toContain("span_start:model.generate");
-    expect(names).toContain("span_end:model.generate");
-    expect(names).toContain("span_start:tool.execute");
-    expect(names).toContain("span_end:tool.execute");
-    expect(names.at(-1)).toBe("event:agent.loop.ended");
-    const seqs = c.snapshot().map((f) => f.sourceSeq!);
-    expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
-    const tool = c.snapshot().find((f) => f.name === "tool.execute" && f.kind === "span_end")!;
-    expect(tool.scope.toolCallId).toBe("c1");
-    expect((tool.body as { isError: boolean }).isError).toBe(false);
-  });
-
-  test("装 tap 与不装 tap、以及 tap 抛错，三种情况 outcome 与 transcript 完全相同", async () => {
-    const run = async (tap?: Parameters<typeof agentEventTapFor>[0]) => {
-      const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn(turns()), tools: [echo], ...(tap === undefined ? {} : { observationTap: agentEventTapFor(tap) }) });
-      const r = await agent.prompt("说 hi");
-      return { outcome: r.outcome, roles: agent.messages.map((m) => m.role), text: agent.messages.map((m) => JSON.stringify((m as { content?: unknown }).content)) };
-    };
-    const bare = await run();
-    const withTap = await run(createInMemoryEngineObservationCollector({ capturePolicy: "content" }).tap);
-    const throwing = await run({
-      capturePolicy: "metadata",
-      offer: () => {
-        throw new Error("tap boom");
-      },
-    });
-    expect(withTap).toEqual(bare);
-    expect(throwing).toEqual(bare);
-    expect(bare.outcome.kind).toBe("completed");
-  });
-
-  test("descriptor 与 tap adapter 是同一份投影：agentEventDescriptor.project === projectAgentEvent", () => {
-    expect(agentEventDescriptor.project).toBe(projectAgentEvent);
+    const [rec] = seq.committedRecords();
+    expect(rec?.name).toBe("memory.mutation.committed");
+    expect(rec?.kind).toBe("event");
+    expect(rec?.attributes).toEqual({ operation: "write" });
+    expect(rec?.body).toEqual({ chars: 12 });
+    expect(rec?.scope).toEqual({ runtimeId: "rt", agentId: "a1" });
+    expect(rec?.instrumentation).toEqual({ name: "echo.memory", version: "1" });
+    expect(rec?.owner).toEqual(owner);
+    expect(JSON.stringify(rec)).not.toContain("alice"); // metadata 档没有 path
   });
 });
 
@@ -432,15 +279,11 @@ describe("descriptor.project 抛错：canonical 路径必须留 hole + gap（202
   });
 
   async function offerThrough(scope?: () => { runId?: string }, establish?: string): Promise<{ seq: ObservationSequencer; diags: string[] }> {
-    const clock = new FakeClock(0);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", store: new InMemoryCanonicalObservationStore(), clock });
+    const { seq, clock } = sequencerWith();
     if (establish !== undefined) await establishRun(seq, establish);
     const diags: string[] = [];
     factSinkToIngest(boom(), seq, {
-      runtimeId: "rt",
-      runtimeGeneration: "g",
-      capturePolicy: "metadata",
-      owner: { status: "not-applicable" },
+      ...NA,
       report: (d) => diags.push(d.code),
       ...(scope === undefined ? {} : { scope }),
     }).offer({});
@@ -481,23 +324,9 @@ describe("descriptor.project 抛错：canonical 路径必须留 hole + gap（202
     expect(seq.committedRecords()[0]?.scope.runId).toBeUndefined();
   });
 
-  test("`/engine` 那条路没有 canonical journal，仍然只丢记录 + 诊断", () => {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    const diags: string[] = [];
-    factSinkToEngineTap(boom(), c.tap, { report: (d) => diags.push(d.code) }).offer({});
-    expect(c.snapshot()).toEqual([]);
-    expect(diags).toEqual(["observation_fact_dropped"]);
-  });
-
   test("project 返回 null 是正常省略，不产生 gap", async () => {
-    const clock = new FakeClock(0);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", store: new InMemoryCanonicalObservationStore(), clock });
-    factSinkToIngest({ instrumentation: { name: "t", version: "1" }, project: () => null }, seq, {
-      runtimeId: "rt",
-      runtimeGeneration: "g",
-      capturePolicy: "metadata",
-      owner: { status: "not-applicable" },
-    }).offer({});
+    const { seq, clock } = sequencerWith();
+    factSinkToIngest({ instrumentation: { name: "t", version: "1" }, project: () => null }, seq, NA).offer({});
     clock.advance(1_000);
     await seq.idle();
     expect(seq.health().capture.canonicalGapCount).toBe(0);
@@ -599,15 +428,11 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
   };
 
   async function offerWithScope(scope: () => never | object, establish?: string): Promise<{ seq: ObservationSequencer; diags: string[]; threw: boolean }> {
-    const clock = new FakeClock(0);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", store: new InMemoryCanonicalObservationStore(), clock });
+    const { seq, clock } = sequencerWith();
     if (establish !== undefined) await establishRun(seq, establish);
     const diags: string[] = [];
     const sink = factSinkToIngest(okDescriptor, seq, {
-      runtimeId: "rt",
-      runtimeGeneration: "g",
-      capturePolicy: "metadata",
-      owner: { status: "not-applicable" },
+      ...NA,
       report: (d) => diags.push(d.code),
       scope: scope as () => Record<string, string>,
     });
@@ -729,39 +554,16 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["run.accepted", "fine"]);
     expect(seq.committedRecords().find((r) => r.name === "fine")?.scope.runId).toBe("run-1");
   });
-
-  test("`/engine` 侧同一把尺：scope 物化失败即拒，不静默记成无 scope 的 fact", () => {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "metadata" });
-    const diags: string[] = [];
-    factSinkToEngineTap(okDescriptor, c.tap, {
-      report: (d) => diags.push(d.code),
-      scope: () => {
-        throw new Error("scope boom");
-      },
-    }).offer({});
-    expect(c.snapshot()).toEqual([]);
-    expect(diags).toEqual(["observation_fact_dropped"]);
-  });
 });
 
 describe("content 档正文按整条 fact 的剩余预算截断（2026-08-27 review P2）", () => {
   const assistantText = (chars: number, ch = "x"): AgentEvent =>
     ev(1, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: ch.repeat(chars) }], stopReason: "end_turn", usage: null, at: 1 } });
 
-  /** 穿过 `/engine` adapter：collector 收到 = 通过了整条 fact 的编码预算。 */
-  function throughEngine(e: AgentEvent): { accepted: boolean; truncated: boolean } {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "content" });
-    factSinkToEngineTap(agentEventDescriptor, c.tap).offer(e);
-    const snap = c.snapshot();
-    const body = snap[0]?.body as Record<string, unknown> | undefined;
-    return { accepted: snap.length === 1, truncated: body?.textTruncated === true };
-  }
-
   /** 穿过 Sequencer：committed 里是记录本身而不是 observation.gap。 */
   async function throughSequencer(e: AgentEvent): Promise<{ accepted: boolean; truncated: boolean }> {
-    const clock = new FakeClock(0);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "content", store: new InMemoryCanonicalObservationStore(), clock });
-    factSinkToIngest(agentEventDescriptor, seq, { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "content", owner: { status: "not-applicable" } }).offer(e);
+    const { seq, clock } = sequencerWith("content");
+    factSinkToIngest(agentEventDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
     clock.advance(1_000);
     await seq.idle();
     const rec = seq.committedRecords()[0];
@@ -769,31 +571,28 @@ describe("content 档正文按整条 fact 的剩余预算截断（2026-08-27 rev
     return { accepted: rec?.name === "model.generate", truncated: body?.textTruncated === true };
   }
 
-  test("review 复现的三个点：50k / 60k / 70k 现在都进得去，60k 与 70k 标 truncated", async () => {
+  test("review 复现的三个点：40k 不截、50k / 60k / 70k 截断后仍落得进库", async () => {
     // 修复前实测：50,000 accepted、60,000 dropped、70,000 被 projector 截断后照样 dropped
-    expect(throughEngine(assistantText(40_000))).toEqual({ accepted: true, truncated: false });
-    expect(throughEngine(assistantText(50_000))).toEqual({ accepted: true, truncated: true }); // 50k > 预算，如实标 truncated
-    expect(throughEngine(assistantText(60_000))).toEqual({ accepted: true, truncated: true });
-    expect(throughEngine(assistantText(70_000))).toEqual({ accepted: true, truncated: true });
+    expect(await throughSequencer(assistantText(40_000))).toEqual({ accepted: true, truncated: false });
+    expect(await throughSequencer(assistantText(50_000))).toEqual({ accepted: true, truncated: true }); // 50k > 预算，如实标 truncated
+    expect(await throughSequencer(assistantText(60_000))).toEqual({ accepted: true, truncated: true });
     expect(await throughSequencer(assistantText(70_000))).toEqual({ accepted: true, truncated: true });
   });
 
   test("textTruncated:true 的记录必须真能落库——这是这条修复的判据", async () => {
     for (const n of [MAX_PROJECTED_TEXT_BYTES + 1, 200_000, 2_000_000]) {
-      expect(throughEngine(assistantText(n)).accepted).toBe(true);
       expect(await throughSequencer(assistantText(n))).toEqual({ accepted: true, truncated: true });
     }
   });
 
   test("最坏转义（控制字符 6 字节/单位）与多字节字符也过得去，不靠 ASCII 侥幸", async () => {
-    for (const ch of ["", "中", "\u{1f600}"]) {
-      expect(throughEngine(assistantText(200_000, ch)).accepted).toBe(true);
+    for (const ch of ["", "中", "\u{1f600}"]) {
       expect((await throughSequencer(assistantText(200_000, ch))).accepted).toBe(true);
     }
   });
 
   test("正文截断按 canonical 字节算，不是 code unit", () => {
-    const control = projectAgentEvent(assistantText(200_000, ""), "content")!.body as Record<string, unknown>;
+    const control = projectAgentEvent(assistantText(200_000, ""), "content")!.body as Record<string, unknown>;
     // 每个控制字符最坏占 6 字节，所以留下的 code unit 数远少于字节预算
     expect((control.text as string).length).toBeLessThanOrEqual(MAX_PROJECTED_TEXT_BYTES / 6);
     const ascii = projectAgentEvent(assistantText(200_000), "content")!.body as Record<string, unknown>;
@@ -805,18 +604,9 @@ describe("代理区必须成对看（2026-08-27 review P1）", () => {
   const assistantText = (chars: number, ch: string): AgentEvent =>
     ev(1, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: ch.repeat(chars) }], stopReason: "end_turn", usage: null, at: 1 } });
 
-  function throughEngine(e: AgentEvent): { accepted: boolean; truncated: boolean } {
-    const c = createInMemoryEngineObservationCollector({ capturePolicy: "content" });
-    factSinkToEngineTap(agentEventDescriptor, c.tap).offer(e);
-    const snap = c.snapshot();
-    const body = snap[0]?.body as Record<string, unknown> | undefined;
-    return { accepted: snap.length === 1, truncated: body?.textTruncated === true };
-  }
-
   async function throughSequencer(e: AgentEvent): Promise<boolean> {
-    const clock = new FakeClock(0);
-    const seq = new ObservationSequencer({ runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "content", store: new InMemoryCanonicalObservationStore(), clock });
-    factSinkToIngest(agentEventDescriptor, seq, { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "content", owner: { status: "not-applicable" } }).offer(e);
+    const { seq, clock } = sequencerWith("content");
+    factSinkToIngest(agentEventDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
     clock.advance(1_000);
     await seq.idle();
     return seq.committedRecords()[0]?.name === "model.generate";
@@ -827,7 +617,6 @@ describe("代理区必须成对看（2026-08-27 review P1）", () => {
     // projectedTextLength=16384、textTruncated=true、accepted=0
     for (const ch of ["\ud800", "\udc00", "\udbff", "\udfff"]) {
       expect(JSON.stringify(ch).length).toBe(8); // "\udXXX" 加两个引号：确认前提没变
-      expect(throughEngine(assistantText(200_000, ch))).toEqual({ accepted: true, truncated: true });
       expect(await throughSequencer(assistantText(200_000, ch))).toBe(true);
     }
   });
@@ -845,196 +634,41 @@ describe("代理区必须成对看（2026-08-27 review P1）", () => {
     expect(text.length).toBe(Math.floor(MAX_PROJECTED_TEXT_BYTES / 4) * 2);
   });
 
-  test("高代理紧跟非低代理时按孤立算，不误当成对", () => {
+  test("高代理紧跟非低代理时按孤立算，不误当成对", async () => {
     // "\ud800a" 里的 \ud800 是孤立的（后面不是低代理），必须按 6 记
     const body = projectAgentEvent(assistantText(100_000, "\ud800a"), "content")!.body as Record<string, unknown>;
     const text = body.text as string;
     // 每两个 code unit 花 6 + 1 = 7 字节
     expect(text.length).toBe(Math.floor(MAX_PROJECTED_TEXT_BYTES / 7) * 2);
-    expect(throughEngine(assistantText(100_000, "\ud800a")).accepted).toBe(true);
-  });
-});
-
-describe("async EngineObservationTap 不许重新造出 unhandled rejection（2026-08-27 review P0）", () => {
-  /** 声明返回 void，实际返回 reject 的 Promise——TypeScript 放行，运行期就是一颗雷。 */
-  function asyncRejectingTap(): { tap: EngineObservationTap; calls: () => number } {
-    let calls = 0;
-    return {
-      tap: {
-        capturePolicy: "metadata",
-        offer: (): void => {
-          calls += 1;
-          return Promise.reject(new Error("exporter down")) as unknown as void;
-        },
-      },
-      calls: () => calls,
-    };
-  }
-
-  async function countUnhandled(fn: () => Promise<void> | void): Promise<number> {
-    let n = 0;
-    const on = (): void => {
-      n += 1;
-    };
-    process.on("unhandledRejection", on);
-    await fn();
-    await new Promise((r) => setTimeout(r, 20));
-    process.off("unhandledRejection", on);
-    return n;
-  }
-
-  test("review 复现：adapter 接住 rejection，零 unhandled，且报脱敏诊断", async () => {
-    // 修复前实测：{unhandled:1, reported:0}——`tap.offer()` 的返回值被丢掉，
-    // 外层 Agent.deliverToTap() 只看得见本 sink 返回的 void，它那道 thenable 防护完全失效
-    const t = asyncRejectingTap();
-    const diags: Diagnostic[] = [];
-    const sink = factSinkToEngineTap(agentEventDescriptor, t.tap, { report: (d) => diags.push(d) });
-    const unhandled = await countUnhandled(() => {
-      sink.offer(ev(1, { type: "agent_start" }));
-    });
-    expect(unhandled).toBe(0);
-    expect(diags.map((d) => d.code)).toContain("observation_tap_failed");
-    expect(JSON.stringify(diags)).not.toContain("exporter down"); // 只出 Name@digest
-  });
-
-  test("返回 thenable 后立刻停用该 tap：pending Promise 不会无界累积", async () => {
-    const t = asyncRejectingTap();
-    const diags: Diagnostic[] = [];
-    const sink = factSinkToEngineTap(agentEventDescriptor, t.tap, { report: (d) => diags.push(d) });
-    const unhandled = await countUnhandled(() => {
-      for (let i = 0; i < 100; i++) sink.offer(ev(i + 1, { type: "agent_start" }));
-    });
-    expect(unhandled).toBe(0);
-    expect(t.calls()).toBe(1); // 第一次之后不再调用它
-  });
-
-  test("真实 Agent + async rejecting tap：outcome 不变、零 unhandled", async () => {
-    const run = async (tap?: EngineObservationTap): Promise<{ kind: string; text: string }> => {
-      const agent = new Agent({
-        model: FAKE_MODEL,
-        streamFunction: scriptedStreamFn([textTurn("hi")]),
-        ...(tap === undefined ? {} : { observationTap: agentEventTapFor(tap) }),
-      });
-      const r = await agent.prompt("说 hi");
-      return { kind: r.outcome.kind, text: JSON.stringify(agent.messages.map((m) => (m as { content?: unknown }).content)) };
-    };
-    const bare = await run();
-    let withTap: { kind: string; text: string } | undefined;
-    const unhandled = await countUnhandled(async () => {
-      withTap = await run(asyncRejectingTap().tap);
-    });
-    expect(unhandled).toBe(0);
-    expect(withTap).toEqual(bare);
-    expect(bare.kind).toBe("completed");
-  });
-});
-
-describe("async tap 的「报一次」必须真的是一次（2026-08-27 review P1）", () => {
-  async function drainMicrotasks(): Promise<void> {
-    await new Promise((r) => setTimeout(r, 20));
-  }
-
-  test("native rejecting Promise 只出一条诊断（修复前是 2 条）", async () => {
-    const diags: Diagnostic[] = [];
-    const sink = factSinkToEngineTap(
-      agentEventDescriptor,
-      { capturePolicy: "metadata", offer: () => Promise.reject(new Error("exporter down")) as unknown as void },
-      { report: (d) => diags.push(d) },
-    );
-    sink.offer(ev(1, { type: "agent_start" }));
-    await drainMicrotasks();
-    expect(diags).toHaveLength(1);
-    expect(diags[0]?.code).toBe("observation_tap_failed");
-    expect(JSON.stringify(diags)).not.toContain("exporter down");
-  });
-
-  test("自定义 thenable 把 reject 回调调 1000 次，仍然只出一条（修复前是 1001 条）", async () => {
-    const diags: Diagnostic[] = [];
-    const sink = factSinkToEngineTap(
-      agentEventDescriptor,
-      {
-        capturePolicy: "metadata",
-        offer: () =>
-          ({
-            then: (_res: unknown, rej: (e: unknown) => void) => {
-              for (let i = 0; i < 1000; i++) rej(new Error(`boom-${i}`));
-            },
-          }) as unknown as void,
-      },
-      { report: (d) => diags.push(d) },
-    );
-    sink.offer(ev(1, { type: "agent_start" }));
-    await drainMicrotasks();
-    expect(diags).toHaveLength(1);
-  });
-
-  test("同步 resolve 的 thenable 也只出一条，且 tap 已停用", async () => {
-    const diags: Diagnostic[] = [];
-    let calls = 0;
-    const sink = factSinkToEngineTap(
-      agentEventDescriptor,
-      {
-        capturePolicy: "metadata",
-        offer: () => {
-          calls += 1;
-          return { then: (res: () => void) => res() } as unknown as void;
-        },
-      },
-      { report: (d) => diags.push(d) },
-    );
-    for (let i = 0; i < 10; i++) sink.offer(ev(i + 1, { type: "agent_start" }));
-    await drainMicrotasks();
-    expect(calls).toBe(1);
-    expect(diags).toHaveLength(1);
+    expect(await throughSequencer(assistantText(100_000, "\ud800a"))).toBe(true);
   });
 });
 
 describe("async reporter 不许击穿主流程（2026-08-27 review P0）", () => {
-  test("fact sink 的 reporter 返回 reject 的 Promise：零 unhandled rejection", async () => {
+  test("fact sink 的 reporter 返回 reject 的 Promise：零 unhandled rejection，且 gap 照开", async () => {
     let unhandled = 0;
     const on = (): void => {
       unhandled += 1;
     };
     process.on("unhandledRejection", on);
-    const sink = factSinkToEngineTap(
-      agentEventDescriptor,
+    const { seq, clock } = sequencerWith();
+    const sink = factSinkToIngest(
       {
-        capturePolicy: "metadata",
-        offer: () => {
-          throw new Error("tap boom");
+        instrumentation: { name: "t", version: "1" },
+        project: () => {
+          throw new Error("projection boom");
         },
       },
-      { report: (() => Promise.reject(new Error("reporter down"))) as unknown as (d: Diagnostic) => void },
+      seq,
+      { ...NA, report: (() => Promise.reject(new Error("reporter down"))) as unknown as (d: Diagnostic) => void },
     );
-    sink.offer(ev(1, { type: "agent_start" }));
+    sink.offer({});
+    sink.offer({});
+    clock.advance(1_000);
+    await seq.idle();
     await new Promise((r) => setTimeout(r, 20));
     process.off("unhandledRejection", on);
     expect(unhandled).toBe(0);
-  });
-});
-
-describe("永不 settle 的 tap 也必须可见（2026-08-27 review P1）", () => {
-  test("tap 返回永久 pending 的 Promise：立刻报一条诊断并停用", async () => {
-    // 修复前实测：calls=1、diagnostics=0——tap 被停用了，故障却完全不可见，
-    // 因为诊断只写在 settle 回调里，而它永远不会 settle
-    const diags: Diagnostic[] = [];
-    let calls = 0;
-    const sink = factSinkToEngineTap(
-      agentEventDescriptor,
-      {
-        capturePolicy: "metadata",
-        offer: () => {
-          calls += 1;
-          return new Promise<void>(() => {}) as unknown as void;
-        },
-      },
-      { report: (d) => diags.push(d) },
-    );
-    sink.offer(ev(1, { type: "agent_start" }));
-    sink.offer(ev(2, { type: "agent_start" }));
-    await new Promise((r) => setTimeout(r, 20));
-    expect(calls).toBe(1);
-    expect(diags).toHaveLength(1);
-    expect(diags[0]?.code).toBe("observation_tap_failed");
+    expect(seq.health().capture.canonicalGapCount).toBe(2);
   });
 });

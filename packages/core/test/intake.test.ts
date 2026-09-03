@@ -1,18 +1,18 @@
-// §14 RunIntakeGate：steer / followUp 的原子裁决与显式 rejected；§15 O1：AgentEvent 被动 tap。
+// §14 RunIntakeGate：steer / followUp 的原子裁决与显式 rejected。
 // 反例优先：每条都先写「上一版会怎么错」。
+// （AgentEvent 进 canonical journal 的顺序保证在 observability-runtime.test.ts：sourceSeq 随 seq 单调。）
 
 import { test, expect } from "bun:test";
 import { Agent } from "../src/agent.ts";
 import { FAKE_MODEL, errorTurn, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
-import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
+import type { LifecycleEvent } from "../src/events.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { RunIntakeGate } from "../src/loop/intake.ts";
 import { defaultConvertToLlm, userMessage } from "../src/messages.ts";
 import { runAgentLoop } from "../src/loop/run-loop.ts";
 import type { AgentLoopConfig } from "../src/loop/types.ts";
 import { DEFAULT_RETRY_POLICY } from "../src/provider/dialect.ts";
-import { InMemorySessionManager, type SessionEntry } from "../src/session/types.ts";
 import { EMPTY_COMPACTION } from "../src/compaction/types.ts";
 
 function tool(name: string, execute: ModelTool["execute"]): ModelTool {
@@ -211,45 +211,6 @@ test("RunIntakeGate：turn 没关就开下一轮（重试路径）→ accepted �
   expect(gate.closeTurn()).toHaveLength(1);
 });
 
-/* ─────────────── §15 O1：AgentEvent 被动 tap ─────────────── */
-
-test("observationTap：同步收到每个已落状态的 AgentEvent（seq 有序、message_end 时 state.messages 已含该条），不被 await", async () => {
-  const tapped: AgentEvent[] = [];
-  const seenAtTap: number[] = [];
-  let agent!: Agent;
-  agent = new Agent({
-    model: FAKE_MODEL,
-    streamFunction: scriptedStreamFn([textTurn("ok")]),
-    observationTap: (e) => {
-      tapped.push(e);
-      if (e.type === "message_end") seenAtTap.push(agent.state.messages.length);
-    },
-  });
-  // 一个永远不 resolve 的 listener 会卡住 run？不会——tap 在 listener 之前、且不被 await；这里只验 tap 自身不是 Promise 面
-  await agent.prompt("go");
-  expect(tapped.map((e) => e.type)).toContain("agent_start");
-  expect(tapped.map((e) => e.type)).toContain("agent_end");
-  for (let i = 1; i < tapped.length; i++) expect(tapped[i]!.seq).toBeGreaterThan(tapped[i - 1]!.seq);
-  // message_end：user 落 1，assistant 落 2
-  expect(seenAtTap).toEqual([1, 2]);
-});
-
-test("observationTap 抛错：run 照常完成，抛错只成 [observation_tap_failed] 诊断；不进控制流", async () => {
-  const agent = new Agent({
-    model: FAKE_MODEL,
-    streamFunction: scriptedStreamFn([textTurn("ok")]),
-    observationTap: () => {
-      throw new Error("collector 坏了");
-    },
-  });
-  const seen = lifecycle(agent);
-  const result = await agent.prompt("go");
-  expect(result.outcome.kind).toBe("completed");
-  expect(agent.state.messages).toHaveLength(2);
-  const diag = seen.filter((e) => e.type === "notification" && e.message.includes("[observation_tap_failed]"));
-  expect(diag.length).toBeGreaterThan(0);
-});
-
 /* ─────────────── 退出路径：六类都在 agent_end 之前关门 ─────────────── */
 
 /** agent_end 的订阅者再 steer / followUp：两个都必须是 rejected——run 已经结束，不能给假 accepted。 */
@@ -371,66 +332,4 @@ test("退出路径 shouldStopAfterTurn（loop 级决策点，Agent 不暴露）�
   expect(result.outcome.kind).toBe("completed");
   // 上一版：shouldStopAfterTurn 直接 break outer → agent_end，这时 gate 还开着，两个都是 accepted
   expect(seen).toEqual(["rejected", "rejected"]);
-});
-
-/* ─────────────── tap：异步 reject 与 seq 顺序 ─────────────── */
-
-test("async observationTap 抛错：reject 被接住转成 [observation_tap_failed]，没有 unhandled rejection，run 照常完成", async () => {
-  const unhandled: unknown[] = [];
-  const onUnhandled = (e: unknown): void => {
-    unhandled.push(e);
-  };
-  process.on("unhandledRejection", onUnhandled);
-  try {
-    const agent = new Agent({
-      model: FAKE_MODEL,
-      streamFunction: scriptedStreamFn([textTurn("ok")]),
-      // 类型写的是返回 void，TypeScript 照样放行 async——上一版 try/catch 接不到 Promise reject（实测 11 条 unhandled）
-      observationTap: async () => {
-        throw new Error("collector 坏了");
-      },
-    });
-    const seen = lifecycle(agent);
-    expect((await agent.prompt("go")).outcome.kind).toBe("completed");
-    await new Promise((r) => setTimeout(r, 20));
-    expect(unhandled).toEqual([]);
-    expect(seen.filter((e) => e.type === "notification" && e.message.includes("[observation_tap_failed]")).length).toBeGreaterThan(0);
-  } finally {
-    process.off("unhandledRejection", onUnhandled);
-  }
-});
-
-test("慢 Session append 期间 steer()：tap 仍严格按 seq 交付——queue_update 不会抢在还在持久化的 message_end 前面", async () => {
-  let agent!: Agent;
-  class SlowSessions extends InMemorySessionManager {
-    override async append(id: string, entries: SessionEntry[]): Promise<void> {
-      if (entries.some((e) => e.kind === "message" && e.message.role === "assistant")) {
-        // 这条 message_end 的 persist 还在飞：外部 steer() fire-and-forget 发出 queue_update（seq 更大）
-        void agent.steer("插话");
-        await new Promise((r) => setTimeout(r, 15));
-      }
-      return super.append(id, entries);
-    }
-  }
-  const sessions = new SlowSessions();
-  const info = await sessions.create({ name: "t" });
-  const tapped: [number, string][] = [];
-  agent = new Agent({
-    model: FAKE_MODEL,
-    streamFunction: scriptedStreamFn([toolTurn("c1", "t", {}), textTurn("ok")]),
-    tools: [tool("t", async () => toolOk("ok"))],
-    sessions,
-    sessionId: info.id,
-    observationTap: (e) => {
-      tapped.push([e.seq, e.type]);
-    },
-  });
-  await agent.prompt("go");
-  const seqs = tapped.map(([s]) => s);
-  // 上一版实测：[9, queue_update] 早于 [8, message_end]
-  expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
-  for (let i = 1; i < seqs.length; i++) expect(seqs[i]).toBe(seqs[i - 1]! + 1); // 连续、无缺口
-  const types = tapped.map(([, t]) => t);
-  expect(types).toContain("queue_update");
-  expect(types.indexOf("queue_update")).toBeGreaterThan(types.indexOf("message_end"));
 });

@@ -1,7 +1,7 @@
 // `createAgent` —— 完整默认装配（D2 / D4 / D5 / D6 / D17，见 AGENT-CORE §13.12.3）。
 //
 // **node-only**：解析 `$PWD` / `$ECHO_HOME`、建 `FileDir` 与文件锁，所以只在根入口，
-// 不进 `/engine`。engine 面的消费者走 `new Agent()`，自己给已解析好的 Model 与端口。
+// 低层用法走 `new Agent()`，自己给已解析好的 Model 与端口。
 //
 // **它是装配函数，不是第二个 Agent 类**（D16）：出来的就是同一个 `Agent`。
 //
@@ -29,10 +29,20 @@ import { FileDir, echoHome, expandHome } from "./storage/file-dir.ts";
 import type { StateLock } from "./storage/lock.ts";
 import { assertSafePathSegment } from "./storage/path-safety.ts";
 import type { StorageDir } from "./storage/types.ts";
+import { systemClock } from "./schedule/clock.ts";
+import { BUILTIN_GENERATION } from "./extension/builtin.ts";
+import { sealAgentAssemblyObservation, type BuiltinSlotContribution } from "./observability/assembly.ts";
+import { attachObservationHost } from "./observability/host-wiring.ts";
+import { ObservationRuntime } from "./observability/runtime.ts";
+import { SqliteCanonicalObservationStore, observationDatabasePath } from "./observability/sqlite-store.ts";
 
 /** 默认身份（D5）。 */
 const DEFAULT_AGENT_ID = "default";
 const LOCK_FILE = ".lock";
+/** §14 RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
+const RUNTIME_GENERATION = "boot";
+/** §15 OR9 的缺省 capture policy：metadata。content 要显式打开，O3a 不开这个口子。 */
+const OBSERVATION_CAPTURE_POLICY = "metadata" as const;
 const TASKS_FILE = "tasks.json";
 const SKILLS_DIR = "skills";
 
@@ -202,7 +212,7 @@ export function resolveModel(provider: Provider, available: readonly Model[], wa
  * **不是公共面**（2026-08-31 收）：§14.2 的标题是「一个包、两个使用高度、**一个** composition root」，
  * 而这个函数曾经和 `createEcho()` 一起挂在根入口上——那就是两个装配现场，
  * 「CLI 与 SDK 不得各自装配」那条也就名存实亡。现在它只被 `createEcho()` 调用：
- * 装配现场唯一，低层用户走 `/engine` 的 `new Agent()`（自己给端口、自己注册工具）。
+ * 装配现场唯一，低层用户走 `new Agent()`（自己给端口、自己注册工具）。
  *
  * 名字保留 `createAgent` 而不是改成 `assembleAgent`：它在几十处注释与决策记录里被引用，
  * 改名换来的是一次全仓改词，换不来任何判据。
@@ -246,6 +256,10 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   const store = opts.store ?? new FileDir(stateDir);
   const lock = opts.lock ?? fileStateLock(join(stateDir, LOCK_FILE));
 
+  // canonical observation store（§15.4.2.2）：固定在状态根下，与自定义 `store` 无关——它是 Runtime 基础设施，不是可换的 Entry。
+  // open / PRAGMA / migrate 任一失败 = 不进 READY（fail-loud），不静默退到「没有 journal」的纯内存 admission（§15.12）。
+  const observationStore = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir) });
+
   // 装配现场（§14.5.1）：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
   // 它撑住的是「值已经造好、`new Agent()` 还没成功」那个窗口——上一版那时抛错，root store 就再没人关过。
   const assembly = new AgentAssembly({ provider: "echo:persistence-local" });
@@ -287,6 +301,24 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     // 形状到此为止。**seal 只冻结形状，不转移所有权**——转移发生在构造成功之后的 `adoptInto()`。
     assembly.seal();
 
+    // 观测 Runtime（§15）：唯一 Sequencer + 上面那条 SQLite；装配快照只封 builtin 槽的身份与安全配置摘要，
+    // **不放对象本体、凭据、路径正文**（assembly.ts 头注）。每个 run 的 `run.assembly` 记录引用这份 digest。
+    const observation = new ObservationRuntime({
+      runtimeId: `rt:${crypto.randomUUID()}`,
+      runtimeGeneration: RUNTIME_GENERATION,
+      capturePolicy: OBSERVATION_CAPTURE_POLICY,
+      store: observationStore,
+      clock: opts.clock ?? systemClock,
+      assembly: sealAgentAssemblyObservation(
+        builtinSlotContributions({
+          customStore: opts.store !== undefined,
+          withoutMemory: opts.withoutMemory === true,
+          providerIds: [opts.provider.id, ...(opts.providers ?? []).map((p) => p.id)],
+          modelId: model.id,
+        }),
+      ),
+    });
+
     agent = new Agent({
       ...opts.agent,
       model,
@@ -305,7 +337,8 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       skillStore: parts.skillStore,
       // 收摊全部 settle 之后，**唯一的那次** close：进程域（borrow）由 assembly 收，
       // 恰好一次由 slot 的三态保证——不再是这里直接调 `store.close()`。
-      finalDisposables: [...(opts.agent?.finalDisposables ?? []), { dispose: () => assembly.disposeProcessScope() }],
+      // 观测排在最前：先把 ring 里的尾巴写进 SQLite 再关它，之后才关 root store（§15.12 shutdown 顺序：flush canonical 在前）。
+      finalDisposables: [...(opts.agent?.finalDisposables ?? []), { dispose: () => observation.dispose() }, { dispose: () => assembly.disposeProcessScope() }],
     });
 
     // **Host-internal 接线在构造之后挂**：写入总闸与所有权账本都不进公共 `AgentOptions`
@@ -313,10 +346,14 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     // adoption 之后 provider 侧就不再是这些值的 dispose owner，`agent.stop()` 是排空账本的唯一触发点。
     ledger = assembly.adoptInto("echo:agent");
     attachStateHost(agent, { gate: ledger.writeGate, adoption: ledger });
+    // canonical writer 同样不进公共 `AgentOptions`（observability/host-wiring.ts 头注）
+    attachObservationHost(agent, { runtime: observation });
   } catch (e) {
     const owner = ledger;
     return await failWithUnwind(
       e,
+      // 观测库先关：它不在 assembly 账本里（Runtime 基础设施，不是 adopt/borrow slot），失败路径要单独收
+      async (): Promise<void> => observationStore.close(),
       ...(owner === undefined
         ? [(): Promise<void> => assembly.abort()]
         : [(): Promise<void> => owner.drain(), (): Promise<void> => assembly.disposeProcessScope()]),
@@ -324,6 +361,26 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   }
 
   return agent;
+}
+
+/**
+ * `createAgent()` 直接构造的 builtin 槽（§15.5.1 sealed AgentAssembly 的 O2a 最小形态）：只有槽名、Entry id、
+ * 代与**安全**配置摘要输入。O2b 接上正式 Entry owner 后往同一 schema 填值，slot id 不漂移。
+ */
+function builtinSlotContributions(input: { customStore: boolean; withoutMemory: boolean; providerIds: readonly string[]; modelId: string }): BuiltinSlotContribution[] {
+  const slot = (name: string, entryId: string, safeConfig: unknown): BuiltinSlotContribution => ({ slot: name, entryId, entryGeneration: BUILTIN_GENERATION, safeConfig });
+  const persistence = { kind: input.customStore ? "custom" : "file" };
+  return [
+    slot("store", "echo:persistence-local", persistence),
+    slot("lock", "echo:persistence-local", persistence),
+    slot("session", "echo:session", {}),
+    ...(input.withoutMemory ? [] : [slot("memory", "echo:memory", {})]),
+    slot("task", "echo:task", {}),
+    slot("schedule", "echo:schedule", {}),
+    slot("inbox", "echo:inbox", {}),
+    slot("skill", "echo:skill", {}),
+    slot("models", "echo:models", { providers: [...input.providerIds], model: input.modelId }),
+  ];
 }
 
 /** 一份装配好的能力面。全部是 `shared` 之上的视图或纯内存对象——没有一件在这一步碰盘。 */

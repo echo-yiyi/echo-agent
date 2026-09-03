@@ -3,12 +3,11 @@
 // 身份分两种，规矩不同：
 //   · **构造期静态 identity**——runtimeId / generation / descriptor.instrumentation / sink owner / capturePolicy。
 //     一次性、可提前拿到：构造时校验并**复制成内部 plain data**，之后再也不读 descriptor / ctx。
-//     必须在构造期拒：这些字段只进 canonical envelope、不进 ephemeral fact，编码期才拒救不了
-//     `/engine`——它根本看不见这些字段，于是同一条事实一边收下、一边成 gap。
+//     必须在构造期拒：编码期才拒的话，一个超长 `instrumentation.name` 会让之后每条记录都成 gap，而接线错误本该当场炸。
 //   · **逐记录动态 identity**——name / scope / correlation / subject / owner / instrumentation / generation。
 //     每条记录都不同，不能 fail-loud（那会把 producer 的一次失误变成主流程异常），
-//     用 `materializeDynamicIdentity()` 返回「违规原因」或「物化后的快照」，由调用方按各自 lane 的失败语义处理
-//     （bounded → hole + gap；engine adapter → 丢一条 + 诊断）。**两条路调同一个函数**，才不会一边收一边成 gap。
+//     用 `materializeDynamicIdentity()` 返回「违规原因」或「物化后的快照」，由调用方按 lane 的失败语义处理
+//     （bounded → hole + gap；boundary → reject）。
 //
 // **只返回「通过」是不够的——必须返回快照**（review 实测的教训，两轮）：
 //   ① 校验完还用 producer 的原对象，就留下 check/encode 之间的 TOCTOU 窗口。Proxy 检查时只露
@@ -74,7 +73,7 @@ export function assertOptionalIdentifier(value: string | undefined, field: strin
 
 /**
  * 校验并**复制**成冻结的 plain data。只校验不复制是不够的：adapter 构造后把
- * `instrumentation.name` 改成 9,000 字节，`/engine` 照收而 Runtime 成 gap（review 实测）。
+ * `instrumentation.name` 改成 9,000 字节，之后每条记录都成 gap（review 实测）。
  */
 export function freezeInstrumentation(v: Readonly<{ name: string; version: string }>, field: string): Readonly<{ name: string; version: string }> {
   const name = v.name;
@@ -110,7 +109,7 @@ export function freezeOwner(owner: ObservationOwner, field: string): Observation
 /* ══════════════════ 逐记录动态 identity：校验即物化 ══════════════════ */
 
 /**
- * 各 identity 容器的**完整键集**。scope 用 envelope 的全集：`/engine` 的 fact scope 是它的子集，
+ * 各 identity 容器的**完整键集**。scope 用 envelope 的全集：producer 侧的 `ObservationFactScope` 是它的子集，
  * 两边因此仍是同一把尺。
  */
 const SCOPE_KEYS: readonly string[] = [
@@ -174,9 +173,9 @@ export type FrameMaterialization =
 const RECORD_KINDS: readonly string[] = ["event", "span_start", "span_end", "snapshot", "health"];
 
 /**
- * **两条路共用的 frame 物化**：`/engine` adapter 与 Sequencer 都调它，同一条记录因此得到同一裁决。
- * 之前只有 Sequencer 校验 `kind`，于是 descriptor 返回 `kind:"bogus"` 时 engine collector 收下、
- * Runtime 成 gap（review 实测）。attributes 也在这里验形与物化——它是 envelope 的固定 schema 的一部分。
+ * **frame 物化只有这一处**：Sequencer 对每条 draft 调它，kind / occurredAt / sourceSeq / attributes / identity 同一把尺。
+ * `kind` 也在这里校（descriptor 返回 `kind:"bogus"` 就是 gap，不是静默收下）；attributes 也在这里验形与物化——
+ * 它是 envelope 的固定 schema 的一部分。
  */
 export function materializeRecordFrame(input: unknown): FrameMaterialization {
   const fail = (violation: string): FrameMaterialization => ({ ok: false, violation });
