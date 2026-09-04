@@ -11,9 +11,12 @@
 // 这里唯一「自己写」的东西是一个**确定性 provider**，
 // 而 provider 本来就是使用者该配的那一件。
 //
-// 用法：`bun resident-host.ts <stateDir> <phase>`，phase ∈ {a, crash, c}。
+// 用法：`bun resident-host.ts <echoHome> <phase> [sessionId]`，phase ∈ {a, wake, crash, c}。
+// **状态根 = session 目录**（2026-09-03）：这里只给 `ECHO_HOME`，让 `createAgent` 自己解析出
+// `<home>/sessions/<id>`——跨进程共享的 tasks / inbox / schedule 因此必须**点名同一段**。
 // 报告走 stdout 最后一行的 JSON。
 
+import { join } from "node:path";
 import { createAgent } from "../../src/create-agent.ts";
 import { mountBuiltinTools } from "../../src/extension/builtin.ts";
 import { listSchedules } from "../../src/schedule/harness.ts";
@@ -36,11 +39,20 @@ type SeenCall = {
 };
 
 // 第三个参数：要**续**哪一段会话。缺省每次启动新建（2026-09-01），跨进程恢复对话由宿主显式给 id
-const [, , stateDir, phase, resumeSessionId] = process.argv;
-if (stateDir === undefined || phase === undefined) {
-  console.error("用法：resident-host.ts <stateDir> <phase> [sessionId]");
+const [, , echoHomeArg, phase, resumeSessionId] = process.argv;
+if (echoHomeArg === undefined || phase === undefined) {
+  console.error("用法：resident-host.ts <echoHome> <phase> [sessionId]");
   process.exit(2);
 }
+
+// 状态根由 `createAgent` 从 ECHO_HOME 解析：`<home>/sessions/<id>`。
+process.env["ECHO_HOME"] = echoHomeArg;
+/** 那一段 session 自己的目录——tasks / inbox / entries 都在它下面。 */
+const sessionDir = (id: string): string => join(echoHomeArg, "sessions", id);
+/** 记忆在 user 层（跨 session 共享），不在 session 目录里。 */
+const memoryDir = (): string => join(echoHomeArg, "memory");
+/** 每一段都点名：跨进程共享 tasks / inbox / schedule 的前提是**同一段 session**。 */
+const resumeOpt = resumeSessionId === undefined ? {} : { sessionId: resumeSessionId };
 
 const seen: SeenCall[] = [];
 
@@ -161,8 +173,8 @@ async function main(): Promise<void> {
         // ⑥ 这一轮是 **Dream 自己**的：门满足后 `finishRun` 会起它，宿主没调任何东西
         text("整理完了"),
       ]),
-      stateDir,
       allowNetwork: false,
+      ...resumeOpt,
       // **skill 的「内容」是使用者给的，「能力」才是 Agent 自己的**——
       // 所以这里传一个 skill 进去（和传 tools 同性质），而 `skill_activate` 这个**工具**
       // 由 `echo:skills` builtin Extension 装（2026-08-31 起：构造归 core，注册走 extension）。
@@ -173,7 +185,7 @@ async function main(): Promise<void> {
     await agent.prompt("把「用户在做 Echo」记进记忆、建个任务、启用那个 skill，再建一个每分钟的提醒");
     // ⑥ 等整理**真的提交**再收摊：`stop()` 会中断在飞的 dream（那是它该做的），
     // 睡一觉赌它跑完了是 flaky 的判据，所以这里盯的是盘上的 `lastAt`。
-    const dreamed = await waitFor(async () => (await readDreamState(new FileDir(stateDir))).lastAt !== null);
+    const dreamed = await waitFor(async () => (await readDreamState(new FileDir(memoryDir()))).lastAt !== null);
 
     // **快照要在 stop() 之前取**：`dispose()` 的语义是「资产归零」，
     // 停完再读 `state.tasks` / `state.activeSkills` 一律是空的（第一版就这么读的，
@@ -201,8 +213,8 @@ async function main(): Promise<void> {
         // 这一轮是闹钟把它叫醒之后自己开的
         text("我醒了，看一眼"),
       ]),
-      stateDir,
       allowNetwork: false,
+      ...resumeOpt,
     });
     await mountBuiltinTools(agent); // 工具面由 builtin Extension 装（§14）
     await agent.start();
@@ -227,8 +239,8 @@ async function main(): Promise<void> {
         callTool("x1", "TaskCreate", { tasks: [{ title: "崩溃前建的" }] }),
         text("建好了"),
       ]),
-      stateDir,
       allowNetwork: false,
+      ...resumeOpt,
     });
     await mountBuiltinTools(agent); // 工具面由 builtin Extension 装（§14）
     await agent.start();
@@ -237,7 +249,7 @@ async function main(): Promise<void> {
     await agent.ingress.deliverDurable({ message: environmentMessage("后台任务跑完了", "background", "b1"), dedupeKey: "background b1" });
     // 落盘是排在 microtask 上的，让它跑完再崩——**判据是「崩之前不需要 stop()」，
     // 不是「不需要等一个 microtask」**。
-    await waitFor(async () => (await new FileDir(stateDir).read("tasks.json"))?.includes("崩溃前建的") === true, 2_000);
+    await waitFor(async () => (await new FileDir(sessionDir(agent.state.sessionId!)).read("tasks.json"))?.includes("崩溃前建的") === true, 2_000);
     report({ phase, seen });
     process.exit(0); // **不 stop**：模拟进程被砍
   }
@@ -247,9 +259,8 @@ async function main(): Promise<void> {
     // ⑨ 第二轮模型调用要**用得上**第一轮的 Session / Memory / Task 上下文
     const agent = await createAgent({
       provider: scriptedProvider([text("我看到之前的记录了"), text("再说一次")]),
-      stateDir,
       allowNetwork: false,
-      ...(resumeSessionId !== undefined ? { sessionId: resumeSessionId } : {}),
+      ...resumeOpt,
       // 真实宿主每次启动都会把自己的 skill 交进来（内容来自它的配置或盘），
       // 所以这里也给——第 9 条的「Skill 上下文」指的是**目录段进 system**，
       // 不是「上一轮激活过的那次还留着」（激活是运行态，不跨进程）。
@@ -260,7 +271,7 @@ async function main(): Promise<void> {
     // 等恢复出来的 inbox 被**它自己**吃干净。
     // **盯可观测结果，不睡固定时长**——本文件自己强调过这条，上一版却在这里 sleep(50)，
     // CI 上一抖就假红/假绿。没有待消费时这句立即返回。
-    await waitFor(async () => (await new InboxStore(new FileDir(stateDir)).restore()).length === 0);
+    await waitFor(async () => (await new InboxStore(new FileDir(sessionDir(agent.state.sessionId!))).restore()).length === 0);
     await agent.prompt("刚才我们聊到哪了？");
     const snapshot = {
       taskCount: agent.state.tasks.total,

@@ -23,6 +23,11 @@ import { InMemoryStateLock } from "../src/storage/lock.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { ScriptedTurn } from "../src/testing.ts";
+import { mkdtempSync } from "node:fs";
+
+// **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
+// 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
 // `createEcho` 的契约：**唯一 composition root** = `createAgent()` + 扫 `extensions/` + mount。
 //

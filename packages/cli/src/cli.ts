@@ -33,8 +33,8 @@ import {
   kimiProvider,
   minimaxProvider,
   openaiProvider,
-  resolveStateDir,
-  SessionService,
+  resolveSessionsRoot,
+  listSessions,
   zaiCodingProvider,
   type CredentialStore,
   type Provider,
@@ -92,8 +92,8 @@ export function usage(name: string): string {
   正文进 stdout、工具旁白进 stderr，读完就干净收摊。Ctrl-C 也是干净收摊。
 
 选项：
-  --state-dir <路径>   状态根（缺省：$ECHO_HOME/agents/<id>，再退到 ~/.echo/agents/<id>；跨目录同一个 agent）
-  --agent-id <名字>    同一状态根下的 agent 身份（缺省 default）
+  --state-dir <路径>   会话目录的上一层（缺省：$ECHO_HOME/sessions，再退到 ~/.echo/sessions）
+  --agent-id <名字>    agent 身份，进 lease 的 holder 标识（缺省 default）
   --provider <名字>    kimi | deepseek | openai | zai | minimax（缺省：上次选的，其次 kimi）
   --model <id>         模型 id（缺省：上次选的，其次由 provider 声明）
   --continue           续本命令在当前目录的最近一段会话
@@ -232,7 +232,9 @@ function echoOptions(
     // 会话身份的第二维：产品名。同一目录里 `echo-agent` 与 `echo-coding` 各有各的对话（2026-09-01 用户拍板）
     agentName: product.name,
     ...(sessionId !== undefined ? { sessionId } : {}),
-    ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
+    // `--state-dir` 是**会话目录的上一层**（2026-09-03）：容器管「会话都放哪儿」，
+    // 某一段的目录由 core 用 sessionsRoot + sessionId 得出。
+    ...(opts.stateDir !== undefined ? { sessionsRoot: opts.stateDir } : {}),
     ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
@@ -248,27 +250,25 @@ function echoOptions(
 /**
  * `--continue` / `--resume` → 要续的那一段的 id；两个都没给 → `undefined`（新建一段）。
  *
- * 清单来自状态根上的 `SessionService.list()`（列表归 core，2026-09-01 用户拍板），状态根与装配用
- * 同一条解析（`resolveStateDir`）。**续不到就判红**：`--resume` 点名的不存在、`--continue` 找不到
- * 本产品在本目录的任何一段，都报错退出——静默新建一段等于把「续」这个字说了没生效。
- * 会话身份是 workspace + agent 两维：`--continue` 只在本产品（`product.name`）、本目录（`process.cwd()`）里挑最近的。
+ * 清单来自 **session 目录的上一层**（`listSessions()`，2026-09-03：一段 session 就是一个状态根，
+ * 它自己看不见别的段）。**续不到就判红**：`--resume` 点名的不存在、`--continue` 找不到本产品在本
+ * 目录的任何一段，都报错退出——静默新建一段等于把「续」这个字说了没生效。
+ *
+ * `--continue` 的筛选是三维：本目录（`process.cwd()`）、本产品（`product.name`）、**自己起的**
+ * （`main`）。第三维是 2026-09-03 加的：`session_create` 派出去的那些段也在同一层目录里，
+ * 续到一段别人派的活不是「上次那段对话」。已关的（`closed`）也不续。
  */
 async function resolveSessionId(product: Product, opts: CliOptions): Promise<string | undefined> {
   if (!opts.continueLast && opts.resume === undefined) return undefined;
-  const stateDir = expandHome(
-    resolveStateDir({
-      ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
-      ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
-    }),
-  );
-  const sessions = await new SessionService(new FileDir(stateDir)).list(); // 已按 updatedAt 降序
+  const root = expandHome(opts.stateDir ?? resolveSessionsRoot());
+  const sessions = await listSessions(new FileDir(root)); // 已按 updatedAt 降序
   if (opts.resume !== undefined) {
-    if (!sessions.some((s) => s.id === opts.resume)) throw new Error(`会话 '${opts.resume}' 不存在（状态根 ${stateDir}）`);
+    if (!sessions.some((s) => s.id === opts.resume)) throw new Error(`会话 '${opts.resume}' 不存在（${root}）`);
     return opts.resume;
   }
   const cwd = process.cwd();
-  const latest = sessions.find((s) => s.workspace === cwd && s.agent === product.name);
-  if (latest === undefined) throw new Error(`${product.name} 在 ${cwd} 还没有可续的会话（状态根 ${stateDir}）`);
+  const latest = sessions.find((s) => s.workspace === cwd && s.agent === product.name && s.main && s.status === "active");
+  if (latest === undefined) throw new Error(`${product.name} 在 ${cwd} 还没有可续的会话（${root}）`);
   return latest.id;
 }
 

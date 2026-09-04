@@ -133,10 +133,11 @@ export type { InboxBatchAckCommitV1, InboxRecordV1 } from "./inbox/records.ts";
  * 会话的语义所有者。**值导出**（2026-09-01）：产品要在装配前挑「续哪一段」（`--continue`），
  * 得自己在状态根的 `FileDir` 上开一个实例调 `list()`——列表归 core，不让产品各自扫 meta 文件。
  */
-export { SessionService } from "./session/service.ts";
+export { SessionService, listSessions } from "./session/service.ts";
 export type { AgentBackground, BackgroundLimits } from "./background/types.ts";
 export type { ActiveSkill, Skill, SkillActivation, SkillCreation } from "./skill/types.ts";
-export type { SessionData, SessionEntry, SessionInfo, SessionManager, SessionStore } from "./session/types.ts";
+export type { SessionData, SessionEntry, SessionInfo, SessionStatus, SessionStore } from "./session/types.ts";
+export { newSessionId } from "./session/types.ts";
 export type {
   TaskBrief,
   TaskCreateResult,
@@ -270,7 +271,7 @@ export type { PeekedLockRecord, StateLockInspection } from "./storage/file-lock.
  * 模型解析与状态根解析这两个纯函数仍然导出——它们是**判据**不是装配现场，
  * 消费方（Runner / 测试）要先算出 `stateDir` 或校验模型 id 时用得上。
  */
-export { resolveModel, resolveStateDir } from "./create-agent.ts";
+export { resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "./create-agent.ts";
 export {
   createEcho,
   discoverExtensionFiles,

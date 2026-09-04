@@ -18,6 +18,11 @@ import { FakeClock } from "../src/schedule/clock.ts";
 import type { BoundedObservationDraft } from "../src/observability/draft.ts";
 import type { RunModelBinding } from "../src/admission/types.ts";
 import type { RunObservation } from "../src/observability/types.ts";
+import { mkdtempSync } from "node:fs";
+
+// **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
+// 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
 // §15.14.1 O3a 的端到端判据：**committed send → getRun → render 出非空稳定文本**。
 // 真 createEcho（真 FileDir + 真文件锁 + 真 bun:sqlite），scripted Provider + 进程内 builtin test Tool；

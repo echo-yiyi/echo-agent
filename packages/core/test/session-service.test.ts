@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { SessionService } from "../src/session/service.ts";
+import { SessionService, listSessions } from "../src/session/service.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
 import { mkdtemp } from "node:fs/promises";
@@ -19,6 +19,16 @@ import type { StorageDir } from "../src/storage/types.ts";
 
 function svc(dir: StorageDir = new InMemoryDir()): { s: SessionService; dir: StorageDir } {
   return { s: new SessionService(dir), dir };
+}
+
+/** 前缀视图：`listSessions` 扫的是 session 目录的上一层，所以每段要各自一个子目录。 */
+function scoped(base: StorageDir, prefix: string): StorageDir {
+  return {
+    read: (path) => base.read(prefix + path),
+    write: (path, content) => base.write(prefix + path, content),
+    remove: (path) => base.remove(prefix + path),
+    list: async (sub) => (await base.list(prefix + sub)).map((k) => k.slice(prefix.length)),
+  };
 }
 
 test("不变量① 恢复后 messages 与 compaction 同源（同一份 entries 投影出来，取最后一次压缩的状态）", async () => {
@@ -87,7 +97,7 @@ test("不变量③ 坏档抛错而不是返回半截 —— entry 解不开", as
   await a.settle();
 
   // 手工毁掉第二条
-  await dir.write("sessions/main/entries/000002.json", "{ 这不是 json");
+  await dir.write("entries/000002.json", "{ 这不是 json");
 
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/000002\.json 解不开/);
 });
@@ -98,7 +108,7 @@ test("不变量③ 坏档抛错 —— entry 缺必要字段", async () => {
   await a.createOrResume("main");
   await a.append("main", [{ kind: "message", message: userMessage("一") }]);
   await a.settle();
-  await dir.write("sessions/main/entries/000001.json", JSON.stringify({ nope: true }));
+  await dir.write("entries/000001.json", JSON.stringify({ nope: true }));
 
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/不是合法 entry/);
 });
@@ -106,7 +116,7 @@ test("不变量③ 坏档抛错 —— entry 缺必要字段", async () => {
 test("不变量③ 坏档抛错 —— meta 解不开", async () => {
   const dir = new InMemoryDir();
   await new SessionService(dir).createOrResume("main");
-  await dir.write("sessions/main/meta.json", "半截");
+  await dir.write("meta.json", "半截");
 
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/meta\.json 解不开/);
 });
@@ -149,8 +159,8 @@ test("盘上出现重复 entry id → 判红", async () => {
   ]);
   await a.settle();
   // 把第二条改成和第一条同 id
-  const dup = await dir.read("sessions/main/entries/000001.json");
-  await dir.write("sessions/main/entries/000002.json", dup!);
+  const dup = await dir.read("entries/000001.json");
+  await dir.write("entries/000002.json", dup!);
 
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/重复 entry id/);
 });
@@ -215,14 +225,14 @@ function failingAt(n: number): { dir: StorageDir } {
 test("写失败之后**不再继续落盘**，settle() 也不会自己变回绿", async () => {
   // 反证的是这条实测破坏：e1 写失败后 e2/e3 照样落盘（它们的 parentId 指向盘上不存在的 e1），
   // 而第二次 settle() 返回 resolved——调用方据此以为已经存下了。
-  const { dir } = failingAt(2); // 1 是 createOrResume 写 meta，2 是第一条 entry
+  const { dir } = failingAt(1); // 新建不写 meta（2026-09-03），所以第 1 次写就是第一条 entry
   const s = new SessionService(dir);
   await s.createOrResume("main");
 
   await s.append("main", [{ kind: "message", message: userMessage("一") }]);
   await expect(s.settle()).rejects.toThrow("write-failed");
 
-  const afterFailure = (await dir.list("sessions/main/entries/")).length;
+  const afterFailure = (await dir.list("entries/")).length;
 
   // ① 后续 append 直接判红，不是排进队再悄悄不做
   await expect(s.append("main", [{ kind: "message", message: userMessage("二") }])).rejects.toThrow(
@@ -233,14 +243,14 @@ test("写失败之后**不再继续落盘**，settle() 也不会自己变回绿"
   await expect(s.settle()).rejects.toThrow("write-failed");
 
   // ③ 盘上没有多出任何东西
-  expect((await dir.list("sessions/main/entries/")).length).toBe(afterFailure);
+  expect((await dir.list("entries/")).length).toBe(afterFailure);
 });
 
 test("**已经排在队里**的写也不许落盘——失败之后队列必须停住", async () => {
   // 上一条测的是「失败之后再 append 判红」，走的是 append 的前置闸。
   // 这条测的是另一半：三次 append 在第一次失败**浮出来之前**就已经排进链里了，
   // 那时前置闸帮不上忙，必须由链自己在中毒后停止执行。
-  const { dir } = failingAt(2); // 1=meta，2=第一批 entry → 失败
+  const { dir } = failingAt(1); // 第 1 次写 = 第一批 entry → 失败
   const s = new SessionService(dir);
   await s.createOrResume("main");
 
@@ -251,11 +261,11 @@ test("**已经排在队里**的写也不许落盘——失败之后队列必须�
 
   await expect(s.settle()).rejects.toThrow("write-failed");
   // 一条都不该在盘上：e1 写失败，e2/e3 的 parentId 指向不存在的 e1，写下去就是坏档
-  expect(await dir.list("sessions/main/entries/")).toEqual([]);
+  expect(await dir.list("entries/")).toEqual([]);
 });
 
 test("中毒的会话重新 createOrResume 才解毒（那是人显式确认盘上状态的点）", async () => {
-  const { dir } = failingAt(2);
+  const { dir } = failingAt(1);
   const s = new SessionService(dir);
   await s.createOrResume("main");
   await s.append("main", [{ kind: "message", message: userMessage("一") }]);
@@ -264,7 +274,7 @@ test("中毒的会话重新 createOrResume 才解毒（那是人显式确认盘�
   await s.createOrResume("main"); // 显式确认
   await s.append("main", [{ kind: "message", message: userMessage("二") }]);
   await s.settle(); // 不再抛
-  expect((await dir.list("sessions/main/entries/")).length).toBeGreaterThan(0);
+  expect((await dir.list("entries/")).length).toBeGreaterThan(0);
 });
 
 test("封存（丢锁）之后连 createOrResume 都拒绝——不给一份写不进去的 session", async () => {
@@ -272,7 +282,7 @@ test("封存（丢锁）之后连 createOrResume 都拒绝——不给一份写�
   const s = new SessionService(dir);
   s.seal();
   await expect(s.createOrResume("main")).rejects.toThrow("拒绝打开");
-  expect(await dir.read("sessions/main/meta.json")).toBeNull();
+  expect(await dir.read("meta.json")).toBeNull();
 });
 
 test("坏 message payload 在恢复时判红——只有 role 是不够的", async () => {
@@ -297,11 +307,11 @@ test("坏 message payload 在恢复时判红——只有 role 是不够的", asy
   for (const c of cases) {
     const dir = new InMemoryDir();
     await dir.write(
-      "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+      "meta.json",
+      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
     );
     await dir.write(
-      "sessions/main/entries/000001.json",
+      "entries/000001.json",
       JSON.stringify({ kind: "message", id: "main-e1", parentId: null, message: c.message }),
     );
     await expect(new SessionService(dir).createOrResume("main"), c.name).rejects.toThrow();
@@ -311,11 +321,11 @@ test("坏 message payload 在恢复时判红——只有 role 是不够的", asy
 test("自定义 role 仍然放行——扩展位不能被验形关掉", async () => {
   const dir = new InMemoryDir();
   await dir.write(
-    "sessions/main/meta.json",
-    JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+    "meta.json",
+    JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
   );
   await dir.write(
-    "sessions/main/entries/000001.json",
+    "entries/000001.json",
     JSON.stringify({
       kind: "message",
       id: "main-e1",
@@ -338,11 +348,11 @@ test("meta.json 丢了但 entries 还在 → 判坏档，不当新会话（否�
   await a.append("main", [{ kind: "message", message: userMessage("旧消息") }]);
   await a.settle();
 
-  await dir.remove("sessions/main/meta.json");
+  await dir.remove("meta.json");
 
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/缺 meta\.json/);
   // 历史还在盘上，没有被抹掉
-  expect(await dir.read("sessions/main/entries/000001.json")).toContain("旧消息");
+  expect(await dir.read("entries/000001.json")).toContain("旧消息");
 });
 
 test("崩在「写完 entry、还没刷 meta」之间：计数按 entries 现算，且不会一直落后", async () => {
@@ -356,8 +366,8 @@ test("崩在「写完 entry、还没刷 meta」之间：计数按 entries 现算
   await a.settle();
 
   // 手工把 meta 打回落后一条（模拟崩在中间）
-  const meta = JSON.parse((await dir.read("sessions/main/meta.json"))!) as Record<string, unknown>;
-  await dir.write("sessions/main/meta.json", JSON.stringify({ ...meta, messageCount: 1 }));
+  const meta = JSON.parse((await dir.read("meta.json"))!) as Record<string, unknown>;
+  await dir.write("meta.json", JSON.stringify({ ...meta, messageCount: 1 }));
 
   const b = new SessionService(dir);
   const resumed = await b.createOrResume("main");
@@ -368,76 +378,104 @@ test("崩在「写完 entry、还没刷 meta」之间：计数按 entries 现算
   // 判据必须落在盘上——返回值是每次现算的，光看它盯不住这条（产品列会话读的是 meta.json）。
   await b.append("main", [{ kind: "message", message: userMessage("三") }]);
   await b.settle();
-  const onDisk = JSON.parse((await dir.read("sessions/main/meta.json"))!) as { messageCount: number };
+  const onDisk = JSON.parse((await dir.read("meta.json"))!) as { messageCount: number };
   expect(onDisk.messageCount).toBe(3); // 旧实现会是 2（读到落后的 1 再加一）
 });
 
 test("meta 缺字段 → 判红（缺字段的 info 不该以「恢复成功」的身份流出去）", async () => {
   const dir = new InMemoryDir();
-  await dir.write("sessions/main/meta.json", JSON.stringify({ id: "main" }));
+  await dir.write("meta.json", JSON.stringify({ id: "main" }));
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/缺 name/);
 });
 
 test("meta 缺 workspace → 判红（2026-09-01 之前的旧档，文案指明怎么处理）；新建写入、resume 以盘上为准", async () => {
-  const dir = new InMemoryDir();
-  await dir.write("sessions/old/meta.json", JSON.stringify({ id: "old", name: "old", createdAt: 1, updatedAt: 1, messageCount: 0 }));
-  await expect(new SessionService(dir).createOrResume("old", { workspace: "/now" })).rejects.toThrow(/缺 workspace.*2026-09-01/);
+  const oldDir = new InMemoryDir();
+  await oldDir.write("meta.json", JSON.stringify({ id: "old", name: "old", createdAt: 1, updatedAt: 1, messageCount: 0 }));
+  await expect(new SessionService(oldDir).createOrResume("old", { workspace: "/now" })).rejects.toThrow(/缺 workspace.*2026-09-01/);
 
+  const dir = new InMemoryDir();
   const s = new SessionService(dir);
   const created = await s.createOrResume("fresh", { workspace: "/repo/a" });
   expect(created.info.workspace).toBe("/repo/a");
-  const onDisk = JSON.parse((await dir.read("sessions/fresh/meta.json"))!) as { workspace: string };
+  await s.append("fresh", [{ kind: "message", message: userMessage("说一句才落 meta") }]);
+  await s.settle();
+  const onDisk = JSON.parse((await dir.read("meta.json"))!) as { workspace: string };
   expect(onDisk.workspace).toBe("/repo/a");
   // 换个宿主目录 resume：盘上的赢，宿主给的不覆盖
   const resumed = await new SessionService(dir).createOrResume("fresh", { workspace: "/elsewhere" });
   expect(resumed.info.workspace).toBe("/repo/a");
 });
 
-test("meta 缺 agent → 判红；agent 新建写入、resume 以盘上为准；缺省 default", async () => {
-  // 会话身份 = workspace + agent（2026-09-01 用户拍板）：没有 agent 的 meta 是今天之前的旧档
-  const dir = new InMemoryDir();
-  await dir.write(
-    "sessions/old/meta.json",
-    JSON.stringify({ id: "old", name: "old", workspace: "/w", createdAt: 1, updatedAt: 1, messageCount: 0 }),
-  );
-  await expect(new SessionService(dir).createOrResume("old", { workspace: "/w", agent: "echo-coding" })).rejects.toThrow(
+test("meta 缺 agent / main / status → 判红；新建写入、resume 以盘上为准；缺省 default + main + active", async () => {
+  // 会话身份 = workspace + agent（2026-09-01）；main + status 是 2026-09-03 加的两维。
+  // 三个字段都**不给缺省**：少了 agent 会续错产品的对话，少了 main 会让 --continue 挑到别人派的活，
+  // 少了 status 会让已关的段照样收信——都是静默走错，不是少一个字段。
+  const bare = { id: "old", name: "old", workspace: "/w", createdAt: 1, updatedAt: 1, messageCount: 0 };
+  const noAgent = new InMemoryDir();
+  await noAgent.write("meta.json", JSON.stringify(bare));
+  await expect(new SessionService(noAgent).createOrResume("old", { workspace: "/w", agent: "echo-coding" })).rejects.toThrow(
     /缺 agent.*2026-09-01/,
   );
+  const noMain = new InMemoryDir();
+  await noMain.write("meta.json", JSON.stringify({ ...bare, agent: "echo-coding" }));
+  await expect(new SessionService(noMain).createOrResume("old")).rejects.toThrow(/缺 main.*2026-09-03/);
+  const badStatus = new InMemoryDir();
+  await badStatus.write("meta.json", JSON.stringify({ ...bare, agent: "echo-coding", main: true, status: "running" }));
+  await expect(new SessionService(badStatus).createOrResume("old")).rejects.toThrow(/status 不认识/);
 
+  const dir = new InMemoryDir();
   const s = new SessionService(dir);
   const created = await s.createOrResume("fresh", { workspace: "/w", agent: "echo-coding" });
-  expect(created.info.agent).toBe("echo-coding");
-  expect((JSON.parse((await dir.read("sessions/fresh/meta.json"))!) as { agent: string }).agent).toBe("echo-coding");
+  expect([created.info.agent, created.info.main, created.info.status]).toEqual(["echo-coding", true, "active"]);
+  await s.append("fresh", [{ kind: "message", message: userMessage("说一句才落 meta") }]);
+  await s.settle();
+  expect((JSON.parse((await dir.read("meta.json"))!) as { agent: string }).agent).toBe("echo-coding");
   // 换个产品 resume 同一段：盘上的赢——续别人的对话得是显式动作，续了也不改它的归属
   const resumed = await new SessionService(dir).createOrResume("fresh", { workspace: "/w", agent: "echo-agent" });
   expect(resumed.info.agent).toBe("echo-coding");
-  expect((await s.createOrResume("bare", { workspace: "/w" })).info.agent).toBe("default");
+  // 经 extension 面（session_create 工具）建的那一段不是 main
+  const spawned = await new SessionService(new InMemoryDir()).createOrResume("spawned", { workspace: "/w", main: false });
+  expect([spawned.info.agent, spawned.info.main]).toEqual(["default", false]);
 });
 
-test("list()：只读 meta 列全部会话，按 updatedAt 降序；坏 meta 判红而不是静默少一条", async () => {
-  const dir = new InMemoryDir();
-  const s = new SessionService(dir);
-  await s.createOrResume("s-1", { workspace: "/a", agent: "echo-agent" });
-  await s.createOrResume("s-2", { workspace: "/a", agent: "echo-coding" });
-  await s.append("s-1", [{ kind: "message", message: userMessage("后来又说了一句") }]);
-  await s.settle();
-  // 产品的 --continue 靠这两维挑「本产品在本目录的最近一段」
-  const listed = await s.list();
-  expect(listed.map((i) => [i.id, i.workspace, i.agent])).toEqual([
-    ["s-1", "/a", "echo-agent"],
-    ["s-2", "/a", "echo-coding"],
-  ]);
-  expect(listed[0]!.updatedAt).toBeGreaterThanOrEqual(listed[1]!.updatedAt);
-  expect(listed[0]!.messageCount).toBe(1);
+test("一个 store 就是一段 session 的目录：在同一个 store 上开第二个 id 判红", async () => {
+  // 没有这条时：第二段的 meta.json / entries 会盖在第一段头上，两段互相毁历史。
+  const s = new SessionService(new InMemoryDir());
+  await s.createOrResume("a");
+  await expect(s.createOrResume("b")).rejects.toThrow(/已经在管 'a'/);
+});
 
-  await dir.write("sessions/broken/meta.json", "{ 坏的");
-  await expect(s.list()).rejects.toThrow(/broken.*解不开/);
+test("listSessions()：扫上一层、只读 meta、按 updatedAt 降序；空会话不进清单；坏 meta 判红而不是静默少一条", async () => {
+  const root = new InMemoryDir();
+  const s1 = new SessionService(scoped(root, "s-1/"));
+  const s2 = new SessionService(scoped(root, "s-2/"));
+  await s1.createOrResume("s-1", { workspace: "/a", agent: "echo-agent" });
+  await s2.createOrResume("s-2", { workspace: "/a", agent: "echo-coding", main: false });
+  await s1.append("s-1", [{ kind: "message", message: userMessage("一") }]);
+  await s1.settle();
+
+  // s-2 一句话没说：**不落 meta，也就不在清单里**——否则每次启动都往清单里塞一个空段
+  expect((await listSessions(root)).map((i) => i.id)).toEqual(["s-1"]);
+
+  await s2.append("s-2", [{ kind: "message", message: userMessage("二") }]);
+  await s2.settle();
+  // 产品的 --continue 靠 workspace + agent + main 三维挑「本产品在本目录、自己起的那一段」
+  const listed = await listSessions(root);
+  expect(listed.map((i) => [i.id, i.workspace, i.agent, i.main]).sort()).toEqual([
+    ["s-1", "/a", "echo-agent", true],
+    ["s-2", "/a", "echo-coding", false],
+  ]);
+  expect(listed[0]!.updatedAt).toBeGreaterThanOrEqual(listed[1]!.updatedAt); // 降序
+  expect(listed.find((i) => i.id === "s-1")!.messageCount).toBe(1);
+
+  await root.write("broken/meta.json", "{ 坏的");
+  await expect(listSessions(root)).rejects.toThrow(/broken.*解不开/);
 });
 
 test("恢复失败**不解毒**——此前抛错之后 append 仍被接受", async () => {
   // 实测破坏：createOrResume 因 entry 断链抛错，随后 append() 仍被接受、
   // settle() 还返回成功，继续往一个已确认损坏的会话里写。
-  const { dir } = failingAt(2);
+  const { dir } = failingAt(1);
   const s = new SessionService(dir);
   await s.createOrResume("main");
   await s.append("main", [{ kind: "message", message: userMessage("一") }]);
@@ -445,7 +483,7 @@ test("恢复失败**不解毒**——此前抛错之后 append 仍被接受", as
 
   // 让恢复失败：盘上只有一条序号为 2 的 entry（第一条压根没写成），序号断链
   await dir.write(
-    "sessions/main/entries/000002.json",
+    "entries/000002.json",
     JSON.stringify({ kind: "message", id: "main-e2", parentId: "main-e1", message: userMessage("坏的") }),
   );
   await expect(s.createOrResume("main")).rejects.toThrow();
@@ -470,11 +508,11 @@ test("内容块闭合验形：缺字段与不认识的 type 都判红", async ()
   for (const c of bad) {
     const dir = new InMemoryDir();
     await dir.write(
-      "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+      "meta.json",
+      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
     );
     await dir.write(
-      "sessions/main/entries/000001.json",
+      "entries/000001.json",
       JSON.stringify({
         kind: "message",
         id: "main-e1",
@@ -493,10 +531,10 @@ test("compaction / error entry 缺 at 判红", async () => {
   ]) {
     const dir = new InMemoryDir();
     await dir.write(
-      "sessions/main/meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", createdAt: 1, updatedAt: 1, messageCount: 0 }),
+      "meta.json",
+      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 0 }),
     );
-    await dir.write("sessions/main/entries/000001.json", JSON.stringify(entry));
+    await dir.write("entries/000001.json", JSON.stringify(entry));
     await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/缺 at/);
   }
 });

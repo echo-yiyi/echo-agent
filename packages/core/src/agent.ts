@@ -43,7 +43,6 @@ import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
 import { buildWorkingMessages, estimateText, estimateTokens } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
-import { InMemorySessionManager, type SessionEntry, type SessionManager } from "./session/types.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
 import { InboxAckError, InboxStore } from "./inbox/store.ts";
@@ -165,7 +164,6 @@ export type AgentOptions = {
    */
   permission?: PermissionPolicy;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
-  sessions?: SessionManager;
   sessionId?: string;
   /**
    * 工作目录的**缺省值**：纯内存 agent 直接用它；有 session 时它只在**新建** session 那一刻写进
@@ -233,7 +231,7 @@ export type AgentOptions = {
   autoDream?: boolean;
   /**
    * 会话的语义所有者（D3）。传了 `start()` 才会 create-or-resume；不传 = 不做会话持久化。
-   * **与 `sessions`（旧 `SessionManager`）互斥**——两个都传会有两套入账语义，构造时判红。
+   * 注入的 store 就是**这一段 session 的目录**（2026-09-03：状态根 = session 目录）。
    */
   sessionService?: SessionService;
   /**
@@ -417,7 +415,6 @@ export class Agent {
   private tapNextSeq = 0;
   private readonly tapPending = new Map<number, AgentEvent>();
 
-  private readonly sessions?: SessionManager;
   /** 持久记忆的操作面：`agent.memory?.shouldDream()`。undefined = 本 agent 没有记忆。 */
   readonly memory?: AgentMemories;
   /** 定时任务的操作面：`agent.schedule?.start()`。undefined = 本 agent 没有闹钟。 */
@@ -426,7 +423,7 @@ export class Agent {
   readonly mcp?: AgentMcpPort;
   /** 任务清单的落盘端口。不传 = 纯内存。 */
   readonly taskStore?: TaskStore;
-  /** D3 的会话语义所有者；与 `sessions` 互斥。 */
+  /** D3 的会话语义所有者。一个 Agent 实例 = 一段 session。 */
   private readonly sessionService?: SessionService;
   private readonly stateLock?: StateLock;
   private readonly agentId: string;
@@ -605,7 +602,6 @@ export class Agent {
       mcp: [],
       tasks: EMPTY_TASK_SNAPSHOT,
     };
-    this.sessions = opts.sessions;
     this.autoConsumeInbox = opts.autoConsumeInbox ?? false;
     this.autoDream = opts.autoDream ?? false;
     this.disposables = opts.disposables ?? [];
@@ -738,10 +734,6 @@ export class Agent {
     this.mcp = opts.mcp;
     this.mcp?.attach({ tools: this.tools, onChanged, deliver, report });
 
-    // 两套会话语义并存会让入账走两条路——构造期判红，不留到运行时才发现。
-    if (opts.sessions !== undefined && opts.sessionService !== undefined) {
-      throw new Error("`sessions` 与 `sessionService` 只能给一个：前者是 D3 之前的形状，新代码用后者");
-    }
     this.sessionService = opts.sessionService;
     this.stateLock = opts.stateLock;
     this.agentId = opts.agentId ?? "default";
@@ -1935,40 +1927,6 @@ export class Agent {
     return this.taskLastWrite ?? Promise.resolve("written");
   }
 
-  /* ───────────── 会话面 ───────────── */
-
-  async newSession(name?: string, workspace: string = this._state.workspace): Promise<string> {
-    const sessions = this.requireSessions();
-    const info = await sessions.create({ name, workspace, agent: this.agentName });
-    this.reset();
-    this._state.sessionId = info.id;
-    this._state.workspace = info.workspace;
-    await this.hooks.notify({ type: "sessionStart", sessionId: info.id, resumed: false, messageCount: 0 }, this.hookContext());
-    return info.id;
-  }
-
-  async loadSession(id: string): Promise<void> {
-    this.assertIdle("session");
-    const sessions = this.requireSessions();
-    const data = await sessions.load(id);
-    this.reset();
-    this._state.messages = [...data.messages];
-    this._state.compaction = data.compaction;
-    this._state.sessionId = data.info.id;
-    this._state.workspace = data.info.workspace;
-    await this.hooks.notify(
-      { type: "sessionStart", sessionId: data.info.id, resumed: true, messageCount: data.messages.length },
-      this.hookContext(),
-    );
-  }
-
-  private requireSessions(): SessionManager {
-    if (this.sessions === undefined) {
-      throw new Error("没有注入 SessionManager：本 Agent 是纯内存模式（会话面不可用）");
-    }
-    return this.sessions;
-  }
-
   /* ───────────── 私有：运行 ───────────── */
 
   /**
@@ -2643,7 +2601,7 @@ export class Agent {
 
   /**
    * 三步顺序**不可换**：
-   *   ① 归约状态 ② 增量交给 SessionManager ③ 逐个 await listener
+   *   ① 归约状态 ② 增量交给 SessionService ③ 逐个 await listener
    * 监听器看到的必须是已经生效的状态——反过来就会读到旧值。
    */
   private async processEvents(input: AgentEventInput): Promise<void> {
@@ -2888,10 +2846,8 @@ export class Agent {
    * 增量入账。**「哪些事件进 session」这条语义在这里，不在 Store**——
    * 三种：定稿消息、压缩、以 error 结束的 run。
    *
-   * 两条落盘路径：
-   * - `sessionService`（D3 之后）：只交内容，**id / parentId 由 Service 生成**。
-   *   身份归 core 的理由见 `session/service.ts`——它是恢复期才会炸的那类不变量。
-   * - `sessions`（旧 `SessionManager`）：语义在实现方手里，id 只能这边自己拼。保留供过渡。
+   * 只交内容，**id / parentId 由 `SessionService` 生成**。身份归 core 的理由见
+   * `session/service.ts`——它是恢复期才会炸的那类不变量。
    */
   private async persist(input: AgentEventInput): Promise<void> {
     const id = this._state.sessionId;
@@ -2908,16 +2864,7 @@ export class Agent {
     }
     if (parts.length === 0) return;
 
-    if (this.sessionService !== undefined) {
-      await this.sessionService.append(id, parts);
-      return;
-    }
-
-    const sessions = this.sessions;
-    if (sessions === undefined) return;
-    const nextId = (n: number): string => `${id}-e${this._state.messages.length}-${n}`;
-    const entries: SessionEntry[] = parts.map((part, n) => ({ ...part, id: nextId(n), parentId: null }) as SessionEntry);
-    await sessions.append(id, entries);
+    await this.sessionService?.append(id, parts);
   }
 }
 
@@ -2985,4 +2932,3 @@ function withUserText(m: AgentMessage, text: string): AgentMessage {
   return { ...m, content } as AgentMessage;
 }
 
-export { InMemorySessionManager };

@@ -1,6 +1,6 @@
 # 会话（Session）与 agent 集群
 
-> 状态：proposed。2026-09-03 口头拍板、未实现；决策记录留在 `docs/decisions/proposed/` 直到实现后移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
+> 状态：设计 2026-09-03 口头拍板。**§9 第 1 步（布局）已实现**，其余待实现；决策记录留在 `docs/decisions/proposed/` 直到整条实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
 > 读者：要实现会话面、给产品接会话工具、把 echo 嵌进常驻程序（多段会话同时工作）的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) 的实例生命周期与 admission；[Context 与 Message Flow](context-and-message-flow.md) 的 transcript / working context 术语；[Compaction](compaction.md) 的「策略是 extension、状态在 core」这条分法——本文对会话用同一条<br>
 > 决策记录（五条，本文只指向，不复述论证）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) · [agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md)
@@ -22,7 +22,17 @@
 - memory 目录的多写者保护（多段 session 同时往 project 级记）。归 memory 线，本文只定作用域。
 - 会话的回收（GC / TTL）。`closed` 的段留在盘上；不会跑的段靠 §7 的挂载条件与 runner 失败判红不产生，而不是事后清。
 
-**待拍板。** 无。五项决策已拍（2026-09-03，口头），见决策记录；实现时发现设计有问题按「停下来、一句话讲清、等拍板」处理。
+**待拍板。** 一条，来自实现（2026-09-03）：**记忆的三层怎么切**。§2 定了 session / project / user 三层，
+但 core 里的记忆是**按分区**组织的（`agent.md` 常驻、`user.md` 常驻、`memory/` 索引，路由靠路径前缀），
+没有 `remember(scope)` 这个工具，也没有「同一套分区在三层各来一份」的形状。所以布局那一步先把记忆整体放在
+**user 层**（`<ECHO_HOME>/memory/`，行为与 2026-09-01 相同，不回退），三层留给 memory 线单独一次改动。
+要拍的是分区与作用域怎么对：哪些分区是 user 级、哪些跟 session 走（dream 只整理 session 那份），
+还是同一套分区在每层各一份、由路径前缀选层。
+
+**这条不拍板的直接后果**（现在就成立，不是将来）：记忆在 user 层被多段 session 共写，dream 也就可能被
+两段同时跑。今天挡它的只有 `.dream` 里那个带过期的软锁（读改写，不是 lease），并发下不牢靠。
+
+其余五项决策已拍（2026-09-03，口头），见决策记录。
 
 **验收判据（机器可判）。** 见 §10。核心四条：同一台机器两段 session 各自的进程同时 `start()` 都成功；A 进程 `session_send` 之后 B 进程不重启就在下一轮看到那条 environment 消息；非 main 的 session 工具表里没有 `session_create`；inline 定义点名了创建者池外的工具，`create` 判红、盘上不建目录。
 
@@ -50,6 +60,9 @@ project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自
 
 三层里唯一的共享写方是 project / user 级 memory：多段 session 同时 `remember` 到同一层。dream 只整理 session 自己那份，不碰上两层，所以整理不冲突；`remember` 的并发写归 memory 线（Non-Goals）。
 
+**这一节里只有记忆的三层还没实现**（2026-09-03）：今天记忆整体在 user 层，session 与 project 两级还没有；
+分区与作用域怎么对是导读「待拍板」那一条。目录解析、session 层与 user 层的分家已经落地。
+
 `ECHO_HOME` 覆盖 `~/.echo`，与今天的 [`resolveStateDir()`](../../packages/core/src/create-agent.ts#symbol=resolveStateDir) 同一个来源；`agents/<agentId>/` 这一层退场，session 的 meta 里记着自己是哪个 agent。
 
 ## 3. session 在盘上
@@ -68,7 +81,7 @@ project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自
   observability/
 ```
 
-今天 `SessionService` 把 session 放在状态根下的 `sessions/<id>/`；状态根变成 session 目录之后，meta 与 entries 上提一层到目录根。`list()` 改成扫 `~/.echo/sessions/*/meta.json`，其余逻辑（坏档判红、序号连续、parent 链、compaction 投影）不动。
+**已实现**（2026-09-03）：meta 与 entries 在目录根，`SessionService` 一个实例管一段（同一个 store 上开第二个 id 判红）；清单是自由函数 [`listSessions()`](../../packages/core/src/session/service.ts#symbol=listSessions)，扫的是上一层；坏档判红、序号连续、parent 链、compaction 投影一行没动。上表里 `memory/`（session 级记忆）与 `status.json` 还没有，见 §2 与 §6。
 
 ```ts
 type AgentRef =
@@ -238,9 +251,10 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 **替代的旧决策**（原文保留在各自的记录里，本文的决策记录标明替代关系）：2026-09-01「状态根用户级 `agents/<agentId>/`」→ 状态根 = session 目录；「记忆用户级、跨项目共享」→ 三级作用域；「会话身份 = workspace + agent」保留，加 `main` 与 `status`。
 
-## 9. 实施顺序（建议，每步独立可验）
+## 9. 实施顺序（每步独立可验）
 
-1. **布局**：状态根 = session 目录；`SessionService` 扁平化与 `list()`；三层作用域解析；memory / skills 提到共享层；空会话延迟写 meta；删旧 `SessionManager`。lease 每段一把随之成立。
+1. **布局（已实现，2026-09-03）**：状态根 = session 目录；`SessionService` 扁平化，清单改自由函数 `listSessions()`（扫上一层）；memory / skills 提到 user 层；空会话延迟写 meta；`SessionInfo` 加 `main` / `status`；删旧 `SessionManager` / `InMemorySessionManager` / `AgentOptions.sessions`；`CreateAgentOptions` 加 `sessionsRoot` 与 `sharedStore`；`observe` 的 `--agent-id` 换成 `--session`。lease 每段一把随之成立。
+   **与本文其余部分的一处差异**：memory 落在 user 层**一层**，还不是 §2 的三层——把哪个记忆分区放哪一层要改 `AgentMemories` 的分区表与 dream 的整理范围，是 memory 线自己的一次改动，登记在下面的「未决」里，不在本步顺手做。
 2. **agent 打包**：ABI 加 `extensions`；echo-agent / echo-coding 写成 bundle；`AgentRef` 进 meta；inline → `echo:inline-agent`；不越权检查。
 3. **通道**：inbox 目录 watch；`source = "session"`；`Echo.sessions` 与 extension 面的 `sessions` / `inbox.watch`；`status.json`。
 4. **工具**：`echo:sessions` 四个工具；main 规则；`wait`；命名钩子。

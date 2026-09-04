@@ -46,12 +46,24 @@ await echo.stop();                      // 先卸扩展 → 等落盘 settle →
 
 ## 状态放在哪
 
-`stateDir` > `$ECHO_HOME/agents/<agentId>` > `~/.echo/agents/<agentId>`。
+**状态根 = 一段 session 的目录**（2026-09-03 起）：`stateDir` > `<sessionsRoot>/<sessionId>` >
+`$ECHO_HOME/sessions/<sessionId>` > `~/.echo/sessions/<sessionId>`。
 
-默认落在**用户级**（2026-09-01 起）：工作目录是 **session** 的字段（`SessionInfo.workspace`），
-缺省 session id 按 workspace 派生——同一个 agent 在多个目录里各有一段连续对话，记忆与技能跨项目共享；
-状态根若按 `$PWD` 走，换个目录就换了一个 agent，与此冲突。这也让 agent 状态与 `credentials.json`、
-`settings.json` 同在 `echoHome()` 下。
+一段 session 就是一个独立在跑的 agent，所以按状态根一份的东西——lease、会话账本、inbox、任务清单、
+闹钟、观测库——都变成按 session 一份。同一台机器上两段 `echo-coding` 因此各拿各的锁、能同时起来；
+在旧布局（`agents/<agentId>/`）下第二段直接 fail-loud。
+
+跨 session 共享的两件**不在**状态根下，在 user 层（`$ECHO_HOME`，缺省 `~/.echo`）：
+
+| 放什么 | 在哪 |
+| --- | --- |
+| 这一段的账本、inbox、tasks、schedule、lease、观测库 | `<ECHO_HOME>/sessions/<id>/` |
+| 记忆 | `<ECHO_HOME>/memory/` |
+| 技能 | `<ECHO_HOME>/skills/` |
+| 凭据、设置、扩展 | `<ECHO_HOME>/` |
+
+工作目录是 **session** 的字段（`SessionInfo.workspace`），不是状态根的一部分——换个目录起就是新的一段，
+记忆与技能仍是同一份。**要整体隔离（评测、单测）就设 `ECHO_HOME`**：只给 `stateDir` 只挪走 session 那一半。
 
 ## 公共面
 

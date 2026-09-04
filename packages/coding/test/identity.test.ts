@@ -17,6 +17,10 @@ import { scriptedDialect } from "@echo-agent/core/testing";
 import { codingPreset } from "../src/index.ts";
 import { codingAgentIdentity } from "../src/agent.ts";
 
+// **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
+// 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
+
 const dirs: string[] = [];
 process.on("exit", () => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 
