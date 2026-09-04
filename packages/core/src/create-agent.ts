@@ -396,6 +396,9 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       ...(parts.memory !== undefined ? { memory: parts.memory } : {}),
       streamFunction: opts.agent?.streamFunction ?? ((m, ctx, o) => models.stream(m, ctx, o)),
       agentId,
+      // Agent 拿 clock 只做一件事：定期重扫 inbox（别的进程写进来的消息靠它才看得见）。
+      // 与 schedule 拿到的是**同一个**——测试拨一次 FakeClock，两边一起动。
+      clock: opts.clock ?? systemClock,
       ...(opts.agentName !== undefined ? { agentName: opts.agentName } : {}),
       // 装配期已经定了（状态根就是它的目录），这里必须原样交给 Agent——
       // 让 `start()` 再抽一个新的，会写进一个**不是自己**的目录里。

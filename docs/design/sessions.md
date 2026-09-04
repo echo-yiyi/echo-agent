@@ -141,9 +141,9 @@ echo-coding  =  echo:coding（identity + conduct:coding 段）
 会话之间只有一种通信：**往对方的 inbox 写一条 record**。inbox 的语义今天就是「外面发生了一件事 → 入队，不打断正在跑的任务，回 idle 后开一轮」（`packages/core/src/agent.ts` 的 `deliver()` 与 inbox 那段注释），落盘形状是 [`InboxStore`](../../packages/core/src/inbox/store.ts#symbol=InboxStore) 的 record + ack marker、at-least-once。跨 session 发消息不需要新协议，需要四处改动：
 
 1. **inbox 按 session 一份。** 状态根变成 session 目录之后自动成立。
-2. **record id 由写者生成。** 今天 record id 是 `InboxStore` 集中分配的六位序号（`store.ts` 的 `nextSeq`，restore 时从盘上校准一次、之后只在内存里递增）。写者从 1 变成 N 之后，两个进程各自校准、各自递增，会发到同一个 `000006.json`；`FileDir.write` 是 tmp + rename，后到的**静默覆盖**先到的，at-least-once 直接变成无声丢失。改成写者自己生成全局唯一、时间可排序的 id（uuidv7 形状，文件名仍字典序 = 时间序），任何写者不读目录就能发号；`SAFE_RECORD_ID` 的判据随之改。只有持有 lease 的进程消费与 ack，别的进程只追加。
+2. **record id 由写者生成**（已实现）。此前 record id 是 `InboxStore` 集中分配的六位序号（`nextSeq`，restore 时从盘上校准一次、之后只在内存里递增）。写者从 1 变成 N 之后，两个进程各自校准、各自递增，会发到同一个 `000006.json`；`FileDir.write` 是 tmp + rename，后到的**静默覆盖**先到的，at-least-once 直接变成无声丢失。现在的形状是 `<12 位十六进制毫秒>-<4 位同毫秒计数><12 位十六进制随机>`：文件名仍字典序 = 时间序，同一个写者严格递增（保序不因换 id 而破），不同写者在同一毫秒靠随机段区分，任何写者不读目录就能发号。发号器在 `InboxStore` 实例上而不是模块级——模块级的话一次「把时钟拨到溢出」的测试会毒死同进程后续所有发号（实测）。只有持有 lease 的进程消费与 ack，别的进程只追加。
 3. **消息形态。** environment 消息，`source = "session"`，`ref` 就是这条 record 的 id，正文由发送方给；dedupeKey 也用它。接收方的 transcript 里就是一条普通 environment 消息，壳按普通方式显示。同一轮发两条就是两个 id，不存在「序号是哪个计数器」的问题。
-4. **跨进程看得见。** `InboxStore` 今天只在启动时读盘。持有 lease 的进程要对自己的 `inbox/` 目录开一个 watch（fs.watch，退化到轮询），别的进程写进来的 record 在下一次 idle 判断时可见。发现机制可以是端口，语义不动。
+4. **跨进程看得见**（已实现）。`InboxStore` 此前只在 `restore()` 那一刻读盘。现在多一个 `refresh()`：重扫目录、把别人写进来的 record 收进 pending，**只加不减**——不碰 ack marker、不做 cleanup、不改 `ready`，坏档只报诊断跳过（运行途中不该被别人写坏的一条掀翻，重启时仍按老规矩判红）。`Agent` 在 `activate()` 里起一拍每秒的轮询，空闲时才扫，扫到就消费。**用轮询而不是 `fs.watch`**：core 不 import 任何 `node:`，而 `Clock` 是已有端口、`FakeClock` 能零 sleep 驱动判据。宿主想更快就自己在目录上装 watcher 再调 `consumeInbox()`——那是加速，不是另一套语义。
 
 同进程里两段 session 互发，实现上可以直接投到对方实例的内存队列，但**先落盘再投**，不允许绕过盘：否则同进程与跨进程两条语义就分叉了。
 
@@ -256,7 +256,11 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 1. **布局（已实现，2026-09-03）**：状态根 = session 目录；`SessionService` 扁平化，清单改自由函数 `listSessions()`（扫上一层）；memory / skills 提到 user 层；空会话延迟写 meta；`SessionInfo` 加 `main` / `status`；删旧 `SessionManager` / `InMemorySessionManager` / `AgentOptions.sessions`；`CreateAgentOptions` 加 `sessionsRoot` 与 `sharedStore`；`observe` 的 `--agent-id` 换成 `--session`。lease 每段一把随之成立。
    **与本文其余部分的一处差异**：memory 落在 user 层**一层**，还不是 §2 的三层——把哪个记忆分区放哪一层要改 `AgentMemories` 的分区表与 dream 的整理范围，是 memory 线自己的一次改动，登记在下面的「未决」里，不在本步顺手做。
 2. **agent 打包**：ABI 加 `extensions`；echo-agent / echo-coding 写成 bundle；`AgentRef` 进 meta；inline → `echo:inline-agent`；不越权检查。
-3. **通道**：inbox 目录 watch；`source = "session"`；`Echo.sessions` 与 extension 面的 `sessions` / `inbox.watch`；`status.json`。
+3. **通道**（第一半已实现，2026-09-03）：record id 改**写者自己发号**（`createRecordIdSource`，
+   `<12 位十六进制毫秒>-<4 位同毫秒计数><12 位十六进制随机>`；同一写者严格递增，跨写者靠随机区分）；
+   `InboxStore.refresh()` 重扫盘上别人写进来的 record；`Agent` 每秒轮询一次自己的 inbox 目录
+   （`INBOX_POLL_MS`，走已有的 `Clock` 端口，不用 `fs.watch`——core 不 import `node:`）。
+   **还没做**：`source = "session"` 的消息形态、`Echo.sessions`、extension 面的 `sessions` / `inbox.watch`、`status.json`。
 4. **工具**：`echo:sessions` 四个工具；main 规则；`wait`；命名钩子。
 5. **壳**：`--continue` 新筛选；`/clear`；`/sessions`。
 

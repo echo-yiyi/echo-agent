@@ -46,6 +46,7 @@ import type { CompactResult } from "./extension/runtime.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
 import { InboxAckError, InboxStore } from "./inbox/store.ts";
+import { systemClock, type Clock } from "./schedule/clock.ts";
 import { environmentDedupeKey, scheduleDedupeKey } from "./inbox/records.ts";
 import { stateHostOf } from "./state/host-wiring.ts";
 import { DurableDeliveryDeferred, type DurableDeliveryRequest, type DurableDeliveryResult, type DurableIngressPort } from "./inbox/ingress.ts";
@@ -90,6 +91,13 @@ import type { BuiltinToolGroups } from "./extension/builtin.ts";
 import type { TaskItem, TaskSnapshot, TaskSpec, TaskStore } from "./task/types.ts";
 
 export type AgentStatus = "idle" | "generating" | "acting" | "compacting";
+
+/**
+ * 多久重扫一次自己的 inbox 目录（毫秒）。**不做成参数**：它是「别的进程写进来的消息多快被看见」的
+ * 下限，不是要按部署调的旋钮。一秒对「另一段 session 发来一句话」这个场景足够快，
+ * 对盘的负担也只是一次目录列举。要更快就由宿主装 watcher 主动调 `consumeInbox()`。
+ */
+const INBOX_POLL_MS = 1_000;
 
 export type AgentState = {
   /* 装备（慢变；仅 idle 可换） */
@@ -239,6 +247,11 @@ export type AgentOptions = {
    * 丢锁时按 §13.12.3 的四步收场。不传 = 不做互斥（评测与一次性跑天然如此）。
    */
   stateLock?: StateLock;
+  /**
+   * 时间与定时器（`schedule/clock.ts` 的端口）。不给用真时钟；测试给 `FakeClock` 才能零 sleep 地驱动
+   * inbox 轮询。**Agent 自己只用它做一件事**：定期重扫 inbox 目录（见 `INBOX_POLL_MS`）。
+   */
+  clock?: Clock;
   /** agent 身份（D5，缺省 `"default"`）。目前只用于 lease 的 holder 标识。 */
   agentId?: string;
   /**
@@ -426,6 +439,9 @@ export class Agent {
   /** D3 的会话语义所有者。一个 Agent 实例 = 一段 session。 */
   private readonly sessionService?: SessionService;
   private readonly stateLock?: StateLock;
+  private readonly clock: Clock;
+  /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
+  private inboxPollCancel?: () => void;
   private readonly agentId: string;
   /** 新建会话时写进 `SessionInfo.agent` 的名字（`AgentOptions.agentName`，缺省 = `agentId`）。 */
   private readonly agentName: string;
@@ -735,6 +751,7 @@ export class Agent {
     this.mcp?.attach({ tools: this.tools, onChanged, deliver, report });
 
     this.sessionService = opts.sessionService;
+    this.clock = opts.clock ?? systemClock;
     this.stateLock = opts.stateLock;
     this.agentId = opts.agentId ?? "default";
     this.agentName = opts.agentName ?? this.agentId;
@@ -1033,6 +1050,42 @@ export class Agent {
    * 攒批不是优化：三个后台任务同时结束就跑一轮，不是三轮。
    * 正在跑 / 队列空 → 返回 null，不做任何事。
    */
+  /**
+   * inbox 轮询：**别的进程写进来的消息，靠它才看得见**（2026-09-03，sessions.md §5）。
+   *
+   * 会话之间发消息 = 往对方的 `inbox/` 目录写一条 record，写者可能是另一个进程。`InboxStore`
+   * 只在 `restore()` 那一刻读过盘，所以不重扫就等于「要等对方重启才收到」——「A 发 B，B 不重启
+   * 就在下一轮看到」这条判据直接不成立。
+   *
+   * 为什么是轮询而不是 `fs.watch`：core 不 import 任何 `node:`（浏览器 / Worker / 边缘运行时都要能跑），
+   * 而 `Clock` 是已有的端口、测试拿 `FakeClock` 就能零 sleep 驱动。真要事件驱动，宿主可以自己在
+   * 目录上装 watcher 再调 `agent.consumeInbox()`——那是加速，不是另一套语义。
+   */
+  private startInboxPoll(): void {
+    if (this.inboxPollCancel !== undefined) return; // 幂等：activate 可能被走到两次
+    this.inboxPollCancel = this.clock.setInterval(() => void this.pollInbox(), INBOX_POLL_MS);
+  }
+
+  private stopInboxPoll(): void {
+    this.inboxPollCancel?.();
+    this.inboxPollCancel = undefined;
+  }
+
+  /**
+   * 一拍轮询。**只在真的空着时扫**：有 run 在跑就跳过——那时扫了也不能消费，白读一遍盘。
+   * 失败只报诊断：一次读盘失败不该把一个健康的 agent 掀翻，下一拍还会再来。
+   */
+  private async pollInbox(): Promise<void> {
+    if (this.phase !== "running" || this.activeRun !== undefined || this.userRunPending || this.inboxTicketOutstanding) return;
+    if (this.inboxFailure !== null) return;
+    try {
+      const found = await this.inbox.refresh();
+      if (found > 0 && this.autoConsumeInbox) await this.consumeInbox();
+    } catch (e) {
+      this.reportDiagnostic({ code: "inbox_refresh_failed", message: errText(e) });
+    }
+  }
+
   async consumeInbox(): Promise<LoopResult | null> {
     if (this.activeRun !== undefined || this.userRunPending || this.inboxTicketOutstanding) return null;
     if (this.inboxFailure !== null) return null; // 账本已封：不再消费，也不假装健康
@@ -1362,6 +1415,7 @@ export class Agent {
       // **把已经起来的东西收干净，再把原错误抛出去。**
       // 顺序上 startSchedule 目前是最后一步、之后不会再抛，但依赖这一点是脆弱的：
       // 以后在它后面加一步，就会漏一个野定时器出去——那种污染跨测试、跨进程都难查。
+      this.stopInboxPoll();
       if (this.schedule !== undefined) stopSchedule(this.schedule);
       if (acquired !== undefined) {
         // **revoke 排在 release 之前**：只 release 的话，锁已经还回去了而本代 view 还写得进去——
@@ -1415,6 +1469,7 @@ export class Agent {
       this.autoConsumeInbox = false;
       this.autoDream = false;
       this.gate?.setActiveBusinessMode("draining");
+      this.stopInboxPoll();
       if (this.schedule !== undefined) stopSchedule(this.schedule);
 
       // ② 等已经登记的受管工作真的做完：
@@ -1525,6 +1580,7 @@ export class Agent {
     // 打开必须在恢复之后：先开的话，dream 可能在 session 还没灌进来时就跑起来。
     if (this.memory !== undefined) this.autoDream = true;
     this.autoConsumeInbox = true;
+    this.startInboxPoll();
 
     this.phase = "running";
     this.restoredReason = null;
@@ -2509,6 +2565,7 @@ export class Agent {
     // 于是 `stop()` 返回、lease 已释放、新 holder 已经拿到锁之后，旧 Agent 的 dream
     // 仍在往 memory 里写——单写者当场破（实测复现）。
     await this.settleDream();
+    this.stopInboxPoll(); // 轮询只读盘、不写，所以取消即可，没有「在飞的那一拍」要等
     if (this.schedule !== undefined) {
       // 取消 timer **并等在飞的那一拍**：`stopSchedule()` 只挡后续，挡不住已经开始的那次，
       // 而它还会写 `schedules.json`。

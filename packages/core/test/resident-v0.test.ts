@@ -61,7 +61,7 @@ function runPhase(stateDir: string, phase: string, sessionId?: string): { ok: bo
 /** 盘上的 inbox record 数。`inbox/acks/` 是 ack marker 目录，不算入站事实。 */
 /** inbox 归 session（状态根 = session 目录，2026-09-03），所以要点名是哪一段的。 */
 function inboxRecordCount(home: string, sessionId: string): number {
-  return readdirSync(join(home, "sessions", sessionId, "inbox")).filter((name) => /^[0-9]{6}\.json$/.test(name)).length;
+  return readdirSync(join(home, "sessions", sessionId, "inbox")).filter((name) => /^[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(name)).length;
 }
 
 test(
