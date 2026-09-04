@@ -5,8 +5,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, createProvider, createProviderStreams, openObservationReader, type Echo, type Provider } from "@echo-agent/core";
-import { scriptedDialect, textTurn, type ScriptedTurn } from "@echo-agent/core/testing";
+import { createEcho, createProvider, createProviderStreams, openObservationReader, toolError, type Echo, type ModelTool, type Provider } from "@echo-agent/core";
+import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { OBSERVE_DEFAULT_PORT, parseObserveArgs, runObserve } from "../src/observe.ts";
 import { observePageHtml, startObserveServer } from "../src/observe/server.ts";
 import { lexicon } from "../src/observe/lexicon.ts";
@@ -42,8 +42,8 @@ function scripted(turns: ScriptedTurn[]): Provider {
   });
 }
 
-async function echoAt(turns: ScriptedTurn[], identity: { agentName?: string; workspace?: string } = {}): Promise<Echo> {
-  const echo = await createEcho({ provider: scripted(turns), stateDir: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [], ...identity });
+async function echoAt(turns: ScriptedTurn[], extra: Partial<Parameters<typeof createEcho>[0]> = {}): Promise<Echo> {
+  const echo = await createEcho({ provider: scripted(turns), stateDir: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [], ...extra });
   running.push(echo);
   await echo.agent.start();
   return echo;
@@ -75,6 +75,39 @@ test("/api/runs 顺带给会话摘要：产品名与 workspace 按 sessionId 反
     await server.stop();
     await reader.close();
   }
+});
+
+test("content 档：/api/runs/<id> 的时间线带工具 params 与结果正文，页面有对应的分段渲染", async () => {
+  const grep: ModelTool = {
+    kind: "model",
+    name: "grep",
+    label: "grep",
+    description: "搜",
+    parameters: { type: "object", properties: { pattern: { type: "string" } } },
+    execute: async () => toolError("grep: no matches for observationTap"),
+  };
+  const echo = await echoAt([toolTurn("c1", "grep", { pattern: "observationTap" }), textTurn("没搜到。")], { observation: { capture: "content" }, agent: { tools: [grep] } });
+  const r = await echo.send("搜一下");
+  const reader = await openObservationReader({ stateRoot: dir });
+  const server = startObserveServer({ reader, stateRoot: dir, port: 0 });
+  try {
+    const vm = (await (await fetch(`${server.url}/api/runs/${r.runId}`)).json()) as {
+      header: { capturePolicy: string };
+      timeline: { kind: string; name: string; body?: Record<string, unknown> }[];
+    };
+    expect(vm.header.capturePolicy).toBe("content");
+    const start = vm.timeline.find((t) => t.kind === "span_start" && t.name === "tool.execute");
+    const end = vm.timeline.find((t) => t.kind === "span_end" && t.name === "tool.execute");
+    expect(start?.body?.params).toEqual({ pattern: "observationTap" });
+    expect(end?.body).toMatchObject({ isError: true, content: "grep: no matches for observationTap" });
+    expect(vm.timeline.some((t) => t.name === "model.generate.delta")).toBe(true);
+  } finally {
+    await server.stop();
+    await reader.close();
+  }
+  // 页面侧：正文分段、delta 折叠、参数预览三件都在（渲染逻辑在浏览器里跑，这里只验它们没被删）
+  const html = observePageHtml();
+  for (const marker of ["contentSections", "FOLDED_INTO", "argPreview", "--observe content"]) expect(html).toContain(marker);
 });
 
 test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / --host 只对 serve 有意义", () => {

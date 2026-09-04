@@ -202,6 +202,14 @@ test("parseArgs:认识的都认得出", () => {
   expect(parseArgs(["-h"])).toBeNull();
 });
 
+test("parseArgs:`--observe <档>` 只认 off / metadata / content，不给就不出现在结果里（core 缺省 metadata）", () => {
+  expect(parseArgs(["--observe", "content"])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, observe: "content" });
+  expect(parseArgs(["--observe", "off"])?.observe).toBe("off");
+  expect(parseArgs([])).not.toHaveProperty("observe");
+  expect(() => parseArgs(["--observe", "full"])).toThrow("--observe 只能是 off / metadata / content");
+  expect(() => parseArgs(["--observe"])).toThrow("缺一个值");
+});
+
 test("parseArgs:`--continue` / `--resume <id>` 各自认得，两个一起给就报错", () => {
   // 2026-09-01 用户拍板：缺省每次启动新建会话，续上次是显式动作
   expect(parseArgs(["--continue"])).toMatchObject({ continueLast: true });

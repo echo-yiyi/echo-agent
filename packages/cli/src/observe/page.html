@@ -111,6 +111,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl .what { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
 .tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; }
 .tl .what .obj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl .what .arg { color: var(--ink-70); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl .what .en { color: var(--stone); font-size: var(--size-micro); }
 .tl .res { color: var(--stone); white-space: nowrap; }
 .tl--boundary { color: var(--ink); }
@@ -120,8 +121,13 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl--warn { color: var(--marigold); }
 .tl--warn .res { color: var(--marigold); }
 .tl--open .res { color: var(--accent-ink); }
-.tl-detail { margin: 0 0 var(--space-4) var(--space-8); padding: var(--ctl-tool-expand-pad); max-height: var(--ctl-tool-expand-max-height); overflow: auto; border-left: 2px solid var(--border); background: var(--ui-inset); font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); white-space: pre-wrap; word-break: break-all; }
+.tl-detail { margin: 0 0 var(--space-4) var(--space-8); padding: var(--ctl-tool-expand-pad); max-height: var(--ctl-tool-expand-max-height); overflow: auto; border-left: 2px solid var(--border); background: var(--ui-inset); font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); }
 .tl-detail[hidden] { display: none; }
+/* content 档的正文分段：标签 + 原样文本；报错段用 clay。metadata 档没有这些字段，段落自然不出现 */
+.tl-sec { margin-bottom: var(--space-8); }
+.tl-sec-label { display: block; margin-bottom: var(--space-2); color: var(--stone); font-size: var(--size-micro); }
+.tl-sec--bad .tl-text { color: var(--clay); }
+.tl-text { margin: 0; font: inherit; white-space: pre-wrap; word-break: break-all; }
 
 table { border-collapse: collapse; width: 100%; font-size: var(--size-ui); }
 th, td { text-align: left; padding: var(--ctl-table-cell-pad-y) var(--ctl-table-cell-pad-x); border-bottom: 1px solid var(--ui-line-soft); }
@@ -262,8 +268,19 @@ function renderFollow() {
 }
 
 /* ── 详情 ── */
-function verbFor(name, attrs) {
-  if (name === "tool.execute") return { verb: LEX.toolVerbs[attrs.toolName] ?? "调用", obj: attrs.toolName ?? "?" };
+/* 工具行的对象位：content 档有 params 时带上第一个字符串参数（≤24 字，agent-behavior §2.3）；metadata 档没有 params，只剩工具名 */
+function argPreview(body) {
+  const p = body?.params;
+  if (p === null || typeof p !== "object") return "";
+  for (const v of Object.values(p)) {
+    if (typeof v !== "string" || v.trim() === "") continue;
+    const s = v.trim().replace(/\s+/g, " ");
+    return s.length > 24 ? `${s.slice(0, 24)}…` : s;
+  }
+  return "";
+}
+function verbFor(name, attrs, body) {
+  if (name === "tool.execute") return { verb: LEX.toolVerbs[attrs.toolName] ?? "调用", obj: attrs.toolName ?? "?", arg: argPreview(body) };
   if (name === "turn.execute") return { verb: "轮", obj: `#${attrs.iteration ?? "?"}` };
   if (name === "model.generate") return { verb: "模型生成", obj: attrs.stopReason ?? "" };
   if (name.startsWith("memory.mutation.")) {
@@ -277,12 +294,26 @@ function verbFor(name, attrs) {
   return { verb: LEX.records[name]?.zh ?? name, obj: "" };
 }
 
+/* content 档才有的逐条流式记录：折进所属的进行中 span（一轮回复几百条 delta，逐行列出来只会淹没时间线），
+   条数记在 entry.folded 上，展开时能看到 */
+const FOLDED_INTO = { "model.generate.delta": "model.generate", "tool.execute.progress": "tool.execute" };
+
 /* span_start / span_end 配对成一行（§2.3：进行中的条目留在列表里，end 只补结果，不另起一行） */
 function buildEntries(vm) {
   const entries = [];
   const open = new Map();
   const keyOf = (t) => `${t.name}|${t.attributes.toolCallId ?? ""}|${t.attributes.iteration ?? ""}|${t.depth}`;
+  const findOpen = (name, toolCallId) => {
+    let found = null;
+    for (const stack of open.values()) for (const e of stack) if (e.start.name === name && (toolCallId === undefined || e.start.attributes.toolCallId === toolCallId)) found = e;
+    return found;
+  };
   for (const t of vm.timeline) {
+    const ownerName = FOLDED_INTO[t.name];
+    if (ownerName !== undefined) {
+      const owner = findOpen(ownerName, t.attributes.toolCallId);
+      if (owner) { owner.folded = (owner.folded ?? 0) + 1; continue; }
+    }
     if (t.kind === "span_start") {
       const e = { start: t, end: null, key: keyOf(t) };
       entries.push(e);
@@ -301,11 +332,51 @@ function buildEntries(vm) {
   return entries;
 }
 
+/* 展开区最多摆这么多字符；再长去 `observe show <id> --body` 看 */
+const TEXT_LIMIT = 8000;
+function clip(s) {
+  return s.length > TEXT_LIMIT ? `${s.slice(0, TEXT_LIMIT)}\n…还有 ${s.length - TEXT_LIMIT} 字符（完整正文：observe show <run-id> --body）` : s;
+}
+/* content 档的正文字段拆成段落（参数 / 结果 / 报错 / 回复），并从原始 JSON 里拿掉，免得同一段正文出现两遍 */
+function contentSections(t, end) {
+  const secs = [];
+  const omit = new Set();
+  const start = t.body ?? {};
+  const fin = end?.body ?? {};
+  const add = (label, value, owner, key, tone) => {
+    if (value === undefined || value === null || value === "") return;
+    secs.push({ label, text: typeof value === "string" ? value : JSON.stringify(value, null, 2), tone });
+    omit.add(`${owner}.${key}`);
+  };
+  if (t.name === "tool.execute") {
+    add("参数", start.params, "body", "params");
+    add(fin.isError ? "报错" : "结果", fin.content, "end", "content", fin.isError ? "bad" : undefined);
+  } else if (t.name === "model.generate") {
+    add("回复", fin.text, "end", "text");
+    if (Array.isArray(fin.toolUseBlocks) && fin.toolUseBlocks.length > 0) add("工具调用", fin.toolUseBlocks, "end", "toolUseBlocks");
+    add("报错", fin.errorMessage, "end", "errorMessage", "bad");
+  } else if (t.name === "agent.message.appended") {
+    add(start.role === "user" ? "用户" : start.role === "toolResult" ? "工具结果" : "正文", start.text, "body", "text");
+  } else if (t.name === "agent.loop.ended") {
+    add("报错", start.errorMessage, "body", "errorMessage", "bad");
+  } else if (t.name === "context.compact" && Array.isArray(fin.spans)) {
+    const sums = fin.spans.filter((s) => typeof s.summary === "string");
+    if (sums.length > 0) add("摘要", sums.map((s) => `[${s.from}–${s.to}]\n${s.summary}`).join("\n\n"), "end", "spans");
+  }
+  const strip = (obj, owner) => {
+    if (obj === undefined || obj === null) return obj;
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) if (!omit.has(`${owner}.${k}`)) out[k] = v;
+    return out;
+  };
+  return { secs, strip };
+}
+
 function renderEntry(e, running, gaps) {
   const t = e.start;
   const end = e.end;
   const attrs = { ...t.attributes, ...(end?.attributes ?? {}) };
-  const { verb, obj } = verbFor(t.name, attrs);
+  const { verb, obj, arg } = verbFor(t.name, attrs, t.body);
   const term = LEX.records[t.name];
   const isTool = t.name === "tool.execute";
   const failed = (isTool && attrs.isError === true) || t.name.endsWith(".failed") || t.name.endsWith(".partial") || (t.name === "agent.loop.ended" && attrs.status === "error");
@@ -329,7 +400,12 @@ function renderEntry(e, running, gaps) {
   if (isOpen) cls.push("tl--open");
   const id = `${t.seq}`;
   const expanded = STATE.expanded.has(id) || (failed && !STATE.expanded.has(`-${id}`));
-  const detail = el("pre", { class: "tl-detail", hidden: !expanded }, JSON.stringify({ name: t.name, seq: t.seq, attributes: attrs, body: t.body, endBody: end?.body }, null, 2));
+  const { secs, strip } = contentSections(t, end);
+  const detail = el("div", { class: "tl-detail", hidden: !expanded });
+  for (const s of secs) detail.append(el("div", { class: `tl-sec${s.tone === "bad" ? " tl-sec--bad" : ""}` }, el("span", { class: "tl-sec-label", text: s.label }), el("pre", { class: "tl-text", text: clip(s.text) })));
+  const raw = { name: t.name, seq: t.seq, attributes: attrs, body: strip(t.body, "body"), endBody: strip(end?.body, "end") };
+  if (e.folded) raw.folded = e.folded;
+  detail.append(el("pre", { class: "tl-text", text: JSON.stringify(raw, null, 2) }));
   const row = el("div", {
     class: cls.join(" "), role: "button", tabindex: 0, title: term?.hint ?? t.name, "aria-expanded": expanded,
     onclick: () => { if (expanded) { STATE.expanded.delete(id); STATE.expanded.add(`-${id}`); } else { STATE.expanded.add(id); STATE.expanded.delete(`-${id}`); } renderDetail(); },
@@ -339,6 +415,7 @@ function renderEntry(e, running, gaps) {
       el("span", { class: "prefix", text: prefix }),
       el("span", { class: "verb", text: verb }),
       obj ? el("span", { class: "obj", text: obj }) : null,
+      arg ? el("span", { class: "arg", text: `"${arg}"` }) : null,
       el("span", { class: "en", text: t.name }),
     ),
     el("span", { class: "res", text: res }),
@@ -386,7 +463,8 @@ function renderDetail() {
   if (vm.assembly.slots.length === 0) chips.append(el("span", { class: "muted", text: vm.assembly.digest === "not-captured" ? "未上报" : "无" }));
   for (const s of vm.assembly.slots) chips.append(el("span", { class: "chip", title: `${s.entryId}@${s.entryGeneration}` }, s.slot));
   field("装配", chips);
-  field("采集档", el("span", { class: "mono", text: `${h.capturePolicy}${h.capturePolicy === "metadata" ? "（只有形状与计数，没有正文）" : ""}` }));
+  const captureNote = { metadata: "（只有形状与计数，没有正文；要看正文用 --observe content 起 agent）", content: "（含模型文本、工具参数与结果正文，明文）", off: "（只有 run 边界）" }[h.capturePolicy] ?? "";
+  field("采集档", el("span", { class: "mono", text: `${h.capturePolicy}${captureNote}` }));
   box.append(dl);
 
   box.append(el("h3", { text: "时间线" }));

@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 285（value 98 · type 169 · both 18）
+符号 286（value 98 · type 170 · both 18）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -233,11 +233,12 @@ both   ObservationStoreOpenError
 -- src/observability/store.ts (1) --
 both   ObservationCorruptionError
 
--- src/observability/types.ts (8) --
+-- src/observability/types.ts (9) --
 type   EchoObservationReader
 type   EchoObservations
 type   EchoRunResult
 type   ListRunsOptions
+type   ObservationCapturePolicy
 type   RunLookupResult
 type   RunObservation
 type   RunObservationHeader

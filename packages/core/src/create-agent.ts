@@ -34,6 +34,7 @@ import { BUILTIN_GENERATION } from "./extension/builtin.ts";
 import { sealAgentAssemblyObservation, type BuiltinSlotContribution } from "./observability/assembly.ts";
 import { attachObservationHost } from "./observability/host-wiring.ts";
 import { ObservationRuntime } from "./observability/runtime.ts";
+import type { ObservationCapturePolicy } from "./observability/types.ts";
 import { SqliteCanonicalObservationStore, observationDatabasePath } from "./observability/sqlite-store.ts";
 
 /** 默认身份（D5）。 */
@@ -41,8 +42,8 @@ const DEFAULT_AGENT_ID = "default";
 const LOCK_FILE = ".lock";
 /** §14 RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
 const RUNTIME_GENERATION = "boot";
-/** §15 OR9 的缺省 capture policy：metadata。content 要显式打开，O3a 不开这个口子。 */
-const OBSERVATION_CAPTURE_POLICY = "metadata" as const;
+/** §15 OR9 的缺省 capture policy：metadata。content 要调用方显式打开（`observation.capture`）。 */
+const DEFAULT_OBSERVATION_CAPTURE: ObservationCapturePolicy = "metadata";
 /**
  * 观测层唯一还会让 agent 等的地方是 `run.closed` 的有界等待（2026-09-03 用户拍板：观测不得影响 agent 主线）。
  * 正常一次 COMMIT 亚毫秒；磁盘卡住时最多等这么久就降级返回，不用 Sequencer 缺省的 5 s。
@@ -112,6 +113,16 @@ export type CreateAgentOptions = {
   credentials?: CredentialStore;
   /** 解析模型时是否允许联网刷新目录。缺省 `true`；离线环境给 `false`。 */
   allowNetwork?: boolean;
+  /**
+   * 观测（§15）。`capture` 是采集档（OR9），缺省 `"metadata"`：只记形状与计数——工具名、耗时、参数与结果的字节数、
+   * token 用量——没有正文。`"content"` 才把模型回复文本、工具 `params` 与结果正文、报错消息写进状态根的
+   * `observability/observations.sqlite`；`"off"` 只留 run 边界，不投影任何 fact。
+   *
+   * 打开 `"content"` 之前要知道的三件事（2026-09-04）：正文**明文落盘、不脱敏**（与会话记录同一状态根、同一暴露面）；
+   * 单条记录超 64 KiB 会成 gap、run 的 integrity 变 partial（长 bash 输出、大文件读取）；token 级 delta 逐条成记录，
+   * 一轮回复几百条，体积可观。
+   */
+  observation?: { capture?: ObservationCapturePolicy };
 
   /**
    * 其余一律透传给低层 `Agent`。
@@ -317,7 +328,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     const observation = new ObservationRuntime({
       runtimeId: `rt:${crypto.randomUUID()}`,
       runtimeGeneration: RUNTIME_GENERATION,
-      capturePolicy: OBSERVATION_CAPTURE_POLICY,
+      capturePolicy: opts.observation?.capture ?? DEFAULT_OBSERVATION_CAPTURE,
       store: observationStore,
       clock: opts.clock ?? systemClock,
       limits: { boundaryDeadlineMs: OBSERVATION_BOUNDARY_DEADLINE_MS },
