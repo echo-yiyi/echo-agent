@@ -29,7 +29,7 @@ import { EMPTY_COMPACTION, type CompactionReason, type CompactionState } from ".
 import { assertCompactionFits } from "../compaction/view.ts";
 import { assertSafePathSegment } from "../storage/path-safety.ts";
 import type { SessionData, SessionEntry, SessionInfo, SessionStore } from "./types.ts";
-import { writeSessionPhase, type SessionPhase } from "./status.ts";
+import { STATUS_FILE, writeSessionPhase, type SessionPhase } from "./status.ts";
 import type { Diagnostic } from "../errors.ts";
 
 /** entry 文件名的序号宽度。定长才能让字典序 = 时间序，`list()` 拿回来直接排序即可。 */
@@ -181,10 +181,15 @@ export class SessionService {
       updatedAt: now,
       messageCount: 0,
     };
-    // **新会话不写 meta**（2026-09-03，sessions.md §3）：起来一句话没说就退出的段，盘上不该留一个空目录，
-    // 否则会话列表很快被空段塞满、`--continue` 也会挑到它。meta 由第一次 `append` 顺带写出去
-    // （`bumpMeta` 本来就每次都刷），在那之前这一段只活在内存里。
-    this.cursors.set(sessionId, { nextSeq: 1, lastEntryId: null, info, metaWritten: false });
+    // **新会话立刻写 meta**（2026-09-04 改回）：一段正开着的 session 必须马上**被别人找得到**——
+    // 清单与 `session_send` 都按 meta 认人。此前把 meta 推迟到第一次入账，于是「刚打开的第二个终端」
+    // 在别人眼里根本不存在：`session_list` 里没有它，`send` 给它是 `not-found`（实测）。
+    // 那正好把「会话之间能互发消息」这条打掉了一半。
+    //
+    // 「不留空段」改由收摊时兜底：`discardIfUnused()`——一句话没说过就把 meta 撤掉，
+    // 它便不再进任何清单。目标没变，换了个不会误伤活人的做法。
+    await this.writeMeta(info);
+    this.cursors.set(sessionId, { nextSeq: 1, lastEntryId: null, info, metaWritten: true });
     this.openedId = sessionId;
     this.poisoned.delete(sessionId);
     return { info, messages: [], compaction: EMPTY_COMPACTION };
@@ -228,17 +233,27 @@ export class SessionService {
   }
 
   /**
-   * 把 meta 立刻落盘（2026-09-03）。**只给「替别人建的那一段」用**：`create` 出来的会话
-   * 是要交给另一个进程去跑的，它得**立刻在清单里看得见**，否则 runner 还没接手就已经查无此段。
+   * 收摊时的兜底：**这一段一句话都没说过就把 meta 撤掉**（2026-09-04）。
    *
-   * 普通启动路径不用它——那种「一句话没说就退出」的段本来就不该在盘上留痕（见 `createOrResume`）。
+   * 撤掉之后它不再进任何清单（`listSessions` 认 meta），`--resume` 它也等于「没有这一段」——
+   * 与从前「空会话不落盘」是同一个结果，区别只在**它活着的时候是看得见的**：
+   * 别人能列到它、能给它带话，那是会话之间互发消息的前提。
+   *
+   * 只在**本实例一条 entry 都没写过**时动手，而且只删我们自己写出去的那两个文件
+   * （`meta.json` / `status.json`）——目录里别的东西（观测库）不归这里管。
+   * 未消费的 inbox 记录是另一道闸，由调用方（`Agent`）判：有人给它留了话就不该撤，
+   * 撤了那条留言就成了没人认领的孤儿。
+   *
+   * @returns 撤了没有。
    */
-  async commitMeta(sessionId: string): Promise<void> {
+  async discardIfUnused(sessionId: string): Promise<boolean> {
     const cursor = this.cursors.get(sessionId);
-    if (cursor === undefined) throw new Error(`会话未打开：${sessionId}——先 createOrResume`);
-    if (cursor.metaWritten) return;
-    await this.writeMeta(cursor.info);
-    cursor.metaWritten = true;
+    if (cursor === undefined || cursor.nextSeq !== 1 || !cursor.metaWritten) return false;
+    if (this.poisoned.has(sessionId)) return false; // 盘上状态没法裁决时不动它
+    await this.store.remove(META_FILE);
+    await this.store.remove(STATUS_FILE);
+    cursor.metaWritten = false;
+    return true;
   }
 
   /**
@@ -357,9 +372,6 @@ export class SessionService {
       updatedAt: Date.now(),
       messageCount: cursor.info.messageCount + added.filter((e) => e.kind === "message").length,
     };
-    // 新会话的 meta 在这里第一次落盘（`createOrResume` 有意不写，见那里）。写在 entry 之后：
-    // 先有 entry 再有 meta，崩在中间是「有 entries 没 meta」——`tryLoad` 认得这个形状并判红，
-    // 反过来「有 meta 没 entries」会被当成一段空会话，把已经写下的历史盖掉。
     await this.writeMeta(cursor.info);
     cursor.metaWritten = true;
   }

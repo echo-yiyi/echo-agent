@@ -120,10 +120,8 @@ test("Store 写失败 → settle() 抛，不是静默 resolve", async () => {
     list: async () => [],
   };
   const s = new SessionService(broken);
-  // 新建不写 meta（2026-09-03），所以第一次落盘是入账那一下：settle() 必须把它抛出来
-  await s.createOrResume("main");
-  await s.append("main", [{ kind: "message", message: userMessage("一") }]);
-  await expect(s.settle()).rejects.toThrow(/disk-down/);
+  // createOrResume 自己会因为写 meta 失败而抛（2026-09-04 起 meta 在新建那一刻就落）
+  await expect(s.createOrResume("main")).rejects.toThrow(/disk-down/);
 });
 
 test("append 期间写失败 → settle() 抛出第一个错误", async () => {

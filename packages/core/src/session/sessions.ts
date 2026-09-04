@@ -116,9 +116,8 @@ export class EchoSessions {
       workspace: input.workspace ?? self.workspace,
       main: input.main ?? true,
     });
-    // **先落 meta 再投消息**：反过来的话，runner 失败后要置 closed 时盘上还没有 meta 可改，
-    // 那条消息就成了没有归属的孤儿。`createOrResume` 有意不写 meta（空会话不留痕），所以这里显式写一次。
-    await svc.commitMeta(id);
+    // `createOrResume` 已经把 meta 写出去了（2026-09-04）：新建的那一段得**立刻在清单里看得见**，
+    // 否则 runner 还没接手它就已经查无此段。这里只等那次写落定。
     await svc.settle();
 
     try {

@@ -111,10 +111,12 @@ type SessionInfo = {
 
 三条不变量沿用：**每段一个写者**（lease）、**坏档判红不给半截**、**transcript 只增不改**。两条新规矩：
 
-- **空会话不落盘。** 新 id 的 `createOrResume` 只建内存游标，meta 在第一次 `append` 时才写。每次启动不再留一个空目录，列表不被空段塞满；`--resume` 一个从没说过话的 id 判红「不存在」。
+- **活着就找得到，空段收摊时撤掉**（2026-09-04 改）。meta 在 `createOrResume` 那一刻就写，所以一段**正开着**的 session 立刻在清单里、也发得进消息；「不留空段」由 `stop()` 兜底：这一段一条 entry 都没写过、inbox 里也没有待消费的记录，就把 `meta.json` 与 `status.json` 撤掉，它便不再进任何清单，`--resume` 它等于「没有这一段」。
+
+  **原来的做法（把 meta 推迟到第一次 `append`）是错的**，实测：B 正开着、还没说过话时，A 的 `session_list` 里没有它、`session_send` 给它是 `not-found`——「打开第二个终端、从第一个带句话过去」这一步直接断掉。目标（列表不被空段塞满）没变，换了个不会误伤活人的做法。
 - **名字来自第一条 user 消息的首行**（截 60 字），由 `echo.agent.hooks` 里的一个钩子在 `message_end` 时调 `rename` 写进 meta；core 只出 `rename`。以后要让模型起名，换钩子即可。**还没做**。
 
-`create()` 出来的段是例外：它是**替别人建的**，得立刻在清单里看得见（runner 还没接手就已经查无此段是错的），所以那条路显式 `commitMeta()`。
+`create()` 出来的段同理立刻可见——它是**替别人建的**，runner 还没接手就已经查无此段是错的。
 
 `/clear` 的语义改为：关掉当前一段（`status = closed`）、新建一段、壳 attach 过去。旧段留在盘上可 `--resume`。协议上的 `reset()` 因此没有消费者，删。**还没做**，代价见 §9 第 5 步。
 
@@ -300,7 +302,8 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 - **main**：非 main 的 session 工具表里没有 `session_create`；宿主 API 的 `create` 不受限。
 - **不越权**：inline 点名创建者池外的工具，`create` 判红、`~/.echo/sessions/` 下不多目录。
 - **`/clear` 落盘**：`/clear` 后旧段 `status = closed`，新段 id 不同；`--resume` 旧段回来的是清之前的对话，`--continue` 挑到的是新段。
-- **空会话**：启动即退出，`~/.echo/sessions/` 下不多目录。
+- **活着就找得到**：一段刚 `start()`、一句话没说的 session，在别的进程的 `session_list` 里在，`session_send` 给它是 `accepted`。
+- **空会话**：启动即退出，那一段不在清单里（meta 被撤）；但**有人给它留过话就不撤**——撤了那条留言就成了没人认领的孤儿。
 - **旧决策失效**：`~/.echo/agents/` 不再被创建；`docs` 门与 API 快照重录。
 
 ## 11. 判据落在哪一层测试

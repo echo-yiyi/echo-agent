@@ -114,6 +114,18 @@ test("create：runner 抛错 / 超时 → 判红，且那一段置 closed，不�
   expect((await listSessions(hung.root)).map((i) => i.status)).toEqual(["closed"]);
 });
 
+test("刚起来、一句话没说的那段也发得到（活着就找得到，2026-09-04）", async () => {
+  // 这条对应的是实测过的那个断点：B 正开着但没说过话 → A 的清单里没有它、send 给它 not-found，
+  // 「打开第二个终端、从第一个带句话过去」这一步直接断掉。
+  const h = harness();
+  const svc = new SessionService(scoped(h.root, "s-fresh/"));
+  await svc.createOrResume("s-fresh", { workspace: "/repo", agent: "echo-agent" }); // 只 start，不说话
+  h.alive.add("s-fresh");
+
+  expect((await h.sessions.list()).map((r) => r.id)).toContain("s-fresh");
+  expect(await h.sessions.send("s-fresh", "在吗")).toMatchObject({ kind: "accepted", alive: true });
+});
+
 test("send：往对方 inbox 落盘一条；对方活着就说活着，没进程就是留言", async () => {
   // 「同进程直接投内存队列」的抄近路会让同进程与跨进程成为两套语义——所以这里盯的是**盘上**有没有。
   const h = harness();
@@ -274,7 +286,13 @@ test("工具面：list 把「活着 / 在忙 / 没进程」说清楚；一段都
 
   await seed(h.root, "s-peer");
   expect(String((await list.execute({} as never, ctx())).content)).toContain("not running");
+  // 活着但状态还没落盘 = **不知道**，不能说成「空闲」：模型会据此以为马上有答复
   h.alive.add("s-peer");
+  const unknown = String((await list.execute({} as never, ctx())).content);
+  expect(unknown).toContain("running");
+  expect(unknown).not.toContain("running, idle");
   await writeSessionPhase(scoped(h.root, "s-peer/"), "working");
   expect(String((await list.execute({} as never, ctx())).content)).toContain("running, busy");
+  await writeSessionPhase(scoped(h.root, "s-peer/"), "idle");
+  expect(String((await list.execute({} as never, ctx())).content)).toContain("running, idle");
 });

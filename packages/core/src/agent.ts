@@ -2609,6 +2609,16 @@ export class Agent {
     // 在飞的 inbox 落盘、会话的未 settle 写——**都必须在关存储之前**
     await attempt(() => this.settleWrites());
     await attempt(async () => await this.sessionService?.settle());
+    // **一句话都没说过的那段，收摊时把 meta 撤掉**（2026-09-04，sessions.md §3）：
+    // 起来就退出的会话不该留在别人的清单里、也不该被 `--continue` 挑中。
+    //
+    // 两道闸都必须过：本段没有任何 entry（`discardIfUnused` 自己判），以及
+    // **inbox 里没有待消费的记录**——有人给它留过话就不能撤，撤了那条留言就成了孤儿。
+    // 撤在 settle 之后：先把该落的落完，再决定这一段算不算数。
+    if (this.inbox.pendingCount === 0) {
+      const id = this._state.sessionId;
+      if (id !== null) await attempt(async () => void (await this.sessionService?.discardIfUnused(id)));
+    }
 
     /* ③ 关一次。顺序保持（关存储有先后），但每一条都要试到。 */
     for (const d of this.finalDisposables) await attempt(() => d.dispose());

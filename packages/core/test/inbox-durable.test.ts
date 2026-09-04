@@ -618,7 +618,9 @@ test("record write 失败 → store-error，不入 pending、不进 index（之�
 test("崩溃恢复：投了没消费 → 换个进程 start() 时那条还在", async () => {
   const store = new InMemoryDir();
 
-  const first = await createAgent(opts(store));
+  // 同一个 store 就是**同一段 session 的目录**（2026-09-03），所以两个进程都点名同一个 id——
+  // 「换个进程续同一段」本来就是显式动作，各生成各的 id 是拿错了 store。
+  const first = await createAgent(opts(store, { sessionId: "crashed" }));
   await first.start();
   first.autoConsumeInbox = false; // 模拟「还没来得及消费」
   first.deliver(environmentMessage("定时任务到点了", "schedule", "s1"));
@@ -629,7 +631,7 @@ test("崩溃恢复：投了没消费 → 换个进程 start() 时那条还在", 
   // 旧版这里手动调了一次，等于绕过了「恢复之后会不会自己醒」这条判据——
   // 而那正是坏的：`start()` 只把 autoConsumeInbox 拨成 true，没有后续事件的话
   // 恢复出来的事实会永远躺在队列里（实测）。
-  const second = await createAgent(opts(store));
+  const second = await createAgent(opts(store, { sessionId: "crashed" }));
   await second.start();
   await new Promise((r) => setTimeout(r, 20)); // 给它自己醒来的机会
 

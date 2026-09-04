@@ -225,7 +225,7 @@ function failingAt(n: number): { dir: StorageDir } {
 test("写失败之后**不再继续落盘**，settle() 也不会自己变回绿", async () => {
   // 反证的是这条实测破坏：e1 写失败后 e2/e3 照样落盘（它们的 parentId 指向盘上不存在的 e1），
   // 而第二次 settle() 返回 resolved——调用方据此以为已经存下了。
-  const { dir } = failingAt(1); // 新建不写 meta（2026-09-03），所以第 1 次写就是第一条 entry
+  const { dir } = failingAt(2); // 1 是 createOrResume 写 meta，2 是第一条 entry
   const s = new SessionService(dir);
   await s.createOrResume("main");
 
@@ -250,7 +250,7 @@ test("**已经排在队里**的写也不许落盘——失败之后队列必须�
   // 上一条测的是「失败之后再 append 判红」，走的是 append 的前置闸。
   // 这条测的是另一半：三次 append 在第一次失败**浮出来之前**就已经排进链里了，
   // 那时前置闸帮不上忙，必须由链自己在中毒后停止执行。
-  const { dir } = failingAt(1); // 第 1 次写 = 第一批 entry → 失败
+  const { dir } = failingAt(2); // 1=meta，2=第一批 entry → 失败
   const s = new SessionService(dir);
   await s.createOrResume("main");
 
@@ -265,7 +265,7 @@ test("**已经排在队里**的写也不许落盘——失败之后队列必须�
 });
 
 test("中毒的会话重新 createOrResume 才解毒（那是人显式确认盘上状态的点）", async () => {
-  const { dir } = failingAt(1);
+  const { dir } = failingAt(2);
   const s = new SessionService(dir);
   await s.createOrResume("main");
   await s.append("main", [{ kind: "message", message: userMessage("一") }]);
@@ -445,7 +445,7 @@ test("一个 store 就是一段 session 的目录：在同一个 store 上开第
   await expect(s.createOrResume("b")).rejects.toThrow(/已经在管 'a'/);
 });
 
-test("listSessions()：扫上一层、只读 meta、按 updatedAt 降序；空会话不进清单；坏 meta 判红而不是静默少一条", async () => {
+test("listSessions()：扫上一层、只读 meta、按 updatedAt 降序；活着就看得见；坏 meta 判红而不是静默少一条", async () => {
   const root = new InMemoryDir();
   const s1 = new SessionService(scoped(root, "s-1/"));
   const s2 = new SessionService(scoped(root, "s-2/"));
@@ -454,8 +454,12 @@ test("listSessions()：扫上一层、只读 meta、按 updatedAt 降序；空�
   await s1.append("s-1", [{ kind: "message", message: userMessage("一") }]);
   await s1.settle();
 
-  // s-2 一句话没说：**不落 meta，也就不在清单里**——否则每次启动都往清单里塞一个空段
-  expect((await listSessions(root)).map((i) => i.id)).toEqual(["s-1"]);
+  // **一句话没说的 s-2 也在清单里**（2026-09-04）：它正开着，别人得找得到它才能给它带话。
+  // 此前把 meta 推迟到第一次入账，于是「刚打开的第二个终端」在别人眼里根本不存在（实测）。
+  expect((await listSessions(root)).map((i) => i.id).sort()).toEqual(["s-1", "s-2"]);
+  // 撤掉的条件是**一条 entry 都没写过**：s-1 说过话，撤不动
+  expect(await s1.discardIfUnused("s-1")).toBe(false);
+  expect((await listSessions(root)).map((i) => i.id).sort()).toEqual(["s-1", "s-2"]);
 
   await s2.append("s-2", [{ kind: "message", message: userMessage("二") }]);
   await s2.settle();
@@ -475,7 +479,7 @@ test("listSessions()：扫上一层、只读 meta、按 updatedAt 降序；空�
 test("恢复失败**不解毒**——此前抛错之后 append 仍被接受", async () => {
   // 实测破坏：createOrResume 因 entry 断链抛错，随后 append() 仍被接受、
   // settle() 还返回成功，继续往一个已确认损坏的会话里写。
-  const { dir } = failingAt(1);
+  const { dir } = failingAt(2);
   const s = new SessionService(dir);
   await s.createOrResume("main");
   await s.append("main", [{ kind: "message", message: userMessage("一") }]);
@@ -575,4 +579,20 @@ test("并发 append 的 messageCount 不丢更新（meta 是读改写，必须�
   const resumed = await new SessionService(new FileDir(dir)).createOrResume("main");
   // 并发读改写会让计数偏小：各自读到同一个旧值、各自加一、后写的盖掉先写的
   expect(resumed.info.messageCount).toBe(10);
+});
+
+test("收摊兜底：一句话都没说过的段撤掉 meta，从此不进清单；说过话的撤不动（2026-09-04）", async () => {
+  // 「空会话不留痕」的新做法：活着的时候看得见（别人才能给它带话），收摊时才决定它算不算数。
+  const root = new InMemoryDir();
+  const silent = new SessionService(scoped(root, "s-silent/"));
+  await silent.createOrResume("s-silent", { workspace: "/a", agent: "echo-agent" });
+  expect((await listSessions(root)).map((i) => i.id)).toEqual(["s-silent"]); // 开着的时候在
+
+  expect(await silent.discardIfUnused("s-silent")).toBe(true);
+  expect(await listSessions(root)).toEqual([]); // 收摊之后不在
+  expect(await silent.discardIfUnused("s-silent")).toBe(false); // 幂等：撤过了就不再撤
+
+  // 同一个 id 再打开 = 一段全新的会话（与「从没存在过」同一个结果）
+  const again = await new SessionService(scoped(root, "s-silent/")).createOrResume("s-silent", { workspace: "/b", agent: "echo-coding" });
+  expect([again.info.workspace, again.messages.length]).toEqual(["/b", 0]);
 });

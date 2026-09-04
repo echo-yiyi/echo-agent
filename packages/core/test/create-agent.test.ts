@@ -14,6 +14,7 @@ import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { scriptedDialect, scriptedStreamFn, textTurn } from "../src/testing.ts";
+import { environmentMessage } from "../src/messages.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import type { Model, Provider } from "../src/provider/types.ts";
 
@@ -170,7 +171,8 @@ test("缺省每次启动新建会话，各占一个目录；显式 sessionId 才
   expect(explicit.state.workspace).toBe("/repo/a"); // resume 以盘上为准
   await explicit.stop();
 
-  // 清单扫的是 session 目录的上一层；**a2 一句话没说，不在清单里**（空会话不落 meta）
+  // 清单扫的是 session 目录的上一层。**a2 一句话没说，收摊时把 meta 撤了**，所以不在清单里；
+  // 但它**活着的时候是在的**——下面那条判据盯的就是这一点（活着找不到 = 别人没法给它带话）。
   const listed = await listSessions(sessionsRoot);
   expect(listed.map((s) => [s.id, s.workspace, s.agent, s.main, s.status])).toEqual([
     [a.state.sessionId!, "/repo/a", "echo-coding", true, "active"],
@@ -597,4 +599,37 @@ test("单个 SKILL.md 读失败：诊断 + 跳过，别的 skill 照常发现，
   expect(notices.join("\n"), "读失败静默消失了").toContain("skill_load_failed");
   expect(notices.join("\n")).toContain("EIO 模拟");
   await agent.stop();
+});
+
+test("活着就找得到：刚起来、一句话没说的那段也在清单里；收摊之后才撤（2026-09-04）", async () => {
+  // 没有这条时实测过：meta 推迟到第一次入账才写，于是**刚打开的第二个终端在别人眼里根本不存在**
+  // ——`listSessions` 里没有它，`session_send` 给它是 not-found。「会话之间能互发消息」当场断一半。
+  const home = await mkdtemp(join(tmpdir(), "echo-visible-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const sessionsRoot = new FileDir(resolveSessionsRoot());
+
+  const silent = await createAgent({ provider, allowNetwork: false, workspace: "/repo/b" });
+  await silent.start();
+  const id = silent.state.sessionId!;
+  expect((await listSessions(sessionsRoot)).map((s) => s.id), "开着却找不到它").toContain(id);
+
+  await silent.stop(); // 一个字没说
+  expect((await listSessions(sessionsRoot)).map((s) => s.id), "收摊后没撤干净").not.toContain(id);
+});
+
+test("留过话的空会话不撤：撤了那条留言就成了没人认领的孤儿（2026-09-04）", async () => {
+  const home = await mkdtemp(join(tmpdir(), "echo-visible-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const sessionsRoot = new FileDir(resolveSessionsRoot());
+
+  const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo/b" });
+  await agent.start();
+  agent.autoConsumeInbox = false; // 留着不消费：模拟「刚投进来就退出」
+  const id = agent.state.sessionId!;
+  await agent.ingress.deliverDurable({ message: environmentMessage("有人给你留了话", "session", "s-x:1"), dedupeKey: "s-x:1" });
+  await agent.stop();
+
+  expect((await listSessions(sessionsRoot)).map((s) => s.id), "有人留了话，这段不该被撤").toContain(id);
 });

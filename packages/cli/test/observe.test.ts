@@ -102,10 +102,10 @@ test("last / show / export / health：跑一轮落盘后都读得到；stop 之�
   expect(result.observationPersistence).toBe("stored");
   const sid = echo.agent.state.sessionId!;
 
-  // 活 writer 旁边读（agent 还没 stop）。**点名那一段**：meta 是随入账一起刷的，
-  // 刚跑完这一瞬间它可能还在写队列里，「最近更新的那一段」要等它落定才看得见。
+  // 活 writer 旁边读（agent 还没 stop）。**不点名也行**：meta 在 start() 那一刻就写了（2026-09-04），
+  // 所以「最近更新的那一段」立刻就找得到。
   const last = io();
-  expect(await runObserve(["last", "--state-dir", dir, "--session", sid], "echo-agent", last)).toBe(0);
+  expect(await runObserve(["last", "--state-dir", dir], "echo-agent", last)).toBe(0);
   expect(last.out.text.startsWith(`Run ${result.runId} · completed · observation complete · `)).toBe(true);
   expect(last.out.text).toContain("Observation Health");
   expect(last.err.text).toBe("");

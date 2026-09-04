@@ -59,7 +59,9 @@ export function sessionToolsSection(opts: SessionToolsOptions): PromptSection {
 }
 
 function describe(row: SessionRow): string {
-  const where = row.alive ? (row.phase === "working" ? "running, busy" : "running, idle") : "not running";
+  // `phase` 为 null = **不知道**（它刚起来、状态还没落盘，或那份读不出来），不是「空闲」。
+  // 把不知道说成空闲，模型会以为「现在问它马上有答复」——这正是 `status.ts` 里那条不许猜的理由。
+  const where = !row.alive ? "not running" : row.phase === null ? "running" : row.phase === "working" ? "running, busy" : "running, idle";
   return `${row.id}  ${row.name}  [${row.agent}]  ${where}  ${row.workspace}`;
 }
 
