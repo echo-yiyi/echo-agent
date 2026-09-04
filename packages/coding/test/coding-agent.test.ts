@@ -1,6 +1,7 @@
 // coding-agent 的契约门:工具真动盘、权限真拦、装配整链真跑通。
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -9,6 +10,7 @@ import { createEcho, createProvider, createProviderStreams, type Echo, type Mode
 import { makeFsTools } from "../src/tools/fs.ts";
 import { makeBashTool } from "../src/tools/bash.ts";
 import { makeSearchTools } from "../src/tools/search.ts";
+import { htmlToText, makeWebTools } from "../src/tools/web.ts";
 import { codingPreset } from "../src/agent.ts";
 import { loadSkills } from "@echo-agent/core";
 import type { PermissionPolicy } from "../src/permission.ts";
@@ -357,9 +359,12 @@ test("responder:'host' → 真发出 permissionRequest,宿主答 allow 就落盘
 test("装配面:四类工具都在(fs/bash/搜索/任务清单);skill 目录空则不装 skill 工具", async () => {
   const echo = await echoWith({ permission: false });
   const names = [...echo.agent.tools.keys()];
-  for (const n of ["read_file", "write_file", "edit_file", "bash", "glob", "grep", "TaskCreate", "TaskList"]) {
+  for (const n of ["read_file", "write_file", "edit_file", "bash", "glob", "grep", "TaskCreate", "TaskList", "worktree_enter", "worktree_exit", "web_fetch"]) {
     expect(names).toContain(n);
   }
+  // 2026-09-03：worktree_exit / web_fetch 是延迟工具——在池里、不在菜单上，经 tool_search 取过才上
+  for (const n of ["worktree_exit", "web_fetch"]) expect(echo.agent.tools.get(n)?.deferred).toBe(true);
+  expect(echo.agent.tools.get("worktree_enter")?.deferred).toBeUndefined();
   // **2026-08-31：skill 工具现在恒在**。原判据是「零 skill 别装——空可选集白占 token」，
   // 那是低层 `new Agent()` 不给 skillStore 时的行为。走 `createEcho()` 拿到的是完整 Runtime，
   // 它按状态根装了 skillStore ⇒ 支持**创建** skill ⇒ 两件工具都装（池空也装，因为 create 用得上）。
@@ -415,4 +420,103 @@ test("`stop()` 先卸 Extension 再停 Agent：产品层那两条的 disposer �
   await echo.stop();
   expect(toolsWhenDisposed).toBe(0); // disposer 没跑过的话，这里是「工具还都在」
   await echo.stop(); // 幂等
+});
+
+/* ══════════ worktree 隔离 ══════════ */
+
+function sh(cwd: string, cmd: string[]): string {
+  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
+  if (r.exitCode !== 0) throw new Error(`${cmd.join(" ")} failed: ${r.stderr.toString()}`);
+  return r.stdout.toString().trim();
+}
+
+test("worktree 隔离（2026-09-03 拍板 B）：worktree_enter 开 worktree、切工作区、会话不断 → bash 从新目录起 → worktree_exit 回主检出并删掉", async () => {
+  sh(root, ["git", "init", "-q"]);
+  sh(root, ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+  const echo = await echoWith({ permission: false });
+  const run = (name: string, params: unknown, c: ToolExecutionContext = ctx()): Promise<{ isError: boolean; content: string }> =>
+    (echo.agent.tools.get(name) as unknown as { execute: (p: unknown, c: unknown) => Promise<{ isError: boolean; content: string }> }).execute(params, c);
+  const before = echo.agent.state.sessionId;
+
+  const entered = await run("worktree_enter", { name: "t1" });
+  expect([entered.isError, entered.content]).toEqual([false, expect.stringContaining("on new branch t1")]);
+  const wt = echo.agent.state.workspace;
+  expect(wt).toBe(join(await realpath(root), ".echo", "worktrees", "t1"));
+  expect(existsSync(join(wt, ".git"))).toBe(true);
+  expect(sh(wt, ["git", "rev-parse", "--abbrev-ref", "HEAD"])).toBe("t1");
+  expect(echo.agent.state.sessionId).toBe(before); // 会话不断
+  // 主检出的 git status 不把 worktree 目录当未跟踪文件
+  expect(await readFile(join(root, ".git", "info", "exclude"), "utf8")).toContain(".echo/worktrees/");
+  expect(sh(root, ["git", "status", "--porcelain"])).toBe("");
+
+  // 工具从新目录起：bash 的 cwd 状态按 workspace 重置
+  const inWt = { ...ctx(), workspace: wt };
+  const pwd = await run("bash", { command: "pwd" }, inWt);
+  expect(await realpath(pwd.content.trim())).toBe(await realpath(wt));
+  // 已经在 worktree 里：再进拒绝
+  expect((await run("worktree_enter", { name: "t2" }, inWt)).isError).toBe(true);
+
+  const left = await run("worktree_exit", { remove: true }, inWt);
+  expect([left.isError, left.content]).toEqual([false, expect.stringContaining("removed")]);
+  expect(echo.agent.state.workspace).toBe(root);
+  expect(existsSync(wt)).toBe(false);
+  expect(sh(root, ["git", "branch", "--list", "t1"])).toContain("t1"); // 分支留着
+  await echo.stop();
+});
+
+test("worktree_enter：不是 git 仓库、名字不合法都是 error，不动工作区", async () => {
+  const echo = await echoWith({ permission: false });
+  const enter = echo.agent.tools.get("worktree_enter") as unknown as { execute: (p: unknown, c: unknown) => Promise<{ isError: boolean; content: string }> };
+  const notRepo = await enter.execute({ name: "x" }, ctx());
+  expect([notRepo.isError, notRepo.content]).toEqual([true, expect.stringContaining("Not a git repository")]);
+  sh(root, ["git", "init", "-q"]);
+  const badName = await enter.execute({ name: "../x" }, ctx());
+  expect([badName.isError, badName.content]).toEqual([true, expect.stringContaining("Invalid worktree name")]);
+  expect(echo.agent.state.workspace).toBe(root);
+  await echo.stop();
+});
+
+/* ══════════ web_fetch ══════════ */
+
+test("web_fetch：HTML 剥成文本（标题、标题级、链接、列表）；JSON 原样；非 2xx 与二进制是 error；max_chars 截断", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const p = new URL(req.url).pathname;
+      if (p === "/page") {
+        return new Response(
+          '<html><head><title>Hi &amp; bye</title><style>x{}</style></head><body><h1>Top</h1><p>Hello <a href="https://x.test/a">link</a> world</p><script>bad()</script><ul><li>one</li><li>two</li></ul></body></html>',
+          { headers: { "content-type": "text/html; charset=utf-8" } },
+        );
+      }
+      if (p === "/json") return Response.json({ a: 1 });
+      if (p === "/bin") return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "application/octet-stream" } });
+      return new Response("nope", { status: 404 });
+    },
+  });
+  try {
+    const [fetchTool] = makeWebTools() as [ModelTool<{ url: string; max_chars?: number }>];
+    const base = `http://127.0.0.1:${server.port}`;
+    const page = await fetchTool.execute({ url: `${base}/page` }, ctx());
+    expect([page.isError, page.content]).toEqual([false, "Hi & bye\n\n# Top\nHello [link](https://x.test/a) world\n- one\n- two"]);
+    const json = await fetchTool.execute({ url: `${base}/json` }, ctx());
+    expect([json.isError, json.content]).toEqual([false, '{"a":1}']);
+    const missing = await fetchTool.execute({ url: `${base}/missing` }, ctx());
+    expect([missing.isError, missing.content]).toEqual([true, expect.stringContaining("HTTP 404")]);
+    const bin = await fetchTool.execute({ url: `${base}/bin` }, ctx());
+    expect([bin.isError, bin.content]).toEqual([true, expect.stringContaining("Unsupported content type")]);
+    const short = await fetchTool.execute({ url: `${base}/page`, max_chars: 8 }, ctx());
+    expect([short.isError, short.content.startsWith("Hi & bye\n…[truncated")]).toEqual([false, true]);
+    const bad = await fetchTool.execute({ url: "ftp://x" }, ctx());
+    expect(bad.isError).toBe(true);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("htmlToText：实体、注释、noscript、相对链接只留文字、多余空行折叠", () => {
+  const out = htmlToText(
+    "<!-- c --><div>A&nbsp;&lt;b&gt;&#39;q&#x27;</div><noscript>no</noscript>\n\n\n<p><a href='/rel'>rel</a> <a href='https://h.test'>https://h.test</a></p><table><tr><td>1</td><td>2</td></tr></table>",
+  );
+  expect(out).toBe("A <b>'q'\n\nrel https://h.test\n1 2"); // 源码里的连续空行折成一个段落空行
 });

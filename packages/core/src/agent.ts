@@ -1310,7 +1310,7 @@ export class Agent {
         this._state.messages = [...data.messages];
         this._state.compaction = data.compaction;
         this._state.sessionId = data.info.id;
-        this._state.workspace = data.info.workspace; // resume 以盘上为准
+        this._state.workspace = data.workspace; // resume 以盘上为准：最后一条 workspace entry，没切过 = 开会话的目录
         await this.hooks.notify(
           {
             type: "sessionStart",
@@ -1961,11 +1961,28 @@ export class Agent {
     this._state.messages = [...data.messages];
     this._state.compaction = data.compaction;
     this._state.sessionId = data.info.id;
-    this._state.workspace = data.info.workspace;
+    this._state.workspace = data.workspace;
     await this.hooks.notify(
       { type: "sessionStart", sessionId: data.info.id, resumed: true, messageCount: data.messages.length },
       this.hookContext(),
     );
+  }
+
+  /**
+   * 切工作目录（2026-09-03 用户拍板：worktree 隔离走 core 的口，**会话不断**）。
+   * 只换 `AgentState.workspace` 并入账一条 `workspace` entry——resume 以最后一条为准；`SessionInfo.workspace`
+   * （会话开在哪）不动，那是会话身份的一维（`--continue` 按它找）。
+   * **不守 idle**：调用方通常是工具（`worktree_enter`），它就在轮中途。生效点是下一次工具执行
+   * （loop 每次执行都现读 `workspace`，见 `createLoopConfig`）与下一轮的 prompt 装配（本轮 system 已冻结）。
+   * core 不解释路径：是不是目录、存不存在由调用方先看；这里只拒空串。
+   */
+  async setWorkspace(workspace: string): Promise<void> {
+    if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必须是非空字符串（宿主给绝对路径）");
+    if (workspace === this._state.workspace) return;
+    this._state.workspace = workspace;
+    const id = this._state.sessionId;
+    if (id === null) return;
+    await this.appendEntries(id, [{ kind: "workspace", at: Date.now(), workspace }]);
   }
 
   private requireSessions(): SessionManager {
@@ -2440,6 +2457,7 @@ export class Agent {
   /** 循环的入参：装备来自这次 admission 冻结的 binding（§14.2.4 model seam），不再读 Agent 的活字段。 */
   private createLoopConfig(scope: AgentAdmissionExecuteScope): AgentLoopConfig {
     const binding = scope.modelBinding;
+    const state = this._state; // 给下面 workspace 的 getter 用：切目录在轮中途发生，要现读
     return {
       model: binding.model as Model, // RunModelSnapshot 与 Model 同形——JSON-like 的冻结副本
       runId: scope.runId,
@@ -2485,7 +2503,10 @@ export class Agent {
         getStages: () => [...this.compactionStages.values()],
         calibration: this.lastCalibration,
       },
-      workspace: this._state.workspace,
+      // **现读**：`setWorkspace()`（worktree 隔离）在轮中途改它，下一次工具执行就要看到新目录
+      get workspace() {
+        return state.workspace;
+      },
     };
   }
 
@@ -2913,7 +2934,11 @@ export class Agent {
       parts.push({ kind: "error", at: Date.now(), error: input.outcome.error });
     }
     if (parts.length === 0) return;
+    await this.appendEntries(id, parts);
+  }
 
+  /** 入账的唯一出口：`persist()`（事件驱动）与 `setWorkspace()`（显式切换）都走这里。 */
+  private async appendEntries(id: string, parts: SessionEntryInput[]): Promise<void> {
     if (this.sessionService !== undefined) {
       await this.sessionService.append(id, parts);
       return;

@@ -30,18 +30,28 @@ export type BashDeps = {
   background?: AgentBackground;
 };
 
-/** shell 一组共享的状态:当前工作目录。`undefined` = 还没 cd 过,用 session 的 workspace。 */
-export type ShellState = { cwd: string | undefined };
+/**
+ * shell 一组共享的状态:当前工作目录,以及它是在哪个 workspace 下记的。`cwd` 为 `undefined` = 还没 cd 过,
+ * 用 session 的 workspace;workspace 变了(worktree 隔离切了目录)cwd 作废,从新 workspace 起。
+ */
+export type ShellState = { cwd: string | undefined; workspace: string | undefined };
 
 /** shell 一组的全部工具。`echo:shell` 注册的与 `codingAgentIdentity()` 列的是**同一份**,不各写各的名单。 */
 export function makeShellTools(deps: BashDeps = {}): ModelTool[] {
-  const state: ShellState = { cwd: undefined };
+  const state: ShellState = { cwd: undefined, workspace: undefined };
   return [makeBashTool(deps, state), jobOutputTool(deps), jobStopTool(deps)] as ModelTool[];
 }
 
-export function makeBashTool(deps: BashDeps = {}, state: ShellState = { cwd: undefined }): ModelTool<{ command: string; timeout_ms?: number; background?: boolean }> {
-  /** 本次命令从哪起：保留的目录还在就用它；被删了就退回 workspace，并把这件事告诉模型。 */
+export function makeBashTool(
+  deps: BashDeps = {},
+  state: ShellState = { cwd: undefined, workspace: undefined },
+): ModelTool<{ command: string; timeout_ms?: number; background?: boolean }> {
+  /** 本次命令从哪起：保留的目录还在就用它；workspace 换了或目录被删了就退回 workspace（后者要告诉模型）。 */
   const startDir = (workspace: string): { cwd: string; note: string } => {
+    if (state.workspace !== workspace) {
+      state.workspace = workspace;
+      state.cwd = undefined;
+    }
     if (state.cwd === undefined) return { cwd: workspace, note: "" };
     if (existsSync(state.cwd)) return { cwd: state.cwd, note: "" };
     const gone = state.cwd;

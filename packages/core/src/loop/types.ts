@@ -142,7 +142,7 @@ export interface AgentLoopConfig {
   retryPolicy: RetryPolicy;
   compaction: LoopCompactionConfig;
 
-  /** 透传给工具的 `ToolExecutionContext.workspace`。 */
+  /** 透传给工具的 `ToolExecutionContext.workspace`。**每次工具执行现读**（agent 给的是 getter）：轮中途切目录要立刻生效。 */
   workspace: string;
 }
 

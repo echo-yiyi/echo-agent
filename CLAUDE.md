@@ -14,7 +14,7 @@ This is not a license to widen the change: before altering a public API, a persi
 |---|---|
 | `packages/core/` | Runtime, engine, provider adapters, state, memory, tasks, and the extension API |
 | `packages/cli/` | `echo-agent`: the general agent product, official CLI and interactive TUI; a consumer of the high-level assembly that knows no specific product |
-| `packages/coding/` | `echo-coding`: the coding agent product; depends on `packages/cli` and mounts its own `echo:workspace` / `echo:shell` |
+| `packages/coding/` | `echo-coding`: the coding agent product; depends on `packages/cli` and mounts its own `echo:workspace` / `echo:shell` / `echo:worktree` / `echo:web` |
 | `examples/` | Runnable samples that consume the public API from tarballs |
 | `test/` | Repository-level distribution and documentation gates |
 | `scripts/` | Inventory, documentation checks, and repository tooling |

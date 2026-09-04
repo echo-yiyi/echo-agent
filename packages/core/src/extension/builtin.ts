@@ -435,6 +435,15 @@ export function agentRuntimeOf(agent: RuntimeSource): AgentRuntime {
       }),
     reset: () => equip(() => agent.reset()),
     compact: (instructions) => agent.compact(instructions),
+    // 切工作目录：Agent 只拒空串 / 入账失败，这里把抛出的原因带出去
+    setWorkspace: async (workspace) => {
+      try {
+        await agent.setWorkspace(workspace);
+        return { kind: "accepted" };
+      } catch (e) {
+        return { kind: "rejected", reason: errText(e) };
+      }
+    },
     get acceptsWork() {
       return agent.acceptsWork;
     },
@@ -453,4 +462,6 @@ export type RuntimeSource = Pick<
   reset(): void;
   /** 手动压缩：Agent 自己不抛、返回结果（忙 / 没阶段都是 rejected），这里只转发。 */
   compact(instructions?: string): Promise<CompactResult>;
+  /** 切工作目录（worktree 隔离）：跑着也能换，抛只在空串 / 入账失败。 */
+  setWorkspace(workspace: string): Promise<void>;
 };

@@ -36,14 +36,17 @@ export type SessionEntry = {
   /** 一次压缩之后的**整个**状态（不是增量）：恢复只取最后一条。下标与运行时同一套。 */
   | { kind: "compaction"; at: number; reason: CompactionReason; compaction: CompactionState }
   | { kind: "error"; at: number; error: AgentError }
+  /** 工作目录切换（2026-09-03，worktree 隔离）：过程事实，恢复取最后一条；一条都没有 = `SessionInfo.workspace`。 */
+  | { kind: "workspace"; at: number; workspace: string }
 );
 
 export type SessionInfo = {
   readonly id: string;
   readonly name: string;
   /**
-   * 这个 session 在哪个目录里干活（2026-09-01 起是 **session 级事实**）：文件工具的边界与起点、
-   * prompt 里的 `{{workspace}}`。新建时由宿主给（绝对路径），resume 时以盘上为准。
+   * 这个 session **开在**哪个目录（2026-09-01 起是 **session 级事实**，也是会话身份的一维：`--continue`
+   * 按 workspace + agent 找）。新建时由宿主给（绝对路径），之后**不变**——中途切目录（worktree 隔离，
+   * 2026-09-03）记成 `workspace` entry，当前目录看 `SessionData.workspace`。
    * **必填**：没有它的 meta 是坏档，resume 判红（pre-release，不留可选兼容）。
    */
   readonly workspace: string;
@@ -80,6 +83,8 @@ export type SessionData = {
   readonly messages: AgentMessage[];
   /** 最后一次压缩之后的视图状态；没压过 = `EMPTY_COMPACTION`。 */
   readonly compaction: CompactionState;
+  /** 当前工作目录：最后一条 `workspace` entry；没切过 = `info.workspace`。文件工具的边界与起点、`{{workspace}}` 读它。 */
+  readonly workspace: string;
 };
 
 export interface SessionManager {
@@ -121,12 +126,14 @@ export class InMemorySessionManager implements SessionManager {
     if (s === undefined) throw new Error(`会话不存在：${id}`);
     const messages: AgentMessage[] = [];
     let compaction: CompactionState = EMPTY_COMPACTION;
+    let workspace = s.info.workspace;
     for (const e of s.entries) {
       if (e.kind === "message") messages.push(e.message);
       else if (e.kind === "compaction") compaction = e.compaction;
+      else if (e.kind === "workspace") workspace = e.workspace;
     }
     assertCompactionFits(messages, compaction, `会话 ${id} 的 compaction`);
-    return { info: s.info, messages, compaction };
+    return { info: s.info, messages, compaction, workspace };
   }
 
   async list(): Promise<SessionInfo[]> {

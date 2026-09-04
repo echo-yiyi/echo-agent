@@ -134,6 +134,14 @@ export interface AgentRuntime {
   compact(instructions?: string): Promise<CompactResult>;
 
   /**
+   * 切工作目录（2026-09-03 用户拍板：worktree 隔离走这个口，**会话不断**）。与其余「换」不同，**跑着也能换**——
+   * 调用方通常是轮中途的工具（`worktree_enter`）。改的是 `state.workspace`：下一次工具执行与下一轮 prompt 装配
+   * 生效（本轮 system 已冻结）；入账一条 `workspace` entry，resume 以最后一条为准，会话身份（开在哪）不动。
+   * core 不解释路径，存不存在调用方先看；`rejected` 只在空串或入账失败。
+   */
+  setWorkspace(workspace: string): Promise<EquipResult>;
+
+  /**
    * 现在能不能收新输入。**壳子必须读它而不是自己猜**：
    * 「忙不忙」的判据牵涉 `activeRun` / permit 落位 / Inbox ack 裁决 / 相位，
    * 全都不在公共面上——壳子自己维护一份必然漂（那是 review 连折腾四轮的东西）。
