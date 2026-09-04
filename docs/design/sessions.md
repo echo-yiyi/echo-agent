@@ -116,7 +116,7 @@ type SessionInfo = {
 
 `create()` 出来的段是例外：它是**替别人建的**，得立刻在清单里看得见（runner 还没接手就已经查无此段是错的），所以那条路显式 `commitMeta()`。
 
-`/clear` 的语义改为：关掉当前一段（`status = closed`）、新建一段、壳 attach 过去。旧段留在盘上可 `--resume`。协议上的 `reset()` 因此没有消费者，删。
+`/clear` 的语义改为：关掉当前一段（`status = closed`）、新建一段、壳 attach 过去。旧段留在盘上可 `--resume`。协议上的 `reset()` 因此没有消费者，删。**还没做**，代价见 §9 第 5 步。
 
 ## 4. agent 是 extension
 
@@ -272,7 +272,13 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 4. **工具（大部分已实现，2026-09-03）**：`echo:sessions` 四个工具（`session_create` / `session_list` /
    `session_send` / `session_close`）与它们的习惯段；两条挂载条件在装配层判——**main 且容器给了
    `SessionRunner` 才挂 `session_create`**，是不是 main 读盘上的 meta。**还没做**：`wait`、命名钩子。
-5. **壳**：`--continue` 新筛选；`/clear`；`/sessions`。
+5. **壳**（`--continue` 的新筛选已随第 1 步实现）：`/clear`、`/sessions` 还没做。
+
+   **`/clear` 为什么没顺手做**：它要「关掉当前一段、开新的一段、attach 过去」，而 attach 就是**换一个
+   `Agent` 实例**——lease、inbox、tasks、schedule、观测库都得跟着重来。这在今天的壳里意味着
+   `runInteractive` 拆开重建 `Echo`、`app.ts` 闭包里的 `agent` 变成可换的，是一次 TUI 重构，
+   不该顺手塞进会话这条线。在那之前 `/clear` 仍是 `reset()`：只清内存、盘上那段照旧，
+   `--resume` 回来还是清之前的对话——这条**已知不一致**记在这里，别当它已经解决。
 
 ## 10. 验收判据
 
@@ -295,13 +301,13 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 ## 11. 判据落在哪一层测试
 
-四层，每层用已有的夹具，只有跨进程那层要加一个 phase。§10 的每条判据都能归到其中一层。
+四层。§10 的每条判据都能归到其中一层；跨进程那层 2026-09-03 新加了一个夹具。
 
 | 层 | 夹具 | 落哪些判据 |
 |---|---|---|
 | **单元（`InMemoryDir`，零盘）** | `packages/core/test/session-service.test.ts`、`inbox-durable.test.ts`（含 durable ingress 的 conformance suite）、`extension-host.test.ts`、`create-agent.test.ts` | 布局扁平化与 `list()` 扫上级目录；空会话延迟写 meta；meta 的 `agent` / `main` / `status` 验形；**多写者不撞号**（两个 `InboxStore` 实例对同一个 `StorageDir` 各投 100 条）；`watch` 命中即消费、超时不消费；bundle 的拓扑装卸与整代回滚；三层作用域解析与 `workspace.json` 校验；inline 不越权判红、快照只能收紧 |
 | **单进程集成（真盘，脚本化 provider）** | `create-agent.test.ts` 的 `fakeProvider`、`packages/cli/test/cli.test.ts` 的 `scriptedProvider`：脚本让模型按顺序调 `session_create` / `session_send` | 同一个容器里两段互发、先落盘再投、ack marker；`wait` 的回信不双送；runner 失败 / 超时判红并置 closed、成功时 `alive = true`；非 main 的工具表；`alive = false` 则 `phase = null` |
-| **跨进程（真 spawn）** | `packages/core/test/resident-v0.test.ts` 与 `fixtures/resident-host.ts`：已经会按 phase 起真进程、末行吐 JSON 报告；**加一个 phase**，两个进程各一段、同一个 `ECHO_HOME` | 两个 `start()` 都成功、各自的 `.lock`；A 发 B 不重启看到（目录 watch）；B 在 working 被杀后 A 列表里 `alive = false`；留言之后 `--resume` 第一轮看到。注意这条测试的 replay 阶段本来就有 ack 裁决窗口的抖动，新 phase 不要落在那个窗口里 |
+| **跨进程（真 spawn，已实现）** | `packages/core/test/sessions-cross-process.test.ts` + `fixtures/session-peer.ts`：一个真进程起一段 session 然后**待着**，末行吐 JSON 报告 | 别的进程写进它 inbox 的一条，它不重启就看见（反证过：把轮询摘掉这条立刻红）；两段各拿各的锁、同时活着、收摊都还回去。留言之后 `--resume` 第一轮看到那条仍在 `resident-v0.test.ts` 里。注意 `resident-v0` 的 replay 阶段本来就有 ack 裁决窗口的抖动，别把新判据挂在那个窗口上 |
 | **壳（真 spawn `bin`）** | `cli.test.ts` 的 `spawnBin` | `--continue` 只挑 main 且 active；`/clear` 后旧段 closed、新段 main、`--resume` 旧段是清之前的对话；启动即退出不留目录；续了壳有提示 |
 
 改公共类型（`SessionInfo`、`Echo`、`CreateEchoOptions`、`ExtensionDefinition`）要重录 API 快照；新文件先 `git add` 再跑分发门。现有测试里与旧语义绑定的要**同一次改**，不留兼容：`inbox-durable.test.ts` 的「恢复之后接着排号」「序号未恢复就 accept 抛」两条随 record id 改写者生成而改写；`create-agent.test.ts` 的 D6 四条随状态根改写；`compaction.test.ts` 用旧 `SessionManager` 的三处改 `InMemoryDir + SessionService`。
