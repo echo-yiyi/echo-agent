@@ -182,6 +182,8 @@ test("**P0**：install 之后启动失败 → 先 revoke 再 release；旧 view 
     },
     seal: () => {},
     settle: async () => {},
+    setPhase: () => {},
+    attachDiagnostics: () => {},
   } as unknown as SessionService;
   const { agent, gate, view } = hostedAgent({ raw, lock, sessionService: broken });
 

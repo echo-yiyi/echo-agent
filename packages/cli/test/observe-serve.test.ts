@@ -43,34 +43,39 @@ function scripted(turns: ScriptedTurn[]): Provider {
 }
 
 async function echoAt(turns: ScriptedTurn[], extra: Partial<Parameters<typeof createEcho>[0]> = {}): Promise<Echo> {
-  const echo = await createEcho({ provider: scripted(turns), stateDir: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [], ...extra });
+  // `dir` 是**会话目录的上一层**（2026-09-03）：每段 session 一个状态根，观测库也跟着一段一份。
+  const echo = await createEcho({ provider: scripted(turns), sessionsRoot: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [], ...extra });
   running.push(echo);
   await echo.agent.start();
   return echo;
 }
 
-test("/api/runs 顺带给会话摘要：产品名与 workspace 按 sessionId 反查，两个产品共用一个状态根也分得开", async () => {
+test("/api/runs 顺带给会话摘要：产品名与 workspace 按 sessionId 反查", async () => {
+  // **观测库一段一份**（2026-09-03：状态根 = session 目录），所以一个 reader 只看得到那一段的 run。
+  // 这条盯的仍是「反查得到」：会话摘要从 session 目录的**上一层**扫，所以面板里出现的
+  // 任何 sessionId 都认得出产品名与 workspace——哪怕那一段不是本库这一段。
   const coding = await echoAt([textTurn("coding 说")], { agentName: "echo-coding", workspace: "/tmp/ws-coding" });
   const a = await coding.send("x");
+  const codingId = coding.agent.state.sessionId!;
   await coding.stop();
   const general = await echoAt([textTurn("agent 说")], { agentName: "echo-agent", workspace: "/tmp/ws-general" });
-  const b = await general.send("y");
-  const reader = await openObservationReader({ stateRoot: dir });
-  const server = startObserveServer({ reader, stateRoot: dir, port: 0 });
+  await general.send("y");
+  const generalId = general.agent.state.sessionId!;
+
+  const stateRoot = join(dir, codingId);
+  const reader = await openObservationReader({ stateRoot });
+  const server = startObserveServer({ reader, stateRoot, port: 0 });
   try {
     const page = (await (await fetch(`${server.url}/api/runs?limit=10`)).json()) as {
       items: { runId: string; sessionId: string | null }[];
       sessions: Record<string, { agent: string; workspace: string; name: string }>;
     };
     const runA = page.items.find((h) => h.runId === a.runId)!;
-    const runB = page.items.find((h) => h.runId === b.runId)!;
-    expect(runA.sessionId).not.toBeNull();
-    expect(runB.sessionId).not.toBeNull();
-    expect(runA.sessionId).not.toBe(runB.sessionId);
-    expect(page.sessions[runA.sessionId!]).toMatchObject({ agent: "echo-coding", workspace: "/tmp/ws-coding" });
-    expect(page.sessions[runB.sessionId!]).toMatchObject({ agent: "echo-agent", workspace: "/tmp/ws-general" });
-    // 只带这页用到的会话，不把整个状态根的会话表都吐出去
-    expect(Object.keys(page.sessions).sort()).toEqual([runA.sessionId!, runB.sessionId!].sort());
+    expect(runA.sessionId).toBe(codingId);
+    expect(page.sessions[codingId]).toMatchObject({ agent: "echo-coding", workspace: "/tmp/ws-coding" });
+    // 只带这页用到的会话，不把整层的会话表都吐出去——另一段在盘上，但这页没用到它
+    expect(Object.keys(page.sessions)).toEqual([codingId]);
+    expect(generalId).not.toBe(codingId);
   } finally {
     await server.stop();
     await reader.close();
@@ -88,8 +93,9 @@ test("content 档：/api/runs/<id> 的时间线带工具 params 与结果正文�
   };
   const echo = await echoAt([toolTurn("c1", "grep", { pattern: "observationTap" }), textTurn("没搜到。")], { observation: { capture: "content" }, agent: { tools: [grep] } });
   const r = await echo.send("搜一下");
-  const reader = await openObservationReader({ stateRoot: dir });
-  const server = startObserveServer({ reader, stateRoot: dir, port: 0 });
+  const stateRoot = join(dir, echo.agent.state.sessionId!); // 观测库一段一份
+  const reader = await openObservationReader({ stateRoot });
+  const server = startObserveServer({ reader, stateRoot, port: 0 });
   try {
     const vm = (await (await fetch(`${server.url}/api/runs/${r.runId}`)).json()) as {
       header: { capturePolicy: string };
@@ -151,8 +157,9 @@ test("页面自足：token CSS 与术语表内联，不引外部资源", () => {
 test("serve：/ 出页面，/api/runs、/api/runs/<id>、/api/health 出 reader 的真数据；未知 run 404；能停", async () => {
   const echo = await echoAt([textTurn("你好")]);
   const r = await echo.send("hi");
-  const reader = await openObservationReader({ stateRoot: dir });
-  const server = startObserveServer({ reader, stateRoot: dir, port: 0 });
+  const stateRoot = join(dir, echo.agent.state.sessionId!); // 观测库一段一份
+  const reader = await openObservationReader({ stateRoot });
+  const server = startObserveServer({ reader, stateRoot, port: 0 });
   try {
     expect(server.url.startsWith("http://127.0.0.1:")).toBe(true);
     const page = await fetch(`${server.url}/`);
@@ -173,7 +180,7 @@ test("serve：/ 出页面，/api/runs、/api/runs/<id>、/api/health 出 reader 
     expect((await fetch(`${server.url}/api/runs`, { method: "POST" })).status).toBe(405);
 
     const health = (await (await fetch(`${server.url}/api/health`)).json()) as { stateRoot: string; counts: { runs: number }; heads: unknown[] };
-    expect(health.stateRoot).toBe(dir);
+    expect(health.stateRoot).toBe(stateRoot);
     expect(health.counts.runs).toBe(1);
     expect(health.heads.length).toBe(1);
   } finally {

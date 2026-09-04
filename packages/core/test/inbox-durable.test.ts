@@ -22,6 +22,13 @@ import {
 import type { Provider } from "../src/provider/types.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 import type { DurableDeliveryResult } from "../src/inbox/ingress.ts";
+/**
+ * 造一个形状合法的 recordId：`<12 位十六进制毫秒>-<16 位十六进制随机>`（2026-09-03 起写者自己发号）。
+ * 测试要**确定性**的 id 才能断言顺序，所以这里把随机尾巴固定成序号。
+ */
+function rid(n: number): string {
+  return `${n.toString(16).padStart(12, "0")}-${"0".repeat(16)}`;
+}
 
 // 持久 Inbox（§13.9 第 10 条）：**已接受但未消费的入站事实，不因崩溃静默丢失**。
 //
@@ -58,10 +65,20 @@ function opts(store: StorageDir, extra: Record<string, unknown> = {}): never {
   } as never;
 }
 
+/** 盯可观测结果，不睡固定时长——轮询是异步的，`clock.advance()` 只是让它开始。 */
+async function waitFor(check: () => boolean, what: string, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`等超时：${what}`);
+}
+
 /** 盘上真正存在的 inbox recordId（不是内存账本的投影）。 */
 async function persistedIdsOf(dir: StorageDir): Promise<readonly string[]> {
   return (await dir.list("inbox/"))
-    .filter((p) => /inbox\/[0-9]{6}\.json$/.test(p))
+    .filter((p) => /inbox\/[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(p))
     .map((p) => p.slice("inbox/".length, -".json".length));
 }
 
@@ -302,7 +319,7 @@ function acceptedIdOf(outcome: InboxAcceptOutcome): string {
 }
 /** 盘上还剩哪些 record（不经账本，直接看文件）。 */
 async function recordFiles(dir: StorageDir): Promise<string[]> {
-  return (await dir.list("inbox/")).filter((p) => /inbox\/[0-9]{6}\.json$/.test(p)).sort();
+  return (await dir.list("inbox/")).filter((p) => /inbox\/[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(p)).sort();
 }
 async function ackFiles(dir: StorageDir): Promise<string[]> {
   return (await dir.list("inbox/acks/")).sort();
@@ -366,62 +383,64 @@ test("restore 从**全部 pending records** 重建 dedupe index：换实例后�
   expect(await recordFiles(dir)).toHaveLength(1);
 });
 
-test("恢复之后接着排号，不和盘上已有的撞；坏档抛错不吞", async () => {
+test("换实例之后发的号排在旧的后面、且不和盘上已有的撞；坏档抛错不吞", async () => {
   const dir = new InMemoryDir();
   const first = await ledger(dir);
-  await accept(first, "一", "k1");
-  await accept(first, "二", "k2");
+  const a = acceptedIdOf(await accept(first, "一", "k1"));
+  const b = acceptedIdOf(await accept(first, "二", "k2"));
+  expect(b > a).toBe(true); // 同一个写者：同毫秒计数器保证严格递增
+  await new Promise((r) => setTimeout(r, 2)); // 跨过一毫秒：不同写者之间只有时间戳能定序
   const second = await ledger(dir);
   const third = acceptedIdOf(await accept(second, "三", "k3"));
   const all = await new InboxStore(dir).restore();
   expect(all).toHaveLength(3);
-  expect(all[2]!.recordId).toBe(third);
+  expect(all.map((r) => r.recordId)).toEqual([a, b, third]); // 恢复顺序 = 投递顺序
   expect(new Set(all.map((r) => r.recordId)).size).toBe(3);
 
-  await dir.write("inbox/000001.json", "{ 半截");
+  await dir.write(`inbox/${rid(1)}.json`, "{ 半截");
   await expect(new InboxStore(dir).restore()).rejects.toThrow(/解不开/);
 });
 
 test("**P0**：序号还没从盘上恢复就 accept → 抛，不许盖掉已有记录；ready 为 false", async () => {
   const dir = new InMemoryDir();
-  await dir.write("inbox/000001.json", JSON.stringify({ id: "000001", message: environmentMessage("崩溃前那条", "x", "old"), at: 1 }));
+  await dir.write(`inbox/${rid(1)}.json`, JSON.stringify({ id: rid(1), message: environmentMessage("崩溃前那条", "x", "old"), at: 1 }));
   const fresh = new InboxStore(dir);
   expect(fresh.ready).toBe(false);
   await expect(accept(fresh, "新的", "k")).rejects.toThrow(/还没从盘上恢复/);
   const all = await new InboxStore(dir).restore();
-  expect(all.map((r) => r.recordId)).toEqual(["000001"]);
+  expect(all.map((r) => r.recordId)).toEqual([rid(1)]);
   expect(JSON.stringify(all[0]!.message)).toContain("崩溃前那条");
 });
 
 test("**P0**：伪造的 recordId 不能删掉别的状态资产", async () => {
   const dir = new InMemoryDir();
   await dir.write("tasks.json", "别动我");
-  await dir.write("inbox/000001.json", JSON.stringify({ recordId: "../tasks", dedupeKey: "k", message: userMessage("坏"), acceptedAt: 1 }));
+  await dir.write(`inbox/${rid(1)}.json`, JSON.stringify({ recordId: "../tasks", dedupeKey: "k", message: userMessage("坏"), acceptedAt: 1 }));
   await expect(new InboxStore(dir).restore()).rejects.toThrow(/不合法|对不上/);
   expect(await dir.read("tasks.json")).toBe("别动我");
 });
 
 test("legacy migration：{id, message, at} 就地迁成 V1；有 source/ref 的按事实身份派生 dedupeKey，没有的只按 recordId（不同旧事实绝不互相去重）", async () => {
   const dir = new InMemoryDir();
-  await dir.write("inbox/000001.json", JSON.stringify({ id: "000001", message: environmentMessage("到点了", "schedule", "s1"), at: 11 }));
-  await dir.write("inbox/000002.json", JSON.stringify({ id: "000002", message: environmentMessage("到点了", "schedule", "s1"), at: 12 }));
-  await dir.write("inbox/000003.json", JSON.stringify({ id: "000003", message: userMessage("没有身份的一条"), at: 13 }));
-  await dir.write("inbox/000004.json", JSON.stringify({ id: "000004", message: userMessage("没有身份的另一条"), at: 14 }));
+  await dir.write(`inbox/${rid(1)}.json`, JSON.stringify({ id: rid(1), message: environmentMessage("到点了", "schedule", "s1"), at: 11 }));
+  await dir.write(`inbox/${rid(2)}.json`, JSON.stringify({ id: rid(2), message: environmentMessage("到点了", "schedule", "s1"), at: 12 }));
+  await dir.write(`inbox/${rid(3)}.json`, JSON.stringify({ id: rid(3), message: userMessage("没有身份的一条"), at: 13 }));
+  await dir.write(`inbox/${rid(4)}.json`, JSON.stringify({ id: rid(4), message: userMessage("没有身份的另一条"), at: 14 }));
 
   const s = await ledger(dir);
   const migrated = await new InboxStore(dir).restore();
-  expect(migrated.map((r) => r.recordId)).toEqual(["000001", "000002", "000003", "000004"]);
+  expect(migrated.map((r) => r.recordId)).toEqual([rid(1), rid(2), rid(3), rid(4)]);
   expect(migrated[0]!.acceptedAt).toBe(11); // at → acceptedAt
   // 同 source/ref 的两条**都保留**，但新 delivery dedupe 到最早一条
   expect(migrated[0]!.dedupeKey).toBe(migrated[1]!.dedupeKey);
   // 没有稳定身份的两条各自独立
   expect(migrated[2]!.dedupeKey).not.toBe(migrated[3]!.dedupeKey);
   // 盘上已经是 V1（迁移 rewrite），再 restore 一次结果相同（幂等）
-  expect(JSON.parse((await dir.read("inbox/000001.json"))!)).toMatchObject({ recordId: "000001", acceptedAt: 11 });
+  expect(JSON.parse((await dir.read(`inbox/${rid(1)}.json`))!)).toMatchObject({ recordId: rid(1), acceptedAt: 11 });
   expect((await new InboxStore(dir).restore()).map((r) => r.dedupeKey)).toEqual(migrated.map((r) => r.dedupeKey));
   // 新 delivery 用同一 legacy key → 命中最早那条
   const hit = await s.accept({ message: environmentMessage("到点了", "schedule", "s1"), dedupeKey: migrated[0]!.dedupeKey });
-  expect(hit).toMatchObject({ kind: "accepted", recordId: "000001", deduplicated: true });
+  expect(hit).toMatchObject({ kind: "accepted", recordId: rid(1), deduplicated: true });
 });
 
 test("reservation：assertReserved 错序 / 不存在都抛；release 整批原序放回；新到的进下一批", async () => {
@@ -526,9 +545,9 @@ test("crash 矩阵：commit 后崩（marker 在、record 还在）→ restore �
 test("crash 矩阵：commit 前崩（没有 marker）→ 整批仍 pending，重启后重放", async () => {
   const dir = new InMemoryDir();
   const s = await ledger(dir);
-  await accept(s, "一", "k1");
+  const only = acceptedIdOf(await accept(s, "一", "k1"));
   s.reserveBatch(); // 崩在 ack 之前：reservation 只活在内存里
-  expect((await new InboxStore(dir).restore()).map((r) => r.recordId)).toEqual(["000001"]);
+  expect((await new InboxStore(dir).restore()).map((r) => r.recordId)).toEqual([only]);
 });
 
 test("marker 不可信（内容重算的 ackCommitId 与文件名对不上）→ restore seal + 抛，不猜", async () => {
@@ -555,7 +574,7 @@ test("recordId 复用防护：cleanup 没做完时，仍受 marker 保护的号�
     write: (p, c) => dir.write(p, c),
     list: (p) => dir.list(p),
     remove: async (p) => {
-      if (/inbox\/[0-9]{6}\.json$/.test(p)) throw new Error("删不掉");
+      if (/inbox\/[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(p)) throw new Error("删不掉");
       return dir.remove(p);
     },
   };
@@ -586,7 +605,7 @@ test("空 dedupeKey / 坏 message → invalid-request，不落盘", async () => 
 test("record write 失败 → store-error，不入 pending、不进 index（之后同 key 还能再投）", async () => {
   const inner = new InMemoryDir();
   let fail = true;
-  const dir = flaky(inner, { write: (p) => fail && /inbox\/[0-9]{6}\.json$/.test(p) });
+  const dir = flaky(inner, { write: (p) => fail && /inbox\/[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(p) });
   const s = await ledger(dir);
   expect(await accept(s, "一", "k1")).toMatchObject({ kind: "rejected", reason: "store-error" });
   expect(s.pendingCount).toBe(0);
@@ -599,7 +618,9 @@ test("record write 失败 → store-error，不入 pending、不进 index（之�
 test("崩溃恢复：投了没消费 → 换个进程 start() 时那条还在", async () => {
   const store = new InMemoryDir();
 
-  const first = await createAgent(opts(store));
+  // 同一个 store 就是**同一段 session 的目录**（2026-09-03），所以两个进程都点名同一个 id——
+  // 「换个进程续同一段」本来就是显式动作，各生成各的 id 是拿错了 store。
+  const first = await createAgent(opts(store, { sessionId: "crashed" }));
   await first.start();
   first.autoConsumeInbox = false; // 模拟「还没来得及消费」
   first.deliver(environmentMessage("定时任务到点了", "schedule", "s1"));
@@ -610,7 +631,7 @@ test("崩溃恢复：投了没消费 → 换个进程 start() 时那条还在", 
   // 旧版这里手动调了一次，等于绕过了「恢复之后会不会自己醒」这条判据——
   // 而那正是坏的：`start()` 只把 autoConsumeInbox 拨成 true，没有后续事件的话
   // 恢复出来的事实会永远躺在队列里（实测）。
-  const second = await createAgent(opts(store));
+  const second = await createAgent(opts(store, { sessionId: "crashed" }));
   await second.start();
   await new Promise((r) => setTimeout(r, 20)); // 给它自己醒来的机会
 
@@ -658,7 +679,7 @@ test("**P0**：伪造的 inbox id 不能删掉别的状态资产（legacy 形状
   const dir = new InMemoryDir();
   await dir.write("tasks.json", "[]");
   await dir.write(
-    "inbox/000001.json",
+    `inbox/${rid(1)}.json`,
     JSON.stringify({ id: "../tasks", message: environmentMessage("坏的", "x", "1"), at: 1 }),
   );
 
@@ -718,16 +739,17 @@ test("**P0**：inbox 落盘失败时，schedule 不许把它记成 fired", async
   await agent.stop();
 });
 
-test("**P0**：启动顺序不许让 cron 补跑盖掉盘上已有的 inbox", async () => {
-  // 实测破坏：`startSchedule()` 排在 `loadAll()` 之前——补跑会 deliver，而那时
-  // `nextSeq` 还是 1，写出的 000001 **盖掉盘上原有的 000001**（两条最后只剩一条）。
+test("**P0**：启动顺序不许让 cron 补跑绕过盘上已有的 inbox", async () => {
+  // 实测破坏：`startSchedule()` 排在 `loadAll()` 之前——补跑会 deliver，而那时盘还没读进来，
+  // 于是这条投递**绕过去重**、也会被随后的 restore 从内存里挤掉（撞名那一半在 2026-09-03
+  // 改成写者自己发号之后结构上已经不可能，但「先恢复再补跑」这条顺序仍是判据）。
   //
   // 判据必须真的让补跑投出去一条：cron 条目 + 上次触发在一小时以前。
   // 光有一条旧 inbox、没有 schedule 的话，这条路根本没被走到（第一版反证就这么漏的）。
   const store = new InMemoryDir();
   await store.write(
-    "inbox/000001.json",
-    JSON.stringify({ id: "000001", message: environmentMessage("崩溃前那条", "x", "old"), at: 1 }),
+    `inbox/${rid(1)}.json`,
+    JSON.stringify({ id: rid(1), message: environmentMessage("崩溃前那条", "x", "old"), at: 1 }),
   );
   await store.write(
     "schedules.json",
@@ -742,10 +764,12 @@ test("**P0**：启动顺序不许让 cron 补跑盖掉盘上已有的 inbox", as
   await agent.start();
   agent.autoConsumeInbox = false; // start() 会打开，这里关掉，别让它把证据吃了
 
-  // 两条都在：旧的没被盖，补跑那条排在 000002
+  // 两条都在：旧的没被挤掉，补跑那条排在它后面（id 前缀是时间戳，字典序 = 时间序）
   const all = await new InboxStore(store).restore();
-  expect(all.map((r) => r.recordId)).toEqual(["000001", "000002"]);
+  expect(all).toHaveLength(2);
+  expect(all[0]!.recordId).toBe(rid(1));
   expect(JSON.stringify(all[0]!.message)).toContain("崩溃前那条");
+  expect(all[1]!.recordId > all[0]!.recordId).toBe(true);
   await agent.stop();
 });
 
@@ -888,8 +912,8 @@ test("**P0**：schedule 那一拍卡在写 schedules.json 时 stop()，store 不
 test("锁很慢时（phase=starting、inbox 未恢复）的投递不会毁掉盘上的记录", async () => {
   const store = new InMemoryDir();
   await store.write(
-    "inbox/000001.json",
-    JSON.stringify({ id: "000001", message: environmentMessage("崩溃前那条", "x", "old"), at: 1 }),
+    `inbox/${rid(1)}.json`,
+    JSON.stringify({ id: rid(1), message: environmentMessage("崩溃前那条", "x", "old"), at: 1 }),
   );
 
   // acquire 卡住：start() 停在取锁那一步，此时 agent 已经能收投递
@@ -1061,7 +1085,7 @@ test("**P0**：restore 后半段（cleanup）失败 → restore reject 且 ready
   let boom = true;
   const dir: StorageDir = {
     read: async (p) => {
-      if (boom && /inbox\/[0-9]{6}\.json$/.test(p) && (await inner.read(p)) === null) throw new Error("读挂了");
+      if (boom && /inbox\/[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(p) && (await inner.read(p)) === null) throw new Error("读挂了");
       return inner.read(p);
     },
     write: (p, c) => inner.write(p, c),
@@ -1175,7 +1199,7 @@ test("message 规范化：形状不合法直接 invalid-request；accepted 之�
 
 test("errorDigest 是真 digest：16 位十六进制，不含错误原文", async () => {
   const inner = new InMemoryDir();
-  const dir = flaky(inner, { write: (p) => /inbox\/[0-9]{6}\.json$/.test(p) });
+  const dir = flaky(inner, { write: (p) => /inbox\/[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(p) });
   const s = await ledger(dir);
   const r = await accept(s, "一", "k1");
   expect(r.kind).toBe("rejected");
@@ -1184,22 +1208,67 @@ test("errorDigest 是真 digest：16 位十六进制，不含错误原文", asyn
   expect(digest).not.toContain("盘挂了");
 });
 
-test("序号耗尽：结构化 store-error + 封账本，不抛给调用方、也不产生 unhandled rejection", async () => {
+test("recordId 时间戳溢出：结构化 store-error + 封账本，不抛给调用方、也不产生 unhandled rejection", async () => {
   const unhandled: unknown[] = [];
   const onUnhandled = (e: unknown): void => {
     unhandled.push(e);
   };
+  const realNow = Date.now;
   process.on("unhandledRejection", onUnhandled);
   try {
     const s = new InboxStore(null);
-    (s as unknown as { nextSeq: number }).nextSeq = 1_000_000; // 定长 6 位的上限之外
-    expect(await accept(s, "一", "k1")).toMatchObject({ kind: "rejected", reason: "store-error", errorDigest: "sequence-exhausted" });
+    Date.now = () => 16 ** 12; // 定长 12 位十六进制毫秒的上限之外（公元 10889 年之后）
+    expect(await accept(s, "一", "k1")).toMatchObject({ kind: "rejected", reason: "store-error", errorDigest: "record-id-overflow" });
     expect(s.sealed).not.toBeNull();
     await new Promise((r) => setTimeout(r, 10));
     expect(unhandled).toEqual([]);
   } finally {
+    Date.now = realNow;
     process.off("unhandledRejection", onUnhandled);
   }
+});
+
+test("**P0**：别的写者投进来的一条，收方不重启就在下一轮吃掉（inbox 轮询）", async () => {
+  // 会话之间发消息 = 往对方的 inbox 目录写一条 record，写者常常是**另一个进程**。
+  // 没有这条时：`InboxStore` 只在 restore 那一刻读过盘，那条消息要等对方重启才被看见——
+  // 「A 发 B，B 不重启就收到」根本不成立，而这正是 agent 集群的最小可用形态。
+  const store = new InMemoryDir();
+  const clock = new FakeClock(0);
+  const agent = await createAgent(opts(store, { clock }));
+  await agent.start();
+  expect(agent.messages.length).toBe(0);
+
+  // **另一个写者**（同形态：跨进程就是另一个进程里的 InboxStore）往同一个目录里投一条
+  const other = new InboxStore(store);
+  await other.restore();
+  expect(await other.accept({ message: environmentMessage("HR 回你了", "session", "s-peer:1"), dedupeKey: "peer-1" })).toMatchObject({
+    kind: "accepted",
+  });
+
+  // 收方一个字都不用改、也不用重启：拨一拍轮询就看见了
+  clock.advance(1_000);
+  await waitFor(() => agent.messages.some((m) => JSON.stringify(m).includes("HR 回你了")), "收方没看见别人投进来的那条");
+  await agent.stop();
+});
+
+test("**P0**：多写者同时往一个 inbox 投，一条都不许被覆盖（recordId 由写者自己发）", async () => {
+  // 没有这条时实测破坏：recordId 由 Store 集中发号（6 位序号，restore 校准一次、之后内存递增），
+  // 于是**跨 session 发消息**的两个进程会写到同一个文件名上；`FileDir` 的写是 tmp + rename，
+  // 后到的静默覆盖先到的——at-least-once 当场变成无声丢失，而且没有任何地方会报错。
+  const dir = new InMemoryDir();
+  const a = await ledger(dir); // 两个独立实例 = 两个写者（跨进程的同形态）
+  const b = await ledger(dir);
+  const N = 100;
+  const ids = await Promise.all([
+    ...Array.from({ length: N }, (_, i) => accept(a, `a${i}`, `ka${i}`).then(acceptedIdOf)),
+    ...Array.from({ length: N }, (_, i) => accept(b, `b${i}`, `kb${i}`).then(acceptedIdOf)),
+  ]);
+  expect(new Set(ids).size).toBe(2 * N); // 发出去的号互不相同
+  expect(await recordFiles(dir)).toHaveLength(2 * N); // 盘上恰好这么多文件：一条都没被盖
+  const restored = await new InboxStore(dir).restore();
+  expect(restored).toHaveLength(2 * N); // 两个写者写的都读得回来
+  // 字典序 = 时间序：投递保序这条不因为换了 id 形状而破
+  expect([...restored].map((r) => r.recordId)).toEqual([...restored].map((r) => r.recordId).sort());
 });
 
 test("公共 schema 文件不含真实 NUL 字节（否则 git 当成 binary，整份 schema 没法按文本 review）", async () => {

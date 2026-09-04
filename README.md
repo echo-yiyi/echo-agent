@@ -22,7 +22,7 @@ printf 'Introduce yourself in one sentence.\n' |
   MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
 ```
 
-By default, persistent state lives at `$ECHO_HOME/agents/<id>`, or `~/.echo/agents/<id>` when `ECHO_HOME` is unset — one agent across all your directories, with a separate conversation per working directory. Use `--state-dir <path>` to override the complete state directory.
+Each session is its own state root: `$ECHO_HOME/sessions/<session-id>`, or `~/.echo/sessions/<session-id>` when `ECHO_HOME` is unset. Its conversation log, inbox, task list, schedules and lock all live there, so two sessions run side by side without fighting over a lock. Memory and skills are shared across sessions and live one level up, at `$ECHO_HOME`. Use `--state-dir <path>` to put session directories somewhere else.
 
 ## Two products
 
@@ -62,7 +62,7 @@ Select a provider with `--provider`; override its default model with `--model`.
 
 The MiniMax adapter is covered by fixtures but has not yet been exercised against the live service.
 
-Use repeatable `--extensions <directory>` flags to choose the extension search directories; with no flag, the CLI searches `./extensions`. Pass `--no-memory` to omit Memory and Dream, or `--agent-id <id>` to choose the persistent agent identity.
+Use repeatable `--extensions <directory>` flags to choose the extension search directories; with no flag, the CLI searches `./extensions`. Pass `--no-memory` to omit Memory and Dream, or `--agent-id <id>` to choose the identity recorded as the lock holder.
 
 Every launch starts a new session. `--continue` resumes the latest session of this command in the current directory; `--resume <id>` resumes a specific one. A session belongs to a directory and a command, so `echo-agent` and `echo-coding` never share a conversation even in the same directory, and a resumed session announces how many messages it brought back.
 

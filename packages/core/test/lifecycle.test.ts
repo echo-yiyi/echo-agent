@@ -29,7 +29,7 @@ function provider(): Provider {
 }
 
 function opts(store: StorageDir, extra: Record<string, unknown> = {}): never {
-  // sessionId 显式给 "main"：下面有测试直接操作 `sessions/main/…` 路径；缺省 id 现在按 workspace 派生
+  // sessionId 显式给 "main"：下面有测试直接操作 `meta.json` / `entries/…`；缺省每次启动是新的一段
   return { provider: provider(), store, lock: new InMemoryStateLock(), allowNetwork: false, sessionId: "main", ...extra } as never;
 }
 
@@ -79,7 +79,7 @@ test("start() 中途失败：lease 还回去，**且不留野定时器**", async
   const lock = new InMemoryStateLock();
   const clock = new FakeClock(0);
   const store = new InMemoryDir();
-  await store.write("sessions/main/meta.json", "不是 json"); // 让 createOrResume 炸
+  await store.write("meta.json", "不是 json"); // 让 createOrResume 炸
 
   const a = await createAgent(opts(store, { lock, clock }));
   await expect(a.start()).rejects.toThrow(/meta\.json 解不开/);

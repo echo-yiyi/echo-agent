@@ -12,6 +12,11 @@ import { makeSearchTools } from "../src/tools/search.ts";
 import { codingPreset } from "../src/agent.ts";
 import { loadSkills } from "@echo-agent/core";
 import type { PermissionPolicy } from "../src/permission.ts";
+import { mkdtempSync } from "node:fs";
+
+// **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
+// 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
 let root: string;
 beforeEach(async () => {

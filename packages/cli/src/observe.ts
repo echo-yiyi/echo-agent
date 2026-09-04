@@ -9,14 +9,19 @@
 // **只调 `openObservationReader()`**：read-only SQLite 连接，不 `createEcho()`、不取 Agent StateLock、不起第二个 Agent；
 // 活 writer（正在跑的 agent）旁边照样能读，只见已 COMMIT 的。每条命令结束关连接。
 //
-// 状态根与主命令同一条解析（`resolveStateDir`）：`--state-dir` / `--agent-id` 的含义一模一样。
+// 状态根与主命令同一条解析：`--state-dir` 是**会话目录的上一层**，`--session` 点名看哪一段。
+// 观测库归 session（状态根 = session 目录，2026-09-03），所以「看哪一段」是必须回答的问题；
+// 都不给就看**最近有记录的那一段**——那是「刚才那次跑」最常见的意思。
 // 不认识的子命令 / 选项一律报错（退出码 2），不静默按缺省跑——与 `cli.ts` 同一条纪律。
 
 import {
   expandHome,
+  FileDir,
+  listSessions,
   observationDatabasePath,
   ObservationDatabaseMissingError,
   openObservationReader,
+  resolveSessionsRoot,
   resolveStateDir,
   type EchoObservationReader,
   type RunLookupResult,
@@ -39,8 +44,10 @@ export type ObserveCommand =
   | Readonly<{ kind: "serve"; port: number; host: string }>;
 
 export type ObserveOptions = Readonly<{
+  /** 会话目录的上一层。缺省 `$ECHO_HOME/sessions`。 */
   stateDir?: string;
-  agentId?: string;
+  /** 看哪一段。不给 = 最近更新的那一段。 */
+  sessionId?: string;
   command: ObserveCommand;
 }>;
 
@@ -58,8 +65,8 @@ export function observeUsage(name: string): string {
   serve                    本地只读面板：run 列表 + 时间线 + 摘要，页面轮询 SQLite，agent 跑着也能看；Ctrl+C 停
 
 选项：
-  --state-dir <路径>       状态根（与主命令同义：缺省 $ECHO_HOME/agents/<id>，再退到 ~/.echo/agents/<id>）
-  --agent-id <名字>        同一状态根下的 agent 身份（缺省 default）
+  --state-dir <路径>       会话目录的上一层（与主命令同义：缺省 $ECHO_HOME/sessions，再退到 ~/.echo/sessions）
+  --session <id>           看哪一段会话（缺省：最近更新的那一段）
   --format <text|json>     输出格式（last / show 缺省 text；export 缺省 json）
   --body                   text 输出里带上每条记录的 body（缺省只有 name / attributes）
   --port <端口>            serve 监听的端口（缺省 ${OBSERVE_DEFAULT_PORT}；0 = 随机）
@@ -74,7 +81,7 @@ export function observeUsage(name: string): string {
 export function parseObserveArgs(argv: readonly string[], name: string): ObserveOptions | null {
   if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") return null;
   let stateDir: string | undefined;
-  let agentId: string | undefined;
+  let sessionId: string | undefined;
   let format: ObserveFormat | undefined;
   let body = false;
   let port: number | undefined;
@@ -91,8 +98,8 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
       case "--state-dir":
         stateDir = value();
         break;
-      case "--agent-id":
-        agentId = value();
+      case "--session":
+        sessionId = value();
         break;
       case "--format": {
         const v = value();
@@ -156,7 +163,7 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
     default:
       throw new Error(`不认识的子命令 'observe ${sub}'\n\n${observeUsage(name)}`);
   }
-  return { ...(stateDir === undefined ? {} : { stateDir }), ...(agentId === undefined ? {} : { agentId }), command };
+  return { ...(stateDir === undefined ? {} : { stateDir }), ...(sessionId === undefined ? {} : { sessionId }), command };
 }
 
 function headerLine(h: RunObservationHeader): string {
@@ -196,18 +203,25 @@ export async function runObserve(argv: readonly string[], name: string, io: Obse
     io.out.write(`${observeUsage(name)}\n`);
     return 0;
   }
-  const stateRoot = expandHome(
-    resolveStateDir({
-      ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
-      ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
-    }),
-  );
+  const sessionsRoot = expandHome(opts.stateDir ?? resolveSessionsRoot());
+  let sessionId = opts.sessionId;
+  if (sessionId === undefined) {
+    // 观测库归 session：不点名就看**最近更新的那一段**。一段都没有时诚实说没有，
+    // 而不是打开一个空目录再报「没有记录」——那两句话指的不是同一件事。
+    const sessions = await listSessions(new FileDir(sessionsRoot)); // 已按 updatedAt 降序
+    if (sessions.length === 0) {
+      io.err.write(`${sessionsRoot} 下还没有任何会话\n`);
+      return 1;
+    }
+    sessionId = sessions[0]!.id;
+  }
+  const stateRoot = resolveStateDir({ sessionsRoot, sessionId });
   let reader: Awaited<ReturnType<typeof openObservationReader>>;
   try {
     reader = await openObservationReader({ stateRoot });
   } catch (e) {
     if (e instanceof ObservationDatabaseMissingError) {
-      io.err.write(`这个状态根还没有任何 run 的观测记录（${observationDatabasePath(stateRoot)} 不存在）\n`);
+      io.err.write(`会话 ${sessionId} 还没有任何 run 的观测记录（${observationDatabasePath(stateRoot)} 不存在）\n`);
       return 1;
     }
     io.err.write(`打不开观测库：${e instanceof Error ? e.message : String(e)}\n`);

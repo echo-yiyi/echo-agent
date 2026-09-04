@@ -8,10 +8,14 @@
 //
 // **纯的**：只依赖 `StorageDir`，不碰 `node:`。
 //
-// 盘上布局（属于本 Service，不是端口契约的一部分，可改）：
+// 盘上布局（属于本 Service，不是端口契约的一部分，可改）。**注入的 store 就是那一段 session 的
+// 目录**（2026-09-03：状态根 = session 目录，sessions.md §3），所以 meta 与 entries 在根上，
+// 和 inbox / tasks / schedule / lease 平级：
 //
-//   sessions/<id>/meta.json            SessionInfo
-//   sessions/<id>/entries/000001.json  一条 entry 一个文件
+//   meta.json            SessionInfo
+//   entries/000001.json  一条 entry 一个文件
+//
+// 清单不在这里：那要扫**上一层**（全部 session 目录），是另一个 store，见本文件末尾的 `listSessions()`。
 //
 // 为什么一条一文件而不是单个 append 文件：`StorageDir` 只有全量 `write`，
 // 单文件追加要「读全量 → 拼接 → 写全量」，长会话下是 O(n²)，而且中途崩溃会毁掉整份。
@@ -25,6 +29,8 @@ import { EMPTY_COMPACTION, type CompactionReason, type CompactionState } from ".
 import { assertCompactionFits } from "../compaction/view.ts";
 import { assertSafePathSegment } from "../storage/path-safety.ts";
 import type { SessionData, SessionEntry, SessionInfo, SessionStore } from "./types.ts";
+import { STATUS_FILE, writeSessionPhase, type SessionPhase } from "./status.ts";
+import type { Diagnostic } from "../errors.ts";
 
 /** entry 文件名的序号宽度。定长才能让字典序 = 时间序，`list()` 拿回来直接排序即可。 */
 const SEQ_WIDTH = 6;
@@ -49,10 +55,8 @@ export function assertSafeSessionId(sessionId: string): void {
   assertSafePathSegment("会话 id ", sessionId);
 }
 
-/** 会话在 store 里的根前缀。`agentId` 不进路径——一个状态根就是一个 agent（D6）。 */
-function sessionRoot(sessionId: string): string {
-  return `sessions/${sessionId}`;
-}
+/** entries 目录在 store 里的前缀。**没有 `sessions/<id>/` 那一层**——store 本身就是那一段的目录。 */
+const ENTRIES_PREFIX = `${ENTRIES_DIR}/`;
 
 type Loaded = {
   readonly info: SessionInfo;
@@ -66,12 +70,14 @@ export type SessionEntryInput =
   | { kind: "error"; at: number; error: AgentError };
 
 /**
- * 会话的语义所有者。一个实例管一个 `SessionStore`，可以开多个会话。
+ * 会话的语义所有者。**一个实例管一段 session**（2026-09-03）：注入的 store 就是那一段的目录，
+ * meta 与 entries 在它的根上。在同一个 store 上开第二个 id 会撞同一批文件，所以判红。
  *
- * **不提供列表 / 删除 / 重命名**：那是产品的会话管理界面，core 自己用不到（§13.12.2）。
- * 产品要就自己在 Store 之上做——它拿到的是同一个字节面。
+ * 清单、删除、重命名不在这里：清单要扫上一层（`listSessions()`），后两件是会话管理界面的事。
  */
 export class SessionService {
+  /** 本实例已经打开的那一段。开第二个不同的 id = 调用方拿错了 store，判红而不是覆盖。 */
+  private openedId: string | null = null;
   /**
    * 每个会话的游标：下一个序号、末条 id，以及**当前的 SessionInfo**。
    *
@@ -82,7 +88,7 @@ export class SessionService {
    */
   private readonly cursors = new Map<
     string,
-    { nextSeq: number; lastEntryId: string | null; info: SessionInfo }
+    { nextSeq: number; lastEntryId: string | null; info: SessionInfo; metaWritten: boolean }
   >();
   /** 未 settle 的写。`stop()` 等的就是它（§13.12.2：Store 面上没有 flush）。 */
   private readonly pending = new Set<Promise<unknown>>();
@@ -114,6 +120,7 @@ export class SessionService {
    * 而不是由 Service 自己猜「上次那次失败也许不要紧」。
    */
   private readonly poisoned = new Map<string, unknown>();
+  private onDiagnostic?: (d: Diagnostic) => void;
 
   constructor(private readonly store: SessionStore) {}
 
@@ -124,8 +131,17 @@ export class SessionService {
    * 任何一条 entry 解不出来都**抛错，不返回半截**——半截 session 比没有 session 更危险，
    * 因为它看起来能用。
    */
-  async createOrResume(sessionId: string, opts?: { name?: string; workspace?: string; agent?: string }): Promise<SessionData> {
+  async createOrResume(
+    sessionId: string,
+    opts?: { name?: string; workspace?: string; agent?: string; main?: boolean },
+  ): Promise<SessionData> {
     assertSafeSessionId(sessionId);
+    if (this.openedId !== null && this.openedId !== sessionId) {
+      throw new Error(
+        `本 SessionService 已经在管 '${this.openedId}'，不能再开 '${sessionId}'——` +
+          `一个 store 就是一段 session 的目录，两段会撞同一批 meta / entries 文件`,
+      );
+    }
     // 封存之后连打开都不许：新建会写 meta，恢复则会给出一份**写不进去**的 session——
     // 后者看起来能用，比拿不到更危险。实测过启动期丢锁时这里仍会把 meta 写出去。
     if (this.sealed) throw new Error(`会话已封存（多半是丢了 single-writer lease）：拒绝打开 ${sessionId}`);
@@ -138,12 +154,14 @@ export class SessionService {
       this.cursors.set(sessionId, {
         nextSeq: existing.entries.length + 1,
         lastEntryId: existing.entries[existing.entries.length - 1]?.id ?? null,
+        metaWritten: true,
         // **计数现算**：entries 是日志、是真相；meta 只是它的快照。崩在「写完 entry、
         // 还没刷 meta」之间是正常的崩溃形态，不该让会话打不开，但也不能让落后的计数
         // 一直落后下去（读旧值再加一 = 永远差那么多）。
         info: { ...projected.info, messageCount: projected.messages.length },
       });
       // 恢复完整成功、游标就位之后才解毒
+      this.openedId = sessionId;
       this.poisoned.delete(sessionId);
       return { ...projected, info: { ...projected.info, messageCount: projected.messages.length } };
     }
@@ -152,47 +170,29 @@ export class SessionService {
     const info: SessionInfo = {
       id: sessionId,
       name: opts?.name ?? sessionId,
-      // 只在新建这一刻写；resume 走上面那条路，以盘上为准。缺省 "/" 与 AgentOptions.workspace 同一个缺省
+      // 只在新建这一刻定；resume 走上面那条路，以盘上为准。缺省 "/" 与 AgentOptions.workspace 同一个缺省
       workspace: opts?.workspace ?? "/",
       // 归哪个 agent（产品）：会话身份的第二维（2026-09-01 用户拍板）。缺省与 `agentId` 缺省同一个字
       agent: opts?.agent ?? "default",
+      // 谁建的（2026-09-03）：缺省 true——不经 `session_create` 工具的路径都是容器自己建的
+      main: opts?.main ?? true,
+      status: "active",
       createdAt: now,
       updatedAt: now,
       messageCount: 0,
     };
+    // **新会话立刻写 meta**（2026-09-04 改回）：一段正开着的 session 必须马上**被别人找得到**——
+    // 清单与 `session_send` 都按 meta 认人。此前把 meta 推迟到第一次入账，于是「刚打开的第二个终端」
+    // 在别人眼里根本不存在：`session_list` 里没有它，`send` 给它是 `not-found`（实测）。
+    // 那正好把「会话之间能互发消息」这条打掉了一半。
+    //
+    // 「不留空段」改由收摊时兜底：`discardIfUnused()`——一句话没说过就把 meta 撤掉，
+    // 它便不再进任何清单。目标没变，换了个不会误伤活人的做法。
     await this.writeMeta(info);
-    this.cursors.set(sessionId, { nextSeq: 1, lastEntryId: null, info });
+    this.cursors.set(sessionId, { nextSeq: 1, lastEntryId: null, info, metaWritten: true });
+    this.openedId = sessionId;
     this.poisoned.delete(sessionId);
     return { info, messages: [], compaction: EMPTY_COMPACTION };
-  }
-
-  /**
-   * 盘上全部会话的清单（只读 meta，不读 entries），按 `updatedAt` 降序。
-   *
-   * 2026-09-01 用户拍板：**列表归 core**，不让产品各自去扫 meta 文件。会话身份是 workspace + agent
-   * 两维，产品要挑「本产品在本目录的最近一段」（`--continue`）、要做会话列表，都得先看得到全部。
-   * 坏 meta **判红**，与恢复同一姿态——清单里静默少一条比整个报错更危险：少的那条正好可能是用户要续的。
-   */
-  async list(): Promise<SessionInfo[]> {
-    const prefix = "sessions/";
-    const out: SessionInfo[] = [];
-    for (const p of await this.store.list(prefix)) {
-      const rel = p.startsWith(prefix) ? p.slice(prefix.length) : p;
-      if (!rel.endsWith(`/${META_FILE}`)) continue;
-      const id = rel.slice(0, -(META_FILE.length + 1));
-      if (id.includes("/")) continue; // 只认 sessions/<id>/meta.json 这一层
-      const raw = await this.store.read(`${prefix}${rel}`);
-      if (raw === null) throw new Error(`会话 ${id} 的 ${META_FILE} 在 list 里有、read 却为空`);
-      let info: SessionInfo;
-      try {
-        info = JSON.parse(raw) as SessionInfo;
-      } catch (e) {
-        throw new Error(`会话 ${id} 的 ${META_FILE} 解不开：${(e as Error).message}`);
-      }
-      assertSessionInfoShape(info, `会话 ${id} 的 ${META_FILE}`);
-      out.push(info);
-    }
-    return out.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   /**
@@ -225,11 +225,63 @@ export class SessionService {
     this.enqueue(sessionId, async () => {
       for (const entry of written) {
         const seq = Number(entry.id.slice(entry.id.lastIndexOf("e") + 1));
-        await this.store.write(`${sessionRoot(sessionId)}/${ENTRIES_DIR}/${seqName(seq)}`, JSON.stringify(entry));
+        await this.store.write(`${ENTRIES_PREFIX}${seqName(seq)}`, JSON.stringify(entry));
       }
       await this.bumpMeta(cursor, written);
     });
     return written;
+  }
+
+  /**
+   * 收摊时的兜底：**这一段一句话都没说过就把 meta 撤掉**（2026-09-04）。
+   *
+   * 撤掉之后它不再进任何清单（`listSessions` 认 meta），`--resume` 它也等于「没有这一段」——
+   * 与从前「空会话不落盘」是同一个结果，区别只在**它活着的时候是看得见的**：
+   * 别人能列到它、能给它带话，那是会话之间互发消息的前提。
+   *
+   * 只在**本实例一条 entry 都没写过**时动手，而且只删我们自己写出去的那两个文件
+   * （`meta.json` / `status.json`）——目录里别的东西（观测库）不归这里管。
+   * 未消费的 inbox 记录是另一道闸，由调用方（`Agent`）判：有人给它留了话就不该撤，
+   * 撤了那条留言就成了没人认领的孤儿。
+   *
+   * @returns 撤了没有。
+   */
+  async discardIfUnused(sessionId: string): Promise<boolean> {
+    const cursor = this.cursors.get(sessionId);
+    if (cursor === undefined || cursor.nextSeq !== 1 || !cursor.metaWritten) return false;
+    if (this.poisoned.has(sessionId)) return false; // 盘上状态没法裁决时不动它
+    await this.store.remove(META_FILE);
+    await this.store.remove(STATUS_FILE);
+    cursor.metaWritten = false;
+    return true;
+  }
+
+  /**
+   * 记下这一段此刻在忙没忙（`status.json`，2026-09-03）。**只有持有 lease 的进程该调它。**
+   *
+   * 与入账走同一条串行链，所以它与 entry 的先后是确定的；但**失败不毒化会话**：
+   * 运行状态是给别人看的提示（「现在问它，它能马上答吗」），读方永远还要再看一眼 lease
+   * （`sessionRow()` 里 `alive === false` 时 `phase` 一律作废）。让一次 status 写失败
+   * 把一段本来健康的对话封存，代价和收益完全不成比例——所以这里只报诊断。
+   */
+  setPhase(sessionId: string, phase: SessionPhase): void {
+    if (this.sealed || this.poisoned.has(sessionId)) return;
+    const prev = this.chain.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .then(async () => {
+        if (this.poisoned.has(sessionId)) return;
+        await writeSessionPhase(this.store, phase);
+      })
+      .catch((e: unknown) => {
+        this.onDiagnostic?.({ code: "session_status_failed", message: `写 ${phase} 状态失败：${e instanceof Error ? e.message : String(e)}` });
+      });
+    this.chain.set(sessionId, next);
+    this.track(next);
+  }
+
+  /** 装配方（Agent）接诊断出口。只有「报告了也改变不了裁决」的事从这里出去。 */
+  attachDiagnostics(sink: (d: Diagnostic) => void): void {
+    this.onDiagnostic = sink;
   }
 
   /**
@@ -298,7 +350,7 @@ export class SessionService {
   }
 
   private async writeMeta(info: SessionInfo): Promise<void> {
-    await this.store.write(`${sessionRoot(info.id)}/${META_FILE}`, JSON.stringify(info));
+    await this.store.write(META_FILE, JSON.stringify(info));
   }
 
   /**
@@ -312,7 +364,7 @@ export class SessionService {
    * 现在 meta 是 entries 的派生快照：写它不需要先问它。
    */
   private async bumpMeta(
-    cursor: { info: SessionInfo },
+    cursor: { info: SessionInfo; metaWritten: boolean },
     added: readonly SessionEntry[],
   ): Promise<void> {
     cursor.info = {
@@ -321,17 +373,17 @@ export class SessionService {
       messageCount: cursor.info.messageCount + added.filter((e) => e.kind === "message").length,
     };
     await this.writeMeta(cursor.info);
+    cursor.metaWritten = true;
   }
 
   /** 不存在返回 `null`；存在但坏 → 抛。 */
   private async tryLoad(sessionId: string): Promise<Loaded | null> {
-    const root = sessionRoot(sessionId);
-    const raw = await this.store.read(`${root}/${META_FILE}`);
+    const raw = await this.store.read(META_FILE);
     if (raw === null) {
       // **缺 meta ≠ 新会话**。entries 还在就说明这是一份**丢了目录的旧会话**——
       // 当成新会话会让恢复出 0 条消息，下一次 append 从 000001.json 重新开始，
       // 直接盖掉历史（实测：删掉 meta.json 之后重启，原有消息全部消失）。
-      const orphans = [...(await this.store.list(`${root}/${ENTRIES_DIR}/`))];
+      const orphans = [...(await this.store.list(ENTRIES_PREFIX))];
       if (orphans.length > 0) {
         throw new Error(
           `会话 ${sessionId} 缺 ${META_FILE}，但盘上还有 ${orphans.length} 条 entry——` +
@@ -351,7 +403,7 @@ export class SessionService {
     // 那份缺字段的 info 会直接进 `SessionData` 交给上层用。
     assertSessionInfoShape(info, `会话 ${sessionId} 的 ${META_FILE}`);
 
-    const prefix = `${root}/${ENTRIES_DIR}/`;
+    const prefix = ENTRIES_PREFIX;
     const paths = [...(await this.store.list(prefix))].sort();
     const entries: SessionEntry[] = [];
     const seen = new Set<string>();
@@ -446,13 +498,22 @@ function assertSessionInfoShape(info: unknown, where: string): void {
     if (typeof i[k] !== "string") {
       throw new Error(
         k === "workspace" || k === "agent"
-          ? `${where} 缺 ${k}——2026-09-01 之前建的 session 没有这个字段；删掉旧的 sessions/<id>/ 目录或手工补上再启动`
+          ? `${where} 缺 ${k}——2026-09-01 之前建的 session 没有这个字段；删掉旧的 session 目录或手工补上再启动`
           : `${where} 缺 ${k}（或不是字符串）`,
       );
     }
   }
   for (const k of ["createdAt", "updatedAt", "messageCount"]) {
     if (typeof i[k] !== "number") throw new Error(`${where} 缺 ${k}（或不是数字）`);
+  }
+  // main / status 是 2026-09-03 加的两维。**不给缺省**：少了 main 的 meta 会让 `--continue` 把
+  // 别人派的活当成「上次那段对话」，少了 status 会让已关的段照样收信——两件都是静默走错，
+  // 不是少一个字段。pre-release，旧档判红、删掉重来。
+  if (typeof i["main"] !== "boolean") {
+    throw new Error(`${where} 缺 main（或不是布尔）——2026-09-03 之前建的 session 没有这个字段；删掉旧的 session 目录再启动`);
+  }
+  if (i["status"] !== "active" && i["status"] !== "closed") {
+    throw new Error(`${where} 的 status 不认识：${String(i["status"])}——只许 active / closed`);
   }
 }
 
@@ -474,3 +535,60 @@ function project(loaded: Loaded): SessionData {
 }
 
 const COMPACTION_REASONS: ReadonlySet<unknown> = new Set<CompactionReason>(["auto", "overflow", "manual"]);
+
+/**
+ * 改一段 session 的持久状态（`active` ↔ `closed`，2026-09-03）。
+ *
+ * **不经 `SessionService` 实例**：`close` 的调用方常常没有打开那一段（会话管理界面关的是**别人**），
+ * 硬要先 `createOrResume` 等于为了改一个字段把整份 entries 读一遍。这里只读改写 meta 一个文件。
+ *
+ * meta 不存在 = 那一段一句话没说过（空会话不落盘），**判红**——静默建一份 meta 出来
+ * 会把「没有这段」变成「有一段关掉的」，两件事不一样。
+ */
+export async function setSessionStatus(store: SessionStore, sessionId: string, status: SessionInfo["status"]): Promise<void> {
+  assertSafeSessionId(sessionId);
+  const raw = await store.read(META_FILE);
+  if (raw === null) throw new Error(`会话 ${sessionId} 没有 ${META_FILE}：改不了状态（它可能一句话都没说过）`);
+  let info: SessionInfo;
+  try {
+    info = JSON.parse(raw) as SessionInfo;
+  } catch (e) {
+    throw new Error(`会话 ${sessionId} 的 ${META_FILE} 解不开：${(e as Error).message}`);
+  }
+  assertSessionInfoShape(info, `会话 ${sessionId} 的 ${META_FILE}`);
+  if (info.status === status) return;
+  await store.write(META_FILE, JSON.stringify({ ...info, status, updatedAt: Date.now() }));
+}
+
+/**
+ * 盘上全部会话的清单（只读 meta，不读 entries），按 `updatedAt` 降序。
+ *
+ * **`root` 是 session 目录的上一层**（`<ECHO_HOME>/sessions/`），不是某一段的目录——一段 session
+ * 就是一个状态根，它自己看不见别的段。所以这是个自由函数而不是 `SessionService` 的方法：
+ * 装配前挑「续哪一段」（`--continue`）、会话列表工具、宿主的 `sessions.list()` 都从这里读，
+ * 三个消费者共用一份实现。
+ *
+ * **一句话没说过的段不在清单里**：新建时不落 meta（见 `createOrResume`），所以启动即退出不留痕。
+ *
+ * 坏 meta **判红**，与恢复同一姿态——清单里静默少一条比整个报错更危险：少的那条正好可能是用户要续的。
+ */
+export async function listSessions(root: SessionStore): Promise<SessionInfo[]> {
+  const out: SessionInfo[] = [];
+  for (const p of await root.list("")) {
+    if (!p.endsWith(`/${META_FILE}`)) continue;
+    const id = p.slice(0, -(META_FILE.length + 1));
+    if (id.includes("/")) continue; // 只认 <id>/meta.json 这一层
+    const raw = await root.read(p);
+    if (raw === null) throw new Error(`会话 ${id} 的 ${META_FILE} 在 list 里有、read 却为空`);
+    let info: SessionInfo;
+    try {
+      info = JSON.parse(raw) as SessionInfo;
+    } catch (e) {
+      throw new Error(`会话 ${id} 的 ${META_FILE} 解不开：${(e as Error).message}`);
+    }
+    assertSessionInfoShape(info, `会话 ${id} 的 ${META_FILE}`);
+    if (info.id !== id) throw new Error(`会话目录 ${id} 的 ${META_FILE} 里 id 是 '${info.id}'，与目录名对不上`);
+    out.push(info);
+  }
+  return out.sort((a, b) => b.updatedAt - a.updatedAt);
+}

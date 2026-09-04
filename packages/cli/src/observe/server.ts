@@ -7,12 +7,15 @@
 //   GET /api/health            库路径、各 runtime 已裁决到的 seq、run / record 计数
 // reader 的每次查询都是短事务，页面轮询不会让 WAL 长住。
 //
-// 会话信息不在 journal 里（run header 只有 sessionId），从状态根的 session meta 读（`SessionService.list()`，只读）：
+// 会话信息不在 journal 里（run header 只有 sessionId），从盘上的 session meta 读（`listSessions()`，只读）。
+// **状态根就是一段 session 的目录**（2026-09-03），所以清单要扫它的**上一层**——那样面板里
+// 出现的任何 sessionId 都反查得到名字与 workspace，不只是本库这一段的。
 // `echo-agent` 与 `echo-coding` 缺省共用一个状态根，产品名（`SessionInfo.agent`）与 workspace 是把它们分开看的唯一依据。
 
 import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FileDir, SessionService, type RunObservationPage, type SqliteEchoObservationReader } from "@echo-agent/core";
+import { FileDir, listSessions, type RunObservationPage, type SqliteEchoObservationReader } from "@echo-agent/core";
 import { renderRunObservation } from "@echo-agent/core/observability";
 import { lexicon } from "./lexicon.ts";
 
@@ -66,13 +69,13 @@ function clampLimit(raw: string | null): number {
 export function startObserveServer(opts: ObserveServerOptions): ObserveServer {
   const reader = opts.reader;
   const hostname = opts.hostname ?? "127.0.0.1";
-  const sessions = new SessionService(new FileDir(opts.stateRoot));
+  const sessionsRoot = new FileDir(dirname(opts.stateRoot));
   let sessionCache: { at: number; map: Record<string, SessionBrief> } | undefined;
   /** sessionId → 摘要。session 目录还不存在（agent 从没起过）就是空表，不是错。 */
   const sessionIndex = async (): Promise<Record<string, SessionBrief>> => {
     if (sessionCache !== undefined && Date.now() - sessionCache.at < SESSION_CACHE_MS) return sessionCache.map;
     const map: Record<string, SessionBrief> = {};
-    for (const s of await sessions.list()) map[s.id] = { agent: s.agent, name: s.name, workspace: s.workspace, updatedAt: s.updatedAt };
+    for (const s of await listSessions(sessionsRoot)) map[s.id] = { agent: s.agent, name: s.name, workspace: s.workspace, updatedAt: s.updatedAt };
     sessionCache = { at: Date.now(), map };
     return map;
   };

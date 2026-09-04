@@ -3,8 +3,9 @@ import { mkdtemp } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgent, resolveModel, resolveStateDir } from "../src/create-agent.ts";
-import { SessionService } from "../src/session/service.ts";
+import { createAgent, resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "../src/create-agent.ts";
+import { SessionService, listSessions } from "../src/session/service.ts";
+import { FileDir } from "../src/storage/file-dir.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { kimiProvider, deepseekProvider } from "../src/provider/openai.ts";
@@ -13,6 +14,7 @@ import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { scriptedDialect, scriptedStreamFn, textTurn } from "../src/testing.ts";
+import { environmentMessage } from "../src/messages.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import type { Model, Provider } from "../src/provider/types.ts";
 
@@ -91,25 +93,38 @@ afterEach(() => {
 
 test("D6 stateDir 最高优先", () => {
   process.env.ECHO_HOME = "/tmp/echo-home";
-  expect(resolveStateDir({ stateDir: "/explicit", agentId: "a" })).toBe("/explicit");
+  expect(resolveStateDir({ stateDir: "/explicit", sessionId: "s1" })).toBe("/explicit");
 });
 
 test("D6 ECHO_HOME 次之", () => {
   process.env.ECHO_HOME = "/tmp/echo-home";
-  expect(resolveStateDir({ agentId: "a" })).toBe("/tmp/echo-home/agents/a");
+  expect(resolveStateDir({ sessionId: "s1" })).toBe("/tmp/echo-home/sessions/s1");
 });
 
-test("D6 最后落用户级 ~/.echo —— 不是项目内 $PWD（2026-09-01：workspace 归 session，状态根跨项目）", () => {
+test("D6 最后落用户级 ~/.echo —— 不是项目内 $PWD（workspace 归 session，状态根跨项目）", () => {
   delete process.env.ECHO_HOME;
-  const got = resolveStateDir({ agentId: "default" });
-  expect(got).toBe(join(homedir(), ".echo", "agents", "default"));
-  // 显式锁住「不按启动目录走」：换个目录启动仍是同一个 agent、同一份记忆；目录差异由 session 的 workspace 承担
+  const got = resolveStateDir({ sessionId: "s1" });
+  expect(got).toBe(join(homedir(), ".echo", "sessions", "s1"));
+  // 显式锁住「不按启动目录走」：目录差异由 session 的 workspace 承担，不由状态根承担
   expect(got.startsWith(process.cwd())).toBe(false);
 });
 
-test("D6 agentId 进路径 —— 两个 agent 不共用状态根", () => {
+test("D6 状态根 = session 目录：两段不共用；agentId 不再进路径（2026-09-03）", () => {
+  // 没有这条时：两段 echo-coding 会共用一把 `.lock`，第二个 `start()` 直接 fail-loud——
+  // 「同一台机器上一个做前端一个做后端」在旧布局下起不来。
   delete process.env.ECHO_HOME;
-  expect(resolveStateDir({ agentId: "a" })).not.toBe(resolveStateDir({ agentId: "b" }));
+  expect(resolveStateDir({ sessionId: "a" })).not.toBe(resolveStateDir({ sessionId: "b" }));
+  // agentId 只剩 lease 的 holder 标识：一段 session 是谁，记在它自己的 meta.json 里
+  expect(resolveStateDir({ sessionId: "s1" })).toBe(join(homedir(), ".echo", "sessions", "s1"));
+});
+
+test("三层作用域：user 层（记忆 / 技能）与 session 目录是两个根，且清单扫的是上一层", () => {
+  process.env.ECHO_HOME = "/tmp/echo-home";
+  expect(resolveSharedDir()).toBe("/tmp/echo-home");
+  expect(resolveSessionsRoot()).toBe("/tmp/echo-home/sessions");
+  // 没有这条时：记忆跟着状态根下沉到 session 目录，每开一段就换一套记忆
+  expect(resolveStateDir({ sessionId: "s1" }).startsWith(resolveSharedDir())).toBe(true);
+  expect(resolveSharedDir().startsWith(resolveStateDir({ sessionId: "s1" }))).toBe(false);
 });
 
 /* ───────────── 装配 + 生命周期 ───────────── */
@@ -123,40 +138,66 @@ test("createAgent 装出的就是同一个 Agent 类（D16），且 model 已解
   });
   await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
   expect(agent.state.model.id).toBe("only"); // 非空 Model，构造时就位
-  expect(agent.state.sessionId).toBeNull(); // 缺省会话在 start() 时新建，构造期不抢先定
+  expect(agent.state.sessionId).toMatch(/^s-/); // 会话 id 在装配期就定——状态根就是它的目录
 });
 
-test("缺省每次启动新建会话：同一状态根同一 workspace 再起一次也是新的一段；显式 sessionId 才续；meta 记 workspace 与 agent", async () => {
-  // 2026-09-01 用户拍板：**续上次是显式动作**。之前缺省按 workspace 派生 id、启动即 resume，
-  // 于是同一目录里起的任何产品都落进同一段对话（实测：coding 续了通用 agent「我没有文件工具」的结论）。
+test("缺省每次启动新建会话，各占一个目录；显式 sessionId 才续；一句话没说的段不进清单", async () => {
+  // 2026-09-01：**续上次是显式动作**。2026-09-03：每段一个状态根——所以「再起一次」不再是
+  // 「同一个目录里多一段」，而是**多一个目录、多一把锁**，这正是两段能同时活着的原因。
+  const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
+  process.env.ECHO_HOME = home;
   const provider = fakeProvider({ id: "t", models: ["only"] });
-  const store = new InMemoryDir();
-  const a = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", agentName: "echo-coding" });
+  const sessionsRoot = new FileDir(resolveSessionsRoot());
+
+  const a = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", agentName: "echo-coding" });
   await a.start();
   expect(a.state.sessionId).toMatch(/^s-/);
   expect(a.state.workspace).toBe("/repo/a");
+
+  const a2 = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", agentName: "echo-coding" });
+  await a2.start(); // **同一台机器、同一个 workspace、同一个产品，两段同时活着**
+  expect(a2.state.sessionId).not.toBe(a.state.sessionId); // 同 workspace、同产品 → 仍是新的一段
+  // 各占各的目录、各持各的锁。旧布局（状态根 = agents/<agentId>）下这里是同一把，第二个 start() 直接 fail-loud
+  expect(existsSync(join(home, "sessions", a.state.sessionId!, ".lock"))).toBe(true);
+  expect(existsSync(join(home, "sessions", a2.state.sessionId!, ".lock"))).toBe(true);
+
+  await a.prompt("你好"); // 说一句才落盘：空会话不留目录
   await a.stop();
+  await a2.stop(); // a2 一句话没说
 
-  const a2 = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", agentName: "echo-coding" });
-  await a2.start();
-  expect(a2.state.sessionId).not.toBe(a.state.sessionId); // 同状态根、同 workspace → 仍是新的一段
-  await a2.stop();
-
-  const explicit = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", sessionId: a.state.sessionId! });
+  const explicit = await createAgent({ provider, allowNetwork: false, workspace: "/elsewhere", sessionId: a.state.sessionId! });
   await explicit.start();
   expect(explicit.state.sessionId).toBe(a.state.sessionId); // 给了 id 才 create-or-resume 那一段
+  expect(explicit.state.workspace).toBe("/repo/a"); // resume 以盘上为准
   await explicit.stop();
 
-  // 会话身份两维都在盘上，`SessionService.list()` 读得回来——产品的 `--continue` 靠它挑「本产品在本目录的最近一段」
-  const listed = await new SessionService(store).list();
-  expect(listed.map((s) => [s.id, s.workspace, s.agent]).sort()).toEqual(
-    [
-      [a.state.sessionId!, "/repo/a", "echo-coding"],
-      [a2.state.sessionId!, "/repo/a", "echo-coding"],
-    ].sort(),
-  );
+  // 清单扫的是 session 目录的上一层。**a2 一句话没说，收摊时把 meta 撤了**，所以不在清单里；
+  // 但它**活着的时候是在的**——下面那条判据盯的就是这一点（活着找不到 = 别人没法给它带话）。
+  const listed = await listSessions(sessionsRoot);
+  expect(listed.map((s) => [s.id, s.workspace, s.agent, s.main, s.status])).toEqual([
+    [a.state.sessionId!, "/repo/a", "echo-coding", true, "active"],
+  ]);
   // 没给 agentName 的低层用户：与 agentId 同名
   expect((await new SessionService(new InMemoryDir()).createOrResume("x", { workspace: "/w" })).info.agent).toBe("default");
+});
+
+test("记忆与技能在 user 层，不跟着状态根下沉到 session 目录", async () => {
+  // 没有这条时：状态根成了 session 目录之后记忆也跟着一段一份——每开一段就失忆一次。
+  const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const agent = await createAgent({ provider, allowNetwork: false });
+  await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
+  await agent.start();
+  const memoryTool = agent.tools.get("memory");
+  expect(memoryTool).toBeDefined();
+  await memoryTool!.execute(
+    { command: "create", path: "memory/fact.md", file_text: "bun test 跑测试" },
+    { toolCallId: "c1", workspace: "/w", sessionId: agent.state.sessionId, iteration: 0 },
+  );
+  await agent.stop();
+  expect(existsSync(join(home, "memory", "memory", "fact.md"))).toBe(true);
+  expect(existsSync(join(home, "sessions", agent.state.sessionId!, "memory"))).toBe(false);
 });
 
 test("resume 时 workspace 以盘上为准：换个目录打开同一个 session，workspace 不跟着进程走", async () => {
@@ -164,6 +205,7 @@ test("resume 时 workspace 以盘上为准：换个目录打开同一个 session
   const provider = fakeProvider({ id: "t", models: ["only"] });
   const first = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/repo/a", sessionId: "s" });
   await first.start();
+  await first.prompt("说一句"); // 一句话没说的段不落 meta（空会话不留痕），也就没有「盘上的 workspace」
   await first.stop();
   const second = await createAgent({ provider, store, lock: new InMemoryStateLock(), allowNetwork: false, workspace: "/elsewhere", sessionId: "s" });
   await second.start();
@@ -204,7 +246,7 @@ test("start() 中途失败必须释放已取得的 lease（否则状态根被死
   const provider = fakeProvider({ id: "t", models: ["only"] });
   // 让 createOrResume 炸：meta.json 是坏的。缺省会话现在每次新建（id 随机），要撞上坏档得显式点名那一段
   const store = new InMemoryDir();
-  await store.write("sessions/bad/meta.json", "不是 json");
+  await store.write("meta.json", "不是 json"); // store 就是那一段的目录（2026-09-03）
 
   const a = await createAgent({ provider, store, lock, allowNetwork: false, sessionId: "bad" });
   await expect(a.start()).rejects.toThrow(/meta\.json 解不开/);
@@ -255,11 +297,10 @@ test("不传 store / lock 时用 first-party 默认件（真落盘）", async ()
   await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
   await agent.start();
   expect(existsSync(join(dir, ".lock"))).toBe(true); // 文件锁真的建了
-  const sessionId = agent.state.sessionId!; // 缺省新建的那一段
   await agent.prompt("落个盘");
   await agent.stop();
   expect(existsSync(join(dir, ".lock"))).toBe(false); // stop 还锁
-  expect(existsSync(join(dir, "sessions", sessionId, "meta.json"))).toBe(true);
+  expect(existsSync(join(dir, "meta.json"))).toBe(true); // stateDir 就是这一段的目录
 });
 
 test("本函数装配的件不许从 `agent` 透传口再塞一次——**判据是 tsc**", () => {
@@ -558,4 +599,37 @@ test("单个 SKILL.md 读失败：诊断 + 跳过，别的 skill 照常发现，
   expect(notices.join("\n"), "读失败静默消失了").toContain("skill_load_failed");
   expect(notices.join("\n")).toContain("EIO 模拟");
   await agent.stop();
+});
+
+test("活着就找得到：刚起来、一句话没说的那段也在清单里；收摊之后才撤（2026-09-04）", async () => {
+  // 没有这条时实测过：meta 推迟到第一次入账才写，于是**刚打开的第二个终端在别人眼里根本不存在**
+  // ——`listSessions` 里没有它，`session_send` 给它是 not-found。「会话之间能互发消息」当场断一半。
+  const home = await mkdtemp(join(tmpdir(), "echo-visible-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const sessionsRoot = new FileDir(resolveSessionsRoot());
+
+  const silent = await createAgent({ provider, allowNetwork: false, workspace: "/repo/b" });
+  await silent.start();
+  const id = silent.state.sessionId!;
+  expect((await listSessions(sessionsRoot)).map((s) => s.id), "开着却找不到它").toContain(id);
+
+  await silent.stop(); // 一个字没说
+  expect((await listSessions(sessionsRoot)).map((s) => s.id), "收摊后没撤干净").not.toContain(id);
+});
+
+test("留过话的空会话不撤：撤了那条留言就成了没人认领的孤儿（2026-09-04）", async () => {
+  const home = await mkdtemp(join(tmpdir(), "echo-visible-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const sessionsRoot = new FileDir(resolveSessionsRoot());
+
+  const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo/b" });
+  await agent.start();
+  agent.autoConsumeInbox = false; // 留着不消费：模拟「刚投进来就退出」
+  const id = agent.state.sessionId!;
+  await agent.ingress.deliverDurable({ message: environmentMessage("有人给你留了话", "session", "s-x:1"), dedupeKey: "s-x:1" });
+  await agent.stop();
+
+  expect((await listSessions(sessionsRoot)).map((s) => s.id), "有人留了话，这段不该被撤").toContain(id);
 });

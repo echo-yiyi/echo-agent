@@ -1,17 +1,16 @@
-// Session：一系列对话，**在盘上**。
+// Session：一段独立在跑的 agent，**在盘上**。设计见 docs/design/sessions.md。
 //
 // 边界：`messages` 是内存里的真源；Session 是它的持久面。
 // **语义在 core，存储可替换**（D3）：create-or-resume、入账内容与时机、恢复顺序、坏档 fail-loud
 // 都由 `SessionService` 拥有；注入进来的 `SessionStore` 只是字节面，换它只换介质。
 //
-// `SessionManager` 是 D3 之前的形状——语义在实现方手里。它仍导出供现有调用方过渡，
-// **新代码走 `SessionService`**。
+// **一个 session 目录就是一个状态根**（2026-09-03，sessions.md §2–§3）：meta 与 entries 在目录根，
+// 与 inbox / tasks / schedule / lease 平级。清单是另一件事——扫上一层目录，见 `listSessions()`。
 
 import type { StorageDir } from "../storage/types.ts";
 import type { AgentError } from "../errors.ts";
 import type { AgentMessage } from "../messages.ts";
-import { EMPTY_COMPACTION, type CompactionReason, type CompactionState } from "../compaction/types.ts";
-import { assertCompactionFits } from "../compaction/view.ts";
+import type { CompactionReason, CompactionState } from "../compaction/types.ts";
 
 /**
  * Session 的存储端口：**与 `StorageDir` 同形，就是它**。
@@ -55,10 +54,32 @@ export type SessionInfo = {
    * **必填**：没有它的 meta 是坏档，resume 判红（pre-release，不留可选兼容）。
    */
   readonly agent: string;
+  /**
+   * 谁建的这一段（2026-09-03，sessions.md §6）。**判据是谁调的 create**：经容器自己的路径建的
+   * （cli 启动、`/clear`、宿主 `echo.sessions.create`）为 `true`；经 extension 面的 `session_create`
+   * 工具建的为 `false`。只有 main 挂 `session_create`，所以扇出只有一层、不会自己繁殖。
+   * `--continue` 只在 main 里挑——续到一段别人派的活不是「上次那段对话」。
+   */
+  readonly main: boolean;
+  /**
+   * 持久状态。`closed` 由 `session_close` 与 `/clear` 写；**容器退出不写**——退出的段仍是
+   * `active`、只是没进程，`--continue` 才续得回来。`closed` 的段缺省不列、不收信。
+   * 运行状态（idle / working）是另一份，在 `status.json`，不进 meta。
+   */
+  readonly status: SessionStatus;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly messageCount: number;
 };
+
+/**
+ * 一段 session 的**持久**状态。运行状态（idle / working）是另一份，不在 meta 里。
+ *
+ * `active` = 还能收信、还能被续；`closed` = 显式关掉的（`session_close` / `/clear`），
+ * 留在盘上可 `--resume`，但不进缺省清单、也不再收信。**容器退出不写 closed**——
+ * 退出的段仍是 active，只是没进程。
+ */
+export type SessionStatus = "active" | "closed";
 
 /**
  * 新会话的 id（2026-09-01 用户拍板：**缺省每次启动新建会话**，续上次是显式动作）。
@@ -82,83 +103,3 @@ export type SessionData = {
   readonly compaction: CompactionState;
 };
 
-export interface SessionManager {
-  create(opts?: { name?: string; workspace?: string; agent?: string }): Promise<SessionInfo>;
-  /** 坏档 **fail-loud**，不给半截 session。 */
-  load(id: string): Promise<SessionData>;
-  /** 轻量清单，不读全量 entries。 */
-  list(): Promise<SessionInfo[]>;
-  delete(id: string): Promise<void>;
-  rename(id: string, name: string): Promise<void>;
-  /** Agent 每次入账调它；**落盘时机（逐条 / 攒批 / 轮末）由实现决定**。 */
-  append(id: string, entries: SessionEntry[]): Promise<void>;
-  flush?(id: string): Promise<void>;
-}
-
-/** core 自带的内存实现：一次性跑、评测、单测用。 */
-export class InMemorySessionManager implements SessionManager {
-  private readonly sessions = new Map<string, { info: SessionInfo; entries: SessionEntry[] }>();
-  private seq = 0;
-
-  async create(opts?: { name?: string; workspace?: string; agent?: string }): Promise<SessionInfo> {
-    const id = `s${++this.seq}`;
-    const now = Date.now();
-    const info: SessionInfo = {
-      id,
-      name: opts?.name ?? id,
-      workspace: opts?.workspace ?? "/",
-      agent: opts?.agent ?? "default",
-      createdAt: now,
-      updatedAt: now,
-      messageCount: 0,
-    };
-    this.sessions.set(id, { info, entries: [] });
-    return info;
-  }
-
-  async load(id: string): Promise<SessionData> {
-    const s = this.sessions.get(id);
-    if (s === undefined) throw new Error(`会话不存在：${id}`);
-    const messages: AgentMessage[] = [];
-    let compaction: CompactionState = EMPTY_COMPACTION;
-    for (const e of s.entries) {
-      if (e.kind === "message") messages.push(e.message);
-      else if (e.kind === "compaction") compaction = e.compaction;
-    }
-    assertCompactionFits(messages, compaction, `会话 ${id} 的 compaction`);
-    return { info: s.info, messages, compaction };
-  }
-
-  async list(): Promise<SessionInfo[]> {
-    return [...this.sessions.values()].map((s) => s.info);
-  }
-
-  async delete(id: string): Promise<void> {
-    this.sessions.delete(id);
-  }
-
-  async rename(id: string, name: string): Promise<void> {
-    const s = this.sessions.get(id);
-    if (s === undefined) throw new Error(`会话不存在：${id}`);
-    s.info = { ...s.info, name, updatedAt: Date.now() };
-  }
-
-  async append(id: string, entries: SessionEntry[]): Promise<void> {
-    const s = this.sessions.get(id);
-    if (s === undefined) throw new Error(`会话不存在：${id}`);
-    s.entries.push(...entries);
-    s.info = {
-      ...s.info,
-      updatedAt: Date.now(),
-      messageCount: s.entries.filter((e) => e.kind === "message").length,
-    };
-  }
-
-  /** 内存实现的树身份：线性使用下 parent 恒为前一条。 */
-  nextEntryId(id: string): { entryId: string; parentId: string | null } {
-    const s = this.sessions.get(id);
-    const entries = s?.entries ?? [];
-    const last = entries[entries.length - 1];
-    return { entryId: `${id}-e${entries.length + 1}`, parentId: last?.id ?? null };
-  }
-}

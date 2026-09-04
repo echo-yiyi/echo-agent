@@ -20,6 +20,7 @@ import {
   FileDir,
   kimiProvider,
   SessionService,
+  listSessions,
   toolOk,
   type Agent,
   type Context,
@@ -32,8 +33,8 @@ import {
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
-import { main, mainFor, parseArgs, usage } from "../src/cli.ts";
-import type { PresetForm } from "../src/product.ts";
+import { echoOptions, main, mainFor, parseArgs, usage } from "../src/cli.ts";
+import { ECHO_AGENT, type PresetForm } from "../src/product.ts";
 import { isConfigured } from "../src/setup.ts";
 import { fakeTui } from "./fake-tui.ts";
 import { linesOf } from "../src/stdin.ts";
@@ -159,8 +160,9 @@ test("输入耗尽即收摊:状态落盘、锁已释放(dispose 真的跑了)", 
 
   // `.lock` 在 dispose 的最后一段被删掉。它还在 = 没收摊,下一个进程会被挡在门外。
   expect(existsSync(join(dir, ".lock")), "收摊后锁还在").toBe(false);
-  // sessions 落盘:证明 start() 真的跑过而不是被跳过
-  expect(existsSync(join(dir, "sessions")), "会话没落盘,start() 恐怕没跑").toBe(true);
+  // 会话落盘:证明 start() 真的跑过而不是被跳过。`stateDir` 就是这一段自己的目录(2026-09-03),
+  // 所以 meta 与 entries 在它的根上,不再有 `sessions/<id>/` 那一层。
+  expect(existsSync(join(dir, "meta.json")), "会话没落盘,start() 恐怕没跑").toBe(true);
 });
 
 test("abort:停止收新输入,并且照样干净收摊", async () => {
@@ -720,6 +722,21 @@ test("mainFor：preset 的 Extension 装不上 → 整个启动失败、退出�
 
 const oldMessage = (text: string) => ({ role: "user" as const, source: "human" as const, content: [{ type: "text" as const, text }], at: 1 });
 
+/**
+ * 在**会话目录的上一层**预置一段（2026-09-03：一段 session 就是一个状态根，`--state-dir` 指的是它们的上一层）。
+ * 说一句话才落 meta——空会话不留痕，所以预置也得说一句。
+ */
+async function seedSession(
+  sessionsRoot: string,
+  id: string,
+  opts: { agent: string; text: string; main?: boolean },
+): Promise<void> {
+  const svc = new SessionService(new FileDir(join(sessionsRoot, id)));
+  await svc.createOrResume(id, { workspace: process.cwd(), agent: opts.agent, main: opts.main ?? true });
+  await svc.append(id, [{ kind: "message", message: oldMessage(opts.text) }]);
+  await svc.settle();
+}
+
 test("--continue：续本产品在本目录的最近一段，屏幕上说明带了几条；别的产品的那段不算", async () => {
   const restore = isolate();
   const ui = fakeTui();
@@ -727,13 +744,10 @@ test("--continue：续本产品在本目录的最近一段，屏幕上说明带�
     const credentials = new FileCredentialStore(join(dir, "credentials.json"));
     await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
     const stateDir = join(dir, "state");
-    // 盘上预置两段，都在本目录：coding 的（更新，但不是本产品的）和 echo-agent 自己的（1 条消息）
-    const sessions = new SessionService(new FileDir(stateDir));
-    await sessions.createOrResume("s-mine", { workspace: process.cwd(), agent: "echo-agent" });
-    await sessions.append("s-mine", [{ kind: "message", message: oldMessage("上一场说过的") }]);
-    await sessions.createOrResume("s-coding", { workspace: process.cwd(), agent: "echo-coding" });
-    await sessions.append("s-coding", [{ kind: "message", message: oldMessage("coding 的旧话") }]);
-    await sessions.settle();
+    // 盘上预置三段，都在本目录：coding 的（不是本产品的）、别人派的（不是 main）、echo-agent 自己的
+    await seedSession(stateDir, "s-mine", { agent: "echo-agent", text: "上一场说过的" });
+    await seedSession(stateDir, "s-coding", { agent: "echo-coding", text: "coding 的旧话" });
+    await seedSession(stateDir, "s-spawned", { agent: "echo-agent", text: "别人派给我的活", main: false });
 
     const running = main(["--continue", "--state-dir", stateDir, "--no-memory", "--extensions", dir], true, {
       ui,
@@ -743,6 +757,7 @@ test("--continue：续本产品在本目录的最近一段，屏幕上说明带�
     await waitFor(() => ui.screen().includes("[会话] 续 s-mine"), "续上的口信");
     expect(ui.screen()).toContain("带着上一场的 1 条");
     expect(ui.screen()).not.toContain("s-coding");
+    expect(ui.screen()).not.toContain("s-spawned"); // 别人派的活不是「上次那段对话」
     ui.feed(String.fromCharCode(4));
     expect(await running).toBe(0);
   } finally {
@@ -750,16 +765,14 @@ test("--continue：续本产品在本目录的最近一段，屏幕上说明带�
   }
 });
 
-test("缺省不续：同一目录再起一次是新的一段（盘上多出一段，旧的原样）", async () => {
+test("缺省不续：同一目录再起一次是新的一段，旧的原样；一句话没说的新段不留痕", async () => {
   const restore = isolate();
   try {
     const credentials = new FileCredentialStore(join(dir, "credentials.json"));
     await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
     const stateDir = join(dir, "state");
-    const sessions = new SessionService(new FileDir(stateDir));
-    await sessions.createOrResume("s-old", { workspace: process.cwd(), agent: "echo-agent" });
-    await sessions.append("s-old", [{ kind: "message", message: oldMessage("上一场") }]);
-    await sessions.settle();
+    await seedSession(stateDir, "s-old", { agent: "echo-agent", text: "上一场" });
+    const before = await listSessions(new FileDir(stateDir));
 
     const ui = fakeTui();
     const running = main(["--state-dir", stateDir, "--no-memory", "--extensions", dir], true, { ui, credentials, verify: async () => ({ ok: true }) });
@@ -768,14 +781,31 @@ test("缺省不续：同一目录再起一次是新的一段（盘上多出一�
     ui.feed(String.fromCharCode(4));
     expect(await running).toBe(0);
 
-    const after = await new SessionService(new FileDir(stateDir)).list();
-    expect(after.map((s) => s.id)).toContain("s-old");
-    expect(after.length).toBe(2);
-    const fresh = after.find((s) => s.id !== "s-old")!;
-    expect([fresh.workspace, fresh.agent, fresh.messageCount]).toEqual([process.cwd(), "echo-agent", 0]);
+    // 旧的一个字没动；新起的那段一句话没说，**盘上不留目录**（否则清单很快被空段塞满）
+    const after = await listSessions(new FileDir(stateDir));
+    expect(after.map((s) => [s.id, s.messageCount])).toEqual(before.map((s) => [s.id, s.messageCount]));
+    expect(after.map((s) => s.id)).toEqual(["s-old"]);
   } finally {
     restore();
   }
+});
+
+test("CLI 打开会话面、但不给 runner：模型能看见别的会话、能带话，开新的一段仍是人的动作", async () => {
+  // 会话面是**容器的开关**（`CreateEchoOptions.sessions`），core 缺省不挂。这条盯的是 CLI 这个容器
+  // 选了什么：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此；但「怎么再开一个终端窗口」
+  // 不该由 CLI 替用户决定，所以不给 runner——模型那边因此没有 session_create。
+  // 判据读的是**装配现场那一份入参**，不是另搭一套。
+  const built = echoOptions(
+    ECHO_AGENT,
+    { interactive: true },
+    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    kimiProvider(),
+    [],
+    new FileCredentialStore(join(dir, "credentials.json")),
+    undefined,
+  );
+  expect(built.sessions).toEqual({});
+  expect(built.sessions?.run).toBeUndefined();
 });
 
 test("--resume 点名不存在的会话 / --continue 没有可续的 → 退出码 1，且不建任何状态（不静默新建）", async () => {

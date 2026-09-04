@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { FileDir } from "../src/storage/file-dir.ts";
 import { SessionService } from "../src/session/service.ts";
 import { resolveStateDir } from "../src/create-agent.ts";
+import { userMessage } from "../src/messages.ts";
 
 // 状态根的 containment（2026-08-19 review 的 P1）。
 //
@@ -25,25 +26,28 @@ test("① sessionId 里的 ../ 逃不出去", async () => {
   await expect(svc.createOrResume("../../escaped")).rejects.toThrow(/不合法/);
 });
 
-test("② agentId 里的 ../ 同样逃不出去（此前只校验了 sessionId）", () => {
-  // 实测过：agentId="../../escaped" 会把整个状态根移出 .echo/agents
-  expect(() => resolveStateDir({ agentId: "../../escaped" })).toThrow(/agentId/);
-  expect(() => resolveStateDir({ agentId: "." })).toThrow(/agentId/);
+test("② sessionId 里的 ../ 在状态根解析这一层也逃不出去", () => {
+  // 状态根 = `<ECHO_HOME>/sessions/<sessionId>`（2026-09-03），所以 sessionId 是路径段：
+  // 不校验的话 "../../escaped" 会把整个状态根移出 .echo/sessions（agentId 在旧布局下实测过同样的洞）。
+  expect(() => resolveStateDir({ sessionId: "../../escaped" })).toThrow(/会话 id/);
+  expect(() => resolveStateDir({ sessionId: "." })).toThrow(/会话 id/);
   // 正常的仍然通
-  expect(resolveStateDir({ agentId: "default", stateDir: "/tmp/x" })).toBe("/tmp/x");
+  expect(resolveStateDir({ sessionId: "s1", stateDir: "/tmp/x" })).toBe("/tmp/x");
 });
 
 test("③ 符号链接逃不出去——词法 containment 看不出这条", async () => {
-  // 实测过：把 root/sessions 链到外部目录之后，createOrResume("main") 会在**外部**
-  // 写出 main/meta.json。每一段路径都在 root 底下，resolve() 全程没话说。
+  // 实测过：把 session 目录里的 entries/ 链到外部目录之后，入账会把 entry 文件写到**外部**去。
+  // 每一段路径都在 root 底下，resolve() 全程没话说——词法 containment 对符号链接是瞎的。
   const root = await tmp("echo-link-root-");
   const outside = await tmp("echo-link-out-");
   await mkdir(join(outside, "stolen"), { recursive: true });
-  await symlink(outside, join(root, "sessions"));
+  await symlink(outside, join(root, "entries"));
 
   const svc = new SessionService(new FileDir(root));
-  await expect(svc.createOrResume("main")).rejects.toThrow(/符号链接/);
-  expect(existsSync(join(outside, "main", "meta.json"))).toBe(false);
+  await svc.createOrResume("main");
+  await svc.append("main", [{ kind: "message", message: userMessage("会被写到外面去吗") }]);
+  await expect(svc.settle()).rejects.toThrow(/符号链接/);
+  expect(existsSync(join(outside, "000001.json"))).toBe(false);
 });
 
 test("③b 检查发生在 mkdir 之前——否则递归建目录会先把路径实体化到外面", async () => {

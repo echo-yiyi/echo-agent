@@ -42,10 +42,11 @@ import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
 import { buildWorkingMessages, estimateText, estimateTokens } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
-import { InMemorySessionManager, type SessionEntry, type SessionManager } from "./session/types.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
+import type { SessionPhase } from "./session/status.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
 import { InboxAckError, InboxStore } from "./inbox/store.ts";
+import { systemClock, type Clock } from "./schedule/clock.ts";
 import { environmentDedupeKey, scheduleDedupeKey } from "./inbox/records.ts";
 import { stateHostOf } from "./state/host-wiring.ts";
 import { DurableDeliveryDeferred, type DurableDeliveryRequest, type DurableDeliveryResult, type DurableIngressPort } from "./inbox/ingress.ts";
@@ -91,6 +92,13 @@ import type { BuiltinToolGroups } from "./extension/builtin.ts";
 import type { TaskItem, TaskSnapshot, TaskSpec, TaskStore } from "./task/types.ts";
 
 export type AgentStatus = "idle" | "generating" | "acting" | "compacting";
+
+/**
+ * 多久重扫一次自己的 inbox 目录（毫秒）。**不做成参数**：它是「别的进程写进来的消息多快被看见」的
+ * 下限，不是要按部署调的旋钮。一秒对「另一段 session 发来一句话」这个场景足够快，
+ * 对盘的负担也只是一次目录列举。要更快就由宿主装 watcher 主动调 `consumeInbox()`。
+ */
+const INBOX_POLL_MS = 1_000;
 
 export type AgentState = {
   /* 装备（慢变；仅 idle 可换） */
@@ -165,7 +173,6 @@ export type AgentOptions = {
    */
   permission?: PermissionPolicy;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
-  sessions?: SessionManager;
   sessionId?: string;
   /**
    * 工作目录的**缺省值**：纯内存 agent 直接用它；有 session 时它只在**新建** session 那一刻写进
@@ -233,7 +240,7 @@ export type AgentOptions = {
   autoDream?: boolean;
   /**
    * 会话的语义所有者（D3）。传了 `start()` 才会 create-or-resume；不传 = 不做会话持久化。
-   * **与 `sessions`（旧 `SessionManager`）互斥**——两个都传会有两套入账语义，构造时判红。
+   * 注入的 store 就是**这一段 session 的目录**（2026-09-03：状态根 = session 目录）。
    */
   sessionService?: SessionService;
   /**
@@ -241,6 +248,11 @@ export type AgentOptions = {
    * 丢锁时按 §13.12.3 的四步收场。不传 = 不做互斥（评测与一次性跑天然如此）。
    */
   stateLock?: StateLock;
+  /**
+   * 时间与定时器（`schedule/clock.ts` 的端口）。不给用真时钟；测试给 `FakeClock` 才能零 sleep 地驱动
+   * inbox 轮询。**Agent 自己只用它做一件事**：定期重扫 inbox 目录（见 `INBOX_POLL_MS`）。
+   */
+  clock?: Clock;
   /** agent 身份（D5，缺省 `"default"`）。目前只用于 lease 的 holder 标识。 */
   agentId?: string;
   /**
@@ -417,7 +429,6 @@ export class Agent {
   private tapNextSeq = 0;
   private readonly tapPending = new Map<number, AgentEvent>();
 
-  private readonly sessions?: SessionManager;
   /** 持久记忆的操作面：`agent.memory?.shouldDream()`。undefined = 本 agent 没有记忆。 */
   readonly memory?: AgentMemories;
   /** 定时任务的操作面：`agent.schedule?.start()`。undefined = 本 agent 没有闹钟。 */
@@ -426,9 +437,12 @@ export class Agent {
   readonly mcp?: AgentMcpPort;
   /** 任务清单的落盘端口。不传 = 纯内存。 */
   readonly taskStore?: TaskStore;
-  /** D3 的会话语义所有者；与 `sessions` 互斥。 */
+  /** D3 的会话语义所有者。一个 Agent 实例 = 一段 session。 */
   private readonly sessionService?: SessionService;
   private readonly stateLock?: StateLock;
+  private readonly clock: Clock;
+  /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
+  private inboxPollCancel?: () => void;
   private readonly agentId: string;
   /** 新建会话时写进 `SessionInfo.agent` 的名字（`AgentOptions.agentName`，缺省 = `agentId`）。 */
   private readonly agentName: string;
@@ -607,7 +621,6 @@ export class Agent {
       mcp: [],
       tasks: EMPTY_TASK_SNAPSHOT,
     };
-    this.sessions = opts.sessions;
     this.autoConsumeInbox = opts.autoConsumeInbox ?? false;
     this.autoDream = opts.autoDream ?? false;
     this.disposables = opts.disposables ?? [];
@@ -743,11 +756,9 @@ export class Agent {
     this.mcp = opts.mcp;
     this.mcp?.attach({ tools: this.tools, onChanged, deliver, report });
 
-    // 两套会话语义并存会让入账走两条路——构造期判红，不留到运行时才发现。
-    if (opts.sessions !== undefined && opts.sessionService !== undefined) {
-      throw new Error("`sessions` 与 `sessionService` 只能给一个：前者是 D3 之前的形状，新代码用后者");
-    }
     this.sessionService = opts.sessionService;
+    this.sessionService?.attachDiagnostics((d) => this.reportDiagnostic(d));
+    this.clock = opts.clock ?? systemClock;
     this.stateLock = opts.stateLock;
     this.agentId = opts.agentId ?? "default";
     this.agentName = opts.agentName ?? this.agentId;
@@ -1046,6 +1057,54 @@ export class Agent {
    * 攒批不是优化：三个后台任务同时结束就跑一轮，不是三轮。
    * 正在跑 / 队列空 → 返回 null，不做任何事。
    */
+  /**
+   * 把运行状态写进 `status.json`（2026-09-03，sessions.md §6）。**只有持有 lease 的进程该写。**
+   *
+   * 它是给别人看的提示：`session_list` 里「这段能不能马上答话」就读它。失败不影响本段对话——
+   * 读方永远还要再看一眼 lease，`alive` 为假时这份 `phase` 一律作废（进程崩在 working 的那种）。
+   */
+  private publishPhase(phase: SessionPhase): void {
+    const id = this._state.sessionId;
+    if (id === null || this.phase !== "running") return;
+    this.sessionService?.setPhase(id, phase);
+  }
+
+  /**
+   * inbox 轮询：**别的进程写进来的消息，靠它才看得见**（2026-09-03，sessions.md §5）。
+   *
+   * 会话之间发消息 = 往对方的 `inbox/` 目录写一条 record，写者可能是另一个进程。`InboxStore`
+   * 只在 `restore()` 那一刻读过盘，所以不重扫就等于「要等对方重启才收到」——「A 发 B，B 不重启
+   * 就在下一轮看到」这条判据直接不成立。
+   *
+   * 为什么是轮询而不是 `fs.watch`：core 不 import 任何 `node:`（浏览器 / Worker / 边缘运行时都要能跑），
+   * 而 `Clock` 是已有的端口、测试拿 `FakeClock` 就能零 sleep 驱动。真要事件驱动，宿主可以自己在
+   * 目录上装 watcher 再调 `agent.consumeInbox()`——那是加速，不是另一套语义。
+   */
+  private startInboxPoll(): void {
+    if (this.inboxPollCancel !== undefined) return; // 幂等：activate 可能被走到两次
+    this.inboxPollCancel = this.clock.setInterval(() => void this.pollInbox(), INBOX_POLL_MS);
+  }
+
+  private stopInboxPoll(): void {
+    this.inboxPollCancel?.();
+    this.inboxPollCancel = undefined;
+  }
+
+  /**
+   * 一拍轮询。**只在真的空着时扫**：有 run 在跑就跳过——那时扫了也不能消费，白读一遍盘。
+   * 失败只报诊断：一次读盘失败不该把一个健康的 agent 掀翻，下一拍还会再来。
+   */
+  private async pollInbox(): Promise<void> {
+    if (this.phase !== "running" || this.activeRun !== undefined || this.userRunPending || this.inboxTicketOutstanding) return;
+    if (this.inboxFailure !== null) return;
+    try {
+      const found = await this.inbox.refresh();
+      if (found > 0 && this.autoConsumeInbox) await this.consumeInbox();
+    } catch (e) {
+      this.reportDiagnostic({ code: "inbox_refresh_failed", message: errText(e) });
+    }
+  }
+
   async consumeInbox(): Promise<LoopResult | null> {
     if (this.activeRun !== undefined || this.userRunPending || this.inboxTicketOutstanding) return null;
     if (this.inboxFailure !== null) return null; // 账本已封：不再消费，也不假装健康
@@ -1375,6 +1434,7 @@ export class Agent {
       // **把已经起来的东西收干净，再把原错误抛出去。**
       // 顺序上 startSchedule 目前是最后一步、之后不会再抛，但依赖这一点是脆弱的：
       // 以后在它后面加一步，就会漏一个野定时器出去——那种污染跨测试、跨进程都难查。
+      this.stopInboxPoll();
       if (this.schedule !== undefined) stopSchedule(this.schedule);
       if (acquired !== undefined) {
         // **revoke 排在 release 之前**：只 release 的话，锁已经还回去了而本代 view 还写得进去——
@@ -1428,6 +1488,7 @@ export class Agent {
       this.autoConsumeInbox = false;
       this.autoDream = false;
       this.gate?.setActiveBusinessMode("draining");
+      this.stopInboxPoll();
       if (this.schedule !== undefined) stopSchedule(this.schedule);
 
       // ② 等已经登记的受管工作真的做完：
@@ -1538,6 +1599,8 @@ export class Agent {
     // 打开必须在恢复之后：先开的话，dream 可能在 session 还没灌进来时就跑起来。
     if (this.memory !== undefined) this.autoDream = true;
     this.autoConsumeInbox = true;
+    this.startInboxPoll();
+    this.publishPhase("idle"); // 起来了、还没活干：别人现在问它，它能马上答
 
     this.phase = "running";
     this.restoredReason = null;
@@ -1940,40 +2003,6 @@ export class Agent {
     return this.taskLastWrite ?? Promise.resolve("written");
   }
 
-  /* ───────────── 会话面 ───────────── */
-
-  async newSession(name?: string, workspace: string = this._state.workspace): Promise<string> {
-    const sessions = this.requireSessions();
-    const info = await sessions.create({ name, workspace, agent: this.agentName });
-    this.reset();
-    this._state.sessionId = info.id;
-    this._state.workspace = info.workspace;
-    await this.hooks.notify({ type: "sessionStart", sessionId: info.id, resumed: false, messageCount: 0 }, this.hookContext());
-    return info.id;
-  }
-
-  async loadSession(id: string): Promise<void> {
-    this.assertIdle("session");
-    const sessions = this.requireSessions();
-    const data = await sessions.load(id);
-    this.reset();
-    this._state.messages = [...data.messages];
-    this._state.compaction = data.compaction;
-    this._state.sessionId = data.info.id;
-    this._state.workspace = data.info.workspace;
-    await this.hooks.notify(
-      { type: "sessionStart", sessionId: data.info.id, resumed: true, messageCount: data.messages.length },
-      this.hookContext(),
-    );
-  }
-
-  private requireSessions(): SessionManager {
-    if (this.sessions === undefined) {
-      throw new Error("没有注入 SessionManager：本 Agent 是纯内存模式（会话面不可用）");
-    }
-    return this.sessions;
-  }
-
   /* ───────────── 私有：运行 ───────────── */
 
   /**
@@ -2248,6 +2277,7 @@ export class Agent {
    */
   private closeRun(): void {
     this._state.status = "idle";
+    this.publishPhase("idle");
     this._state.startedAt = null;
     this._state.streamingMessage = undefined;
     this._state.pendingToolCalls = new Set();
@@ -2547,6 +2577,7 @@ export class Agent {
     // 于是 `stop()` 返回、lease 已释放、新 holder 已经拿到锁之后，旧 Agent 的 dream
     // 仍在往 memory 里写——单写者当场破（实测复现）。
     await this.settleDream();
+    this.stopInboxPoll(); // 轮询只读盘、不写，所以取消即可，没有「在飞的那一拍」要等
     if (this.schedule !== undefined) {
       // 取消 timer **并等在飞的那一拍**：`stopSchedule()` 只挡后续，挡不住已经开始的那次，
       // 而它还会写 `schedules.json`。
@@ -2574,6 +2605,16 @@ export class Agent {
     // 在飞的 inbox 落盘、会话的未 settle 写——**都必须在关存储之前**
     await attempt(() => this.settleWrites());
     await attempt(async () => await this.sessionService?.settle());
+    // **一句话都没说过的那段，收摊时把 meta 撤掉**（2026-09-04，sessions.md §3）：
+    // 起来就退出的会话不该留在别人的清单里、也不该被 `--continue` 挑中。
+    //
+    // 两道闸都必须过：本段没有任何 entry（`discardIfUnused` 自己判），以及
+    // **inbox 里没有待消费的记录**——有人给它留过话就不能撤，撤了那条留言就成了孤儿。
+    // 撤在 settle 之后：先把该落的落完，再决定这一段算不算数。
+    if (this.inbox.pendingCount === 0) {
+      const id = this._state.sessionId;
+      if (id !== null) await attempt(async () => void (await this.sessionService?.discardIfUnused(id)));
+    }
 
     /* ③ 关一次。顺序保持（关存储有先后），但每一条都要试到。 */
     for (const d of this.finalDisposables) await attempt(() => d.dispose());
@@ -2639,7 +2680,7 @@ export class Agent {
 
   /**
    * 三步顺序**不可换**：
-   *   ① 归约状态 ② 增量交给 SessionManager ③ 逐个 await listener
+   *   ① 归约状态 ② 增量交给 SessionService ③ 逐个 await listener
    * 监听器看到的必须是已经生效的状态——反过来就会读到旧值。
    */
   private async processEvents(input: AgentEventInput): Promise<void> {
@@ -2648,6 +2689,9 @@ export class Agent {
     switch (input.type) {
       case "agent_start":
         this._state.status = "generating";
+        // 运行状态落盘（2026-09-03）：只在 idle ↔ working 这条边上写，generating / acting / compacting
+        // 是 working 的子态——别人只关心「现在问它，它能马上答吗」。
+        this.publishPhase("working");
         break;
       case "turn_start":
         this._state.iteration = input.iteration;
@@ -2880,10 +2924,8 @@ export class Agent {
    * 增量入账。**「哪些事件进 session」这条语义在这里，不在 Store**——
    * 三种：定稿消息、压缩、以 error 结束的 run。
    *
-   * 两条落盘路径：
-   * - `sessionService`（D3 之后）：只交内容，**id / parentId 由 Service 生成**。
-   *   身份归 core 的理由见 `session/service.ts`——它是恢复期才会炸的那类不变量。
-   * - `sessions`（旧 `SessionManager`）：语义在实现方手里，id 只能这边自己拼。保留供过渡。
+   * 只交内容，**id / parentId 由 `SessionService` 生成**。身份归 core 的理由见
+   * `session/service.ts`——它是恢复期才会炸的那类不变量。
    */
   private async persist(input: AgentEventInput): Promise<void> {
     const id = this._state.sessionId;
@@ -2900,16 +2942,7 @@ export class Agent {
     }
     if (parts.length === 0) return;
 
-    if (this.sessionService !== undefined) {
-      await this.sessionService.append(id, parts);
-      return;
-    }
-
-    const sessions = this.sessions;
-    if (sessions === undefined) return;
-    const nextId = (n: number): string => `${id}-e${this._state.messages.length}-${n}`;
-    const entries: SessionEntry[] = parts.map((part, n) => ({ ...part, id: nextId(n), parentId: null }) as SessionEntry);
-    await sessions.append(id, entries);
+    await this.sessionService?.append(id, parts);
   }
 }
 
@@ -2977,4 +3010,3 @@ function withUserText(m: AgentMessage, text: string): AgentMessage {
   return { ...m, content } as AgentMessage;
 }
 
-export { InMemorySessionManager };

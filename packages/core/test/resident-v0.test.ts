@@ -42,7 +42,8 @@ type Report = {
  * 外层 `test(..., 120_000)` 抢不进来，整个测试会挂到 runner 超时才死，还看不出是谁卡的。
  */
 function runPhase(stateDir: string, phase: string, sessionId?: string): { ok: boolean; report: Report | null; out: string } {
-  // `sessionId`：要**续**哪一段。缺省每次启动新建会话（2026-09-01 用户拍板），跨进程恢复对话是显式动作
+  // `sessionId`：要**续**哪一段。缺省每次启动新建会话，跨进程恢复是显式动作；
+  // 2026-09-03 起状态根 = session 目录，所以**共享 tasks / inbox / schedule 也必须点名同一段**。
   const r = Bun.spawnSync(["bun", HOST, stateDir, phase, ...(sessionId === undefined ? [] : [sessionId])], {
     stdout: "pipe",
     stderr: "pipe",
@@ -58,8 +59,9 @@ function runPhase(stateDir: string, phase: string, sessionId?: string): { ok: bo
 }
 
 /** 盘上的 inbox record 数。`inbox/acks/` 是 ack marker 目录，不算入站事实。 */
-function inboxRecordCount(dir: string): number {
-  return readdirSync(join(dir, "inbox")).filter((name) => /^[0-9]{6}\.json$/.test(name)).length;
+/** inbox 归 session（状态根 = session 目录，2026-09-03），所以要点名是哪一段的。 */
+function inboxRecordCount(home: string, sessionId: string): number {
+  return readdirSync(join(home, "sessions", sessionId, "inbox")).filter((name) => /^[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(name)).length;
 }
 
 test(
@@ -98,23 +100,24 @@ test(
     expect(ra.seen.every((s) => !s.tools.includes("transcript_read"))).toBe(true);
 
     // 落盘是真的：记忆文件、索引、闹钟、会话 entries
-    expect(existsSync(join(dir, "memory", "项目.md"))).toBe(true);
-    expect(existsSync(join(dir, "schedules.json"))).toBe(true);
+    // 记忆在 user 层（`<home>/memory/`，跨 session 共享）；闹钟与 entries 在**这一段自己的目录**里
+    expect(existsSync(join(dir, "memory", "memory", "项目.md"))).toBe(true);
+    expect(existsSync(join(dir, "sessions", ra.sessionId!, "schedules.json"))).toBe(true);
     expect(readdirSync(join(dir, "sessions", ra.sessionId!, "entries")).length).toBeGreaterThan(0);
 
     // ⑥ **Dream 是 Agent 自己起的**：宿主没调任何整理相关的东西，只是把门喂饱
     // （10 个记忆文件 / 10 次写入）。判据是盘上的 `lastAt` 被提交，不是「dream 跑过」。
     expect(ra.dreamed, "门满足了，Agent 却没自己整理").toBe(true);
-    expect(readdirSync(join(dir, "memory")).length).toBeGreaterThanOrEqual(10);
+    expect(readdirSync(join(dir, "memory", "memory")).length).toBeGreaterThanOrEqual(10);
 
     // ⑪ 干净 stop 之后锁必须还回去
-    expect(existsSync(join(dir, ".lock")), "stop() 之后锁没释放").toBe(false);
+    expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock")), "stop() 之后锁没释放").toBe(false);
 
     /* ─── ⑤ 闹钟到点 → Inbox → **Agent 自己醒来** ─── */
     // 「不是测试直接调 loop」是这一条的全部意义：宿主只 `schedule_create` 了一个
     // 1.2 秒之后的 `at`，然后等；开新一轮的是 agent 自己。
     // **不注入假时钟**——`at` 不限过去未来，tick 每秒一拍，真时钟下就能测。
-    const wake = runPhase(dir, "wake");
+    const wake = runPhase(dir, "wake", ra.sessionId!); // 闹钟归 session：要验「A 建的那条还在」就得续 A 那一段
     expect(wake.ok, `phase wake 挂了：\n${wake.out}`).toBe(true);
     expect(wake.report!.woke, "闹钟到点了，Agent 没醒").toBe(true);
 
@@ -157,31 +160,32 @@ test(
     expect(last.systemPrompt, "任务清单跑进 system 了——每轮变的东西不许进 system 段").not.toContain("任务清单");
 
     // ⑪ 再次干净收摊
-    expect(existsSync(join(dir, ".lock"))).toBe(false);
+    expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock"))).toBe(false);
 
     /* ─── ⑩ 崩溃：未消费的入站事实留存 + 任务改完即落盘 ─── */
-    const crash = runPhase(dir, "crash");
+    // 任务与 inbox 也归 session：要验「崩溃前那条还在、重启后被吃掉」，crash 就得续同一段
+    const crash = runPhase(dir, "crash", ra.sessionId!);
     expect(crash.ok, `phase crash 挂了：\n${crash.out}`).toBe(true);
     // 只数 record 文件：`inbox/acks/` 是 batch-ack marker 的目录（§14.2.4），不是入站事实
-    expect(inboxRecordCount(dir), "崩溃前投进来的那条不在盘上").toBe(1);
+    expect(inboxRecordCount(dir, ra.sessionId!), "崩溃前投进来的那条不在盘上").toBe(1);
     // **任务是「工具回执说成功之后就崩」的那条**：此前 `saveTasks` 只在 `dispose()` 里调，
     // 干净 stop 掩盖了这个缺口——崩溃时那条任务会丢。
-    expect(readFileSync(join(dir, "tasks.json"), "utf8"), "崩溃前建的任务没落盘").toContain("崩溃前建的");
+    expect(readFileSync(join(dir, "sessions", ra.sessionId!, "tasks.json"), "utf8"), "崩溃前建的任务没落盘").toContain("崩溃前建的");
 
     /* ─── 单写契约：崩溃留下的锁**不许被自动抢占**（这一步是运维，不是产品能力）─── */
     // 2026-08-18 那条 P0 的直接后果：自动 stale takeover 会双授，已取消。
     // 代价就是这里——新进程必须**拒绝启动**，等人来清。**这不叫「自动恢复」**，
     // 所以第 8 条不由这条路证明（它已经由上面的干净重启证过了）。
-    expect(existsSync(join(dir, ".lock")), "崩溃应当留下锁").toBe(true);
+    expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock")), "崩溃应当留下锁").toBe(true);
     const blocked = runPhase(dir, "c", ra.sessionId!);
     expect(blocked.ok, "陈尸锁在，新进程却启动了——单写者当场破").toBe(false);
     expect(blocked.out).toContain("已被另一个写者持有");
 
     // 人工清锁的前提是**看得见是谁占着**——这就是 `inspectStateLock` 存在的理由
-    const who = await inspectStateLock(join(dir, ".lock"));
+    const who = await inspectStateLock(join(dir, "sessions", ra.sessionId!, ".lock"));
     expect(who.state).toBe("valid");
     expect(who.state === "valid" && who.record.holder).toBe("agent:default");
-    rmSync(join(dir, ".lock")); // ← 显式运维步骤
+    rmSync(join(dir, "sessions", ra.sessionId!, ".lock")); // ← 显式运维步骤
 
     /* ─── ⑩ 清锁之后：那条入站事实被 Agent 自己吃掉 ─── */
     const replay = runPhase(dir, "c", ra.sessionId!);
@@ -190,8 +194,8 @@ test(
       replay.report!.seen[0]!.texts.join("\n"),
       "崩溃时未消费的那条没被重放",
     ).toContain("后台任务跑完了");
-    expect(inboxRecordCount(dir), "消费完盘上还留着").toBe(0);
-    expect(existsSync(join(dir, ".lock"))).toBe(false);
+    expect(inboxRecordCount(dir, ra.sessionId!), "消费完盘上还留着").toBe(0);
+    expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock"))).toBe(false);
   },
   120_000,
 );
