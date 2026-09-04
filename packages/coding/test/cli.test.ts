@@ -7,13 +7,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { usage } from "echo-agent";
+import { InMemoryCredentialStore } from "@echo-agent/core";
 import { ECHO_CODING } from "../src/cli.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
 test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；两种形态都不装权限策略（缺省全放行）", () => {
   for (const interactive of [true, false]) {
-    const preset = ECHO_CODING.preset!({ interactive });
+    const preset = ECHO_CODING.preset!({ interactive, credentials: new InMemoryCredentialStore() });
     // 身份与纪律段、文件读写与搜索、shell 只属于 coding（不在 echo-agent 里）——它们以三条 Extension 的形态跟着产品走
     expect(preset.extensions?.map((e) => e.entryId)).toEqual(["echo:coding", "echo:workspace", "echo:shell", "echo:worktree", "echo:web"]);
     // workspace 是 session 级事实，由 `mainFor()` 直接交给 `createEcho()`，preset 不出这一项（2026-09-01）。

@@ -19,7 +19,7 @@ import { shellToolsSection } from "./prompt.ts";
 /** 工作区读写与搜索：`read_file` / `write_file` / `edit_file` / `glob` / `grep` / `list_dir`。 */
 export const ECHO_WORKSPACE = defineToolPack("echo:workspace");
 
-/** 取网页：`web_fetch`（延迟工具）。纯函数造的工具，config 进来即可。 */
+/** 取网页与搜索：`web_fetch` / `web_search`（延迟工具）。纯函数造的工具，config 进来即可。 */
 export const ECHO_WEB = defineToolPack("echo:web");
 
 /**

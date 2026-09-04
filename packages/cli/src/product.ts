@@ -14,13 +14,19 @@
 // 它是 session 级事实，`mainFor()` 直接交给 `createEcho({ workspace })`。
 
 import { readFileSync } from "node:fs";
-import type { CreateEchoOptions } from "@echo-agent/core";
+import type { CreateEchoOptions, CredentialStore } from "@echo-agent/core";
 import { identityEntry } from "./prompt.ts";
 
 /** 装配前已经定了的形态。产品层据此决定「谁答权限询问」之类；工作目录不在这里（见文件头）。 */
 export type PresetForm = Readonly<{
   /** `true` = 交互形态（有人坐在终端前）；`false` = 管道 / CI。判据只有 `main()` 那一个。 */
   interactive: boolean;
+  /**
+   * 凭据来源——**与启动逻辑同一个 store**（缺省 `$ECHO_HOME/credentials.json`，测试可注入）。
+   * 产品自带的、要 key 的工具（如 `echo-coding` 的 `web_search` 读 `brave`）从这里拿，不各开各的文件：
+   * 解析顺序与模型 key 一样是「环境变量 → 这个 store → 没有」（2026-09-04）。
+   */
+  credentials: CredentialStore;
 }>;
 
 export type Product = Readonly<{

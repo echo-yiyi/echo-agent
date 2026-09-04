@@ -658,7 +658,7 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
     expect(ui.screen()).toContain("echo-试产品");
     expect(ui.screen()).toContain("v9.9.9");
     // 形态到了 preset 手里，而且只调一次（workspace 不经 preset，`mainFor()` 直接交给 createEcho）
-    expect(forms).toEqual([{ interactive: true }]);
+    expect(forms).toEqual([{ interactive: true, credentials }]); // 凭据 store 原样交给产品（web_search 读 brave）
     expect(applied, "preset 交出的 Extension 没被 mount").toBe(1);
     // 渐进式披露的缺省名单（`DEFAULT_DEFERRED_TOOLS`）进了装配：名单非空 → `tool_search` 在池里；
     // 延迟的工具本身也在池里（只是不上菜单，那半边的判据在 core 的 tool-search.test）

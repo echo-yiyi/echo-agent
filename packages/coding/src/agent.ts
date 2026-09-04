@@ -26,7 +26,7 @@
 
 import { DEFAULT_MAX_ITERATIONS, type AssembleContext } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
 import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extension";
-import type { PermissionPolicy as CorePermissionPolicy, PromptSection, Skill } from "@echo-agent/core";
+import type { CredentialStore, PermissionPolicy as CorePermissionPolicy, PromptSection, Skill } from "@echo-agent/core";
 import { makeBashTool, makeShellTools } from "./tools/bash.ts";
 import { makeFsTools } from "./tools/fs.ts";
 import { makeSearchTools } from "./tools/search.ts";
@@ -45,6 +45,11 @@ export type CodingPresetOptions = {
    */
   skills?: Skill[];
   maxIterations?: number;
+  /**
+   * 凭据来源：`web_search` 从这里读搜索服务的 key（`brave`），排在环境变量 `BRAVE_API_KEY` 之后。
+   * 不给 = 只认环境变量（评测、低层装配）。宿主给的是与模型 key 同一个 store（`PresetForm.credentials`）。
+   */
+  credentials?: CredentialStore;
 };
 
 /**
@@ -161,8 +166,8 @@ export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
       { entryId: "echo:shell", definition: ECHO_SHELL as never },
       // worktree 隔离要 `AgentRuntime.setWorkspace`，同 shell 一样自己 inject（2026-09-03）
       { entryId: "echo:worktree", definition: ECHO_WORKTREE as never },
-      // 取网页：纯函数工具，config 进来；延迟工具，经 tool_search 取过才上菜单
-      { entryId: "echo:web", definition: ECHO_WEB as never, config: { tools: makeWebTools() } },
+      // 取网页 / 搜索：纯函数工具，config 进来；延迟工具，经 tool_search 取过才上菜单
+      { entryId: "echo:web", definition: ECHO_WEB as never, config: { tools: makeWebTools({ credentials: opts.credentials }) } },
     ],
   };
 }

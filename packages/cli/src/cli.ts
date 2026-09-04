@@ -376,7 +376,7 @@ export function mainFor(product: Product): Main {
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
-      const form: PresetForm = { interactive };
+      const form: PresetForm = { interactive, credentials };
       return interactive
         ? await runInteractive(product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, sessionId, notices, controller.signal, deps)
         : await runPiped(product, form, effective, provider, choices, credentials, sessionId, notices, controller.signal);

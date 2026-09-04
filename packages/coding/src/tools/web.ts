@@ -1,16 +1,122 @@
-// web_fetch（2026-09-03）：取一个 URL 的正文给模型看。不做出网确认（用户拍板：缺省全放行）；不接搜索——
-// web_search 要接搜索服务（要 key），另议。HTML 在这层剥成可读文本，不加依赖。
-// 延迟工具（`deferred`）：多数编码任务用不上它，经 tool_search 取过才上菜单。
+// web 一组（2026-09-03/04）：`web_fetch` 取一个 URL 的正文；`web_search` 走 Brave Search API 拿结果列表。
+// 不做出网确认（用户拍板：缺省全放行）。HTML 在这层剥成可读文本，不加依赖。
+// 两件都是延迟工具（`deferred`）：多数编码任务用不上，经 tool_search 取过才上菜单。
+//
+// 搜索源选 Brave（2026-09-04 用户拍板）：与模型无关，一把 key 五家 provider 通用；厂商自带搜索要改 core 的
+// dialect 且 deepseek 没有，另议。key 的解析顺序与模型 key 一样：环境变量 `BRAVE_API_KEY` → 凭据 store 的
+// `brave` 条目 → 没有（工具如实报「没配」，不猜）。key 的值不进任何错误信息。
 
-import { toolError, toolOk, type ModelTool } from "@echo-agent/core";
+import { toolError, toolOk, type CredentialStore, type ModelTool } from "@echo-agent/core";
 
 const TIMEOUT_MS = 30_000;
 /** 响应体最多读这么多字节：超过就截，避免一个大文件把内存与上下文一起吃掉。 */
 const MAX_BYTES = 4_000_000;
 const DEFAULT_MAX_CHARS = 20_000;
 
-export function makeWebTools(): ModelTool[] {
-  return [webFetchTool()] as ModelTool[];
+const BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const BRAVE_ENV = "BRAVE_API_KEY";
+/** 凭据 store 里的条目名：`{ "brave": { "apiKey": "…" } }`。 */
+const BRAVE_CREDENTIAL = "brave";
+const SEARCH_TIMEOUT_MS = 20_000;
+const SEARCH_COUNT_DEFAULT = 5;
+const SEARCH_COUNT_MAX = 10;
+
+export type WebDeps = {
+  /** 搜索 key 的第二来源（第一是环境变量）。不给 = 只认环境变量。 */
+  credentials?: Pick<CredentialStore, "read">;
+  /** 测试用：把 Brave 的接口指到假服务。 */
+  searchEndpoint?: string;
+};
+
+export function makeWebTools(deps: WebDeps = {}): ModelTool[] {
+  return [webFetchTool(), webSearchTool(deps)] as ModelTool[];
+}
+
+/** 环境变量 → 凭据 store → 没有。值只在这里经手，不进返回给模型的任何文字。 */
+async function searchKey(deps: WebDeps): Promise<string | undefined> {
+  const env = process.env[BRAVE_ENV];
+  if (env !== undefined && env !== "") return env;
+  const stored = await deps.credentials?.read(BRAVE_CREDENTIAL);
+  return stored?.type === "api_key" && stored.key !== "" ? stored.key : undefined;
+}
+
+type BraveResult = { title?: unknown; url?: unknown; description?: unknown; age?: unknown; page_age?: unknown };
+
+const FRESHNESS: Record<string, string> = { day: "pd", week: "pw", month: "pm", year: "py" };
+
+function webSearchTool(deps: WebDeps): ModelTool<{ query: string; count?: number; freshness?: string }> {
+  return {
+    kind: "model",
+    name: "web_search",
+    label: "搜网页",
+    deferred: true,
+    description:
+      "Search the web (Brave Search) and return the top results as title, URL and snippet; read a result with web_fetch. " +
+      "count is 1-10 (default 5); freshness limits results to the last day, week, month or year. " +
+      `Needs a Brave Search API key: the ${BRAVE_ENV} environment variable or a '${BRAVE_CREDENTIAL}' entry in the credentials file.`,
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        count: { type: "number", description: "How many results, 1-10 (default 5)" },
+        freshness: { type: "string", enum: ["day", "week", "month", "year"], description: "Only results from the last day/week/month/year" },
+      },
+      required: ["query"],
+    },
+    async execute({ query, count, freshness }, ctx) {
+      const q = query.trim();
+      if (q === "") return toolError("query is empty");
+      const key = await searchKey(deps);
+      if (key === undefined) {
+        return toolError(
+          `No search service configured: set ${BRAVE_ENV}, or add { "${BRAVE_CREDENTIAL}": { "apiKey": "…" } } to $ECHO_HOME/credentials.json ` +
+            "(a Brave Search API key, see https://brave.com/search/api/).",
+        );
+      }
+      const url = new URL(deps.searchEndpoint ?? BRAVE_ENDPOINT);
+      url.searchParams.set("q", q);
+      url.searchParams.set("count", String(Math.min(SEARCH_COUNT_MAX, Math.max(1, Math.floor(count ?? SEARCH_COUNT_DEFAULT)))));
+      if (freshness !== undefined) {
+        const code = FRESHNESS[freshness];
+        if (code === undefined) return toolError(`freshness must be one of day, week, month, year (got '${freshness}')`);
+        url.searchParams.set("freshness", code);
+      }
+      const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+      const signal = ctx.signal === undefined ? timeout : AbortSignal.any([ctx.signal, timeout]);
+      let res: Response;
+      let text: string;
+      try {
+        res = await fetch(url, { signal, headers: { accept: "application/json", "x-subscription-token": key } });
+        text = await res.text();
+      } catch (e) {
+        return toolError(`Search request failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (res.status === 401 || res.status === 403) return toolError(`Brave Search rejected the API key (HTTP ${res.status}); check ${BRAVE_ENV} or the '${BRAVE_CREDENTIAL}' credential`);
+      if (res.status === 429) return toolError("Brave Search rate limit or quota exceeded (HTTP 429); wait or check the plan");
+      if (!res.ok) return toolError(`Brave Search returned HTTP ${res.status} ${res.statusText}\n${text.slice(0, 300)}`);
+      let results: BraveResult[];
+      try {
+        const parsed = JSON.parse(text) as { web?: { results?: unknown } };
+        results = Array.isArray(parsed.web?.results) ? (parsed.web.results as BraveResult[]) : [];
+      } catch {
+        return toolError("Brave Search returned a response that is not JSON");
+      }
+      if (results.length === 0) return toolOk(`No results for "${q}"`, { query: q, count: 0 });
+      const lines = results.map((r, i) => {
+        const title = typeof r.title === "string" ? stripTags(r.title) : "(untitled)";
+        const link = typeof r.url === "string" ? r.url : "";
+        const snippet = typeof r.description === "string" ? stripTags(r.description) : "";
+        const age = typeof r.age === "string" ? r.age : typeof r.page_age === "string" ? r.page_age : "";
+        return `${i + 1}. ${title}${age === "" ? "" : ` (${age})`}\n   ${link}${snippet === "" ? "" : `\n   ${snippet}`}`;
+      });
+      return toolOk(`Results for "${q}":\n${lines.join("\n")}`, { query: q, count: results.length });
+    },
+  };
+}
+
+/** Brave 的标题与摘要里带 `<strong>` 之类的高亮标签：剥掉、解实体、压空白。 */
+function stripTags(s: string): string {
+  return decodeEntities(s.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
 }
 
 function webFetchTool(): ModelTool<{ url: string; max_chars?: number }> {
@@ -22,7 +128,7 @@ function webFetchTool(): ModelTool<{ url: string; max_chars?: number }> {
     description:
       "Fetch a URL (http or https) and return its content as text: HTML is reduced to readable text with headings and " +
       "links kept as [text](url); JSON and plain text come back as they are. Follows redirects, 30 s timeout, " +
-      "output capped at max_chars (default 20000).",
+      "output capped at max_chars (default 20000). Find pages with web_search.",
     parameters: {
       type: "object",
       properties: {

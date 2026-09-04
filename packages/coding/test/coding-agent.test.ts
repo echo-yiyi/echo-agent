@@ -359,11 +359,11 @@ test("responder:'host' → 真发出 permissionRequest,宿主答 allow 就落盘
 test("装配面:四类工具都在(fs/bash/搜索/任务清单);skill 目录空则不装 skill 工具", async () => {
   const echo = await echoWith({ permission: false });
   const names = [...echo.agent.tools.keys()];
-  for (const n of ["read_file", "write_file", "edit_file", "bash", "glob", "grep", "TaskCreate", "TaskList", "worktree_enter", "worktree_exit", "web_fetch"]) {
+  for (const n of ["read_file", "write_file", "edit_file", "bash", "glob", "grep", "TaskCreate", "TaskList", "worktree_enter", "worktree_exit", "web_fetch", "web_search"]) {
     expect(names).toContain(n);
   }
-  // 2026-09-03：worktree_exit / web_fetch 是延迟工具——在池里、不在菜单上，经 tool_search 取过才上
-  for (const n of ["worktree_exit", "web_fetch"]) expect(echo.agent.tools.get(n)?.deferred).toBe(true);
+  // 2026-09-03：worktree_exit / web_fetch / web_search 是延迟工具——在池里、不在菜单上，经 tool_search 取过才上
+  for (const n of ["worktree_exit", "web_fetch", "web_search"]) expect(echo.agent.tools.get(n)?.deferred).toBe(true);
   expect(echo.agent.tools.get("worktree_enter")?.deferred).toBeUndefined();
   // **2026-08-31：skill 工具现在恒在**。原判据是「零 skill 别装——空可选集白占 token」，
   // 那是低层 `new Agent()` 不给 skillStore 时的行为。走 `createEcho()` 拿到的是完整 Runtime，
@@ -519,4 +519,55 @@ test("htmlToText：实体、注释、noscript、相对链接只留文字、多�
     "<!-- c --><div>A&nbsp;&lt;b&gt;&#39;q&#x27;</div><noscript>no</noscript>\n\n\n<p><a href='/rel'>rel</a> <a href='https://h.test'>https://h.test</a></p><table><tr><td>1</td><td>2</td></tr></table>",
   );
   expect(out).toBe("A <b>'q'\n\nrel https://h.test\n1 2"); // 源码里的连续空行折成一个段落空行
+});
+
+test("web_search（Brave）：没配 key 如实报没配；环境变量优先于凭据 store；结果剥标签成「标题 / 链接 / 摘要」；401 说 key 被拒且不泄露 key", async () => {
+  const seen: Record<string, string>[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const u = new URL(req.url);
+      const token = req.headers.get("x-subscription-token") ?? "";
+      seen.push({ q: u.searchParams.get("q") ?? "", count: u.searchParams.get("count") ?? "", freshness: u.searchParams.get("freshness") ?? "", token });
+      if (token === "bad") return new Response("{}", { status: 401 });
+      return Response.json({
+        web: {
+          results: [
+            { title: "<strong>Bun</strong> docs", url: "https://bun.sh/docs", description: "Bun &amp; TypeScript <b>guide</b>", age: "2 days ago" },
+            { title: "Other", url: "https://x.test" },
+          ],
+        },
+      });
+    },
+  });
+  const search = (tools: ModelTool[]): ModelTool<{ query: string; count?: number; freshness?: string }> =>
+    tools.find((t) => t.name === "web_search") as ModelTool<{ query: string; count?: number; freshness?: string }>;
+  const prev = process.env.BRAVE_API_KEY;
+  delete process.env.BRAVE_API_KEY;
+  try {
+    const endpoint = `http://127.0.0.1:${server.port}/search`;
+    const none = search(makeWebTools({ searchEndpoint: endpoint }));
+    const r0 = await none.execute({ query: "bun" }, ctx());
+    expect([r0.isError, r0.content]).toEqual([true, expect.stringContaining("No search service configured")]);
+    expect(seen.length).toBe(0); // 没 key 不出网
+
+    const store = { read: async (id: string) => (id === "brave" ? ({ type: "api_key", key: "from-store" } as const) : undefined) };
+    const withStore = search(makeWebTools({ credentials: store, searchEndpoint: endpoint }));
+    const r1 = await withStore.execute({ query: "bun workspace", count: 2, freshness: "week" }, ctx());
+    expect([r1.isError, r1.content]).toEqual([
+      false,
+      'Results for "bun workspace":\n1. Bun docs (2 days ago)\n   https://bun.sh/docs\n   Bun & TypeScript guide\n2. Other\n   https://x.test',
+    ]);
+    expect(seen.at(-1)).toEqual({ q: "bun workspace", count: "2", freshness: "pw", token: "from-store" });
+
+    process.env.BRAVE_API_KEY = "bad"; // 环境变量赢过 store
+    const r2 = await withStore.execute({ query: "x" }, ctx());
+    expect([r2.isError, r2.content, seen.at(-1)?.token]).toEqual([true, expect.stringContaining("rejected the API key"), "bad"]);
+    expect(r2.content).not.toContain("from-store");
+    expect(r2.content).not.toContain("bad\n");
+  } finally {
+    if (prev === undefined) delete process.env.BRAVE_API_KEY;
+    else process.env.BRAVE_API_KEY = prev;
+    server.stop(true);
+  }
 });
