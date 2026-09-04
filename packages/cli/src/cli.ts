@@ -37,6 +37,7 @@ import {
   SessionService,
   zaiCodingProvider,
   type CredentialStore,
+  type ObservationCapturePolicy,
   type Provider,
 } from "@echo-agent/core";
 import type { TUI } from "@earendil-works/pi-tui";
@@ -71,7 +72,15 @@ export type CliOptions = {
    */
   continueLast: boolean;
   resume?: string;
+  /**
+   * `--observe <档>`：观测采集档。**不给 = 没说**，由 core 缺省（metadata）。`content` 把模型文本、
+   * 工具参数与结果正文明文写进状态根的 observations.sqlite——看 `echo-agent observe serve` 时才需要。
+   */
+  observe?: ObservationCapturePolicy;
 };
+
+/** `--observe` 能接的值。与 `ObservationCapturePolicy` 同一份枚举——多写少写 `satisfies` 都会报。 */
+const CAPTURE_POLICIES = ["off", "metadata", "content"] as const satisfies readonly ObservationCapturePolicy[];
 
 const PROVIDERS: Record<ProviderName, () => Provider> = {
   kimi: () => kimiProvider(),
@@ -100,10 +109,11 @@ export function usage(name: string): string {
   --resume <id>        续指定的那一段会话
   --extensions <目录>  去哪里找扩展，可重复（缺省 ./extensions）
   --no-memory          不装记忆与 Dream
+  --observe <档>       观测采集档：metadata（缺省，只记形状与计数）| content（带模型文本、工具参数与结果正文，明文落盘）| off
   -h, --help           显示本帮助
 
 子命令：
-  observe <last|show <run-id>|export <run-id>|health>
+  observe <last|show <run-id>|export <run-id>|health|serve>
                        看已落盘的 run 观测记录：不启动 agent、不取锁（详见 ${name} observe --help）。
                        管道形态每轮结束会在 stderr 打一行 \`[run] <run-id> …\`，拿它去 observe show。
 
@@ -178,6 +188,12 @@ export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.nam
       case "--resume":
         opts.resume = value();
         break;
+      case "--observe": {
+        const v = value();
+        if (!(CAPTURE_POLICIES as readonly string[]).includes(v)) throw new Error(`--observe 只能是 ${CAPTURE_POLICIES.join(" / ")}，不是 '${v}'`);
+        opts.observe = v as ObservationCapturePolicy;
+        break;
+      }
       default:
         throw new Error(`不认识的选项 '${flag}'\n\n${usage(name)}`);
     }
@@ -235,6 +251,7 @@ function echoOptions(
     ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
     ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
+    ...(opts.observe !== undefined ? { observation: { capture: opts.observe } } : {}),
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
     // 所以这里区分「空数组」与「不传」，不能无脑展开。
     ...(opts.extensionDirs.length > 0 ? { extensionDirs: opts.extensionDirs } : {}),

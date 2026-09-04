@@ -1,0 +1,8 @@
+{
+  "upstream": "/Users/hainan/Code/echo_design",
+  "scope": "只 vendor 编程产品的 CSS token（dist/coding/tokens.css）；整份 dist/ 的其余产品文件本包不用",
+  "syncedAt": "2026-09-03",
+  "dist": {
+    "coding/tokens.css": "104a642888e6d10d69106b2182034414821723e7441704282e27728a2c669455"
+  }
+}

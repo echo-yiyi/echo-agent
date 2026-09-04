@@ -91,7 +91,7 @@ export type AgentAdmissionResult<TResult extends LoopResult = LoopResult> =
   | Readonly<{ kind: "callback-error"; runId: string; result: LoopResult; error: AgentError }>
   | Readonly<{
       kind: "rejected";
-      reason: "paused" | "stopping" | "lease-lost" | "superseded" | "observation-unavailable";
+      reason: "paused" | "stopping" | "lease-lost" | "superseded";
     }>;
 
 /** `enqueue()` 同步返回：只取得 request ownership，不等 permit、不等 run 完成。`settled` 恰好 fulfill 一次，绝不 reject。 */

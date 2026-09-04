@@ -34,6 +34,7 @@ import { BUILTIN_GENERATION } from "./extension/builtin.ts";
 import { sealAgentAssemblyObservation, type BuiltinSlotContribution } from "./observability/assembly.ts";
 import { attachObservationHost } from "./observability/host-wiring.ts";
 import { ObservationRuntime } from "./observability/runtime.ts";
+import type { ObservationCapturePolicy } from "./observability/types.ts";
 import { SqliteCanonicalObservationStore, observationDatabasePath } from "./observability/sqlite-store.ts";
 
 /** 默认身份（D5）。 */
@@ -41,8 +42,18 @@ const DEFAULT_AGENT_ID = "default";
 const LOCK_FILE = ".lock";
 /** §14 RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
 const RUNTIME_GENERATION = "boot";
-/** §15 OR9 的缺省 capture policy：metadata。content 要显式打开，O3a 不开这个口子。 */
-const OBSERVATION_CAPTURE_POLICY = "metadata" as const;
+/** §15 OR9 的缺省 capture policy：metadata。content 要调用方显式打开（`observation.capture`）。 */
+const DEFAULT_OBSERVATION_CAPTURE: ObservationCapturePolicy = "metadata";
+/**
+ * 观测层唯一还会让 agent 等的地方是 `run.closed` 的有界等待（2026-09-03 用户拍板：观测不得影响 agent 主线）。
+ * 正常一次 COMMIT 亚毫秒；磁盘卡住时最多等这么久就降级返回，不用 Sequencer 缺省的 5 s。
+ */
+const OBSERVATION_BOUNDARY_DEADLINE_MS = 500;
+/**
+ * SQLite 的 busy_timeout 是**同步等待**（占着事件循环）。状态根有单写者锁、WAL 下 reader 不挡 writer，
+ * 正常永远不该等；真等到了就是接线错误，快点失败让 Sequencer 降级，别拖主线 5 s。
+ */
+const OBSERVATION_BUSY_TIMEOUT_MS = 250;
 const TASKS_FILE = "tasks.json";
 const SKILLS_DIR = "skills";
 
@@ -102,6 +113,16 @@ export type CreateAgentOptions = {
   credentials?: CredentialStore;
   /** 解析模型时是否允许联网刷新目录。缺省 `true`；离线环境给 `false`。 */
   allowNetwork?: boolean;
+  /**
+   * 观测（§15）。`capture` 是采集档（OR9），缺省 `"metadata"`：只记形状与计数——工具名、耗时、参数与结果的字节数、
+   * token 用量——没有正文。`"content"` 才把模型回复文本、工具 `params` 与结果正文、报错消息写进状态根的
+   * `observability/observations.sqlite`；`"off"` 只留 run 边界，不投影任何 fact。
+   *
+   * 打开 `"content"` 之前要知道的三件事（2026-09-04）：正文**明文落盘、不脱敏**（与会话记录同一状态根、同一暴露面）；
+   * 单条记录超 64 KiB 会成 gap、run 的 integrity 变 partial（长 bash 输出、大文件读取）；token 级 delta 逐条成记录，
+   * 一轮回复几百条，体积可观。
+   */
+  observation?: { capture?: ObservationCapturePolicy };
 
   /**
    * 其余一律透传给低层 `Agent`。
@@ -257,8 +278,9 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   const lock = opts.lock ?? fileStateLock(join(stateDir, LOCK_FILE));
 
   // canonical observation store（§15.4.2.2）：固定在状态根下，与自定义 `store` 无关——它是 Runtime 基础设施，不是可换的 Entry。
-  // open / PRAGMA / migrate 任一失败 = 不进 READY（fail-loud），不静默退到「没有 journal」的纯内存 admission（§15.12）。
-  const observationStore = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir) });
+  // open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——那是状态根坏了 / 文件系统不支持，启动时就该看见。
+  // 起来之后的写失败**不再**影响 run（观测层只降级，见 observability/runtime.ts 头注）。
+  const observationStore = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir), busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
 
   // 装配现场（§14.5.1）：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
   // 它撑住的是「值已经造好、`new Agent()` 还没成功」那个窗口——上一版那时抛错，root store 就再没人关过。
@@ -306,9 +328,10 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     const observation = new ObservationRuntime({
       runtimeId: `rt:${crypto.randomUUID()}`,
       runtimeGeneration: RUNTIME_GENERATION,
-      capturePolicy: OBSERVATION_CAPTURE_POLICY,
+      capturePolicy: opts.observation?.capture ?? DEFAULT_OBSERVATION_CAPTURE,
       store: observationStore,
       clock: opts.clock ?? systemClock,
+      limits: { boundaryDeadlineMs: OBSERVATION_BOUNDARY_DEADLINE_MS },
       assembly: sealAgentAssemblyObservation(
         builtinSlotContributions({
           customStore: opts.store !== undefined,

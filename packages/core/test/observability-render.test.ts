@@ -82,9 +82,9 @@ async function fixtureRun(): Promise<RunObservation> {
   try {
     let iteration = 0;
     const sink = rt.eventSink(() => ({ ...identity, runId: "run:fixed", ...(iteration > 0 ? { turnId: `t${iteration}` } : {}) }));
-    expect(await rt.acceptRun({ runId: "run:fixed", source: { kind: "user" }, ...identity, modelBinding: binding })).toBe("accepted");
+    rt.acceptRun({ runId: "run:fixed", source: { kind: "user" }, ...identity, modelBinding: binding });
     clock.advance(1);
-    await rt.startRun("run:fixed", identity);
+    rt.startRun("run:fixed", identity);
     for (const e of script()) {
       // 与 Agent 的 scope 供给同一规则：turn 归属只在 turn 开着时补（turn_end 自带 turnId，之后清掉）
       if (e.type === "turn_start") iteration = e.iteration;
