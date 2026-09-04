@@ -103,7 +103,7 @@ export function usage(name: string): string {
   -h, --help           显示本帮助
 
 子命令：
-  observe <last|show <run-id>|export <run-id>|health>
+  observe <last|show <run-id>|export <run-id>|health|serve>
                        看已落盘的 run 观测记录：不启动 agent、不取锁（详见 ${name} observe --help）。
                        管道形态每轮结束会在 stderr 打一行 \`[run] <run-id> …\`，拿它去 observe show。
 

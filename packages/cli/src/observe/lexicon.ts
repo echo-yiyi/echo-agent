@@ -1,0 +1,110 @@
+// observe 面板的术语表（设计系统 `spec/agent-behavior.md` §7：后端枚举 → 界面文案只在这一处翻译）。
+//
+// 条目四字段缺一不可：`zh` 主标签、`en` 原词（mono 小字并列显示）、`tone` 色调、`hint` **判定口径**（不是同义反复）。
+// 页面通过 `lexiconJson()` 拿到整份，渲染层不再自己猜字面。
+
+export type Tone = "neutral" | "accent" | "positive" | "caution" | "critical" | "info";
+
+export type Term = Readonly<{ zh: string; en: string; tone: Tone; hint: string }>;
+
+/**
+ * run 的终态 / 进行态。`RunObservationStatus` 五值加一个派生值 `truncated`：
+ * 设计系统要求「跑到上限被截断」与「自行收尾」严格区分（§2.1），本仓里它是 `error` 且 `outcome.error.code === "max_iterations"`。
+ */
+export const RUN_STATUS: Readonly<Record<string, Term>> = {
+  running: { zh: "进行中", en: "running", tone: "accent", hint: "已拿到 permit、run.closed 还没落库；页面会持续刷新它" },
+  completed: { zh: "已完成", en: "completed", tone: "positive", hint: "agent 自行收尾，run.closed 已 COMMIT" },
+  truncated: { zh: "已截停", en: "truncated", tone: "caution", hint: "跑到迭代上限被截断、未自行收尾——产出可能不完整（error code = max_iterations）" },
+  aborted: { zh: "已中止", en: "aborted", tone: "neutral", hint: "用户或宿主主动 abort；已产出的部分保留" },
+  error: { zh: "失败", en: "error", tone: "critical", hint: "provider / 工具 / 内核的不可恢复错误；outcome.error.code 说明是哪一类" },
+  interrupted: { zh: "已中断", en: "interrupted", tone: "neutral", hint: "进程崩溃后由下一次持锁启动封口的 run；它自己没有结局" },
+};
+
+export const RUN_SOURCE: Readonly<Record<string, Term>> = {
+  user: { zh: "用户", en: "user", tone: "neutral", hint: "prompt / continue / 管道输入发起" },
+  dream: { zh: "整理", en: "dream", tone: "info", hint: "agent 空闲时自动排的记忆整理，用隔离 transcript，不进主对话" },
+  inbox: { zh: "收件", en: "inbox", tone: "info", hint: "Schedule / 外部投递进 inbox 后由 agent 自行消费的一批" },
+  extension: { zh: "扩展", en: "extension", tone: "info", hint: "Extension 提交的 run（O2b）" },
+};
+
+export const INTEGRITY: Readonly<Record<string, Term>> = {
+  complete: { zh: "完整", en: "complete", tone: "positive", hint: "本 run 没有任何 canonical gap" },
+  partial: { zh: "有缺口", en: "partial", tone: "caution", hint: "至少一条 observation.gap：缓冲溢出 / 编码失败 / 采集上限 / 落盘失败；缺的是记录，不是 agent 的产出" },
+};
+
+export const PERSISTENCE: Readonly<Record<string, Term>> = {
+  stored: { zh: "已落盘", en: "stored", tone: "positive", hint: "run.closed 已 COMMIT 且读回可见" },
+  degraded: { zh: "未落盘", en: "degraded", tone: "caution", hint: "封口那笔没写进 SQLite（writer 降级 / 到期）；agent 的 outcome 不受影响" },
+};
+
+/**
+ * 工具名 → 人话动词（设计系统 §2.3 动词表：读取 / 搜索 / 写入 / 记住 / 回忆 / 运行 / 请求 / 打开 / 修改 / 删除）。
+ * 没登记的工具用「调用」+ 原名。`memory` 工具的动作（记住 / 修改 / 删除 / 回忆）在紧随其后的 `memory.mutation.*` 事实里，
+ * 工具 span 本身在 metadata 档看不到参数，所以只能是「调用」。
+ */
+export const TOOL_VERBS: Readonly<Record<string, string>> = {
+  read_file: "读取",
+  list_dir: "读取",
+  job_output: "读取",
+  TaskList: "读取",
+  TaskGet: "读取",
+  schedule_list: "读取",
+  glob: "搜索",
+  grep: "搜索",
+  tool_search: "搜索",
+  write_file: "写入",
+  TaskCreate: "写入",
+  schedule_create: "写入",
+  edit_file: "修改",
+  TaskUpdate: "修改",
+  bash: "运行",
+  job_stop: "删除",
+  schedule_cancel: "删除",
+};
+
+/** canonical record 名 → 时间线一行怎么念。没登记的用原名（设计系统 §2.10：未知事件用 generic 呈现，不丢）。 */
+export const RECORD_TERMS: Readonly<Record<string, Term>> = {
+  "run.accepted": { zh: "接受 run", en: "run.accepted", tone: "neutral", hint: "admission 分配 runId、冻结模型绑定" },
+  "run.assembly": { zh: "装配快照", en: "run.assembly", tone: "neutral", hint: "本 run 冻结的 builtin 槽与模型绑定 digest" },
+  "run.started": { zh: "开始执行", en: "run.started", tone: "neutral", hint: "executor 进入 loop" },
+  "run.closed": { zh: "封口", en: "run.closed", tone: "neutral", hint: "业务 outcome 冻结后落的终态记录" },
+  "agent.loop.started": { zh: "循环开始", en: "agent.loop.started", tone: "neutral", hint: "agent_start" },
+  "agent.loop.ended": { zh: "循环结束", en: "agent.loop.ended", tone: "neutral", hint: "agent_end，attributes.status 是 outcome" },
+  "agent.message.appended": { zh: "消息入账", en: "agent.message.appended", tone: "neutral", hint: "非 assistant 消息进 transcript（用户 / 工具结果 / 环境）" },
+  "turn.execute": { zh: "轮", en: "turn.execute", tone: "neutral", hint: "一次模型调用 + 其工具调用；iteration 是第几轮" },
+  "model.generate": { zh: "模型生成", en: "model.generate", tone: "neutral", hint: "一次 provider 调用；span_end 带 stopReason / usage" },
+  "model.usage": { zh: "用量", en: "model.usage", tone: "neutral", hint: "provider 回报的 token 数" },
+  "model.retry.scheduled": { zh: "重试", en: "model.retry.scheduled", tone: "caution", hint: "provider 出错后内核安排的重试，attempt / cause" },
+  "tool.execute": { zh: "工具", en: "tool.execute", tone: "neutral", hint: "一次工具执行；isError 是工具结果的成败，不是 run 的" },
+  "context.compact": { zh: "上下文压缩", en: "context.compact", tone: "neutral", hint: "上下文被压缩——agent 忘掉了一部分" },
+  "memory.mutation.committed": { zh: "记忆已写", en: "memory.mutation.committed", tone: "positive", hint: "create / replace / insert / delete / rename 成功落盘；indexOutcome 说索引重建结果" },
+  "memory.mutation.rejected": { zh: "记忆拒写", en: "memory.mutation.rejected", tone: "caution", hint: "语义拒绝（越界 / 不存在 / 超预算），数据未变" },
+  "memory.mutation.failed": { zh: "记忆写失败", en: "memory.mutation.failed", tone: "critical", hint: "主存储 I/O 抛错且数据未变，stage 说在哪一段" },
+  "memory.mutation.partial": { zh: "记忆半提交", en: "memory.mutation.partial", tone: "critical", hint: "rename 目标已建、源删失败之类的半提交" },
+  "memory.compose": { zh: "记忆入 prompt", en: "memory.compose", tone: "neutral", hint: "这次进 system 的分区数 / 块数 / 字符数" },
+  "task.state.committed": { zh: "任务状态", en: "task.state.committed", tone: "neutral", hint: "内存清单已变（不等于已落盘）" },
+  "task.store.saved": { zh: "任务已落盘", en: "task.store.saved", tone: "positive", hint: "真实 TaskStore.save() 成功" },
+  "task.store.failed": { zh: "任务落盘失败", en: "task.store.failed", tone: "critical", hint: "真实 TaskStore.save() 抛错" },
+  "schedule.created": { zh: "闹钟登记", en: "schedule.created", tone: "neutral", hint: "add 之后 save 成功" },
+  "schedule.cancelled": { zh: "闹钟取消", en: "schedule.cancelled", tone: "neutral", hint: "cancel 之后 save 成功" },
+  "schedule.delivered": { zh: "闹钟投递", en: "schedule.delivered", tone: "positive", hint: "到期投进 inbox 并被接受" },
+  "schedule.missed": { zh: "闹钟错过", en: "schedule.missed", tone: "caution", hint: "重启补跑判定错过：过期删除或跳过欠账" },
+  "schedule.bookkeeping-failed": { zh: "闹钟簿记失败", en: "schedule.bookkeeping-failed", tone: "critical", hint: "投递之后落盘失败，下次 tick 会再投" },
+  "agent.queue.updated": { zh: "队列变化", en: "agent.queue.updated", tone: "neutral", hint: "steering / followUp / inbox 队列长度" },
+  "agent.resource.changed": { zh: "资源变化", en: "agent.resource.changed", tone: "neutral", hint: "工具 / skill / MCP 注册或卸载" },
+  "agent.custom_event": { zh: "自定义事件", en: "agent.custom_event", tone: "neutral", hint: "上层 agent 的领域事件，metadata 档 body 恒空" },
+  "observation.gap": { zh: "记录缺口", en: "observation.gap", tone: "caution", hint: "这段 seq 的记录没能进账本；reason 说为什么" },
+};
+
+export type Lexicon = Readonly<{
+  runStatus: typeof RUN_STATUS;
+  runSource: typeof RUN_SOURCE;
+  integrity: typeof INTEGRITY;
+  persistence: typeof PERSISTENCE;
+  toolVerbs: typeof TOOL_VERBS;
+  records: typeof RECORD_TERMS;
+}>;
+
+export function lexicon(): Lexicon {
+  return { runStatus: RUN_STATUS, runSource: RUN_SOURCE, integrity: INTEGRITY, persistence: PERSISTENCE, toolVerbs: TOOL_VERBS, records: RECORD_TERMS };
+}

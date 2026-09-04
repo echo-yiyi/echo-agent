@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Echo · observe</title>
+<style>
+/* token 来自设计系统 dist/coding/tokens.css（vendor/echo-tokens，带账本）；本文件不写任何裸色值 / 裸间距 */
+/*__TOKENS__*/
+
+*, *::before, *::after { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--size-content);
+  line-height: var(--line-content);
+  color: var(--ink);
+  background: var(--paper);
+}
+code, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+button { font: inherit; color: inherit; }
+button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width) solid var(--accent); outline-offset: var(--focus-ring-offset); }
+
+.page { padding: var(--space-16) var(--space-20); max-width: 1440px; margin: 0 auto; }
+
+/* 页头（console.md §2）：每页一次，h2 + 说明 + 右侧动作区 */
+.pagehead { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-16); margin-bottom: var(--space-16); }
+.pagehead h2 { margin: 0; font-size: var(--size-h2); font-weight: 600; white-space: nowrap; }
+.pagehead .desc { margin: var(--space-4) 0 0; font-size: var(--size-ui); color: var(--stone); max-width: 68ch; }
+.pagehead .actions { display: flex; align-items: center; gap: var(--space-8); flex-shrink: 0; }
+
+.btn {
+  height: var(--ctl-btn-height); padding: 0 var(--ctl-btn-pad-x); border-radius: var(--r-sm);
+  border: 1px solid var(--border); background: var(--surface); font-size: var(--size-ui); cursor: pointer;
+  transition: background var(--duration) var(--ease);
+}
+.btn:hover { background: var(--ui-raised); }
+.btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-wash); }
+.btn:active { transform: scale(var(--press-scale)); }
+
+/* 列表-详情骨架（console.md §1）：列表栏固定宽、详情栏吃剩余；顶边对齐 */
+.split { display: grid; grid-template-columns: var(--ctl-list-pane-width) 1fr; gap: var(--ctl-split-gap); align-items: start; }
+@media (max-width: 720px) { .split { grid-template-columns: 1fr; } }
+.pane { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); }
+
+/* 筛选栏（§7）：筛选片用 aria-pressed；无数据只降透明度不移除；计数是筛后数 */
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-6); padding: var(--space-8) var(--ctl-list-item-pad-x); border-bottom: 1px solid var(--border); }
+.chip {
+  height: 22px; padding: 0 var(--space-8); border-radius: var(--r-full); border: 1px solid var(--border); background: transparent;
+  font-size: var(--size-caption); color: var(--ink-70); cursor: pointer;
+}
+.chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-wash); }
+.chip--dimmed { opacity: 0.45; }
+.filters .count { margin-left: auto; font-size: var(--size-caption); color: var(--stone); }
+
+/* 实体行（§5.2）：selected = 左侧 2px 声色条 + accent-wash；hover 只换底 */
+.runs { list-style: none; margin: 0; padding: 0; max-height: calc(100vh - 180px); overflow: auto; }
+.run {
+  display: block; width: 100%; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--ui-line-soft);
+  padding: var(--ctl-list-item-pad-y) var(--ctl-list-item-pad-x); cursor: pointer;
+  box-shadow: inset 2px 0 0 transparent; transition: background var(--duration) var(--ease);
+}
+.run:hover { background: var(--ui-raised); }
+.run[aria-selected="true"] { background: var(--accent-wash); box-shadow: inset 2px 0 0 var(--accent); }
+.run .l1 { display: flex; align-items: center; gap: var(--space-6); }
+.run .l1 .dur { margin-left: auto; font-size: var(--size-caption); color: var(--stone); }
+.run .l2 { margin-top: var(--space-2); display: flex; gap: var(--space-8); font-size: var(--size-caption); color: var(--stone); }
+.run .l2 .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 状态标签三件套（DESIGN §6.2）：主色文字 + 极浅底 + 同色浅描边，绝不整块高饱和填充 */
+.badge { display: inline-flex; align-items: center; gap: var(--space-4); height: 18px; padding: 0 var(--space-6); border-radius: var(--r-sm); font-size: var(--size-caption); border: 1px solid var(--border); color: var(--ink-70); background: var(--ui-inset); white-space: nowrap; }
+.badge .en { font-family: var(--font-mono); font-size: var(--size-micro); opacity: 0.8; }
+.badge--positive { color: var(--moss); background: var(--moss-soft); border-color: var(--moss-line); }
+.badge--caution { color: var(--marigold); background: var(--marigold-soft); border-color: var(--marigold-line); }
+.badge--critical { color: var(--clay); background: var(--clay-soft); border-color: var(--clay-line); }
+.badge--accent { color: var(--accent-ink); background: var(--accent-wash); border-color: var(--accent-wash); }
+.badge--info { color: var(--ui-info); background: var(--ui-info-soft); border-color: var(--ui-info-line); }
+
+/* 空态（components §9）：说明这里会出现什么 + 明确的下一步 */
+.empty { padding: var(--space-32) var(--space-16); text-align: center; color: var(--stone); font-size: var(--size-ui); }
+.empty code { display: inline-block; margin-top: var(--space-8); color: var(--ink-70); }
+
+/* 详情 */
+.detail { padding: var(--card-padding); min-height: 320px; }
+.detail .head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); margin-bottom: var(--space-12); }
+.detail .head .id { font-size: var(--size-h3); font-weight: 600; }
+.detail h3 { margin: var(--space-20) 0 var(--space-8); font-size: var(--size-ui); font-weight: 600; color: var(--ink-70); text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* 字段行（§4）：标签列固定宽，值列自适应；内容槽只有纯文本 / chip 组 / key-value 三种 */
+.fields { display: grid; grid-template-columns: var(--ctl-field-label-width) 1fr; row-gap: var(--ctl-field-row-gap); column-gap: var(--space-12); }
+.fields dt { margin: 0; color: var(--stone); font-size: var(--size-ui); }
+.fields dd { margin: 0; font-size: var(--size-ui); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.chips .chip { cursor: default; }
+
+/* 时间线：每行 = 相对时间 · 缩进 · 前缀 · 动作 对象 · 结果（agent-behavior §2.3 的条目形态） */
+.timeline { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
+.tl {
+  display: grid; grid-template-columns: 64px 1fr auto; align-items: baseline; gap: var(--space-8);
+  min-height: var(--ctl-tool-row-height); padding: var(--space-2) var(--space-8); font-family: var(--font-mono); font-size: var(--size-ui); color: var(--ink-70);
+  cursor: pointer; border-radius: var(--r-sm);
+}
+.tl:hover { background: var(--ui-raised); }
+.tl .t { color: var(--stone); text-align: right; font-variant-numeric: tabular-nums; }
+.tl .what { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
+.tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; }
+.tl .what .obj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl .what .en { color: var(--stone); font-size: var(--size-micro); }
+.tl .res { color: var(--stone); white-space: nowrap; }
+.tl--boundary { color: var(--ink); }
+.tl--turn { color: var(--ink); font-weight: 600; }
+.tl--bad { color: var(--clay); }
+.tl--bad .res { color: var(--clay); }
+.tl--warn { color: var(--marigold); }
+.tl--warn .res { color: var(--marigold); }
+.tl--open .res { color: var(--accent-ink); }
+.tl-detail { margin: 0 0 var(--space-4) var(--space-8); padding: var(--ctl-tool-expand-pad); max-height: var(--ctl-tool-expand-max-height); overflow: auto; border-left: 2px solid var(--border); background: var(--ui-inset); font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); white-space: pre-wrap; word-break: break-all; }
+.tl-detail[hidden] { display: none; }
+
+table { border-collapse: collapse; width: 100%; font-size: var(--size-ui); }
+th, td { text-align: left; padding: var(--ctl-table-cell-pad-y) var(--ctl-table-cell-pad-x); border-bottom: 1px solid var(--ui-line-soft); }
+th { color: var(--stone); font-weight: 500; }
+td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.health { margin-top: var(--space-20); padding-top: var(--space-12); border-top: 1px solid var(--border); font-size: var(--size-ui); color: var(--ink-70); display: flex; flex-wrap: wrap; gap: var(--space-8); align-items: center; }
+.muted { color: var(--stone); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="pagehead">
+    <div>
+      <h2>Echo · observe</h2>
+      <p class="desc" id="desc">正在连接…</p>
+    </div>
+    <div class="actions">
+      <span class="muted" id="freshness" aria-live="polite"></span>
+      <button class="btn" id="follow" aria-pressed="true" title="新 run 出现时自动切过去；关掉后停在你选的那条">跟随最新</button>
+    </div>
+  </header>
+
+  <div class="split">
+    <aside class="pane" aria-label="run 列表">
+      <div class="filters" id="filters" role="group" aria-label="按来源筛选"></div>
+      <ul class="runs" id="runs"></ul>
+    </aside>
+    <main class="pane detail" id="detail" aria-live="polite"></main>
+  </div>
+</div>
+
+<script>
+const LEX = /*__LEXICON__*/ null;
+const STATE = { runs: [], filter: "all", selected: null, follow: true, vm: null, expanded: new Set(), hidden: false };
+
+const el = (tag, attrs, ...children) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs ?? {})) {
+    if (k === "class") n.className = v;
+    else if (k === "text") n.textContent = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (typeof v === "boolean" && !k.startsWith("aria-")) { if (v) n.setAttribute(k, ""); } // hidden 之类的布尔属性：有即真
+    else if (v !== undefined && v !== null) n.setAttribute(k, String(v));
+  }
+  for (const c of children) if (c !== null && c !== undefined) n.append(c);
+  return n;
+};
+const fmtMs = (ms) => (Math.abs(ms) < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`);
+const fmtClock = (t) => new Date(t).toLocaleTimeString("zh-CN", { hour12: false });
+const shortId = (id) => (id.length > 22 ? `${id.slice(0, 12)}…${id.slice(-6)}` : id);
+
+/* run 的终态：error + max_iterations 是「已截停」（设计系统 §2.1 硬性区分 completed 与 truncated） */
+function statusKey(header, outcome) {
+  if (header.status === "error" && outcome && outcome.error && outcome.error.code === "max_iterations") return "truncated";
+  return header.status;
+}
+function badge(term, key) {
+  const t = term ?? { zh: key, en: key, tone: "neutral", hint: "" };
+  return el("span", { class: `badge badge--${t.tone}`, title: t.hint }, t.zh, el("span", { class: "en", text: t.en }));
+}
+
+/* ── 列表 ── */
+function renderFilters() {
+  const box = document.getElementById("filters");
+  box.replaceChildren();
+  const counts = {};
+  for (const r of STATE.runs) counts[r.source.kind] = (counts[r.source.kind] ?? 0) + 1;
+  const kinds = ["all", ...Object.keys(LEX.runSource)];
+  for (const k of kinds) {
+    const n = k === "all" ? STATE.runs.length : (counts[k] ?? 0);
+    const label = k === "all" ? "全部" : LEX.runSource[k].zh;
+    box.append(el("button", {
+      class: `chip${n === 0 && k !== "all" ? " chip--dimmed" : ""}`,
+      "aria-pressed": STATE.filter === k,
+      title: k === "all" ? "" : LEX.runSource[k].hint,
+      onclick: () => { STATE.filter = k; renderFilters(); renderRuns(); },
+    }, `${label} ${n}`));
+  }
+  const shown = visibleRuns().length;
+  box.append(el("span", { class: "count", text: STATE.filter === "all" ? `${shown} 条` : `${shown} 条（共 ${STATE.runs.length}）` }));
+}
+function visibleRuns() {
+  return STATE.filter === "all" ? STATE.runs : STATE.runs.filter((r) => r.source.kind === STATE.filter);
+}
+function renderRuns() {
+  const list = document.getElementById("runs");
+  list.replaceChildren();
+  const runs = visibleRuns();
+  if (runs.length === 0) {
+    const msg = STATE.runs.length === 0
+      ? el("div", { class: "empty" }, "这里会显示 agent 每一次运行的记录。", el("br"), "跑一轮就会出现：", el("br"), el("code", { text: 'echo-agent "帮我看看这个仓库"' }))
+      : el("div", { class: "empty" }, "这个来源下还没有 run。", el("br"), el("button", { class: "btn", onclick: () => { STATE.filter = "all"; renderFilters(); renderRuns(); } }, "清除筛选"));
+    list.append(el("li", {}, msg));
+    return;
+  }
+  for (const r of runs) {
+    const dur = r.endedAt === null ? "进行中" : fmtMs(r.endedAt - r.acceptedAt);
+    const item = el("li", {}, el("button", {
+      class: "run", role: "option", "aria-selected": STATE.selected === r.runId, title: r.runId,
+      onclick: () => { STATE.selected = r.runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(r.runId)}`); renderRuns(); loadRun(); },
+    },
+      el("div", { class: "l1" }, badge(LEX.runStatus[r.status], r.status), badge(LEX.runSource[r.source.kind], r.source.kind), el("span", { class: "dur mono", text: dur })),
+      el("div", { class: "l2" }, el("span", { class: "mono", text: fmtClock(r.acceptedAt) }), el("span", { class: "id mono", text: shortId(r.runId) })),
+    ));
+    list.append(item);
+  }
+}
+function renderFollow() {
+  document.getElementById("follow").setAttribute("aria-pressed", String(STATE.follow));
+}
+
+/* ── 详情 ── */
+function verbFor(name, attrs) {
+  if (name === "tool.execute") return { verb: LEX.toolVerbs[attrs.toolName] ?? "调用", obj: attrs.toolName ?? "?" };
+  if (name === "turn.execute") return { verb: "轮", obj: `#${attrs.iteration ?? "?"}` };
+  if (name === "model.generate") return { verb: "模型生成", obj: attrs.stopReason ?? "" };
+  if (name.startsWith("memory.mutation.")) {
+    const v = { create: "记住", replace: "修改", insert: "修改", rename: "修改", delete: "删除" }[attrs.operation] ?? attrs.operation;
+    return { verb: v, obj: attrs.partition ? `${attrs.partition}${attrs.reasonCode ? ` · ${attrs.reasonCode}` : ""}` : "" };
+  }
+  if (name === "memory.compose") return { verb: "回忆", obj: `${attrs.blocks ?? 0}/${attrs.regions ?? 0} 个分区` };
+  if (name === "observation.gap") return { verb: "记录缺口", obj: attrs.reason ?? "" };
+  if (name.startsWith("schedule.")) return { verb: LEX.records[name]?.zh ?? name, obj: attrs.scheduleId ?? "" };
+  if (name === "task.state.committed") return { verb: "任务状态", obj: `${attrs.operation ?? ""} ×${attrs.count ?? 0}` };
+  return { verb: LEX.records[name]?.zh ?? name, obj: "" };
+}
+
+/* span_start / span_end 配对成一行（§2.3：进行中的条目留在列表里，end 只补结果，不另起一行） */
+function buildEntries(vm) {
+  const entries = [];
+  const open = new Map();
+  const keyOf = (t) => `${t.name}|${t.attributes.toolCallId ?? ""}|${t.attributes.iteration ?? ""}|${t.depth}`;
+  for (const t of vm.timeline) {
+    if (t.kind === "span_start") {
+      const e = { start: t, end: null, key: keyOf(t) };
+      entries.push(e);
+      const stack = open.get(e.key) ?? [];
+      stack.push(e);
+      open.set(e.key, stack);
+      continue;
+    }
+    if (t.kind === "span_end") {
+      const stack = open.get(keyOf(t));
+      const e = stack?.pop();
+      if (e) { e.end = t; continue; }
+    }
+    entries.push({ start: t, end: null, key: null, single: true });
+  }
+  return entries;
+}
+
+function renderEntry(e, running, gaps) {
+  const t = e.start;
+  const end = e.end;
+  const attrs = { ...t.attributes, ...(end?.attributes ?? {}) };
+  const { verb, obj } = verbFor(t.name, attrs);
+  const term = LEX.records[t.name];
+  const isTool = t.name === "tool.execute";
+  const failed = (isTool && attrs.isError === true) || t.name.endsWith(".failed") || t.name.endsWith(".partial") || (t.name === "agent.loop.ended" && attrs.status === "error");
+  const warn = t.name === "observation.gap" || t.name.endsWith(".rejected") || t.name.endsWith(".missed") || t.name === "model.retry.scheduled";
+  const isOpen = !e.single && end === null && t.kind === "span_start";
+  let prefix = "·";
+  if (isTool || t.kind === "span_start") prefix = failed ? "✕" : "▸";
+  if (t.name === "observation.gap") prefix = "⚠";
+  if (t.name === "context.compact") prefix = "⤓";
+  let res = "";
+  if (end && end.durationMs !== undefined) res = fmtMs(end.durationMs);
+  else if (isOpen) res = running ? "进行中" : "未收尾";
+  if (isTool && failed) res = `${res ? `${res} · ` : ""}出错`;
+  if (t.name === "observation.gap") res = `丢 ${t.body?.dropped ?? "?"} 条`;
+  if (t.name === "model.generate" && end?.body?.usage && (end.body.usage.inputTokens || end.body.usage.outputTokens)) res = `${res} · ${end.body.usage.inputTokens ?? 0}↑ ${end.body.usage.outputTokens ?? 0}↓`;
+  const cls = ["tl"];
+  if (t.name.startsWith("run.")) cls.push("tl--boundary");
+  if (t.name === "turn.execute") cls.push("tl--turn");
+  if (failed) cls.push("tl--bad");
+  else if (warn) cls.push("tl--warn");
+  if (isOpen) cls.push("tl--open");
+  const id = `${t.seq}`;
+  const expanded = STATE.expanded.has(id) || (failed && !STATE.expanded.has(`-${id}`));
+  const detail = el("pre", { class: "tl-detail", hidden: !expanded }, JSON.stringify({ name: t.name, seq: t.seq, attributes: attrs, body: t.body, endBody: end?.body }, null, 2));
+  const row = el("div", {
+    class: cls.join(" "), role: "button", tabindex: 0, title: term?.hint ?? t.name, "aria-expanded": expanded,
+    onclick: () => { if (expanded) { STATE.expanded.delete(id); STATE.expanded.add(`-${id}`); } else { STATE.expanded.add(id); STATE.expanded.delete(`-${id}`); } renderDetail(); },
+  },
+    el("span", { class: "t", text: `+${fmtMs(t.relativeMs)}` }),
+    el("span", { class: "what", style: `padding-left: calc(var(--space-16) * ${t.depth})` },
+      el("span", { class: "prefix", text: prefix }),
+      el("span", { class: "verb", text: verb }),
+      obj ? el("span", { class: "obj", text: obj }) : null,
+      el("span", { class: "en", text: t.name }),
+    ),
+    el("span", { class: "res", text: res }),
+  );
+  return [row, detail];
+}
+
+function renderDetail() {
+  const box = document.getElementById("detail");
+  box.replaceChildren();
+  const vm = STATE.vm;
+  if (vm === null) {
+    box.append(el("div", { class: "empty" }, STATE.runs.length === 0 ? "还没有 run 可看。" : "选一条 run。"));
+    return;
+  }
+  if (vm.kind === "pruned") {
+    box.append(el("div", { class: "head" }, el("span", { class: "id mono", text: vm.header.runId }), badge(LEX.runStatus[vm.header.status], vm.header.status)),
+      el("p", { class: "muted", text: "这条 run 的记录 body 已被清理（retention），只剩 header 与缺口。" }));
+    return;
+  }
+  const h = vm.header;
+  const running = h.status === "running";
+  const sk = statusKey(h, vm.outcome);
+  const duration = h.endedAt === null ? `进行中 · 已 ${fmtMs(Date.now() - h.acceptedAt)}` : fmtMs(h.endedAt - h.acceptedAt);
+  box.append(el("div", { class: "head" },
+    el("span", { class: "id mono", text: h.runId }),
+    badge(LEX.runStatus[sk], sk),
+    badge(LEX.integrity[h.integrity], h.integrity),
+    badge(LEX.persistence[h.persistence], h.persistence),
+    el("span", { class: "muted mono", text: duration }),
+  ));
+  if (sk === "truncated") box.append(el("p", { class: "muted", text: "跑到上限停了，这次的结果可能不完整" }));
+  if (vm.outcome && vm.outcome.status === "error" && sk !== "truncated") box.append(el("p", { class: "tl--bad", text: `出了点问题：${vm.outcome.error?.code ?? "unknown"}。看时间线里标红的那一行` }));
+
+  const dl = el("dl", { class: "fields" });
+  const field = (label, ...value) => { dl.append(el("dt", { text: label }), el("dd", {}, ...value)); };
+  field("来源", badge(LEX.runSource[h.source.kind], h.source.kind), el("span", { class: "muted mono", text: ` ${fmtClock(h.acceptedAt)}` }));
+  field("agent", el("span", { class: "mono", text: `${h.agentId} · ${h.agentInstanceId}` }));
+  field("会话", el("span", { class: "mono", text: h.sessionId ?? "无（临时对话）" }));
+  field("模型", el("span", { class: "mono", text: `${vm.modelBinding.providerId} / ${vm.modelBinding.modelId} · ${vm.modelBinding.catalogRevision}` }));
+  const chips = el("div", { class: "chips" });
+  if (vm.assembly.slots.length === 0) chips.append(el("span", { class: "muted", text: vm.assembly.digest === "not-captured" ? "未上报" : "无" }));
+  for (const s of vm.assembly.slots) chips.append(el("span", { class: "chip", title: `${s.entryId}@${s.entryGeneration}` }, s.slot));
+  field("装配", chips);
+  field("采集档", el("span", { class: "mono", text: `${h.capturePolicy}${h.capturePolicy === "metadata" ? "（只有形状与计数，没有正文）" : ""}` }));
+  box.append(dl);
+
+  box.append(el("h3", { text: "时间线" }));
+  const tl = el("ul", { class: "timeline" });
+  for (const e of buildEntries(vm)) {
+    const [row, detail] = renderEntry(e, running, vm.health.canonicalGaps);
+    tl.append(el("li", {}, row, detail));
+  }
+  box.append(tl);
+
+  box.append(el("h3", { text: "工具" }));
+  if (vm.summary.tools.length === 0) {
+    box.append(el("p", { class: "muted", text: h.capturePolicy === "off" ? "未采集（capture policy off）" : "这次没有调用工具" }));
+  } else {
+    const table = el("table", {}, el("thead", {}, el("tr", {},
+      el("th", { text: "工具" }), el("th", { class: "num", text: "调用" }), el("th", { class: "num", text: "成功" }), el("th", { class: "num", text: "出错" }), el("th", { class: "num", text: "耗时" }), el("th", { class: "num", text: "结果字符" }))));
+    const tb = el("tbody");
+    for (const t of vm.summary.tools) tb.append(el("tr", {},
+      el("td", { class: "mono", text: `${LEX.toolVerbs[t.toolId] ?? "调用"} ${t.toolId}` }), el("td", { class: "num", text: t.calls }), el("td", { class: "num", text: t.successes }),
+      el("td", { class: "num", text: t.errors }), el("td", { class: "num", text: fmtMs(t.totalDurationMs) }), el("td", { class: "num", text: t.resultBytes })));
+    table.append(tb);
+    box.append(table);
+  }
+  const m = vm.summary.model;
+  // 「未上报」不是 0（agent-behavior §4.3）：provider 没给 usage 就说没给，不显示 0↑ 0↓
+  const tokens = m.calls > 0 && m.inputTokens === 0 && m.outputTokens === 0 ? "token 未上报" : `${m.inputTokens}↑ ${m.outputTokens}↓ tokens`;
+  box.append(el("p", { class: "muted mono", text: `模型 ${m.calls} 次 · ${tokens} · 合计 ${fmtMs(m.totalDurationMs)}` }));
+
+  const gaps = vm.health.canonicalGaps;
+  box.append(el("div", { class: "health" },
+    badge(LEX.integrity[h.integrity], h.integrity),
+    el("span", { text: gaps.length === 0 ? "缺口 0" : `缺口 ${gaps.length}：${gaps.map((g) => `${g.reason}（丢 ${g.dropped}）`).join("、")}` }),
+    badge(LEX.persistence[vm.health.persistence], vm.health.persistence),
+    el("span", { text: vm.health.redacted ? "已脱敏（metadata 档不含正文）" : "含正文" }),
+    el("span", { class: "muted mono", text: `记录 ${vm.summary.recordCount}` }),
+  ));
+}
+
+/* ── 数据 ── */
+async function getJson(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return r.json();
+}
+let lastOk = 0;
+async function loadRuns() {
+  try {
+    const page = await getJson("/api/runs?limit=50");
+    STATE.runs = page.items;
+    lastOk = Date.now();
+    if (STATE.follow) {
+      // 跟随：正在跑的 > 最新的非整理 run > 最新的。dream run 每轮之后都有一条、几毫秒就完，跟着它看不到东西
+      const target = STATE.runs.find((r) => r.status === "running") ?? STATE.runs.find((r) => r.source.kind !== "dream") ?? STATE.runs[0] ?? null;
+      const next = target ? target.runId : null;
+      if (next !== STATE.selected) { STATE.selected = next; STATE.expanded.clear(); await loadRun(); }
+    } else if (STATE.selected !== null && !STATE.runs.some((r) => r.runId === STATE.selected)) {
+      STATE.selected = STATE.runs[0]?.runId ?? null;
+      await loadRun();
+    }
+    renderFilters();
+    renderRuns();
+    document.getElementById("desc").textContent = `${STATE.runs.length} 条 run · 只读轮询 SQLite，agent 跑着也能看`;
+  } catch (e) {
+    document.getElementById("desc").textContent = `连不上 observe 服务：${e.message}。它退出了？重新跑 echo-agent observe serve`;
+  }
+  document.getElementById("freshness").textContent = lastOk ? `刷新于 ${fmtClock(lastOk)}` : "";
+}
+async function loadRun() {
+  if (STATE.selected === null) { STATE.vm = null; renderDetail(); return; }
+  try {
+    const vm = await getJson(`/api/runs/${encodeURIComponent(STATE.selected)}`);
+    STATE.vm = vm;
+    renderDetail();
+  } catch (e) {
+    STATE.vm = null;
+    renderDetail();
+    document.getElementById("detail").append(el("p", { class: "tl--bad", text: `取不到这条 run：${e.message}` }));
+  }
+}
+
+document.getElementById("follow").addEventListener("click", () => { STATE.follow = !STATE.follow; renderFollow(); if (STATE.follow) { history.replaceState(null, "", location.pathname); loadRuns(); } });
+document.addEventListener("visibilitychange", () => { STATE.hidden = document.hidden; });
+
+(async () => {
+  // `?run=<id>`：直接打开某条（可分享、刷新不丢），这时不跟随
+  const wanted = new URLSearchParams(location.search).get("run");
+  if (wanted) { STATE.selected = wanted; STATE.follow = false; renderFollow(); }
+  try {
+    const h = await getJson("/api/health");
+    document.getElementById("desc").textContent = `${h.stateRoot} · ${h.counts.runs} 条 run`;
+  } catch {}
+  await loadRuns();
+  setInterval(() => { if (!STATE.hidden) loadRuns(); }, 500);
+  setInterval(() => {
+    if (STATE.hidden || STATE.selected === null) return;
+    const cur = STATE.runs.find((r) => r.runId === STATE.selected);
+    if (cur && cur.status === "running") loadRun();
+  }, 300);
+  setInterval(() => { if (!STATE.hidden && STATE.selected !== null) loadRun(); }, 2000);
+})();
+</script>
+</body>
+</html>
