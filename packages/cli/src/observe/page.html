@@ -68,6 +68,10 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .run .l1 .dur { margin-left: auto; font-size: var(--size-caption); color: var(--stone); }
 .run .l2 { margin-top: var(--space-2); display: flex; gap: var(--space-8); font-size: var(--size-caption); color: var(--stone); }
 .run .l2 .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 实体标识（console.md §5.1）：用户认的是产品名 + 目录，不是 runId；runId 仍在第二行与 title 里可得 */
+.run .name { flex: 1; min-width: 0; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run .l2 .ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.filters .sep { width: 1px; height: 14px; background: var(--border); margin: 0 var(--space-2); }
 
 /* 状态标签三件套（DESIGN §6.2）：主色文字 + 极浅底 + 同色浅描边，绝不整块高饱和填充 */
 .badge { display: inline-flex; align-items: center; gap: var(--space-4); height: 18px; padding: 0 var(--space-6); border-radius: var(--r-sm); font-size: var(--size-caption); border: 1px solid var(--border); color: var(--ink-70); background: var(--ui-inset); white-space: nowrap; }
@@ -153,7 +157,15 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 
 <script>
 const LEX = /*__LEXICON__*/ null;
-const STATE = { runs: [], filter: "all", selected: null, follow: true, vm: null, expanded: new Set(), hidden: false };
+const STATE = { runs: [], sessions: {}, filter: "all", product: "all", selected: null, follow: true, vm: null, expanded: new Set(), hidden: false };
+/* run 归哪个产品：header 只有 sessionId，产品名与 workspace 在会话 meta 里（/api/runs 顺带给） */
+const sessionOf = (r) => (r.sessionId ? STATE.sessions[r.sessionId] : undefined);
+const productOf = (r) => sessionOf(r)?.agent ?? (r.sessionId ? "未上报" : "无会话");
+const shortPath = (p) => {
+  if (!p) return "";
+  const parts = p.split("/").filter(Boolean);
+  return parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : p;
+};
 
 const el = (tag, attrs, ...children) => {
   const n = document.createElement(tag);
@@ -185,12 +197,27 @@ function badge(term, key) {
 function renderFilters() {
   const box = document.getElementById("filters");
   box.replaceChildren();
+  // 第一组：产品（来自会话 meta）。两个产品缺省共用一个状态根，这是把它们分开看的依据
+  const productCounts = {};
+  for (const r of STATE.runs) productCounts[productOf(r)] = (productCounts[productOf(r)] ?? 0) + 1;
+  const products = Object.keys(productCounts).sort();
+  if (products.length > 1) {
+    for (const p of ["all", ...products]) {
+      const n = p === "all" ? STATE.runs.length : productCounts[p];
+      box.append(el("button", {
+        class: "chip", "aria-pressed": STATE.product === p, title: p === "all" ? "" : "会话 meta 里的产品名（SessionInfo.agent）",
+        onclick: () => { STATE.product = p; renderFilters(); renderRuns(); },
+      }, `${p === "all" ? "全部产品" : p} ${n}`));
+    }
+    box.append(el("span", { class: "sep", "aria-hidden": "true" }));
+  }
+  // 第二组：来源。无数据只降透明度不移除（console.md §7）
   const counts = {};
   for (const r of STATE.runs) counts[r.source.kind] = (counts[r.source.kind] ?? 0) + 1;
   const kinds = ["all", ...Object.keys(LEX.runSource)];
   for (const k of kinds) {
     const n = k === "all" ? STATE.runs.length : (counts[k] ?? 0);
-    const label = k === "all" ? "全部" : LEX.runSource[k].zh;
+    const label = k === "all" ? "全部来源" : LEX.runSource[k].zh;
     box.append(el("button", {
       class: `chip${n === 0 && k !== "all" ? " chip--dimmed" : ""}`,
       "aria-pressed": STATE.filter === k,
@@ -199,10 +226,11 @@ function renderFilters() {
     }, `${label} ${n}`));
   }
   const shown = visibleRuns().length;
-  box.append(el("span", { class: "count", text: STATE.filter === "all" ? `${shown} 条` : `${shown} 条（共 ${STATE.runs.length}）` }));
+  const filtered = STATE.filter !== "all" || STATE.product !== "all";
+  box.append(el("span", { class: "count", text: filtered ? `${shown} 条（共 ${STATE.runs.length}）` : `${shown} 条` }));
 }
 function visibleRuns() {
-  return STATE.filter === "all" ? STATE.runs : STATE.runs.filter((r) => r.source.kind === STATE.filter);
+  return STATE.runs.filter((r) => (STATE.filter === "all" || r.source.kind === STATE.filter) && (STATE.product === "all" || productOf(r) === STATE.product));
 }
 function renderRuns() {
   const list = document.getElementById("runs");
@@ -211,7 +239,7 @@ function renderRuns() {
   if (runs.length === 0) {
     const msg = STATE.runs.length === 0
       ? el("div", { class: "empty" }, "这里会显示 agent 每一次运行的记录。", el("br"), "跑一轮就会出现：", el("br"), el("code", { text: 'echo-agent "帮我看看这个仓库"' }))
-      : el("div", { class: "empty" }, "这个来源下还没有 run。", el("br"), el("button", { class: "btn", onclick: () => { STATE.filter = "all"; renderFilters(); renderRuns(); } }, "清除筛选"));
+      : el("div", { class: "empty" }, "这个筛选下没有 run。", el("br"), el("button", { class: "btn", onclick: () => { STATE.filter = "all"; STATE.product = "all"; renderFilters(); renderRuns(); } }, "清除筛选"));
     list.append(el("li", {}, msg));
     return;
   }
@@ -221,8 +249,10 @@ function renderRuns() {
       class: "run", role: "option", "aria-selected": STATE.selected === r.runId, title: r.runId,
       onclick: () => { STATE.selected = r.runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(r.runId)}`); renderRuns(); loadRun(); },
     },
-      el("div", { class: "l1" }, badge(LEX.runStatus[r.status], r.status), badge(LEX.runSource[r.source.kind], r.source.kind), el("span", { class: "dur mono", text: dur })),
-      el("div", { class: "l2" }, el("span", { class: "mono", text: fmtClock(r.acceptedAt) }), el("span", { class: "id mono", text: shortId(r.runId) })),
+      // 三行：实体名（产品）+ 时长 / 状态与来源标签 / 时间 · 目录 · runId（console.md §5.1：实体名在上，类型信息在下）
+      el("div", { class: "l1" }, el("span", { class: "name", text: productOf(r), title: sessionOf(r)?.name ?? "" }), el("span", { class: "dur mono", text: dur })),
+      el("div", { class: "l2" }, badge(LEX.runStatus[r.status], r.status), badge(LEX.runSource[r.source.kind], r.source.kind)),
+      el("div", { class: "l2" }, el("span", { class: "mono", text: fmtClock(r.acceptedAt) }), el("span", { class: "ws mono", text: shortPath(sessionOf(r)?.workspace ?? ""), title: sessionOf(r)?.workspace ?? "" }), el("span", { class: "id mono", text: shortId(r.runId) })),
     ));
     list.append(item);
   }
@@ -347,7 +377,10 @@ function renderDetail() {
   const field = (label, ...value) => { dl.append(el("dt", { text: label }), el("dd", {}, ...value)); };
   field("来源", badge(LEX.runSource[h.source.kind], h.source.kind), el("span", { class: "muted mono", text: ` ${fmtClock(h.acceptedAt)}` }));
   field("agent", el("span", { class: "mono", text: `${h.agentId} · ${h.agentInstanceId}` }));
-  field("会话", el("span", { class: "mono", text: h.sessionId ?? "无（临时对话）" }));
+  const sess = h.sessionId ? STATE.sessions[h.sessionId] : undefined;
+  field("产品", el("span", { class: "mono", text: sess ? sess.agent : h.sessionId ? "未上报（会话 meta 缺失）" : "无会话（临时对话）" }));
+  field("工作目录", el("span", { class: "mono", text: sess ? sess.workspace : "—" }));
+  field("会话", el("span", { class: "mono", text: h.sessionId ? `${h.sessionId}${sess?.name && sess.name !== h.sessionId ? ` · ${sess.name}` : ""}` : "无（临时对话）" }));
   field("模型", el("span", { class: "mono", text: `${vm.modelBinding.providerId} / ${vm.modelBinding.modelId} · ${vm.modelBinding.catalogRevision}` }));
   const chips = el("div", { class: "chips" });
   if (vm.assembly.slots.length === 0) chips.append(el("span", { class: "muted", text: vm.assembly.digest === "not-captured" ? "未上报" : "无" }));
@@ -403,6 +436,7 @@ async function loadRuns() {
   try {
     const page = await getJson("/api/runs?limit=50");
     STATE.runs = page.items;
+    STATE.sessions = page.sessions ?? {};
     lastOk = Date.now();
     if (STATE.follow) {
       // 跟随：正在跑的 > 最新的非整理 run > 最新的。dream run 每轮之后都有一条、几毫秒就完，跟着它看不到东西

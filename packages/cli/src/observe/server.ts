@@ -2,16 +2,28 @@
 //
 // 数据面只有三条路由，全部走同一个 read-only reader（不取锁、不起 agent）：
 //   GET /                      页面（vendor 的 token CSS + 术语表内联，零外部资源）
-//   GET /api/runs?limit&cursor  `listRuns()` 的一页 header
+//   GET /api/runs?limit&cursor  `listRuns()` 的一页 header + 这页用到的会话（产品名 / workspace，按 sessionId 反查）
 //   GET /api/runs/<run-id>     `getRun()` → `RunObservationViewModel`（renderer 的 json 格式，UI 消费同一份 ViewModel，§15.6）
 //   GET /api/health            库路径、各 runtime 已裁决到的 seq、run / record 计数
 // reader 的每次查询都是短事务，页面轮询不会让 WAL 长住。
+//
+// 会话信息不在 journal 里（run header 只有 sessionId），从状态根的 session meta 读（`SessionService.list()`，只读）：
+// `echo-agent` 与 `echo-coding` 缺省共用一个状态根，产品名（`SessionInfo.agent`）与 workspace 是把它们分开看的唯一依据。
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { SqliteEchoObservationReader } from "@echo-agent/core";
+import { FileDir, SessionService, type RunObservationPage, type SqliteEchoObservationReader } from "@echo-agent/core";
 import { renderRunObservation } from "@echo-agent/core/observability";
 import { lexicon } from "./lexicon.ts";
+
+/** 页面要的会话摘要：产品名与 workspace。不带 messageCount 之类会随 agent 写盘变化的东西——那是另一份真相。 */
+export type SessionBrief = Readonly<{ agent: string; name: string; workspace: string; updatedAt: number }>;
+
+/** `/api/runs` 的响应：一页 header + 这页引用到的会话。 */
+export type RunsResponse = RunObservationPage & Readonly<{ sessions: Readonly<Record<string, SessionBrief>> }>;
+
+/** session meta 每次 list 都要扫目录；轮询 500ms 一次，缓存 2s 足够新鲜（会话不会秒级增删）。 */
+const SESSION_CACHE_MS = 2_000;
 
 export type ObserveServerOptions = Readonly<{
   reader: SqliteEchoObservationReader;
@@ -54,6 +66,16 @@ function clampLimit(raw: string | null): number {
 export function startObserveServer(opts: ObserveServerOptions): ObserveServer {
   const reader = opts.reader;
   const hostname = opts.hostname ?? "127.0.0.1";
+  const sessions = new SessionService(new FileDir(opts.stateRoot));
+  let sessionCache: { at: number; map: Record<string, SessionBrief> } | undefined;
+  /** sessionId → 摘要。session 目录还不存在（agent 从没起过）就是空表，不是错。 */
+  const sessionIndex = async (): Promise<Record<string, SessionBrief>> => {
+    if (sessionCache !== undefined && Date.now() - sessionCache.at < SESSION_CACHE_MS) return sessionCache.map;
+    const map: Record<string, SessionBrief> = {};
+    for (const s of await sessions.list()) map[s.id] = { agent: s.agent, name: s.name, workspace: s.workspace, updatedAt: s.updatedAt };
+    sessionCache = { at: Date.now(), map };
+    return map;
+  };
   const server = Bun.serve({
     hostname,
     port: opts.port ?? 4321,
@@ -69,7 +91,15 @@ export function startObserveServer(opts: ObserveServerOptions): ObserveServer {
         }
         if (url.pathname === "/api/runs") {
           const cursor = url.searchParams.get("cursor");
-          return json(await reader.listRuns({ limit: clampLimit(url.searchParams.get("limit")), ...(cursor === null ? {} : { cursor }) }));
+          const page = await reader.listRuns({ limit: clampLimit(url.searchParams.get("limit")), ...(cursor === null ? {} : { cursor }) });
+          const index = await sessionIndex();
+          const used: Record<string, SessionBrief> = {};
+          for (const h of page.items) {
+            const brief = h.sessionId === null ? undefined : index[h.sessionId];
+            if (h.sessionId !== null && brief !== undefined) used[h.sessionId] = brief;
+          }
+          const body: RunsResponse = { ...page, sessions: used };
+          return json(body);
         }
         const m = /^\/api\/runs\/([^/]+)$/.exec(url.pathname);
         if (m !== null) {

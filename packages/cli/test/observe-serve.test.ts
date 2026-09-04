@@ -42,12 +42,40 @@ function scripted(turns: ScriptedTurn[]): Provider {
   });
 }
 
-async function echoAt(turns: ScriptedTurn[]): Promise<Echo> {
-  const echo = await createEcho({ provider: scripted(turns), stateDir: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [] });
+async function echoAt(turns: ScriptedTurn[], identity: { agentName?: string; workspace?: string } = {}): Promise<Echo> {
+  const echo = await createEcho({ provider: scripted(turns), stateDir: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [], ...identity });
   running.push(echo);
   await echo.agent.start();
   return echo;
 }
+
+test("/api/runs 顺带给会话摘要：产品名与 workspace 按 sessionId 反查，两个产品共用一个状态根也分得开", async () => {
+  const coding = await echoAt([textTurn("coding 说")], { agentName: "echo-coding", workspace: "/tmp/ws-coding" });
+  const a = await coding.send("x");
+  await coding.stop();
+  const general = await echoAt([textTurn("agent 说")], { agentName: "echo-agent", workspace: "/tmp/ws-general" });
+  const b = await general.send("y");
+  const reader = await openObservationReader({ stateRoot: dir });
+  const server = startObserveServer({ reader, stateRoot: dir, port: 0 });
+  try {
+    const page = (await (await fetch(`${server.url}/api/runs?limit=10`)).json()) as {
+      items: { runId: string; sessionId: string | null }[];
+      sessions: Record<string, { agent: string; workspace: string; name: string }>;
+    };
+    const runA = page.items.find((h) => h.runId === a.runId)!;
+    const runB = page.items.find((h) => h.runId === b.runId)!;
+    expect(runA.sessionId).not.toBeNull();
+    expect(runB.sessionId).not.toBeNull();
+    expect(runA.sessionId).not.toBe(runB.sessionId);
+    expect(page.sessions[runA.sessionId!]).toMatchObject({ agent: "echo-coding", workspace: "/tmp/ws-coding" });
+    expect(page.sessions[runB.sessionId!]).toMatchObject({ agent: "echo-agent", workspace: "/tmp/ws-general" });
+    // 只带这页用到的会话，不把整个状态根的会话表都吐出去
+    expect(Object.keys(page.sessions).sort()).toEqual([runA.sessionId!, runB.sessionId!].sort());
+  } finally {
+    await server.stop();
+    await reader.close();
+  }
+});
 
 test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / --host 只对 serve 有意义", () => {
   expect(parseObserveArgs(["serve"], "x")).toEqual({ command: { kind: "serve", port: OBSERVE_DEFAULT_PORT, host: "127.0.0.1" } });
