@@ -133,7 +133,11 @@ export type { InboxBatchAckCommitV1, InboxRecordV1 } from "./inbox/records.ts";
  * 会话的语义所有者。**值导出**（2026-09-01）：产品要在装配前挑「续哪一段」（`--continue`），
  * 得自己在状态根的 `FileDir` 上开一个实例调 `list()`——列表归 core，不让产品各自扫 meta 文件。
  */
-export { SessionService, listSessions } from "./session/service.ts";
+export { SessionService, listSessions, setSessionStatus } from "./session/service.ts";
+export { EchoSessions, SESSION_SOURCE, DEFAULT_RUN_TIMEOUT_MS } from "./session/sessions.ts";
+export type { CreateSessionInput, EchoSessionsDeps, SendResult, SessionRow, SessionRunner } from "./session/sessions.ts";
+export { readSessionPhase, writeSessionPhase, STATUS_FILE } from "./session/status.ts";
+export type { SessionPhase, SessionStatusFile } from "./session/status.ts";
 export type { AgentBackground, BackgroundLimits } from "./background/types.ts";
 export type { ActiveSkill, Skill, SkillActivation, SkillCreation } from "./skill/types.ts";
 export type { SessionData, SessionEntry, SessionInfo, SessionStatus, SessionStore } from "./session/types.ts";

@@ -29,6 +29,8 @@ import { EMPTY_COMPACTION, type CompactionReason, type CompactionState } from ".
 import { assertCompactionFits } from "../compaction/view.ts";
 import { assertSafePathSegment } from "../storage/path-safety.ts";
 import type { SessionData, SessionEntry, SessionInfo, SessionStore } from "./types.ts";
+import { writeSessionPhase, type SessionPhase } from "./status.ts";
+import type { Diagnostic } from "../errors.ts";
 
 /** entry 文件名的序号宽度。定长才能让字典序 = 时间序，`list()` 拿回来直接排序即可。 */
 const SEQ_WIDTH = 6;
@@ -118,6 +120,7 @@ export class SessionService {
    * 而不是由 Service 自己猜「上次那次失败也许不要紧」。
    */
   private readonly poisoned = new Map<string, unknown>();
+  private onDiagnostic?: (d: Diagnostic) => void;
 
   constructor(private readonly store: SessionStore) {}
 
@@ -222,6 +225,48 @@ export class SessionService {
       await this.bumpMeta(cursor, written);
     });
     return written;
+  }
+
+  /**
+   * 把 meta 立刻落盘（2026-09-03）。**只给「替别人建的那一段」用**：`create` 出来的会话
+   * 是要交给另一个进程去跑的，它得**立刻在清单里看得见**，否则 runner 还没接手就已经查无此段。
+   *
+   * 普通启动路径不用它——那种「一句话没说就退出」的段本来就不该在盘上留痕（见 `createOrResume`）。
+   */
+  async commitMeta(sessionId: string): Promise<void> {
+    const cursor = this.cursors.get(sessionId);
+    if (cursor === undefined) throw new Error(`会话未打开：${sessionId}——先 createOrResume`);
+    if (cursor.metaWritten) return;
+    await this.writeMeta(cursor.info);
+    cursor.metaWritten = true;
+  }
+
+  /**
+   * 记下这一段此刻在忙没忙（`status.json`，2026-09-03）。**只有持有 lease 的进程该调它。**
+   *
+   * 与入账走同一条串行链，所以它与 entry 的先后是确定的；但**失败不毒化会话**：
+   * 运行状态是给别人看的提示（「现在问它，它能马上答吗」），读方永远还要再看一眼 lease
+   * （`sessionRow()` 里 `alive === false` 时 `phase` 一律作废）。让一次 status 写失败
+   * 把一段本来健康的对话封存，代价和收益完全不成比例——所以这里只报诊断。
+   */
+  setPhase(sessionId: string, phase: SessionPhase): void {
+    if (this.sealed || this.poisoned.has(sessionId)) return;
+    const prev = this.chain.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .then(async () => {
+        if (this.poisoned.has(sessionId)) return;
+        await writeSessionPhase(this.store, phase);
+      })
+      .catch((e: unknown) => {
+        this.onDiagnostic?.({ code: "session_status_failed", message: `写 ${phase} 状态失败：${e instanceof Error ? e.message : String(e)}` });
+      });
+    this.chain.set(sessionId, next);
+    this.track(next);
+  }
+
+  /** 装配方（Agent）接诊断出口。只有「报告了也改变不了裁决」的事从这里出去。 */
+  attachDiagnostics(sink: (d: Diagnostic) => void): void {
+    this.onDiagnostic = sink;
   }
 
   /**
@@ -478,6 +523,30 @@ function project(loaded: Loaded): SessionData {
 }
 
 const COMPACTION_REASONS: ReadonlySet<unknown> = new Set<CompactionReason>(["auto", "overflow", "manual"]);
+
+/**
+ * 改一段 session 的持久状态（`active` ↔ `closed`，2026-09-03）。
+ *
+ * **不经 `SessionService` 实例**：`close` 的调用方常常没有打开那一段（会话管理界面关的是**别人**），
+ * 硬要先 `createOrResume` 等于为了改一个字段把整份 entries 读一遍。这里只读改写 meta 一个文件。
+ *
+ * meta 不存在 = 那一段一句话没说过（空会话不落盘），**判红**——静默建一份 meta 出来
+ * 会把「没有这段」变成「有一段关掉的」，两件事不一样。
+ */
+export async function setSessionStatus(store: SessionStore, sessionId: string, status: SessionInfo["status"]): Promise<void> {
+  assertSafeSessionId(sessionId);
+  const raw = await store.read(META_FILE);
+  if (raw === null) throw new Error(`会话 ${sessionId} 没有 ${META_FILE}：改不了状态（它可能一句话都没说过）`);
+  let info: SessionInfo;
+  try {
+    info = JSON.parse(raw) as SessionInfo;
+  } catch (e) {
+    throw new Error(`会话 ${sessionId} 的 ${META_FILE} 解不开：${(e as Error).message}`);
+  }
+  assertSessionInfoShape(info, `会话 ${sessionId} 的 ${META_FILE}`);
+  if (info.status === status) return;
+  await store.write(META_FILE, JSON.stringify({ ...info, status, updatedAt: Date.now() }));
+}
 
 /**
  * 盘上全部会话的清单（只读 meta，不读 entries），按 `updatedAt` 降序。

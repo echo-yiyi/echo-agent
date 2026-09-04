@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 290（value 102 · type 169 · both 19）
+符号 304（value 108 · type 176 · both 20）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -323,9 +323,27 @@ type   ThinkingLevel
 -- src/schedule/harness.ts (1) --
 type   AgentSchedule
 
--- src/session/service.ts (2) --
+-- src/session/service.ts (3) --
 value  listSessions
 both   SessionService
+value  setSessionStatus
+
+-- src/session/sessions.ts (8) --
+type   CreateSessionInput
+value  DEFAULT_RUN_TIMEOUT_MS
+both   EchoSessions
+type   EchoSessionsDeps
+type   SendResult
+value  SESSION_SOURCE
+type   SessionRow
+type   SessionRunner
+
+-- src/session/status.ts (5) --
+value  readSessionPhase
+type   SessionPhase
+type   SessionStatusFile
+value  STATUS_FILE
+value  writeSessionPhase
 
 -- src/session/types.ts (6) --
 value  newSessionId

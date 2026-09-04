@@ -41,7 +41,10 @@ import { readdir } from "node:fs/promises";
 import { extname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Agent } from "./agent.ts";
-import { createAgent, type CreateAgentOptions } from "./create-agent.ts";
+import { createAgent, resolveSessionsRoot, resolveStateDir, type CreateAgentOptions } from "./create-agent.ts";
+import { EchoSessions, type SessionRunner } from "./session/sessions.ts";
+import { FileDir, expandHome } from "./storage/file-dir.ts";
+import { inspectStateLock } from "./storage/file-lock.ts";
 import { errText, type Diagnostic } from "./errors.ts";
 import { defineExtension, type ExtensionDefinition } from "./extension/abi.ts";
 import { ExtensionHost, type ExtensionEntry } from "./extension/host.ts";
@@ -54,6 +57,8 @@ import type { EchoObservations, EchoRunResult } from "./observability/types.ts";
 
 /** 约定目录名：`<cwd>/extensions`。 */
 export const EXTENSIONS_DIR = "extensions";
+/** 与 `create-agent.ts` 同一个名字：会话面判「那一段活着吗」读的就是它。 */
+const LOCK_FILE = ".lock";
 
 /** 显式传入那一代（`opts.extensions`，含壳）。换代（reload）是 §14.8/§14.9 的事。 */
 const BOOT_GENERATION = "boot";
@@ -85,6 +90,17 @@ export type CreateEchoOptions = CreateAgentOptions & {
   extensions?: readonly ExtensionEntry[];
   /** 解析约定目录与相对 `extensionDirs` 的基准。缺省 `process.cwd()`。 */
   cwd?: string;
+  /**
+   * 会话面（2026-09-03，sessions.md §7）：**容器怎么让新建的一段跑起来**。
+   *
+   * `run` 不给时 `echo.sessions.create()` 照样建（宿主自己知道怎么跑它），但模型面的
+   * `session_create` 工具在那种容器里不挂——工具不能承诺系统不交付的事。
+   */
+  sessions?: {
+    run?: SessionRunner;
+    /** runner 迟迟不 resolve 的上界，缺省 30 秒。超时按失败处理：判红并把那段置 closed。 */
+    runTimeoutMs?: number;
+  };
 };
 
 /** 装上了什么。`file` 为 `undefined` 表示它来自 `opts.extensions`（不是从盘上发现的）。 */
@@ -110,6 +126,11 @@ export type Echo = Readonly<{
    * 空数组 = 全部装上。**显式传入的失败不在这里**——那种直接抛。
    */
   diagnostics: readonly Diagnostic[];
+  /**
+   * 会话面（2026-09-03）：开一段、列一遍、发一句、关一段。
+   * 与模型的 `session_*` 工具、壳的 `/sessions` **同一份实现**。
+   */
+  sessions: EchoSessions;
   /** 先卸 Extension（构造的逆序），再停 Agent。 */
   stop(): Promise<void>;
 }>;
@@ -361,6 +382,32 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
      * `send()` = user source 的调用方适配器（§15.5.2）：outcome 来自 loop，观测三元组来自 admission 已 COMMIT 的 RunIndex。
      * `observationPersistence` 是**当前 Runtime** 的投影：terminal 已进 index 才 stored；尾写失败磁盘仍 running → degraded。
      */
+    // 会话面（2026-09-03）：一个容器一个实例，三个消费者共用（工具 / 壳 / 宿主）。
+    //
+    // 这里注进去的两件都是**宿主知识**，core 自己给不出：
+    //   · `isAlive` 读的是那一段的 `.lock`——文件锁是 node 的事，而且**陈尸锁也算活着**
+    //     （单写者设计不做自动接管，见 `storage/file-lock.ts`）：读到 valid 就当有人占着，
+    //     要不要清由人决定。
+    //   · `run` 是「怎么让新的一段跑起来」，core 不起进程（sessions.md 的 Non-Goals）。
+    //
+    // 别人那一段的目录**不过本 Agent 的写入闸**：闸管的是「本段的 lease 还在不在手上」，
+    // 而往别人的 inbox 写一条本来就不在我们的 lease 覆盖范围内——那是它自己的账本，
+    // 由它自己的 lease 保护。
+    const sessionsRoot = expandHome(opts.sessionsRoot ?? resolveSessionsRoot());
+    const sessionDirOf = (id: string): string => resolveStateDir({ sessionsRoot, sessionId: id });
+    const sessions = new EchoSessions({
+      root: new FileDir(sessionsRoot),
+      storeFor: (id) => new FileDir(sessionDirOf(id)),
+      isAlive: async (id) => (await inspectStateLock(join(sessionDirOf(id), LOCK_FILE))).state === "valid",
+      self: () => ({
+        sessionId: agent.state.sessionId,
+        agent: opts.agentName ?? opts.agentId ?? "default",
+        workspace: agent.state.workspace,
+      }),
+      ...(opts.sessions?.run !== undefined ? { run: opts.sessions.run } : {}),
+      ...(opts.sessions?.runTimeoutMs !== undefined ? { runTimeoutMs: opts.sessions.runTimeoutMs } : {}),
+    });
+
     const send = async (input: string | AgentMessage): Promise<EchoRunResult> => {
       const result = await agent.prompt(input);
       const index = observation.runIndexOf(result.runId);
@@ -376,6 +423,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     return Object.freeze({
       agent,
       send,
+      sessions,
       observations: observation.observations,
       extensions: Object.freeze(loaded),
       diagnostics: Object.freeze(diagnostics),

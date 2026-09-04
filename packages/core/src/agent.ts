@@ -44,6 +44,7 @@ import { clampCalibration, runCompaction, type CompactionOutcome } from "./compa
 import { buildWorkingMessages, estimateText, estimateTokens } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
+import type { SessionPhase } from "./session/status.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
 import { InboxAckError, InboxStore } from "./inbox/store.ts";
 import { systemClock, type Clock } from "./schedule/clock.ts";
@@ -751,6 +752,7 @@ export class Agent {
     this.mcp?.attach({ tools: this.tools, onChanged, deliver, report });
 
     this.sessionService = opts.sessionService;
+    this.sessionService?.attachDiagnostics((d) => this.reportDiagnostic(d));
     this.clock = opts.clock ?? systemClock;
     this.stateLock = opts.stateLock;
     this.agentId = opts.agentId ?? "default";
@@ -1050,6 +1052,18 @@ export class Agent {
    * 攒批不是优化：三个后台任务同时结束就跑一轮，不是三轮。
    * 正在跑 / 队列空 → 返回 null，不做任何事。
    */
+  /**
+   * 把运行状态写进 `status.json`（2026-09-03，sessions.md §6）。**只有持有 lease 的进程该写。**
+   *
+   * 它是给别人看的提示：`session_list` 里「这段能不能马上答话」就读它。失败不影响本段对话——
+   * 读方永远还要再看一眼 lease，`alive` 为假时这份 `phase` 一律作废（进程崩在 working 的那种）。
+   */
+  private publishPhase(phase: SessionPhase): void {
+    const id = this._state.sessionId;
+    if (id === null || this.phase !== "running") return;
+    this.sessionService?.setPhase(id, phase);
+  }
+
   /**
    * inbox 轮询：**别的进程写进来的消息，靠它才看得见**（2026-09-03，sessions.md §5）。
    *
@@ -1581,6 +1595,7 @@ export class Agent {
     if (this.memory !== undefined) this.autoDream = true;
     this.autoConsumeInbox = true;
     this.startInboxPoll();
+    this.publishPhase("idle"); // 起来了、还没活干：别人现在问它，它能马上答
 
     this.phase = "running";
     this.restoredReason = null;
@@ -2266,6 +2281,7 @@ export class Agent {
    */
   private closeRun(): void {
     this._state.status = "idle";
+    this.publishPhase("idle");
     this._state.startedAt = null;
     this._state.streamingMessage = undefined;
     this._state.pendingToolCalls = new Set();
@@ -2667,6 +2683,9 @@ export class Agent {
     switch (input.type) {
       case "agent_start":
         this._state.status = "generating";
+        // 运行状态落盘（2026-09-03）：只在 idle ↔ working 这条边上写，generating / acting / compacting
+        // 是 working 的子态——别人只关心「现在问它，它能马上答吗」。
+        this.publishPhase("working");
         break;
       case "turn_start":
         this._state.iteration = input.iteration;

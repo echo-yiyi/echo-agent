@@ -112,7 +112,9 @@ type SessionInfo = {
 三条不变量沿用：**每段一个写者**（lease）、**坏档判红不给半截**、**transcript 只增不改**。两条新规矩：
 
 - **空会话不落盘。** 新 id 的 `createOrResume` 只建内存游标，meta 在第一次 `append` 时才写。每次启动不再留一个空目录，列表不被空段塞满；`--resume` 一个从没说过话的 id 判红「不存在」。
-- **名字来自第一条 user 消息的首行**（截 60 字），由 `echo.agent.hooks` 里的一个钩子在 `message_end` 时调 `rename` 写进 meta；core 只出 `rename`。以后要让模型起名，换钩子即可。
+- **名字来自第一条 user 消息的首行**（截 60 字），由 `echo.agent.hooks` 里的一个钩子在 `message_end` 时调 `rename` 写进 meta；core 只出 `rename`。以后要让模型起名，换钩子即可。**还没做**。
+
+`create()` 出来的段是例外：它是**替别人建的**，得立刻在清单里看得见（runner 还没接手就已经查无此段是错的），所以那条路显式 `commitMeta()`。
 
 `/clear` 的语义改为：关掉当前一段（`status = closed`）、新建一段、壳 attach 过去。旧段留在盘上可 `--resume`。协议上的 `reset()` 因此没有消费者，删。
 
@@ -256,11 +258,15 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 1. **布局（已实现，2026-09-03）**：状态根 = session 目录；`SessionService` 扁平化，清单改自由函数 `listSessions()`（扫上一层）；memory / skills 提到 user 层；空会话延迟写 meta；`SessionInfo` 加 `main` / `status`；删旧 `SessionManager` / `InMemorySessionManager` / `AgentOptions.sessions`；`CreateAgentOptions` 加 `sessionsRoot` 与 `sharedStore`；`observe` 的 `--agent-id` 换成 `--session`。lease 每段一把随之成立。
    **与本文其余部分的一处差异**：memory 落在 user 层**一层**，还不是 §2 的三层——把哪个记忆分区放哪一层要改 `AgentMemories` 的分区表与 dream 的整理范围，是 memory 线自己的一次改动，登记在下面的「未决」里，不在本步顺手做。
 2. **agent 打包**：ABI 加 `extensions`；echo-agent / echo-coding 写成 bundle；`AgentRef` 进 meta；inline → `echo:inline-agent`；不越权检查。
-3. **通道**（第一半已实现，2026-09-03）：record id 改**写者自己发号**（`createRecordIdSource`，
+3. **通道（已实现，2026-09-03）**：record id 改**写者自己发号**（`createRecordIdSource`，
    `<12 位十六进制毫秒>-<4 位同毫秒计数><12 位十六进制随机>`；同一写者严格递增，跨写者靠随机区分）；
    `InboxStore.refresh()` 重扫盘上别人写进来的 record；`Agent` 每秒轮询一次自己的 inbox 目录
-   （`INBOX_POLL_MS`，走已有的 `Clock` 端口，不用 `fs.watch`——core 不 import `node:`）。
-   **还没做**：`source = "session"` 的消息形态、`Echo.sessions`、extension 面的 `sessions` / `inbox.watch`、`status.json`。
+   （`INBOX_POLL_MS`，走已有的 `Clock` 端口，不用 `fs.watch`——core 不 import `node:`）；
+   `EchoSessions`（create / list / send / close）挂在 `Echo.sessions` 上，消息形态是
+   `source = "session"` 的 environment 消息、`ref` 由发送方落款；`status.json` 由持锁进程在
+   idle ↔ working 边上写，读的时候与 lease 合成一次（`alive` 为假则 `phase` 恒为 `null`）；
+   `SessionRunner` 与它的失败 / 超时语义（判红并把那段置 `closed`）也在这一步。
+   **还没做**：extension 面的 `sessions` / `inbox.watch`（`wait` 与 `replyTo` 跟着它走）。
 4. **工具**：`echo:sessions` 四个工具；main 规则；`wait`；命名钩子。
 5. **壳**：`--continue` 新筛选；`/clear`；`/sessions`。
 
