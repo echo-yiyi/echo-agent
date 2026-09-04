@@ -1,9 +1,9 @@
 // coding-agent 的契约门:工具真动盘、权限真拦、装配整链真跑通。
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { createEcho, createProvider, createProviderStreams, type Echo, type ModelTool, type Provider, type ToolExecutionContext } from "@echo-agent/core";
 import { makeFsTools } from "../src/tools/fs.ts";
@@ -175,6 +175,40 @@ test("bash 超时:杀掉并说清,不挂死", async () => {
   expect(r.isError).toBe(true);
   expect(r.content).toContain("Timed out");
 }, 10_000);
+
+test("bash 工作目录跨调用保留：cd 之后下一次从那里起；cd 失败不动；目录被删退回 workspace 并说明；exit 也保留退出码", async () => {
+  // 2026-09-03 补：此前每次都是全新 shell，模型得每条命令都带 `cd sub && …`，多走一步就忘。变量仍不保留（照 Claude Code）。
+  await mkdir(join(root, "sub"), { recursive: true });
+  const bash = makeBashTool();
+  const first = await bash.execute({ command: "cd sub && pwd" }, ctx());
+  expect([first.isError, first.content]).toEqual([false, expect.stringContaining("(working directory is now ")]);
+  expect(first.content.startsWith(await realpath(join(root, "sub")))).toBe(true);
+  // 下一次从 sub 起；标记不漏进正文
+  const second = await bash.execute({ command: "basename \"$PWD\"; X=1" }, ctx());
+  expect([second.isError, second.content.trimEnd()]).toEqual([false, "sub"]);
+  // 变量不保留
+  const third = await bash.execute({ command: "echo \"[$X]\"" }, ctx());
+  expect(third.content.trimEnd()).toBe("[]");
+  // cd 失败：目录不动，退出码照实回
+  const bad = await bash.execute({ command: "cd nope-not-here" }, ctx());
+  expect([bad.isError, bad.content]).toEqual([true, expect.stringContaining("exit code 1")]);
+  expect(bad.content).not.toContain("working directory is now");
+  expect((await bash.execute({ command: "basename \"$PWD\"" }, ctx())).content.trimEnd()).toBe("sub");
+  // 命令自己 exit：退出码保留（包了一层不能把它吞成 0）
+  const exited = await bash.execute({ command: "exit 7" }, ctx());
+  expect([exited.isError, exited.content]).toEqual([true, "exit code 7\n"]);
+  // 目录被删：退回 workspace，并把这件事说出来
+  await rm(join(root, "sub"), { recursive: true, force: true });
+  const back = await bash.execute({ command: "basename \"$PWD\"" }, ctx());
+  expect(back.isError).toBe(false);
+  expect(back.content).toContain("no longer exists; back in the workspace root");
+  expect(back.content.startsWith(basename(root))).toBe(true);
+  // 输出超长也截不掉标记：cd 仍然记住
+  await mkdir(join(root, "sub2"), { recursive: true });
+  const huge = await bash.execute({ command: "cd sub2 && head -c 100000 /dev/zero | tr '\\0' 'x'" }, ctx());
+  expect([huge.isError, huge.content.includes("output truncated")]).toEqual([false, true]);
+  expect((await bash.execute({ command: "basename \"$PWD\"" }, ctx())).content.trimEnd()).toBe("sub2");
+});
 
 test("后台作业：bash background 起 → job_output 看得到状态与最近输出 → job_stop 杀掉 → 再看是 killed；丢了 id 也找得回", async () => {
   // 2026-09-02 补的两件：此前 background: true 之后模型中途看不到输出、也停不掉——「跑起来看日志再改」走不通。
