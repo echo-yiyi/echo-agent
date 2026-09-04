@@ -91,12 +91,9 @@ const AGENT_BUILTIN_TOOLS = [
   "skill_activate",
   "skill_create",
   "transcript_read",
-  // 会话面（2026-09-03）：**`session_create` 不在这里**——它只挂给 main 且容器给了 SessionRunner 的那一段，
-  // 而 digest 是「这个产品缺省装出来什么」的快照，cli 缺省不给 runner。给了 runner 的容器会多一件，
-  // 那是容器的差异，不是产品身份的差异。
-  "session_close",
-  "session_list",
-  "session_send",
+  // **会话面（`session_*`）不在这里**：挂不挂它是**容器**的决定（`CreateEchoOptions.sessions`），
+  // 不是产品身份。cli 开着它，所以真跑起来的 echo-coding 会多三件；而这份 digest 描述的是
+  // 「这个产品自己带什么」——把容器的选择写进产品身份，换个宿主就对不上了。
 ] as const;
 
 /** 产品自己出的四段（identity / conduct:coding / tool:workspace / tool:shell），按 order 排。 */

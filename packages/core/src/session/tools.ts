@@ -15,6 +15,11 @@ import { PROMPT_ORDER, type PromptSection } from "../prompt/types.ts";
 import { toolError, toolOk, type ModelTool } from "../tools/types.ts";
 import type { EchoSessions, SessionRow } from "./sessions.ts";
 
+/**
+ * **暂时没有 `agent` 参数**：「按名挑一个 agent 定义」要等 agent 打包那一步（sessions.md §4）落地。
+ * 在那之前让模型点名一个身份，等于工具收下了一个没人兑现的参数——新建的那段仍然跑容器挂的那一套。
+ * 少一个参数比多一个假参数好。
+ */
 export type SessionToolsOptions = {
   /** 挂不挂 `session_create`。装配层按「是不是 main」与「容器给没给 runner」决定。 */
   readonly canCreate: boolean;
@@ -58,21 +63,20 @@ function describe(row: SessionRow): string {
   return `${row.id}  ${row.name}  [${row.agent}]  ${where}  ${row.workspace}`;
 }
 
-function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?: string; agent?: string; workspace?: string }> {
+function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?: string; workspace?: string }> {
   return {
     kind: "model",
     name: "session_create",
     label: "开一段会话",
     description:
-      "Start another agent in its own session and give it a first instruction. It runs on its own from then on: " +
-      "separate conversation, separate inbox, no access to yours. Returns its id — use session_send to say more to it. " +
-      "Its answers come back to you as messages, not as the result of this call.",
+      "Start another session and give it a first instruction. It runs on its own from then on: " +
+      "separate conversation, separate inbox, no access to yours, same agent as you. Returns its id — " +
+      "use session_send to say more to it. Its answers come back to you as messages, not as the result of this call.",
     parameters: {
       type: "object",
       properties: {
         message: { type: "string", description: "The first instruction for the new session — what you want it to do" },
         name: { type: "string", description: "Short human-readable name, e.g. 'review PR 42'" },
-        agent: { type: "string", description: "Which agent it should be; defaults to the same one you are" },
         workspace: { type: "string", description: "Absolute path it works in; defaults to yours" },
       },
       required: ["message"],
@@ -87,7 +91,6 @@ function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?:
           message: params.message,
           main: false,
           ...(params.name !== undefined ? { name: params.name } : {}),
-          ...(params.agent !== undefined ? { agent: params.agent } : {}),
           ...(params.workspace !== undefined ? { workspace: params.workspace } : {}),
         });
         return toolOk(`Started session ${row.id} (${row.name}). It has your first message; its replies arrive as messages.`);

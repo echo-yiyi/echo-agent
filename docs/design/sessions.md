@@ -232,9 +232,13 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 | `session_list` | `workspace?`、`includeClosed?` | 全部 |
 | `session_close` | `id` | 全部 |
 
-**开关** = 挂不挂 `echo:sessions`。不挂就是今天的单会话，不需要另加配置项。工具的 description 与 `session_*` 的习惯段由这个 extension 自己出（prompt 决策 2：只有拥有工具的 extension 在自己的段里提它）。
+**开关** = 容器给不给 `CreateEchoOptions.sessions`（已实现）。不给就是今天的单会话形态，prompt 里一件工具都不多；`echo.sessions` 这组 API 与开关无关，恒在。工具的 description 与 `session_*` 的习惯段由这个 extension 自己出（prompt 决策 2：只有拥有工具的 extension 在自己的段里提它）。
 
-它**不在 builtin 表里**，与 `echo:inline-tools` 同代（INLINE）：builtin 表是从一个 `Agent` 派生的，而会话面是**容器**级的——一个容器管着好几段。
+它**不在 builtin 表里**，与 `echo:inline-tools` 同代（INLINE）：builtin 表是从一个 `Agent` 派生的，而会话面是**容器**级的——一个容器管着好几段。同理它**不进产品的行为身份快照**（`codingAgentIdentity`）：挂不挂是容器的选择，写进产品身份换个宿主就对不上。
+
+**CLI 这个容器选的是**：开会话面、**不给 runner**。同一台机器上多开几个终端就是多段 agent，让它们看得见彼此、能互相带个话；而「怎么再开一个终端窗口」不该由 CLI 替用户决定，所以模型那边没有 `session_create`——开新的一段仍然是人的动作。
+
+`session_create` 现在**没有 `agent` 参数**：按名挑一个 agent 定义要等 §4 的 agent 打包落地。在那之前收下这个参数等于收下一个没人兑现的值——新建的那段仍然跑容器挂的那一套。
 
 ## 8. 与现有件的对接
 

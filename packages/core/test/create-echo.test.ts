@@ -39,8 +39,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "fixtures/extensions");
 
 /** §14 owner 表里本批搬进来的四条，顺序即 `builtinEntries()` 的顺序。 */
-// `echo:sessions`（2026-09-03）不在 builtin 表里：会话面是**容器**级的，`Agent` 上没有它。
-// 它与 `echo:inline-tools` 同代（INLINE），所以恒在清单里、排在 builtin 之后。
+// `echo:sessions`（2026-09-03）**不在缺省清单里**：挂不挂它是容器的开关（`CreateEchoOptions.sessions`），
+// 不给就是今天的单会话形态。给了的话它与 `echo:inline-tools` 同代（INLINE），排在 builtin 之后。
 const BUILTIN_NAMES = ["echo:agent", "echo:tasks", "echo:skills", "echo:memory", "echo:scheduler", "echo:compaction"] as const;
 const SESSIONS_NAME = "echo:sessions";
 
@@ -160,13 +160,13 @@ test("扫 extensions/ → 两个 Extension 都 mount，工具真的进了 agent 
 
   // **清单里内建在前、外部在后**——这正是「内部 extension 先、外部 extension 后」那条顺序的可见面。
   // 内建四条恒在（§14 owner 表），所以断言要连它们一起写：清单是「这个 agent 会什么」的完整答案。
-  expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, SESSIONS_NAME, "adds-tool", "nested"]);
+  expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, "adds-tool", "nested"]);
   // 盘上发现的那两条带 file；内建来自内置模块表，没有文件
   expect(echo.extensions.filter((e) => e.file !== undefined).map((e) => e.entryId)).toEqual([
     resolve(FIXTURES, "adds-tool.ts"),
     resolve(FIXTURES, "nested/index.ts"),
   ]);
-  expect(echo.extensions.filter((e) => e.file === undefined).map((e) => e.entryId)).toEqual([...BUILTIN_NAMES, SESSIONS_NAME]);
+  expect(echo.extensions.filter((e) => e.file === undefined).map((e) => e.entryId)).toEqual([...BUILTIN_NAMES]);
 
   const names = [...echo.agent.tools.keys()];
   expect(names).toContain("fixture_year");
@@ -443,7 +443,7 @@ test("两个目录指到同一个文件只装一次（按解析后的绝对路�
     stateDir: join(await tmp(), "state"),
     dirs: [FIXTURES, join(FIXTURES, "..", "extensions")],
   });
-  expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, SESSIONS_NAME, "adds-tool", "nested"]);
+  expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, "adds-tool", "nested"]);
 });
 
 test("extensionDirs: [] 关掉自动发现；opts.extensions 仍然照装（file 为 undefined）", async () => {
@@ -474,7 +474,7 @@ test("extensionDirs: [] 关掉自动发现；opts.extensions 仍然照装（file
   });
   running.push(echo);
 
-  expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, SESSIONS_NAME, "inline"]);
+  expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, "inline"]);
   expect(echo.extensions.at(-1)).toEqual({ entryId: "inline", name: "inline", file: undefined });
   expect(echo.agent.tools.has("inline_tool")).toBe(true);
   expect(echo.agent.tools.has("fixture_year")).toBe(false); // 自动发现确实被关掉了
@@ -608,7 +608,7 @@ test("能力不在就不出条目：`withoutMemory` 的 agent 清单里**没有*
   running.push(without);
   expect(without.extensions.map((e) => e.name)).not.toContain("echo:memory");
   // 别的能力照在——判据要能区分「这一条没了」和「整张表塌了」
-  expect(without.extensions.map((e) => e.name)).toEqual(["echo:agent", "echo:tasks", "echo:skills", "echo:scheduler", "echo:compaction", SESSIONS_NAME]);
+  expect(without.extensions.map((e) => e.name)).toEqual(["echo:agent", "echo:tasks", "echo:skills", "echo:scheduler", "echo:compaction"]);
 });
 
 test("构造失败：**已 mount 的 builtin 那一代也要卸**（review 三轮：上一版是假判据）", async () => {
@@ -764,5 +764,41 @@ test("公开清单 = Host 实际挂上的那一份（review 二轮 P1：上一�
 
   // ② **完全相等**：清单里的每一条都真在 Host 上，Host 上的每一条也都在清单里。
   //    只断言「包含 echo:agent」不够——那样反过来（Host 多挂了没进清单的）仍抓不到。
-  expect(echo.extensions.map((e) => e.entryId).sort()).toEqual([...BUILTIN_NAMES, SESSIONS_NAME].sort());
+  expect(echo.extensions.map((e) => e.entryId).sort()).toEqual([...BUILTIN_NAMES].sort());
+});
+
+test("会话面是**容器的开关**：不给 `sessions` 就一件工具都不多；给了才挂（2026-09-03）", async () => {
+  // 没有这条时：三件 session 工具会进每一个产品的 prompt，而单会话形态的用户根本用不上它们。
+  const off = await createEcho({ provider: scripted([textTurn("ok")]), allowNetwork: false, store: new InMemoryDir(), lock: new InMemoryStateLock(), extensionDirs: [] });
+  expect(off.extensions.map((e) => e.name)).not.toContain("echo:sessions");
+  expect([...off.agent.tools.keys()].filter((n) => n.startsWith("session_"))).toEqual([]);
+  await off.stop();
+
+  const on = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    store: new InMemoryDir(),
+    lock: new InMemoryStateLock(),
+    extensionDirs: [],
+    sessions: {}, // 容器要会话面，但不给 runner
+  });
+  expect(on.extensions.map((e) => e.name)).toContain("echo:sessions");
+  // **没给 runner 就没有 session_create**：工具不能承诺系统不交付的事
+  expect([...on.agent.tools.keys()].filter((n) => n.startsWith("session_")).sort()).toEqual([
+    "session_close",
+    "session_list",
+    "session_send",
+  ]);
+  await on.stop();
+
+  const withRunner = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    store: new InMemoryDir(),
+    lock: new InMemoryStateLock(),
+    extensionDirs: [],
+    sessions: { run: async () => {} },
+  });
+  expect([...withRunner.agent.tools.keys()]).toContain("session_create");
+  await withRunner.stop();
 });

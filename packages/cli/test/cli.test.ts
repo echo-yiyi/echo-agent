@@ -33,8 +33,8 @@ import {
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
-import { main, mainFor, parseArgs, usage } from "../src/cli.ts";
-import type { PresetForm } from "../src/product.ts";
+import { echoOptions, main, mainFor, parseArgs, usage } from "../src/cli.ts";
+import { ECHO_AGENT, type PresetForm } from "../src/product.ts";
 import { isConfigured } from "../src/setup.ts";
 import { fakeTui } from "./fake-tui.ts";
 import { linesOf } from "../src/stdin.ts";
@@ -773,6 +773,24 @@ test("缺省不续：同一目录再起一次是新的一段，旧的原样；�
   } finally {
     restore();
   }
+});
+
+test("CLI 打开会话面、但不给 runner：模型能看见别的会话、能带话，开新的一段仍是人的动作", async () => {
+  // 会话面是**容器的开关**（`CreateEchoOptions.sessions`），core 缺省不挂。这条盯的是 CLI 这个容器
+  // 选了什么：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此；但「怎么再开一个终端窗口」
+  // 不该由 CLI 替用户决定，所以不给 runner——模型那边因此没有 session_create。
+  // 判据读的是**装配现场那一份入参**，不是另搭一套。
+  const built = echoOptions(
+    ECHO_AGENT,
+    { interactive: true },
+    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    kimiProvider(),
+    [],
+    new FileCredentialStore(join(dir, "credentials.json")),
+    undefined,
+  );
+  expect(built.sessions).toEqual({});
+  expect(built.sessions?.run).toBeUndefined();
 });
 
 test("--resume 点名不存在的会话 / --continue 没有可续的 → 退出码 1，且不建任何状态（不静默新建）", async () => {

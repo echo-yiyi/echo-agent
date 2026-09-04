@@ -92,10 +92,11 @@ export type CreateEchoOptions = CreateAgentOptions & {
   /** 解析约定目录与相对 `extensionDirs` 的基准。缺省 `process.cwd()`。 */
   cwd?: string;
   /**
-   * 会话面（2026-09-03，sessions.md §7）：**容器怎么让新建的一段跑起来**。
+   * 会话面（2026-09-03，sessions.md §7）。**给了才把 `session_*` 工具挂给模型**——这就是那个开关：
+   * 不给就是今天的单会话形态，prompt 里一件工具都不多。`echo.sessions` 这组 API 与开关无关，恒在。
    *
-   * `run` 不给时 `echo.sessions.create()` 照样建（宿主自己知道怎么跑它），但模型面的
-   * `session_create` 工具在那种容器里不挂——工具不能承诺系统不交付的事。
+   * `run` 是「容器怎么让新建的一段跑起来」。不给时 `echo.sessions.create()` 照样建（宿主自己知道
+   * 怎么跑它），但模型面的 `session_create` 不挂——工具不能承诺系统不交付的事。
    */
   sessions?: {
     run?: SessionRunner;
@@ -391,7 +392,9 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       //     那条路本来就是容器自己建的，缺省 true）。
       //   · 容器没给 `SessionRunner` 时**整组的 create 都不挂**——模型调了 `session_create`、
       //     系统却什么都不做，比没有这件工具更坏（工具不能承诺系统不交付的事）。
-      ...(await sessionToolsEntry(sessions, sessionsRoot, agent.state.sessionId, opts.sessions?.run !== undefined)),
+      ...(opts.sessions === undefined
+        ? [] // **开关**：容器不提会话面，这个 agent 就是今天的单会话形态，工具一件不多
+        : await sessionToolsEntry(sessions, sessionsRoot, agent.state.sessionId, opts.sessions.run !== undefined)),
     ];
     // 顺序与从前一致：inline → 盘上发现的 → extra。差别只在**代的划分**：
     //   · inline / extra 是显式装配 → 各自一代、fail-loud；

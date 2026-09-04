@@ -206,8 +206,11 @@ function providerChoices(): readonly FirstRunChoice[] {
  * `createEcho()` 的入参，两种形态共用——**装配只有一处**，形态差别只在「装不装壳」。
  *
  * `provider` 由调用方给：同一个实例既用来装配，也交给壳子在界面里配 key（要它的 `baseUrl` 去验）。
+ *
+ * **导出只为判据**（`cli.test.ts`）：装配现场仍然只有这一处，测试读的是同一份入参，
+ * 不是另搭一套。
  */
-function echoOptions(
+export function echoOptions(
   product: Product,
   form: PresetForm,
   opts: CliOptions,
@@ -235,6 +238,10 @@ function echoOptions(
     // `--state-dir` 是**会话目录的上一层**（2026-09-03）：容器管「会话都放哪儿」，
     // 某一段的目录由 core 用 sessionsRoot + sessionId 得出。
     ...(opts.stateDir !== undefined ? { sessionsRoot: opts.stateDir } : {}),
+    // 会话面开着（2026-09-03）：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此、
+    // 能互相带个话。**不给 `run`**——「怎么再开一个终端窗口」不是 CLI 该替用户决定的事，
+    // 所以模型这边没有 `session_create`，开新的一段仍然是人的动作。
+    sessions: {},
     ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
