@@ -9,7 +9,19 @@
 
 import { errText, type AgentState, type CredentialStore, type Model, type Provider, type ThinkingLevel } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
-import { decodeKittyPrintable, Editor, fuzzyFilter, isKeyRelease, ProcessTerminal, SelectList, TuiMainScreen, type AutocompleteItem, type TUI } from "@earendil-works/pi-tui";
+import {
+  decodeKittyPrintable,
+  Editor,
+  fuzzyFilter,
+  isKeyRelease,
+  ProcessTerminal,
+  SelectList,
+  truncateToWidth,
+  TuiMainScreen,
+  visibleWidth,
+  type AutocompleteItem,
+  type TUI,
+} from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
 import { wrap } from "./text.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -125,9 +137,12 @@ function footerLine(state: Readonly<AgentState>, width: number): string {
   if (state.tasks.total > 0) parts.push(`任务 ${state.tasks.active.length}/${state.tasks.total}`);
   if (state.activeSkills.length > 0) parts.push(`skill ${state.activeSkills.length}`);
   if (state.mcp.length > 0) parts.push(`mcp ${state.mcp.length}`);
-  const text = parts.join(" · ");
-  // 宽字符按一列算会略溢出、被终端折成两行——状态栏不值得为此拖一套字宽库进来
-  return dim([...text].slice(0, Math.max(0, width)).join(""));
+  // 按**可见列宽**裁，不按码点：「空闲 / 缓存 / 上下文」是宽字符，一个占两列，按码点切会超宽——
+  // 而 pi-tui 对超宽行直接抛，实测状态栏 60 > 55 整屏崩（2026-09-04）。次要项排在后面，
+  // 放不下先整段从尾部丢；连第一段都放不下再硬截。字宽算法用 pi-tui 自己那套（与它的判定一致）。
+  let kept = parts;
+  while (kept.length > 1 && visibleWidth(kept.join(" · ")) > width) kept = kept.slice(0, -1);
+  return dim(truncateToWidth(kept.join(" · "), Math.max(0, width), ""));
 }
 
 /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止，返回退出码。**不负责收摊 Agent**——那归装配层。 */

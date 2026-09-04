@@ -160,6 +160,28 @@ test("工具折叠行：摘要再长也截到宽度——pi-tui 对超宽行直�
   expect(lines[0]).toContain("…"); // 截过要看得出来
 });
 
+test("状态栏在窄终端上按可见列宽裁：宽字符段按码点切会超宽——实测 60 > 55 整屏崩（2026-09-04）；先丢尾部次要段，模型名恒在", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([]);
+  // 崩溃现场那组数：deepseek-v4-flash · 空闲 · ↑279k ↓18k · 缓存 255k (91%) · 上下文 …
+  const state = {
+    ...agent.state,
+    model: { ...agent.state.model, id: "deepseek-v4-flash", capabilities: { contextWindow: 256_000 } },
+    usage: { inputTokens: 279_000, outputTokens: 18_000, cachedInputTokens: 255_000 },
+    contextTokens: 90_000,
+  };
+  const done = runTui({ agent: runtimeOf(agent, { state }), ui });
+  await flush();
+  for (const width of [55, 40, 20]) {
+    const footer = ui.lines(width).at(-1)!;
+    expect(visibleWidth(footer), footer).toBeLessThanOrEqual(width);
+    expect(footer).toContain("deepseek-v4-flash"); // 最重要的在最前；丢的是尾部
+  }
+  expect(ui.lines(120).at(-1)!).toContain("上下文 90k/256k"); // 宽度够时一段不少
+  quit(ui);
+  await done;
+});
+
 test("欢迎头在窄终端上按宽度折：键位提示 95 列，40 列终端上原来启动即崩", async () => {
   const ui = fakeTui();
   const done = runTui({ agent: runtimeOf(agentWith([])), ui });
