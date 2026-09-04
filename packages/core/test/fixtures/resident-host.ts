@@ -162,6 +162,8 @@ async function main(): Promise<void> {
         ),
         callTool("t2", "TaskCreate", { tasks: [{ title: "把 M6 做完", detail: "Runtime V0 Gate 起手" }] }),
         callTool("t3", "skill_activate", { name: "写提交信息" }),
+        // schedule_create / skill_create 是延迟工具（2026-09-02 `deferred: true`）：先经 tool_search 取 schema，下一轮才能调
+        callTool("t3b", "tool_search", { names: ["schedule_create", "skill_create"] }),
         callTool("t4", "schedule_create", { prompt: "该看一眼进度了", every_seconds: 60 }),
         // OSS-1c：由 **Agent** 创建 skill 并落盘到状态根——下一个进程要能发现它
         callTool("t5", "skill_create", {
@@ -208,6 +210,7 @@ async function main(): Promise<void> {
     const at = new Date(Date.now() + 1_200).toISOString();
     const agent = await createAgent({
       provider: scriptedProvider([
+        callTool("w0", "tool_search", { names: ["schedule_create"] }), // 新进程：延迟工具要重新取（已加载按进程记）
         callTool("w1", "schedule_create", { prompt: "该看一眼进度了", at }),
         text("定好了"),
         // 这一轮是闹钟把它叫醒之后自己开的

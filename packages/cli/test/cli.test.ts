@@ -31,7 +31,7 @@ import {
   type ProviderEvent,
 } from "@echo-agent/core";
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
-import { defineExtension } from "@echo-agent/core/extension";
+import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
 import { echoOptions, main, mainFor, parseArgs, usage } from "../src/cli.ts";
 import { ECHO_AGENT, type PresetForm } from "../src/product.ts";
@@ -202,6 +202,14 @@ test("parseArgs:认识的都认得出", () => {
   });
   expect(parseArgs(["--help"])).toBeNull();
   expect(parseArgs(["-h"])).toBeNull();
+});
+
+test("parseArgs:`--observe <档>` 只认 off / metadata / content，不给就不出现在结果里（core 缺省 metadata）", () => {
+  expect(parseArgs(["--observe", "content"])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, observe: "content" });
+  expect(parseArgs(["--observe", "off"])?.observe).toBe("off");
+  expect(parseArgs([])).not.toHaveProperty("observe");
+  expect(() => parseArgs(["--observe", "full"])).toThrow("--observe 只能是 off / metadata / content");
+  expect(() => parseArgs(["--observe"])).toThrow("缺一个值");
 });
 
 test("parseArgs:`--continue` / `--resume <id>` 各自认得，两个一起给就报错", () => {
@@ -633,11 +641,14 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
     await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" }); // 有凭据 → 不进引导设置，直接装配
     const forms: PresetForm[] = [];
     let applied = 0;
+    let poolNames: string[] = [];
     const probe = defineExtension({
       name: "test:probe",
       hostAbiVersion: 1,
-      apply() {
+      inject: { runtime: { service: AgentRuntimeService, required: true } },
+      apply(ctx) {
         applied++;
+        poolNames = ctx.get(AgentRuntimeService).state.tools.map((t) => t.name); // 真装出来的工具池
       },
     });
     const productMain = mainFor({
@@ -659,6 +670,10 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
     // 形态到了 preset 手里，而且只调一次（workspace 不经 preset，`mainFor()` 直接交给 createEcho）
     expect(forms).toEqual([{ interactive: true }]);
     expect(applied, "preset 交出的 Extension 没被 mount").toBe(1);
+    // 渐进式披露的缺省名单（`DEFAULT_DEFERRED_TOOLS`）进了装配：名单非空 → `tool_search` 在池里；
+    // 延迟的工具本身也在池里（只是不上菜单，那半边的判据在 core 的 tool-search.test）
+    expect(poolNames).toContain("tool_search");
+    expect(poolNames).toContain("schedule_create");
 
     ui.feed(String.fromCharCode(4));
     expect(await running).toBe(0);

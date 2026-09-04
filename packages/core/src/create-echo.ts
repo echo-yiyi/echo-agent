@@ -116,7 +116,7 @@ export type Echo = Readonly<{
   agent: Agent;
   /**
    * 完整 Runtime 的一次 user run（§15.6 / OR5）：`agent.prompt()` 加上观测三元组。
-   * canonical store 在 admission 时不可写 → reject `ObservationStoreUnavailableError`，不颁发 permit（§15.12）。
+   * 观测层永远拦不住 run：store 写不动时 run 照跑，只是 `observationPersistence` 报 `degraded`（2026-09-03 用户拍板）。
    */
   send(input: string | AgentMessage): Promise<EchoRunResult>;
   /** live 查询面：`getRun(result.runId)` → `renderRunObservation()`。只有 `createEcho()` 出来的 Runtime 承诺 canonical persistence。 */

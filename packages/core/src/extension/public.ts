@@ -52,6 +52,7 @@ export {
   ECHO_SCHEDULER,
   ECHO_SKILLS,
   ECHO_TASKS,
+  ECHO_TOOL_SEARCH,
   type BuiltinToolGroup,
   type BuiltinToolGroups,
   type BuiltinToolsConfig,

@@ -99,6 +99,7 @@ function getTool(tasks: TaskMap): ModelTool<{ id: string }> {
   return {
     kind: "model",
     name: "TaskGet",
+    deferred: true, // 冷门：不上菜单，模型 tool_search 取过再用（2026-09-02，缺省那一批）
     label: "看任务详情",
     description: "Show one task in full: expanded notes, status, what it waits for, what it blocks.",
     parameters: {

@@ -16,7 +16,6 @@ import { memoryFactDescriptor } from "./memory/observe.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import type { CapabilityFactSink } from "./observability/fact-sink.ts";
-import { ObservationStoreUnavailableError } from "./observability/store.ts";
 import type { EchoObservableState, RuntimePhase } from "./observability/types.ts";
 import { HookRuntime, type HookContext, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
@@ -74,7 +73,8 @@ import { assembleSystem } from "./prompt/assemble.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
 import { newSessionId } from "./session/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
-import { activeTools, registerTool, registerTools, resolveTool, toolSchemasOf, type ToolMap } from "./tools/harness.ts";
+import { activeTools, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap } from "./tools/harness.ts";
+import { makeToolSearchTool } from "./tools/tool-search.ts";
 import type { Diagnostic } from "./errors.ts";
 import type { StorageDir } from "./storage/types.ts";
 import type { ResourceChange } from "./events.ts";
@@ -446,6 +446,8 @@ export class Agent {
   private readonly agentId: string;
   /** 新建会话时写进 `SessionInfo.agent` 的名字（`AgentOptions.agentName`，缺省 = `agentId`）。 */
   private readonly agentName: string;
+  /** 经 `tool_search` 取过 schema 的延迟工具名（`ToolBase.deferred`）。按 agent 进程记；只有 `tool_search` 会写。 */
+  private readonly loadedTools = new Set<string>();
   /** 本代 Agent 的进程内身份：写入格与 RunIntakeGate 共用同一个。 */
   private readonly agentInstanceId: string;
   /**
@@ -730,6 +732,9 @@ export class Agent {
       skills: { tools: skillTools, sections: [skillsSection] },
       memory: memoryTools === undefined || this.memory === undefined ? undefined : { tools: memoryTools, sections: memoryPromptSections(this.memory) },
       scheduler: scheduleTools === undefined ? undefined : { tools: scheduleTools },
+      // 渐进式披露的入口，恒装：延迟工具是标记、随时可能被 extension / MCP 注册进来；
+      // 池里没有待取的延迟工具时它自己不上菜单（`visibleTools`），不多占一格
+      toolSearch: { tools: [makeToolSearchTool({ tools: this.tools, loaded: this.loadedTools })] },
       // 压缩阶梯 + transcript_read + 习惯段：与 memory 同款——`builtin: false` 就是「这组不在」，
       // 流水线与 registry 仍在，等别的扩展注册阶段。`transcript_read` 读的是活的 transcript。
       compaction: opts.compaction?.builtin === false ? undefined : defaultCompactionPack(opts.compaction ?? {}, () => this._state.messages),
@@ -764,7 +769,7 @@ export class Agent {
       binding: (input) => this.modelBinding(input),
       normalizeFailure: (input) => this.normalizeAdmittedCallbackFailure(input),
       assertReserved: (id, ids) => this.inbox.assertReserved(id, ids),
-      // §15.5.2：run.accepted / run.closed 的唯一 emission owner 是 admission；没挂 canonical writer 时 accepted 恒 true
+      // §15.5.2：run.accepted / run.closed 的唯一 emission owner 是 admission。accepted 只预留不等、永不拒 run；closed 有界等 COMMIT
       observe: {
         accepted: (input) => this.observeRunAccepted(input),
         closed: (input) => this.observeRunClosed(input),
@@ -2142,16 +2147,7 @@ export class Agent {
     try {
       const ticket = this.admission.admitUser((scope) => this.executeAdmitted(scope, executor));
       const settled = await ticket.settled;
-      if (settled.kind === "rejected") {
-        // canonical store 在 admission 时不可写：user `send()` 收到的是带 persistence 证据的类型化错误（§15.12）
-        if (settled.reason === "observation-unavailable") {
-          throw new ObservationStoreUnavailableError(
-            "run 被 admission 拒绝：canonical observation store 不可写（run.accepted 落不下去）",
-            this.observation?.sequencer.persistenceState ?? { status: "healthy" },
-          );
-        }
-        throw new Error(`run 被 admission 拒绝：${settled.reason}`);
-      }
+      if (settled.kind === "rejected") throw new Error(`run 被 admission 拒绝：${settled.reason}`);
       // permit 已 close、ticket 已结算——这时才归 idle、才排 Inbox / Dream。
       // 先清 pending 标记再 finishRun：它里面的 consumeInbox() 看到 userRunPending 还是 true 就会直接返回（实测漏消费）。
       this.userRunPending = false;
@@ -2186,8 +2182,8 @@ export class Agent {
     this._state.startedAt = Date.now();
     this._state.lastError = null;
     try {
-      // §15.5.2 第 4 步：permit executor 进入 loop 的那一拍 await `run.started`；落不下去只降级，不取消 run
-      await this.observeRunStarted(runId);
+      // §15.5.2 第 4 步：permit executor 进入 loop 的那一拍发 `run.started`——只预留不等，落不下去只降级
+      this.observeRunStarted(runId);
       const result = await executor(scope, abortController.signal);
       this.terminalByRun.set(runId, result); // 终态已出：之后 callback 再抛，normalizer 复用它
       return result;
@@ -2351,7 +2347,7 @@ export class Agent {
     const memory = this.memory;
     const idle: LoopResult = { outcome: { kind: "completed" }, messages: [] };
     // Dream 也是一次 accepted run：executor 进入即 `run.started`（门控没过也封口成 completed，不留半截）
-    await this.observeRunStarted(scope.runId);
+    this.observeRunStarted(scope.runId);
     if (memory === undefined || !this.dreamAllowed) return idle;
     try {
       // 门控：间隔、写入数、轮数、文件数四道，全满足才跑
@@ -2474,9 +2470,9 @@ export class Agent {
       convertToLlm: this.convertToLlm,
       transformContext: this.transformContext,
       getApiKey: binding.getApiKey,
-      getTools: () => activeTools(this.tools),
+      getTools: () => visibleTools(this.tools, this.loadedTools), // 菜单 = 常驻 + 已加载的延迟工具
       knownToolNames: () => [...this.tools.keys()],
-      resolveTool: (name) => resolveTool(this.tools, name),
+      resolveTool: (name) => resolveTool(this.tools, name, this.loadedTools),
       // 通道 B:run 中途会变的内容(激活 skill 正文),每轮从各 PromptSource 重算、
       // 拼在消息末尾、不进 transcript。
       getTurnInjections: (visibleTools) => this.promptSources((n) => visibleTools.has(n)).flatMap((s) => s.turnInjections?.() ?? []),
@@ -2851,18 +2847,14 @@ export class Agent {
     return { agentId: this.agentId, agentInstanceId: this.agentInstanceId, sessionId: this._state.sessionId };
   }
 
-  /** admission 颁发 permit 前：没挂 canonical writer 一律放行；挂了就要 `run.accepted` 真 COMMIT。 */
-  private async observeRunAccepted(input: { runId: string; source: RunSource; modelBinding: RunModelBinding }): Promise<boolean> {
-    const rt = this.observationRuntime();
-    if (rt === undefined) return true;
-    const r = await rt.acceptRun({ runId: input.runId, source: input.source, ...this.observationIdentity(), modelBinding: input.modelBinding });
-    return r === "accepted";
+  /** admission 颁发 permit 时：`run.accepted` 只同步预留、不等落盘——观测层永远拦不住也拖不住 run。 */
+  private observeRunAccepted(input: { runId: string; source: RunSource; modelBinding: RunModelBinding }): void {
+    this.observationRuntime()?.acceptRun({ runId: input.runId, source: input.source, ...this.observationIdentity(), modelBinding: input.modelBinding });
   }
 
-  private async observeRunStarted(runId: string): Promise<void> {
-    const rt = this.observationRuntime();
-    if (rt === undefined) return;
-    await rt.startRun(runId, this.observationIdentity());
+  /** executor 进入 loop 那一拍：同样只预留、不等。 */
+  private observeRunStarted(runId: string): void {
+    this.observationRuntime()?.startRun(runId, this.observationIdentity());
   }
 
   /** permit finalizer：业务 outcome 已冻结（executed / callback-error 都是）；finalSnapshot 由本 Agent 此刻的状态投影。 */

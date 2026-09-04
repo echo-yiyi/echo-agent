@@ -2,9 +2,11 @@
 // 持有唯一的 Sequencer 与 SQLite store，是 run 三条边界（`run.accepted / run.started / run.closed`）的**唯一 emission owner**，
 // 并把 AgentEvent 经 `factSinkToIngest(agentEventDescriptor)` 送进 bounded lane。
 //
-// 失败语义照 §15.12：
-//   · `run.accepted` 落不下去 → 不颁发 permit（admission 返回 `rejected(observation-unavailable)`）；
-//   · `run.started` / `run.closed` 落不下去 → 业务 run 照跑、照返回真实 outcome，只有 persistence 降级 + 诊断；
+// 失败语义（2026-09-03 用户拍板：**观测不得影响 agent 主线**，放弃规格 §15.12 的 fail-closed admission）：
+//   · `run.accepted` / `run.assembly` / `run.started` 只**同步预留 seq**（顺序由预留决定，不由落盘决定），提交是
+//     fire-and-forget；落不下去只降级 persistence + 诊断，**永远不拒 run、不让 run 等**；
+//   · `run.closed` 仍等它 COMMIT——它在 run 的活干完之后，`send()` 靠它如实报 `observationPersistence`；等待有界
+//     （`boundaryDeadlineMs`），到期即降级返回；
 //   · 观测层任何异常都不进 Agent 控制流——这里每个公开方法都不抛。
 //
 // 由 `createAgent()` 构造并经 `attachObservationHost()` 挂到 Agent 上；低层 `new Agent()` 没有它。
@@ -205,10 +207,11 @@ export class ObservationRuntime {
   /* ───────── run 三条边界（唯一 emission owner） ───────── */
 
   /**
-   * admission 颁发 permit 之前：`run.accepted`（RunIndex 种子）必须 COMMIT，否则不颁发。
-   * 紧跟的 `run.assembly` 快照是**可选**投影：落不下去只记诊断，run 照跑——一条快照不值得拒掉业务。
+   * admission 颁发 permit 时：`run.accepted`（RunIndex 种子）与紧跟的 `run.assembly` 快照都只同步预留 seq，
+   * 提交不等——admission 不因观测层的任何状态拒 run 或等 run。`appendBoundary()` 的预留、RunIndex 登记都在
+   * 同步段，所以不等也保序；落不下去的结果只进诊断与 persistence health。
    */
-  async acceptRun(input: RunAcceptInput): Promise<"accepted" | "unavailable"> {
+  acceptRun(input: RunAcceptInput): void {
     const acceptedAt = this.clock.now();
     const header: RunObservationHeaderSeed = {
       runId: input.runId,
@@ -223,38 +226,44 @@ export class ObservationRuntime {
     };
     const body: RunAcceptedBodyV1 = { header };
     const scope = this.runScope(input.runId, input);
-    try {
-      await this.sequencer.appendBoundary(this.boundary("run.accepted", "event", scope, acceptedAt, body));
-    } catch (e) {
-      this.report({ code: "observation_run_rejected", message: `run ${input.runId}：run.accepted 落不下去，不颁发 permit：${redactedLabel(e)}` });
-      return "unavailable";
-    }
+    this.fireBoundary(input.runId, "run.accepted", this.boundary("run.accepted", "event", scope, acceptedAt, body));
     const assembly: RunAssemblyBodyV1 = {
       agentAssembly: this.assembly,
       // RunModelSnapshot 与 `Model` 的数据字段同形（api / params / thinkingLevelMap / capabilities / cost），digest 同一把尺
       modelBinding: snapshotRunModelBinding(input.modelBinding.model as unknown as Model, input.modelBinding.catalogRevision),
     };
-    try {
-      await this.sequencer.appendBoundary(this.boundary(RUN_ASSEMBLY_RECORD, "snapshot", scope, acceptedAt, assembly));
-    } catch (e) {
-      this.report({ code: "observation_boundary_failed", message: `run ${input.runId}：run.assembly 落不下去（run 照跑）：${redactedLabel(e)}` });
-    }
-    return "accepted";
+    this.fireBoundary(input.runId, RUN_ASSEMBLY_RECORD, this.boundary(RUN_ASSEMBLY_RECORD, "snapshot", scope, acceptedAt, assembly));
   }
 
-  /** permit executor 真正进入 loop 的那一拍。失败不取消 run（§15.12）。 */
-  async startRun(runId: string, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>): Promise<void> {
+  /** permit executor 真正进入 loop 的那一拍。同样只预留、不等（§15.12：started 失败本来就不取消 run）。 */
+  startRun(runId: string, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>): void {
     const body: RunStartedBodyV1 = { startedBy: "permit-executor" };
+    this.fireBoundary(runId, "run.started", this.boundary("run.started", "event", this.runScope(runId, identity), this.clock.now(), body));
+  }
+
+  /**
+   * 预留即返回、提交不等的 boundary。`appendBoundary()` 的同步段做完 lifecycle 检查 / seq 预留 / RunIndex 登记才返回
+   * Promise，所以顺序已定；这里只负责把 rejection 接住变成诊断——否则是进程级 unhandled rejection。
+   */
+  private fireBoundary(runId: string, name: string, draft: BoundaryObservationDraft<unknown>): void {
+    let pending: Promise<unknown>;
     try {
-      await this.sequencer.appendBoundary(this.boundary("run.started", "event", this.runScope(runId, identity), this.clock.now(), body));
+      pending = this.sequencer.appendBoundary(draft);
     } catch (e) {
-      this.report({ code: "observation_boundary_failed", message: `run ${runId}：run.started 落不下去（run 照跑）：${redactedLabel(e)}` });
+      this.report({ code: "observation_boundary_failed", message: `run ${runId}：${name} 预留失败（run 照跑）：${redactedLabel(e)}` });
+      return;
     }
+    pending.then(
+      () => {},
+      (e: unknown) => this.report({ code: "observation_boundary_failed", message: `run ${runId}：${name} 落不下去（run 照跑，persistence 降级）：${redactedLabel(e)}` }),
+    );
   }
 
   /**
    * permit finalizer：业务 outcome 已冻结之后封口。body 只有有界 outcome 与可选 finalSnapshot；
-   * capture gap 的 count / digest 由 Sequencer 从自己的账本填（`RunClosedBodyV1`）。失败 = 该 run persistence degraded。
+   * capture gap 的 count / digest 由 Sequencer 从自己的账本填（`RunClosedBodyV1`）。
+   * 这一条**等 COMMIT**（有界：`boundaryDeadlineMs`）——它在 run 的活干完之后，`send()` 靠它如实报 persistence；
+   * 到期 / 失败 = 该 run persistence degraded，outcome 不变。
    */
   async closeRun(input: RunCloseInput, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>): Promise<void> {
     const now = this.clock.now();

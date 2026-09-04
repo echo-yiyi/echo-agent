@@ -90,22 +90,14 @@ test(
     // `skill_create` 2026-08-24 起在面上（OSS-1c）：默认装配有了落盘的 `onCreate`
     //（写状态根 `skills/<name>/SKILL.md`，`start()` 时发现回来），
     // 「返回成功、重启即消失」那个反对理由不再成立。
-    expect(ra.seen[0]!.tools).toEqual(
-      [
-        "TaskCreate",
-        "TaskGet",
-        "TaskList",
-        "TaskUpdate",
-        "memory",
-        "schedule_cancel",
-        "schedule_create",
-        "schedule_list",
-        "skill_activate",
-        "skill_create",
-        // 2026-09-02 起 `echo:compaction` 在默认装配里：压缩之后模型靠它取回原文
-        "transcript_read",
-      ].sort(),
-    );
+    // 2026-09-02 渐进式披露：第一眼的菜单只有常驻的 + `tool_search`；`TaskGet` / `schedule_*` / `skill_create` /
+    // `transcript_read`（`echo:compaction`）标了 `deferred`，模型经 tool_search 取过 schema 才上菜单——
+    // 宿主脚本里第一轮就是 tool_search，所以后面的轮次能调 skill_create / schedule_create（上面 `called` 已证）
+    expect(ra.seen[0]!.tools).toEqual(["TaskCreate", "TaskList", "TaskUpdate", "memory", "skill_activate", "tool_search"].sort());
+    // 取过之后：后面某一轮的菜单里延迟的两件已经在，tool_search 仍在（还有别的延迟工具没取）；
+    // 没取过的（transcript_read）任何一轮都不在菜单上
+    expect(ra.seen.some((s) => ["skill_create", "schedule_create", "tool_search"].every((n) => s.tools.includes(n)))).toBe(true);
+    expect(ra.seen.every((s) => !s.tools.includes("transcript_read"))).toBe(true);
 
     // 落盘是真的：记忆文件、索引、闹钟、会话 entries
     // 记忆在 user 层（`<home>/memory/`，跨 session 共享）；闹钟与 entries 在**这一段自己的目录**里

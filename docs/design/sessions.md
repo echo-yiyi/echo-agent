@@ -255,6 +255,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 | `CreateEchoOptions` | — | 加 `sessions.run`（`SessionRunner`）与 `sessions.runTimeoutMs`（缺省 30 秒），容器给；没给 `run` 就不挂 `session_create` |
 | `AgentRuntime` 协议 | `reset()` | 删 `reset()`；不加会话方法，壳走 `Echo.sessions` |
 | cli `--continue` / `--resume` | 装配前另起 `SessionService(FileDir)` 扫状态根 | 同一个函数，扫 `~/.echo/sessions/`；筛选加 `main` 与 `status` |
+| observe（含 `serve` 面板） | 一个状态根装多段会话，一份观测库能同时看几段 | **观测库一段一份**（它在 session 目录里）：一个 reader / 一个面板只看得到那一段的 run。`--session` 点名看哪一段，不给就是最近更新的那一段；会话摘要仍从上一层扫，所以面板里出现的任何 sessionId 都反查得到名字与 workspace |
 | TUI | `/clear` = `reset()` | `/clear` = close + create + attach；`/sessions` = `list` + attach（同容器） |
 | memory | 一层，状态根下 | 三层（§2）；`remember` 加 `scope`；dream 只整理 session 层 |
 | schedule / tasks / dream / observability | 按状态根一份 | 不改代码，随状态根变成按 session 一份 |

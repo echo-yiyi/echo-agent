@@ -90,6 +90,7 @@ function createTool(deps: SkillToolsDeps): ModelTool<{ name: string; description
   return {
     kind: "model",
     name: "skill_create",
+    deferred: true, // 冷门：不上菜单，模型 tool_search 取过再用（2026-09-02，缺省那一批）
     label: "创建 skill",
     description:
       "Save a way of working as a new skill so it can be activated for similar tasks later. " +

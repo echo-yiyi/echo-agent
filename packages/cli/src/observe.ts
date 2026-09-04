@@ -4,6 +4,7 @@
 //   observe show <run-id>             指定 run
 //   observe export <run-id> --format  json（缺省）或 text，原样进 stdout
 //   observe health                    库在哪、每个 runtime 裁决到哪、多少 run / record
+//   observe serve [--port N]          本地只读面板（页面轮询 SQLite，agent 跑着也能看），Ctrl+C 停
 //
 // **只调 `openObservationReader()`**：read-only SQLite 连接，不 `createEcho()`、不取 Agent StateLock、不起第二个 Agent；
 // 活 writer（正在跑的 agent）旁边照样能读，只见已 COMMIT 的。每条命令结束关连接。
@@ -28,14 +29,19 @@ import {
 } from "@echo-agent/core";
 import { renderRunObservation } from "@echo-agent/core/observability";
 import type { Sink } from "./run.ts";
+import { startObserveServer } from "./observe/server.ts";
 
 export type ObserveFormat = "text" | "json";
+
+/** `serve` 缺省端口；0 = 随机（测试）。 */
+export const OBSERVE_DEFAULT_PORT = 4321;
 
 export type ObserveCommand =
   | Readonly<{ kind: "last"; format: ObserveFormat; body: boolean }>
   | Readonly<{ kind: "show"; runId: string; format: ObserveFormat; body: boolean }>
   | Readonly<{ kind: "export"; runId: string; format: ObserveFormat }>
-  | Readonly<{ kind: "health" }>;
+  | Readonly<{ kind: "health" }>
+  | Readonly<{ kind: "serve"; port: number; host: string }>;
 
 export type ObserveOptions = Readonly<{
   /** 会话目录的上一层。缺省 `$ECHO_HOME/sessions`。 */
@@ -45,8 +51,8 @@ export type ObserveOptions = Readonly<{
   command: ObserveCommand;
 }>;
 
-/** 输出口，与 `run()` 同款：生产是 stdout / stderr，测试是收集器。 */
-export type ObserveIo = Readonly<{ out: Sink; err: Sink }>;
+/** 输出口，与 `run()` 同款：生产是 stdout / stderr，测试是收集器。`signal` 只对 `serve` 有意义：不给就接 SIGINT / SIGTERM。 */
+export type ObserveIo = Readonly<{ out: Sink; err: Sink; signal?: AbortSignal }>;
 
 export function observeUsage(name: string): string {
   return `用法：${name} observe <子命令> [选项]
@@ -56,16 +62,19 @@ export function observeUsage(name: string): string {
   show <run-id>            指定 run 的观测记录
   export <run-id>          导出（缺省 --format json；--format text 给人读文本）
   health                   库的位置、各 runtime 已裁决到的 seq、run / record 计数
+  serve                    本地只读面板：run 列表 + 时间线 + 摘要，页面轮询 SQLite，agent 跑着也能看；Ctrl+C 停
 
 选项：
   --state-dir <路径>       会话目录的上一层（与主命令同义：缺省 $ECHO_HOME/sessions，再退到 ~/.echo/sessions）
   --session <id>           看哪一段会话（缺省：最近更新的那一段）
   --format <text|json>     输出格式（last / show 缺省 text；export 缺省 json）
   --body                   text 输出里带上每条记录的 body（缺省只有 name / attributes）
+  --port <端口>            serve 监听的端口（缺省 ${OBSERVE_DEFAULT_PORT}；0 = 随机）
+  --host <地址>            serve 绑定的地址（缺省 127.0.0.1；面板无鉴权，别暴露到局域网）
   -h, --help               显示本帮助
 
 只读已落盘的记录：不启动 agent、不取锁；正在跑的 agent 旁边也能看，看到的是它已 COMMIT 的部分。
-退出码：0 找到并打印；1 没有记录 / run 不存在；2 参数错。`;
+退出码：0 找到并打印 / 面板正常退出；1 没有记录 / run 不存在；2 参数错。`;
 }
 
 /** 解析 `observe` 之后的 argv。返回 `null` = 打帮助以 0 退出；不认识的一律 throw。 */
@@ -75,6 +84,8 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
   let sessionId: string | undefined;
   let format: ObserveFormat | undefined;
   let body = false;
+  let port: number | undefined;
+  let host: string | undefined;
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -99,6 +110,16 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
       case "--body":
         body = true;
         break;
+      case "--port": {
+        const v = value();
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 65535) throw new Error(`--port 要 0–65535 的整数，不认识 '${v}'`);
+        port = n;
+        break;
+      }
+      case "--host":
+        host = value();
+        break;
       case "-h":
       case "--help":
         return null;
@@ -111,8 +132,14 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
   const only = (n: number): void => {
     if (rest.length !== n) throw new Error(`observe ${sub} 需要 ${n} 个参数，给了 ${rest.length} 个\n\n${observeUsage(name)}`);
   };
+  if ((port !== undefined || host !== undefined) && sub !== "serve") throw new Error("--port / --host 只对 serve 有意义");
   let command: ObserveCommand;
   switch (sub) {
+    case "serve":
+      only(0);
+      if (format !== undefined || body) throw new Error("serve 没有 --format / --body");
+      command = { kind: "serve", port: port ?? OBSERVE_DEFAULT_PORT, host: host ?? "127.0.0.1" };
+      break;
     case "last":
       only(0);
       command = { kind: "last", format: format ?? "text", body };
@@ -201,7 +228,7 @@ export async function runObserve(argv: readonly string[], name: string, io: Obse
     return 1;
   }
   try {
-    return await execute(opts.command, reader, io);
+    return await execute(opts.command, reader, io, stateRoot);
   } catch (e) {
     io.err.write(`${e instanceof Error ? e.message : String(e)}\n`);
     return 1;
@@ -210,8 +237,39 @@ export async function runObserve(argv: readonly string[], name: string, io: Obse
   }
 }
 
-async function execute(command: ObserveCommand, reader: Awaited<ReturnType<typeof openObservationReader>>, io: ObserveIo): Promise<number> {
+/** `serve` 的退出条件：给了 signal 就等它（测试），否则接 SIGINT / SIGTERM——与 `main` 的「怎么停只有一种回答」一致。 */
+function waitForStop(signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal !== undefined) {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      signal.addEventListener("abort", () => resolve(), { once: true });
+      return;
+    }
+    const stop = (): void => {
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      resolve();
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+  });
+}
+
+async function execute(command: ObserveCommand, reader: Awaited<ReturnType<typeof openObservationReader>>, io: ObserveIo, stateRoot: string): Promise<number> {
   switch (command.kind) {
+    case "serve": {
+      const server = startObserveServer({ reader, stateRoot, hostname: command.host, port: command.port });
+      io.out.write(`observe 面板：${server.url}（只读，agent 跑着也能看；Ctrl+C 停止）\n`);
+      try {
+        await waitForStop(io.signal);
+      } finally {
+        await server.stop();
+      }
+      return 0;
+    }
     case "last": {
       const lookup = await reader.lastRun();
       if (lookup.kind === "unknown") {

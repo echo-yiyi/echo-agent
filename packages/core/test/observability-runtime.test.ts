@@ -12,6 +12,7 @@ import type { Provider } from "../src/provider/types.ts";
 import { renderRunObservation, buildRunObservationViewModel } from "../src/observability/render.ts";
 import { RUN_ASSEMBLY_RECORD } from "../src/observability/draft.ts";
 import { ObservationRuntime } from "../src/observability/runtime.ts";
+import { observationHostOf } from "../src/observability/host-wiring.ts";
 import { SqliteCanonicalObservationStore, observationDatabasePath } from "../src/observability/sqlite-store.ts";
 import { sealAgentAssemblyObservation } from "../src/observability/assembly.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
@@ -343,8 +344,8 @@ describe("canonical gap（硬门 4）", () => {
     };
     const identity = { agentId: "a", agentInstanceId: "a#1", sessionId: null };
     try {
-      expect(await rt.acceptRun({ runId: "run:gap", source: { kind: "user" }, ...identity, modelBinding: binding })).toBe("accepted");
-      await rt.startRun("run:gap", identity);
+      rt.acceptRun({ runId: "run:gap", source: { kind: "user" }, ...identity, modelBinding: binding });
+      rt.startRun("run:gap", identity);
       // ring 容量 2，delayed flush 不会触发：第三条起溢出 → canonical gap（boundary lane）
       for (let i = 0; i < 5; i++) rt.sequencer.offer(bounded(rt, "run:gap", i));
       await rt.closeRun({ runId: "run:gap", outcome: { kind: "completed" }, finalState: null }, identity);
@@ -367,5 +368,27 @@ describe("canonical gap（硬门 4）", () => {
     } finally {
       await rt.dispose();
     }
+  });
+});
+
+describe("观测层坏了不影响 agent 主线（2026-09-03 拍板：放弃 fail-closed admission）", () => {
+  test("SQLite 在 run 之前被关掉：send 照常 completed、persistence 报 degraded；下一次 send 也照跑；stop 不抛", async () => {
+    const stateDir = join(await tmp(), "state");
+    const echo = await echoWith({ stateDir, turns: [textTurn("one"), textTurn("two")] });
+    const rt = observationHostOf(echo.agent)!.runtime;
+    rt.store.close(); // 模拟 store 坏掉：之后每次 commit 都抛，writer 会 seal
+
+    const a = await echo.send("a");
+    expect(a.outcome.kind).toBe("completed");
+    expect(a.observationPersistence).toBe("degraded");
+    expect(a.observationIntegrity).toBe("partial");
+    expect(rt.sequencer.persistenceState.status).not.toBe("healthy");
+
+    // 修复前：run.accepted 落不下去 → admission 拒绝 → send() 抛 ObservationStoreUnavailableError
+    const b = await echo.send("b");
+    expect(b.outcome.kind).toBe("completed");
+    expect(b.observationPersistence).toBe("degraded");
+    expect(echo.agent.messages.filter((m) => m.role === "assistant").length).toBe(2);
+    await echo.stop();
   });
 });

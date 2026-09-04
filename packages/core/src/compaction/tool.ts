@@ -88,6 +88,7 @@ export function transcriptReadTool(source: () => readonly AgentMessage[]): Model
   return {
     kind: "model",
     name: TRANSCRIPT_READ_TOOL,
+    deferred: true, // 冷门：不上菜单，模型 tool_search 取过再用（2026-09-02，缺省那一批）
     label: "读原始对话",
     description:
       "Read the original messages of this conversation by index, including parts that context compaction has summarized, condensed, or cleared. " +

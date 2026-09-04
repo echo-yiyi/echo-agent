@@ -1,0 +1,292 @@
+/* Echo 编程 —— 由 tokens/build.js 生成，不要手改。
+   品牌层 v1.0.0 · 密度 紧凑 · 默认基调 light */
+
+:root {
+  --ink: oklch(0.2238 0.0077 118.4);
+  --ink-70: oklch(0.446 0.0128 112.7);
+  --stone: oklch(0.532 0.0133 106.8);
+  --border: oklch(0.9185 0.0096 93.6);
+  --surface: oklch(1 0 89.9);
+  --paper: oklch(0.949 0.0083 91.5);
+  --accent: oklch(0.48 0.19 295);
+  --accent-hover: oklch(0.43 0.19 295);
+  --accent-ink: oklch(0.45 0.19 295);
+  --accent-wash: oklch(0.95 0.0266 295);
+  --accent-contrast: #FFFFFF;
+  --moss: oklch(0.5112 0.1317 152.6);
+  --moss-soft: oklch(0.9612 0.0173 159.1);
+  --moss-line: oklch(0.8814 0.0534 155.3);
+  --clay: oklch(0.5432 0.1757 16.6);
+  --clay-soft: oklch(0.9574 0.0188 5.3);
+  --clay-line: oklch(0.8642 0.055 4);
+  --marigold: oklch(0.524 0.12 61.8);
+  --marigold-soft: oklch(0.9617 0.0237 79.7);
+  --marigold-line: oklch(0.8875 0.0618 83);
+  --moss-contrast: #FFFFFF;
+  --clay-contrast: #FFFFFF;
+  --marigold-contrast: #FFFFFF;
+  /* 扩展: graph —— 仅限 .kernel-graph 内部。**不再是「全站唯一深色区」**——首页 .control-home 是第二块，已登记为 extensions.home。别拿它去画白底区域（index.css 原注释）。 */
+  --graph-deep: oklch(0.2879 0.0705 277.7);
+  --graph-mid: oklch(0.2123 0.047 278);
+  --graph-far: oklch(0.1684 0.0353 279.3);
+  --graph-edge: oklch(0.3138 0.0658 278.4);
+  --graph-fg: oklch(0.958 0.0202 279.9);
+  --graph-fg-2: oklch(0.7677 0.083 280.4);
+  --graph-fg-3: oklch(0.6273 0.0797 280.5);
+  --graph-flow: oklch(0.7005 0.147 278.5);
+  --graph-tool: oklch(0.8003 0.1821 151.7);
+  --graph-mem: oklch(0.8369 0.1644 84.4);
+  --graph-ok: oklch(0.8003 0.1821 151.7);
+  --graph-warn: oklch(0.8369 0.1644 84.4);
+  --graph-bad: oklch(0.7192 0.169 13.4);
+  --graph-idle: oklch(0.557 0.0639 278.7);
+  /* 扩展: ui */
+  --ui-raised: oklch(0.9728 0.0054 95.1);
+  --ui-inset: oklch(0.9638 0.0054 95.1);
+  --ui-line-soft: oklch(0.946 0.0083 91.5);
+  --ui-line-strong: oklch(0.8754 0.0111 95.2);
+  --ui-ink-4: oklch(0.7424 0.0141 102.1);
+  --ui-info: oklch(0.5291 0.129 248.8);
+  --ui-info-soft: oklch(0.957 0.0155 248);
+  --ui-info-line: oklch(0.869 0.0438 243);
+  /* 扩展: home —— 仅限 .control-home 内部（产品控制中心 · 内核全景）。它是一块**可视化画布**，与 graph 同性质——别拿它去画普通内容区。 */
+  --home-bg: oklch(0.205 0.002 286.2);
+  --home-panel: oklch(0.2331 0.0059 301.1);
+  --home-raised: oklch(0.2773 0.0112 300.8);
+  --home-ink: oklch(0.9555 0.0099 87.5);
+  --home-muted: oklch(0.7285 0.0127 313.2);
+  --home-faint: oklch(0.5599 0.0163 308.1);
+  --home-purple: oklch(0.6857 0.1877 295.9);
+  --home-purple-deep: oklch(0.5044 0.1942 293.5);
+  --home-green: oklch(0.7869 0.1289 132.3);
+  --home-amber: oklch(0.77 0.1242 78.5);
+  --home-red: oklch(0.6791 0.1264 26.9);
+  --home-line: rgb(255 255 255 / 0.11);
+  --home-line-soft: rgb(255 255 255 / 0.07);
+  --home-glow: oklch(0.8176 0.1067 299.3);
+  --home-green-bright: oklch(0.8463 0.1248 120.6);
+  --home-bg-from: oklch(0.211 0.0042 308.2);
+  --home-bg-to: oklch(0.1917 0.002 286.2);
+  --home-purple-soft: oklch(0.7423 0.1156 301.1);
+  --home-sunk: oklch(0.1826 0.002 286.2);
+  --home-panel-from: oklch(0.2227 0.0119 300.6);
+  --home-panel-to: oklch(0.1806 0.0026 145.5);
+  --home-purple-hover: oklch(0.8287 0.0973 296.9);
+
+  --font-sans: ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, "Cascadia Code", monospace;
+  --size-micro: 9.5px;
+  --size-caption: 10.5px;
+  --size-ui: 11.5px;
+  --size-content: 13px;
+  --size-h3: 15px;
+  --size-h2: 18px;
+  --size-h1: 22px;
+  --line-content: 1.5;
+  --card-padding: 12px;
+  --block-gap: 24px;
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-10: 10px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-28: 28px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+  --space-56: 56px;
+  --space-64: 64px;
+  --space-80: 80px;
+  --space-96: 96px;
+  --space-128: 128px;
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 13px;
+  --r-full: 9999px;
+  /* 控件尺寸 —— spec/components.md §1.2 / §2.2 的尺寸表。随密度档变化。 */
+  --ctl-btn-height: 28px;
+  --ctl-btn-pad-x: 12px;
+  --ctl-icon-size: 14px;
+  --ctl-icon-gap: 4px;
+  --ctl-input-height: 32px;
+  --ctl-input-pad-x: 8px;
+  --ctl-label-gap: 4px;
+  --ctl-hint-gap: 4px;
+  --ctl-tool-row-height: 20px;
+  --ctl-tool-prefix-width: 12px;
+  --ctl-tool-expand-max-height: 240px;
+  --ctl-tool-expand-pad: 8px;
+  --ctl-step-row-height: 24px;
+  --ctl-step-mark-size: 12px;
+  --ctl-step-mark-gap: 8px;
+  --ctl-step-rail-width: 1px;
+  --ctl-auth-pad: 12px;
+  --ctl-auth-title-gap: 8px;
+  --ctl-auth-body-gap: 12px;
+  --ctl-auth-btn-gap: 8px;
+  --ctl-auth-max-width: 400px;
+  --ctl-tip-max-width: 220px;
+  --ctl-tip-pad-y: 4px;
+  --ctl-tip-pad-x: 8px;
+  --ctl-table-cell-pad-y: 6px;
+  --ctl-table-cell-pad-x: 8px;
+  --ctl-list-pane-width: 280px;
+  --ctl-split-gap: 12px;
+  --ctl-field-label-width: 100px;
+  --ctl-field-row-gap: 8px;
+  --ctl-list-item-pad-y: 8px;
+  --ctl-list-item-pad-x: 12px;
+  --shadow-sm: 0 1px 2px rgba(42,35,32,0.06);
+  --shadow-md: 0 4px 12px rgba(42,35,32,0.08);
+  --shadow-lg: 0 12px 32px rgba(42,35,32,0.12);
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --duration: 120ms;
+  --echo-period: 2400ms;
+  --icon-stroke: 1.75;
+  --press-scale: 0.97;
+  /* 可访问性底线 —— 【硬】，无豁免（DESIGN.md §6.4）。组件靠它们画聚焦环、
+     补移动端热区。别只在组件侧写 var(--x, 2px) 回退——那是掩盖缺口不是修复。 */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+  --min-touch-target: 44px;
+  /* 层级 —— 只有这六层，不允许自造中间值（spec/layout.md §6）。
+     与密度、与产品都无关：层是按「要盖住谁」分的，不是按控件形态分的。
+     需要盖住某层就用上一档，盖不住说明层级设计错了。 */
+  --z-base: 0;
+  --z-raised: 10;
+  --z-sticky: 100;
+  --z-overlay: 200;
+  --z-modal: 300;
+  --z-toast: 400;
+}
+
+/* 另一套基调。DESIGN.md §1.1：所有 Echo 产品必须支持暗色模式，且暗色须独立推导。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ink: oklch(0.95 0.008 105);
+    --ink-70: oklch(0.72 0.012 105);
+    --stone: oklch(0.634 0.013 105);
+    --border: oklch(0.35 0.01 105);
+    --surface: oklch(0.26 0.008 105);
+    --paper: oklch(0.2 0.007 105);
+    --accent: oklch(0.48 0.19 295);
+    --accent-hover: oklch(0.43 0.19 295);
+    --accent-ink: oklch(0.8 0.113 295);
+    --accent-wash: oklch(0.28 0.06649999999999999 295);
+    --accent-contrast: #FFFFFF;
+    --moss: oklch(0.74 0.1 127);
+    --moss-soft: oklch(0.26 0.035 127);
+    --moss-line: oklch(0.44 0.06 127);
+    --clay: oklch(0.74 0.12 36);
+    --clay-soft: oklch(0.26 0.042 36);
+    --clay-line: oklch(0.44 0.072 36);
+    --marigold: oklch(0.74 0.12 75);
+    --marigold-soft: oklch(0.26 0.042 75);
+    --marigold-line: oklch(0.44 0.072 75);
+    --moss-contrast: #161613;
+    --clay-contrast: #161613;
+    --marigold-contrast: #161613;
+  }
+}
+:root[data-theme="dark"] {
+  --ink: oklch(0.95 0.008 105);
+  --ink-70: oklch(0.72 0.012 105);
+  --stone: oklch(0.634 0.013 105);
+  --border: oklch(0.35 0.01 105);
+  --surface: oklch(0.26 0.008 105);
+  --paper: oklch(0.2 0.007 105);
+  --accent: oklch(0.48 0.19 295);
+  --accent-hover: oklch(0.43 0.19 295);
+  --accent-ink: oklch(0.8 0.113 295);
+  --accent-wash: oklch(0.28 0.06649999999999999 295);
+  --accent-contrast: #FFFFFF;
+  --moss: oklch(0.74 0.1 127);
+  --moss-soft: oklch(0.26 0.035 127);
+  --moss-line: oklch(0.44 0.06 127);
+  --clay: oklch(0.74 0.12 36);
+  --clay-soft: oklch(0.26 0.042 36);
+  --clay-line: oklch(0.44 0.072 36);
+  --marigold: oklch(0.74 0.12 75);
+  --marigold-soft: oklch(0.26 0.042 75);
+  --marigold-line: oklch(0.44 0.072 75);
+  --moss-contrast: #161613;
+  --clay-contrast: #161613;
+  --marigold-contrast: #161613;
+}
+:root[data-theme="light"] {
+  --ink: oklch(0.2238 0.0077 118.4);
+  --ink-70: oklch(0.446 0.0128 112.7);
+  --stone: oklch(0.532 0.0133 106.8);
+  --border: oklch(0.9185 0.0096 93.6);
+  --surface: oklch(1 0 89.9);
+  --paper: oklch(0.949 0.0083 91.5);
+  --accent: oklch(0.48 0.19 295);
+  --accent-hover: oklch(0.43 0.19 295);
+  --accent-ink: oklch(0.45 0.19 295);
+  --accent-wash: oklch(0.95 0.0266 295);
+  --accent-contrast: #FFFFFF;
+  --moss: oklch(0.5112 0.1317 152.6);
+  --moss-soft: oklch(0.9612 0.0173 159.1);
+  --moss-line: oklch(0.8814 0.0534 155.3);
+  --clay: oklch(0.5432 0.1757 16.6);
+  --clay-soft: oklch(0.9574 0.0188 5.3);
+  --clay-line: oklch(0.8642 0.055 4);
+  --marigold: oklch(0.524 0.12 61.8);
+  --marigold-soft: oklch(0.9617 0.0237 79.7);
+  --marigold-line: oklch(0.8875 0.0618 83);
+  --moss-contrast: #FFFFFF;
+  --clay-contrast: #FFFFFF;
+  --marigold-contrast: #FFFFFF;
+  /* 扩展: graph —— 仅限 .kernel-graph 内部。**不再是「全站唯一深色区」**——首页 .control-home 是第二块，已登记为 extensions.home。别拿它去画白底区域（index.css 原注释）。 */
+  --graph-deep: oklch(0.2879 0.0705 277.7);
+  --graph-mid: oklch(0.2123 0.047 278);
+  --graph-far: oklch(0.1684 0.0353 279.3);
+  --graph-edge: oklch(0.3138 0.0658 278.4);
+  --graph-fg: oklch(0.958 0.0202 279.9);
+  --graph-fg-2: oklch(0.7677 0.083 280.4);
+  --graph-fg-3: oklch(0.6273 0.0797 280.5);
+  --graph-flow: oklch(0.7005 0.147 278.5);
+  --graph-tool: oklch(0.8003 0.1821 151.7);
+  --graph-mem: oklch(0.8369 0.1644 84.4);
+  --graph-ok: oklch(0.8003 0.1821 151.7);
+  --graph-warn: oklch(0.8369 0.1644 84.4);
+  --graph-bad: oklch(0.7192 0.169 13.4);
+  --graph-idle: oklch(0.557 0.0639 278.7);
+  /* 扩展: ui */
+  --ui-raised: oklch(0.9728 0.0054 95.1);
+  --ui-inset: oklch(0.9638 0.0054 95.1);
+  --ui-line-soft: oklch(0.946 0.0083 91.5);
+  --ui-line-strong: oklch(0.8754 0.0111 95.2);
+  --ui-ink-4: oklch(0.7424 0.0141 102.1);
+  --ui-info: oklch(0.5291 0.129 248.8);
+  --ui-info-soft: oklch(0.957 0.0155 248);
+  --ui-info-line: oklch(0.869 0.0438 243);
+  /* 扩展: home —— 仅限 .control-home 内部（产品控制中心 · 内核全景）。它是一块**可视化画布**，与 graph 同性质——别拿它去画普通内容区。 */
+  --home-bg: oklch(0.205 0.002 286.2);
+  --home-panel: oklch(0.2331 0.0059 301.1);
+  --home-raised: oklch(0.2773 0.0112 300.8);
+  --home-ink: oklch(0.9555 0.0099 87.5);
+  --home-muted: oklch(0.7285 0.0127 313.2);
+  --home-faint: oklch(0.5599 0.0163 308.1);
+  --home-purple: oklch(0.6857 0.1877 295.9);
+  --home-purple-deep: oklch(0.5044 0.1942 293.5);
+  --home-green: oklch(0.7869 0.1289 132.3);
+  --home-amber: oklch(0.77 0.1242 78.5);
+  --home-red: oklch(0.6791 0.1264 26.9);
+  --home-line: rgb(255 255 255 / 0.11);
+  --home-line-soft: rgb(255 255 255 / 0.07);
+  --home-glow: oklch(0.8176 0.1067 299.3);
+  --home-green-bright: oklch(0.8463 0.1248 120.6);
+  --home-bg-from: oklch(0.211 0.0042 308.2);
+  --home-bg-to: oklch(0.1917 0.002 286.2);
+  --home-purple-soft: oklch(0.7423 0.1156 301.1);
+  --home-sunk: oklch(0.1826 0.002 286.2);
+  --home-panel-from: oklch(0.2227 0.0119 300.6);
+  --home-panel-to: oklch(0.1806 0.0026 145.5);
+  --home-purple-hover: oklch(0.8287 0.0973 296.9);
+}

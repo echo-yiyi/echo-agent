@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 304（value 108 · type 176 · both 20）
+符号 304（value 108 · type 177 · both 19）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -232,15 +232,15 @@ both   ObservationDatabaseMissingError
 value  observationDatabasePath
 both   ObservationStoreOpenError
 
--- src/observability/store.ts (2) --
+-- src/observability/store.ts (1) --
 both   ObservationCorruptionError
-both   ObservationStoreUnavailableError
 
--- src/observability/types.ts (8) --
+-- src/observability/types.ts (9) --
 type   EchoObservationReader
 type   EchoObservations
 type   EchoRunResult
 type   ListRunsOptions
+type   ObservationCapturePolicy
 type   RunLookupResult
 type   RunObservation
 type   RunObservationHeader
@@ -432,7 +432,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 55（value 24 · type 27 · both 4）
+符号 56（value 25 · type 27 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -450,7 +450,7 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (17) --
+-- src/extension/builtin.ts (18) --
 value  agentRuntimeOf
 value  BUILTIN_GENERATION
 value  builtinEntries
@@ -465,6 +465,7 @@ value  ECHO_MEMORY
 value  ECHO_SCHEDULER
 value  ECHO_SKILLS
 value  ECHO_TASKS
+value  ECHO_TOOL_SEARCH
 value  mountBuiltinTools
 type   PromptPackConfig
 type   RuntimeSource
@@ -668,9 +669,9 @@ value  textTurn
 value  toolTurn
 
 == 入口 "./tools" → src/tools/public.ts ==
-符号 14（value 12 · type 2 · both 0）
+符号 15（value 13 · type 2 · both 0）
 
--- src/tools/harness.ts (14) --
+-- src/tools/harness.ts (15) --
 value  activeTools
 value  disableTools
 value  enableTools
@@ -685,3 +686,4 @@ value  toolSchemasOf
 value  unregisterExact
 value  unregisterTool
 value  unregisterTools
+value  visibleTools

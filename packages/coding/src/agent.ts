@@ -90,6 +90,7 @@ const AGENT_BUILTIN_TOOLS = [
   "schedule_list",
   "skill_activate",
   "skill_create",
+  "tool_search", // 2026-09-02 渐进式披露的入口，core 恒装（在不在菜单上另算，这里是池）
   "transcript_read",
   // **会话面（`session_*`）不在这里**：挂不挂它是**容器**的决定（`CreateEchoOptions.sessions`），
   // 不是产品身份。cli 开着它，所以真跑起来的 echo-coding 会多三件；而这份 digest 描述的是

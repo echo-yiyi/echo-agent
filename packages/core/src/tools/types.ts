@@ -47,6 +47,13 @@ type ToolBase<TParams, TMeta> = {
    * 来源恢复时把它设回 undefined 即可，**不必重新注册**。
    */
   disabled?: string;
+  /**
+   * 延迟披露（2026-09-02 用户拍板）：**冷门工具标 true**——注册在池里、能被点名解析，但不上模型菜单，
+   * 直到模型经 `tool_search` 取过它的 schema（下一轮起可调）。与 `disabled` 同一条规矩：状态住在工具身上，
+   * 改缺省 = 改工具的定义；执行层只在 `visibleTools()` / `resolveTool()` 各看一眼这个字段。
+   * 用途只有一个：schema 全塞进每轮请求会先把上下文吃掉，接了 MCP 之后工具一多这是唯一的止损。
+   */
+  readonly deferred?: boolean;
   execute(params: TParams, ctx: ToolExecutionContext): Promise<AgentToolResult<TMeta>>;
 };
 
