@@ -1,4 +1,4 @@
-// 定时任务的操作方法:agent 的闹钟。设计见 docs/design/parts/schedule.md。
+// 定时任务的操作方法:agent 的闹钟。
 //
 // **这个文件里全是方法,没有 interface、没有类**（2026-08-05 用户拍定）:
 // 登记表是 agent 的（`agent.schedule.entries` 是 `Map<string, ScheduleEntry>`,

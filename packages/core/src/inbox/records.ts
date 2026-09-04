@@ -1,4 +1,4 @@
-// Inbox 的持久 schema（docs/design/AGENT-CORE.md §14.2.4「完整 durable ingress 只有一个公共协议」）。
+// Inbox 的持久 schema。**完整 durable ingress 只有一个公共协议**。
 //
 // 两份落盘形状 + 它们的 id 规则。**纯的**（只用 Web Crypto 与字符串），能进 engine 面。
 //

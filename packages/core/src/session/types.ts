@@ -1,4 +1,4 @@
-// Session：一系列对话，**在盘上**。设计见 docs/design/AGENT-CORE.md §9 与 §13.12.2。
+// Session：一系列对话，**在盘上**。
 //
 // 边界：`messages` 是内存里的真源；Session 是它的持久面。
 // **语义在 core，存储可替换**（D3）：create-or-resume、入账内容与时机、恢复顺序、坏档 fail-loud

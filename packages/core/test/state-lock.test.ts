@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileStateLock, inspectStateLock } from "../src/storage/file-lock.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
 
-// StateLock 的契约（AGENT-CORE §13.12.3）。
+// StateLock 的契约。
 //
 // 这道端口存在的理由本身就是一条判据：`StorageDir` 只有 read/write/remove/list，
 // **没有原子 create-if-absent 也没有 CAS**，拿它模拟锁必然留 TOCTOU 窗口。

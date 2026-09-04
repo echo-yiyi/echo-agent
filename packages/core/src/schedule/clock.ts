@@ -1,4 +1,4 @@
-// Clock —— 时间与定时器的端口（D3 的第四类，见 AGENT-CORE §13.12.1）。**纯的**，能进 engine 面。
+// Clock —— 时间与定时器的端口（D3 的第四类）。**纯的**，能进 engine 面。
 //
 // 立端口的理由不是「时间可能有多种实现」，而是**确定性测试**：`schedule/harness.ts` 原先
 // 直接 `setInterval` + `Date.now()`，于是「到点了会不会投递」这类判据只能靠 sleep 去撞，

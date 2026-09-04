@@ -1,4 +1,4 @@
-// 循环的入参形状。设计见 docs/design/AGENT-CORE.md §3.5。
+// 循环的入参形状。
 
 import type { AgentEventInput, AgentOutcome } from "../events.ts";
 import type { HookContext, HookRuntime } from "../hooks/runtime.ts";

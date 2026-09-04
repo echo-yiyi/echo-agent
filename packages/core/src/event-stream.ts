@@ -1,5 +1,5 @@
 // 事件流：同一个流，既能 for await 逐字消费（UI），又能 await result() 一把梭
-// （评测 / 摘要 / 子 agent）。设计见 docs/design/AGENT-CORE.md §8.4。
+// （评测 / 摘要 / 子 agent）。
 //
 // **单消费者契约**：waiter 是单槽——循环是唯一的 for-await 方；UI 看的是循环转播的
 // AgentEvent，不直接喝这条流。要多消费者得加广播缓冲，复杂度不值。

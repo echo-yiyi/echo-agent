@@ -1,4 +1,4 @@
-// Agent 类：状态的唯一所有者。设计见 docs/design/AGENT-CORE.md §2。
+// Agent 类：状态的唯一所有者。
 //
 // 为什么是类不是函数（三条，函数形态给不出）：
 //   ① 生命周期跨越多次调用——`streamingMessage` / `pendingToolCalls` 这些「正在发生什么」

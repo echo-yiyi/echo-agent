@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { userMessage } from "../src/messages.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 
-// Session Service 的四条不变量（AGENT-CORE §13.12.2 逐条要求配单测）。
+// Session Service 的四条不变量（逐条配单测）。
 //
 // **由来**：D3 之前，这些语义住在注入方实现的 `SessionManager` 里——「坏档 fail-loud，
 // 不给半截 session」只是接口注释里的一句自觉。换一个实现就可以返回半截、可以静默吞掉 append，

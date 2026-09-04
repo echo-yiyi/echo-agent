@@ -1,4 +1,4 @@
-// memory 工具:六动词薄壳,逐个调 MemoryHarness 的方法。设计见 docs/design/parts/memory.md。
+// memory 工具:六动词薄壳,逐个调 MemoryHarness 的方法。
 //
 // 命令面**对齐 Anthropic memory tool**(view/create/str_replace/insert/delete/rename)
 // ——判据与 skill 加载器同一条:「别人训练好的行为能不能在我们这直接跑」。

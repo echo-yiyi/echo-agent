@@ -1,5 +1,4 @@
 // MemoryHarness:记忆的操作面(与 SkillHarness / ToolHarness 平级的资源宿主)。
-// 设计见 docs/design/parts/memory.md。
 //
 // 结构(2026-08-05 用户拍定):
 //   **方法是唯一写路径,工具是薄壳**——view/create/strReplace/insert/delete/rename 是

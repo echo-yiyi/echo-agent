@@ -1,4 +1,4 @@
-// Permission stage 的公共词汇。设计见 docs/design/AGENT-CORE.md §14.10.3 / §14.2.3。
+// Permission stage 的公共词汇。
 //
 // 授权不是普通 preToolUse hook：它是工具流水线里**固定位置的一道 stage**——
 //   transform hooks → 对最终参数重新校验 → freeze → authorization（只能决定，不能改参数）→ execute。

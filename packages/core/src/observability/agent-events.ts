@@ -52,7 +52,7 @@ const MAX_CONTENT_BLOCK_SCAN = 1_024;
  *
  * 保留额留给 body 其余字段（stopReason / 计数 / usage / model）与 fact 框架（name / scope / attributes）。
  * **仍不是整条 body 的保证**：content 档的 `toolUseBlocks[].input` 大小不可预估，它超预算时整条照样被拒——
- * 那条走 O3a 的 attachment/blob（`docs/ISSUES.md` E 类已登记）。这里保证的是**正文本身不再是超预算的原因**。
+ * 那条走 O3a 的 attachment/blob。这里保证的是**正文本身不再是超预算的原因**。
  */
 const PROJECTED_BODY_RESERVE = 8 * 1024;
 export const MAX_PROJECTED_TEXT_BYTES = projectionEncodingLimits().maxBytes - PROJECTED_BODY_RESERVE;

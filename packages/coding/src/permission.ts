@@ -1,4 +1,4 @@
-// 权限：产品策略翻译成 core 的 authorization stage（AGENT-CORE §14.10.3），不再是一条 preToolUse hook。
+// 权限：产品策略翻译成 core 的 authorization stage，不再是一条 preToolUse hook。
 //
 // 三档规则不变:allow(放行)/ deny(拒)/ ask(问裁决人)。规则在构造期交给 Agent
 // （`permissionPolicyFor()` → `AgentOptions.permission`），跑在固定 stage：

@@ -1,4 +1,4 @@
-// Extension Host ABI（docs/design/AGENT-CORE.md §14.7.1）：Extension 模块看到的全部类型，
+// Extension Host ABI：Extension 模块看到的全部类型，
 // 加两个构造器 `defineService()` / `defineExtension()`。
 //
 // 这里只有**声明**：模块求值阶段必须 declaration-only，长期副作用只能在 `apply()` 里经 `ctx.effect()` 建立

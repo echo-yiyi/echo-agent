@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { inventory, render, entryPoints, SNAPSHOT_PATH } from "../scripts/api-inventory.ts";
 import type { ApiSymbol } from "../scripts/api-inventory.ts";
 
-// `@echo/core` 的公共面快照门（AGENT-CORE §13 的 D15）。
+// `@echo/core` 的公共面快照门（D15）。
 //
 // **由来（2026-08-17）**：M1 用一条一次性的 `getExportsOfModule` 命令清点公共面，得出
 // **165 个符号**，这个数被写进了设计文档、还成了「按现有 165 个符号机械做减法」的施工依据。

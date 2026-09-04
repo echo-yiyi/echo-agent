@@ -1,4 +1,4 @@
-// Run admission 的公共类型面（docs/design/AGENT-CORE.md §14.2.4「Unified Run Admission」）。
+// Run admission 的公共类型面。
 //
 // 一条 run 要跑，先取得 permit：用户 prompt、Agent 内建的 Inbox 消费、Dream 整理，最终都经同一个 admission。
 // 这里只有 host port 的形状：`AgentAdmissionPort`、request / ticket / result / execute scope，以及每次 admission

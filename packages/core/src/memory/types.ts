@@ -1,4 +1,4 @@
-// 记忆的数据形状。设计见 docs/design/parts/memory.md。
+// 记忆的数据形状。
 //
 // 写法与 messages.ts 同构:**纯数据判别联合**(mode ↔ role)+ 扩展位 + 构造器;
 // 行为(组装 / 写入校验)是外置的分发函数(compose.ts),认不出的种类组装时隐形。

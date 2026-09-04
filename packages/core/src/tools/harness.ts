@@ -1,4 +1,4 @@
-// 工具的操作方法。设计见 docs/design/AGENT-CORE.md §5A。
+// 工具的操作方法。
 //
 // **这个文件里全是方法,没有 interface、没有类、没有状态**（2026-08-05 用户拍定）:
 // 数据是 agent 的（`agent.tools` 就是一个 `Map<string, AgentTool>`,装的是**工具本体**,

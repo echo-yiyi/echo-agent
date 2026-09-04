@@ -1,4 +1,4 @@
-// skill 加载器:扫盘 → Skill[]。设计见 docs/design/AGENT-CORE.md §5A.5。
+// skill 加载器:扫盘 → Skill[]。
 //
 // **判据:别人写的 skill 能不能在我们这跑起来**(2026-08-04 用户拍定)——
 // 所以 Claude Code / pi 的目录式 skill(`<dir>/SKILL.md` + frontmatter + 同目录文件)

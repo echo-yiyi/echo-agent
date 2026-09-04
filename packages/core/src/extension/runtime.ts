@@ -1,5 +1,5 @@
-// `AgentRuntime` —— **壳子与 Agent 之间的那份协议**（`docs/design/AGENT-CORE.md` §14 owner 表：
-// 「`echo:agent` … 构造/恢复低层 Agent 并 **provide AgentRuntime**」）。
+// `AgentRuntime` —— **壳子与 Agent 之间的那份协议**：`echo:agent` 构造/恢复低层 Agent，
+// 并 **provide AgentRuntime**。
 //
 // ## 它解决什么
 //

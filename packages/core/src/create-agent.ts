@@ -1,4 +1,4 @@
-// `createAgent` —— 完整默认装配（D2 / D4 / D5 / D6 / D17，见 AGENT-CORE §13.12.3）。
+// `createAgent` —— 完整默认装配（D2 / D4 / D5 / D6 / D17）。
 //
 // **node-only**：解析 `$PWD` / `$ECHO_HOME`、建 `FileDir` 与文件锁，所以只在根入口，
 // 低层用法走 `new Agent()`，自己给已解析好的 Model 与端口。

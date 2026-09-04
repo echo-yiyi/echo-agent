@@ -1,4 +1,4 @@
-// `@echo-agent/core` —— **唯一入口**。设计真相源：docs/design/AGENT-CORE.md §13（D13 / D16）。
+// `@echo-agent/core` —— **唯一入口**。
 //
 // 边界一句话：**Agent 管机制，用户换策略与基础设施**（§13.3）。
 // 状态机、恢复与提交顺序归 core 自己拥有；用户注入的是 Store / Strategy / Source / Clock / Executor / Lock，

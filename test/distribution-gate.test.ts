@@ -3,15 +3,14 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-// **Distribution Gate**（AGENT-CORE §13.9 第二层门）：`@echo-agent/core` 这个 npm 包**真的可消费吗**。
+// **Distribution Gate**（第二层门）：`@echo-agent/core` 这个 npm 包**真的可消费吗**。
 //
-// 它回答的问题与另外两道门都不同：
-//   · `test/package-boundary.test.ts` 看的是**源码里**的 import 合不合规；
-//   · `test/package-isolation.test.ts` 看的是**拷出去的目录**能不能独立 typecheck；
+// 它回答的问题与另一道门不同：
+//   · `packages/cli/test/package-isolation.test.ts` 看的是**拷出去的目录**能不能独立 typecheck；
 //   · 本门看的是**打包产物**——`pack` 出来的 tarball 装到一个干净项目里，
 //     照着 `exports` 表 import，能不能真的跑起来。
 //
-// 为什么前两道盖不住这一条：它们都还在 workspace 里，`@echo-agent/core` 是软链，
+// 为什么那道门盖不住这一条：它还在 workspace 里，`@echo-agent/core` 是软链，
 // `exports` 写错、`files` 漏文件、依赖漏声明——**一个都发现不了**，因为源码就在旁边。
 // 只有装一次真实产物才谈得上「用户拿到的东西能用」。
 //
@@ -71,7 +70,7 @@ function packAndInstall(): { consumer: string; cleanup: () => void } {
 }
 
 /**
- * 把一个包的 **git tracked** 文件原样拷进目标目录（同 `test/package-isolation.test.ts`）。
+ * 把一个包的 **git tracked** 文件原样拷进目标目录（同 `packages/cli/test/package-isolation.test.ts`）。
  * 只拷 tracked 的，顺带证明「这个包在 git 里是完整的」——漏 add 一个文件，这里会红在缺文件上。
  */
 function copyTracked(pkgRel: string, dest: string): number {
@@ -116,7 +115,7 @@ function packCli(work: string, coreTgz: string): string {
 }
 
 /**
- * **§13.11 点名的消费者，逐个验一遍**（`docs/ISSUES.md` OSS-4）。
+ * **点名的消费者，逐个验一遍**。
  *
  * 它们平时靠 workspace 软链吃到 `@echo-agent/core` 的**源码**，于是「只用公开面」「产物够它用」
  * 两句话都没验过：软链下面 `exports` 写漏、`files` 漏文件、深 import 越界——一个都暴露不出来。
@@ -326,9 +325,9 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   test(
     "exports 的每条 dist 支在装完之后都真实存在（含 .d.ts，不然 TS 用户拿到 any）",
     () => {
-      // **这条门守的是 `package-boundary` 守不到的那一半**：那边只能检仓库里就有的文件
-      // （`bun` 支指源码），`dist/` 是 build 产出、不在仓库，它只能跳过。跳过的部分必须
-      // 有人接着——就是这里：build + pack + install 之后，逐条 dist 路径落地检查。
+      // **仓内的静态检查守不到这一半**：仓库里只有源码（`bun` 支指源码），`dist/` 是 build
+      // 产出、不在仓库，静态检查只能跳过。跳过的部分必须有人接着——就是这里：
+      // build + pack + install 之后，逐条 dist 路径落地检查。
       // 少了这条，`./mcp` 之类子路径的 dist 写错了也没人管，直到 Node 用户 import 才炸。
       const { consumer, cleanup } = packAndInstall();
       try {
@@ -360,8 +359,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
     },
     180_000,
   );
-  // 两个消费者（§13.11 / `docs/ISSUES.md` OSS-4）。判据同形，理由见下面 coding 那条。
-  // examples 是第三个，判据在 `test/examples.test.ts`——它们不是 workspace 成员，走的路不同。
+  // 两个消费者。判据同形，理由见下面 coding 那条。
+  // examples 是第三个：它们不是 workspace 成员，走的路不同，本门不覆盖。
   //
   // **`旧 runner 包` 2026-08-31 删包**（拍板方案 ③：两个 CLI 并成一个，`echo-agent` 归 `echo-agent`）。
   // 它守着的那两件事一件没丢，都并进 tui 这一条：

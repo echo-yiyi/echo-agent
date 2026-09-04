@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectStateLock } from "../src/storage/file-lock.ts";
 
-// **Runtime V0 Gate**（AGENT-CORE §13.9 的 12 条 resident integration）。
+// **Runtime V0 Gate**（12 条 resident integration）。
 //
 // 与本仓其余测试的区别只有一条，但那一条是全部意义：**这里真的起第二个进程**。
 // 此前所有写着「换个进程」的用例换的是**实例**——同一个 `InMemoryDir` 传给新 `Agent`，

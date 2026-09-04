@@ -183,6 +183,13 @@
   },
   "active": "914a439825a204ed",
   "lastOpenFiles": [
+    "design/compaction.md",
+    "decisions/implemented/2026-09-02-compaction-threshold.md",
+    "decisions/implemented/2026-09-02-compaction-summary-message.md",
+    "decisions/implemented/2026-09-02-compaction-state-is-a-view.md",
+    "decisions/implemented/2026-09-02-compaction-manual-and-state.md",
+    "decisions/implemented/2026-09-02-compaction-ladder.md",
+    "decisions/implemented/2026-09-02-compaction-as-extension.md",
     "architecture.md",
     "review/architecture-draft.md",
     "__probe/p.zh.md",

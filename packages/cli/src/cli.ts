@@ -89,7 +89,7 @@ const PROVIDERS: Record<ProviderName, () => Provider> = {
   // `zai` 是短名，实际是智谱 GLM 的 coding 端点（pi 那边叫 `zai-coding-cn`）
   zai: () => zaiCodingProvider(),
   // MiniMax 挂的是 **M3**：目录换成它之后 thinking 可以关掉，不再需要「先改消息契约才能用」。
-  // **仍未经真 key 实跑验证**（假 fetch 只证明请求体形状），这一条登记在 `docs/ISSUES.md`。
+  // **仍未经真 key 实跑验证**（假 fetch 只证明请求体形状）。
   minimax: () => minimaxProvider(),
 };
 

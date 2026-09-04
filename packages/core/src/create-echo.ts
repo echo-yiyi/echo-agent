@@ -10,7 +10,7 @@
 //
 // 规格里的 Loader 是四步（resolve → manifest → **内容寻址编译** → import），并要一道
 // host singleton identity gate。**本文件只做最后一步的最小形态**：直接 `import()` 源文件。
-// 差在哪、为什么现在可以这样，逐条说清（登记在 `docs/ISSUES.md`）：
+// 差在哪、为什么现在可以这样，逐条说清：
 //
 //   - **不编译、不内容寻址**：因此**没有热重载**——同一路径的模块在进程内只求值一次，
 //     改了文件要重启。`mount` 用固定 generation `"boot"`，换代是 O4 的事。

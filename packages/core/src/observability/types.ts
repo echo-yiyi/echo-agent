@@ -1,4 +1,4 @@
-// Observation 公共 ABI（AGENT-CORE §15.4.1 / §15.5.1 / §15.6 / §15.12，逐字照录；O2a B1）。
+// Observation 公共 ABI（O2a B1）。
 //
 // **只放 JSON-safe 的值与形状**：persist / query / render 面上只出现 `ObservationValue`，任何运行期对象
 // （Error、Uint8Array、bigint、Map……）都在 Sequencer 的 `normalizeObservationValue()` 里归一或被拒，

@@ -35,11 +35,7 @@ describe("文档门", () => {
     expect(v.map(x => x.path), `代码块编译失败:${fmt(v)}\n`).toEqual([]);
   });
 
-  // **暂时 skip(2026-09-01,为开 CI)**:这道判据现在红 60 条,全部是"文档还没写"——
-  // 注释里写了 `docs/design/parts/*.md` 这类将来才会有的文件。它是**文档进度条,不是正确性判据**,
-  // 不该拦住外部 PR。可见性没丢:CI 里 `bun scripts/docs-lint.ts` 仍会跑并打印这 60 条,
-  // 只是 `continue-on-error`。**filerefs 归零那天把 `.skip` 去掉,CI 里也一并改成阻断。**
-  test.skip("引用:注释与散文里写到的文件路径真实存在", () => {
+  test("引用:注释与散文里写到的文件路径真实存在", () => {
     const v = checkFileRefs(manifest);
     expect(v.map(x => x.path), `引用了不存在的文件:${fmt(v)}\n`).toEqual([]);
   });

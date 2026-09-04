@@ -1,5 +1,4 @@
 // 消息层：我们的账本（AgentMessage）与发出去的电报（ProviderMessage），以及两者之间**唯一**一道翻译。
-// 设计见 docs/design/AGENT-CORE.md §4。
 //
 // 三条不变量：
 //   ① AgentMessage 是纯数据（JSON-safe）——它会被原样落盘，所以不许挂函数、不许挂类实例。

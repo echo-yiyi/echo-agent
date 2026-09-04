@@ -5,7 +5,7 @@
 // `examples/extension/extensions/current-year.ts`——用户写的 Extension 文件必须 import 得到
 // `defineExtension` 与 `AgentTools`，否则「自动发现扩展」这句话对包外的人不成立。
 // 在此之前它一直空着，是因为「exports 表无死条目」那道门要求每条子路径都有真实的跨包消费者
-//（memory / schedule 等七条子路径就是因此建了又撤，见 docs/ISSUES.md OSS-2）。
+//（memory / schedule 等七条子路径就是因此建了又撤）。
 //
 // 这里的东西**纯**（不碰 `node:`）。
 

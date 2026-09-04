@@ -1,4 +1,4 @@
-// 状态根的写入资格（docs/design/AGENT-CORE.md §14.9）。**Host-internal**：这些形状都不进公共面，
+// 状态根的写入资格。**Host-internal**：这些形状都不进公共面，
 // Extension 拿不到 token，lane 也不通过 AsyncLocal / 可选参数 / 领域 message 透传。
 //
 // 三个东西：

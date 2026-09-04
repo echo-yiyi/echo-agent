@@ -1,4 +1,4 @@
-// `echo:*` builtin Extension 表（`docs/design/AGENT-CORE.md` §14 那张**生命周期 owner 表**）。
+// `echo:*` builtin Extension 表。
 //
 // 规格原话：`echo:*` 通过**内置模块表**解析，不从安装目录动态找文件；但**进入 ExtensionHost 后
 // 与第三方一样**获得 Fiber、Effect、依赖检查与 dispose。first-party Extension 不得 import

@@ -1,4 +1,4 @@
-// `@echo/core` 公共 API 清点（AGENT-CORE §13 的 D15）。
+// `@echo/core` 公共 API 清点（D15）。
 //
 // **一份结果，两个用途**：人读它来划 root/engine/subpath（§13.11 M2 的第二件事），
 // 门读它来防公共面无声漂移。所以清点逻辑只有这一份——`inventory()`——

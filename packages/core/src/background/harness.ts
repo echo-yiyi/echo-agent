@@ -1,4 +1,4 @@
-// 后台活动的操作方法。设计见 docs/design/AGENT-CORE.md §5B。
+// 后台活动的操作方法。
 //
 // **这个文件里全是方法,没有 interface、没有类、没有状态**（2026-08-05 用户拍定）:
 // 任务表是 agent 的——`agent.background` 就是 `Map<string, BackgroundTask>`,

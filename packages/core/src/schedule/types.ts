@@ -1,4 +1,4 @@
-// schedule 的数据形状。设计见 docs/design/parts/schedule.md。
+// schedule 的数据形状。
 //
 // 写法与 messages/memory 同构:纯数据判别联合,JSON-safe,直接落盘(schedules.json 全量读写)。
 // 触发是**投递不是执行**:到期 → host.deliver(environment 消息)→ inbox → 回 idle 后

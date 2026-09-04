@@ -1,5 +1,4 @@
 // Hook Runtime：进程内可编程、进程外可脚本化的统一挂点机制。
-// 设计见 docs/design/AGENT-CORE.md §7；接缝加固见 §14.7.5。
 //
 // 三条骨架：
 //   ① **一套词汇表，两种消费**：LifecycleEvent 是唯一词汇表；注册表给每个事件标

@@ -1,4 +1,4 @@
-// Runner 的全部实质：**给 Agent 一个进程与一个输入源**（`docs/design/AGENT-CORE.md` §13.2）。
+// Runner 的全部实质：**给 Agent 一个进程与一个输入源**。
 //
 // 边界照抄设计，没有多做：Host 负责承载、投递输入、接收输出、进程级启停；
 // **不替 Agent 编排** Memory / Dream / Schedule / Task——那些是 `start()` 自己的事。

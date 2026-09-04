@@ -1,5 +1,4 @@
 // RunIntakeGate：Agent 内**唯一**裁决 steer / followUp 入队与 run / turn 关门的临界区。
-// 设计见 docs/design/AGENT-CORE.md §14.2.3（followUp/steer 语义）与 §14.9.3（「不得先读 state 再另行 enqueue」）。
 //
 // 规则：
 //   - followUp 只进当前 run，steer 只进当前活动 turn；没有就返回 rejected——不抛、不偷偷转成下一 run；

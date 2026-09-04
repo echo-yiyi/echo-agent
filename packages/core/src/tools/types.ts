@@ -1,4 +1,4 @@
-// 工具层。设计见 docs/design/AGENT-CORE.md §5。
+// 工具层。
 //
 // 两条判据：
 //   ① 工具在**值层面**天然开放（多给一个实例就是扩展），所以没有 CustomAgentTools 类型扩展位。

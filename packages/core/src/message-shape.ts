@@ -2,7 +2,7 @@
 // 两份各写各的必然漂移，而「盘上的坏档」要在读进来那一刻就判红，不能等到下游拿着半截消息炸。
 //
 // **不进公共面**：`messages.ts` 被 `engine.ts` 整个 re-export，放那儿等于凭空长两个公开符号；
-// 公共面只许因真实的跨包需要而增长（docs/ISSUES.md OSS-2）。包内两处 import 这个文件即可。
+// 公共面只许因真实的跨包需要而增长。包内两处 import 这个文件即可。
 
 import type { AgentMessage } from "./messages.ts";
 
