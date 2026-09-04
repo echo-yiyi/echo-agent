@@ -258,6 +258,8 @@ describe("Agent 接线", () => {
     const agent = new Agent({
       model: FAKE_MODEL,
       streamFunction: scriptedStreamFn([
+        // schedule_* 是延迟工具（2026-09-02，`deferred: true`）：模型得先经 tool_search 取 schema，下一轮才能调
+        toolTurn("t0", "tool_search", { names: ["schedule_create"] }),
         toolTurn("t1", "schedule_create", { prompt: "检查 CI", every_seconds: 60 }),
         textTurn("已安排"),
         textTurn("好的我去检查 CI"),

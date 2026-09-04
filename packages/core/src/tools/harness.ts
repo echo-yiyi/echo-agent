@@ -11,6 +11,7 @@
 
 import type { ToolSchema } from "../messages.ts";
 import { toolSchemas as projectToolSchemas, type AgentTool } from "./types.ts";
+import { TOOL_SEARCH_NAME } from "./tool-search.ts";
 
 /** agent 的工具面。键是 `tool.name`,值就是工具本体。 */
 export type ToolMap = Map<string, AgentTool>;
@@ -78,6 +79,22 @@ export function activeTools(tools: ToolMap): readonly AgentTool[] {
   return [...tools.values()].filter((t) => t.disabled === undefined);
 }
 
+/**
+ * **本轮摆给模型的菜单**（渐进式披露，2026-09-02 用户拍板）：没被禁用、且（不延迟 或 已加载）。
+ * 延迟是工具自己的标记（`ToolBase.deferred`）；`loaded` 是本 agent 经 `tool_search` 取过 schema 的名字。
+ * `tool_search` 自己只在池里**还有没加载的延迟工具**时上菜单——没什么可取时不多占一格。
+ * `getTools()` 的实现，循环契约不变。
+ */
+export function visibleTools(tools: ToolMap, loaded?: ReadonlySet<string>): readonly AgentTool[] {
+  const active = activeTools(tools);
+  if (loaded === undefined) return active;
+  const pending = active.some((t) => t.deferred === true && !loaded.has(t.name));
+  return active.filter((t) => {
+    if (t.name === TOOL_SEARCH_NAME) return pending;
+    return t.deferred !== true || loaded.has(t.name);
+  });
+}
+
 /** 禁用一批（MCP 断线时它自己知道给过哪些名字）。返回真禁掉的个数。 */
 export function disableTools(tools: ToolMap, names: readonly string[], reason: string): number {
   let n = 0;
@@ -105,16 +122,21 @@ export function enableTools(tools: ToolMap, names: readonly string[]): number {
 export type ToolResolution =
   | { ok: true; tool: AgentTool }
   | { ok: false; reason: "not_found" }
-  | { ok: false; reason: "disabled"; message: string };
+  | { ok: false; reason: "disabled"; message: string }
+  /** 延迟工具、还没经 tool_search 取过 schema：模型直接点名时要看到这句，而不是「未知工具」 */
+  | { ok: false; reason: "deferred"; message: string };
 
 /**
  * 执行时解析一个工具名。**给准确原因**，不是含糊的「未知工具」——
- * 模型点了一个刚断线的 MCP 工具，它该看到「服务器已断开」。
+ * 模型点了一个刚断线的 MCP 工具，它该看到「服务器已断开」；点了一个没加载的延迟工具，该看到「先 tool_search」。
  */
-export function resolveTool(tools: ToolMap, name: string): ToolResolution {
+export function resolveTool(tools: ToolMap, name: string, loaded?: ReadonlySet<string>): ToolResolution {
   const tool = tools.get(name);
   if (tool === undefined) return { ok: false, reason: "not_found" };
   if (tool.disabled !== undefined) return { ok: false, reason: "disabled", message: tool.disabled };
+  if (loaded !== undefined && tool.deferred === true && !loaded.has(name)) {
+    return { ok: false, reason: "deferred", message: `Tool '${name}' is deferred: load it with ${TOOL_SEARCH_NAME} first, then call it` };
+  }
   return { ok: true, tool };
 }
 
