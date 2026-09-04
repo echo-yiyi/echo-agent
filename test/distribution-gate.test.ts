@@ -537,6 +537,9 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
           "echo:memory",
           "echo:scheduler",
           "echo:compaction",
+          // `echo:sessions`（2026-09-03）与 `echo:inline-tools` 同代（INLINE），所以排在 builtin 之后、
+          // 盘上发现的之前。它不在 builtin 表里：会话面是**容器**级的，`Agent` 上没有它。
+          "echo:sessions",
           "current-year",
         ]);
         // ② 工具**进了模型看得见的那一面**（样例一个工具都没显式传，全靠扩展）

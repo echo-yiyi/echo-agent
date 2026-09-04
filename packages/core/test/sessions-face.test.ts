@@ -12,6 +12,7 @@ import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EchoSessions, type SessionRow } from "../src/session/sessions.ts";
+import { makeSessionTools, sessionToolsSection } from "../src/session/tools.ts";
 import { listSessions, SessionService } from "../src/session/service.ts";
 import { InboxStore } from "../src/inbox/store.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
@@ -56,6 +57,11 @@ function harness(opts: { selfId?: string; run?: (row: SessionRow) => Promise<voi
     ...(opts.runTimeoutMs !== undefined ? { runTimeoutMs: opts.runTimeoutMs } : {}),
   });
   return { root, sessions, alive, ran };
+}
+
+/** 工具执行上下文：这组工具一个字段都不用，给一份最小的。 */
+function ctx(): never {
+  return { toolCallId: "c1", workspace: "/repo", sessionId: "s-self", iteration: 0 } as never;
 }
 
 /** 预置一段说过话的会话（一句话没说的段不落 meta，也就不在清单里）。 */
@@ -209,4 +215,66 @@ test("真盘上跑一遍：两段各占一个目录，互发的消息落在对�
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+/* ═══════════════ 工具面：两条挂载条件 ═══════════════ */
+
+test("工具面：main 且容器给了 runner 才挂 session_create；非 main / 没 runner 都只剩三件", () => {
+  // 两条挂载条件各挡一种错：
+  //   · 非 main 也能建 → 扇出没有边界，派出去的段会自己再派；
+  //   · 没 runner 还挂着 → 模型调了 session_create、系统什么都不做，比没有这件工具更坏。
+  const h = harness();
+  const full = makeSessionTools(h.sessions, { canCreate: true }).map((t) => t.name);
+  expect(full).toEqual(["session_create", "session_list", "session_send", "session_close"]);
+  const limited = makeSessionTools(h.sessions, { canCreate: false }).map((t) => t.name);
+  expect(limited).toEqual(["session_list", "session_send", "session_close"]);
+  // 能回话、能找人、能收工——少的只有「派活」那一件
+  expect(limited).toContain("session_send");
+});
+
+test("工具面：习惯段只在能派活时讲派活；异步这条两种情况都讲", () => {
+  const withCreate = sessionToolsSection({ canCreate: true }).render({} as never);
+  const without = sessionToolsSection({ canCreate: false }).render({} as never);
+  expect(withCreate).toContain("session_create");
+  expect(without).not.toContain("session_create");
+  for (const text of [withCreate, without]) {
+    expect(text).toContain("does not wait for a reply"); // 异步是这组工具最容易被误解的一条
+  }
+});
+
+test("工具面：session_create 建出来的一律不是 main（扇出只有一层）", async () => {
+  const h = harness({ run: async () => {} });
+  const [create] = makeSessionTools(h.sessions, { canCreate: true });
+  const r = await create!.execute({ message: "去看 PR 42" } as never, ctx());
+  expect(r.isError ?? false).toBe(false);
+  const [row] = await listSessions(h.root);
+  expect(row!.main).toBe(false);
+});
+
+test("工具面：send 把「留言」和「对话」说成两句话，失败带原因", async () => {
+  const h = harness();
+  await seed(h.root, "s-peer");
+  const send = makeSessionTools(h.sessions, { canCreate: false }).find((t) => t.name === "session_send")!;
+
+  const stored = await send.execute({ to: "s-peer", message: "在吗" } as never, ctx());
+  expect(String(stored.content)).toContain("not running");
+  h.alive.add("s-peer");
+  const live = await send.execute({ to: "s-peer", message: "再问一句" } as never, ctx());
+  expect(String(live.content)).toContain("running");
+
+  const missing = await send.execute({ to: "s-nope", message: "在吗" } as never, ctx());
+  expect(missing.isError).toBe(true);
+  expect(String(missing.content)).toContain("not-found");
+});
+
+test("工具面：list 把「活着 / 在忙 / 没进程」说清楚；一段都没有时也是一句话", async () => {
+  const h = harness();
+  const list = makeSessionTools(h.sessions, { canCreate: false }).find((t) => t.name === "session_list")!;
+  expect(String((await list.execute({} as never, ctx())).content)).toContain("No other sessions");
+
+  await seed(h.root, "s-peer");
+  expect(String((await list.execute({} as never, ctx())).content)).toContain("not running");
+  h.alive.add("s-peer");
+  await writeSessionPhase(scoped(h.root, "s-peer/"), "working");
+  expect(String((await list.execute({} as never, ctx())).content)).toContain("running, busy");
 });

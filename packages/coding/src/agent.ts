@@ -91,6 +91,12 @@ const AGENT_BUILTIN_TOOLS = [
   "skill_activate",
   "skill_create",
   "transcript_read",
+  // 会话面（2026-09-03）：**`session_create` 不在这里**——它只挂给 main 且容器给了 SessionRunner 的那一段，
+  // 而 digest 是「这个产品缺省装出来什么」的快照，cli 缺省不给 runner。给了 runner 的容器会多一件，
+  // 那是容器的差异，不是产品身份的差异。
+  "session_close",
+  "session_list",
+  "session_send",
 ] as const;
 
 /** 产品自己出的四段（identity / conduct:coding / tool:workspace / tool:shell），按 order 排。 */

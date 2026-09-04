@@ -234,6 +234,8 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 **开关** = 挂不挂 `echo:sessions`。不挂就是今天的单会话，不需要另加配置项。工具的 description 与 `session_*` 的习惯段由这个 extension 自己出（prompt 决策 2：只有拥有工具的 extension 在自己的段里提它）。
 
+它**不在 builtin 表里**，与 `echo:inline-tools` 同代（INLINE）：builtin 表是从一个 `Agent` 派生的，而会话面是**容器**级的——一个容器管着好几段。
+
 ## 8. 与现有件的对接
 
 | 件 | 今天 | 改成 |
@@ -267,7 +269,9 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
    idle ↔ working 边上写，读的时候与 lease 合成一次（`alive` 为假则 `phase` 恒为 `null`）；
    `SessionRunner` 与它的失败 / 超时语义（判红并把那段置 `closed`）也在这一步。
    **还没做**：extension 面的 `sessions` / `inbox.watch`（`wait` 与 `replyTo` 跟着它走）。
-4. **工具**：`echo:sessions` 四个工具；main 规则；`wait`；命名钩子。
+4. **工具（大部分已实现，2026-09-03）**：`echo:sessions` 四个工具（`session_create` / `session_list` /
+   `session_send` / `session_close`）与它们的习惯段；两条挂载条件在装配层判——**main 且容器给了
+   `SessionRunner` 才挂 `session_create`**，是不是 main 读盘上的 meta。**还没做**：`wait`、命名钩子。
 5. **壳**：`--continue` 新筛选；`/clear`；`/sessions`。
 
 ## 10. 验收判据

@@ -43,6 +43,7 @@ import { pathToFileURL } from "node:url";
 import type { Agent } from "./agent.ts";
 import { createAgent, resolveSessionsRoot, resolveStateDir, type CreateAgentOptions } from "./create-agent.ts";
 import { EchoSessions, type SessionRunner } from "./session/sessions.ts";
+import { makeSessionTools, sessionToolsSection } from "./session/tools.ts";
 import { FileDir, expandHome } from "./storage/file-dir.ts";
 import { inspectStateLock } from "./storage/file-lock.ts";
 import { errText, type Diagnostic } from "./errors.ts";
@@ -134,6 +135,39 @@ export type Echo = Readonly<{
   /** 先卸 Extension（构造的逆序），再停 Agent。 */
   stop(): Promise<void>;
 }>;
+
+/**
+ * `echo:sessions` 这一条 Entry（没有就是空数组）。
+ *
+ * `main` 从盘上读：`--resume` 一段别人派的活时，那一段**不是** main，所以它没有 `session_create`。
+ * 读不到 meta = 这一段还没说过话（空会话不落盘），那只可能是容器自己刚建的，按 main 算。
+ */
+async function sessionToolsEntry(
+  sessions: EchoSessions,
+  sessionsRoot: string,
+  sessionId: string | null,
+  hasRunner: boolean,
+): Promise<readonly ExtensionEntry[]> {
+  const main = sessionId === null ? true : await isMainSession(sessionsRoot, sessionId);
+  const toolOpts = { canCreate: main && hasRunner };
+  return [
+    {
+      entryId: "echo:sessions",
+      definition: defineToolPack("echo:sessions") as never,
+      config: { tools: makeSessionTools(sessions, toolOpts), sections: [sessionToolsSection(toolOpts)] },
+    },
+  ];
+}
+
+async function isMainSession(sessionsRoot: string, sessionId: string): Promise<boolean> {
+  const raw = await new FileDir(resolveStateDir({ sessionsRoot, sessionId })).read("meta.json");
+  if (raw === null) return true; // 还没落 meta = 刚由容器建的这一段
+  try {
+    return (JSON.parse(raw) as { main?: unknown }).main !== false;
+  } catch {
+    return true; // meta 坏了这里不判红：`start()` 马上会撞上同一份并给出更准确的话
+  }
+}
 
 /** 加载某个 Extension 文件失败：import 抛了，或默认导出不是 `defineExtension()` 的产物。 */
 export class ExtensionLoadError extends Error {
@@ -285,6 +319,32 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // 从这里起 Agent 已经存在：任何（fail-loud 路径上的）失败都必须把它停掉，否则 store 与文件锁没人收。
   const diagnostics: Diagnostic[] = [];
   /** 已经 mount 上的**非 builtin** 代，按 mount 顺序。收摊与失败回滚都按它逆序卸。 */
+  // 会话面（2026-09-03）：一个容器一个实例，三个消费者共用（工具 / 壳 / 宿主）。
+  //
+  // 这里注进去的两件都是**宿主知识**，core 自己给不出：
+  //   · `isAlive` 读的是那一段的 `.lock`——文件锁是 node 的事，而且**陈尸锁也算活着**
+  //     （单写者设计不做自动接管，见 `storage/file-lock.ts`）：读到 valid 就当有人占着，
+  //     要不要清由人决定。
+  //   · `run` 是「怎么让新的一段跑起来」，core 不起进程（sessions.md 的 Non-Goals）。
+  //
+  // 别人那一段的目录**不过本 Agent 的写入闸**：闸管的是「本段的 lease 还在不在手上」，
+  // 而往别人的 inbox 写一条本来就不在我们的 lease 覆盖范围内——那是它自己的账本，
+  // 由它自己的 lease 保护。
+  const sessionsRoot = expandHome(opts.sessionsRoot ?? resolveSessionsRoot());
+  const sessionDirOf = (id: string): string => resolveStateDir({ sessionsRoot, sessionId: id });
+  const sessions = new EchoSessions({
+    root: new FileDir(sessionsRoot),
+    storeFor: (id) => new FileDir(sessionDirOf(id)),
+    isAlive: async (id) => (await inspectStateLock(join(sessionDirOf(id), LOCK_FILE))).state === "valid",
+    self: () => ({
+      sessionId: agent.state.sessionId,
+      agent: opts.agentName ?? opts.agentId ?? "default",
+      workspace: agent.state.workspace,
+    }),
+    ...(opts.sessions?.run !== undefined ? { run: opts.sessions.run } : {}),
+    ...(opts.sessions?.runTimeoutMs !== undefined ? { runTimeoutMs: opts.sessions.runTimeoutMs } : {}),
+  });
+
   const mountedGens: string[] = [];
   try {
     // 盘上的扩展逐个加载：**坏一个记一条诊断、跳过它**（D6，头注）。`loadExtensionFile` 本身照抛
@@ -316,10 +376,23 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     const extra = opts.extensions ?? [];
     // `agent.tools` 的归宿：一条 inline Extension，与外部扩展同代、同 registry、同所有权账本。
     // 排在最前面，是因为它语义上最接近「这个 agent 自带的」——磁盘发现的扩展可能想覆盖它。
-    const inline: ExtensionEntry[] =
-      inlineTools.length === 0
+    const inline: ExtensionEntry[] = [
+      ...(inlineTools.length === 0
         ? []
-        : [{ entryId: "echo:inline-tools", definition: defineToolPack("echo:inline-tools") as never, config: { tools: inlineTools } }];
+        : [{ entryId: "echo:inline-tools", definition: defineToolPack("echo:inline-tools") as never, config: { tools: inlineTools } }]),
+      // ── `echo:sessions`：会话面的模型可见工具（2026-09-03，sessions.md §7）──────────────
+      //
+      // **不在 builtin 表里**，因为它要的东西 `Agent` 没有：会话面是**容器**级的
+      // （一个容器管着好几段），而 builtin 表是从一个 Agent 派生出来的。
+      //
+      // 两条挂载条件都在这里判，不在工具里判：
+      //   · `canCreate` —— 只有 main 才挂 `session_create`。扇出只有一层：派出去的那段
+      //     自己没有这件工具，不会再派。是不是 main 读盘上的 meta（新建的段还没有 meta，
+      //     那条路本来就是容器自己建的，缺省 true）。
+      //   · 容器没给 `SessionRunner` 时**整组的 create 都不挂**——模型调了 `session_create`、
+      //     系统却什么都不做，比没有这件工具更坏（工具不能承诺系统不交付的事）。
+      ...(await sessionToolsEntry(sessions, sessionsRoot, agent.state.sessionId, opts.sessions?.run !== undefined)),
+    ];
     // 顺序与从前一致：inline → 盘上发现的 → extra。差别只在**代的划分**：
     //   · inline / extra 是显式装配 → 各自一代、fail-loud；
     //   · 盘上发现的每个一代 → 坏 apply 只回滚它自己，记诊断继续（D6）。
@@ -382,32 +455,6 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
      * `send()` = user source 的调用方适配器（§15.5.2）：outcome 来自 loop，观测三元组来自 admission 已 COMMIT 的 RunIndex。
      * `observationPersistence` 是**当前 Runtime** 的投影：terminal 已进 index 才 stored；尾写失败磁盘仍 running → degraded。
      */
-    // 会话面（2026-09-03）：一个容器一个实例，三个消费者共用（工具 / 壳 / 宿主）。
-    //
-    // 这里注进去的两件都是**宿主知识**，core 自己给不出：
-    //   · `isAlive` 读的是那一段的 `.lock`——文件锁是 node 的事，而且**陈尸锁也算活着**
-    //     （单写者设计不做自动接管，见 `storage/file-lock.ts`）：读到 valid 就当有人占着，
-    //     要不要清由人决定。
-    //   · `run` 是「怎么让新的一段跑起来」，core 不起进程（sessions.md 的 Non-Goals）。
-    //
-    // 别人那一段的目录**不过本 Agent 的写入闸**：闸管的是「本段的 lease 还在不在手上」，
-    // 而往别人的 inbox 写一条本来就不在我们的 lease 覆盖范围内——那是它自己的账本，
-    // 由它自己的 lease 保护。
-    const sessionsRoot = expandHome(opts.sessionsRoot ?? resolveSessionsRoot());
-    const sessionDirOf = (id: string): string => resolveStateDir({ sessionsRoot, sessionId: id });
-    const sessions = new EchoSessions({
-      root: new FileDir(sessionsRoot),
-      storeFor: (id) => new FileDir(sessionDirOf(id)),
-      isAlive: async (id) => (await inspectStateLock(join(sessionDirOf(id), LOCK_FILE))).state === "valid",
-      self: () => ({
-        sessionId: agent.state.sessionId,
-        agent: opts.agentName ?? opts.agentId ?? "default",
-        workspace: agent.state.workspace,
-      }),
-      ...(opts.sessions?.run !== undefined ? { run: opts.sessions.run } : {}),
-      ...(opts.sessions?.runTimeoutMs !== undefined ? { runTimeoutMs: opts.sessions.runTimeoutMs } : {}),
-    });
-
     const send = async (input: string | AgentMessage): Promise<EchoRunResult> => {
       const result = await agent.prompt(input);
       const index = observation.runIndexOf(result.runId);
