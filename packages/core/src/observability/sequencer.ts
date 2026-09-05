@@ -1,4 +1,4 @@
-// ObservationSequencer（§15.4.2 / §15.4.2.1 / §15.12）：recordId、seq、observedAt 与 canonical append 顺序的
+// ObservationSequencer：recordId、seq、observedAt 与 canonical append 顺序的
 // **唯一 owner**。producer 只提交 draft；identity、normalize、batch、live 扇出全在这里。
 //
 // 两条 lane 两种 API：
@@ -82,7 +82,7 @@ export interface ObservationIngest {
   reserveProjectionFailureGap(input: Readonly<{ runId: string | undefined }>): ProjectionFailureOutcome;
 }
 
-/** 不属于 ObservationIngest：仅 permit finalizer 的内部封口通道可调用（§15.4.2）。 */
+/** 不属于 ObservationIngest：仅 permit finalizer 的内部封口通道可调用。 */
 export interface SequencerFinalizationPrivate {
   reserveOptionalProjectionGap(
     input: Readonly<{
@@ -118,7 +118,7 @@ export const DEFAULT_SEQUENCER_LIMITS: SequencerLimits = {
 
 export type ObservationSequencerOptions = Readonly<{
   runtimeId: string;
-  /** §14 RuntimeGeneration 标识，盖进每条 envelope 的 `generation.runtime`。 */
+  /** RuntimeGeneration 标识，盖进每条 envelope 的 `generation.runtime`。 */
   runtimeGeneration: string;
   /** admission 时冻结的 capture policy；这里只用于 health 快照，不参与投影（投影在 tap/adapter）。 */
   capturePolicy: ObservationCapturePolicy;
@@ -507,7 +507,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
         return Promise.reject(new Error(`${name} 被拒：${problem}`));
       }
       if (name === "run.closed" && runId !== undefined) {
-        // §15.4.2 / §15.5.1：在预留 run.closed 的 seq **之前** preflight。可选 projection 超限只留 capture_limit
+        // 在预留 run.closed 的 seq **之前** preflight。可选 projection 超限只留 capture_limit
         // gap 再以安全 body 封口，不降级、不关 admission；只有 required safe body 仍非法才走 required failure。
         try {
           const raw = toEncode.body as RunClosedBodyInput;
@@ -529,7 +529,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     try {
       candidate = this.encodeCandidate(toEncode, seq, boundaryEncodingLimits(), undefined);
     } catch (e) {
-      // 先裁决 hole/health，再拒绝（§15.4.2：required safe body 编码失败）
+      // 先裁决 hole/health，再拒绝（required safe body 编码失败）
       this.markHole(seq, runId, "encoding_error", undefined, e);
       return Promise.reject(toSafeError(e, "boundary 编码失败"));
     }
@@ -718,7 +718,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     const encoded = encodeCanonical(input, limits);
     // **O2a 没有 blob CAS seam，就不许提交 BlobRef**（2026-08-27 review P1）：`buildCommitInput()` 只把
     // record bytes 交给 store，`CanonicalObservationStore` 也没有 blob staging/读取面；candidate 随 commit
-    // 释放后原始 bytes 永久消失，留下一条**指向不存在内容的 ref**（§15.13 明禁「悬空 ref」）。
+    // 释放后原始 bytes 永久消失，留下一条**指向不存在内容的 ref**——「悬空 ref」是明禁的。
     // 在 seam 落地（O3b）之前，binary 一律判红 → hole + gap，不写一个假装可解析的 digest。
     if (encoded.blobs.length > 0) {
       throw new ObservationEncodingError("unsupported_value", "$", "binary 需要 blob CAS seam（O3b），O2a 不得提交 BlobRef");
@@ -743,7 +743,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
    * gap 能不能挂 runId：**只有 `run.accepted` 成功、RunIndex 条目已建立之后才能挂**（2026-08-27 review P0）。
    *
    * 起因：失败的 `run.accepted` 会产生一条 run-scoped gap，而那时 RunIndex 根本还不存在——实测磁盘状态是
-   * `gap.scope.runId="r1"`、`committedPrefix=2`、`RunIndex("r1")=null`。这直接违反 §15.4.2.3
+   * `gap.scope.runId="r1"`、`committedPrefix=2`、`RunIndex("r1")=null`。这直接违反
    * 「run-scoped gap 同事务更新 RunIndex」与「retention 窗口内 index 缺失即 corruption」。
    * 两个副作用同样实在：`rollGap("r1")` 会污染随后**用同一 runId 重试成功**的那个 run（新 run 一上来就被
    * 标 partial）；而永远不会 accepted 成功的 runId 则一直留在 `runGaps` 里，成为内存增长面。
@@ -1239,7 +1239,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     }
   }
 
-  /** §15.4.2.3：用同一批 recordId/bytes read-after-error，只有三种结论。 */
+  /** 用同一批 recordId/bytes read-after-error，只有三种结论。 */
   private async readAfterError(input: CommitBatchInput): Promise<"committed" | "absent" | "indeterminate"> {
     try {
       const head = await this.store.readCommittedPrefix(input.runtimeId);

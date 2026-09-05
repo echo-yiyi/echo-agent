@@ -1,4 +1,4 @@
-// 唯一的 normalize / canonical 序列化（§15.4.1）。Sequencer 在预留 identity 之后调它；producer 与 adapter
+// 唯一的 normalize / canonical 序列化。Sequencer 在预留 identity 之后调它；producer 与 adapter
 // 不得预先跑另一套（两套 normalize = 两份真相）。
 //
 // 规则（每条都有测试锁着）：
@@ -43,7 +43,7 @@ export type EncodingLimits = Readonly<{
   maxBytes: number;
   maxValueDepth: number;
   maxValueNodes: number;
-  /** 0 = 不允许任何 blob（boundary lane：run 边界不得引用未 verified 的 blob，§15.4.2.4）。 */
+  /** 0 = 不允许任何 blob（boundary lane：run 边界不得引用未 verified 的 blob）。 */
   maxBlobChunkBytes: number;
 }>;
 
@@ -88,7 +88,7 @@ export function boundaryEncodingLimits(): EncodingLimits {
   };
 }
 
-/** worker 在 SQL 引用提交前要持久化的 blob（§15.4.2.4）；digest 已进 candidate bytes。 */
+/** worker 在 SQL 引用提交前要持久化的 blob；digest 已进 candidate bytes。 */
 export type StagedBlob = Readonly<{ digest: string; bytes: Uint8Array }>;
 
 export type NormalizedValue = Readonly<{
@@ -158,7 +158,7 @@ export type PlainDictFailureKind = "not_plain" | "symbol_key" | "accessor" | "no
 /**
  * **故意不返回原容器**（2026-08-27 review P1）：上一版同时给 `obj` 和 `values`，于是 body、`attributes`、
  * `counters`/`flags` 三个消费方全都拿 `obj` 回读了一遍——descriptor 说 `"safe"`、`get` trap 说 `"secret"` 时，
- * 落进 canonical 的是 `"secret"`、`getCalls=1`，§15 那句「值取自 descriptor，get trap 一次都不执行」是假的。
+ * 落进 canonical 的是 `"secret"`、`getCalls=1`，原先那句「值取自 descriptor，get trap 一次都不执行」是假的。
  * 删掉 `obj` 让 TypeScript 把漏点一次找全，是这条唯一靠得住的修法：只要还留着口子，就还得靠人记得别用。
  */
 export type PlainDictRead =

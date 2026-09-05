@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { hmacSha256Hex, sha256Hex } from "../src/observability/hash.ts";
 
-// 纯 JS SHA-256 / HMAC（§15.4.2 的同步预算要求 `offer()` 同步，Web Crypto 是异步的）。
+// 纯 JS SHA-256 / HMAC（同步预算要求 `offer()` 同步，Web Crypto 是异步的）。
 // 用 NIST / RFC 4231 已知向量锁；单块、多块、跨块填充边界各一。
 
 test("SHA-256：NIST 已知向量", () => {

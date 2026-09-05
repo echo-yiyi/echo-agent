@@ -1,4 +1,4 @@
-// CapabilityFactSink（§15.9）：没有统一 AgentEvent 的内建 Capability（Memory / Task / Schedule …）在自己的
+// CapabilityFactSink：没有统一 AgentEvent 的内建 Capability（Memory / Task / Schedule …）在自己的
 // 唯一 decision / commit / settle 点调 `sink.offer(fact)`。
 //
 //   · 每个 Capability 自己拥有窄 fact union 与 descriptor（descriptor 与语义 owner 共址，不住中央 switch）；

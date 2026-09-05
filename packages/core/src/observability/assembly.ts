@@ -1,4 +1,4 @@
-// 最小 sealed AgentAssembly / RunModelBinding 观测快照（§15.5.1，O2a 范围）。
+// 最小 sealed AgentAssembly / RunModelBinding 观测快照（O2a 范围）。
 //
 // **只封 `createAgent()` 今天直接构造的 builtin 槽**（store / lock / session / memory / schedule / tasks / models …），
 // 不实现外部 Entry / Fiber / Service——那是 O2b。O2b 接上正式 Entry owner 后往**同一 schema** 里填值，
@@ -14,7 +14,7 @@ import type { AgentAssemblyObservationSnapshot, RunModelBindingObservationSnapsh
 export type BuiltinSlotContribution = Readonly<{
   /** 槽名：与 `createAgent()` 的构造槽一一对应（如 "store" / "lock" / "session" / "memory"）。 */
   slot: string;
-  /** builtin Entry id（§14 命名：`echo:agent` / `echo:memory` / `echo:tasks` …）。 */
+  /** builtin Entry id（`echo:agent` / `echo:memory` / `echo:tasks` …）。 */
   entryId: string;
   entryGeneration: string;
   /** 只放安全 metadata（实现种类、非敏感配置摘要输入）；**不放对象本体、凭据、路径正文**。 */

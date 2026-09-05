@@ -28,7 +28,7 @@ import type {
   SinkDeliveryGap,
 } from "../src/observability/types.ts";
 
-// §15.4.2 / §15.4.2.1 / §15.12 的 Sequencer 契约。全部用 FakeClock + in-memory 参考 store：零 sleep、零真盘。
+// Sequencer 契约。全部用 FakeClock + in-memory 参考 store：零 sleep、零真盘。
 
 const RT = "rt-test";
 
@@ -1016,7 +1016,7 @@ describe("异步 subscriber 不许绕过 bounded queue（2026-08-27 review P1）
 describe("O2a 不得提交悬空 BlobRef（2026-08-27 review P1）", () => {
   test("binary body → hole + gap，而不是一条指向不存在内容的 digest", async () => {
     // 修复前实测：记录 committed 成功、body 是 {digest,size}，而 store 没有任何 blob 面，
-    // candidate 随 commit 释放后原始 bytes 永久消失（§15.13 明禁悬空 ref）
+    // candidate 随 commit 释放后原始 bytes 永久消失（悬空 ref 是明禁的）
     const h = harness();
     h.seq.offer(bounded({ payload: new Uint8Array([1, 2, 3]) }));
     await h.flush();

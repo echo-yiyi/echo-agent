@@ -1,4 +1,4 @@
-// CanonicalObservationStore（§15.4.2 / §15.4.2.3）：Sequencer 之下唯一的持久层 seam。
+// CanonicalObservationStore：Sequencer 之下唯一的持久层 seam。
 //
 // V0 生产实现是 `bun:sqlite`（O3a）；这里的 in-memory 实现**只供 O2a reference conformance**，
 // 不能装进 `createEcho()`，用户配置也不能替换 canonical store。两个实现共用同一套裁决：
@@ -18,7 +18,7 @@ export class ObservationCorruptionError extends Error {
   }
 }
 
-/** §15.12：admission 时 canonical store 不可写 / writer 已 sealed。 */
+/** admission 时 canonical store 不可写 / writer 已 sealed。 */
 export class ObservationStoreUnavailableError extends Error {
   readonly code = "observation_store_unavailable";
   readonly persistence: ObservationPersistenceState;
@@ -59,7 +59,7 @@ export interface CanonicalObservationStore {
   commitBatchIfAbsent(input: CommitBatchInput): Promise<CommitBatchResult>;
   readRecordBytes(recordId: string): Promise<Uint8Array | null>;
   readRunIndex(runId: string): Promise<RunIndexEntryV1 | null>;
-  /** commit-unknown 的 read-after-error 与 boundary resolve 都要 read-back head（§15.4.2.3）。 */
+  /** commit-unknown 的 read-after-error 与 boundary resolve 都要 read-back head。 */
   readCommittedPrefix(runtimeId: string): Promise<number>;
 }
 
@@ -167,7 +167,7 @@ export class InMemoryCanonicalObservationStore implements CanonicalObservationSt
     return this.heads.get(runtimeId) ?? 0;
   }
 
-  /** 测试助手：按 seq 读回。是否进正式 seam（replay / getRun 的按 seq 读）待拍，见 §15 待拍板。 */
+  /** 测试助手：按 seq 读回。是否进正式 seam（replay / getRun 的按 seq 读）待定。 */
   async readRecordBytesBySeq(runtimeId: string, seq: number): Promise<Uint8Array | null> {
     const id = this.seqIndex.get(`${runtimeId}#${seq}`);
     return id === undefined ? null : (this.records.get(id) ?? null);

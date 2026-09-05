@@ -25,7 +25,7 @@ import { mkdtempSync } from "node:fs";
 // 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
 process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
-// §15.14.1 O3a 的端到端判据：**committed send → getRun → render 出非空稳定文本**。
+// O3a 的端到端判据：**committed send → getRun → render 出非空稳定文本**。
 // 真 createEcho（真 FileDir + 真文件锁 + 真 bun:sqlite），scripted Provider + 进程内 builtin test Tool；
 // completed / error / abort 三条路径都能按 runId 取到已 COMMIT 的 record 并渲染；Tool 抛错仍配对；压小 ring 产生
 // canonical gap 时 integrity=partial 且 renderer 显示；离线 reader 在活 writer 旁边读到同一份。
@@ -150,7 +150,7 @@ describe("send → getRun → render（completed）", () => {
     expect(text.content).toContain("tool.execute");
     expect(text.content).toContain("ping calls=1 ok=1 err=0");
     expect(text.content).toContain("persistence stored");
-    // JSON round-trip（canonical serializer 之后 renderer 结果不变，§15.5.1）
+    // JSON round-trip（canonical serializer 之后 renderer 结果不变）
     const round = JSON.parse(JSON.stringify(o)) as RunObservation;
     expect(renderRunObservation(round, { format: "text" }).content).toBe(text.content);
     const json = renderRunObservation(o, { format: "json" });
