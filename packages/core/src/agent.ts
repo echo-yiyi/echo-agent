@@ -20,6 +20,8 @@ import type { EchoObservableState, RuntimePhase } from "./observability/types.ts
 import { HookRuntime, type HookContext, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
+import { QuestionLedger } from "./question/ledger.ts";
+import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk, QuestionPolicy, QuestionSettlement } from "./question/types.ts";
 import {
   defaultConvertToLlm,
   userMessage,
@@ -75,6 +77,7 @@ import { newSessionId } from "./session/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
 import { activeTools, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap } from "./tools/harness.ts";
 import { makeToolSearchTool } from "./tools/tool-search.ts";
+import { makeAskUserTool } from "./question/tool.ts";
 import type { Diagnostic } from "./errors.ts";
 import type { StorageDir } from "./storage/types.ts";
 import type { ResourceChange } from "./events.ts";
@@ -172,6 +175,11 @@ export type AgentOptions = {
    * "none" = 诚实缺席，ask 当 policy deny）——两者都不给，构造期 fail-loud。
    */
   permission?: PermissionPolicy;
+  /**
+   * 提问策略（`ask_user`，2026-09-05）：有没有人会答模型的问题。不给 = `none`（库用法的常态，工具当场回「没人能答」）；
+   * 壳子坐着人就给 `responder:"host"`。与 `permission` 是两条平行的通道，各答各的。
+   */
+  questions?: QuestionPolicy;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   sessionId?: string;
   /**
@@ -587,6 +595,9 @@ export class Agent {
   /** permission ask 账本：只有 `answerPermission()` 与 loop 的 ask 路径碰它。 */
   private readonly permissions = new PermissionLedger();
   private readonly permissionPolicy: PermissionPolicy;
+  /** 提问账本：只有 `answerQuestion()` 与 `ask_user` 工具碰它。 */
+  private readonly questions = new QuestionLedger();
+  private readonly questionPolicy: QuestionPolicy;
   /** 当前 run 的稳定身份；permission ask 与事件关联引用它。 */
   private currentRunId: string | null = null;
   public getApiKey?: AgentOptions["getApiKey"];
@@ -734,6 +745,8 @@ export class Agent {
       // 渐进式披露的入口，恒装：延迟工具是标记、随时可能被 extension / MCP 注册进来；
       // 池里没有待取的延迟工具时它自己不上菜单（`visibleTools`），不多占一格
       toolSearch: { tools: [makeToolSearchTool({ tools: this.tools, loaded: this.loadedTools })] },
+      // 提问 `ask_user`（2026-09-05）：常驻；有没有人答由 `questions` 策略定，没人时工具当场如实回话
+      askUser: { tools: [makeAskUserTool({ ask: (input, signal) => this.askQuestion(input, signal) })] },
       // 压缩阶梯 + transcript_read + 习惯段：与 memory 同款——`builtin: false` 就是「这组不在」，
       // 流水线与 registry 仍在，等别的扩展注册阶段。`transcript_read` 读的是活的 transcript。
       compaction: opts.compaction?.builtin === false ? undefined : defaultCompactionPack(opts.compaction ?? {}, () => this._state.messages),
@@ -749,6 +762,7 @@ export class Agent {
     this.streamFunction = opts.streamFunction;
     this.hooks = opts.hooks ?? new HookRuntime();
     this.permissionPolicy = validatePermissionPolicy(opts.permission);
+    this.questionPolicy = validateQuestionPolicy(opts.questions);
     this.getApiKey = opts.getApiKey;
     // **放在最后**：attach 可能触发 report → hookContext() → this.hooks，
     // 而 hooks 是上面几行才赋的值（实测踩到：放在前面直接 TypeError）。
@@ -856,6 +870,51 @@ export class Agent {
   /** Inspector 用：还在等人的 ask。 */
   get pendingPermissions(): readonly import("./permission/types.ts").PermissionAsk[] {
     return this.permissions.pending;
+  }
+
+  /**
+   * 可信宿主回答一次提问（模型调了 `ask_user`）。accepted / stale / closed 都是正常结果、都 fulfill；
+   * 只有 JS 边界的坏 shape 才以 TypeError reject。**至少给一样**：选项或文字——空回答不是回答。
+   */
+  async answerQuestion(input: QuestionAnswer): Promise<QuestionAnswerResult> {
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      typeof input.questionId !== "string" ||
+      input.questionId === "" ||
+      !Array.isArray(input.selected) ||
+      !input.selected.every((s) => typeof s === "string" && s !== "") ||
+      (input.text !== undefined && typeof input.text !== "string") ||
+      (input.selected.length === 0 && (input.text === undefined || input.text.trim() === ""))
+    ) {
+      throw new TypeError("answerQuestion：需要 { questionId: string, selected: string[], text?: string }，且选项与文字至少给一样");
+    }
+    return this.questions.answer(input);
+  }
+
+  /** 壳子重挂时补摆：还在等人的提问。 */
+  get pendingQuestions(): readonly QuestionAsk[] {
+    return this.questions.pending;
+  }
+
+  /**
+   * `ask_user` 的落点。策略说没人（`responder:"none"`），或声明了宿主却没人订阅 lifecycle，都当场回 no-responder——
+   * 不生成 ask、不等人（与权限那边「诚实缺席」同一口径）。有人就登记、发 `question` 事件、等结算；
+   * 没等到（超时 / 中止 / 收摊）再发 `questionCancelled`，壳子据此撤掉屏幕上的问题。
+   */
+  private async askQuestion(input: Omit<QuestionAsk, "questionId">, signal: AbortSignal | undefined): Promise<QuestionSettlement> {
+    const policy = this.questionPolicy;
+    if (policy.responder === "none" || !this.hooks.hasSubscribers()) return { kind: "unanswered", reason: "no-responder" };
+    const handle = this.questions.openAsk(input, { timeoutMs: policy.askTimeoutMs ?? null, signal: signal ?? this.signal ?? new AbortController().signal });
+    await this.hooks.notify({ type: "question", ...handle.ask }, this.hookContext());
+    const settlement = await handle.settled;
+    if (settlement.kind === "unanswered" && settlement.reason !== "no-responder") {
+      await this.hooks.notify(
+        { type: "questionCancelled", questionId: handle.questionId, toolCallId: handle.ask.toolCallId, reason: settlement.reason },
+        this.hookContext(),
+      );
+    }
+    return settlement;
   }
 
   subscribe(listener: AgentListener): () => void {
@@ -2589,6 +2648,7 @@ export class Agent {
     this.reportUnconsumed(this.intake.dispose(), "dispose");
     // 再封 ask 账本：还在等人的 ask 以 runtime-disposed 封口（早于下面的 abort，否则会被记成 run-aborted）。
     this.permissions.dispose();
+    this.questions.dispose();
     // 关 admission：排队的 rejected(stopping)、在跑的 abort 并等它 close；之后的 enqueue 一律 rejected
     await this.admission.close("stopping");
     if (this.activeRun !== undefined) {
@@ -2965,6 +3025,17 @@ export class Agent {
     if (parts.length === 0) return;
     await this.sessionService?.append(id, parts);
   }
+}
+
+/** `AgentOptions.questions` 验形：不给 = 没人答（库用法的常态）；给了就得说清有没有人、等多久。 */
+function validateQuestionPolicy(p: QuestionPolicy | undefined): QuestionPolicy {
+  if (p === undefined) return { responder: "none", askTimeoutMs: null };
+  if (p.responder !== "host" && p.responder !== "none") throw new Error('questions.responder 必须是 "host" 或 "none"');
+  const t = p.askTimeoutMs;
+  if (t !== undefined && t !== null && (typeof t !== "number" || !Number.isFinite(t) || t <= 0)) {
+    throw new Error("questions.askTimeoutMs 必须是正数（毫秒）或 null（等人不超时）");
+  }
+  return { responder: p.responder, askTimeoutMs: t ?? null };
 }
 
 function normalizePrompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): AgentMessage[] {

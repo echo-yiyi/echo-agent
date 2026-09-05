@@ -10,6 +10,7 @@
 //   LifecycleEvent  hook 的挂点词汇表（可拦截 / 仅通知）
 
 import type { AgentError } from "./errors.ts";
+import type { QuestionOption } from "./question/types.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage, Usage } from "./messages.ts";
 import type { AgentToolResult } from "./tools/types.ts";
 import type { CompactionReason, CompactionState } from "./compaction/types.ts";
@@ -191,6 +192,17 @@ export type LifecycleEvent =
       decidedBy: "human" | "timeout";
     }
   | { type: "permissionCancelled"; permissionId: string; toolCallId: string; reason: "run-aborted" | "runtime-disposed" }
+  /* 提问（`ask_user`，2026-09-05）：与权限询问平行的另一条通道——那是壳子拦工具的工程机制，这是模型主动调的工具。
+     同样 notify-only：回答只能来自可信宿主的 answerQuestion()。没等到答案（超时 / 中止 / 收摊）发 cancelled，壳子据此撤掉问题。 */
+  | {
+      type: "question";
+      questionId: string;
+      toolCallId: string;
+      question: string;
+      options: readonly QuestionOption[];
+      multiSelect: boolean;
+    }
+  | { type: "questionCancelled"; questionId: string; toolCallId: string; reason: "timed-out" | "run-aborted" | "runtime-disposed" }
   /* 通知 */
   | { type: "notification"; kind: "waiting_permission"; permissionId: string; message: string }
   | { type: "notification"; kind: "idle" | "task_done" | "error"; message: string };

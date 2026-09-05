@@ -92,6 +92,7 @@ const AGENT_BUILTIN_TOOLS = [
   "TaskGet",
   "TaskList",
   "TaskUpdate",
+  "ask_user", // 2026-09-05 提问工具，core 恒装；管道形态没人答时它如实回话
   "schedule_cancel",
   "schedule_create",
   "schedule_list",

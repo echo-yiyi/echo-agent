@@ -34,6 +34,7 @@ import type { Model, ThinkingLevel } from "../provider/types.ts";
 import type { AgentMessage, ImageBlock } from "../messages.ts";
 import type { FollowUpResult, SteerResult } from "../loop/intake.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionAsk } from "../permission/types.ts";
+import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk } from "../question/types.ts";
 import { defineService, type ServiceKey } from "./abi.ts";
 
 /** 一轮跑完的结果。壳子只关心成没成、错在哪。 */
@@ -101,6 +102,15 @@ export interface AgentRuntime {
   answerPermission(answer: PermissionAnswer): Promise<PermissionAnswerResult>;
   /** 还欠着几个答复。壳子重启 / 重绘时靠它把待答的重新摆出来。 */
   readonly pendingPermissions: readonly PermissionAsk[];
+
+  /**
+   * 回答一次 `question`（模型调了 `ask_user`，2026-09-05）。与 `answerPermission` 平行的另一条通道：
+   * 那边是壳子拦工具的工程机制，这边是模型主动调的工具。壳子两条都得接——不接 `question` 的壳，
+   * `ask_user` 只能等到超时或中止。
+   */
+  answerQuestion(answer: QuestionAnswer): Promise<QuestionAnswerResult>;
+  /** 还在等人的提问。壳子重挂时靠它把问题重新摆出来。 */
+  readonly pendingQuestions: readonly QuestionAsk[];
 
   /* ── 停 ───────────────────────────────────────────────────────────── */
 

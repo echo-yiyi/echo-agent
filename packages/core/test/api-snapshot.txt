@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 304（value 108 · type 177 · both 19）
+符号 311（value 108 · type 184 · both 19）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -320,6 +320,15 @@ type   StreamFn
 type   StreamOptions
 type   ThinkingLevel
 
+-- src/question/types.ts (7) --
+type   QuestionAnswer
+type   QuestionAnswerResult
+type   QuestionAsk
+type   QuestionAskHandle
+type   QuestionOption
+type   QuestionPolicy
+type   QuestionSettlement
+
 -- src/schedule/harness.ts (1) --
 type   AgentSchedule
 
@@ -432,7 +441,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 56（value 25 · type 27 · both 4）
+符号 57（value 26 · type 27 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -450,7 +459,7 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (18) --
+-- src/extension/builtin.ts (19) --
 value  agentRuntimeOf
 value  BUILTIN_GENERATION
 value  builtinEntries
@@ -460,6 +469,7 @@ type   BuiltinToolsConfig
 value  definePromptPack
 value  defineToolPack
 value  ECHO_AGENT
+value  ECHO_ASK
 value  ECHO_COMPACTION
 value  ECHO_MEMORY
 value  ECHO_SCHEDULER

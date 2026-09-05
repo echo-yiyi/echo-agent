@@ -68,6 +68,9 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
     get pendingPermissions() {
       return base.pendingPermissions;
     },
+    get pendingQuestions() {
+      return base.pendingQuestions;
+    },
     get acceptsWork() {
       return base.acceptsWork;
     },
@@ -88,6 +91,7 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
     reset: () => base.reset(),
     compact: (i) => base.compact(i),
     setWorkspace: (w) => base.setWorkspace(w),
+    answerQuestion: (a) => base.answerQuestion(a),
   };
   // **不能用 `Object.assign`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter-only，
   // 赋值会抛 "Attempted to assign to readonly property"（实测）。覆盖项一律走 `defineProperty`，
@@ -391,6 +395,71 @@ test("欢迎头报模型 id（启动是装配层的事，壳子只说自己接�
   await flush();
   expect(ui.screen()).toContain("模型 only");
   expect(ui.screen()).toContain("only"); // FAKE 模型 id
+  quit(ui);
+  await done;
+});
+
+/* ─────────────── 提问：`ask_user`，与权限平行的另一支 ─────────────── */
+
+test("question（ask_user）摆上屏幕：单选按数字直答；没选项的在输入行打字回车；多选打序号串；答完撤掉（2026-09-05）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const answered: { questionId: string; selected: readonly string[]; text?: string }[] = [];
+  const runtime = runtimeOf(agent, {
+    answerQuestion: async (a) => {
+      answered.push({ questionId: a.questionId, selected: a.selected, ...(a.text === undefined ? {} : { text: a.text }) });
+      return { kind: "accepted" as const, questionId: a.questionId, toolCallId: "c" };
+    },
+  });
+  const done = runTui({ agent: runtime, ui });
+  await flush();
+
+  emitLifecycle(agent, {
+    type: "question",
+    questionId: "q1",
+    toolCallId: "c1",
+    question: "用哪个测试框架？",
+    options: [{ label: "vitest" }, { label: "bun test", description: "仓库已在用" }],
+    multiSelect: false,
+  });
+  await flush();
+  const screen = ui.screen();
+  expect(screen).toContain("用哪个测试框架？");
+  expect(screen).toContain("1. vitest");
+  expect(screen).toContain("2. bun test");
+  expect(screen).toContain("数字直选"); // 提示语写清怎么答
+  expect(answered).toEqual([]); // 还没按键，不许替用户答
+  ui.feed("2");
+  await flush();
+  expect(answered).toEqual([{ questionId: "q1", selected: ["bun test"] }]);
+  expect(ui.screen()).not.toContain("1. vitest"); // 答完撤掉
+  expect(ui.screen()).toContain("[回答] bun test");
+
+  // 没选项：输入行打字回车就是回答，不会当成新的一句 prompt
+  emitLifecycle(agent, { type: "question", questionId: "q2", toolCallId: "c2", question: "分支叫什么？", options: [], multiSelect: false });
+  await flush();
+  ui.feed("feature/x");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered.at(-1)).toEqual({ questionId: "q2", selected: [], text: "feature/x" });
+
+  // 多选：序号串按序号选，去重
+  emitLifecycle(agent, { type: "question", questionId: "q3", toolCallId: "c3", question: "要哪些？", options: [{ label: "a" }, { label: "b" }, { label: "c" }], multiSelect: true });
+  await flush();
+  expect(ui.screen()).toContain("可多个");
+  ui.feed("1,3,1");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered.at(-1)).toEqual({ questionId: "q3", selected: ["a", "c"] });
+
+  // 没等到答案（那一轮中止）：撤掉
+  emitLifecycle(agent, { type: "question", questionId: "q4", toolCallId: "c4", question: "还在吗？", options: [], multiSelect: false });
+  await flush();
+  expect(ui.screen()).toContain("还在吗？");
+  emitLifecycle(agent, { type: "questionCancelled", questionId: "q4", toolCallId: "c4", reason: "run-aborted" });
+  await flush();
+  expect(ui.screen()).not.toContain("在输入行打字回答");
+
   quit(ui);
   await done;
 });

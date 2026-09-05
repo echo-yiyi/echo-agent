@@ -109,6 +109,15 @@ export type {
   PermissionStage,
   PermissionVerdict,
 } from "./permission/types.ts";
+export type {
+  QuestionAnswer,
+  QuestionAnswerResult,
+  QuestionAsk,
+  QuestionAskHandle,
+  QuestionOption,
+  QuestionPolicy,
+  QuestionSettlement,
+} from "./question/types.ts";
 
 /* ───────────── 状态与 options 的词汇：**类型在这里，值在子路径** ───────────── */
 

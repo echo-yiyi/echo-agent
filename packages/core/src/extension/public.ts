@@ -53,6 +53,7 @@ export {
   ECHO_SKILLS,
   ECHO_TASKS,
   ECHO_TOOL_SEARCH,
+  ECHO_ASK,
   type BuiltinToolGroup,
   type BuiltinToolGroups,
   type BuiltinToolsConfig,

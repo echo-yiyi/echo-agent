@@ -805,6 +805,18 @@ test("CLI 打开会话面、但不给 runner：模型能看见别的会话、能
     undefined,
   );
   expect(built.sessions).toEqual({});
+  // 提问（`ask_user`，2026-09-05）由形态定：交互 = 有人答，管道 = 没人（工具当场如实回话）
+  expect(built.agent?.questions).toEqual({ responder: "host", askTimeoutMs: null });
+  const piped = echoOptions(
+    ECHO_AGENT,
+    { interactive: false, credentials },
+    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    kimiProvider(),
+    [],
+    credentials,
+    undefined,
+  );
+  expect(piped.agent?.questions).toEqual({ responder: "none", askTimeoutMs: null });
   expect(built.sessions?.run).toBeUndefined();
 });
 

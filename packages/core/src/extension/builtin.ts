@@ -168,6 +168,8 @@ export const ECHO_MEMORY = defineToolPack("echo:memory");
 export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
 /** 渐进式披露的入口 `tool_search`（2026-09-02）：恒装；延迟是工具自己的标记（`ToolBase.deferred`）。 */
 export const ECHO_TOOL_SEARCH = defineToolPack("echo:tool-search");
+/** 提问 `ask_user`（2026-09-05）：恒装；有没有人答由 `AgentOptions.questions` 定，没人时工具如实回话。 */
+export const ECHO_ASK = defineToolPack("echo:ask");
 
 function isStageArray(v: unknown): v is readonly CompactionStage[] {
   return (
@@ -240,6 +242,8 @@ export type BuiltinToolGroups = {
   readonly scheduler: BuiltinToolGroup | undefined;
   /** 渐进式披露的入口（`tool_search`），恒在；上不上菜单由 `visibleTools()` 按池里有没有待取的延迟工具决定。 */
   readonly toolSearch: BuiltinToolGroup | undefined;
+  /** 提问 `ask_user`，恒在。 */
+  readonly askUser: BuiltinToolGroup | undefined;
   /** `undefined` = `compaction.builtin === false`：不装缺省阶梯（流水线与 registry 仍在，等别的扩展注册阶段）。 */
   readonly compaction: CompactionPackConfig | undefined;
 };
@@ -276,6 +280,7 @@ export function builtinEntries(
     ["echo:memory", ECHO_MEMORY as ExtensionDefinition<unknown>, groups.memory],
     ["echo:scheduler", ECHO_SCHEDULER as ExtensionDefinition<unknown>, groups.scheduler],
     ["echo:tool-search", ECHO_TOOL_SEARCH as ExtensionDefinition<unknown>, groups.toolSearch],
+    ["echo:ask", ECHO_ASK as ExtensionDefinition<unknown>, groups.askUser],
     ["echo:compaction", ECHO_COMPACTION as ExtensionDefinition<unknown>, groups.compaction],
   ];
   return [
@@ -423,6 +428,10 @@ export function agentRuntimeOf(agent: RuntimeSource): AgentRuntime {
     get pendingPermissions() {
       return agent.pendingPermissions;
     },
+    answerQuestion: (a) => agent.answerQuestion(a),
+    get pendingQuestions() {
+      return agent.pendingQuestions;
+    },
     abort: (reason) => agent.abort(reason),
     // 换装备（P3a）：机制在 Agent 的装备 setter 与 reset() 上，这里只是接口到协议的映射
     setModel: (model) =>
@@ -453,7 +462,17 @@ export function agentRuntimeOf(agent: RuntimeSource): AgentRuntime {
 /** `agentRuntimeOf` 要用到的那部分 Agent。**不收整个 Agent 类**——收窄从这里就开始。 */
 export type RuntimeSource = Pick<
   AgentRuntime,
-  "state" | "subscribe" | "subscribeLifecycle" | "steer" | "followUp" | "answerPermission" | "pendingPermissions" | "abort" | "acceptsWork"
+  | "state"
+  | "subscribe"
+  | "subscribeLifecycle"
+  | "steer"
+  | "followUp"
+  | "answerPermission"
+  | "pendingPermissions"
+  | "answerQuestion"
+  | "pendingQuestions"
+  | "abort"
+  | "acceptsWork"
 > & {
   prompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): Promise<{ outcome: AgentOutcome }>;
   /** 装备面（P3a）：Agent 的 get/set 属性对与 `reset()`。守 idle 的抛在 Agent 里，`equip()` 只做映射。 */
