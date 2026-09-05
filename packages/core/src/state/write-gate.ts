@@ -7,7 +7,7 @@
 //   - `CapabilityWriteAuthority` + `adoptStorageView()`：每个能力拿到的仍是原样的 `StorageDir`，
 //     只是每个 mutating method 在真 I/O 紧邻边界先 `assertWriteAllowed()`。
 //
-// **它能判什么、不能判什么**（§14.9 那张表）：能拒空 / revoked cell、错 Lease 身份、关着的根闸、
+// **它能判什么、不能判什么**：能拒空 / revoked cell、错 Lease 身份、关着的根闸、
 // 未开放的 lane、关着的 active business 通道；**不能**分辨同一个 Memory view 是前台还是 Dream 在调——
 // 那条互斥来自 admission 的单 permit 与 `abort → wait settled` 顺序，不是 I/O 层的 origin check。
 

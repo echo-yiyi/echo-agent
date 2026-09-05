@@ -1,4 +1,4 @@
-// `@echo-agent/core/extension`（§14.2.6 冻结清单里的一条）—— Extension Host ABI：definition / Context / ServiceKey /
+// `@echo-agent/core/extension` —— Extension Host ABI：definition / Context / ServiceKey /
 // Fiber 状态 / Effect / registries。不导出 RunPermit / concrete Agent / Fiber 与 EffectStack 本体。
 //
 // **2026-08-28 起已登记进 `package.json#exports`**（`./extension`）：第一个真实消费者是

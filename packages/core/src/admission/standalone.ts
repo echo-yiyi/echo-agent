@@ -1,4 +1,4 @@
-// StandaloneRunAdmission（§14.2.4）：standalone Agent 自带的 run admission——单 permit 的串行 actor。
+// StandaloneRunAdmission：standalone Agent 自带的 run admission——单 permit 的串行 actor。
 //
 // 规则（都是 ABI 结算规则，conformance 锁着）：
 //   - 一次只有一个 permit；foreground（user / inbox）高于 maintenance（Dream）：没有 active permit、没有排队的
@@ -39,9 +39,9 @@ export type AdmissionDeps = Readonly<{
   /** runId 生成（缺省 `run:<uuid>` / `dream:<uuid>`）。 */
   runId?(source: RunSource): string;
   /**
-   * §15.5.2 的 run 边界（Host-internal，非 throwing）：
+   * run 边界（Host-internal，非 throwing）：
    *   · `accepted` 在 binding 冻结之后、execute 之前**同步**调一次：只预留记录，不等落盘、不返回裁决——
-   *     admission 永远不因观测层的状态拒 run 或等 run（2026-09-03 用户拍板，放弃 §15.12 的 fail-closed）；
+   *     admission 永远不因观测层的状态拒 run 或等 run（2026-09-03 用户拍板，放弃 fail-closed）；
    *   · `closed` 在 result 形成之后、ticket 结算之前 await（Host 侧有界等待）——terminal record 先 COMMIT（或明确失败 /
    *     到期降级）再放行下一份 permit。
    * 两个都由 Host 保证不抛；这里再兜一层，观测层的异常不改变业务结算。
@@ -251,7 +251,7 @@ export class StandaloneRunAdmission implements AgentAdmissionPort {
         }
         result = { kind: "callback-error", runId, result: normalized, error: toAgentError(failure.error, aborted) };
       }
-      // 封口：terminal record 先落（或明确失败 / 到期降级）再结算 ticket、再放行下一份 permit（§15.5.2 第 5–6 步）
+      // 封口：terminal record 先落（或明确失败 / 到期降级）再结算 ticket、再放行下一份 permit
       if (result !== null && this.deps.observe !== undefined) {
         try {
           await this.deps.observe.closed({ runId, result });

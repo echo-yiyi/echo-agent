@@ -1,4 +1,4 @@
-// 依赖图（§14.7.2）：inject / provide 在 mount 前成图。
+// 依赖图：inject / provide 在 mount 前成图。
 //
 //   provider ACTIVE 后 consumer 才能 LOADING；consumer 先 UNLOAD，provider 后 UNLOAD
 //   required 缺失 → 启动失败（不 PENDING 假装成功）；cycle → 报完整路径

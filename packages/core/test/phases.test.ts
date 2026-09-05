@@ -1,4 +1,4 @@
-// §14 生命周期相位：`start({activation:"deferred"})` → `restored(deferred-start)` → `activate()` → running；
+// 生命周期相位：`start({activation:"deferred"})` → `restored(deferred-start)` → `activate()` → running；
 // `pauseManagedWork({reason:"handoff"})` → `restored(paused)` → `resumeManagedWork()` → running；
 // 以及 restored 的方法矩阵（prompt 拒、consumeInbox 禁、Dream 禁、ingress 仍 accepted 但不自动消费）。
 //

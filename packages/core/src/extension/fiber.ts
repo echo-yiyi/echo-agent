@@ -1,4 +1,4 @@
-// Fiber（§14.7.3）：一个 Entry generation 的运行实例——状态机 + 它拥有的 Effect + 它给 Extension 的 Context。
+// Fiber：一个 Entry generation 的运行实例——状态机 + 它拥有的 Effect + 它给 Extension 的 Context。
 //
 //   DISCOVERED → PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED
 //                                      └ failure → FAILED（unwind owned effects）→ DISPOSED

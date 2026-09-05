@@ -1,4 +1,4 @@
-// Host 自带的 Service（§14.7.4「保留裸领域实体，用 sidecar ledger 记录归属」）。**两类，别混**：
+// Host 自带的 Service（「保留裸领域实体，用 sidecar ledger 记录归属」）。**两类，别混**：
 //
 //   · **registry**（tools / hooks / skills）——扩展**往 agent 里注册东西**的口子。
 //     包住现有 harness，**不给 AgentTool / Skill 加 source 或 Fiber 字段**。

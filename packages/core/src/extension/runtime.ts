@@ -17,7 +17,7 @@
 //
 // 开放的话「壳实现了多少全凭自觉」这个病只是换了个地方——它是**穷举**：加一支就是改契约，
 // 所有壳都得跟上。这也正是它值得配一套 conformance 的原因：壳恰好有**两个**实现，
-// 而共享 suite 的全部价值就是「两个实现跑同一套判据」（§12 决策记录 2026-08-28）。
+// 而共享 suite 的全部价值就是「两个实现跑同一套判据」（2026-08-28 决策记录）。
 //
 // ## 三样故意不放进来
 //
@@ -113,7 +113,7 @@ export interface AgentRuntime {
    * 换模型（P3a）。**慢变装备，仅 idle 可换**——core 原有的守卫（`agent.ts` `assertIdle`），
    * 这里只是把它接到协议上。忙时 `rejected` 带原因，**不排队**：排队会让「我换了模型」
    * 在几分钟后某个自主 run 之后突然生效，那是惊吓不是功能。
-   * 绿灯 = **下一轮**生效：每次 admission 冻结 model binding（§14.2.4 model seam），本轮不撕裂。
+   * 绿灯 = **下一轮**生效：每次 admission 冻结 model binding（model seam），本轮不撕裂。
    * 目录从哪来是壳子的事（P3a 只在当前 provider 的目录里选；跨 provider 是 P3b 的装配面）。
    */
   setModel(model: Model): Promise<EquipResult>;

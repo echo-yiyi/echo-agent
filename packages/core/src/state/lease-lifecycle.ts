@@ -1,4 +1,4 @@
-// 主动释放与意外丢锁共用的 host lifecycle port（§14.5）。
+// 主动释放与意外丢锁共用的 host lifecycle port。
 //
 // **只允许 composition root 构造时注入**：不进 Extension ABI，也不从 AgentHandle 暴露。
 // 它只处理 Host 自己拥有的收尾（完整 Runtime 是 canonical Observation writer；standalone 是对应的

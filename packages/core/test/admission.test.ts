@@ -1,4 +1,4 @@
-// §14.2.4 Unified Run Admission（standalone 版）：admission 类型面 / normalizeModelSnapshot / StandaloneRunAdmission 的 ABI 结算规则 /
+// Unified Run Admission（standalone 版）：admission 类型面 / normalizeModelSnapshot / StandaloneRunAdmission 的 ABI 结算规则 /
 // Agent 的 prompt · Inbox · Dream 全部经同一 port。conformance 由 fake 与 standalone 共跑一套。
 
 import { test, expect } from "bun:test";

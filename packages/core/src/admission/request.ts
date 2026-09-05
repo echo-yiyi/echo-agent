@@ -1,4 +1,4 @@
-// `AgentInternalRunRequest` 的运行时验形（§14.2.4）：按 `source.kind` 显式穷举——
+// `AgentInternalRunRequest` 的运行时验形：按 `source.kind` 显式穷举——
 //   inbox：必须带非空 reservationId + 非空 / 有序 / 去重的 reservedRecordIds，priority / purpose 都是 foreground；
 //   dream：禁止携带 reservation 字段，priority / purpose 都是 maintenance；
 //   其他：不是 Agent 内建来源，拒。

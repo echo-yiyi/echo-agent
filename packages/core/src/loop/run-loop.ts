@@ -164,7 +164,7 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
       continue outer; // 注入即「又给了一件事」，回内层
     }
 
-    /* 真要停了：关 run intake（§14 RunIntakeGate）。「队列空」与「关门」是同一原子步——stop hook 等待期间
+    /* 真要停了：关 run intake（RunIntakeGate）。「队列空」与「关门」是同一原子步——stop hook 等待期间
        到达并 accepted 的 followUp 不能凭空消失：关不上就说明有货，消费掉再回内层。 */
     const late = (await config.intake?.tryCloseRun()) ?? null;
     if (late !== null) {
@@ -175,7 +175,7 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
   }
 
   if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-  // run 关门（§14 RunIntakeGate）**必须在 agent_end 之前**：abort / error / 超时 / 轮数用尽 / shouldStopAfterTurn
+  // run 关门（RunIntakeGate）**必须在 agent_end 之前**：abort / error / 超时 / 轮数用尽 / shouldStopAfterTurn
   // 各条 break outer 都经这里。上一版关门在 runWithLifecycle 的 finally——agent_end 的订阅者 followUp() 拿到
   // accepted、随后被 [queue_dropped] 丢掉，等于对一个已结束的 run 返回假 accepted（实测）。正常收尾时门已在
   // tryCloseRun 关上，这里 no-op。
@@ -199,7 +199,7 @@ export async function decideAfterTurn(
   emit: Emit,
 ): Promise<AfterTurnDecision> {
   /* ① 模型还要工具 → 继续干。本 turn accepted 的 steer 在关 turn 时一并并入——「跑的中途插话 → 下一圈开头」，
-     accepted 的 steer 必须在它所属的 turn 关门前消费（§14 RunIntakeGate），不攒到某个收尾的轮才捞 */
+     accepted 的 steer 必须在它所属的 turn 关门前消费（RunIntakeGate），不攒到某个收尾的轮才捞 */
   if (turn.stopReason === "tool_use") {
     await absorb(context, (await config.intake?.closeTurn()) ?? [], emit);
     return { action: "continue" };

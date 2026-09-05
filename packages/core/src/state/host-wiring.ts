@@ -1,4 +1,4 @@
-// Host-internal 的接线（§14.9 / §14.5）：状态根写入总闸与 lease lifecycle port **不进公共 `AgentOptions`**。
+// Host-internal 的接线：状态根写入总闸与 lease lifecycle port **不进公共 `AgentOptions`**。
 //
 // 为什么用 WeakMap 而不是构造参数：`AgentOptions` 是根入口的公开类型，往里加字段就是公共面变化
 // ——「公共类型里可配置、文档却说只有 composition root 能用」是个站不住的中间态（普通用户能注入自己的
@@ -13,7 +13,7 @@ export type StateHostWiring = Readonly<{
   gate?: StateWriteGate;
   leaseLifecycle?: StateLeaseLifecycle;
   /**
-   * 装配现场转过来的所有权账本（§14.5.1）：这一个 Agent 是全部 adopt slot 的唯一 dispose owner，
+   * 装配现场转过来的所有权账本：这一个 Agent 是全部 adopt slot 的唯一 dispose owner，
    * `stop()` 排空它。同样不进公共 `AgentOptions`——外部注入一份「保险 disposer」正是要防的那件事。
    */
   adoption?: AdoptionLedger;

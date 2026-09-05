@@ -12,7 +12,7 @@ import type { AgentMessage } from "../src/messages.ts";
 
 type ToolResultEntry = Extract<AgentMessage, { role: "toolResult" }>;
 
-// §14.7.5「先加固现有接缝」的六条反例（O1a）。每条都是**摘掉修复就会红**的判据，
+// 「先加固现有接缝」的六条反例（O1a）。每条都是**摘掉修复就会红**的判据，
 // 不是「探到能力」——探到能力 ≠ 用了能力，本仓栽过。
 //
 //   1. 工具执行只认本轮对象快照——本轮中途注册的名字即使被模型点中也不执行

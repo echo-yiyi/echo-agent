@@ -1,4 +1,4 @@
-// admission 的测试替身与共享 conformance（§14.2.4）。走 `@echo-agent/core/testing` 子路径，不在生产面上。
+// admission 的测试替身与共享 conformance。走 `@echo-agent/core/testing` 子路径，不在生产面上。
 //
 //   - `createFakeAgentAdmission()`：手动驱动的 fake——`grantNext(binding)` / `rejectNext(reason)` / `abortActive()`，
 //     不自己跑微任务；测试可读 pending request，但拿不到 execute callback；
@@ -201,7 +201,7 @@ async function driveUntil(sut: AdmissionUnderTest, cond: () => boolean, steps = 
 }
 
 /**
- * ABI 结算规则（§14.2.4）：foreground 高于 maintenance；在跑的 Dream 可被抢占；scope 的 source / purpose 与 request 一致；
+ * ABI 结算规则：foreground 高于 maintenance；在跑的 Dream 可被抢占；scope 的 source / purpose 与 request 一致；
  * execute 0-or-1 次；LoopResult 原样保留；正常 rejected 只 fulfill；sync throw / async reject / abort 都形成 callback-error 且
  * 各只 settle 一次；execute 里再 enqueue 不会递归执行。抛错 = 不合格。
  */
@@ -475,7 +475,7 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
 export type ModelSnapshotUnderTest = Readonly<{ snapshot: (model: Model) => RunModelSnapshot }>;
 
 /**
- * `RunModelSnapshot` 的口径（§14.2.4）：
+ * `RunModelSnapshot` 的口径：
  * **递归 clone + 冻结**（原对象事后怎么改都影响不到快照）、只接受 JSON-like 值、
  * 不能 canonical 表达的值一律 **fail-loud 不静默删字段**、`__proto__` 这种键只是自身属性。
  *

@@ -32,7 +32,7 @@ export class RunIntakeGate {
   private turn: { readonly turnId: string; steers: AgentMessage[] } | null = null;
   private disposed = false;
   /**
-   * reconfiguration barrier（§14.9.5）：handoff 的 `pauseManagedWork()` 立起来之后，新的 steer / followUp 一律
+   * reconfiguration barrier：handoff 的 `pauseManagedWork()` 立起来之后，新的 steer / followUp 一律
    * `rejected(reconfiguring)`。**barrier 之前 accepted 的仍必须消费完**——它们 pin 着当前 turn / run，
    * 由正在 drain 的那一轮照常吃掉。不立这道闸的话，handoff 期间源源不断的 followUp 能把前台 run 无限延长，
    * drain 永远等不到头（实测饥饿）。

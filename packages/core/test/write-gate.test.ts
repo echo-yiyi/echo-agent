@@ -1,4 +1,4 @@
-// §14.9 状态根写入资格：LeaseIdentityCell 三态 / 五条 enforced lane / activeBusinessMode /
+// 状态根写入资格：LeaseIdentityCell 三态 / 五条 enforced lane / activeBusinessMode /
 // adoptStorageView 的 fail-closed，以及 Agent 的 revoke fence 顺序（release 之前 revoke、丢锁不补 flush）。
 //
 // Agent 级的几条**一律对真 adopted view 断言**：只断言 `prompt()` / `ingress` 被拒是没有区分力的——

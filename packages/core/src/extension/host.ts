@@ -1,7 +1,7 @@
-// ExtensionHost（§14.7.1–14.7.4）：把一组 Entry 作为一个 generation mount / unmount 的内核。
+// ExtensionHost：把一组 Entry 作为一个 generation mount / unmount 的内核。
 //
 // O2a 的边界：只有 PREPARE（成图、验规则）→ 按拓扑 LOADING → ACTIVE，与逆拓扑 unmount。
-// reload 事务（§14.9.3 的 QUIESCE / SWAP）、loader / import（§14.8）、ManagedRunSources（要 admission）都不在这里。
+// reload 事务（QUIESCE / SWAP）、loader / import、ManagedRunSources（要 admission）都不在这里。
 //
 // 三条纪律：
 //   - mount 是**全有或全无**：任何一个 Fiber 失败，它自己 LIFO unwind，本次已 ACTIVE 的按逆序全部卸掉，再抛；

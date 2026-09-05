@@ -1,4 +1,4 @@
-// §14.5.1 AgentAssembly adoption：assembly 状态机、三态租约、唯一 dispose owner、原子转移、零副作用 factory。
+// AgentAssembly adoption：assembly 状态机、三态租约、唯一 dispose owner、原子转移、零副作用 factory。
 //
 // 判据尽量用「**第二次 dispose 会抛错**」的合法 fixture 立——契约里 `StorageDir.close()` 没有要求幂等，
 // 所以「关两次」不是洁癖问题，而是注入一个守规矩的实现就会当场炸。计数断言只能证明「至少一次」，

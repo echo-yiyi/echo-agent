@@ -161,7 +161,7 @@ export function definePromptPack(name: string): ExtensionDefinition<PromptPackCo
   });
 }
 
-/** §14 owner 表里的四条（本批只搬工具注册；session/background/mcp 等仍在各自的位置）。 */
+/** 生命周期 owner 的四条（本批只搬工具注册；session/background/mcp 等仍在各自的位置）。 */
 export const ECHO_TASKS = defineToolPack("echo:tasks");
 export const ECHO_SKILLS = defineToolPack("echo:skills");
 export const ECHO_MEMORY = defineToolPack("echo:memory");
@@ -356,13 +356,13 @@ export async function mountBuiltinTools(
 export const BUILTIN_GENERATION = "builtin";
 
 /**
- * `echo:agent` —— §14 owner 表那一条：**provide `AgentRuntime`**。
+ * `echo:agent` —— **provide `AgentRuntime`** 的那一条。
  *
  * 它是「壳也是 extension」这件事的支点：壳（TUI / Web）`inject` 这个 Service，
  * 于是它们与工具扩展**长在同一套机制上**，而不是 core 外面套的一层。
  *
- * 本批只做 provide 这一半——规格里 `echo:agent` 还要「seal AgentAssembly、构造/恢复低层 Agent」
- * （§14 第 11–14 步的 candidate/seal 换代流程）。那是 O3 正题，这里用**已经造好的** Agent
+ * 本批只做 provide 这一半——`echo:agent` 还要「seal AgentAssembly、构造/恢复低层 Agent」
+ * （candidate/seal 换代流程）。那是 O3 正题，这里用**已经造好的** Agent
  * 交出协议，形状对、顺序对，只是还没有 candidate 那套。**不假装它已经是完整的 O3。**
  */
 export const ECHO_AGENT: ExtensionDefinition<{ runtime: AgentRuntime }> = defineExtension<{ runtime: AgentRuntime }>({
