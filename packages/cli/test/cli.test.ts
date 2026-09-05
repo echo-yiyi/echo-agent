@@ -95,7 +95,7 @@ function scriptedProvider(turns: ProviderEvent[][]): Provider {
 }
 
 /**
- * **走真装配**（`createEcho` —— §14.2 的唯一 composition root）而不是 `new Agent`：
+ * **走真装配**（`createEcho` —— 唯一 composition root）而不是 `new Agent`：
  * Runner 面对的就是这一个。落盘默认件、单写者锁、`start()` 的恢复顺序、以及
  * builtin extension 装上来的工具面，都只在这条路上才存在——
  * 用低层 `new Agent` 测，「收摊后锁没了」这类判据压根无从谈起。
@@ -289,7 +289,7 @@ test("bin:缺凭据诚实拒跑——不退化成假模型", () => {
 
 /* ────────── 2026-08-24 review 的两条：done-only provider · 预先 abort ────────── */
 
-/** 只发 `done` 的一轮——Core §6.1 契约③ 明说这是**最低实现门槛**（CLI 这类无流式后端）。 */
+/** 只发 `done` 的一轮——Core 契约③ 明说这是**最低实现门槛**（CLI 这类无流式后端）。 */
 function bareDoneTurn(text: string): ProviderEvent[] {
   return [
     {

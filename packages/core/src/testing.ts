@@ -102,7 +102,7 @@ export function errorTurn(code: string, message: string, retryable: boolean): Sc
   ];
 }
 
-// §14.2.4：durable ingress 的答复口径。standalone `Agent.ingress` 与 O3 的 Runtime/AgentHandle stable ingress
+// durable ingress 的答复口径。standalone `Agent.ingress` 与 O3 的 Runtime/AgentHandle stable ingress
 // 跑同一 suite——第二个实现最容易跑偏的正是口径（拒绝用不用 rejection、去重回不回原 recordId）。
 export {
   runDedupeKeyProducerConformance,
@@ -112,7 +112,7 @@ export {
   type DurableIngressUnderTest,
 } from "./inbox/testing.ts";
 
-// §14.2.4：admission 的 fake 与共享 conformance——StandaloneRunAdmission 与将来完整 Runtime 的 admission 都跑同一 suite。
+// admission 的 fake 与共享 conformance——StandaloneRunAdmission 与将来完整 Runtime 的 admission 都跑同一 suite。
 export {
   createFakeAgentAdmission,
   runAgentAdmissionConformance,

@@ -41,9 +41,9 @@ import { SqliteCanonicalObservationStore, observationDatabasePath } from "./obse
 /** 默认身份（D5）。 */
 const DEFAULT_AGENT_ID = "default";
 const LOCK_FILE = ".lock";
-/** §14 RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
+/** RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
 const RUNTIME_GENERATION = "boot";
-/** §15 OR9 的缺省 capture policy：metadata。content 要调用方显式打开（`observation.capture`）。 */
+/** OR9 的缺省 capture policy：metadata。content 要调用方显式打开（`observation.capture`）。 */
 const DEFAULT_OBSERVATION_CAPTURE: ObservationCapturePolicy = "metadata";
 /**
  * 观测层唯一还会让 agent 等的地方是 `run.closed` 的有界等待（2026-09-03 用户拍板：观测不得影响 agent 主线）。
@@ -137,7 +137,7 @@ export type CreateAgentOptions = {
   /** 解析模型时是否允许联网刷新目录。缺省 `true`；离线环境给 `false`。 */
   allowNetwork?: boolean;
   /**
-   * 观测（§15）。`capture` 是采集档（OR9），缺省 `"metadata"`：只记形状与计数——工具名、耗时、参数与结果的字节数、
+   * 观测。`capture` 是采集档（OR9），缺省 `"metadata"`：只记形状与计数——工具名、耗时、参数与结果的字节数、
    * token 用量——没有正文。`"content"` 才把模型回复文本、工具 `params` 与结果正文、报错消息写进状态根的
    * `observability/observations.sqlite`；`"off"` 只留 run 边界，不投影任何 fact。
    *
@@ -273,7 +273,7 @@ export function resolveModel(provider: Provider, available: readonly Model[], wa
 /**
  * 装配一个带 first-party 默认件的 Agent。**async**：内部要刷新并解析模型目录。
  *
- * **不是公共面**（2026-08-31 收）：§14.2 的标题是「一个包、两个使用高度、**一个** composition root」，
+ * **不是公共面**（2026-08-31 收）：「一个包、两个使用高度、**一个** composition root」，
  * 而这个函数曾经和 `createEcho()` 一起挂在根入口上——那就是两个装配现场，
  * 「CLI 与 SDK 不得各自装配」那条也就名存实亡。现在它只被 `createEcho()` 调用：
  * 装配现场唯一，低层用户走 `new Agent()`（自己给端口、自己注册工具）。
@@ -328,12 +328,12 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   const sharedStore = opts.sharedStore ?? opts.store ?? new FileDir(expandHome(resolveSharedDir()));
   const lock = opts.lock ?? fileStateLock(join(stateDir, LOCK_FILE));
 
-  // canonical observation store（§15.4.2.2）：固定在状态根下，与自定义 `store` 无关——它是 Runtime 基础设施，不是可换的 Entry。
+  // canonical observation store：固定在状态根下，与自定义 `store` 无关——它是 Runtime 基础设施，不是可换的 Entry。
   // open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——那是状态根坏了 / 文件系统不支持，启动时就该看见。
   // 起来之后的写失败**不再**影响 run（观测层只降级，见 observability/runtime.ts 头注）。
   const observationStore = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir), busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
 
-  // 装配现场（§14.5.1）：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
+  // 装配现场：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
   // 它撑住的是「值已经造好、`new Agent()` 还没成功」那个窗口——上一版那时抛错，root store 就再没人关过。
   const assembly = new AgentAssembly({ provider: "echo:persistence-local" });
 
@@ -344,7 +344,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   // 没要求幂等，注入一个第二次关闭就报错的合法实现，默认 `agent.stop()` 当场失败——实测），
   // 而且可能在 `saveTasks()` 还没写完时就关了。真正的关闭放在 `finalDisposables`：
   // 那是所有收摊 settle 之后才跑的一档。
-  // 它在 assembly 里是 **borrow**（§14.5.1 规则 2）：进程域的值，dispose owner 永远是 provider 侧，
+  // 它在 assembly 里是 **borrow**（规则 2）：进程域的值，dispose owner 永远是 provider 侧，
   // Agent 拿到的 `shared` 是**不带 `close`** 的视图。standalone 下进程域与 Agent 同寿，
   // 所以那次唯一的 close 仍由 `finalDisposables` 触发（见下方装配处）。
   const shared: StorageDir = assembly.borrow<StorageDir>(
@@ -394,7 +394,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     // 形状到此为止。**seal 只冻结形状，不转移所有权**——转移发生在构造成功之后的 `adoptInto()`。
     assembly.seal();
 
-    // 观测 Runtime（§15）：唯一 Sequencer + 上面那条 SQLite；装配快照只封 builtin 槽的身份与安全配置摘要，
+    // 观测 Runtime：唯一 Sequencer + 上面那条 SQLite；装配快照只封 builtin 槽的身份与安全配置摘要，
     // **不放对象本体、凭据、路径正文**（assembly.ts 头注）。每个 run 的 `run.assembly` 记录引用这份 digest。
     const observation = new ObservationRuntime({
       runtimeId: `rt:${crypto.randomUUID()}`,
@@ -435,7 +435,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       skillStore: parts.skillStore,
       // 收摊全部 settle 之后，**唯一的那次** close：进程域（borrow）由 assembly 收，
       // 恰好一次由 slot 的三态保证——不再是这里直接调 `store.close()`。
-      // 观测排在最前：先把 ring 里的尾巴写进 SQLite 再关它，之后才关 root store（§15.12 shutdown 顺序：flush canonical 在前）。
+      // 观测排在最前：先把 ring 里的尾巴写进 SQLite 再关它，之后才关 root store（shutdown 顺序：flush canonical 在前）。
       finalDisposables: [...(opts.agent?.finalDisposables ?? []), { dispose: () => observation.dispose() }, { dispose: () => assembly.disposeProcessScope() }],
     });
 
@@ -462,7 +462,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
 }
 
 /**
- * `createAgent()` 直接构造的 builtin 槽（§15.5.1 sealed AgentAssembly 的 O2a 最小形态）：只有槽名、Entry id、
+ * `createAgent()` 直接构造的 builtin 槽（sealed AgentAssembly 的 O2a 最小形态）：只有槽名、Entry id、
  * 代与**安全**配置摘要输入。O2b 接上正式 Entry owner 后往同一 schema 填值，slot id 不漂移。
  */
 function builtinSlotContributions(input: { customStore: boolean; withoutMemory: boolean; providerIds: readonly string[]; modelId: string }): BuiltinSlotContribution[] {
@@ -503,10 +503,10 @@ function prepareCapabilities(input: {
   withoutMemory?: boolean;
 }): AssembledCapabilities {
   const { assembly, shared, sharedUser } = input;
-  // **写入资格在这里发**（§14.9）：composition root 建一个总闸，每个能力拿到的是它发的 authority 包过的
+  // **写入资格在这里发**：composition root 建一个总闸，每个能力拿到的是它发的 authority 包过的
   // view——签名与 `StorageDir` 一模一样，领域对象什么都不用改。身份要等 `Agent.start()` acquire 成功才装进去，
   // 所以从这里到 start 之间的任何写都 fail-closed。
-  // 写入格是 **candidate-owned**（§14.5.1 规则 6）：在 assembly 上建、随 adoption 转给唯一那个 Agent，
+  // 写入格是 **candidate-owned**（规则 6）：在 assembly 上建、随 adoption 转给唯一那个 Agent，
   // 只有它 `start()` acquire 成功后才 install。一次装配一个 cell，所以三代之间结构上就不共享。
   const gate = assembly.writeGate;
   const viewFor = (capabilityId: string, lanes: readonly Parameters<typeof gate.openLane>[0][]): StorageDir =>
@@ -516,7 +516,7 @@ function prepareCapabilities(input: {
   // 它**不**提供互斥——user 层本来就是多段 session 共写的（sessions.md §2）。
   const sharedViewFor = (capabilityId: string, lanes: readonly Parameters<typeof gate.openLane>[0][]): StorageDir =>
     adoptStorageView(sharedUser, gate.authorityFor(capabilityId, { lanes, activeBusiness: true }));
-  // lane 划分照 §14.9 那张表：恢复期的写都走 restore-migration，收摊尾写走 lifecycle-finalization，
+  // lane 划分：恢复期的写都走 restore-migration，收摊尾写走 lifecycle-finalization，
   // inbox 的 durable delivery 与 schedule 的 catch-up 各有自己的一条。
   const sessionView = viewFor("echo:session", ["restore-migration", "lifecycle-finalization"]);
   const memoryView = scopedDir(sharedViewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`);
@@ -529,7 +529,7 @@ function prepareCapabilities(input: {
   // 记忆若跟着下沉就是每开一段换一套记忆。`createAgentMemories` 只要字节面，给它 `<ECHO_HOME>/memory/`。
   // 用户想换存储或策略时给 `sharedStore`，或者直接走低层 `new Agent({ memory })` 自己装。
   //
-  // 下面五件是 **adopt** slot（§14.5.1 规则 1）：agent 域的值，`new Agent()` 成功后由那一个 Agent 唯一 dispose。
+  // 下面五件是 **adopt** slot（规则 1）：agent 域的值，`new Agent()` 成功后由那一个 Agent 唯一 dispose。
   // 它们的 factory 都是**零外部副作用**的——只把注入的字节视图存起来，不读盘、不取锁、不起 timer；
   // 恢复归 `start()`、timer 与 intake 归 `activate()`。所以 candidate 期的 dispose 没有可关的资源，
   // 这里一个 disposer 都不登记（`assembly.adopt` 的第三参）。这条契约由 `assembly.test.ts` 的探针守着。
@@ -540,7 +540,7 @@ function prepareCapabilities(input: {
 
   // 任务清单与闹钟也落在同一个状态根下。
   // `TaskStore` 是字节面（D3 收窄后），所以这里就是把 `StorageDir` 的两个方法接过去——
-  // 这也印证了 §13.12.2 说的「终局是直接用 StorageDir，TaskStore 类型退役」。
+  // 这也印证了「终局是直接用 StorageDir，TaskStore 类型退役」。
   const taskStore = assembly.adopt<TaskStore>("echo:task", () => ({
     read: () => taskView.read(TASKS_FILE),
     write: (text) => taskView.write(TASKS_FILE, text),
@@ -549,7 +549,7 @@ function prepareCapabilities(input: {
   // 入站事实也落在同一个状态根下——崩溃时未消费的那些在 `start()` 时重放。
   const inboxStore = assembly.adopt("echo:inbox", () => new InboxStore(inboxView));
   const sessionService = assembly.adopt("echo:session", () => new SessionService(sessionView));
-  // skill 落在状态根 `skills/<name>/SKILL.md`（§13.6 布局；§5A.4c「文件实现写 SKILL.md」）。
+  // skill 落在状态根 `skills/<name>/SKILL.md`（「文件实现写 SKILL.md」）。
   // 给 Agent 的是这一层的**字节视图**（D3），发现 / 落盘 / 工具 / 租约门全在 Agent 里。
   // 视图不是独立的值，跟着它上面那层 slot 走，所以不单独占一个 slot。
   const skillStore = scopedDir(skillView, `${SKILLS_DIR}/`);

@@ -343,7 +343,7 @@ test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含�
   expect(loaded.compaction).toEqual(agent.state.compaction);
 });
 
-test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐字节相同（§7.4 第 4 条）", async () => {
+test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐字节相同", async () => {
   const store = new InMemoryDir();
   const a = capturing([reply("<summary>S1</summary>"), textTurn("one"), textTurn("two")]);
   const agentA = await agentWithBuiltins(a.fn, { session: { store, id: "s1" } });

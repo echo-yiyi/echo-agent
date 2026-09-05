@@ -1,4 +1,4 @@
-// StateLock —— 状态根的单写者资格（D6 / §13.12.3）。**纯端口，不碰 `node:`。**
+// StateLock —— 状态根的单写者资格（D6）。**纯端口，不碰 `node:`。**
 //
 // 为什么不塞进 `StorageDir`：那个面只有 read/write/remove/list，**没有原子 create-if-absent
 // 也没有 CAS**，用它模拟锁必然留 TOCTOU 窗口。而且一旦用户换成远程 Store，两个 `stateDir`
@@ -69,7 +69,7 @@ export class InMemoryStateLock implements StateLock {
   }
 
   /**
-   * 模拟租约丢失。**测试专用**——丢锁后的行为是契约要求配单测的不变量（§13.12.3），
+   * 模拟租约丢失。**测试专用**——丢锁后的行为是契约要求配单测的不变量，
    * 没有这个入口就只能等真实租约过期，那种测试要么慢要么飘。
    */
   simulateLost(reason: string): void {

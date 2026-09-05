@@ -38,7 +38,7 @@ export const SCHEDULE_FILE = "schedules.json";
 export type ScheduleDeps = {
   deliver?: (m: AgentMessage) => Promise<void> | void;
   report?: (d: Diagnostic) => void;
-  /** §15.9 领域观测 sink（module-local、永不抛）：created / cancelled / delivered / bookkeeping-failed / missed 各在唯一 settle 点发一次。 */
+  /** 领域观测 sink（module-local、永不抛）：created / cancelled / delivered / bookkeeping-failed / missed 各在唯一 settle 点发一次。 */
   observe?: CapabilityFactSink<ScheduleFact>;
 };
 
@@ -170,7 +170,7 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
       if (!isDue(entry, now)) continue;
       // **等接受成功再簿记**：投递抛错时下面几行不执行，条目原样留着，下一 tick 重来。
       await ctx.deliver?.(environmentMessage(renderFire(entry.schedule), SCHEDULE_KIND, entry.schedule.id));
-      // deliver 返回 = 投递被接受：这是 delivered 的唯一 emission point（§15.9）
+      // deliver 返回 = 投递被接受：这是 delivered 的唯一 emission point
       observe(ctx, { kind: "delivered", id: entry.schedule.id, scheduleKind: entry.schedule.kind, via: "tick" }, now);
       fired.push(entry.schedule);
       if (entry.schedule.kind === "at") {

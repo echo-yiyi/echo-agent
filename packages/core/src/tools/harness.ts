@@ -19,7 +19,7 @@ export type ToolMap = Map<string, AgentTool>;
 /**
  * 装一个工具。撞名 **fail-loud**,要盖掉必须显式 `replace: true`——不许静默影子。
  *
- * 返回的卸载器**只认对象身份**（§14.7.5 第 5 条）：池里这个名字若已被别人显式 replace 成
+ * 返回的卸载器**只认对象身份**：池里这个名字若已被别人显式 replace 成
  * 另一个对象,它什么都不做——按名字删会把新条目一起误删。返回 true = 真卸掉了。
  */
 export function registerTool(tools: ToolMap, tool: AgentTool, opts?: { replace?: boolean }): () => boolean {

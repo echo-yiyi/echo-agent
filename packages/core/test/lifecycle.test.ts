@@ -11,7 +11,7 @@ import { scriptedDialect, textTurn } from "../src/testing.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 
-// M5 · 统一生命周期（§13.12.4 的搬迁清单）：
+// M5 · 统一生命周期的搬迁清单：
 // 这些以前全靠用户往 `AgentOptions` 里逐项塞、再手动 `loadTasks()` / `schedule.start()`；
 // D4 之后归 `createAgent` 装配、`start()` 统一恢复与启动。
 //
@@ -102,7 +102,7 @@ test("start() 幂等：重复调不会起两套定时器", async () => {
   expect(clock.pending).toBe(0);
 });
 
-test("start() 打开常驻行为：会自己醒、会自己整理（§13.12.4 的最后一行）", async () => {
+test("start() 打开常驻行为：会自己醒、会自己整理", async () => {
   const agent = await createAgent(opts(new InMemoryDir(), { clock: new FakeClock(0) }));
   expect(agent.autoConsumeInbox).toBe(false); // 构造后还没开
   expect(agent.autoDream).toBe(false);

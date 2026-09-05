@@ -18,7 +18,7 @@ import { inspectStateLock } from "../src/storage/file-lock.ts";
 //   crash —— 投进一条 inbox、**不消费**、硬退出（不 stop）
 //   c     —— 新进程恢复一切
 //
-// §13.9 明说 Distribution Gate 的 `node run.mjs`（单次调用）**不是** Runtime V0 Gate，
+// Distribution Gate 的 `node run.mjs`（单次调用）**不是** Runtime V0 Gate，
 // 所以那条不能替代本文件。
 
 const HOST = join(import.meta.dir, "fixtures", "resident-host.ts");
@@ -65,7 +65,7 @@ function inboxRecordCount(home: string, sessionId: string): number {
 }
 
 test(
-  "Runtime V0：三个真进程走完 §13.9 的 resident integration",
+  "Runtime V0：三个真进程走完 12 条 resident integration",
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "echo-resident-"));
 
@@ -148,7 +148,7 @@ test(
     // Skill：目录段进 system（激活是运行态、不跨进程；宿主每次启动重新交 skill）
     expect(last.systemPrompt, "skill 目录没进 system").toContain("写提交信息");
 
-    // Task：A 进程建的那条，回到盘上**并且**进了 C 进程的 context（2026-08-24 §5D.7 落地前，
+    // Task：A 进程建的那条，回到盘上**并且**进了 C 进程的 context（2026-08-24 落地前，
     // 这里只验得到前半句）。**进的是消息末尾的注入，不是 system**——清单每轮都在变，
     // 放 system 等于每轮打掉 prompt cache，所以下面那条 `not.toContain` 是**设计要求**，
     // 不再是「还没做」的记号：它红了说明清单跑进 system 段去了。
@@ -166,7 +166,7 @@ test(
     // 任务与 inbox 也归 session：要验「崩溃前那条还在、重启后被吃掉」，crash 就得续同一段
     const crash = runPhase(dir, "crash", ra.sessionId!);
     expect(crash.ok, `phase crash 挂了：\n${crash.out}`).toBe(true);
-    // 只数 record 文件：`inbox/acks/` 是 batch-ack marker 的目录（§14.2.4），不是入站事实
+    // 只数 record 文件：`inbox/acks/` 是 batch-ack marker 的目录，不是入站事实
     expect(inboxRecordCount(dir, ra.sessionId!), "崩溃前投进来的那条不在盘上").toBe(1);
     // **任务是「工具回执说成功之后就崩」的那条**：此前 `saveTasks` 只在 `dispose()` 里调，
     // 干净 stop 掩盖了这个缺口——崩溃时那条任务会丢。

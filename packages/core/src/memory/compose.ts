@@ -107,7 +107,7 @@ export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
     const block = await composeMemoryRegion(ctx, m);
     if (block !== "") blocks.push(block);
   }
-  // §15.9 compose counts：这次进 system 的分区数 / 非空块数 / 字符数（sink 永不抛，兜一层不让观测影响 prompt）
+  // compose counts：这次进 system 的分区数 / 非空块数 / 字符数（sink 永不抛，兜一层不让观测影响 prompt）
   try {
     ctx.observe?.offer({ kind: "compose", regions: regions.length, blocks: blocks.length, chars: blocks.reduce((n, b) => n + b.length, 0), occurredAt: Date.now() });
   } catch {

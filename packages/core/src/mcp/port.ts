@@ -1,6 +1,6 @@
 // MCP 端口：core 认识的全部 MCP 概念。**这个文件不 import MCP SDK，也不 import 任何实现**。
 //
-// 为什么是端口而不是实现（2026-08-11 开源计划 §4 拍定）：
+// 为什么是端口而不是实现（2026-08-11 开源计划拍定）：
 // SDK-backed 的 MCP 实现会把 `@modelcontextprotocol/sdk` 拖进 core 的根依赖图——
 // 装 `@echo-agent/core` 只想跑一个 agent 的人，被迫装上整套 MCP 协议栈。
 // 所以 core 只留「怎么接」，「怎么连」出去到适配器一侧（不在本仓）。

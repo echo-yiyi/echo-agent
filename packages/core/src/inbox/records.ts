@@ -3,7 +3,7 @@
 // 两份落盘形状 + 它们的 id 规则。**纯的**：只用 Web Crypto 与字符串。
 //
 // `causation?: ObservationRef` 是 spec 里的可选字段，Observation 落地（O2f）之前不写进 schema——
-// 同一 schemaVersion 只许**增加** optional 字段（§15.4.3），所以那时补上是合法演进，现在先不占位。
+// 同一 schemaVersion 只许**增加** optional 字段，所以那时补上是合法演进，现在先不占位。
 
 import type { AgentMessage } from "../messages.ts";
 import { assertMessageShape } from "../message-shape.ts";
@@ -143,7 +143,7 @@ export function environmentDedupeKey(source: string, ref: string): string {
 }
 
 /**
- * Schedule 的 dedupeKey = `hash(agentId, schedule.id, schedule.createdAt)`（§14 R6）。
+ * Schedule 的 dedupeKey = `hash(agentId, schedule.id, schedule.createdAt)`（R6）。
  * **incarnation 进 key、scheduledAt 不进**：删掉后以同一 ID 重建的 schedule 是**另一个事实**，不能跟旧的共用
  * 防积压 key（否则新 schedule 被记 fired、Inbox 里却只有旧 prompt，新事实被吞——实测）；而同一 incarnation
  * 的多次到点仍要防积压，所以 scheduledAt 不能进。

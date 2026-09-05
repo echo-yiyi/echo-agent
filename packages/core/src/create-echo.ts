@@ -1,4 +1,4 @@
-// `createEcho` —— **唯一 composition root**（§14.14.1 O3 的第一刀）。
+// `createEcho` —— **唯一 composition root**（O3 的第一刀）。
 //
 // `createAgent()` 装的是「一个能跑的 Agent」；`createEcho()` 在它外面多做一件事：
 // **把磁盘上的 Extension 发现出来、装进这个 Agent**。所以出来的不是第二个 Agent 类，
@@ -6,7 +6,7 @@
 //
 // **node-only**（`node:fs/promises` + `node:url`），和 `create-agent.ts` 一样只在根入口。
 //
-// ## 与 §14.8 完整 Loader 的诚实边界
+// ## 与完整 Loader 的诚实边界
 //
 // 规格里的 Loader 是四步（resolve → manifest → **内容寻址编译** → import），并要一道
 // host singleton identity gate。**本文件只做最后一步的最小形态**：直接 `import()` 源文件。
@@ -17,10 +17,10 @@
 //   - **不做 singleton resolver**：`ServiceKeyTable` 按 `id + version/kind/scope/reload`
 //     canonicalize（见 `extension/service-key.ts`），所以就算 Extension 解析到了另一份
 //     `@echo-agent/core` 实例，同 id 的 ServiceKey 仍会归一，registry 照样拿得到。
-//     §14.8.2 要求的 `extensionServiceKey === hostServiceKey` **引用相等**门这里没有——
+//     完整 Loader 要求的 `extensionServiceKey === hostServiceKey` **引用相等**门这里没有——
 //     它防的是「两份物理实例各持一半状态」，那要等 O4 的编译期 resolver 才有意义。
 //   - **不弹信任确认**（2026-08-28 用户拍板）：`extensions/` 下的文件按用户自己的代码对待。
-//     模块求值本来就不是 sandbox（§14.8.4），加一个确认框只是仪式，挡不住任何东西。
+// 模块求值本来就不是 sandbox，加一个确认框只是仪式，挡不住任何东西。
 //
 // ## 坏扩展不阻塞启动（D6，2026-09-01 用户拍板：常驻 agent 的存活不以外围配置为前提）
 //
@@ -61,7 +61,7 @@ export const EXTENSIONS_DIR = "extensions";
 /** 与 `create-agent.ts` 同一个名字：会话面判「那一段活着吗」读的就是它。 */
 const LOCK_FILE = ".lock";
 
-/** 显式传入那一代（`opts.extensions`，含壳）。换代（reload）是 §14.8/§14.9 的事。 */
+/** 显式传入那一代（`opts.extensions`，含壳）。换代（reload）是后话。 */
 const BOOT_GENERATION = "boot";
 /** `agent.tools` 转成的 inline Extension 那一代：显式装配，fail-loud。 */
 const INLINE_GENERATION = "boot:inline";
@@ -115,7 +115,7 @@ export type LoadedExtension = Readonly<{
 export type Echo = Readonly<{
   agent: Agent;
   /**
-   * 完整 Runtime 的一次 user run（§15.6 / OR5）：`agent.prompt()` 加上观测三元组。
+   * 完整 Runtime 的一次 user run（OR5）：`agent.prompt()` 加上观测三元组。
    * 观测层永远拦不住 run：store 写不动时 run 照跑，只是 `observationPersistence` 报 `degraded`（2026-09-03 用户拍板）。
    */
   send(input: string | AgentMessage): Promise<EchoRunResult>;
@@ -275,7 +275,7 @@ export async function loadExtensionFile(file: string): Promise<ExtensionDefiniti
 export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   const dirs = resolveExtensionDirs(opts);
 
-  // **先扫盘、后造 Agent**：发现阶段一行用户代码都不执行（§14.8.1「不允许边发现边执行」），
+  // **先扫盘、后造 Agent**：发现阶段一行用户代码都不执行（「不允许边发现边执行」），
   // 这一段失败时还没有 Agent 要收拾。去重按解析后的绝对路径——同一个文件被两个目录指到只装一次。
   const files: string[] = [];
   const seen = new Set<string>();
@@ -362,7 +362,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
 
     // ── ① 内部：`echo:*` builtin 表 ──────────────────────────────────────────────
     // 「通过内置模块表解析，不从安装目录动态找文件；但进入 ExtensionHost 后与第三方一样
-    // 获得 Fiber、Effect、依赖检查与 dispose」（§14）。所以内建工具与外部扩展**同一条注册路**。
+    // 获得 Fiber、Effect、依赖检查与 dispose」。所以内建工具与外部扩展**同一条注册路**。
     //
     // **单独一代**，不是跟外部合并成一次 mount。两个理由：
     //   · 顺序——外部扩展可以 inject builtin 提供的 Service，那要求 builtin 先 ACTIVE
@@ -455,7 +455,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     };
 
     /**
-     * `send()` = user source 的调用方适配器（§15.5.2）：outcome 来自 loop，观测三元组来自 admission 已 COMMIT 的 RunIndex。
+     * `send()` = user source 的调用方适配器：outcome 来自 loop，观测三元组来自 admission 已 COMMIT 的 RunIndex。
      * `observationPersistence` 是**当前 Runtime** 的投影：terminal 已进 index 才 stored；尾写失败磁盘仍 running → degraded。
      */
     const send = async (input: string | AgentMessage): Promise<EchoRunResult> => {

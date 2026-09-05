@@ -1,4 +1,4 @@
-// Runtime V0 Gate 的**宿主程序**（§13.9 的 12 条 resident integration）。
+// Runtime V0 Gate 的**宿主程序**（12 条 resident integration）。
 //
 // 这不是测试，是一个**真的会被 spawn 起来的进程**。测试（`resident-v0.test.ts`）负责
 // 起它三次、比对它吐出的报告——「跨进程」这一维只有这样才成立：
@@ -182,7 +182,7 @@ async function main(): Promise<void> {
       // 由 `echo:skills` builtin Extension 装（2026-08-31 起：构造归 core，注册走 extension）。
       agent: { skills: [SKILL] },
     });
-    await mountBuiltinTools(agent); // 工具面由 builtin Extension 装（§14）
+    await mountBuiltinTools(agent); // 工具面由 builtin Extension 装
     await agent.start();
     await agent.prompt("把「用户在做 Echo」记进记忆、建个任务、启用那个 skill，再建一个每分钟的提醒");
     // ⑥ 等整理**真的提交**再收摊：`stop()` 会中断在飞的 dream（那是它该做的），
@@ -219,7 +219,7 @@ async function main(): Promise<void> {
       allowNetwork: false,
       ...resumeOpt,
     });
-    await mountBuiltinTools(agent); // 工具面由 builtin Extension 装（§14）
+    await mountBuiltinTools(agent); // 工具面由 builtin Extension 装
     await agent.start();
     await agent.prompt("一分钟后提醒我");
 
@@ -245,7 +245,7 @@ async function main(): Promise<void> {
       allowNetwork: false,
       ...resumeOpt,
     });
-    await mountBuiltinTools(agent); // 工具面由 builtin Extension 装（§14）
+    await mountBuiltinTools(agent); // 工具面由 builtin Extension 装
     await agent.start();
     agent.autoConsumeInbox = false;
     await agent.prompt("再建一条任务");
@@ -269,7 +269,7 @@ async function main(): Promise<void> {
       // 不是「上一轮激活过的那次还留着」（激活是运行态，不跨进程）。
       agent: { skills: [SKILL] },
     });
-    await mountBuiltinTools(agent); // 工具面由 builtin Extension 装（§14）
+    await mountBuiltinTools(agent); // 工具面由 builtin Extension 装
     await agent.start();
     // 等恢复出来的 inbox 被**它自己**吃干净。
     // **盯可观测结果，不睡固定时长**——本文件自己强调过这条，上一版却在这里 sleep(50)，

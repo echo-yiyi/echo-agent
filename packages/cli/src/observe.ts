@@ -1,4 +1,4 @@
-// `echo-agent observe`：看已落盘的 run 观测记录（§15.6 CLI 最小面）。
+// `echo-agent observe`：看已落盘的 run 观测记录（CLI 最小面）。
 //
 //   observe last                      最近一次 run，人读文本
 //   observe show <run-id>             指定 run

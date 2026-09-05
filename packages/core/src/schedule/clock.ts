@@ -30,7 +30,7 @@ export const systemClock: Clock = {
 /**
  * 假时钟：时间只在 `advance()` 时前进，定时器只在被拨过去时触发。
  *
- * 这是 §13.12.1 说 Clock「非补不可」的那个理由——没有它，schedule 的判据只能写成
+ * 这是 Clock「非补不可」的那个理由——没有它，schedule 的判据只能写成
  * 「sleep 一会儿再看」，那种测试在 CI 上必然变成 flake 源。
  */
 export class FakeClock implements Clock {

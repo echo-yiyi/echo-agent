@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 // `exports` 写错、`files` 漏文件、依赖漏声明——**一个都发现不了**，因为源码就在旁边。
 // 只有装一次真实产物才谈得上「用户拿到的东西能用」。
 //
-// **Node 与 Bun 两侧都覆盖**（§13.9 的要求）。
+// **Node 与 Bun 两侧都覆盖**。
 // Node 侧一度只能 skip——`exports` 直接指向 `.ts`，Node 不转译 TypeScript。
 // 2026-08-18 补上 build（`tsc` 出 `.js` + `.d.ts`，`exports` 改条件导出：
 // `bun` 支给 workspace 与 Bun，`import`/`default` 支给 Node），这条才真跑得起来。
@@ -161,7 +161,7 @@ function isolatedConsumer(pkgRel: string, minFiles: number, extraDeps: readonly 
 }
 
 /**
- * examples 是第三个消费者（§13.11）。它们**不是 workspace 成员**——判据就是「装 tarball 能用」，
+ * examples 是第三个消费者。它们**不是 workspace 成员**——判据就是「装 tarball 能用」，
  * 进了 workspace 会被软链掉，那句话当场失效。所以这里的 `file:` 替换是它们**唯一**的装法。
  *
  * 两档判据，分开是因为**诚实**：需要模型凭据的样例在 CI 里跑不了，那就只验它 typecheck，
@@ -525,7 +525,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         };
         // ① 内建六条在前、扫到的 `extensions/current-year.ts` 在后——
         //    这就是「内部 extension 先、外部 extension 后」那条顺序在**装出来的包上**的样子。
-        //    内建也走 extension 机制（§14 owner 表），所以它们出现在清单里不是噪音，是契约。
+        //    内建也走 extension 机制（生命周期 owner），所以它们出现在清单里不是噪音，是契约。
         //    `echo:agent`（provide `AgentRuntime`）2026-08-31 起也在这份清单里：**清单就是 Host
         //    实际挂上的那一份**，它挂了却不报，清单与真相就分了家（review 二轮 P1）。
         //    `echo:compaction`（缺省压缩阶梯 + transcript_read）2026-09-02 起同理。

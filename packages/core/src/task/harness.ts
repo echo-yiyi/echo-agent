@@ -232,7 +232,7 @@ export function unlinkTasks(tasks: TaskMap, from: string, to: string, kind: stri
 }
 
 /**
- * Map swap 之后发 `task.state.committed`（§15.9 Task 行的唯一 state emission point）。
+ * Map swap 之后发 `task.state.committed`（Task 行的唯一 state emission point）。
  * 它只说明内存态已变，**不说明已持久化**——store 事实在 `saveTasks()` 那一头。sink 永不抛，这里再兜一层。
  */
 function commit(tasks: TaskMap, draft: Map<string, TaskItem>, fact: { operation: TaskStateOperation; ids: readonly string[]; before?: string; after?: string }): void {
@@ -317,7 +317,7 @@ function assertTaskItem(v: unknown, where: string): asserts v is TaskItem {
 export async function saveTasks(tasks: TaskMap, store: TaskStore): Promise<void> {
   const text = `${JSON.stringify([...tasks.values()], null, 2)}\n`;
   const count = tasks.size;
-  // `task.store.saved / failed` 只在这里、只在真实 `TaskStore.write()` settle 之后发（§15.9）：state commit 不等于已落盘
+  // `task.store.saved / failed` 只在这里、只在真实 `TaskStore.write()` settle 之后发：state commit 不等于已落盘
   const emit = (fact: TaskFact): void => {
     try {
       taskObserverOf(tasks)?.offer(fact);

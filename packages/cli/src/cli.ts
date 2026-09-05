@@ -320,7 +320,7 @@ export function mainFor(product: Product): Main {
     interactive: boolean = process.stdin.isTTY === true,
     deps: MainDeps = {},
   ): Promise<number> => {
-    // `observe` 是只读子命令：不装配、不取锁、不看凭据——在一切启动逻辑之前分走（§15.6）
+    // `observe` 是只读子命令：不装配、不取锁、不看凭据——在一切启动逻辑之前分走
     if (argv[0] === "observe") return runObserve(argv.slice(1), product.name);
     let opts: CliOptions | null;
     try {
@@ -430,7 +430,7 @@ async function runPiped(
   notices: readonly string[],
   signal: AbortSignal,
 ): Promise<number> {
-  // **唯一 composition root**（§14.2）：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
+  // **唯一 composition root**：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
   const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId);
   // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥
   const echo = await createEcho({ ...base, extensions: [...(base.extensions ?? []), pipeSurfaceEntry()] });

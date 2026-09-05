@@ -1,4 +1,4 @@
-// `echo-agent observe`（§15.6 CLI 最小面）：四条子命令只走 `openObservationReader()`。
+// `echo-agent observe`（CLI 最小面）：四条子命令只走 `openObservationReader()`。
 // 判据：真 createEcho 跑一轮落盘 → 进程内调 `runObserve()` 读回来；活 writer 旁边也能读；没库时诚实报错。
 
 import { afterEach, beforeEach, expect, test } from "bun:test";

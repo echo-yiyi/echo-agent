@@ -45,7 +45,7 @@ export type PermissionAnswerResult =
       reason: "answered" | "timed-out" | "run-aborted" | "runtime-disposed";
     }>;
 
-/** ask 超时的唯一 owner 是 policy（§14.10.3）：`null` = 等人，不超时。 */
+/** ask 超时的唯一 owner 是 policy：`null` = 等人，不超时。 */
 export type PermissionPolicyConfig = Readonly<{
   askTimeoutMs: number | null;
 }>;

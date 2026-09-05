@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-// 「core 零运行时依赖」——M1（2026-08-11 开源计划 §4）把它从目标变成断言。
+// 「core 零运行时依赖」——M1（2026-08-11 开源计划）把它从目标变成断言。
 //
 // 脱钩前 `@modelcontextprotocol/sdk` 是 core 唯一的运行时依赖，而且是**根入口硬拖的**：
 // `import { Agent } from "@echo-agent/core"` 会一路静态 import 到 `mcp/harness.ts` → SDK。

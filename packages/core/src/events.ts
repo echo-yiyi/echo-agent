@@ -62,7 +62,7 @@ export type ResourceChange = {
 export type AgentOutcome =
   | { kind: "completed" }
   | { kind: "aborted"; reason?: string }
-  /** 含义是「**真的没救了**」——该重的循环已经重过（重试在 core 里，§3.2）。 */
+  /** 含义是「**真的没救了**」——该重的循环已经重过（重试在 core 里）。 */
   | { kind: "error"; error: AgentError };
 
 export type CoreAgentEvent =
@@ -166,7 +166,7 @@ export type LifecycleEvent =
   | { type: "postCompact"; reason: CompactionReason; compaction: CompactionState; stages: readonly string[] }
   /** 某个阶段抛错（带 `stage`），或整条流水线跑完没有一段改了状态（不带）。 */
   | { type: "compactionFailed"; reason: CompactionReason; stage?: string; message: string }
-  /* 权限（§14.10.3 固定 stage）：只有真正进入 ask 才有 permissionId；policy 直接 allow/deny 没有 ask、也就没有 ID。
+  /* 权限（固定 stage）：只有真正进入 ask 才有 permissionId；policy 直接 allow/deny 没有 ask、也就没有 ID。
      这四种全部 notify-only——hook 只能观察，回答只能来自可信宿主的 answerPermission()。 */
   | {
       type: "permissionRequest";

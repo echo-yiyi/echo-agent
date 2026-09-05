@@ -1,4 +1,4 @@
-// adopt slot factory 的**零外部副作用探针**（§14.5.1 末段）。
+// adopt slot factory 的**零外部副作用探针**。
 //
 // 契约那句话是：PREPARE 允许创建 candidate-owned JS 对象，但 factory / constructor **不得**读写磁盘、
 // 取得 StateLock、启动 timer、连接网络/子进程、注册 global listener，或消费 Inbox。这条契约撑着两件事：

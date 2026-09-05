@@ -7,7 +7,7 @@ import { HookRuntime } from "../src/hooks/runtime.ts";
 import type { PermissionPolicy } from "../src/permission/types.ts";
 import { PermissionLedger, deepFreezePlain } from "../src/permission/ledger.ts";
 
-// §14.10.3 permission stage（O1b）的反例。每条都是**摘掉对应实现就会红**的判据。
+// permission stage（O1b）的反例。每条都是**摘掉对应实现就会红**的判据。
 //
 //   - 顺序固定：transform hooks → 重新校验 → freeze → authorization → execute。ask 里的 params、宿主看到的、
 //     execute 收到的是同一份冻结对象；

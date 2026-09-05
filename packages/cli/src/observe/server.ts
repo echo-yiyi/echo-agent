@@ -3,7 +3,7 @@
 // 数据面只有三条路由，全部走同一个 read-only reader（不取锁、不起 agent）：
 //   GET /                      页面（vendor 的 token CSS + 术语表内联，零外部资源）
 //   GET /api/runs?limit&cursor  `listRuns()` 的一页 header + 这页用到的会话（产品名 / workspace，按 sessionId 反查）
-//   GET /api/runs/<run-id>     `getRun()` → `RunObservationViewModel`（renderer 的 json 格式，UI 消费同一份 ViewModel，§15.6）
+//   GET /api/runs/<run-id>     `getRun()` → `RunObservationViewModel`（renderer 的 json 格式，UI 消费同一份 ViewModel）
 //   GET /api/health            库路径、各 runtime 已裁决到的 seq、run / record 计数
 // reader 的每次查询都是短事务，页面轮询不会让 WAL 长住。
 //

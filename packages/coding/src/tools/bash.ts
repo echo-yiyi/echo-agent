@@ -1,6 +1,6 @@
 // shell 一组:bash(前台跑命令;background: true 时挂进 agent.background)+ job_output / job_stop(后台作业的回读与停止)。
 //
-// **执行体在这层,队列在 core**——这正是 §5B「队列在 core,跑什么在产品」那句话的落地:
+// **执行体在这层,队列在 core**——这正是「队列在 core,跑什么在产品」那句话的落地:
 // core 的 startBackground / getBackground / killBackground 管闸/缓冲/收摊,这里只填「怎么起一个进程」
 // 和「怎么把缓冲与取消口摆给模型」。
 //

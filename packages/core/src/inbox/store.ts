@@ -1,7 +1,7 @@
-// 持久 Inbox 账本 —— **已接受但未消费的入站事实，不因崩溃静默丢失**（§13.9 第 10 条、§14.2.4）。
+// 持久 Inbox 账本 —— **已接受但未消费的入站事实，不因崩溃静默丢失**。
 //
 // 它是**四件东西的唯一 owner**：pending records、pending dedupe index、reservation ledger、batch-ack marker。
-// Runtime / Agent 不建第二份账（§14.2.4「不维护 recordId→batch 镜像」）。
+// Runtime / Agent 不建第二份账（「不维护 recordId→batch 镜像」）。
 //
 // **纯的**：只依赖 `StorageDir` 与 Web Crypto。传 `null` = 纯内存模式（评测与一次性跑），
 // 两种模式共用同一套 id / dedupe / reservation 语义，只有「写不写盘」不同。
@@ -52,7 +52,7 @@ export type InboxReservedBatch = Readonly<{
   messages: readonly AgentMessage[];
 }>;
 
-/** ack 的三态裁决之一（§14.2.4 的表）。`pre-commit` 与 `indeterminate` 都以 reject 报出。 */
+/** ack 的三态裁决之一。`pre-commit` 与 `indeterminate` 都以 reject 报出。 */
 export class InboxAckError extends Error {
   constructor(
     readonly verdict: "pre-commit" | "indeterminate",
@@ -125,7 +125,7 @@ export class InboxStore {
   /* ─────────────── restore ─────────────── */
 
   /**
-   * 恢复顺序写死（§14.2.4）：**先读并验证全部 ack markers**，建立 `logicallyAckedRecordIds`，再扫 record 文件与
+   * 恢复顺序写死：**先读并验证全部 ack markers**，建立 `logicallyAckedRecordIds`，再扫 record 文件与
    * legacy migration——被 marker 覆盖的 record 绝不进 pending queue / dedupe index / reservation，只幂等删除。
    * 反过来先扫 record 就会把已经逻辑 ack 的那批重新投递一遍。
    */

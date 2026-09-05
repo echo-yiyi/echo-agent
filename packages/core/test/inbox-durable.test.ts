@@ -30,7 +30,7 @@ function rid(n: number): string {
   return `${n.toString(16).padStart(12, "0")}-${"0".repeat(16)}`;
 }
 
-// 持久 Inbox（§13.9 第 10 条）：**已接受但未消费的入站事实，不因崩溃静默丢失**。
+// 持久 Inbox：**已接受但未消费的入站事实，不因崩溃静默丢失**。
 //
 // inbox 原本是纯内存队列：定时任务到点了、后台活动结束了，投进来，进程一崩就没了。
 // 「外面发生过这件事」是事实，不是运行时状态——它该活过进程。
@@ -298,7 +298,7 @@ test("dedupeKey producer conformance：schedule adapter 的 key 派生必须过�
   ).rejects.toThrow(/必须是非空字符串/);
 });
 
-/* ───────────── InboxStore 账本本身（§14.2.4） ───────────── */
+/* ───────────── InboxStore 账本本身 ───────────── */
 
 /** 造一个已恢复的账本。 */
 async function ledger(dir: StorageDir): Promise<InboxStore> {

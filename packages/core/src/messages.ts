@@ -34,7 +34,7 @@ export type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: 
  *
  * **为什么标在块上而不是消息上**：pi 是拿 `AssistantMessage` 的 `provider/api/model` 三元组比
  * （`transform-messages.ts`），而本仓的投影**有意剥掉** `AssistantMessage.model`
- * （§4 不变量③：ProviderMessage 是临时形态，不带账本字段）。要么破那条不变量，
+ * （不变量③：ProviderMessage 是临时形态，不带账本字段）。要么破那条不变量，
  * 要么让来源跟着不透明数据一起走——选后者：**谁不透明，谁自己带身份**。
  */
 export type ThinkingBlock = {

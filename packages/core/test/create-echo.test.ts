@@ -38,7 +38,7 @@ process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "fixtures/extensions");
 
-/** §14 owner 表里本批搬进来的四条，顺序即 `builtinEntries()` 的顺序。 */
+/** 生命周期 owner 里本批搬进来的四条，顺序即 `builtinEntries()` 的顺序。 */
 // `echo:sessions`（2026-09-03）**不在缺省清单里**：挂不挂它是容器的开关（`CreateEchoOptions.sessions`），
 // 不给就是今天的单会话形态。给了的话它与 `echo:inline-tools` 同代（INLINE），排在 builtin 之后。
 const BUILTIN_NAMES = ["echo:agent", "echo:tasks", "echo:skills", "echo:memory", "echo:scheduler", "echo:tool-search", "echo:compaction"] as const;
@@ -159,7 +159,7 @@ test("扫 extensions/ → 两个 Extension 都 mount，工具真的进了 agent 
   const echo = await echoAt({ stateDir: join(await tmp(), "state") });
 
   // **清单里内建在前、外部在后**——这正是「内部 extension 先、外部 extension 后」那条顺序的可见面。
-  // 内建四条恒在（§14 owner 表），所以断言要连它们一起写：清单是「这个 agent 会什么」的完整答案。
+  // 内建四条恒在（生命周期 owner），所以断言要连它们一起写：清单是「这个 agent 会什么」的完整答案。
   expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, "adds-tool", "nested"]);
   // 盘上发现的那两条带 file；内建来自内置模块表，没有文件
   expect(echo.extensions.filter((e) => e.file !== undefined).map((e) => e.entryId)).toEqual([

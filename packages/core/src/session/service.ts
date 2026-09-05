@@ -1,4 +1,4 @@
-// Session Service —— **语义在 core**（D3 / §13.12.2）。
+// Session Service —— **语义在 core**（D3）。
 //
 // 这个文件存在的理由：`SessionManager` 把 create/load/append 的语义交给了注入方，
 // 于是「坏档 fail-loud、不给半截 session」只是注释里的一句自觉——换一个实现就可以返回半截、
@@ -90,9 +90,9 @@ export class SessionService {
     string,
     { nextSeq: number; lastEntryId: string | null; info: SessionInfo; metaWritten: boolean }
   >();
-  /** 未 settle 的写。`stop()` 等的就是它（§13.12.2：Store 面上没有 flush）。 */
+  /** 未 settle 的写。`stop()` 等的就是它（Store 面上没有 flush）。 */
   private readonly pending = new Set<Promise<unknown>>();
-  /** 封存后拒绝一切写入。丢锁时置真（§13.12.3 的第 ① 步）。 */
+  /** 封存后拒绝一切写入。丢锁时置真。 */
   private sealed = false;
   /**
    * 每个会话一条**串行写链**。两个理由：
@@ -310,7 +310,7 @@ export class SessionService {
   }
 
   /**
-   * 封存：此后拒绝一切写入。丢锁时调（§13.12.3 的第 ① 步）。
+   * 封存：此后拒绝一切写入。丢锁时调。
    * **不等 pending**——丢锁后连已经在飞的写都不该再指望，等它只会拖长双写窗口。
    */
   seal(): void {

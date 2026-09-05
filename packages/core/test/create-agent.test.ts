@@ -257,7 +257,7 @@ test("start() 中途失败必须释放已取得的 lease（否则状态根被死
   await b.stop();
 });
 
-test("丢锁 → 停止持久化 + 拒绝新工作（§13.12.3 的 ①③）", async () => {
+test("丢锁 → 停止持久化 + 拒绝新工作（丢锁善后的 ①③）", async () => {
   const lock = new InMemoryStateLock();
   const agent = await createAgent({
     provider: fakeProvider({ id: "t", models: ["only"] }),
@@ -415,7 +415,7 @@ test("排队之后、真正落盘之前丢锁：那一笔也要撤回（执行�
   await agent.stop().catch(() => undefined);
 });
 
-/* ───────────── OSS-1c：skill_create 的默认落盘 + start() 发现（§5A.4c / §13.6） ───────────── */
+/* ───────────── OSS-1c：skill_create 的默认落盘 + start() 发现 ───────────── */
 
 const toolCtx = () => ({ toolCallId: "t1", workspace: "/", sessionId: null, iteration: 0 });
 
@@ -427,7 +427,7 @@ async function execTool(agent: Awaited<ReturnType<typeof createAgent>>, name: st
 
 test("skill_create 落盘 → 第二次装配 start() 发现回来，activate 可用（跨装配：同进程换实例；真跨进程见 resident-v0）", async () => {
   const dir = new InMemoryDir();
-  // 工具面由 `echo:*` builtin Extension 装（§14）：`createAgent` 只是内部装配函数，
+  // 工具面由 `echo:*` builtin Extension 装：`createAgent` 只是内部装配函数，
   // 不 mount 扩展——真正的 composition root 是 `createEcho()`。这里手动挂同一张表。
   const mk = async () => {
     const a = await createAgent({
@@ -449,7 +449,7 @@ test("skill_create 落盘 → 第二次装配 start() 发现回来，activate �
     content: "先说结论，末行带门禁读数。",
   });
   expect([created.isError, created.content]).toEqual([false, created.content]);
-  // 落盘形态是目录式入口（§5A.4c 原话「文件实现写 SKILL.md」）
+  // 落盘形态是目录式入口（原话「文件实现写 SKILL.md」）
   const onDisk = await dir.read("skills/commit-msg/SKILL.md");
   expect(onDisk, "工具说成功了，盘上却没有").toContain("写提交信息的规矩");
   expect(onDisk).toContain("先说结论");

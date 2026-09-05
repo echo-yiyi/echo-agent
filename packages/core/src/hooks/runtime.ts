@@ -7,10 +7,10 @@
 //   ② **两种 handler 后端，同协议**：进程内 callback 与外部脚本同事件、同顺序、
 //      同折叠、同失败语义，只差运输。
 //   ③ **hook 没有特权**：V0 handler 只有当前事件与 HookResult 的 continue/block/patch，
-//      **不暴露** steer/followUp/abort 或 `tools.invoke` 命令面（§7.1；2026-08-25 决策记录）。
+//      **不暴露** steer/followUp/abort 或 `tools.invoke` 命令面（2026-08-25 决策记录）。
 //      Hook 要改变后续对话，走将来显式授权的 Runtime command API；问人是 permission pipeline 的事。
 //
-// §14.7.5 加固的几条（2026-08-25）：
+// 加固的几条（2026-08-25）：
 //   - **turn 工作集**：`snapshot()` 把当前 handler 条目冻成一份 `HookWorkset`，循环在每轮开头取一次，
 //     本轮中途的注册/卸载只影响下一轮——热重载不能让同一轮前半用旧 handler、后半用新 handler。
 //   - **卸载器认对象身份**：`on()` 返回的卸载器只删自己登记的那一条；同 id 后来者不受它影响。
@@ -26,7 +26,7 @@ import type { AgentToolResult } from "../tools/types.ts";
 /**
  * 可拦截点。其余事件是「已经发生」，订阅即可，返回值不被消费。
  *
- * `permissionRequest` **不在**这里（§14.7.5 第 4 条）：授权只能来自正式 authorization stage，
+ * `permissionRequest` **不在**这里：授权只能来自正式 authorization stage，
  * hook 对 permission 生命周期事件只能观察——留在可拦截集里，`block` 就是第二条 deny 路径，
  * `patch` 就能改掉已冻结的参数。
  */
@@ -62,7 +62,7 @@ type PatchOf<E extends LifecycleEventType> = E extends keyof Patchable ? Patchab
 /* ───────────────── HookResult ───────────────── */
 
 export type HookResult<E extends LifecycleEventType = LifecycleEventType> = {
-  /** 缺省 continue；handler 返回 void 也是 continue。**没有 "stop"**——hook 不能停整个 agent（§7.8 否决）。 */
+  /** 缺省 continue；handler 返回 void 也是 continue。**没有 "stop"**——hook 不能停整个 agent（已否决）。 */
   decision?: "continue" | "block";
   /** block 时这句话就是落给模型/日志的拒因。 */
   reason?: string;
@@ -81,7 +81,7 @@ export type Interception<E extends LifecycleEventType> = {
 export type HookOrigin = "model" | "hook" | "runtime" | "user";
 
 /**
- * hook 能碰到的现场——**只有现场，没有命令面**（§7.1）。
+ * hook 能碰到的现场——**只有现场，没有命令面**。
  * 刻意没有的：`agent.steer/followUp/abort`、`tools.invoke`（2026-08-25 作废：绕开循环流水线的后门）、
  * `session.appendMessage`（破 entries 单写者）、`ui.confirm`（问人是 permission pipeline 的职责）。
  */
@@ -97,7 +97,7 @@ export type HookContext = {
 export type NotifyOnlyType = Exclude<LifecycleEventType, InterceptableType>;
 
 /**
- * 只读观察者（§14.2.3 `subscribeLifecycle()`）：与 handler 走**同一个 emission point、同一顺序**，
+ * 只读观察者（`subscribeLifecycle()`）：与 handler 走**同一个 emission point、同一顺序**，
  * 但不参与折叠——返回值不是授权决定，抛错也不能隐式 allow/deny。可信宿主 CLI/SDK 用它收 permission ask，
  * 再单独调 `answerPermission()`；不为 permission 另造一条事件总线。
  */
@@ -107,9 +107,9 @@ export type LifecycleEventListener = (event: LifecycleEvent) => void | Promise<v
 type NotifyReturn = void | undefined | Promise<void | undefined>;
 
 /**
- * handler 允许的返回类型随事件分两种（§7.2）：可拦截点可以返回 `HookResult`；notify-only 点**不能**——
+ * handler 允许的返回类型随事件分两种：可拦截点可以返回 `HookResult`；notify-only 点**不能**——
  * 不是「返回了也被忽略」，是类型上不合法。`permissionRequest/Granted/Denied/Cancelled` 都在后一类：
- * hook 对 permission 只能观察，block/patch 不是合法返回值（§14.7.5 第 4 条）。
+ * hook 对 permission 只能观察，block/patch 不是合法返回值。
  *
  * `on()` 把 handler 的实际返回类型抓成类型参数 `R extends HookHandlerReturn<E>`：TS 本来允许把「返回了东西的
  * 函数」赋给「返回 void 的函数类型」，光靠 `=> void` 拦不住 `on("permissionRequest", () => ({ decision: "block" }))`；
@@ -159,7 +159,7 @@ const FAIL_CLOSED: ReadonlySet<string> = new Set<string>(["preToolUse"]);
 
 /**
  * 一轮里固定不变的 handler 工作集：与 `HookRuntime` 同一套 has / notify / intercept，
- * 只是条目在 `snapshot()` 那一刻冻结（§14.7.5 第 2 条）。`HookRuntime` 自己也实现它——
+ * 只是条目在 `snapshot()` 那一刻冻结。`HookRuntime` 自己也实现它——
  * 直接拿活对象用就是「每次调用看最新」，循环内不许这么用。
  */
 export interface HookWorkset {
@@ -260,7 +260,7 @@ export class HookRuntime implements HookWorkset {
   }
 
   /**
-   * 卸载**只认对象身份**（§14.7.5 第 5 条）：按 id 找会误删后来同 id 的那条——
+   * 卸载**只认对象身份**：按 id 找会误删后来同 id 的那条——
    * `opts.id` 是调用方给的，两次注册同一个 id 完全合法，旧卸载器不该动新条目。
    */
   private remove(event: LifecycleEventType, entry: Entry): void {
