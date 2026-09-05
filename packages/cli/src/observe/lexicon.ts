@@ -1,4 +1,4 @@
-// observe 面板的术语表（设计系统 `spec/agent-behavior.md` §7：后端枚举 → 界面文案只在这一处翻译）。
+// observe 面板的术语表：后端枚举 → 界面文案只在这一处翻译。
 //
 // 条目四字段缺一不可：`zh` 主标签、`en` 原词（mono 小字并列显示）、`tone` 色调、`hint` **判定口径**（不是同义反复）。
 // 页面通过 `lexiconJson()` 拿到整份，渲染层不再自己猜字面。
@@ -9,7 +9,7 @@ export type Term = Readonly<{ zh: string; en: string; tone: Tone; hint: string }
 
 /**
  * run 的终态 / 进行态。`RunObservationStatus` 五值加一个派生值 `truncated`：
- * 设计系统要求「跑到上限被截断」与「自行收尾」严格区分（§2.1），本仓里它是 `error` 且 `outcome.error.code === "max_iterations"`。
+ * 设计系统要求「跑到上限被截断」与「自行收尾」严格区分，本仓里它是 `error` 且 `outcome.error.code === "max_iterations"`。
  */
 export const RUN_STATUS: Readonly<Record<string, Term>> = {
   running: { zh: "进行中", en: "running", tone: "accent", hint: "已拿到 permit、run.closed 还没落库；页面会持续刷新它" },
@@ -38,7 +38,7 @@ export const PERSISTENCE: Readonly<Record<string, Term>> = {
 };
 
 /**
- * 工具名 → 人话动词（设计系统 §2.3 动词表：读取 / 搜索 / 写入 / 记住 / 回忆 / 运行 / 请求 / 打开 / 修改 / 删除）。
+ * 工具名 → 人话动词（设计系统的动词表：读取 / 搜索 / 写入 / 记住 / 回忆 / 运行 / 请求 / 打开 / 修改 / 删除）。
  * 没登记的工具用「调用」+ 原名。`memory` 工具的动作（记住 / 修改 / 删除 / 回忆）在紧随其后的 `memory.mutation.*` 事实里，
  * 工具 span 本身在 metadata 档看不到参数，所以只能是「调用」。
  */
@@ -62,7 +62,7 @@ export const TOOL_VERBS: Readonly<Record<string, string>> = {
   schedule_cancel: "删除",
 };
 
-/** canonical record 名 → 时间线一行怎么念。没登记的用原名（设计系统 §2.10：未知事件用 generic 呈现，不丢）。 */
+/** canonical record 名 → 时间线一行怎么念。没登记的用原名（设计系统：未知事件用 generic 呈现，不丢）。 */
 export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "run.accepted": { zh: "接受 run", en: "run.accepted", tone: "neutral", hint: "admission 分配 runId、冻结模型绑定" },
   "run.assembly": { zh: "装配快照", en: "run.assembly", tone: "neutral", hint: "本 run 冻结的 builtin 槽与模型绑定 digest" },

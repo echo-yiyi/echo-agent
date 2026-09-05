@@ -125,7 +125,7 @@ test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / 
   expect(() => parseObserveArgs(["serve", "--format", "json"], "x")).toThrow("serve 没有");
 });
 
-test("术语表：每条四字段齐全，hint 不是同义反复（设计系统 §7）", () => {
+test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   const lex = lexicon();
   for (const group of [lex.runStatus, lex.runSource, lex.integrity, lex.persistence, lex.records]) {
     for (const [key, term] of Object.entries(group)) {
