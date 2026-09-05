@@ -10,26 +10,16 @@
 // 活 writer（正在跑的 agent）旁边照样能读，只见已 COMMIT 的。每条命令结束关连接。
 //
 // 状态根与主命令同一条解析：`--state-dir` 是**会话目录的上一层**，`--session` 点名看哪一段。
-// 观测库归 session（状态根 = session 目录，2026-09-03），所以「看哪一段」是必须回答的问题；
-// 都不给就看**最近有记录的那一段**——那是「刚才那次跑」最常见的意思。
+// 观测库归 session（状态根 = session 目录，2026-09-03），agent 集群里几段并行——不点名就把会话根下
+// **全部**有库的段一起看（2026-09-05）：runId 全局唯一，`show <run-id>` 不必知道它在哪一段；
+// `last` 是全部会话里最近的那条；`serve` 一个面板看整个集群。
 // 不认识的子命令 / 选项一律报错（退出码 2），不静默按缺省跑——与 `cli.ts` 同一条纪律。
 
-import {
-  expandHome,
-  FileDir,
-  listSessions,
-  observationDatabasePath,
-  ObservationDatabaseMissingError,
-  openObservationReader,
-  resolveSessionsRoot,
-  resolveStateDir,
-  type EchoObservationReader,
-  type RunLookupResult,
-  type RunObservationHeader,
-} from "@echo-agent/core";
+import { expandHome, resolveSessionsRoot, type RunLookupResult, type RunObservationHeader } from "@echo-agent/core";
 import { renderRunObservation } from "@echo-agent/core/observability";
 import type { Sink } from "./run.ts";
 import { startObserveServer } from "./observe/server.ts";
+import { SessionObservationReaders } from "./observe/sessions.ts";
 
 export type ObserveFormat = "text" | "json";
 
@@ -46,7 +36,7 @@ export type ObserveCommand =
 export type ObserveOptions = Readonly<{
   /** 会话目录的上一层。缺省 `$ECHO_HOME/sessions`。 */
   stateDir?: string;
-  /** 看哪一段。不给 = 最近更新的那一段。 */
+  /** 只看这一段。不给 = 会话根下全部有观测记录的会话一起看。 */
   sessionId?: string;
   command: ObserveCommand;
 }>;
@@ -66,7 +56,7 @@ export function observeUsage(name: string): string {
 
 选项：
   --state-dir <路径>       会话目录的上一层（与主命令同义：缺省 $ECHO_HOME/sessions，再退到 ~/.echo/sessions）
-  --session <id>           看哪一段会话（缺省：最近更新的那一段）
+  --session <id>           只看这一段会话（缺省：全部会话一起看——last 是最近的一条，show 按 run-id 找，serve 一个面板看整个集群）
   --format <text|json>     输出格式（last / show 缺省 text；export 缺省 json）
   --body                   text 输出里带上每条记录的 body（缺省只有 name / attributes）
   --port <端口>            serve 监听的端口（缺省 ${OBSERVE_DEFAULT_PORT}；0 = 随机）
@@ -204,36 +194,29 @@ export async function runObserve(argv: readonly string[], name: string, io: Obse
     return 0;
   }
   const sessionsRoot = expandHome(opts.stateDir ?? resolveSessionsRoot());
-  let sessionId = opts.sessionId;
-  if (sessionId === undefined) {
-    // 观测库归 session：不点名就看**最近更新的那一段**。一段都没有时诚实说没有，
-    // 而不是打开一个空目录再报「没有记录」——那两句话指的不是同一件事。
-    const sessions = await listSessions(new FileDir(sessionsRoot)); // 已按 updatedAt 降序
-    if (sessions.length === 0) {
-      io.err.write(`${sessionsRoot} 下还没有任何会话\n`);
-      return 1;
-    }
-    sessionId = sessions[0]!.id;
-  }
-  const stateRoot = resolveStateDir({ sessionsRoot, sessionId });
-  let reader: Awaited<ReturnType<typeof openObservationReader>>;
+  const readers = new SessionObservationReaders({ sessionsRoot, ...(opts.sessionId === undefined ? {} : { sessionId: opts.sessionId }) });
   try {
-    reader = await openObservationReader({ stateRoot });
+    await readers.refresh(true);
   } catch (e) {
-    if (e instanceof ObservationDatabaseMissingError) {
-      io.err.write(`会话 ${sessionId} 还没有任何 run 的观测记录（${observationDatabasePath(stateRoot)} 不存在）\n`);
-      return 1;
-    }
     io.err.write(`打不开观测库：${e instanceof Error ? e.message : String(e)}\n`);
     return 1;
   }
+  // 一个库都没有：面板照样起（agent 稍后起来就有了），查询类命令诚实说没有——分清「没有会话」与「会话有了、还没跑过 run」，
+  // 那两句话指的不是同一件事。
+  if (readers.size === 0 && opts.command.kind !== "serve") {
+    if (opts.sessionId !== undefined) io.err.write(`会话 ${opts.sessionId} 还没有任何 run 的观测记录（${readers.databasePath(opts.sessionId)} 不存在）\n`);
+    else if (Object.keys(readers.sessions).length === 0) io.err.write(`${sessionsRoot} 下还没有任何会话\n`);
+    else io.err.write(`${sessionsRoot} 下的 ${Object.keys(readers.sessions).length} 段会话都还没有 run 的观测记录\n`);
+    await readers.close();
+    return 1;
+  }
   try {
-    return await execute(opts.command, reader, io, stateRoot);
+    return await execute(opts.command, readers, io);
   } catch (e) {
     io.err.write(`${e instanceof Error ? e.message : String(e)}\n`);
     return 1;
   } finally {
-    await reader.close();
+    await readers.close();
   }
 }
 
@@ -258,11 +241,12 @@ function waitForStop(signal: AbortSignal | undefined): Promise<void> {
   });
 }
 
-async function execute(command: ObserveCommand, reader: Awaited<ReturnType<typeof openObservationReader>>, io: ObserveIo, stateRoot: string): Promise<number> {
+async function execute(command: ObserveCommand, readers: SessionObservationReaders, io: ObserveIo): Promise<number> {
   switch (command.kind) {
     case "serve": {
-      const server = startObserveServer({ reader, stateRoot, hostname: command.host, port: command.port });
-      io.out.write(`observe 面板：${server.url}（只读，agent 跑着也能看；Ctrl+C 停止）\n`);
+      const server = startObserveServer({ readers, hostname: command.host, port: command.port });
+      const scope = readers.opts.sessionId === undefined ? `会话根 ${readers.opts.sessionsRoot} 下全部会话` : `会话 ${readers.opts.sessionId}`;
+      io.out.write(`observe 面板：${server.url}（${scope}；只读，agent 跑着也能看；Ctrl+C 停止）\n`);
       try {
         await waitForStop(io.signal);
       } finally {
@@ -271,7 +255,7 @@ async function execute(command: ObserveCommand, reader: Awaited<ReturnType<typeo
       return 0;
     }
     case "last": {
-      const lookup = await reader.lastRun();
+      const lookup = await readers.lastRun();
       if (lookup.kind === "unknown") {
         io.err.write("库里还没有任何 run\n");
         return 1;
@@ -279,26 +263,30 @@ async function execute(command: ObserveCommand, reader: Awaited<ReturnType<typeo
       return printLookup(lookup, "last", command.format, command.body, io);
     }
     case "show":
-      return printLookup(await reader.getRun(command.runId), `show ${command.runId}`, command.format, command.body, io);
+      return printLookup(await readers.getRun(command.runId), `show ${command.runId}`, command.format, command.body, io);
     case "export":
-      return printLookup(await reader.getRun(command.runId), `export ${command.runId}`, command.format, false, io);
+      return printLookup(await readers.getRun(command.runId), `export ${command.runId}`, command.format, false, io);
     case "health":
-      return health(reader, io);
+      return health(readers, io);
   }
 }
 
-async function health(reader: EchoObservationReader & { path: string; runtimeHeads(): Promise<readonly { runtimeId: string; committedPrefix: number }[]>; counts(): Promise<{ runs: number; records: number }> }, io: ObserveIo): Promise<number> {
-  const heads = await reader.runtimeHeads();
-  const counts = await reader.counts();
-  const last = await reader.lastRun();
-  const lines = [
-    `observation database  ${reader.path}`,
-    `runs                  ${counts.runs} · records ${counts.records}`,
-    `runtime heads         ${heads.length === 0 ? "(none)" : heads.map((h) => `${h.runtimeId} → committed ${h.committedPrefix}`).join(" · ")}`,
-    `last run              ${last.kind === "found" ? headerLine(last.observation) : last.kind === "pruned" ? `${headerLine(last.header)} (pruned)` : "(none)"}`,
-    // 活 Runtime 的 phase / persistence / sink health 尚未落盘（O3b）：离线 reader 给不出，明说而不是编一个
-    "live runtime health   not persisted yet (O3b); in-process use echo.observations.snapshot()",
-  ];
-  io.out.write(`${lines.join("\n")}\n`);
+/** 每段会话一块；活 Runtime 的 phase / persistence / sink health 尚未落盘（O3b），离线 reader 给不出，明说而不是编一个。 */
+async function health(readers: SessionObservationReaders, io: ObserveIo): Promise<number> {
+  const blocks: string[] = [];
+  for (const s of await readers.health()) {
+    const brief = readers.sessions[s.sessionId];
+    blocks.push(
+      [
+        `session               ${s.sessionId}${brief === undefined ? "" : ` · ${brief.agent} · ${brief.workspace}`}`,
+        `observation database  ${s.path}`,
+        `runs                  ${s.counts.runs} · records ${s.counts.records}`,
+        `runtime heads         ${s.heads.length === 0 ? "(none)" : s.heads.map((h) => `${h.runtimeId} → committed ${h.committedPrefix}`).join(" · ")}`,
+        `last run              ${s.last === null ? "(none)" : headerLine(s.last)}`,
+      ].join("\n"),
+    );
+  }
+  blocks.push("live runtime health   not persisted yet (O3b); in-process use echo.observations.snapshot()");
+  io.out.write(`${blocks.join("\n\n")}\n`);
   return 0;
 }

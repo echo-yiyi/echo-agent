@@ -19,6 +19,8 @@
 import { errText, type Diagnostic } from "../errors.ts";
 import type { AgentMessage } from "../messages.ts";
 import type { StorageDir } from "../storage/types.ts";
+import type { CapabilityFactSink } from "../observability/fact-sink.ts";
+import { inboxRecordBrief, type InboxFact, type InboxRecordBrief } from "./observe.ts";
 import {
   ackCommitIdOf,
   ackIdFromPath,
@@ -91,9 +93,15 @@ export class InboxStore {
   private readonly ackBarriers = new Map<string, Promise<void>>();
 
   private onDiagnostic?: (d: Diagnostic) => void;
+  /** 观测出口（Inbox 行，observe.ts 头注列了全部发点）：装配方（Agent）接上；没接就不发。 */
+  observe?: CapabilityFactSink<InboxFact>;
 
   constructor(private readonly store: StorageDir | null = null) {
     if (store === null) this.restored = true; // 纯内存：没有盘可恢复
+  }
+
+  private fact(fact: Omit<InboxFact, "occurredAt">): void {
+    this.observe?.offer({ ...fact, occurredAt: Date.now() });
   }
 
   /** 装配方（Agent）接诊断出口。cleanup-pending / seal 这类只能报告、不能改变裁决的事从这里出去。 */
@@ -160,6 +168,7 @@ export class InboxStore {
     this.pending = pending;
     this.index.clear();
     for (const r of pending) this.indexPush(r.dedupeKey, r.recordId); // 从**全部 pending records** 重建
+    if (pending.length > 0) this.fact({ kind: "restored", records: pending.map((r) => inboxRecordBrief(r.message, r.recordId)) });
 
     // cleanup：删掉被 marker 覆盖的 record；某个 marker 的 records 全没了才删该 marker
     for (const id of ackedOnDisk) {
@@ -232,6 +241,8 @@ export class InboxStore {
     for (const r of found) {
       this.pending.push(r);
       this.indexPush(r.dedupeKey, r.recordId);
+      // 别的进程写进来的（跨 session 的 session_send 就是这条路）：一条一个事实，source / ref 说是谁发的
+      this.fact({ kind: "accepted", records: [inboxRecordBrief(r.message, r.recordId)], deduplicated: false, via: "refresh" });
     }
     return found.length;
   }
@@ -270,15 +281,15 @@ export class InboxStore {
    * index 或 record write 失败不得返回 accepted。
    */
   async accept(request: InboxAcceptRequest): Promise<InboxAcceptOutcome> {
-    if (this.sealedReason !== null) return { kind: "rejected", reason: "store-error", errorDigest: "inbox-sealed" };
+    if (this.sealedReason !== null) return this.reject([], "store-error", "inbox-sealed");
     const dedupeKey = request?.dedupeKey;
-    if (typeof dedupeKey !== "string" || dedupeKey === "") return { kind: "rejected", reason: "invalid-request", errorDigest: "empty-dedupe-key" };
+    if (typeof dedupeKey !== "string" || dedupeKey === "") return this.reject([], "invalid-request", "empty-dedupe-key");
     // 形状按公共判据验（与 Session 恢复同一份），随即取 JSON-safe 副本——账本存副本，不存调用方的对象
     let message: AgentMessage;
     try {
       message = canonicalizeMessage(request?.message, "inbox 投递");
     } catch {
-      return { kind: "rejected", reason: "invalid-request", errorDigest: "message-shape" };
+      return this.reject([], "invalid-request", "message-shape");
     }
     if (!this.restored) {
       // 序号没恢复就发号会盖掉盘上已有的 record——这是不变量破坏，不是可重试的 I/O 失败
@@ -303,6 +314,7 @@ export class InboxStore {
 
     const existing = this.index.get(dedupeKey);
     if (existing !== undefined && existing.length > 0) {
+      this.fact({ kind: "accepted", records: [inboxRecordBrief(message, existing[0]!)], deduplicated: true, via: "deliver" });
       return { kind: "accepted", recordId: existing[0]!, dedupeKey, deduplicated: true };
     }
     // **撞上在飞的那次就跟着它一起等**，不是直接 return：直接 return 等于凭空给第二个调用方一个「已被接受」的答复，
@@ -329,7 +341,7 @@ export class InboxStore {
     } catch (e) {
       // 时间戳宽度溢出（公元 10889 年之后）：也要有明确结局——封账本、结构化拒绝，不把这条抛给调用方
       this.seal(errText(e));
-      return { kind: "rejected", reason: "store-error", errorDigest: "record-id-overflow" };
+      return this.reject([inboxRecordBrief(message)], "store-error", "record-id-overflow", errText(e));
     }
     const record: InboxRecordV1 = { recordId, dedupeKey, message, acceptedAt: Date.now() };
     if (this.store !== null) {
@@ -338,12 +350,19 @@ export class InboxStore {
       } catch (e) {
         // 原文只进本地诊断；协议里给的是**真 digest**，不是截断的错误文本
         this.diagnose("inbox_write_failed", `record ${recordId} 落盘失败：${errText(e)}`);
-        return { kind: "rejected", reason: "store-error", errorDigest: await errorDigest(errText(e)) };
+        return this.reject([inboxRecordBrief(message)], "store-error", await errorDigest(errText(e)), errText(e));
       }
     }
     this.pending.push(record);
     this.indexPush(dedupeKey, recordId);
+    this.fact({ kind: "accepted", records: [inboxRecordBrief(message, recordId)], deduplicated: false, via: "deliver" });
     return { kind: "accepted", recordId, dedupeKey, deduplicated: false };
+  }
+
+  /** 结构化拒绝 + 一条 rejected 事实：原文只进事实的 content 档（metadata 只留 digest），协议里仍是 errorDigest。 */
+  private reject(records: readonly InboxRecordBrief[], reason: "invalid-request" | "store-error", errorDigest: string, message?: string): InboxAcceptOutcome {
+    this.fact({ kind: "rejected", records, reason, errorDigest, ...(message === undefined ? {} : { message }) });
+    return { kind: "rejected", reason, errorDigest };
   }
 
   /* ─────────────── reservation ledger ─────────────── */
@@ -368,12 +387,23 @@ export class InboxStore {
     }
   }
 
-  /** 整批放回 pending 队头（原序）：durable facts 一条不丢，dedupe index 不动（它们仍在盘上）。 */
-  releaseBatch(reservationId: string): void {
+  /**
+   * 这批交给了哪条 run：`consumeInbox` 的 executor 进 loop 之前调，事实**落在那条 run 里**
+   * （此刻 Agent 的 scope 供给已带 runId），run 的时间线由此能回答「谁的哪几条消息触发的」。
+   */
+  noteConsumed(reservationId: string, runId: string): void {
+    const batch = this.reservations.get(reservationId);
+    if (batch === undefined) return;
+    this.fact({ kind: "consumed", records: batch.map((r) => inboxRecordBrief(r.message, r.recordId)), reservationId, runId });
+  }
+
+  /** 整批放回 pending 队头（原序）：durable facts 一条不丢，dedupe index 不动（它们仍在盘上）。`reason` 只进观测。 */
+  releaseBatch(reservationId: string, reason: "run-rejected" | "enqueue-failed" | "ack-pre-commit" | "released" = "released", runId?: string): void {
     const batch = this.reservations.get(reservationId);
     if (batch === undefined) return;
     this.reservations.delete(reservationId);
     this.pending = [...batch, ...this.pending];
+    this.fact({ kind: "released", records: batch.map((r) => inboxRecordBrief(r.message, r.recordId)), reservationId, reason, ...(runId === undefined ? {} : { runId }) });
   }
 
   /**
@@ -383,14 +413,16 @@ export class InboxStore {
    * commit 之前禁止 remove 任何 record、禁止更新 dedupe index；commit 之后整批在逻辑上已 ack，
    * 后续 record/marker 删除只是可恢复 cleanup，失败也**不能把 batch 改回 pending**。
    */
-  async ackBatch(reservationId: string): Promise<void> {
+  async ackBatch(reservationId: string, opts: Readonly<{ runId?: string }> = {}): Promise<void> {
     this.assertNotSealed("ackBatch");
     const batch = this.reservations.get(reservationId);
     if (batch === undefined) return; // 幂等：已经 ack 过
     const recordIds = batch.map((r) => r.recordId);
+    const acked: Omit<InboxFact, "occurredAt"> = { kind: "acked", records: batch.map((r) => inboxRecordBrief(r.message, r.recordId)), reservationId, ...(opts.runId === undefined ? {} : { runId: opts.runId }) };
     const store = this.store;
     if (store === null) {
       this.closeReservation(reservationId, recordIds);
+      this.fact(acked);
       return;
     }
 
@@ -405,7 +437,7 @@ export class InboxStore {
     });
     for (const k of keys) this.ackBarriers.set(k, barrier);
     try {
-      return await this.commitAck(reservationId, recordIds, ackCommitId, bytes, path, store);
+      return await this.commitAck(reservationId, recordIds, ackCommitId, bytes, path, store, acked);
     } finally {
       // 先摘 barrier 再放行：被唤醒的 accept 不能再看到这条已经裁决完的 barrier
       for (const k of keys) if (this.ackBarriers.get(k) === barrier) this.ackBarriers.delete(k);
@@ -420,6 +452,7 @@ export class InboxStore {
     bytes: string,
     path: string,
     store: StorageDir,
+    acked: Omit<InboxFact, "occurredAt">,
   ): Promise<void> {
     try {
       await store.write(path, bytes);
@@ -434,7 +467,7 @@ export class InboxStore {
       }
       if (got === null) {
         // **只能由明确 not-found 得出**：整批与 dedupe index 原样 pending
-        this.releaseBatch(reservationId);
+        this.releaseBatch(reservationId, "ack-pre-commit", acked.runId);
         throw new InboxAckError("pre-commit", `inbox 整批 ack 未提交（marker 未落盘）：${errText(writeError)}——整批仍 pending，可重新 reserve`);
       }
       if (got !== bytes) {
@@ -446,6 +479,7 @@ export class InboxStore {
 
     // committed：同一 critical section 关闭 reservation + 一次性移除整批 index
     this.closeReservation(reservationId, recordIds);
+    this.fact(acked);
     // 可恢复 cleanup：幂等删 record，**确认整批都不存在了**才删 marker
     let allGone = true;
     for (const id of recordIds) {
@@ -497,7 +531,10 @@ export class InboxStore {
   }
 
   private seal(reason: string): void {
-    if (this.sealedReason === null) this.sealedReason = reason;
+    if (this.sealedReason === null) {
+      this.sealedReason = reason;
+      this.fact({ kind: "sealed", records: [], message: reason });
+    }
     this.diagnose("inbox_sealed", reason);
   }
 
