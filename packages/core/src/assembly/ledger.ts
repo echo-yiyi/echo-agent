@@ -1,4 +1,4 @@
-// AgentAssembly adoption（§14.5.1）：**每个 slot 在任何时刻只有一个 dispose owner，转移是原子的。**
+// AgentAssembly adoption：**每个 slot 在任何时刻只有一个 dispose owner，转移是原子的。**
 //
 // 为什么要有这一层：装配一个 Agent 要先造出若干 agent 域的值（Session / Memory / Schedule / Task / Inbox），
 // 再把它们交给 `new Agent()`。这中间有一个窗口——**值已经造出来、Agent 还没构造成功**。上一版没人管这个
@@ -24,7 +24,7 @@
 // slot 的三态 `offered → adopted → disposed` 仍然单向走，且**跑 disposer 之前先落终态**——disposer 抛错也不给
 // 第二次机会（否则 `stop()` 失败后重试就是二次 dispose）。
 //
-// **adopt slot 的 factory 必须零外部副作用**（§14.5.1 末段）：不读写磁盘、不取 StateLock、不起 timer、
+// **adopt slot 的 factory 必须零外部副作用**：不读写磁盘、不取 StateLock、不起 timer、
 // 不连网络/子进程、不注册 global listener、不消费 Inbox。durable restore 归 `Agent.start()`，
 // 自主活动与 timer 归 `Agent.activate()`。这条契约由 `probe.ts` 的探针在 conformance 里证明——
 // 它是「未 start 的 candidate 被 dispose 时只释放纯内存引用」这句话成立的前提，
@@ -33,7 +33,7 @@
 import { errText } from "../errors.ts";
 import { createStateWriteGate, type StateWriteGate } from "../state/write-gate.ts";
 
-/** slot 的处置模式（§14.5.1）。 */
+/** slot 的处置模式。 */
 export type AssemblyDisposalMode =
   | { kind: "adopt" } // agent-scope value：构造成功后由 concrete Agent 唯一 dispose
   | { kind: "borrow" }; // process-scope value：provider 保持 dispose owner，Agent 只借用
@@ -47,7 +47,7 @@ export type AssemblyState = "open" | "sealed" | "adopted" | "failed" | "aborting
 
 /**
  * 可观测的 slot 事实。**来源 owner 与当前 dispose owner 分开记**——值被 Agent adopt 之后不能把 provider
- * 丢掉，也不能反过来据 provider 身份推断它仍负责 dispose（§14.5.1 末段 Observation 那条）。
+ * 丢掉，也不能反过来据 provider 身份推断它仍负责 dispose（Observation 那条）。
  */
 export type AssemblySlotInfo = Readonly<{
   slotId: string;
@@ -110,13 +110,13 @@ async function unwind(slots: readonly Slot[], pick: (s: Slot) => boolean, what: 
 
 /**
  * adoption 之后的账本：**这一个 concrete Agent 是全部 adopt slot 的唯一 dispose owner**，
- * `Agent.stop()` 排空它。它同时带着 candidate 期就建好的写入格（§14.5.1 规则 6：
+ * `Agent.stop()` 排空它。它同时带着 candidate 期就建好的写入格（规则 6：
  * cell 归 candidate，只有这一个 Agent 的 `start()` acquire 成功后才 install，三代之间不共享）。
  */
 export type AdoptionLedger = Readonly<{
   /** 接管方身份（默认 profile 里是 `echo:agent` 这个 composition Entry）。 */
   consumerId: string;
-  /** 随 adoption 一起转过来的写入格（§14.9）。 */
+  /** 随 adoption 一起转过来的写入格。 */
   writeGate: StateWriteGate;
   /** 这个账本是不是某个 slot 的 dispose owner（已 drain 的也算——所有权不因为收过而回退给 provider）。 */
   owns(slotId: string): boolean;
@@ -154,7 +154,7 @@ export class AgentAssembly {
   /** 值是谁造的。 */
   readonly provider: string;
   /**
-   * candidate-owned 写入格。**在 assembly 上建、随 adoption 转给唯一那个 Agent**（§14.5.1 规则 6）：
+   * candidate-owned 写入格。**在 assembly 上建、随 adoption 转给唯一那个 Agent**（规则 6）：
    * 一次装配一个 cell，所以「old / candidate / fresh 三代不共享」是结构上成立的，不靠纪律。
    */
   readonly writeGate: StateWriteGate = createStateWriteGate();
@@ -202,7 +202,7 @@ export class AgentAssembly {
 
   /**
    * 登记一个进程域的值：**dispose owner 永远是 provider**，Agent 只借用。
-   * 交给 Agent 的必须是不带 `close` / `dispose` 的视图（§14.5.1 规则 2）。
+   * 交给 Agent 的必须是不带 `close` / `dispose` 的视图（规则 2）。
    */
   borrow<T>(slotId: string, value: T, opts: { dispose: () => void | Promise<void> }): T {
     this.assertRegistrable(slotId);

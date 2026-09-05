@@ -1,14 +1,14 @@
-// `@echo-agent/core` —— **唯一入口**。设计真相源：docs/design/AGENT-CORE.md §13（D13 / D16）。
+// `@echo-agent/core` —— **唯一入口**。
 //
-// 边界一句话：**Agent 管机制，用户换策略与基础设施**（§13.3）。
+// 边界一句话：**Agent 管机制，用户换策略与基础设施**。
 // 状态机、恢复与提交顺序归 core 自己拥有；用户注入的是 Store / Strategy / Source / Clock / Executor / Lock，
 // 它们只换介质与策略，换不掉语义。
 //
-// **两个使用高度，都在这条入口上**（§14.2）：
+// **两个使用高度，都在这条入口上**：
 //   - 高：`createEcho()` —— **唯一**的装配现场，端口与内建能力都已备好；
 //   - 低：`new Agent()` —— 自己给端口、自己注册工具。
 //
-// **能力的构造器与操作面下沉子路径**。判据是 §13.5 那句：「普通用户不 import 这些子路径
+// **能力的构造器与操作面下沉子路径**。判据是那句：「普通用户不 import 这些子路径
 // 也已经得到工作的默认能力，**只有替换默认件或开发扩展时才进入子路径**」。
 // 现在真的存在的是：`./tools` · `./task` · `./task/fs` · `./background` · `./extension` · `./mcp`
 // （以 `package.json#exports` 为准，那才是外部开发者能 import 的东西）。
@@ -94,7 +94,7 @@ export type {
   Patchable,
 } from "./hooks/runtime.ts";
 
-/* ───────────── permission：§14.10.3 固定 stage 的公共词汇（`AgentOptions.permission` 收的就是 PermissionPolicy） ───────────── */
+/* ───────────── permission：固定 stage 的公共词汇（`AgentOptions.permission` 收的就是 PermissionPolicy） ───────────── */
 
 export type {
   PermissionAnswer,
@@ -125,7 +125,7 @@ export { fenceSafe, truncateMarked } from "./prompt/sanitize.ts";
 export type { AgentMemories } from "./memory/harness.ts";
 export type { AgentSchedule } from "./schedule/harness.ts";
 export type { InboxStore } from "./inbox/store.ts";
-// §14.2.4：durable ingress 的公共协议（`agent.ingress` 的类型）与两份持久 schema。
+// durable ingress 的公共协议（`agent.ingress` 的类型）与两份持久 schema。
 // `DurableDeliveryDeferred` 是 Host-internal 的 adapter 转接口，**不出**。
 export type { DurableDeliveryRequest, DurableDeliveryResult, DurableIngressPort } from "./inbox/ingress.ts";
 export type { InboxBatchAckCommitV1, InboxRecordV1 } from "./inbox/records.ts";
@@ -133,10 +133,15 @@ export type { InboxBatchAckCommitV1, InboxRecordV1 } from "./inbox/records.ts";
  * 会话的语义所有者。**值导出**（2026-09-01）：产品要在装配前挑「续哪一段」（`--continue`），
  * 得自己在状态根的 `FileDir` 上开一个实例调 `list()`——列表归 core，不让产品各自扫 meta 文件。
  */
-export { SessionService } from "./session/service.ts";
+export { SessionService, listSessions, setSessionStatus } from "./session/service.ts";
+export { EchoSessions, SESSION_SOURCE, DEFAULT_RUN_TIMEOUT_MS } from "./session/sessions.ts";
+export type { CreateSessionInput, EchoSessionsDeps, SendResult, SessionRow, SessionRunner } from "./session/sessions.ts";
+export { readSessionPhase, writeSessionPhase, STATUS_FILE } from "./session/status.ts";
+export type { SessionPhase, SessionStatusFile } from "./session/status.ts";
 export type { AgentBackground, BackgroundLimits } from "./background/types.ts";
 export type { ActiveSkill, Skill, SkillActivation, SkillCreation } from "./skill/types.ts";
-export type { SessionData, SessionEntry, SessionInfo, SessionManager, SessionStore } from "./session/types.ts";
+export type { SessionData, SessionEntry, SessionInfo, SessionStatus, SessionStore } from "./session/types.ts";
+export { newSessionId } from "./session/types.ts";
 export type {
   TaskBrief,
   TaskCreateResult,
@@ -216,9 +221,9 @@ export {
 export type { CompactionPackConfig } from "./compaction/builtin.ts";
 export { TRANSCRIPT_READ_TOOL, renderTranscript, transcriptReadTool } from "./compaction/tool.ts";
 export type { TranscriptReadParams } from "./compaction/tool.ts";
-// §14.2.3：steer / followUp 的显式结果（accepted 或带原因的 rejected；不抛、不静默入队）
+// steer / followUp 的显式结果（accepted 或带原因的 rejected；不抛、不静默入队）
 export type { FollowUpResult, SteerResult } from "./loop/intake.ts";
-// §14.2.4：run admission 的 host port 面——request / ticket / result / execute scope，与每次 admission 冻结的 model seam。
+// run admission 的 host port 面——request / ticket / result / execute scope，与每次 admission 冻结的 model seam。
 // RunPermit、StandaloneRunAdmission、失败规范化是 Host 私有，不出。
 export type {
   AgentAdmissionExecuteScope,
@@ -234,7 +239,7 @@ export type {
 export { normalizeModelSnapshot, ModelSnapshotError } from "./admission/model-snapshot.ts";
 
 /**
- * §15.6 完整 Runtime 的观测公共面（O3a）：`createEcho()` 出来的 `echo.send()` / `echo.observations`，
+ * 完整 Runtime 的观测公共面（O3a）：`createEcho()` 出来的 `echo.send()` / `echo.observations`，
  * 以及 observe CLI 的唯一离线入口 `openObservationReader()`（read-only SQLite，不取 StateLock、不起 Runtime）。
  * 类型与纯函数 renderer 从 `@echo-agent/core/observability` 子路径拿；这里只放会碰盘的入口与其错误类。
  */
@@ -260,17 +265,17 @@ export { fileStateLock, inspectStateLock } from "./storage/file-lock.ts";
 export type { PeekedLockRecord, StateLockInspection } from "./storage/file-lock.ts";
 
 /**
- * **两个使用高度，一个 composition root**（§14.2）：
+ * **两个使用高度，一个 composition root**：
  *   - 高 = `createEcho()`，**唯一**的装配现场；
  *   - 低 = `new Agent()`，自己给端口、自己注册工具。
  *
  * `createAgent` **不在公共面上**（2026-08-31 收）：它曾经是第二个 composition root，
- * 与 §14.2 的标题「一个包、两个使用高度、**一个** composition root」直接冲突。
+ * 与「一个包、两个使用高度、**一个** composition root」直接冲突。
  * 现在它降为 `create-agent.ts` 里的内部装配函数，只有 `createEcho()` 调它。
  * 模型解析与状态根解析这两个纯函数仍然导出——它们是**判据**不是装配现场，
  * 消费方（Runner / 测试）要先算出 `stateDir` 或校验模型 id 时用得上。
  */
-export { resolveModel, resolveStateDir } from "./create-agent.ts";
+export { resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "./create-agent.ts";
 export {
   createEcho,
   discoverExtensionFiles,

@@ -27,8 +27,13 @@ import { createProviderStreams } from "../src/provider/dialect.ts";
 import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { ObservationEnvelope } from "../src/observability/types.ts";
+import { mkdtempSync } from "node:fs";
 
-// §15.9 O3a 的三条领域行（硬门 9）：fixture **直接调真实的** Memory create / replace / insert / delete / rename、
+// **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
+// 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
+
+// O3a 的三条领域行（硬门 9）：fixture **直接调真实的** Memory create / replace / insert / delete / rename、
 // Task commit / saveTasks、Schedule tick / catchUp 路径，断言每个成功 / 拒绝 / 失败分支恰有一条事实，
 // 没有测试专属 producer。最后一段走真 createEcho：run 内 builtin memory 工具触发的事实能由 getRun(runId) 取得，
 // run 外的 Schedule 事实经 snapshot → subscribe 取得。

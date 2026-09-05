@@ -1,4 +1,4 @@
-// Skill 的数据与操作面。设计见 docs/design/AGENT-CORE.md（skill 一节）。
+// Skill 的数据与操作面。
 //
 // Skill 解决什么问题：把「磁盘上一坨文件」变成「一条能摆到模型面前的指令」，
 // 并且让指令里能引用它旁边的模板与脚本。所以它必须同时回答三件事：
@@ -59,7 +59,7 @@ export type ActiveSkill = {
 
 /**
  * 一次 skill 发现的产出（loader 扫盘、或 `skillSource` 端口从状态根恢复）。
- * 住 types.ts 而不是 loader.ts：`Agent`（engine 面）要引用它，loader 拖 `node:`。
+ * 住 types.ts 而不是 loader.ts：`Agent` 要引用它，而 loader 拖 `node:`。
  */
 export type LoadedSkills = {
   skills: Skill[];

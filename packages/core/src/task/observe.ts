@@ -1,4 +1,4 @@
-// Task 的领域观测（§15.9 Task 行）：两种真相分开——
+// Task 的领域观测（Task 行）：两种真相分开——
 //   · `task.state.committed`：`commit()` 完成 Map swap 之后（内存态已变）；
 //   · `task.store.saved / failed`：只在真实 `saveTasks()` settle 之后（O3a 只有 dispose / 显式写链那几处会调它）。
 // renderer 不得把 state commit 显示为 durable；多次 state commit 可以对应一次 store save（O2b dirty coalescer）。

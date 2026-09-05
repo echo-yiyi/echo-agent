@@ -1,8 +1,8 @@
-// ObservationRuntime（§15.5.2 / §15.12，O3a）：完整 Runtime 里 canonical writer 的宿主——
+// ObservationRuntime（O3a）：完整 Runtime 里 canonical writer 的宿主——
 // 持有唯一的 Sequencer 与 SQLite store，是 run 三条边界（`run.accepted / run.started / run.closed`）的**唯一 emission owner**，
 // 并把 AgentEvent 经 `factSinkToIngest(agentEventDescriptor)` 送进 bounded lane。
 //
-// 失败语义（2026-09-03 用户拍板：**观测不得影响 agent 主线**，放弃规格 §15.12 的 fail-closed admission）：
+// 失败语义（2026-09-03 用户拍板：**观测不得影响 agent 主线**，放弃 fail-closed admission）：
 //   · `run.accepted` / `run.assembly` / `run.started` 只**同步预留 seq**（顺序由预留决定，不由落盘决定），提交是
 //     fire-and-forget；落不下去只降级 persistence + 诊断，**永远不拒 run、不让 run 等**；
 //   · `run.closed` 仍等它 COMMIT——它在 run 的活干完之后，`send()` 靠它如实报 `observationPersistence`；等待有界
@@ -49,14 +49,14 @@ export function builtinOwner(entryId: string): ObservationOwner {
 
 /** Agent 循环自己发的事实（run 边界、turn / model / tool span）都归 `echo:agent` 这一 builtin Entry。 */
 export const AGENT_ENTRY_ID = "echo:agent";
-/** §15.9 三个 O3a 领域行的 owner：与 extension/builtin.ts 的 tool pack 同名。 */
+/** 三个 O3a 领域行的 owner：与 extension/builtin.ts 的 tool pack 同名。 */
 export const MEMORY_ENTRY_ID = "echo:memory";
 export const TASKS_ENTRY_ID = "echo:tasks";
 export const SCHEDULER_ENTRY_ID = "echo:scheduler";
 
 export type ObservationRuntimeOptions = Readonly<{
   runtimeId: string;
-  /** §14 RuntimeGeneration；O3a 只有 boot 一代。 */
+  /** RuntimeGeneration；O3a 只有 boot 一代。 */
   runtimeGeneration: string;
   capturePolicy: ObservationCapturePolicy;
   store: SqliteCanonicalObservationStore;
@@ -93,7 +93,7 @@ function clipSafeString(s: string): string {
   return `${out}…`;
 }
 
-/** `AgentOutcome` → 有界的 terminal outcome：正文 / message 不进 boundary，只留 code + digest（§15.5.1）。 */
+/** `AgentOutcome` → 有界的 terminal outcome：正文 / message 不进 boundary，只留 code + digest。 */
 export function toRunClosedOutcome(outcome: AgentOutcome): RunClosedOutcomeObservation {
   switch (outcome.kind) {
     case "completed":
@@ -115,7 +115,7 @@ export class ObservationRuntime {
   /** live 查询面（`echo.observations`）：同一个 Sequencer + 同一条 SQLite connection 的只读查询。 */
   readonly observations: LiveEchoObservations;
   private readonly clock: Clock;
-  /** 随库首建、永不改写（§15.9）；库关了之后挂 sink（stop 后再 start 的拒绝路径）也不能再去读它。 */
+  /** 随库首建、永不改写；库关了之后挂 sink（stop 后再 start 的拒绝路径）也不能再去读它。 */
   private readonly pathDigestKeyBytes: Uint8Array;
   private report: (d: Diagnostic) => void = () => {};
   private scopeSupplier: ObservationScopeSupplier = () => ({});
@@ -158,7 +158,7 @@ export class ObservationRuntime {
     return this.phase;
   }
 
-  /** 当前 Runtime 对某 run 的 persistence 投影：终态已 COMMIT 进 RunIndex 才是 stored，否则 degraded（§15.5.1）。 */
+  /** 当前 Runtime 对某 run 的 persistence 投影：终态已 COMMIT 进 RunIndex 才是 stored，否则 degraded。 */
   persistenceOf(runId: string): "stored" | "degraded" {
     const idx = this.sequencer.committedRunIndex(runId);
     return idx !== undefined && idx.terminalRecordId !== undefined ? "stored" : "degraded";
@@ -176,21 +176,21 @@ export class ObservationRuntime {
     this.scopeSupplier = supplier;
   }
 
-  /** 本 state root 的 Memory path HMAC key（§15.9）：只给 writer 侧的 descriptor，永不进 envelope。构造期读一次，之后不碰库。 */
+  /** 本 state root 的 Memory path HMAC key：只给 writer 侧的 descriptor，永不进 envelope。构造期读一次，之后不碰库。 */
   get pathDigestKey(): Uint8Array {
     return this.pathDigestKeyBytes;
   }
 
   /**
    * AgentEvent → bounded lane 的 sink。`scope` 缺省用 `bindScope()` 挂上的供给（runId / turnId 只有 Agent 知道）。
-   * 由 Agent 在 `processEvents()` 的 state apply + required persistence 之后同步调用（§15.12）。
+   * 由 Agent 在 `processEvents()` 的 state apply + required persistence 之后同步调用。
    */
   eventSink(scope?: ObservationScopeSupplier): CapabilityFactSink<AgentEvent> {
     return this.capabilitySink(agentEventDescriptor, builtinOwner(AGENT_ENTRY_ID), scope);
   }
 
   /**
-   * 内建 Capability（Memory / Task / Schedule …）的 module-local sink（§15.9）：descriptor 归语义 owner，
+   * 内建 Capability（Memory / Task / Schedule …）的 module-local sink：descriptor 归语义 owner，
    * 这里只把它转成 `ObservationIngest.offer()`，identity / owner / runtime 身份在构造期钉住。
    */
   capabilitySink<T>(descriptor: CapabilityFactDescriptor<T>, owner: ObservationOwner, scope?: ObservationScopeSupplier): CapabilityFactSink<T> {
@@ -235,7 +235,7 @@ export class ObservationRuntime {
     this.fireBoundary(input.runId, RUN_ASSEMBLY_RECORD, this.boundary(RUN_ASSEMBLY_RECORD, "snapshot", scope, acceptedAt, assembly));
   }
 
-  /** permit executor 真正进入 loop 的那一拍。同样只预留、不等（§15.12：started 失败本来就不取消 run）。 */
+  /** permit executor 真正进入 loop 的那一拍。同样只预留、不等（started 失败本来就不取消 run）。 */
   startRun(runId: string, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>): void {
     const body: RunStartedBodyV1 = { startedBy: "permit-executor" };
     this.fireBoundary(runId, "run.started", this.boundary("run.started", "event", this.runScope(runId, identity), this.clock.now(), body));

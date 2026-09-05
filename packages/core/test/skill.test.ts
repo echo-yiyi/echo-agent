@@ -1,4 +1,4 @@
-// skill 的契约门。设计见 docs/design/AGENT-CORE.md §5A。
+// skill 的契约门。
 //
 // 形态变化（2026-08-05）：不再有 SkillHarness 这个对象——池是 `agent.skills`（Map<string, Skill>），
 // 工作集是 `agent.activeSkills`，操作全是 `skill/harness.ts` 里的函数。

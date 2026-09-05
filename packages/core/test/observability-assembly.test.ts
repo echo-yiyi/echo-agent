@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { sealAgentAssemblyObservation, snapshotRunModelBinding, type BuiltinSlotContribution } from "../src/observability/assembly.ts";
 import { FAKE_MODEL } from "../src/testing.ts";
 
-// §15.5.1 / O2a：最小 sealed AgentAssembly 与 RunModelBinding 观测快照。schema 与 digest 必须稳定——
+// O2a：最小 sealed AgentAssembly 与 RunModelBinding 观测快照。schema 与 digest 必须稳定——
 // O2b 接上正式 Entry owner 后往同一 schema 填值，slot ID 与 contribution digest 不漂移。
 
 const slots: BuiltinSlotContribution[] = [

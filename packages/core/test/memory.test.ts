@@ -1,4 +1,4 @@
-// 记忆模块的契约门。对应设计 docs/design/parts/memory.md。
+// 记忆模块的契约门。
 //
 // 锁的不变量:
 //   ① 三层内建(agent/user resident + memory indexed),分区注册开、路径重叠 fail-loud

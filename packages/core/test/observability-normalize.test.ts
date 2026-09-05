@@ -14,7 +14,7 @@ import {
 import { sha256Hex } from "../src/observability/hash.ts";
 import { OBSERVATION_SYNC_LIMITS } from "../src/observability/types.ts";
 
-// §15.4.1：唯一 normalize。每条规则一个测试；上限用「刚好命中 / 超一单位」两个 fixture 锁边界（§15.4.2）。
+// 唯一 normalize。每条规则一个测试；上限用「刚好命中 / 超一单位」两个 fixture 锁边界。
 
 function codeOf(fn: () => unknown): string {
   try {

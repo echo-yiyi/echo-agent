@@ -1,24 +1,24 @@
-// Observation 公共 ABI（AGENT-CORE §15.4.1 / §15.5.1 / §15.6 / §15.12，逐字照录；O2a B1）。
+// Observation 公共 ABI（O2a B1）。
 //
 // **只放 JSON-safe 的值与形状**：persist / query / render 面上只出现 `ObservationValue`，任何运行期对象
 // （Error、Uint8Array、bigint、Map……）都在 Sequencer 的 `normalizeObservationValue()` 里归一或被拒，
-// 不靠 `JSON.stringify()` 静默删字段（§15.4.1）。
+// 不靠 `JSON.stringify()` 静默删字段。
 //
 // `ObservationDraft` 系列是 Host-internal producer 输入，**不在这里**（见 `./draft.ts`），
 // 绝不从 observability 公共子路径导出。
 
-/* ══════════════════ §15.4.1 值与 envelope ══════════════════ */
+/* ══════════════════ 值与 envelope ══════════════════ */
 
 /** JSON-safe 标量：canonical envelope 里能出现的叶子值。 */
 export type ObservationScalar = null | boolean | number | string;
 
-/** JSON-safe 值（§15.4.1）：body / attributes / snapshot 都先成为它，才能进 canonical journal 与 renderer。 */
+/** JSON-safe 值：body / attributes / snapshot 都先成为它，才能进 canonical journal 与 renderer。 */
 export type ObservationValue =
   | ObservationScalar
   | readonly ObservationValue[]
   | { readonly [key: string]: ObservationValue };
 
-/** Error 的安全投影：name / message / code 与 stack 的 digest，不带原始 stack（§15.11 采集边界）。 */
+/** Error 的安全投影：name / message / code 与 stack 的 digest，不带原始 stack（采集边界）。 */
 export type ObservationError = Readonly<{
   name: string;
   message: string;
@@ -34,7 +34,7 @@ export type ObservationError = Readonly<{
   stackChars?: number;
 }>;
 
-/** 大正文的 content-addressed 引用（§15.4.2.4）；O3a 只定形状，真正的 blob CAS 接线在 O3b。 */
+/** 大正文的 content-addressed 引用；O3a 只定形状，真正的 blob CAS 接线在 O3b。 */
 export type ObservationBlobRef = Readonly<{
   digest: string;
   mediaType?: string;
@@ -58,7 +58,7 @@ export type ObservationOwner =
   | Readonly<{
       status: "known";
       entryId: string;
-      // §14 Entry generation 是内容/换代 identity，保持 string，不另造数值代号。
+      // Entry generation 是内容/换代 identity，保持 string，不另造数值代号。
       entryGeneration: string;
       via: "assembly" | "registry" | "fiber";
     }>
@@ -67,10 +67,10 @@ export type ObservationOwner =
 
 /** 两条 lane：boundary 同步等 COMMIT（run 边界、gap），bounded 进有界 ring 批量提交（高频事实）。 */
 export type ObservationLane = "boundary" | "bounded";
-/** 四种原始信号（§15.3）加 health。 */
+/** 四种原始信号加 health。 */
 export type ObservationRecordKind = "event" | "span_start" | "span_end" | "snapshot" | "health";
 
-/** canonical record 的 envelope（§15.4.1）：identity（recordId / seq / observedAt）由 Sequencer 分配，producer 只给 body 与 descriptor。 */
+/** canonical record 的 envelope：identity（recordId / seq / observedAt）由 Sequencer 分配，producer 只给 body 与 descriptor。 */
 export type ObservationEnvelope<T extends ObservationValue = ObservationValue> = Readonly<{
   schemaVersion: 1;
   recordId: string;
@@ -114,31 +114,31 @@ export type ObservationEnvelope<T extends ObservationValue = ObservationValue> =
   body: T;
 }>;
 
-/* ══════════════════ §15.3.3 Snapshot ══════════════════ */
+/* ══════════════════ Snapshot ══════════════════ */
 
-/** 此刻权威状态的只读投影（§15.3.3）：`throughSeq` 说明它相对 journal 的新鲜度。 */
+/** 此刻权威状态的只读投影：`throughSeq` 说明它相对 journal 的新鲜度。 */
 export type ObservationSnapshot<T extends ObservationValue> = Readonly<{
   throughSeq: number;
   at: number;
   state: T;
 }>;
 
-/* ══════════════════ §14 里被 §15 引用的 Runtime 类型 ══════════════════ */
-// 这三个的定义权在 §14.2（EchoRuntime）。O3a 落 `createEcho()` 时从 runtime 模块导出并在这里 re-export；
+/* ══════════════════ 从 Runtime 一侧借来的类型 ══════════════════ */
+// 这三个的定义权在 `EchoRuntime` 一侧。O3a 落 `createEcho()` 时从 runtime 模块导出并在这里 re-export；
 // 现在先住这里，避免两份定义漂移。
 
-/** §14 Runtime 生命周期 phase；与 observation persistence 正交（§15.12）。 */
+/** Runtime 生命周期 phase；与 observation persistence 正交。 */
 export type RuntimePhase = "bootstrapping" | "ready" | "reconfiguring" | "failed" | "disposing" | "disposed";
 
 /** 兼容的人读投影：phase，或 phase=ready 且 persistence 非 healthy 时的 `"degraded"`；内部真相始终是两轴。 */
 export type EchoRuntimeStatus = RuntimePhase | "degraded";
 
-// `RunSource` 的定义权归 §14.2.4 admission（`../admission/types.ts`）——这里只转发，不留第二份定义。
+// `RunSource` 的定义权归 admission（`../admission/types.ts`）——这里只转发，不留第二份定义。
 import type { RunSource } from "../admission/types.ts";
 import type { AgentOutcome } from "../events.ts";
 export type { RunSource };
 
-/* ══════════════════ §15.5.1 RunObservation 家族 ══════════════════ */
+/* ══════════════════ RunObservation 家族 ══════════════════ */
 
 /** 采集档位（OR9）：off 只留身份骨架与安全 outcome；metadata 缺省；content 才带正文（需显式打开）。 */
 export type ObservationCapturePolicy = "off" | "metadata" | "content";
@@ -206,7 +206,7 @@ export type RunClosedOutcomeObservation = Readonly<{
   errorDigest?: string;
 }>;
 
-/** 单个 Capability 的固定 counters / flags / digest 摘要（各有上限，§15.5.1）；正文与列表不进这里。 */
+/** 单个 Capability 的固定 counters / flags / digest 摘要（各有上限）；正文与列表不进这里。 */
 export type CapabilityObservationSummary = Readonly<{
   schemaVersion: 1;
   stateDigest: string;
@@ -302,7 +302,7 @@ export type RunObservationHeader = Readonly<{
   persistence: "stored" | "degraded";
 }>;
 
-/** RunIndex 行（`observation_run_index`，§15.4.2.2）：retention 之后 header 的唯一真相源；与 records 同事务更新。 */
+/** RunIndex 行（`observation_run_index`）：retention 之后 header 的唯一真相源；与 records 同事务更新。 */
 export type RunIndexEntryV1 = Readonly<{
   schemaVersion: 1;
   runtimeId: string;
@@ -317,7 +317,7 @@ export type RunIndexEntryV1 = Readonly<{
   prunedAt?: number;
 }>;
 
-/** 一次 run 的硬产物（§15.5.1）：header + 冻结快照 + records + 派生的 gaps / summary；整体可按 canonical JSON round-trip。 */
+/** 一次 run 的硬产物：header + 冻结快照 + records + 派生的 gaps / summary；整体可按 canonical JSON round-trip。 */
 export type RunObservation = RunObservationHeader &
   Readonly<{
     agentAssembly: AgentAssemblyObservationSnapshot;
@@ -344,9 +344,9 @@ export type RunLookupResult =
     }>
   | Readonly<{ kind: "unknown" }>;
 
-/* ══════════════════ §15.12 gap 三族与 sink / persistence health ══════════════════ */
+/* ══════════════════ gap 三族与 sink / persistence health ══════════════════ */
 
-/** canonical gap 的原因（§15.12）。 */
+/** canonical gap 的原因。 */
 export type ObservationGapReason =
   | "buffer_overflow"
   | "encoding_error"
@@ -398,7 +398,7 @@ export type SinkHealth = Readonly<{
   lastErrorDigest?: string;
 }>;
 
-/** canonical persistence 的五态（§15.12）；与 RuntimePhase 正交。 */
+/** canonical persistence 的五态；与 RuntimePhase 正交。 */
 export type ObservationPersistenceStatus = "healthy" | "degraded" | "recovering" | "sealed" | "lost-lease";
 
 /** persistence 状态带证据：非 healthy 时必有 since / lastErrorDigest / reopenAttempts。 */
@@ -447,7 +447,7 @@ export type ObservationHealth = Readonly<{
   sinks: readonly SinkHealth[];
 }>;
 
-/* ══════════════════ §15.6 用户取得与渲染的公共面 ══════════════════ */
+/* ══════════════════ 用户取得与渲染的公共面 ══════════════════ */
 
 /**
  * 完整 Runtime `send()` 的返回（OR5）：业务 outcome 与观测三元组正交——
@@ -527,7 +527,7 @@ export interface EchoObservationReader {
   close(): Promise<void>;
 }
 
-/* ══════════════════ §15.7 renderer ViewModel ══════════════════ */
+/* ══════════════════ renderer ViewModel ══════════════════ */
 
 /** Timeline 的一行：相对 acceptedAt 的时间、层级与（span_end 才有的）耗时。 */
 export type RunObservationTimelineItem = Readonly<{
@@ -584,7 +584,7 @@ export type RenderedRunObservation = Readonly<{
   content: string;
 }>;
 
-/* ══════════════════ §15.4.2 同步预算（硬门，不是建议） ══════════════════ */
+/* ══════════════════ 同步预算（硬门，不是建议） ══════════════════ */
 
 /** `offer()` 的同步预算：超出任一项按 encoding failure 裁决，不静默截断成另一份事实。 */
 export const OBSERVATION_SYNC_LIMITS = {

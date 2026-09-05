@@ -99,6 +99,9 @@ const AGENT_BUILTIN_TOOLS = [
   "skill_create",
   "tool_search", // 2026-09-02 渐进式披露的入口，core 恒装（在不在菜单上另算，这里是池）
   "transcript_read",
+  // **会话面（`session_*`）不在这里**：挂不挂它是**容器**的决定（`CreateEchoOptions.sessions`），
+  // 不是产品身份。cli 开着它，所以真跑起来的 echo-coding 会多三件；而这份 digest 描述的是
+  // 「这个产品自己带什么」——把容器的选择写进产品身份，换个宿主就对不上了。
 ] as const;
 
 /** 产品自己出的四段（identity / conduct:coding / tool:workspace / tool:shell），按 order 排。 */

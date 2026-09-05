@@ -1,5 +1,4 @@
 // 消息层：我们的账本（AgentMessage）与发出去的电报（ProviderMessage），以及两者之间**唯一**一道翻译。
-// 设计见 docs/design/AGENT-CORE.md §4。
 //
 // 三条不变量：
 //   ① AgentMessage 是纯数据（JSON-safe）——它会被原样落盘，所以不许挂函数、不许挂类实例。
@@ -35,7 +34,7 @@ export type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: 
  *
  * **为什么标在块上而不是消息上**：pi 是拿 `AssistantMessage` 的 `provider/api/model` 三元组比
  * （`transform-messages.ts`），而本仓的投影**有意剥掉** `AssistantMessage.model`
- * （§4 不变量③：ProviderMessage 是临时形态，不带账本字段）。要么破那条不变量，
+ * （不变量③：ProviderMessage 是临时形态，不带账本字段）。要么破那条不变量，
  * 要么让来源跟着不透明数据一起走——选后者：**谁不透明，谁自己带身份**。
  */
 export type ThinkingBlock = {

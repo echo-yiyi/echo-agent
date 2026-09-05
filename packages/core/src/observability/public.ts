@@ -1,7 +1,7 @@
-// `@echo-agent/core/observability` —— 观测的**公共类型与只读工具**（§15：公共类型、查询面类型与 renderer 从这条子路径导出）。
+// `@echo-agent/core/observability` —— 观测的**公共类型与只读工具**（公共类型、查询面类型与 renderer 从这条子路径导出）。
 //
 // 这里只有 JSON-safe 的类型、上限常量、快照构造器与**纯函数** renderer。**Sequencer / store / draft / fact-sink 不在这里**：
-// 它们是 Host-internal seam，露出来等于允许外部伪造 canonical identity（§15.4.1 末尾）。
+// 它们是 Host-internal seam，露出来等于允许外部伪造 canonical identity。
 // 会碰盘的入口（`openObservationReader`）在根入口——根入口本来就是 node-only。
 //
 // 纯（不碰 `node:` / `bun:`）：浏览器 / Worker 里的渲染消费者也能 import。

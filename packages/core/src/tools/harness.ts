@@ -1,4 +1,4 @@
-// 工具的操作方法。设计见 docs/design/AGENT-CORE.md §5A。
+// 工具的操作方法。
 //
 // **这个文件里全是方法,没有 interface、没有类、没有状态**（2026-08-05 用户拍定）:
 // 数据是 agent 的（`agent.tools` 就是一个 `Map<string, AgentTool>`,装的是**工具本体**,
@@ -19,7 +19,7 @@ export type ToolMap = Map<string, AgentTool>;
 /**
  * 装一个工具。撞名 **fail-loud**,要盖掉必须显式 `replace: true`——不许静默影子。
  *
- * 返回的卸载器**只认对象身份**（§14.7.5 第 5 条）：池里这个名字若已被别人显式 replace 成
+ * 返回的卸载器**只认对象身份**：池里这个名字若已被别人显式 replace 成
  * 另一个对象,它什么都不做——按名字删会把新条目一起误删。返回 true = 真卸掉了。
  */
 export function registerTool(tools: ToolMap, tool: AgentTool, opts?: { replace?: boolean }): () => boolean {

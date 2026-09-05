@@ -303,7 +303,7 @@ test("新三家真的把请求打到自己的端点上（假 fetch，零网络�
   }
 });
 
-test("baseUrl 可覆盖：MiniMax 换区、自建网关都不用改代码（那条端点尚未实跑验证，见 ISSUES）", async () => {
+test("baseUrl 可覆盖：MiniMax 换区、自建网关都不用改代码（那条端点尚未实跑验证）", async () => {
   const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
   const provider = minimaxProvider({ baseUrl: "https://api.minimaxi.com/v1", fetchFn: fn });
   await collect(provider.stream(provider.getModels()[0]!, CTX, { apiKey: "k" }));
@@ -449,7 +449,7 @@ test("GLM：thinking 开着且 clear_thinking:false（preserved thinking 要的�
   }
 });
 
-test("MiniMax 仍不声称 reasoning：它的 <think> 混在正文里，需要专门的 compat（见 ISSUES）", () => {
+test("MiniMax 仍不声称 reasoning：它的 <think> 混在正文里，需要专门的 compat", () => {
   for (const model of minimaxProvider().getModels()) {
     expect([model.id, model.capabilities?.reasoning ?? false]).toEqual([model.id, false]);
   }

@@ -1,4 +1,4 @@
-// `run.closed` 的 preflight（§15.5.1「boundary body 必须按构造有界」/ §15.4.2 optional projection fallback）。
+// `run.closed` 的 preflight（「boundary body 必须按构造有界」/ optional projection fallback）。
 //
 // 纯函数、不依赖 Runtime admission（review：O2a 要能独立验「超限自动降级、run.closed 仍 stored、下一 admission
 // 可继续」）。规则：

@@ -1,4 +1,4 @@
-// Permission ledger：Agent 私有的 pending ask 账本。设计见 docs/design/AGENT-CORE.md §14.10.3。
+// Permission ledger：Agent 私有的 pending ask 账本。
 //
 // 它回答三件事，且每件都在同一个同步临界区里裁决（JS 单线程，方法内不 await）：
 //   - open：只有真正进入 ask 才生成 ID、登记 pending、挂 timeout/abort；

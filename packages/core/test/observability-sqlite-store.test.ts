@@ -17,7 +17,7 @@ import { encodeCanonical } from "../src/observability/normalize.ts";
 import type { BoundaryObservationDraft, BoundedObservationDraft, RunAcceptedBodyV1 } from "../src/observability/draft.ts";
 import type { RunIndexEntryV1, RunObservationHeader } from "../src/observability/types.ts";
 
-// §15.4.2.2 / §15.4.2.3 的 SQLite store：与 in-memory 参考实现**同一套裁决**，外加 SQLite 才有的三件事——
+// SQLite store：与 in-memory 参考实现**同一套裁决**，外加 SQLite 才有的三件事——
 // PRAGMA 验证、schema/key 建库与 reopen、read-only reader 在活 writer 旁边只见已 COMMIT 快照。
 
 const RT = "rt-sqlite";

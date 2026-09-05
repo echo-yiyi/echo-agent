@@ -1,4 +1,4 @@
-// 固定渲染结构（§15.7）：`buildRunObservationViewModel()` 与 `renderRunObservation()` 都是**纯函数**——
+// 固定渲染结构：`buildRunObservationViewModel()` 与 `renderRunObservation()` 都是**纯函数**——
 // 不读 Agent、不查 store、不看当前 exporter / subscriber 状态，也不改原 envelope。同一 record、同一 rendererVersion
 // 必然同一输出；golden 锁层级、相对顺序与 redaction，不锁 wall clock / 随机 ID（时间全部相对 acceptedAt）。
 //

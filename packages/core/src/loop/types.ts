@@ -1,4 +1,4 @@
-// 循环的入参形状。设计见 docs/design/AGENT-CORE.md §3.5。
+// 循环的入参形状。
 
 import type { AgentEventInput, AgentOutcome } from "../events.ts";
 import type { HookContext, HookRuntime } from "../hooks/runtime.ts";
@@ -91,7 +91,7 @@ export interface AgentLoopConfig {
    * 本轮开始时池里**全部**名字（含被禁用的）。与 `getTools()` 同一拍取，一起冻成本轮工作集：
    * 执行只认 `getTools()` 给出的对象；不在里面的名字，**只有本轮开始时已知的**才去问 `resolveTool`
    * 要一个准确原因（禁用 / 已卸载）。本轮开始后才注册的名字即使模型点中也不执行——它是下一轮的
-   * （§14.7.5 第 1 条：实时池不能成为第二条解析路）。
+   * （实时池不能成为第二条解析路）。
    */
   knownToolNames: () => readonly string[];
   /**
@@ -114,7 +114,7 @@ export interface AgentLoopConfig {
   /** 每轮注入。`visibleTools` 是本轮冻结的、模型菜单上的工具名——注入里的工具门控只许读它，不读活池。 */
   getTurnInjections?: (visibleTools: ReadonlySet<string>) => Promise<AgentMessage[]> | AgentMessage[];
   /**
-   * §14 RunIntakeGate 的循环侧：turn / run 的开关门与 drain。Agent 实现；drain 出来的消息已过 userPromptSubmit 准入。
+   * RunIntakeGate 的循环侧：turn / run 的开关门与 drain。Agent 实现；drain 出来的消息已过 userPromptSubmit 准入。
    * 不给 = 这条 run 不吃 steer / followUp（Dream）。
    */
   intake?: LoopIntake;
@@ -124,14 +124,14 @@ export interface AgentLoopConfig {
 
   /**
    * 工具前后的拦截统一走 hooks 的 preToolUse / postToolUse 挂点，**不是两个字段**。
-   * 循环在每轮开头 `snapshot()` 一次、整轮只用那份工作集（§14.7.5 第 2 条）；
+   * 循环在每轮开头 `snapshot()` 一次、整轮只用那份工作集；
    * 轮与轮之间（stop / preCompact）才看活对象。
    */
   hooks: HookRuntime;
   hookContext: HookContext;
 
   /**
-   * 授权 stage（§14.10.3）：在 transform hooks 与重新校验之后、execute 之前的固定位置；
+   * 授权 stage：在 transform hooks 与重新校验之后、execute 之前的固定位置；
    * 只能决定，不能改参数。它看到的 `params` 已经冻结，与 execute 收到的是同一份。
    */
   permission: PermissionStage;

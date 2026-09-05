@@ -1,4 +1,4 @@
-// skill 加载器:扫盘 → Skill[]。设计见 docs/design/AGENT-CORE.md §5A.5。
+// skill 加载器:扫盘 → Skill[]。
 //
 // **判据:别人写的 skill 能不能在我们这跑起来**(2026-08-04 用户拍定)——
 // 所以 Claude Code / pi 的目录式 skill(`<dir>/SKILL.md` + frontmatter + 同目录文件)
@@ -24,7 +24,7 @@ import type { LoadedSkills, Skill } from "./types.ts";
 // 格式（parse / serialize / buildSkill）住 `format.ts`（纯）；这里保住既有导出路径。
 export { SKILL_ENTRY_FILE, parseSkillText } from "./format.ts";
 
-export type { LoadedSkills } from "./types.ts"; // 声明移居 types.ts（engine 面要用），这里保住既有导出路径
+export type { LoadedSkills } from "./types.ts"; // 声明移居 types.ts（`Agent` 要用），这里保住既有导出路径
 
 /**
  * 扫多个目录。撞名**先到先得 + 诊断**(目录顺序就是优先级:项目级排前面赢过全局级),

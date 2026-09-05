@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileDir } from "../src/storage/file-dir.ts";
 
-// `FileDir` 的 Store conformance（§13.12.2）：**一次 `write` 要么整份生效、要么完全不生效**。
+// `FileDir` 的 Store conformance：**一次 `write` 要么整份生效、要么完全不生效**。
 //
 // **立门由来（2026-08-18，CI 上真炸过）**：临时文件名原先是 `${target}.${pid}.${Date.now()}`，
 // 同一毫秒内并发写同一路径会生成**同名**临时文件——先到的 `rename` 走了，后到的 `rename`

@@ -1,4 +1,4 @@
-// EffectStack（§14.7.3）：一个 Fiber 拥有的全部 Effect，按登记顺序入栈、**LIFO** 卸。
+// EffectStack：一个 Fiber 拥有的全部 Effect，按登记顺序入栈、**LIFO** 卸。
 //
 // 卸载顺序是契约：关闭登记闸 → abort → 等所有还没完成的 start settle → LIFO dispose。
 // 「异步回调不能在 disposer snapshot 之后偷偷注册新资源」靠两件事：闸关了之后 `ctx.effect()` 直接抛；

@@ -14,7 +14,8 @@ import { assistantMessage, toolResultMessage, userMessage, type AgentMessage, ty
 import type { Model, StreamFn } from "../src/provider/types.ts";
 import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
-import { InMemorySessionManager } from "../src/session/types.ts";
+import { SessionService } from "../src/session/service.ts";
+import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { EMPTY_COMPACTION, type CompactionInput, type CompactionStage, type CompactionState } from "../src/compaction/types.ts";
 import {
   IMAGE_TOKEN_ESTIMATE,
@@ -285,16 +286,27 @@ test("extractSummary：剥 scratchpad、取 summary 里面的；都没有就整�
 /* ═══════════════ 循环层 ═══════════════ */
 
 /** 低层路径：`new Agent()` + `mountBuiltinTools()`，与 createEcho 同一张 builtin 表。 */
-async function agentWithBuiltins(streamFunction: StreamFn, opts: { model?: Model; sessions?: InMemorySessionManager; compaction?: Agent["compaction"] } = {}): Promise<Agent> {
+async function agentWithBuiltins(
+  streamFunction: StreamFn,
+  opts: { model?: Model; session?: { store: InMemoryDir; id: string }; compaction?: Agent["compaction"] } = {},
+): Promise<Agent> {
   const agent = new Agent({
     model: opts.model ?? SMALL,
     streamFunction,
     tools: [echoTool()],
-    ...(opts.sessions !== undefined ? { sessions: opts.sessions } : {}),
+    // 一个 store 就是一段 session 的目录（2026-09-03）：同一个 store 换个 Agent 就是「另一个进程续同一段」
+    ...(opts.session !== undefined ? { sessionService: new SessionService(opts.session.store), sessionId: opts.session.id } : {}),
     compaction: opts.compaction ?? { reserveTokens: 100, keepRecentTokens: 40 },
   });
   await mountBuiltinTools(agent);
+  // 注入了 sessionService 就是 lifecycle-managed：不 start 连 prompt 都不接
+  if (opts.session !== undefined) await agent.start();
   return agent;
+}
+
+/** 从盘上把那一段读回来——测试要验的是「落盘了什么」，所以每次新开一个 Service。 */
+async function loadSession(store: InMemoryDir, id: string): Promise<{ compaction: CompactionState }> {
+  return await new SessionService(store).createOrResume(id);
 }
 
 function collect(agent: Agent): { events: AgentEvent[]; lifecycle: LifecycleEvent[] } {
@@ -306,10 +318,9 @@ function collect(agent: Agent): { events: AgentEvent[]; lifecycle: LifecycleEven
 }
 
 test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含摘要不含原文；压完下一轮不重复压；状态与 session 都记下", async () => {
-  const sessions = new InMemorySessionManager();
+  const store = new InMemoryDir();
   const { fn, requests } = capturing([reply("<summary>S1</summary>"), toolTurn("t1", "echo", {}), textTurn("done")]);
-  const agent = await agentWithBuiltins(fn, { sessions });
-  const id = await agent.newSession();
+  const agent = await agentWithBuiltins(fn, { session: { store, id: "s1" } });
   const { events, lifecycle } = collect(agent);
   const result = await agent.prompt(BIG_TEXT);
   expect(result.outcome.kind).toBe("completed");
@@ -328,20 +339,18 @@ test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含�
   // transcript 原文还在
   expect(agent.messages[0]!.role === "user" && JSON.stringify(agent.messages[0]!.content)).toContain(BIG_TEXT);
   // session 里有一条 compaction entry，状态与运行时同一份
-  const loaded = await sessions.load(id);
+  const loaded = await loadSession(store, "s1");
   expect(loaded.compaction).toEqual(agent.state.compaction);
 });
 
-test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐字节相同（§7.4 第 4 条）", async () => {
-  const sessions = new InMemorySessionManager();
+test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐字节相同", async () => {
+  const store = new InMemoryDir();
   const a = capturing([reply("<summary>S1</summary>"), textTurn("one"), textTurn("two")]);
-  const agentA = await agentWithBuiltins(a.fn, { sessions });
-  const id = await agentA.newSession();
+  const agentA = await agentWithBuiltins(a.fn, { session: { store, id: "s1" } });
   await agentA.prompt(BIG_TEXT);
   // 另一个进程在这一刻恢复同一段（transcript 两条 + 一条 compaction entry）
   const b = capturing([textTurn("two")]);
-  const agentB = await agentWithBuiltins(b.fn, { sessions });
-  await agentB.loadSession(id);
+  const agentB = await agentWithBuiltins(b.fn, { session: { store, id: "s1" } });
   expect(agentB.state.compaction).toEqual(agentA.state.compaction);
   await agentA.prompt("next");
   await agentB.prompt("next");
@@ -562,10 +571,9 @@ test("echo:compaction 装上之后 transcript_read 在工具面上，读的是�
 /* ═══════════════ 手动 ═══════════════ */
 
 test("Agent.compact：走同一条流水线（manual，无视阈值，指令交给摘要）；忙时 rejected；没阶段 rejected", async () => {
-  const sessions = new InMemorySessionManager();
+  const store = new InMemoryDir();
   const { fn, requests } = capturing([textTurn("hi"), reply("<summary>MANUAL</summary>")]);
-  const agent = await agentWithBuiltins(fn, { sessions, model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
-  const id = await agent.newSession();
+  const agent = await agentWithBuiltins(fn, { session: { store, id: "s1" }, model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
   await agent.prompt("hello");
   const { events } = collect(agent);
   const r = await agent.compact("only the TODOs");
@@ -574,7 +582,7 @@ test("Agent.compact：走同一条流水线（manual，无视阈值，指令交�
   expect(agent.state.compaction.spans[0]!.summary).toContain("MANUAL");
   expect(agent.state.status).toBe("idle");
   expect(events.map((e) => e.type)).toEqual(["compaction_start", "compaction_end"]); // 不是一个 run：没有 agent_start / agent_end
-  expect((await sessions.load(id)).compaction).toEqual(agent.state.compaction);
+  expect((await loadSession(store, "s1")).compaction).toEqual(agent.state.compaction);
 
   // 忙：run 中途 compact
   const busy = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("x")]) });

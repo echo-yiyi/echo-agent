@@ -1,4 +1,4 @@
-// 身份/框架字段的**校验即物化**（§15.4.1「attributes 只能用低基数安全值」的同族规矩）。
+// 身份/框架字段的**校验即物化**（与「attributes 只能用低基数安全值」同族的规矩）。
 //
 // 身份分两种，规矩不同：
 //   · **构造期静态 identity**——runtimeId / generation / descriptor.instrumentation / sink owner / capturePolicy。
@@ -315,7 +315,7 @@ export type ScopeMaterialization =
  * 失败时尽量带回 `runId`：**整份容器先物化**，`runId` 从那份快照里挑，所以
  * `{ runId:"r1", nope:"x" }`、「别的字段是 accessor / non-enumerable」这几种输入的 gap 仍挂得到正确的 run。
  * 只有连键集都读不出来（非对象 / 非 plain 容器 / ownKeys trap 抛错）才退成 runtime-scoped——
- * 上一版说的是「只有供给自身炸掉才退化」，那句不成立，已按实情改口（§15.9）。
+ * 上一版说的是「只有供给自身炸掉才退化」，那句不成立，已按实情改口。
  */
 export function materializeScope(raw: unknown): ScopeMaterialization {
   try {

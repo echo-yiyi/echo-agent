@@ -14,6 +14,11 @@ import { htmlToText, makeWebTools } from "../src/tools/web.ts";
 import { codingPreset } from "../src/agent.ts";
 import { loadSkills } from "@echo-agent/core";
 import type { PermissionPolicy } from "../src/permission.ts";
+import { mkdtempSync } from "node:fs";
+
+// **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
+// 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
 let root: string;
 beforeEach(async () => {
@@ -334,7 +339,7 @@ test("responder:'host' → 真发出 permissionRequest,宿主答 allow 就落盘
   // 2026-08-31：**裁决人不再由本包接**。原先 `installPermission()` 在这一层订阅
   // `permissionRequest` 去问一个回调——那和壳做的是同一件事，而仓库里从没有调用方给过回调。
   // 删掉之后本层只剩「策略翻译对不对」：`responder:"host"` 必须让 core **发出 ask**
-  // 而不是就地折成 deny。谁来答是壳的事（`@echo/tui` 的 `echo:tui` 在做，判据在那边）。
+  // 而不是就地折成 deny。谁来答是壳的事（`echo-agent` 的 `echo:tui` 在做，判据在那边）。
   //
   // 这里由测试扮演宿主，走的是**和壳完全相同**的那条通路：订阅 lifecycle → answerPermission。
   const echo = await echoWith({

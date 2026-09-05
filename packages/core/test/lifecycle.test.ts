@@ -11,7 +11,7 @@ import { scriptedDialect, textTurn } from "../src/testing.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 
-// M5 · 统一生命周期（§13.12.4 的搬迁清单）：
+// M5 · 统一生命周期的搬迁清单：
 // 这些以前全靠用户往 `AgentOptions` 里逐项塞、再手动 `loadTasks()` / `schedule.start()`；
 // D4 之后归 `createAgent` 装配、`start()` 统一恢复与启动。
 //
@@ -29,7 +29,7 @@ function provider(): Provider {
 }
 
 function opts(store: StorageDir, extra: Record<string, unknown> = {}): never {
-  // sessionId 显式给 "main"：下面有测试直接操作 `sessions/main/…` 路径；缺省 id 现在按 workspace 派生
+  // sessionId 显式给 "main"：下面有测试直接操作 `meta.json` / `entries/…`；缺省每次启动是新的一段
   return { provider: provider(), store, lock: new InMemoryStateLock(), allowNetwork: false, sessionId: "main", ...extra } as never;
 }
 
@@ -79,7 +79,7 @@ test("start() 中途失败：lease 还回去，**且不留野定时器**", async
   const lock = new InMemoryStateLock();
   const clock = new FakeClock(0);
   const store = new InMemoryDir();
-  await store.write("sessions/main/meta.json", "不是 json"); // 让 createOrResume 炸
+  await store.write("meta.json", "不是 json"); // 让 createOrResume 炸
 
   const a = await createAgent(opts(store, { lock, clock }));
   await expect(a.start()).rejects.toThrow(/meta\.json 解不开/);
@@ -102,7 +102,7 @@ test("start() 幂等：重复调不会起两套定时器", async () => {
   expect(clock.pending).toBe(0);
 });
 
-test("start() 打开常驻行为：会自己醒、会自己整理（§13.12.4 的最后一行）", async () => {
+test("start() 打开常驻行为：会自己醒、会自己整理", async () => {
   const agent = await createAgent(opts(new InMemoryDir(), { clock: new FakeClock(0) }));
   expect(agent.autoConsumeInbox).toBe(false); // 构造后还没开
   expect(agent.autoDream).toBe(false);

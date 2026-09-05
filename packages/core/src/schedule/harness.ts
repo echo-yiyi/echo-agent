@@ -1,4 +1,4 @@
-// 定时任务的操作方法:agent 的闹钟。设计见 docs/design/parts/schedule.md。
+// 定时任务的操作方法:agent 的闹钟。
 //
 // **这个文件里全是方法,没有 interface、没有类**（2026-08-05 用户拍定）:
 // 登记表是 agent 的（`agent.schedule.entries` 是 `Map<string, ScheduleEntry>`,
@@ -38,7 +38,7 @@ export const SCHEDULE_FILE = "schedules.json";
 export type ScheduleDeps = {
   deliver?: (m: AgentMessage) => Promise<void> | void;
   report?: (d: Diagnostic) => void;
-  /** §15.9 领域观测 sink（module-local、永不抛）：created / cancelled / delivered / bookkeeping-failed / missed 各在唯一 settle 点发一次。 */
+  /** 领域观测 sink（module-local、永不抛）：created / cancelled / delivered / bookkeeping-failed / missed 各在唯一 settle 点发一次。 */
   observe?: CapabilityFactSink<ScheduleFact>;
 };
 
@@ -71,7 +71,7 @@ export type AgentSchedule = ScheduleDeps &
     /**
      * 活的定时器的**取消函数**。它是这个上下文的一部分——收摊时要调,不留野定时器。
      * 存取消函数而不是 handle：`setInterval` 的返回类型在 node 与浏览器不同,
-     * 写进类型就把宿主类型拖进了 engine 面。
+     * 写进类型就把宿主类型拖进了公共面。
      */
     cancelTick?: (() => void) | null;
     /** 盘上内容是否已读进来。 */
@@ -170,7 +170,7 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
       if (!isDue(entry, now)) continue;
       // **等接受成功再簿记**：投递抛错时下面几行不执行，条目原样留着，下一 tick 重来。
       await ctx.deliver?.(environmentMessage(renderFire(entry.schedule), SCHEDULE_KIND, entry.schedule.id));
-      // deliver 返回 = 投递被接受：这是 delivered 的唯一 emission point（§15.9）
+      // deliver 返回 = 投递被接受：这是 delivered 的唯一 emission point
       observe(ctx, { kind: "delivered", id: entry.schedule.id, scheduleKind: entry.schedule.kind, via: "tick" }, now);
       fired.push(entry.schedule);
       if (entry.schedule.kind === "at") {

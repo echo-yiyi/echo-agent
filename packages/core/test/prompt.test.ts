@@ -268,7 +268,7 @@ describe("Agent 接线", () => {
     expect(JSON.stringify(agent.messages)).not.toContain("instructions begin");
   });
 
-  test("任务清单每轮注入(§5D.7):空清单不占位、建完下一轮就可见、不打 system 缓存、不进 transcript", async () => {
+  test("任务清单每轮注入:空清单不占位、建完下一轮就可见、不打 system 缓存、不进 transcript", async () => {
     const { spy, seen } = spying([
       toolTurn("t1", "TaskCreate", { tasks: [{ title: "把 M6 做完" }, { title: "已经做完的", status: "done" }] }),
       textTurn("建好了"),

@@ -1,4 +1,4 @@
-// `normalizeModelSnapshot(model)`（§14.2.4）：把 `Model` 变成 JSON-like 的冻结快照。
+// `normalizeModelSnapshot(model)`：把 `Model` 变成 JSON-like 的冻结快照。
 //
 // 按**精确 schema** 验形：顶层只认 provider / id / api / name / capabilities / cost / params / thinkingLevelMap，
 // 未知字段拒；capabilities / cost / thinkingLevelMap 的每个键与标量类型逐个验；params 是自由 JSON-like 字典。

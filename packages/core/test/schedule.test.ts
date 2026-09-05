@@ -1,4 +1,4 @@
-// schedule 模块的契约门。对应设计 docs/design/parts/schedule.md。
+// schedule 模块的契约门。
 //
 // 锁的不变量:
 //   ① cron 子集语义(含日/星期双约束 OR、*/N、区间、步长、0/7 都是周日)

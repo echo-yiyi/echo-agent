@@ -1,14 +1,14 @@
-// `echo-agent` 的命令行面：**唯一那个可执行文件**（2026-08-31 用户拍板方案 ③）。
+// `echo-agent` 的命令行面：**唯一那个可执行文件**。
 //
 // ## 为什么只有一个
 //
-// 在它之前有两个 CLI：`@echo/runner` 的 `echo-agent`（管道形态）与 `@echo/tui` 的 `echo-tui`
-// （交互形态）。两个包、两套参数解析、两份 `createEcho()` 调用——于是它们**会分家**，
-// 实测已经分了：runner 认五家 provider，TUI 只认两家，加 provider 时漏改了后者。
+// 两个 CLI 就是两套参数解析、两份 `createEcho()` 调用——它们**会分家**：实测过一次，
+// 加 provider 只改了其中一边，另一边就少认几家。所以交互与管道两种形态共用同一个入口、
+// 同一次装配。
 //
-// 归并的落点是 `@echo/tui` 而不是 `@echo/core`，因为 core 的**运行时依赖恒空**是硬门
+// 落点是本包而不是 `@echo-agent/core`，因为 core 的**运行时依赖恒空**是硬门
 // （`packages/core/test/zero-runtime-deps.test.ts`），而交互式终端要 `pi-tui`。
-// core 保持纯库不出 bin；`@echo/tui` 既是默认壳，也是那个可执行文件。
+// core 保持纯库不出 bin；本包既是默认壳，也是那个可执行文件。
 //
 // ## 形态怎么选：看 stdin 是不是终端
 //
@@ -33,8 +33,8 @@ import {
   kimiProvider,
   minimaxProvider,
   openaiProvider,
-  resolveStateDir,
-  SessionService,
+  resolveSessionsRoot,
+  listSessions,
   zaiCodingProvider,
   type CredentialStore,
   type ObservationCapturePolicy,
@@ -89,7 +89,7 @@ const PROVIDERS: Record<ProviderName, () => Provider> = {
   // `zai` 是短名，实际是智谱 GLM 的 coding 端点（pi 那边叫 `zai-coding-cn`）
   zai: () => zaiCodingProvider(),
   // MiniMax 挂的是 **M3**：目录换成它之后 thinking 可以关掉，不再需要「先改消息契约才能用」。
-  // **仍未经真 key 实跑验证**（假 fetch 只证明请求体形状），这一条登记在 `docs/ISSUES.md`。
+  // **仍未经真 key 实跑验证**（假 fetch 只证明请求体形状）。
   minimax: () => minimaxProvider(),
 };
 
@@ -101,8 +101,8 @@ export function usage(name: string): string {
   正文进 stdout、工具旁白进 stderr，读完就干净收摊。Ctrl-C 也是干净收摊。
 
 选项：
-  --state-dir <路径>   状态根（缺省：$ECHO_HOME/agents/<id>，再退到 ~/.echo/agents/<id>；跨目录同一个 agent）
-  --agent-id <名字>    同一状态根下的 agent 身份（缺省 default）
+  --state-dir <路径>   会话目录的上一层（缺省：$ECHO_HOME/sessions，再退到 ~/.echo/sessions）
+  --agent-id <名字>    agent 身份，进 lease 的 holder 标识（缺省 default）
   --provider <名字>    kimi | deepseek | openai | zai | minimax（缺省：上次选的，其次 kimi）
   --model <id>         模型 id（缺省：上次选的，其次由 provider 声明）
   --continue           续本命令在当前目录的最近一段会话
@@ -222,8 +222,11 @@ function providerChoices(): readonly FirstRunChoice[] {
  * `createEcho()` 的入参，两种形态共用——**装配只有一处**，形态差别只在「装不装壳」。
  *
  * `provider` 由调用方给：同一个实例既用来装配，也交给壳子在界面里配 key（要它的 `baseUrl` 去验）。
+ *
+ * **导出只为判据**（`cli.test.ts`）：装配现场仍然只有这一处，测试读的是同一份入参，
+ * 不是另搭一套。
  */
-function echoOptions(
+export function echoOptions(
   product: Product,
   form: PresetForm,
   opts: CliOptions,
@@ -248,7 +251,13 @@ function echoOptions(
     // 会话身份的第二维：产品名。同一目录里 `echo-agent` 与 `echo-coding` 各有各的对话（2026-09-01 用户拍板）
     agentName: product.name,
     ...(sessionId !== undefined ? { sessionId } : {}),
-    ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
+    // `--state-dir` 是**会话目录的上一层**（2026-09-03）：容器管「会话都放哪儿」，
+    // 某一段的目录由 core 用 sessionsRoot + sessionId 得出。
+    ...(opts.stateDir !== undefined ? { sessionsRoot: opts.stateDir } : {}),
+    // 会话面开着（2026-09-03）：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此、
+    // 能互相带个话。**不给 `run`**——「怎么再开一个终端窗口」不是 CLI 该替用户决定的事，
+    // 所以模型这边没有 `session_create`，开新的一段仍然是人的动作。
+    sessions: {},
     ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     ...(opts.observe !== undefined ? { observation: { capture: opts.observe } } : {}),
@@ -265,27 +274,25 @@ function echoOptions(
 /**
  * `--continue` / `--resume` → 要续的那一段的 id；两个都没给 → `undefined`（新建一段）。
  *
- * 清单来自状态根上的 `SessionService.list()`（列表归 core，2026-09-01 用户拍板），状态根与装配用
- * 同一条解析（`resolveStateDir`）。**续不到就判红**：`--resume` 点名的不存在、`--continue` 找不到
- * 本产品在本目录的任何一段，都报错退出——静默新建一段等于把「续」这个字说了没生效。
- * 会话身份是 workspace + agent 两维：`--continue` 只在本产品（`product.name`）、本目录（`process.cwd()`）里挑最近的。
+ * 清单来自 **session 目录的上一层**（`listSessions()`，2026-09-03：一段 session 就是一个状态根，
+ * 它自己看不见别的段）。**续不到就判红**：`--resume` 点名的不存在、`--continue` 找不到本产品在本
+ * 目录的任何一段，都报错退出——静默新建一段等于把「续」这个字说了没生效。
+ *
+ * `--continue` 的筛选是三维：本目录（`process.cwd()`）、本产品（`product.name`）、**自己起的**
+ * （`main`）。第三维是 2026-09-03 加的：`session_create` 派出去的那些段也在同一层目录里，
+ * 续到一段别人派的活不是「上次那段对话」。已关的（`closed`）也不续。
  */
 async function resolveSessionId(product: Product, opts: CliOptions): Promise<string | undefined> {
   if (!opts.continueLast && opts.resume === undefined) return undefined;
-  const stateDir = expandHome(
-    resolveStateDir({
-      ...(opts.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
-      ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
-    }),
-  );
-  const sessions = await new SessionService(new FileDir(stateDir)).list(); // 已按 updatedAt 降序
+  const root = expandHome(opts.stateDir ?? resolveSessionsRoot());
+  const sessions = await listSessions(new FileDir(root)); // 已按 updatedAt 降序
   if (opts.resume !== undefined) {
-    if (!sessions.some((s) => s.id === opts.resume)) throw new Error(`会话 '${opts.resume}' 不存在（状态根 ${stateDir}）`);
+    if (!sessions.some((s) => s.id === opts.resume)) throw new Error(`会话 '${opts.resume}' 不存在（${root}）`);
     return opts.resume;
   }
   const cwd = process.cwd();
-  const latest = sessions.find((s) => s.workspace === cwd && s.agent === product.name);
-  if (latest === undefined) throw new Error(`${product.name} 在 ${cwd} 还没有可续的会话（状态根 ${stateDir}）`);
+  const latest = sessions.find((s) => s.workspace === cwd && s.agent === product.name && s.main && s.status === "active");
+  if (latest === undefined) throw new Error(`${product.name} 在 ${cwd} 还没有可续的会话（${root}）`);
   return latest.id;
 }
 
@@ -313,7 +320,7 @@ export function mainFor(product: Product): Main {
     interactive: boolean = process.stdin.isTTY === true,
     deps: MainDeps = {},
   ): Promise<number> => {
-    // `observe` 是只读子命令：不装配、不取锁、不看凭据——在一切启动逻辑之前分走（§15.6）
+    // `observe` 是只读子命令：不装配、不取锁、不看凭据——在一切启动逻辑之前分走
     if (argv[0] === "observe") return runObserve(argv.slice(1), product.name);
     let opts: CliOptions | null;
     try {
@@ -423,7 +430,7 @@ async function runPiped(
   notices: readonly string[],
   signal: AbortSignal,
 ): Promise<number> {
-  // **唯一 composition root**（§14.2）：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
+  // **唯一 composition root**：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
   const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId);
   // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥
   const echo = await createEcho({ ...base, extensions: [...(base.extensions ?? []), pipeSurfaceEntry()] });

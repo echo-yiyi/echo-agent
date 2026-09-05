@@ -1,8 +1,8 @@
-// 查询面（§15.6 / §15.6.1，O3a）：live `EchoObservations` 与离线 `EchoObservationReader`。
+// 查询面（O3a）：live `EchoObservations` 与离线 `EchoObservationReader`。
 //
 // 两者共用同一套「先读 RunIndex、再按 `firstSeq..lastSeq` 取 retained records、再物化」的路径；差别只在
 // live 面还能给 Sequencer 的 health / subscribe。每次查询都是一个短 SQLite 读：bytes 拷到进程内就结束，decode
-// 与物化在事务之外（§15.6.1）。
+// 与物化在事务之外。
 //
 // O3a 不做的（O3b）：retention（`pruned` 只在 index 已标 pruned 时返回）、跨进程 interrupted recovery、
 // 离线 reader 的 runtime health 快照（health 尚未持久化，`snapshot()` fail-loud 而不是编一个）。
@@ -25,7 +25,7 @@ import type {
 const DEFAULT_PAGE = 20;
 const MAX_PAGE = 200;
 
-/** opaque cursor 坏了 / 篡改了：fail-loud，不用可漂移的偏移量猜（§15.6.1）。 */
+/** opaque cursor 坏了 / 篡改了：fail-loud，不用可漂移的偏移量猜。 */
 export class ObservationCursorError extends Error {
   readonly code = "observation_cursor_invalid";
   constructor(message: string) {
@@ -178,7 +178,7 @@ export class SqliteEchoObservationReader implements EchoObservationReader {
     return listRuns(this.store, options);
   }
 
-  /** O3a：runtime health 不落盘，离线 reader 给不出真实的 phase / sink health——fail-loud，不伪装实时（§15.7）。 */
+  /** O3a：runtime health 不落盘，离线 reader 给不出真实的 phase / sink health——fail-loud，不伪装实时。 */
   async snapshot(): Promise<EchoObservationSnapshot> {
     throw new ObservationNotPersistedError("runtime health snapshot is not persisted yet (O3b); use runtimeHeads() / listRuns() for what the store knows");
   }
@@ -198,7 +198,7 @@ export class SqliteEchoObservationReader implements EchoObservationReader {
 }
 
 /**
- * observe CLI 与 SDK 的离线入口（§15.6）：只读已 COMMIT 的 record / index，活 writer 存在时仍可安全只读。
+ * observe CLI 与 SDK 的离线入口：只读已 COMMIT 的 record / index，活 writer 存在时仍可安全只读。
  * 库不存在抛 `ObservationDatabaseMissingError`（这个 state root 还没记录过 run）。
  */
 export function openObservationReader(options: Readonly<{ stateRoot: string }>): Promise<SqliteEchoObservationReader> {

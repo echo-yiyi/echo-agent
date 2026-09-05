@@ -1,4 +1,4 @@
-// 第三方异常进入 public / persisted 面之前的投影（§15.11 的采集边界规矩）。
+// 第三方异常进入 public / persisted 面之前的投影（采集边界规矩）。
 //
 // 起因（review 实测）：`SinkHealth.lastErrorDigest` 里出现过整条
 // `Authorization: Bearer sk-secret-…`——第三方 listener 抛出的 Error.message 被原样存进了可查询的 health。

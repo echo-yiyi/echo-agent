@@ -1,5 +1,4 @@
 // MemoryHarness:记忆的操作面(与 SkillHarness / ToolHarness 平级的资源宿主)。
-// 设计见 docs/design/parts/memory.md。
 //
 // 结构(2026-08-05 用户拍定):
 //   **方法是唯一写路径,工具是薄壳**——view/create/strReplace/insert/delete/rename 是
@@ -81,7 +80,7 @@ export type AgentMemories = MemoryDeps & {
   writesSinceDream: number;
   turnsSinceDream: number;
   /**
-   * §15.9 领域观测 sink（module-local、永不抛）：五种 mutation 的最外层与 compose 各发一次事实。
+   * 领域观测 sink（module-local、永不抛）：五种 mutation 的最外层与 compose 各发一次事实。
    * 没挂 = 不发。由 composition root / Agent 挂；工具与上层复写看不见它，也不该碰它。
    */
   observe?: CapabilityFactSink<MemoryFact>;
@@ -93,7 +92,7 @@ export type AgentMemories = MemoryDeps & {
  *
  * 从前这里写 `dir ?? new FileDir(join(echoHome(), "memory"))`——一个「顺手带的默认实现」，
  * 代价是把 `node:fs`/`node:os` 拖进 `Agent` 的依赖闭包：能力层只该定义语义与端口，
- * 默认件属于装配层（§13.3「Agent 拥有 Service，外部注入 Store」）。
+ * 默认件属于装配层（「Agent 拥有 Service，外部注入 Store」）。
  *
  * 「默认落盘」不是没有了，是**上移**：M3 的 `await createAgent()`（async，D17）负责注入 FileDir。
  */
@@ -250,7 +249,7 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise
 /**
  * 同分区内改名。跨分区 = 换预算域,不许静默发生——读出来在目标分区重新 create。
  *
- * **不复用公开的 `memoryCreate()`**：那会在 rename 之外再发一条 create 事实（§15.9「rename 内部不得双发」）。
+ * **不复用公开的 `memoryCreate()`**：那会在 rename 之外再发一条 create 事实（「rename 内部不得双发」）。
  * 目标写成功、源删失败是 **partial**（带 stage），不能谎报 committed，也不能像从前那样报成整体失败。
  */
 export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: string): Promise<AgentToolResult> {
@@ -449,7 +448,7 @@ export async function disposeMemory(ctx: AgentMemories): Promise<void> {
 }
 
 /* ───────────── 私有：mutation 骨架（typed outcome → 观测事实 → AgentToolResult） ─────────────
-   §15.9：先形成 typed outcome，再投影成现有 AgentToolResult；不能靠解析成功 / 错误字符串猜阶段。
+   先形成 typed outcome，再投影成现有 AgentToolResult；不能靠解析成功 / 错误字符串猜阶段。
    semantic guard / not-found = rejected；primary I/O 抛错且未改数据 = failed；改了一半 = partial（带 stage）。 */
 
 type MutationFrame = {
@@ -503,7 +502,7 @@ function pathForFact(raw: string): string {
 }
 
 /**
- * **唯一 emission point**（§15.9）：五种 mutation 在 semantic reject、primary storage settle、index refresh outcome
+ * **唯一 emission point**：五种 mutation 在 semantic reject、primary storage settle、index refresh outcome
  * 都已知之后到这里，恰发一次事实，再投影成 `AgentToolResult`。sink 按契约永不抛，这里再兜一层。
  */
 function finishMemoryMutation(ctx: AgentMemories, frame: MutationFrame, verdict: MutationVerdict): AgentToolResult {
@@ -593,7 +592,7 @@ function guardIndexFile(path: string): string | null {
 
 /**
  * indexed 分区的落盘索引:每次写方法成功后重建(CC 的 MEMORY.md 同款)。
- * 保持 no-throw + report，但把结果交出去：主 mutation 仍 committed，`indexOutcome:"failed"` 必须可见（§15.9）。
+ * 保持 no-throw + report，但把结果交出去：主 mutation 仍 committed，`indexOutcome:"failed"` 必须可见。
  */
 async function refreshIndex(ctx: AgentMemories, owner: AnyMemory | undefined): Promise<MemoryIndexOutcome> {
   if (owner === undefined || owner.mode !== "indexed") return "not-applicable";

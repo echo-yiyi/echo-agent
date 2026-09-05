@@ -14,6 +14,11 @@ import { userMessage } from "../src/messages.ts";
 import { scriptedDialect, scriptedStreamFn, textTurn } from "../src/testing.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { StorageDir } from "../src/storage/types.ts";
+import { mkdtempSync } from "node:fs";
+
+// **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
+// 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
 // 2026-08-18 review 捅出来的一批：**单写与持久化的核心契约可复现破坏**。
 // 每条都对应一个实测过的破坏路径，不是假想。
@@ -29,7 +34,7 @@ function provider(): Provider {
 }
 
 function opts(store: StorageDir, extra: Record<string, unknown> = {}): never {
-  // sessionId 显式给 "main"：下面有测试直接操作 `sessions/main/…` 路径；缺省 id 现在按 workspace 派生
+  // sessionId 显式给 "main"：下面有测试直接操作 `meta.json` / `entries/…`；缺省每次启动是新的一段
   return { provider: provider(), store, lock: new InMemoryStateLock(), allowNetwork: false, sessionId: "main", ...extra } as never;
 }
 
@@ -115,7 +120,7 @@ test("Store 写失败 → settle() 抛，不是静默 resolve", async () => {
     list: async () => [],
   };
   const s = new SessionService(broken);
-  // createOrResume 自己会因为写 meta 失败而抛
+  // createOrResume 自己会因为写 meta 失败而抛（2026-09-04 起 meta 在新建那一刻就落）
   await expect(s.createOrResume("main")).rejects.toThrow(/disk-down/);
 });
 
@@ -154,7 +159,7 @@ test("entry 序号断链 → 拒载（否则续号会覆盖历史）", async () 
   await a.settle();
 
   // 删掉中间那条：实测过的破坏是恢复后续号从 e3 开始，下一次 append 覆盖原来的 000003.json
-  await dir.remove("sessions/main/entries/000002.json");
+  await dir.remove("entries/000002.json");
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/序号断链/);
 });
 
@@ -168,19 +173,22 @@ test("parent 链断了 → 拒载", async () => {
   ]);
   await a.settle();
 
-  const raw = JSON.parse((await dir.read("sessions/main/entries/000002.json"))!) as Record<string, unknown>;
+  const raw = JSON.parse((await dir.read("entries/000002.json"))!) as Record<string, unknown>;
   raw["parentId"] = "main-e99"; // 指向不存在的前一条
-  await dir.write("sessions/main/entries/000002.json", JSON.stringify(raw));
+  await dir.write("entries/000002.json", JSON.stringify(raw));
 
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/parentId/);
 });
 
 test("meta.id 与目录名对不上 → 拒载", async () => {
   const dir = new InMemoryDir();
-  await new SessionService(dir).createOrResume("main");
-  const meta = JSON.parse((await dir.read("sessions/main/meta.json"))!) as Record<string, unknown>;
+  const first = new SessionService(dir);
+  await first.createOrResume("main");
+  await first.append("main", [{ kind: "message", message: userMessage("一") }]); // 说一句才有 meta
+  await first.settle();
+  const meta = JSON.parse((await dir.read("meta.json"))!) as Record<string, unknown>;
   meta["id"] = "别的会话";
-  await dir.write("sessions/main/meta.json", JSON.stringify(meta));
+  await dir.write("meta.json", JSON.stringify(meta));
 
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/与目录名对不上/);
 });
@@ -192,14 +200,14 @@ test("kind 不认识 / payload 缺件 → 拒载（判别联合逐个验）", as
   await a.append("main", [{ kind: "message", message: userMessage("一") }]);
   await a.settle();
 
-  const raw = JSON.parse((await dir.read("sessions/main/entries/000001.json"))!) as Record<string, unknown>;
+  const raw = JSON.parse((await dir.read("entries/000001.json"))!) as Record<string, unknown>;
   delete raw["message"]; // kind 还是 message，但 payload 没了
-  await dir.write("sessions/main/entries/000001.json", JSON.stringify(raw));
+  await dir.write("entries/000001.json", JSON.stringify(raw));
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/message 不是对象/);
 
   raw["kind"] = "未来版本的新类型";
   raw["message"] = { role: "user" };
-  await dir.write("sessions/main/entries/000001.json", JSON.stringify(raw));
+  await dir.write("entries/000001.json", JSON.stringify(raw));
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/kind 不认识/);
 });
 
@@ -261,11 +269,11 @@ test("只装 sessionService、不装锁的 Agent，stop() 之后同样不许再�
 
   await agent.start();
   await agent.prompt("干活");
-  const before = (await store.list("sessions/main/entries/")).length;
+  const before = (await store.list("entries/")).length;
   await agent.stop();
 
   await expect(agent.prompt("我还想写")).rejects.toThrow(/不接受新工作/);
-  expect((await store.list("sessions/main/entries/")).length).toBe(before);
+  expect((await store.list("entries/")).length).toBe(before);
 });
 
 /* ───────────── P1：启动途中丢锁，start() 不许返回成功 ───────────── */

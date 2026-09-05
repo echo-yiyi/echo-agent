@@ -1,4 +1,4 @@
-// 任务清单的契约门。设计见 docs/design/AGENT-CORE.md §5D。
+// 任务清单的契约门。
 //
 // 判据面对应设计里那几条硬话：
 //   ① 批量原子 + 同批 ref 互引    ② 成环即拒、整批回滚
@@ -332,7 +332,7 @@ function ctx(): Parameters<ReturnType<typeof makeTaskTools>[number]["execute"]>[
   };
 }
 
-/* ══════════ 语义在 core：第三方 Store 使坏时必须判红（D3 / §13.12.2） ══════════ */
+/* ══════════ 语义在 core：第三方 Store 使坏时必须判红（D3） ══════════ */
 //
 // `TaskStore` 收窄成字节面之前，JSON 解码、逐条验形、「文件不存在算空清单」全在实现方手里，
 // 而 `loadTasks()` 只有三行、完全信任返回值——第三方可以静默丢记录、返回缺字段的 `TaskItem`

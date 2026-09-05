@@ -1,4 +1,4 @@
-// skill 的操作方法。设计见 docs/design/AGENT-CORE.md §5A。
+// skill 的操作方法。
 //
 // **这个文件里全是方法,没有 interface、没有类、没有状态**（2026-08-05 用户拍定）:
 // 数据是 agent 的——`agent.skills` 是 `Map<string, Skill>`（装 **Skill 本体**,
@@ -26,7 +26,7 @@ export type ActiveSkillMap = Map<string, ActiveSkill>;
  * 撞名 fail-loud,与工具面同规矩;热重载路径必须显式 `replace: true`
  * ——否则 fs 回调里抛出就是未捕获拒绝。
  *
- * 返回的卸载器**只认对象身份**（§14.7.5 第 5 条）:某个名字若已被显式 replace 成另一个 Skill 对象,
+ * 返回的卸载器**只认对象身份**:某个名字若已被显式 replace 成另一个 Skill 对象,
  * 它不动那条。给了 `active` 时,卸掉的同时撤下激活（与 `removeSkill` 同规矩）。返回真卸掉的名字。
  */
 export function addSkills(

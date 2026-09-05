@@ -1,7 +1,7 @@
-// Host-internal 的观测接线（§15，O3a）：canonical writer **不进公共 `AgentOptions`**。
+// Host-internal 的观测接线（O3a）：canonical writer **不进公共 `AgentOptions`**。
 //
 // 与 `state/host-wiring.ts` 同一个理由、同一个做法：`AgentOptions` 是根入口的公开类型，
-// 往里放 `ObservationIngest` 等于允许任何调用方伪造 canonical identity（§15.4.1 末尾）。这里的东西只由
+// 往里放 `ObservationIngest` 等于允许任何调用方伪造 canonical identity。这里的东西只由
 // 同一个包内的 composition root（`createAgent`）在构造之后挂上；Extension 与外部调用方拿不到、也看不见。
 // Agent 按需 `observationHostOf(this)` 读——没挂就是低层 `new Agent()` 那条路：没有 journal，也没有观测面。
 

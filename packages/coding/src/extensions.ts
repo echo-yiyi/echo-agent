@@ -1,5 +1,4 @@
-// coding agent 自己那几件工具的 Extension 形态（`docs/design/AGENT-CORE.md` §14 owner 表里的
-// `echo:workspace` 与 `echo:shell`）。
+// coding agent 自己那几件工具的 Extension 形态：`echo:workspace` 与 `echo:shell`。
 //
 // **为什么不是直接 `registerTool()`**（2026-08-31 用户拍板：「机制必须同一份，都要走 extension」）：
 // 直调那条路没有 owner——装上去的工具没人持 disposer，卸不掉、也不出现在能力清单里。

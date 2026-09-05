@@ -1,4 +1,4 @@
-// Durable ingress 的公共协议（§14.2.4）：**V0 只有这一种 `deliverDurable()` 返回类型**。
+// Durable ingress 的公共协议：**V0 只有这一种 `deliverDurable()` 返回类型**。
 //
 // 「投成功了吗」的答复走这里：`accepted` 只在 Inbox record 已持久化后返回；相同 pending dedupeKey 返回原
 // `recordId` 与 `deduplicated:true`。运行期拒绝与 Store I/O 失败都 fulfill 结构化 result，**不用 Promise rejection

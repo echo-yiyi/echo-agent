@@ -1,4 +1,4 @@
-// Runner 的全部实质：**给 Agent 一个进程与一个输入源**（`docs/design/AGENT-CORE.md` §13.2）。
+// Runner 的全部实质：**给 Agent 一个进程与一个输入源**。
 //
 // 边界照抄设计，没有多做：Host 负责承载、投递输入、接收输出、进程级启停；
 // **不替 Agent 编排** Memory / Dream / Schedule / Task——那些是 `start()` 自己的事。
@@ -15,7 +15,7 @@ export type Sink = { write(text: string): void };
 export type RunOptions = {
   /**
    * 已装配、**尚未 `start()`** 的 Echo（`createEcho()` 的产物：Agent + 已 mount 的 Extension）。
-   * 谁装配谁决定 provider、状态根与扩展；壳子不参与装配（§14.2「一个 composition root」）。
+   * 谁装配谁决定 provider、状态根与扩展；壳子不参与装配（「一个 composition root」）。
    * 收摊也归它：`echo.stop()` 先卸 Extension 再停 Agent——壳子自己 `agent.stop()` 会漏掉前半。
    */
   echo: Echo;
@@ -58,7 +58,7 @@ export async function run(opts: RunOptions): Promise<number> {
   let failed = false;
 
   // **只订阅 delta 是不够的**：Core 明确说 provider 的最低实现门槛是「只发 done」
-  // （§6.1 契约③，CLI 这类无流式后端就是这样）。那种 provider 一个 `text_delta` 都不发，
+  // （契约③，CLI 这类无流式后端就是这样）。那种 provider 一个 `text_delta` 都不发，
   // 于是 Runner 只打出一个换行——正文整段丢掉（2026-08-24 review 第 3 条实测 `out:"\n"`）。
   // 记一下这条 assistant 消息有没有流式输出过；没有就在 `message_end` 从定稿里补打。
   let streamedThisMessage = false;
@@ -89,13 +89,13 @@ export async function run(opts: RunOptions): Promise<number> {
       if (aborted()) break;
       const text = line.trim();
       if (text === "") continue;
-      // 走 `send()` 而不是 `agent.prompt()`：完整 Runtime 的 run 结果带 runId 与观测三元组（§15.6 OR5）
+      // 走 `send()` 而不是 `agent.prompt()`：完整 Runtime 的 run 结果带 runId 与观测三元组（OR5）
       const result = await echo.send(text);
       if (result.outcome.kind === "error") {
         failed = true;
         err.write(`[错误] ${result.outcome.error.message}\n`);
       }
-      // 每轮结束打 runId（§15.6「结束时打印 runId」）：进 err 不进正文；拿它去 `observe show <run-id>`
+      // 每轮结束打 runId（「结束时打印 runId」）：进 err 不进正文；拿它去 `observe show <run-id>`
       err.write(`[run] ${result.runId} · observation ${result.observationIntegrity} · ${result.observationPersistence}\n`);
       if (aborted()) break;
     }

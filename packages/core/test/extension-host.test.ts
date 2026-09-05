@@ -1,4 +1,4 @@
-// §14.7.1–14.7.4 Extension Host 内核：ServiceKey canonicalize / 依赖图 / Fiber 状态机 / EffectStack / registry sidecar。
+// Extension Host 内核：ServiceKey canonicalize / 依赖图 / Fiber 状态机 / EffectStack / registry sidecar。
 // 每条反例先写「没有这条规则会怎么错」。
 
 import { test, expect } from "bun:test";
@@ -47,7 +47,7 @@ function entry(entryId: string, definition: ExtensionEntry["definition"], config
   return { entryId, definition, config };
 }
 
-/* ─────────────── §14.7.1 的 github 例子：provider + consumer，装上/卸下都要成对 ─────────────── */
+/* ─────────────── github 例子：provider + consumer，装上/卸下都要成对 ─────────────── */
 
 test("fixture：provider 发布 single Service，consumer 注册 Tool + Hook；unmount 逆序卸、Tool/Hook 真的没了", async () => {
   const log: string[] = [];

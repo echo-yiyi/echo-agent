@@ -5,8 +5,8 @@
 // 平铺进同一个 `node_modules`。装到别处就 `Cannot find module '@echo-agent/core'`，连 `--help` 都出不来。
 // **「在仓库里能跑」证明不了「装出去能跑」**，只有隔离安装能证明。
 //
-// 手法照抄仓库既有的 `test/package-isolation.test.ts`（判据 4④）：拷贝 → 把 `workspace:` 换成
-// 同等语义的 `file:` → 装 → 跑。**改的是协议不是依赖**：依赖条目本身一条不增不减。
+// 手法：拷贝 → 把 `workspace:` 换成同等语义的 `file:` → 装 → 跑。
+// **改的是协议不是依赖**：依赖条目本身一条不增不减。
 
 import { test, expect } from "bun:test";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -51,7 +51,7 @@ function copyPackage(from: string, to: string): void {
 
       const pkgPath = join(tuiDir, "package.json");
       const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { dependencies: Record<string, string> };
-      // **先断言依赖声明齐全**——漏了 `@echo/core` 下面就装不出来，但报错会指向 npm 404，
+      // **先断言依赖声明齐全**——漏了 `@echo-agent/core` 下面就装不出来，但报错会指向 npm 404，
       // 那时不容易一眼看出根因，所以这里先说清楚。
       expect(Object.keys(pkg.dependencies).sort()).toEqual(["@earendil-works/pi-tui", "@echo-agent/core"]);
       pkg.dependencies["@echo-agent/core"] = `file:${coreDir}`;

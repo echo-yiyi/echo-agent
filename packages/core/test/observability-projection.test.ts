@@ -9,7 +9,7 @@ import { ObservationSequencer } from "../src/observability/sequencer.ts";
 import type { Diagnostic } from "../src/errors.ts";
 import { OBSERVATION_SYNC_LIMITS, type ObservationRecordKind } from "../src/observability/types.ts";
 
-// §15.3.5 / §15.9 / OR2：AgentEvent 的固定投影、custom event 的 generic 投影，以及 descriptor → Sequencer 这条
+// OR2：AgentEvent 的固定投影、custom event 的 generic 投影，以及 descriptor → Sequencer 这条
 // 唯一 adapter 的失败语义（投影抛错 / scope 失败 / 身份超长 → hole + gap 或构造期拒，绝不静默丢、绝不击穿 no-throw）。
 
 const ev = <T extends object>(seq: number, e: T): AgentEvent => ({ seq, at: 1_000 + seq, ...e }) as unknown as AgentEvent;
@@ -117,7 +117,7 @@ describe("CoreAgentEvent 逐 type 固定投影（metadata 档）", () => {
   });
 });
 
-describe("agent.custom_event（OR2 / §15.11）", () => {
+describe("agent.custom_event（OR2）", () => {
   const custom = ev(9, { type: "memory_retrieval_hit", text: "private memory text", content: "more", unknownKey: { nested: true } });
 
   test("metadata：body 恒 {}，customEventType/payloadBytes/payloadTruncated 进 attributes，正文零泄露", () => {

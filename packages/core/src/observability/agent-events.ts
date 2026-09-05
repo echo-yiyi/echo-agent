@@ -1,11 +1,11 @@
-// AgentEvent → 观测事实的**固定 descriptor**（§15.3.5 / §15.9 Agent/Turn、Model、Tool、Context 四行）。
+// AgentEvent → 观测事实的**固定 descriptor**（Agent/Turn、Model、Tool、Context 四行）。
 //
 // 只做投影，不改事实：`CoreAgentEvent` 每种 type 一条固定 name/kind；非 core 的 `CustomAgentEvents`
 // 只能成为 `agent.custom_event` generic record（OR2）——原 type 进 `attributes.customEventType`，
-// metadata 档 body 恒 `{}`（payload 没有可信的字段级 sensitivity schema，按整体敏感处理，§15.11）。
+// metadata 档 body 恒 `{}`（payload 没有可信的字段级 sensitivity schema，按整体敏感处理）。
 //
 // run 边界（run.accepted / started / closed）**不在这里**：它们只有 admission / executor / finalizer 一个
-// emission owner（§15.3.5）；tap 只提供 turn / message / tool / status 这些 finalizer 形成终态所需的事实。
+// emission owner；tap 只提供 turn / message / tool / status 这些 finalizer 形成终态所需的事实。
 //
 // 纯 Web-standard（不碰 `node:`）。
 
@@ -18,7 +18,7 @@ import { OBSERVATION_SYNC_LIMITS } from "./types.ts";
 
 export const AGENT_EVENT_INSTRUMENTATION = { name: "echo.agent-event", version: "1" } as const;
 
-/** 固定 span 名（§15.3.2 / §15.9）。 */
+/** 固定 span 名。 */
 export const SPAN_TURN_EXECUTE = "turn.execute";
 export const SPAN_MODEL_GENERATE = "model.generate";
 export const SPAN_TOOL_EXECUTE = "tool.execute";
@@ -34,7 +34,7 @@ type Attrs = Record<string, string | number | boolean>;
  * 遍历、拼接、物化了一遍——metadata 档也照跑 `textOf()` 与 `toolUsesOf()`，后者建完整数组只为取
  * `.length`；content 档还把这两件事各做第二遍。50 万个普通 tool_use block 额外分配约 35 MB，
  * 最后只产出一个几百字节的 metadata body。**这是当前 Provider 数据路径上就会发生的事**，
- * 不属于 §15.16 OP2 那类未来敌意 Proxy 风险，不能挂在那条待拍板下面拖。
+ * 不属于「未来敌意 Proxy」那类风险，不能挂在那条待拍板下面拖。
  *
  * 所以 projector 自己也进同步预算：**一次扫描**同时算 metadata 计数与 content 正文，
  * 扫描条数有上限，计数不建中间数组，正文不做无界拼接；被截断一律显式标出来
@@ -52,7 +52,7 @@ const MAX_CONTENT_BLOCK_SCAN = 1_024;
  *
  * 保留额留给 body 其余字段（stopReason / 计数 / usage / model）与 fact 框架（name / scope / attributes）。
  * **仍不是整条 body 的保证**：content 档的 `toolUseBlocks[].input` 大小不可预估，它超预算时整条照样被拒——
- * 那条走 O3a 的 attachment/blob（`docs/ISSUES.md` E 类已登记）。这里保证的是**正文本身不再是超预算的原因**。
+ * 那条走 O3a 的 attachment/blob。这里保证的是**正文本身不再是超预算的原因**。
  */
 const PROJECTED_BODY_RESERVE = 8 * 1024;
 export const MAX_PROJECTED_TEXT_BYTES = projectionEncodingLimits().maxBytes - PROJECTED_BODY_RESERVE;
@@ -176,7 +176,7 @@ function noteTruncation(body: Record<string, unknown>, s: ContentSummary): void 
 
 /**
  * metadata 档的尺寸估算：走同一套 canonical 编码但只取字节数；达到同步上限即停、标 truncated——
- * 坏 shape / getter 抛错也只标 truncated，绝不让 Agent outcome 失败（§15.11）。
+ * 坏 shape / getter 抛错也只标 truncated，绝不让 Agent outcome 失败。
  * `payloadTruncated:false` 时 payloadBytes 是精确 canonical UTF-8 长度；true 时是已检查上限（lower bound）。
  */
 export function estimatePayloadBytes(value: unknown): Readonly<{ payloadBytes: number; payloadTruncated: boolean }> {
@@ -265,7 +265,7 @@ export function projectAgentEvent(event: AgentEvent, policy: ObservationCaptureP
     case "message_start":
       return { ...base, kind: "span_start", name: SPAN_MODEL_GENERATE, scope: {}, attributes: { role: event.role }, body: {} };
     case "message_update": {
-      if (!content) return null; // metadata：token 级 delta 只做 span 聚合，不逐条成记录（§15.7 / §15.11）
+      if (!content) return null; // metadata：token 级 delta 只做 span 聚合，不逐条成记录
       const d = event.delta as { type: string; text?: string; argsText?: string };
       const body: Record<string, unknown> = { deltaType: d.type };
       if (typeof d.text === "string") body.text = d.text;

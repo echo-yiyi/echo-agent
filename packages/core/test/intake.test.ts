@@ -1,4 +1,4 @@
-// §14 RunIntakeGate：steer / followUp 的原子裁决与显式 rejected。
+// RunIntakeGate：steer / followUp 的原子裁决与显式 rejected。
 // 反例优先：每条都先写「上一版会怎么错」。
 // （AgentEvent 进 canonical journal 的顺序保证在 observability-runtime.test.ts：sourceSeq 随 seq 单调。）
 

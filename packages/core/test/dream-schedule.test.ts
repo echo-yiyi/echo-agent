@@ -9,7 +9,7 @@ import { HookRuntime } from "../src/hooks/runtime.ts";
 import { toolOk } from "../src/tools/types.ts";
 import type { AgentMemories } from "../src/memory/harness.ts";
 
-// Dream 自调度（C6 / D7，AGENT-CORE §13.3）：**触发、互斥、预算、中断、提交都在 core**。
+// Dream 自调度（C6 / D7）：**触发、互斥、预算、中断、提交都在 core**。
 //
 // C6 的原话是「memory 设计把 Dream 调度交给装配方」——那意味着每个接入方都要自己写
 // timer 与 subagent glue，而「什么时候该整理」是记忆语义的一部分，不是装配细节。

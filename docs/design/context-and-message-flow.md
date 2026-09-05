@@ -219,7 +219,7 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 | 触发后紧接着的 provider request 不含已覆盖原文、含摘要与尾巴 | [auto 触发](../../packages/core/test/compaction.test.ts#test=auto超阈值-轮首压缩-紧接着的-provider-请求只含摘要不含原文压完下一轮不重复压状态与-session-都记下) |
 | 摘要带 harness 来源，不伪装成人或 assistant 原话 | [投影](../../packages/core/test/compaction.test.ts#test=投影段-一条-userharness清掉的-toolresult-换占位但-toolcallid-iserror-不动transcript-原对象一个字不改) |
 | tool_use / tool_result 配对不被切断 | [切点](../../packages/core/test/compaction.test.ts#test=切点toolresult-前面不能切snapback-优先轮起点其次合法切点都没有回-min) |
-| 压缩后立即续与恢复后续，下一次 provider context 逐字节相同 | [恢复一致](../../packages/core/test/compaction.test.ts#test=压缩后立即续跑-vs-重启恢复后续跑下一次送模消息逐字节相同74-第-4-条) |
+| 压缩后立即续与恢复后续，下一次 provider context 逐字节相同 | [恢复一致](../../packages/core/test/compaction.test.ts#test=压缩后立即续跑-vs-重启恢复后续跑下一次送模消息逐字节相同) |
 | 游标只有一种：transcript 下标，运行时与盘上同一套 | [session 恢复](../../packages/core/test/session-service.test.ts#test=不变量①-恢复后-messages-与-compaction-同源同一份-entries-投影出来取最后一次压缩的状态) |
 | 压到预算内之后下一轮不重复摘要 | 同第一条 |
 
@@ -250,7 +250,7 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 | tool result 在线上合并、账本中逐条保留 | [toolResult 投影与相邻合并](../../packages/core/test/invariants.test.ts#test=投影toolresult-包回-user-角色的-toolresult-块相邻的合并成一条) |
 | 空 assistant 不进入 provider context | [空 assistant 隐形](../../packages/core/test/invariants.test.ts#test=投影空-content-的-assistant-消息整条隐形空消息是协议违规) |
 | system section 排序、空段与 render 失败 | [assembleSystem 行为](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null)、[坏段隐形并留痕](../../packages/core/test/prompt.test.ts#test=render-抛错-该段隐形不击穿onfailure-留痕) |
-| skill / task injection 每轮刷新且不入 transcript | [skill injection](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)、[task injection](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入5d7空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |
+| skill / task injection 每轮刷新且不入 transcript | [skill injection](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)、[task injection](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |
 | session 恢复时拒绝坏内建消息 | [坏 message payload 恢复判红](../../packages/core/test/session-service.test.ts#test=坏-message-payload-在恢复时判红只有-role-是不够的)、[content block 闭合验形](../../packages/core/test/session-service.test.ts#test=内容块闭合验形缺字段与不认识的-type-都判红) |
 
 ### 当前没有门守

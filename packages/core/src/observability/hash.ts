@@ -1,9 +1,9 @@
 // 同步 SHA-256 / HMAC-SHA256（纯 JS，Web-standard）。
 //
-// **为什么不用 Web Crypto**：`crypto.subtle.digest` 是异步的，而 §15.4.2 要求 `offer()` 同步、无 Promise
+// **为什么不用 Web Crypto**：`crypto.subtle.digest` 是异步的，而同步预算要求 `offer()` 同步、无 Promise
 // ——recordId / blob digest / canonical digest 都在同步 critical section 里算。`node:crypto` 有同步
 // `createHash`，但 `./observability` 公共子路径与 `/testing` 要保持纯 Web-standard（不碰 `node:`），所以自己写。
-// 输入上限由调用方保证（§15.4.2：单条 canonical ≤ 64 KiB、blob chunk ≤ 1 MiB），这个体量下纯 JS 足够。
+// 输入上限由调用方保证（单条 canonical ≤ 64 KiB、blob chunk ≤ 1 MiB），这个体量下纯 JS 足够。
 //
 // 实现对照 FIPS 180-4；测试用 NIST/RFC 4231 已知向量锁住。
 
@@ -85,7 +85,7 @@ export function sha256Hex(input: Uint8Array | string): string {
   return toHex(sha256Bytes(input));
 }
 
-/** HMAC-SHA256（RFC 2104），返回小写十六进制。§15.9 memory pathDigest 用它。 */
+/** HMAC-SHA256（RFC 2104），返回小写十六进制。memory pathDigest 用它。 */
 export function hmacSha256Hex(key: Uint8Array | string, message: Uint8Array | string): string {
   let k = toBytes(key);
   if (k.length > 64) k = sha256Bytes(k);

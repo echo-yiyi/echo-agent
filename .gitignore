@@ -1,7 +1,20 @@
 node_modules/
 .echo/
-.env
 *.log
+
+# Claude Code 的本地态：worktree 是完整仓库拷贝（`git add -A` 会当 embedded repo 收进来），
+# settings.local.json 是个人配置。共享的 .claude/settings.json 与 commands/ 仍可提交。
+.claude/worktrees/
+.claude/settings.local.json
+
+# 凭据与密钥：一条都不许进仓库。
+# 单写 `.env` 挡不住 `.env.local`；CLI 的首次运行体验会把 API key 落到 credentials.json。
+.env*
+credentials.json
+*.pem
+*.key
+id_rsa*
+*.p12
 
 # 构建产物（`bun run build` 出的，`files` 里发布、仓库里不收）
 packages/core/dist/

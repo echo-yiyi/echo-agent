@@ -1,4 +1,4 @@
-// V0 唯一 canonical store：`bun:sqlite`（§15.4.2.2 / §15.4.2.3，O3a happy path）。
+// V0 唯一 canonical store：`bun:sqlite`（O3a happy path）。
 //
 // 库固定在 `<stateRoot>/observability/observations.sqlite`；writer open 时验 WAL / NORMAL / foreign_keys / busy_timeout，
 // 任一不满足就 fail-loud——不进 READY，不静默退到别的 journal mode。一个进程只有一条 writer connection，
@@ -16,11 +16,11 @@ import { canonicalJsonBytes } from "./normalize.ts";
 import { ObservationCorruptionError, runIndexDigest, type CanonicalObservationStore, type CommitBatchInput, type CommitBatchResult } from "./store.ts";
 import type { ObservationValue, RunIndexEntryV1, RunObservationHeader } from "./types.ts";
 
-/** 库文件相对 state root 的固定位置（§15.4.2.2）。 */
+/** 库文件相对 state root 的固定位置。 */
 export const OBSERVATION_DB_RELATIVE_PATH = join("observability", "observations.sqlite");
-/** 当前 schema 版本。同版本只能加 optional 字段（§15.4.3）；旧库版本更高 = 本进程太旧，fail-loud。 */
+/** 当前 schema 版本。同版本只能加 optional 字段；旧库版本更高 = 本进程太旧，fail-loud。 */
 export const OBSERVATION_SCHEMA_VERSION = 1;
-/** `path_digest_key` 的固定长度（§15.9：Memory path 的 HMAC key，随库首次创建，之后永不改写）。 */
+/** `path_digest_key` 的固定长度（Memory path 的 HMAC key，随库首次创建，之后永不改写）。 */
 export const PATH_DIGEST_KEY_BYTES = 32;
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 
@@ -54,7 +54,7 @@ export class ObservationDatabaseMissingError extends Error {
   }
 }
 
-/** writer open 时 PRAGMA / schema / key 任一不满足：完整 Runtime 不进入 READY（§15.4.2.2）。 */
+/** writer open 时 PRAGMA / schema / key 任一不满足：完整 Runtime 不进入 READY。 */
 export class ObservationStoreOpenError extends Error {
   readonly code = "observation_store_open_failed";
   constructor(message: string, options?: { cause?: unknown }) {
@@ -65,11 +65,11 @@ export class ObservationStoreOpenError extends Error {
 
 export type SqliteObservationOpenOptions = Readonly<{
   path: string;
-  /** 有界 busy_timeout（毫秒）。缺省 5s；不允许无上限等待（§15.12）。 */
+  /** 有界 busy_timeout（毫秒）。缺省 5s；不允许无上限等待。 */
   busyTimeoutMs?: number;
 }>;
 
-/** `listRunIndex` 的分页游标：`(acceptedAt, runId)` 倒序稳定分页（§15.6.1）。 */
+/** `listRunIndex` 的分页游标：`(acceptedAt, runId)` 倒序稳定分页。 */
 export type RunIndexCursor = Readonly<{ acceptedAt: number; runId: string }>;
 
 export type RuntimeHeadRow = Readonly<{ runtimeId: string; committedPrefix: number }>;
@@ -185,7 +185,7 @@ const RUN_INDEX_COLUMNS =
 /**
  * 只读面：writer 与 reader 共用。reader connection 是 `readonly`，只看已 COMMIT 快照，不取 StateLock、不写任何查询状态。
  *
- * 每个方法一个短查询：拷出 bytes 就结束，decode 在外面做（§15.6.1「reader transaction 必须短」）。
+ * 每个方法一个短查询：拷出 bytes 就结束，decode 在外面做（「reader transaction 必须短」）。
  */
 export class SqliteObservationReader {
   protected closed = false;
@@ -279,7 +279,7 @@ export class SqliteObservationReader {
     return this.db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM observation_run_index").get()?.n ?? 0;
   }
 
-  /** 关 connection。幂等。observe CLI 每条命令结束都必须调（§15.6.1）。 */
+  /** 关 connection。幂等。observe CLI 每条命令结束都必须调。 */
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -314,7 +314,7 @@ export class SqliteCanonicalObservationStore extends SqliteObservationReader imp
     return new SqliteCanonicalObservationStore(db, opts.path);
   }
 
-  /** 本 state root 的 Memory path HMAC key。只供 writer 侧 projection（§15.9），永不进 envelope / reader / export。 */
+  /** 本 state root 的 Memory path HMAC key。只供 writer 侧 projection，永不进 envelope / reader / export。 */
   readPathDigestKey(): Uint8Array {
     const row = this.db.query<{ path_digest_key: Uint8Array }, []>("SELECT path_digest_key FROM observation_private_meta WHERE id = 1").get();
     if (row === null) throw new ObservationCorruptionError("observation_private_meta 缺 path_digest_key");
@@ -324,7 +324,7 @@ export class SqliteCanonicalObservationStore extends SqliteObservationReader imp
   }
 
   /**
-   * §15.4.2.3：一个 `BEGIN IMMEDIATE` 事务里做三件事——插 records、按 expected digest 校验并写 RunIndex、CAS 推进 head。
+   * 一个 `BEGIN IMMEDIATE` 事务里做三件事——插 records、按 expected digest 校验并写 RunIndex、CAS 推进 head。
    * 任何校验失败抛 `ObservationCorruptionError` 并 ROLLBACK；SQLite 自己的错误（busy / I/O）原样抛给 Sequencer 做 read-after-error。
    */
   async commitBatchIfAbsent(input: CommitBatchInput): Promise<CommitBatchResult> {
@@ -445,7 +445,7 @@ function pragmaValue<T>(db: SqliteDatabase, sql: string): T | undefined {
   return values[0];
 }
 
-/** §15.4.2.2 固定验证：WAL / NORMAL / foreign_keys / bounded busy_timeout。不满足 = 不进 READY。 */
+/** 固定验证：WAL / NORMAL / foreign_keys / bounded busy_timeout。不满足 = 不进 READY。 */
 function applyWriterPragmas(db: SqliteDatabase, busyTimeoutMs: number): void {
   const journal = pragmaValue<string>(db, "PRAGMA journal_mode = WAL");
   if (typeof journal !== "string" || journal.toLowerCase() !== "wal") {

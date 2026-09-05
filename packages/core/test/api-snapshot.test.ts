@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { inventory, render, entryPoints, SNAPSHOT_PATH } from "../scripts/api-inventory.ts";
 import type { ApiSymbol } from "../scripts/api-inventory.ts";
 
-// `@echo/core` 的公共面快照门（AGENT-CORE §13 的 D15）。
+// `@echo-agent/core` 的公共面快照门（D15）。
 //
 // **由来（2026-08-17）**：M1 用一条一次性的 `getExportsOfModule` 命令清点公共面，得出
 // **165 个符号**，这个数被写进了设计文档、还成了「按现有 165 个符号机械做减法」的施工依据。
@@ -14,7 +14,7 @@ import type { ApiSymbol } from "../scripts/api-inventory.ts";
 //
 // 守两件事：
 //   A. 公共面不无声漂移——增删一个导出符号、或把它挪到别的模块，snapshot 必须跟着改，
-//      改动进 diff 让人看见。M2 要在这份清单上划 root/engine/subpath，底下的地基不能自己动。
+//      改动进 diff 让人看见。M2 要在这份清单上划根入口与子路径，底下的地基不能自己动。
 //   B. **数得对**，不只是「没变」。全文比对天然是恒绿友好的：清点逻辑整个写错、
 //      每次都数出同一份错结果，比对照样过。所以另有一组 fixture 自检锁住判定分支。
 //
@@ -31,7 +31,7 @@ test("snapshot 与实际公共面一致（不等即红，跑 --write 重录并�
     throw new Error(
       "公共 API 面与 test/api-snapshot.txt 不一致。\n" +
         "确认这是有意的改动后重录：bun packages/core/scripts/api-inventory.ts --write\n" +
-        "**必须人审 diff**——这份清单是 M2 划 root/engine/subpath 的底稿。",
+        "**必须人审 diff**——这份清单是 M2 划根入口与子路径的底稿。",
     );
   }
 });

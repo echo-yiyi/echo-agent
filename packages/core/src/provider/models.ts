@@ -1,4 +1,4 @@
-// createProvider + Models 运行时集合。设计见 docs/design/AGENT-CORE.md §8.1。
+// createProvider + Models 运行时集合。
 //
 // 分工：
 //   createProvider  配置 + 方言实现 → Provider 对象（内建 provider 与自定义 provider 同一条路）

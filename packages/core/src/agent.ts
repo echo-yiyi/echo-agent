@@ -1,4 +1,4 @@
-// Agent 类：状态的唯一所有者。设计见 docs/design/AGENT-CORE.md §2。
+// Agent 类：状态的唯一所有者。
 //
 // 为什么是类不是函数（三条，函数形态给不出）：
 //   ① 生命周期跨越多次调用——`streamingMessage` / `pendingToolCalls` 这些「正在发生什么」
@@ -42,10 +42,11 @@ import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
 import { buildWorkingMessages, estimateText, estimateTokens } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
-import { InMemorySessionManager, type SessionEntry, type SessionManager } from "./session/types.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
+import type { SessionPhase } from "./session/status.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
 import { InboxAckError, InboxStore } from "./inbox/store.ts";
+import { systemClock, type Clock } from "./schedule/clock.ts";
 import { environmentDedupeKey, scheduleDedupeKey } from "./inbox/records.ts";
 import { stateHostOf } from "./state/host-wiring.ts";
 import { DurableDeliveryDeferred, type DurableDeliveryRequest, type DurableDeliveryResult, type DurableIngressPort } from "./inbox/ingress.ts";
@@ -91,6 +92,13 @@ import type { BuiltinToolGroups } from "./extension/builtin.ts";
 import type { TaskItem, TaskSnapshot, TaskSpec, TaskStore } from "./task/types.ts";
 
 export type AgentStatus = "idle" | "generating" | "acting" | "compacting";
+
+/**
+ * 多久重扫一次自己的 inbox 目录（毫秒）。**不做成参数**：它是「别的进程写进来的消息多快被看见」的
+ * 下限，不是要按部署调的旋钮。一秒对「另一段 session 发来一句话」这个场景足够快，
+ * 对盘的负担也只是一次目录列举。要更快就由宿主装 watcher 主动调 `consumeInbox()`。
+ */
+const INBOX_POLL_MS = 1_000;
 
 export type AgentState = {
   /* 装备（慢变；仅 idle 可换） */
@@ -159,13 +167,12 @@ export type AgentOptions = {
   transformContext?: TransformContext;
   hooks?: HookRuntime;
   /**
-   * 授权策略（§14.10.3 固定 stage）。不给 = 全部放行（低层 Agent 的默认）。
+   * 授权策略（固定 stage）。不给 = 全部放行（低层 Agent 的默认）。
    * `askTimeoutMs:null` 时必须显式声明 `responder`（"host" = 宿主会 `subscribeLifecycle()` 后回答；
    * "none" = 诚实缺席，ask 当 policy deny）——两者都不给，构造期 fail-loud。
    */
   permission?: PermissionPolicy;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
-  sessions?: SessionManager;
   sessionId?: string;
   /**
    * 工作目录的**缺省值**：纯内存 agent 直接用它；有 session 时它只在**新建** session 那一刻写进
@@ -179,7 +186,7 @@ export type AgentOptions = {
   /**
    * skill 的持久化端口（D3：端口收窄成与 `StorageDir` 同形的**字节面**，语义进 core）。
    * 它是 `skills/` 这一层目录的视图：Agent 在里面按生态的目录式布局读写 `<name>/SKILL.md`
-   *（格式在 `skill/format.ts`），**发现**在 `start()`（§13.6「发现 Skills」），
+   *（格式在 `skill/format.ts`），**发现**在 `start()`，
    * **落盘**在 `skill_create` 工具路径上、经单写者租约门。
    *
    * 给了它，Agent 就自己装 `skill_activate` + `skill_create` 两件（池随时会长出来，
@@ -199,7 +206,7 @@ export type AgentOptions = {
   taskStore?: TaskStore;
   /**
    * MCP 端口。不传 = 本 agent 不认识 MCP（`agent.mcp` 为 `undefined`，`state.mcp` 恒空）。
-   * 实现在 `@echo/mcp`——服务器配置、传输、超时都是**它**的词汇，core 不认识。
+   * 实现在适配器一侧（不在本仓）——服务器配置、传输、超时都是**它**的词汇，core 不认识。
    * **装配 ≠ 连接**：`await agent.mcp?.connectAll()` 才连。
    */
   mcp?: AgentMcpPort;
@@ -233,14 +240,19 @@ export type AgentOptions = {
   autoDream?: boolean;
   /**
    * 会话的语义所有者（D3）。传了 `start()` 才会 create-or-resume；不传 = 不做会话持久化。
-   * **与 `sessions`（旧 `SessionManager`）互斥**——两个都传会有两套入账语义，构造时判红。
+   * 注入的 store 就是**这一段 session 的目录**（2026-09-03：状态根 = session 目录）。
    */
   sessionService?: SessionService;
   /**
    * 状态根的单写者资格（D6）。传了 `start()` 会取 lease，**拿不到就 fail-loud**；
-   * 丢锁时按 §13.12.3 的四步收场。不传 = 不做互斥（评测与一次性跑天然如此）。
+   * 丢锁时按四步收场。不传 = 不做互斥（评测与一次性跑天然如此）。
    */
   stateLock?: StateLock;
+  /**
+   * 时间与定时器（`schedule/clock.ts` 的端口）。不给用真时钟；测试给 `FakeClock` 才能零 sleep 地驱动
+   * inbox 轮询。**Agent 自己只用它做一件事**：定期重扫 inbox 目录（见 `INBOX_POLL_MS`）。
+   */
+  clock?: Clock;
   /** agent 身份（D5，缺省 `"default"`）。目前只用于 lease 的 holder 标识。 */
   agentId?: string;
   /**
@@ -250,7 +262,7 @@ export type AgentOptions = {
    */
   agentName?: string;
   /**
-   * inbox 的持久面（§13.9 第 10 条）。传了 = 投进来的入站事实先落盘，
+   * inbox 的持久面。传了 = 投进来的入站事实先落盘，
    * run 结束后才删；**崩在半路的会在 `start()` 时重放**。不传 = 纯内存（崩了就丢）。
    */
   inboxStore?: InboxStore;
@@ -274,7 +286,7 @@ type RunExecutor = (scope: AgentAdmissionExecuteScope, signal: AbortSignal) => P
 
 /**
  * `prompt()` / `continue()` 的返回：LoopResult 加上 admission 分配的 `runId`——完整 Runtime 的 `send()` 靠它把
- * outcome 与 RunObservation 关联（§15.6 `EchoRunResult`）。纯增量：期望 `LoopResult` 的调用方照旧可用。
+ * outcome 与 RunObservation 关联（`EchoRunResult`）。纯增量：期望 `LoopResult` 的调用方照旧可用。
  */
 export type AgentRunResult = LoopResult & Readonly<{ runId: string }>;
 
@@ -345,7 +357,7 @@ export class Agent {
   /** 工具池。「能用 / 禁用」是工具自己的状态（`tool.disabled`），不外挂。 */
   readonly tools: ToolMap = new Map();
   /**
-   * 内建能力**造好但尚未注册**的工具，按 §14 owner 表分四组。
+   * 内建能力**造好但尚未注册**的工具，按生命周期 owner 分四组。
    *
    * **Host-internal**：装配层（`createEcho`）拿它去 mount `echo:*` builtin Extension，
    * 由那条路经 `AgentTools.register` 注册。低层 `new Agent()` 的用户看到它是空注册状态——
@@ -370,15 +382,15 @@ export class Agent {
   private readonly listeners = new Set<AgentListener>();
   private seq = 0;
 
-  /* 三条队列，消费时机各不相同（分界见 §5B）：
+  /* 三条队列，消费时机各不相同：
      steering —— 人/hook 放，**内层轮末**消费：「顺便注意一下 X」，不打断，并入当前任务
      followUp —— 人/hook 放，**内层收尾后、同一次 run 内**：「这件做完接着做下一件」
      inbox    —— **环境**放（后台结束、定时到点、webhook），**回 idle 后开新的 run**：「外面发生了一件事」
      前两条是「同一个任务里的追加」，inbox 是「一个新任务的由头」。
      定时投递不单设队列——它就是「延时往 inbox 塞一条」，定时器归产品。 */
-  /** steering / followUp 两条队列住在 RunIntakeGate 里：裁决与入队同一同步步（§14 RunIntakeGate）。 */
+  /** steering / followUp 两条队列住在 RunIntakeGate 里：裁决与入队同一同步步。 */
   private readonly intake: RunIntakeGate;
-  /** run admission（§14.2.4）：prompt / continue / Inbox / Dream 都经它取 permit；单 permit、前台高于 Dream。 */
+  /** run admission：prompt / continue / Inbox / Dream 都经它取 permit；单 permit、前台高于 Dream。 */
   private readonly admission: StandaloneRunAdmission;
   /** 用户 run 从 enqueue 到 settle 之间：prompt() 的重入检查要看它（permit 落位之前 activeRun 还是空）。 */
   private userRunPending = false;
@@ -393,7 +405,7 @@ export class Agent {
   private inboxTicketOutstanding = false;
   private dreamTicketOutstanding = false;
   /**
-   * Inbox 账本裁决为 indeterminate 之后的**可见失败**（§14.2.4「进入可见 FAILED」）：
+   * Inbox 账本裁决为 indeterminate 之后的**可见失败**（「进入可见 FAILED」）：
    * 账本已 seal，状态根处于无法裁决的状态——不再接新工作、不再消费 inbox，也不假装健康。
    * 只有重启（restore 重新裁决 marker）能解封，本进程不得自行重试。
    */
@@ -401,7 +413,7 @@ export class Agent {
   /** standalone 没有 catalog：model 换一次 revision +1，binding 固定到它。 */
   private catalogRevision = 0;
   /**
-   * Inbox 账本（§14.2.4）：pending records、dedupe index、reservation ledger、batch-ack marker 的**唯一 owner**。
+   * Inbox 账本：pending records、dedupe index、reservation ledger、batch-ack marker 的**唯一 owner**。
    * 装了持久 inbox 就是那一份；没装则是同一个类的纯内存模式——语义一致，只差写不写盘。
    */
   private readonly inbox: InboxStore;
@@ -417,7 +429,6 @@ export class Agent {
   private tapNextSeq = 0;
   private readonly tapPending = new Map<number, AgentEvent>();
 
-  private readonly sessions?: SessionManager;
   /** 持久记忆的操作面：`agent.memory?.shouldDream()`。undefined = 本 agent 没有记忆。 */
   readonly memory?: AgentMemories;
   /** 定时任务的操作面：`agent.schedule?.start()`。undefined = 本 agent 没有闹钟。 */
@@ -426,9 +437,12 @@ export class Agent {
   readonly mcp?: AgentMcpPort;
   /** 任务清单的落盘端口。不传 = 纯内存。 */
   readonly taskStore?: TaskStore;
-  /** D3 的会话语义所有者；与 `sessions` 互斥。 */
+  /** D3 的会话语义所有者。一个 Agent 实例 = 一段 session。 */
   private readonly sessionService?: SessionService;
   private readonly stateLock?: StateLock;
+  private readonly clock: Clock;
+  /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
+  private inboxPollCancel?: () => void;
   private readonly agentId: string;
   /** 新建会话时写进 `SessionInfo.agent` 的名字（`AgentOptions.agentName`，缺省 = `agentId`）。 */
   private readonly agentName: string;
@@ -437,7 +451,7 @@ export class Agent {
   /** 本代 Agent 的进程内身份：写入格与 RunIntakeGate 共用同一个。 */
   private readonly agentInstanceId: string;
   /**
-   * 状态根写入总闸与 lease lifecycle port（§14.9 / §14.5，**Host-internal**）：由同包的 composition root 经
+   * 状态根写入总闸与 lease lifecycle port（**Host-internal**）：由同包的 composition root 经
    * `attachStateHost()` 挂上，不进公共 `AgentOptions`。低层 `new Agent()` 没挂 = 不设闸。
    */
   private get gate(): import("./state/write-gate.ts").StateWriteGate | undefined {
@@ -447,7 +461,7 @@ export class Agent {
     return stateHostOf(this)?.leaseLifecycle;
   }
   /**
-   * 装配现场转过来的所有权账本（§14.5.1）。**`stop()` 是排空它的唯一触发点**——
+   * 装配现场转过来的所有权账本。**`stop()` 是排空它的唯一触发点**——
    * provider 侧只撤 slot metadata，不许再 dispose 同一个值。低层 `new Agent()` 没挂 = 没有账本要排。
    */
   private get adoption(): import("./assembly/ledger.ts").AdoptionLedger | undefined {
@@ -455,7 +469,7 @@ export class Agent {
   }
   /** install 之后启动失败：写入格已 revoke，本实例作废（不能清空复用）。 */
   private startFencedError: Error | null = null;
-  /** 跨进程可确认的入站口（§14.2.4）：`deliver()` 是它的 fire-and-forget 便捷面。 */
+  /** 跨进程可确认的入站口：`deliver()` 是它的 fire-and-forget 便捷面。 */
   readonly ingress: DurableIngressPort;
   /**
    * **在飞的 durable write**（inbox 落盘、任务清单落盘）。`stop()` 要等它们 settle，
@@ -494,7 +508,7 @@ export class Agent {
 
   /** `start()` 取到的租约。`stop()` 释放它；丢锁时它已经不作数。 */
   private lease?: Lease;
-  /** 丢锁后置真：拒绝一切新工作（§13.12.3 第 ③ 步）。 */
+  /** 丢锁后置真：拒绝一切新工作。 */
   private leaseLostError: Error | null = null;
   /**
    * 生命周期状态。**只有带持久化装配的 Agent 才受它约束**——低层 `new Agent()`
@@ -505,8 +519,7 @@ export class Agent {
    * 旧 Agent 仍能写进两条 session message——**单写者当场破**。
    */
   /**
-   * 生命周期相位（§14 的相位图）。仓库里一直叫 `running`，规格里那张图写的是 `active`——**同一个相位**，
-   * 沿用既有词、不另造。O2d-2 新增两个：
+   * 生命周期相位。相位名沿用既有词、不另造。O2d-2 新增两个：
    *   - `restored`：持有租约、durable 恢复做完了，但 timer / Dream / Inbox consumer **还没自己动**；
    *   - `pausing`：`pauseManagedWork()` 正在把受管工作 drain 干净（handoff 专用的接缝）。
    *
@@ -538,7 +551,7 @@ export class Agent {
   private startInFlight?: { readonly ticket: number; readonly activation: "immediate" | "deferred"; readonly promise: Promise<void> };
   /** 进行中的 `stop()`。同上；另外 `stop()` 要靠 `startInFlight` 等启动收完再动手。 */
   private stopInFlight?: { readonly ticket: number; readonly promise: Promise<void> };
-  /** `dispose()` 幂等的落点：第二次调用等第一次，不再跑一遍收摊（§14.7.5 第 6 条）。 */
+  /** `dispose()` 幂等的落点：第二次调用等第一次，不再跑一遍收摊。 */
   private disposeInFlight?: Promise<void>;
   public autoConsumeInbox: boolean;
   public autoDream: boolean;
@@ -571,7 +584,7 @@ export class Agent {
   public transformContext?: TransformContext;
   public streamFunction: StreamFn;
   public hooks: HookRuntime;
-  /** permission ask 账本（§14.10.3）：只有 `answerPermission()` 与 loop 的 ask 路径碰它。 */
+  /** permission ask 账本：只有 `answerPermission()` 与 loop 的 ask 路径碰它。 */
   private readonly permissions = new PermissionLedger();
   private readonly permissionPolicy: PermissionPolicy;
   /** 当前 run 的稳定身份；permission ask 与事件关联引用它。 */
@@ -607,7 +620,6 @@ export class Agent {
       mcp: [],
       tasks: EMPTY_TASK_SNAPSHOT,
     };
-    this.sessions = opts.sessions;
     this.autoConsumeInbox = opts.autoConsumeInbox ?? false;
     this.autoDream = opts.autoDream ?? false;
     this.disposables = opts.disposables ?? [];
@@ -636,15 +648,15 @@ export class Agent {
     if (opts.tasks !== undefined) createTasks(this.tasks, opts.tasks);
 
     // **Task 与 Skill 是 Agent 自己的能力，不是产品层的挂件**（2026-08-23 用户拍板）。
-    // 此前它们的工具只有 `@echo/coding-agent` 注册，于是默认装配出来的 agent
+    // 此前它们的工具只有 `echo-coding` 注册，于是默认装配出来的 agent
     // 工具面只有 memory + schedule 四件，「由 Agent 创建 Task / 激活 Skill」
-    // （§13.9 第 4 条）根本走不通。现在与 memory / schedule 同一个模式：能力在，工具就在。
+    // 根本走不通。现在与 memory / schedule 同一个模式：能力在，工具就在。
     //
     // 两者的装法不同，理由不同：
     //   · **task 恒装**——`this.tasks` 总是存在，没有「能力不在」这个状态；
     //   · **skill 池非空才装**——空可选集的工具每轮白占 token，严格 provider 还会拒收
     //     （v1 的教训，`skill/tools.ts` 的注释里记着）。构造之后才 `addSkills` 的用法
-    //     仍由装配方自己注册，`@echo/coding-agent` 走的就是那条。
+    //     仍由装配方自己注册，`echo-coding` 走的就是那条。
     // **改完就落盘，不等到 stop()。** 此前 `saveTasks` 只在 `dispose()` 里调一次：
     // 模型 `TaskCreate` 拿到「已建 1 条任务」的成功回执之后进程崩掉，那条任务就没了——
     // 工具说成功、盘上没有，是最坏的一种谎。resident 测试此前用干净 stop 掩盖了这个缺口。
@@ -743,11 +755,9 @@ export class Agent {
     this.mcp = opts.mcp;
     this.mcp?.attach({ tools: this.tools, onChanged, deliver, report });
 
-    // 两套会话语义并存会让入账走两条路——构造期判红，不留到运行时才发现。
-    if (opts.sessions !== undefined && opts.sessionService !== undefined) {
-      throw new Error("`sessions` 与 `sessionService` 只能给一个：前者是 D3 之前的形状，新代码用后者");
-    }
     this.sessionService = opts.sessionService;
+    this.sessionService?.attachDiagnostics((d) => this.reportDiagnostic(d));
+    this.clock = opts.clock ?? systemClock;
     this.stateLock = opts.stateLock;
     this.agentId = opts.agentId ?? "default";
     this.agentName = opts.agentName ?? this.agentId;
@@ -758,7 +768,7 @@ export class Agent {
       binding: (input) => this.modelBinding(input),
       normalizeFailure: (input) => this.normalizeAdmittedCallbackFailure(input),
       assertReserved: (id, ids) => this.inbox.assertReserved(id, ids),
-      // §15.5.2：run.accepted / run.closed 的唯一 emission owner 是 admission。accepted 只预留不等、永不拒 run；closed 有界等 COMMIT
+      // run.accepted / run.closed 的唯一 emission owner 是 admission。accepted 只预留不等、永不拒 run；closed 有界等 COMMIT
       observe: {
         accepted: (input) => this.observeRunAccepted(input),
         closed: (input) => this.observeRunClosed(input),
@@ -818,7 +828,7 @@ export class Agent {
   }
 
   /**
-   * 订阅 LifecycleEvent 实时通道（§14.2.3）：与 hook 走同一个 emission point、同一顺序，但只观察、不参与折叠。
+   * 订阅 LifecycleEvent 实时通道：与 hook 走同一个 emission point、同一顺序，但只观察、不参与折叠。
    * 可信宿主用它收 `permissionRequest`，再单独调 `answerPermission()`。
    */
   subscribeLifecycle(listener: LifecycleEventListener): () => void {
@@ -826,7 +836,7 @@ export class Agent {
   }
 
   /**
-   * 可信宿主回答一次 ask（§14.10.3）。accepted / stale / closed 都是正常结果、都 fulfill；
+   * 可信宿主回答一次 ask。accepted / stale / closed 都是正常结果、都 fulfill；
    * 只有 JS 边界的坏 shape 才以 TypeError reject。Extension/Tool 拿不到这个入口。
    */
   async answerPermission(input: PermissionAnswer): Promise<PermissionAnswerResult> {
@@ -886,7 +896,7 @@ export class Agent {
   /* ───────────── 命令面 ───────────── */
 
   /**
-   * 开一轮新任务。重入直接 throw；「一次只跑一个」由 admission 的单 permit 保证（§14.2.4），
+   * 开一轮新任务。重入直接 throw；「一次只跑一个」由 admission 的单 permit 保证，
    * 这里的重入检查只是给调用方一个即时的答复。
    */
   async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): Promise<AgentRunResult> {
@@ -903,7 +913,7 @@ export class Agent {
     const last = this._state.messages[this._state.messages.length - 1];
     if (last === undefined) throw new Error("没有可续跑的消息");
     if (last.role === "assistant") {
-      // steer / followUp 只在 run 里 accepted（§14 RunIntakeGate），idle 时两条队列必空——
+      // steer / followUp 只在 run 里 accepted（RunIntakeGate），idle 时两条队列必空——
       // 上一版「末条是 assistant 就捞队列当新一轮」这条路已不存在。
       throw new Error("末条是 assistant，无从续跑；要接着说请用 prompt()");
     }
@@ -912,7 +922,7 @@ export class Agent {
   }
 
   /**
-   * 跑的中途插话：只进**当前活动 turn**，轮末并入（§14.2.3）。裁决与入队在 RunIntakeGate 同一同步步里
+   * 跑的中途插话：只进**当前活动 turn**，轮末并入。裁决与入队在 RunIntakeGate 同一同步步里
    * 完成——方法是 async 只为了与 EchoRuntime 同形，返回前没有 await。没有活动 turn 返回
    * `rejected(no-active-turn)`：不抛、不入队等下一个 run。
    */
@@ -923,7 +933,7 @@ export class Agent {
   }
 
   /**
-   * 这件做完接着做下一件：只进**当前 run**（§14.2.3）。没有 run 返回 `rejected(no-active-run)`，
+   * 这件做完接着做下一件：只进**当前 run**。没有 run 返回 `rejected(no-active-run)`，
    * 不退化成 prompt()。
    */
   async followUp(message: AgentMessage | string): Promise<FollowUpResult> {
@@ -947,7 +957,7 @@ export class Agent {
   }
 
   /**
-   * Schedule 领域端口的适配（§14.2.4）：`ScheduleDeps.deliver` 的签名不改——accepted（含 deduplicated）映射成
+   * Schedule 领域端口的适配：`ScheduleDeps.deliver` 的签名不改——accepted（含 deduplicated）映射成
    * resolve，schedule 才按既有逻辑推进 `lastFiredAt` / 删一次性任务；任何 structured rejected 映射成
    * `DurableDeliveryDeferred` rejection，于是现有 tick/catch-up 的 catch 路径保留 entry / due occurrence 并报告原因。
    * adapter 不重写 schedule 状态机，也不把 rejected 当已投递。
@@ -960,7 +970,7 @@ export class Agent {
   }
 
   /**
-   * Schedule 的 dedupeKey 用 **incarnation**（`hash(agentId, id, createdAt)`，§14 R6）：删掉后以同一 ID 重建的
+   * Schedule 的 dedupeKey 用 **incarnation**（`hash(agentId, id, createdAt)`）：删掉后以同一 ID 重建的
    * schedule 是另一个事实。只按 `(source, ref)` 时，旧事实还 pending 就会把新 schedule 的那次吞掉——
    * 新 schedule 被记 fired、Inbox 里却只有旧 prompt（实测）。登记表里找不到（已被删）才退回普通派生。
    */
@@ -1010,7 +1020,7 @@ export class Agent {
     if (this.disposeInFlight !== undefined || this.phase === "stopped") return { kind: "rejected", reason: "runtime-disposed" };
     // 账本没恢复就发号会盖掉盘上已有的 record；restore 后半段失败时 `ready` 仍为 false，这里照样挡住
     if (!this.inbox.ready) return { kind: "rejected", reason: "runtime-not-ready" };
-    // **公开 ingress 在「持有租约且恢复完了」之后开放**（§14 restored 方法矩阵）：
+    // **公开 ingress 在「持有租约且恢复完了」之后开放**（restored 方法矩阵）：
     //   - `new` / `starting`：Lease 可能还没拿到、也可能随后失败回退，那时对外承诺「已持久接受」不诚实 → 拒；
     //   - `restored`（deferred-start 与 paused 都算）与 `pausing`：**仍持合法 Lease，target 开着 → accepted 并持久化**，
     //     只是不自动 consume（`autoConsumeInbox` 那时是关的）——handoff 期间外面发生的事一件都不该丢。
@@ -1046,6 +1056,54 @@ export class Agent {
    * 攒批不是优化：三个后台任务同时结束就跑一轮，不是三轮。
    * 正在跑 / 队列空 → 返回 null，不做任何事。
    */
+  /**
+   * 把运行状态写进 `status.json`（2026-09-03，sessions.md §6）。**只有持有 lease 的进程该写。**
+   *
+   * 它是给别人看的提示：`session_list` 里「这段能不能马上答话」就读它。失败不影响本段对话——
+   * 读方永远还要再看一眼 lease，`alive` 为假时这份 `phase` 一律作废（进程崩在 working 的那种）。
+   */
+  private publishPhase(phase: SessionPhase): void {
+    const id = this._state.sessionId;
+    if (id === null || this.phase !== "running") return;
+    this.sessionService?.setPhase(id, phase);
+  }
+
+  /**
+   * inbox 轮询：**别的进程写进来的消息，靠它才看得见**（2026-09-03，sessions.md §5）。
+   *
+   * 会话之间发消息 = 往对方的 `inbox/` 目录写一条 record，写者可能是另一个进程。`InboxStore`
+   * 只在 `restore()` 那一刻读过盘，所以不重扫就等于「要等对方重启才收到」——「A 发 B，B 不重启
+   * 就在下一轮看到」这条判据直接不成立。
+   *
+   * 为什么是轮询而不是 `fs.watch`：core 不 import 任何 `node:`（浏览器 / Worker / 边缘运行时都要能跑），
+   * 而 `Clock` 是已有的端口、测试拿 `FakeClock` 就能零 sleep 驱动。真要事件驱动，宿主可以自己在
+   * 目录上装 watcher 再调 `agent.consumeInbox()`——那是加速，不是另一套语义。
+   */
+  private startInboxPoll(): void {
+    if (this.inboxPollCancel !== undefined) return; // 幂等：activate 可能被走到两次
+    this.inboxPollCancel = this.clock.setInterval(() => void this.pollInbox(), INBOX_POLL_MS);
+  }
+
+  private stopInboxPoll(): void {
+    this.inboxPollCancel?.();
+    this.inboxPollCancel = undefined;
+  }
+
+  /**
+   * 一拍轮询。**只在真的空着时扫**：有 run 在跑就跳过——那时扫了也不能消费，白读一遍盘。
+   * 失败只报诊断：一次读盘失败不该把一个健康的 agent 掀翻，下一拍还会再来。
+   */
+  private async pollInbox(): Promise<void> {
+    if (this.phase !== "running" || this.activeRun !== undefined || this.userRunPending || this.inboxTicketOutstanding) return;
+    if (this.inboxFailure !== null) return;
+    try {
+      const found = await this.inbox.refresh();
+      if (found > 0 && this.autoConsumeInbox) await this.consumeInbox();
+    } catch (e) {
+      this.reportDiagnostic({ code: "inbox_refresh_failed", message: errText(e) });
+    }
+  }
+
   async consumeInbox(): Promise<LoopResult | null> {
     if (this.activeRun !== undefined || this.userRunPending || this.inboxTicketOutstanding) return null;
     if (this.inboxFailure !== null) return null; // 账本已封：不再消费，也不假装健康
@@ -1057,7 +1115,7 @@ export class Agent {
       this.reportDiagnostic({ code: "inbox_consume_refused", message: errText(e) });
       return null;
     }
-    // 一次 reserve 一批（§14.2.4）：reservationId + 有序 recordIds 随 request 进 admission；新到的 delivery 进下一批
+    // 一次 reserve 一批：reservationId + 有序 recordIds 随 request 进 admission；新到的 delivery 进下一批
     // **从 reserve 一直立到 ack 裁决结束**：这段时间外部 prompt()/continue() 一律被 assertAcceptsWork 拒。
     // 上一版在 ack 之前就清了标记，于是 marker 还卡着、裁决没出来时新 run 已经拿到 permit——
     // 它可能跑在「这批要重放」或「账本要 seal」之前（实测 agent_start 从 1 变成 2）。
@@ -1183,12 +1241,12 @@ export class Agent {
     return { kind: "done", stages: outcome.stages, contextTokens: outcome.contextTokens };
   }
 
-  /* ───────────── 生命周期（D4 / §13.12.3） ───────────── */
+  /* ───────────── 生命周期（D4） ───────────── */
 
   /**
    * 一次做完所有恢复与启动。**幂等**：重复调直接返回。
    *
-   * 顺序是契约的一部分（§13.12.3）：取 lease → create-or-resume 默认 Session
+   * 顺序是契约的一部分：取 lease → create-or-resume 默认 Session
    * →（M4/M5 起）恢复 Memory / Skills / Tasks / Schedules / Inbox → 启动后台 → 发 ready。
    *
    * **不变量：中途任何一步失败，必须释放已取得的 lease 再抛**——否则状态根会被一个
@@ -1210,7 +1268,7 @@ export class Agent {
   /**
    * 起来。缺省 = durable 恢复 + 立刻开始自己动（保持既有语义）。
    * `activation: "deferred"` 只做恢复，停在 `restored(deferred-start)`：timer / Dream / Inbox consumer 都不启动，
-   * 等 composition/handoff 在 atomic swap 之后调 `activate()`（§14 的窄接缝，不是重写恢复逻辑）。
+   * 等 composition/handoff 在 atomic swap 之后调 `activate()`（窄接缝，不是重写恢复逻辑）。
    */
   async start(options: { activation?: "immediate" | "deferred" } = {}): Promise<void> {
     // canonical writer 在 start 入口就接上：恢复期的 Schedule 补跑（catchUp）已经会发领域事实，不能等到第一个 run 才挂 sink
@@ -1260,7 +1318,7 @@ export class Agent {
     // **终态**：停过就不能再起。要新的实例就重新 createAgent——允许复活会让「谁持有状态根」变成一笔糊涂账。
     if (this.phase === "stopped") throw new Error("这个 Agent 已经 stop() 过了：请新建一个");
     if (this.phase === "lost") throw new Error("这个 Agent 已丢失 single-writer 租约：请新建一个");
-    // **install 之后失败是终态**：写入格已 revoke 且不可复用（§14.9「fresh rollback 必须重建一整套」）。
+    // **install 之后失败是终态**：写入格已 revoke 且不可复用（「fresh rollback 必须重建一整套」）。
     // 拿锁**之前**失败仍可重试（换状态根、修坏档再来）——这两种失败的契约不一样，不能混成一句「可重试」。
     if (this.startFencedError !== null) {
       throw new Error(`这个 Agent 在取得租约之后启动失败过，写入格已作废：请新建一个（原因：${this.startFencedError.message}）`);
@@ -1274,10 +1332,10 @@ export class Agent {
     try {
       if (this.stateLock !== undefined) {
         // holder 只是给人看的标识——**不要在这里取 pid**，那是 node 全局，
-        // agent.ts 在 engine 面。进程身份由 Lock 的实现自己记。
+        // agent.ts 不拖 `node:`。进程身份由 Lock 的实现自己记。
         const lease = await this.stateLock.acquire({ holder: `agent:${this.agentId}` });
         if (lease === null) {
-          // 拿不到就是拿不到——core 不抢占（§13.12.3）。
+          // 拿不到就是拿不到——core 不抢占。
           // 但**必须说清是谁占着**：不接管的代价是人工删锁，而人工删锁得先看得见对面是谁。
           const who = (await this.stateLock.describeHolder?.()) ?? null;
           throw new Error(
@@ -1288,12 +1346,12 @@ export class Agent {
         acquired = lease;
         this.lease = lease;
         void this.watchLease(lease);
-        // acquire 成功后才有写入身份：**cell 与根闸同一步装上**（§14.9），随后才打开 restore-migration。
+        // acquire 成功后才有写入身份：**cell 与根闸同一步装上**，随后才打开 restore-migration。
         // 装之前任何写都 fail-closed——PREPARE / 尚未 start 的 view 就是这个状态。
         this.gate?.install({ agentInstanceId: this.agentInstanceId, acquisitionId: crypto.randomUUID() });
       }
       // 恢复期的写（session 建档、legacy migration、任务回写）走 restore-migration；durable ingress 从
-      // 持有租约起就可写（§14.9 的 lane 表），两者到 revoke fence 才关。
+      // 持有租约起就可写（lane 表），两者到 revoke fence 才关。
       this.gate?.openLane("restore-migration");
       this.gate?.openLane("durable-ingress");
 
@@ -1322,7 +1380,7 @@ export class Agent {
         );
       }
 
-      // 发现 Skills（§13.6）：从 `skillStore` 读 `<name>/SKILL.md`，撞名先到先得 + 诊断
+      // 发现 Skills：从 `skillStore` 读 `<name>/SKILL.md`，撞名先到先得 + 诊断
       //（构造期显式传的赢）。**逐文件容错**：一个 SKILL.md 读失败 / 内容坏 → 诊断 + 跳过，
       // 不拖垮启动——`skills/` 与扫盘目录是同类东西（人也会手放文件），姿态与 loader 一致；
       // 不学 `loadTasks` 的坏档判红（tasks.json 是机器专属档案，坏了就是状态根坏了）。
@@ -1354,10 +1412,10 @@ export class Agent {
       // 必须等 inbox 把序号从盘上初始化之后才行（见下一段）。
       if (this.schedule !== undefined) await loadSchedule(this.schedule);
 
-      // 未消费的入站事实：崩溃前投进来、还没跑完的，在这里重放（§13.9 第 10 条）。
+      // 未消费的入站事实：崩溃前投进来、还没跑完的，在这里重放。
       // `restore()` 顺带把序号排到盘上最大之后——**它必须发生在任何投递之前**，否则新投递会从 000001
       // 重新开始，**盖掉盘上原有的那条**（实测：两条最后只剩一条）。它同时重建 dedupe index、
-      // 迁移 legacy record，并按 ack marker 跳过已经逻辑 ack 的那批（§14.2.4）。
+      // 迁移 legacy record，并按 ack marker 跳过已经逻辑 ack 的那批。
       await this.inbox.restore();
 
       // 恢复结束：关掉 restore-migration。**active business 先不开**——
@@ -1375,6 +1433,7 @@ export class Agent {
       // **把已经起来的东西收干净，再把原错误抛出去。**
       // 顺序上 startSchedule 目前是最后一步、之后不会再抛，但依赖这一点是脆弱的：
       // 以后在它后面加一步，就会漏一个野定时器出去——那种污染跨测试、跨进程都难查。
+      this.stopInboxPoll();
       if (this.schedule !== undefined) stopSchedule(this.schedule);
       if (acquired !== undefined) {
         // **revoke 排在 release 之前**：只 release 的话，锁已经还回去了而本代 view 还写得进去——
@@ -1407,7 +1466,7 @@ export class Agent {
   }
 
   /**
-   * handoff 专用的 drain 接缝（§14）：`running → pausing → restored(paused)`。
+   * handoff 专用的 drain 接缝：`running → pausing → restored(paused)`。
    * 停新的 Schedule / Inbox / Background producer，abort 并 settle 低优先级 Dream，drain 已 accepted 的
    * foreground permit；business gate 在此期间 open→draining，全部 settle 之后 closed。
    * **它不关 durable-ingress target、不 seal、不 flush、不 release Lease**——那些是 `stop()` 的事。
@@ -1428,6 +1487,7 @@ export class Agent {
       this.autoConsumeInbox = false;
       this.autoDream = false;
       this.gate?.setActiveBusinessMode("draining");
+      this.stopInboxPoll();
       if (this.schedule !== undefined) stopSchedule(this.schedule);
 
       // ② 等已经登记的受管工作真的做完：
@@ -1515,7 +1575,7 @@ export class Agent {
    * 之后才算真的在跑**，producer 也才在那之后启动。
    */
   private async beginManagedWork(): Promise<void> {
-    // 补跑的写只走 managed-activation（§14.9 lane 表）：Schedule catch-up 的 delivery / cursor / expired 都在
+    // 补跑的写只走 managed-activation（lane 表）：Schedule catch-up 的 delivery / cursor / expired 都在
     // 这条 lane 上，timer 不用它。**business 仍关着**——判据是 OR，先开 business 这条 lane 就形同虚设。
     if (this.schedule !== undefined) {
       const closeActivation = this.gate?.openLane("managed-activation");
@@ -1534,10 +1594,12 @@ export class Agent {
     this.gate?.setActiveBusinessMode("open");
     this.intake.reopenAfterReconfiguration();
 
-    // 常驻行为（§13.12.4）：**「常驻」在机制上的全部区别就是这两条**——会自己醒（消费 inbox）、会自己整理（dream）。
+    // 常驻行为：**「常驻」在机制上的全部区别就是这两条**——会自己醒（消费 inbox）、会自己整理（dream）。
     // 打开必须在恢复之后：先开的话，dream 可能在 session 还没灌进来时就跑起来。
     if (this.memory !== undefined) this.autoDream = true;
     this.autoConsumeInbox = true;
+    this.startInboxPoll();
+    this.publishPhase("idle"); // 起来了、还没活干：别人现在问它，它能马上答
 
     this.phase = "running";
     this.restoredReason = null;
@@ -1551,7 +1613,7 @@ export class Agent {
   /**
    * 收摊：drain/abort 受管活动 → 等 pending durable write settle → 释放 lease。
    *
-   * **Store 面上没有 flush**（§13.12.2）：`write()` resolve 即持久，所以这里等的是
+   * **Store 面上没有 flush**：`write()` resolve 即持久，所以这里等的是
    * 那些还没 settle 的 write，不是「调一个 flush 方法」。
    */
   async stop(): Promise<void> {
@@ -1588,7 +1650,7 @@ export class Agent {
     // 已经停了的进程永久占住——实测过（注入一个抛错的 disposable，`stop()` reject，
     // 之后第二次 acquire 一直拿不到）。所以这里先各自捕获，最后再决定抛哪个。
     // shutdown 不走 `draining`（那是 handoff 的接缝）：同一段里直接把 active business 关掉、
-    // 打开 lifecycle-finalization——abort terminal、session settle/seal、尾写都只走这条 lane（§14.9 第 5 条）。
+    // 打开 lifecycle-finalization——abort terminal、session settle/seal、尾写都只走这条 lane。
     // **只有写入格还 installed 时才开这条 lane**：启动失败或丢锁之后格子已 revoke，那时 stop() 仍要把资源关干净，
     // 但一个字节都不该再写状态根。
     const gateUsable = this.gate !== undefined && this.gate.cell.state() === "installed";
@@ -1614,7 +1676,7 @@ export class Agent {
     let releaseError: { readonly e: unknown } | null = null;
     if (shutdownError !== null) errors.push(shutdownError.e);
     try {
-      // **最后一站，且 cell 仍 installed**：Host 自己的 writer 在这里 flush / close（§14.5）。
+      // **最后一站，且 cell 仍 installed**：Host 自己的 writer 在这里 flush / close。
       // 它不拥有 ingress target、也不重复 drain——那些在 dispose() 里已经做完了。
       // **只有仍持合法租约、且没进过 loss fence 时才调**：从没 start() 过、或者已经丢锁走过 `onLeaseLost()` 的，
       // 这条正常释放 fence 根本不该发生（丢锁路径只做 loss-safe 的资源清理）。
@@ -1651,7 +1713,7 @@ export class Agent {
   }
 
   /**
-   * 丢锁善后。顺序不可调换（§13.12.3）：
+   * 丢锁善后。顺序不可调换：
    * ① 停止一切持久化 → ② abort 当前工作 → ③ 拒绝新工作 → ④ 发错误事件。
    *
    * **不能 drain**：drain 的定义是「做完手上的事」，而做完必然要写盘——那正是 ① 禁止的。
@@ -1942,31 +2004,6 @@ export class Agent {
 
   /* ───────────── 会话面 ───────────── */
 
-  async newSession(name?: string, workspace: string = this._state.workspace): Promise<string> {
-    const sessions = this.requireSessions();
-    const info = await sessions.create({ name, workspace, agent: this.agentName });
-    this.reset();
-    this._state.sessionId = info.id;
-    this._state.workspace = info.workspace;
-    await this.hooks.notify({ type: "sessionStart", sessionId: info.id, resumed: false, messageCount: 0 }, this.hookContext());
-    return info.id;
-  }
-
-  async loadSession(id: string): Promise<void> {
-    this.assertIdle("session");
-    const sessions = this.requireSessions();
-    const data = await sessions.load(id);
-    this.reset();
-    this._state.messages = [...data.messages];
-    this._state.compaction = data.compaction;
-    this._state.sessionId = data.info.id;
-    this._state.workspace = data.workspace;
-    await this.hooks.notify(
-      { type: "sessionStart", sessionId: data.info.id, resumed: true, messageCount: data.messages.length },
-      this.hookContext(),
-    );
-  }
-
   /**
    * 切工作目录（2026-09-03 用户拍板：worktree 隔离走 core 的口，**会话不断**）。
    * 只换 `AgentState.workspace` 并入账一条 `workspace` entry——resume 以最后一条为准；`SessionInfo.workspace`
@@ -1981,20 +2018,13 @@ export class Agent {
     this._state.workspace = workspace;
     const id = this._state.sessionId;
     if (id === null) return;
-    await this.appendEntries(id, [{ kind: "workspace", at: Date.now(), workspace }]);
-  }
-
-  private requireSessions(): SessionManager {
-    if (this.sessions === undefined) {
-      throw new Error("没有注入 SessionManager：本 Agent 是纯内存模式（会话面不可用）");
-    }
-    return this.sessions;
+    await this.sessionService?.append(id, [{ kind: "workspace", at: Date.now(), workspace }]);
   }
 
   /* ───────────── 私有：运行 ───────────── */
 
   /**
-   * 用户输入进 transcript 的**唯一准入口**（§14.7.5 第 3 条）：初始 prompt、steering、followUp 三条路都从这里过
+   * 用户输入进 transcript 的**唯一准入口**：初始 prompt、steering、followUp 三条路都从这里过
    * `userPromptSubmit` 拦截，事件的 `source` 由入口如实标（human / steer / followUp），不从消息上猜。
    * patch → 改写正文后的消息才进 transcript；block → 不进 transcript，记一条 `user_prompt_blocked` 诊断
    * ——队列里那条消息就此结清，不会静默消失也不会偷偷转成别的入口。
@@ -2090,7 +2120,7 @@ export class Agent {
     if (this.inboxFailure !== null) {
       return `Inbox 账本无法裁决，拒绝新工作：${this.inboxFailure.message}`;
     }
-    // 丢锁后拒绝新工作（§13.12.3 第 ③ 步）
+    // 丢锁后拒绝新工作
     if (this.leaseLostError !== null) {
       return `已丢失 single-writer 租约，拒绝新工作：${this.leaseLostError.message}`;
     }
@@ -2117,7 +2147,7 @@ export class Agent {
     if (this.lifecycleManaged && this.phase !== "running") {
       return `Agent 当前状态是 ${this.phaseLabel}，不接受新工作（只有 running 才接）`;
     }
-    // 声明了「宿主会回答 ask」却没人订阅——在 run 入口就 fail-loud，不能等到 Tool 已经暂停才发现无人回答（§14.10.3）。
+    // 声明了「宿主会回答 ask」却没人订阅——在 run 入口就 fail-loud，不能等到 Tool 已经暂停才发现无人回答。
     if (this.permissionPolicy.responder === "host" && this.permissionPolicy.askTimeoutMs === null && !this.hooks.hasSubscribers()) {
       return 'permission 策略声明了 responder:"host" 且 ask 不超时，但没有任何 subscribeLifecycle() 订阅者——无人回答，拒绝开始 run';
     }
@@ -2155,7 +2185,7 @@ export class Agent {
     const runId = scope.runId;
     this.currentRunId = runId;
     this.runMessagesBefore = this._state.messages.length;
-    // run intake 开门（§14 RunIntakeGate）：与 activeRun 落位同一同步段——从这一刻起 followUp() 才 accepted
+    // run intake 开门（RunIntakeGate）：与 activeRun 落位同一同步段——从这一刻起 followUp() 才 accepted
     this.intake.openRun(runId);
     const abortController = new AbortController();
     const onScopeAbort = (): void => abortController.abort();
@@ -2170,23 +2200,23 @@ export class Agent {
     this._state.startedAt = Date.now();
     this._state.lastError = null;
     try {
-      // §15.5.2 第 4 步：permit executor 进入 loop 的那一拍发 `run.started`——只预留不等，落不下去只降级
+      // permit executor 进入 loop 的那一拍发 `run.started`——只预留不等，落不下去只降级
       this.observeRunStarted(runId);
       const result = await executor(scope, abortController.signal);
       this.terminalByRun.set(runId, result); // 终态已出：之后 callback 再抛，normalizer 复用它
       return result;
     } finally {
       scope.signal.removeEventListener("abort", onScopeAbort);
-      // run 关门的兜底（§14 RunIntakeGate）：循环在 agent_end 之前关过了，这里通常 no-op；
+      // run 关门的兜底（RunIntakeGate）：循环在 agent_end 之前关过了，这里通常 no-op；
       // 只有「全部被准入拦下、没起循环」或抛错的 run 从这里关。accepted 未消费的显式报出——不留给下一个 run。
       this.reportUnconsumed(this.intake.closeRun(), "run 结束");
-      // run 封口：本 run 的 permission tombstone 从「一条不丢」转进有界池（§14.10.3 retention 至少到 run closure）
+      // run 封口：本 run 的 permission tombstone 从「一条不丢」转进有界池（retention 至少到 run closure）
       this.permissions.closeRun(runId);
     }
   }
 
   /**
-   * execute 抛了（循环违约或 bug）也要合成完整的事件序列——**订阅方永远看不到「缺一拍」的事件流**（§14.2.4）。
+   * execute 抛了（循环违约或 bug）也要合成完整的事件序列——**订阅方永远看不到「缺一拍」的事件流**。
    * Host-internal、non-throwing：该 run 已有终态 → 复用暂存的 LoopResult，只记 contract failure，不发第二个 agent_end；
    * 尚无终态 → 合成 message/turn/agent 终结事件；sink 自身失败 → non-retryable internal fallback（Observation partial 归 O2f）。
    * Dream 的事件不外发，只给 LoopResult。
@@ -2235,7 +2265,7 @@ export class Agent {
     }
   }
 
-  /** 每次 admission 冻结的 model seam（§14.2.4）。standalone 没有 catalog：provider 身份固定为 echo:standalone。 */
+  /** 每次 admission 冻结的 model seam。standalone 没有 catalog：provider 身份固定为 echo:standalone。 */
   private modelBinding(input: { source: RunSource; purpose: "foreground" | "maintenance" }): RunModelBinding {
     const model = this._state.model;
     return Object.freeze({
@@ -2265,6 +2295,7 @@ export class Agent {
    */
   private closeRun(): void {
     this._state.status = "idle";
+    this.publishPhase("idle");
     this._state.startedAt = null;
     this._state.streamingMessage = undefined;
     this._state.pendingToolCalls = new Set();
@@ -2311,7 +2342,7 @@ export class Agent {
   }
 
   /**
-   * finishRun() 里排一次 Dream（§14.2.4）：只做同步标记 + enqueue 拿到即时 ticket，**不 await、不递归进循环**；
+   * finishRun() 里排一次 Dream：只做同步标记 + enqueue 拿到即时 ticket，**不 await、不递归进循环**；
    * admission 在当前 callback 返回、permit close 之后才调度它，前台一来就让位（还没跑 → superseded；在跑 → abort）。
    * 门控（shouldDream）在拿到 permit 之后查。
    */
@@ -2431,7 +2462,7 @@ export class Agent {
     return [
       // 激活的 skill 正文：每轮从工作集现算，拼消息末尾、不进 transcript
       { turnInjections: () => renderSkillInjections(this.skills, this.activeSkills) },
-      // 任务清单（§5D.7）：**每轮重算**，因为 run 中途模型自己就会 TaskCreate / TaskUpdate。
+      // 任务清单：**每轮重算**，因为 run 中途模型自己就会 TaskCreate / TaskUpdate。
       // 走 turnInjection 而非 system 段的理由写在 `renderTaskInjection` 的注释里（缓存）。
       //
       // **按工具是否真在门控**，与上面 skills 那条同款（2026-08-31）。此前这里写的是
@@ -2444,7 +2475,7 @@ export class Agent {
     ];
   }
 
-  /** 循环的入参：装备来自这次 admission 冻结的 binding（§14.2.4 model seam），不再读 Agent 的活字段。 */
+  /** 循环的入参：装备来自这次 admission 冻结的 binding（model seam），不再读 Agent 的活字段。 */
   private createLoopConfig(scope: AgentAdmissionExecuteScope): AgentLoopConfig {
     const binding = scope.modelBinding;
     const state = this._state; // 给下面 workspace 的 getter 用：切目录在轮中途发生，要现读
@@ -2464,7 +2495,7 @@ export class Agent {
       // 通道 B:run 中途会变的内容(激活 skill 正文),每轮从各 PromptSource 重算、
       // 拼在消息末尾、不进 transcript。
       getTurnInjections: (visibleTools) => this.promptSources((n) => visibleTools.has(n)).flatMap((s) => s.turnInjections?.() ?? []),
-      // RunIntakeGate 的循环侧。两条队列出来的消息同样要过 userPromptSubmit 准入（§14.7.5 第 3 条），source 如实标；
+      // RunIntakeGate 的循环侧。两条队列出来的消息同样要过 userPromptSubmit 准入，source 如实标；
       // 开关门本身是 gate 里的同步步，准入在 drain 之后才 await。
       intake: {
         openTurn: (turnId) => this.intake.openTurn(turnId),
@@ -2518,7 +2549,7 @@ export class Agent {
    * 不该由 harness 代清（这一条是 2026-08-05 归属拍板的直接推论）。
    */
   async dispose(): Promise<void> {
-    // 幂等（§14.7.5 第 6 条）：第二次调用拿到同一个结果，不再跑一遍收摊——
+    // 幂等：第二次调用拿到同一个结果，不再跑一遍收摊——
     // 再跑一遍会把已经关掉的存储再关一次、把已经归零的资产再清一次，两者都可能抛。
     if (this.disposeInFlight === undefined) this.disposeInFlight = this.doDispose();
     return this.disposeInFlight;
@@ -2532,7 +2563,7 @@ export class Agent {
     // 上一版把 ③ 排在了 ② 前面（`settleWrites()` / `sessionService.settle()` 在
     // `dispose()` **之后**才跑），于是 store 关掉之后 inbox 与 schedule 还在往里写（实测）。
     //
-    // **每一档、每一项都要发生**（§14.7.5 第 6 条「全尝试」）：一个 disposer reject 不能让
+    // **每一档、每一项都要发生**（「全尝试」）：一个 disposer reject 不能让
     // 其余清理和资产归零被跳过。上一版 ② 用 `Promise.all`，第一个 reject 之后剩下的错误全丢、
     // 也不等它们真的做完；③ 用 `for…await`，第一个抛出后后面的存储根本没关。
     // 这里全部 all-settled，最后把收到的错误**聚合**抛出，一个都不吞。
@@ -2568,6 +2599,7 @@ export class Agent {
     // 于是 `stop()` 返回、lease 已释放、新 holder 已经拿到锁之后，旧 Agent 的 dream
     // 仍在往 memory 里写——单写者当场破（实测复现）。
     await this.settleDream();
+    this.stopInboxPoll(); // 轮询只读盘、不写，所以取消即可，没有「在飞的那一拍」要等
     if (this.schedule !== undefined) {
       // 取消 timer **并等在飞的那一拍**：`stopSchedule()` 只挡后续，挡不住已经开始的那次，
       // 而它还会写 `schedules.json`。
@@ -2588,13 +2620,23 @@ export class Agent {
       ...(memory !== undefined ? [job(() => disposeMemory(memory))] : []),
       ...(schedule !== undefined ? [job(() => disposeSchedule(schedule))] : []),
       ...this.disposables.map((d) => job(() => d.dispose())),
-      // adopt 过来的 agent 域值：**本 Agent 是唯一 dispose owner**（§14.5.1 规则 1），这里排空账本。
+      // adopt 过来的 agent 域值：**本 Agent 是唯一 dispose owner**，这里排空账本。
       // 排在 ③ 之前：agent 域先收、进程域（borrow 的 root store）后关，方向是 consumer → provider。
       job(() => this.adoption?.drain() ?? Promise.resolve()),
     ]);
     // 在飞的 inbox 落盘、会话的未 settle 写——**都必须在关存储之前**
     await attempt(() => this.settleWrites());
     await attempt(async () => await this.sessionService?.settle());
+    // **一句话都没说过的那段，收摊时把 meta 撤掉**（2026-09-04，sessions.md §3）：
+    // 起来就退出的会话不该留在别人的清单里、也不该被 `--continue` 挑中。
+    //
+    // 两道闸都必须过：本段没有任何 entry（`discardIfUnused` 自己判），以及
+    // **inbox 里没有待消费的记录**——有人给它留过话就不能撤，撤了那条留言就成了孤儿。
+    // 撤在 settle 之后：先把该落的落完，再决定这一段算不算数。
+    if (this.inbox.pendingCount === 0) {
+      const id = this._state.sessionId;
+      if (id !== null) await attempt(async () => void (await this.sessionService?.discardIfUnused(id)));
+    }
 
     /* ③ 关一次。顺序保持（关存储有先后），但每一条都要试到。 */
     for (const d of this.finalDisposables) await attempt(() => d.dispose());
@@ -2639,7 +2681,7 @@ export class Agent {
   }
 
   /**
-   * hook 拿到的现场。**只有现场，没有命令面**（§7.1，2026-08-25 决策记录）：
+   * hook 拿到的现场。**只有现场，没有命令面**（2026-08-25 决策记录）：
    * 上一版这里给了 steer/followUp/abort 和「直调 InternalTool」——后者绕开循环流水线
    * （preToolUse 拦截、事件、结果入账），是一条不受拦截的后门，与 `HookEffect[]` 一并删除。
    */
@@ -2660,7 +2702,7 @@ export class Agent {
 
   /**
    * 三步顺序**不可换**：
-   *   ① 归约状态 ② 增量交给 SessionManager ③ 逐个 await listener
+   *   ① 归约状态 ② 增量交给 SessionService ③ 逐个 await listener
    * 监听器看到的必须是已经生效的状态——反过来就会读到旧值。
    */
   private async processEvents(input: AgentEventInput): Promise<void> {
@@ -2669,6 +2711,9 @@ export class Agent {
     switch (input.type) {
       case "agent_start":
         this._state.status = "generating";
+        // 运行状态落盘（2026-09-03）：只在 idle ↔ working 这条边上写，generating / acting / compacting
+        // 是 working 的子态——别人只关心「现在问它，它能马上答吗」。
+        this.publishPhase("working");
         break;
       case "turn_start":
         this._state.iteration = input.iteration;
@@ -2741,7 +2786,7 @@ export class Agent {
     try {
       await this.persist(input);
     } finally {
-      // §15 被动 tap：state 与 required persistence 已落才释放，且**严格按 seq 顺序**（见 releaseToTap）。
+      // 被动 tap：state 与 required persistence 已落才释放，且**严格按 seq 顺序**（见 releaseToTap）。
       // persist 抛错（run 随之失败）也要放行这一条——否则后面所有 seq 都卡死在缓冲里。
       this.releaseToTap(event);
     }
@@ -2771,7 +2816,7 @@ export class Agent {
 
   /**
    * 同步交给 canonical sink，**不 await**。sink 自身 never-throw（fact-sink.ts），这里再兜一层：
-   * 异常原文不进诊断（§15.11 采集边界）——只留分类 + 稳定 hash；观测层任何异常都不进 Agent 控制流。
+   * 异常原文不进诊断（采集边界）——只留分类 + 稳定 hash；观测层任何异常都不进 Agent 控制流。
    */
   private deliverToTap(event: AgentEvent): void {
     const sink = this.observationSink;
@@ -2783,7 +2828,7 @@ export class Agent {
     }
   }
 
-  /* ───────────── §15 canonical writer 接线（Host-internal） ───────────── */
+  /* ───────────── canonical writer 接线（Host-internal） ───────────── */
 
   /** 首次调用解析 `attachObservationHost` 挂上的 runtime，并接上诊断与 AgentEvent sink；没挂就永远 undefined。 */
   private observationRuntime(): ObservationRuntime | undefined {
@@ -2796,7 +2841,7 @@ export class Agent {
     rt.attachDiagnostics((d) => this.reportDiagnostic(d));
     rt.bindScope(() => this.observationScope());
     this.observationSink = rt.eventSink();
-    // §15.9 的三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
+    // 三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
     if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID));
     attachTaskObserver(this.tasks, rt.capabilitySink(taskFactDescriptor, builtinOwner(TASKS_ENTRY_ID)));
     if (this.schedule !== undefined) this.schedule.observe = rt.capabilitySink(scheduleFactDescriptor, builtinOwner(SCHEDULER_ENTRY_ID));
@@ -2841,7 +2886,7 @@ export class Agent {
     await rt.closeRun({ runId: input.runId, outcome: input.result.result.outcome, finalState: this.observableState(rt, input.runId) }, this.observationIdentity());
   }
 
-  /** `EchoObservableState`（§15.5.1）：只放固定的低基数字段；Capability summary 随 §15.9 埋点进来（O3a 第二刀）。 */
+  /** `EchoObservableState`：只放固定的低基数字段；Capability summary 随埋点进来（O3a 第二刀）。 */
   private observableState(rt: ObservationRuntime, runId: string): EchoObservableState {
     const phase = this.observationPhase();
     const persistence = rt.sequencer.persistenceState.status;
@@ -2865,7 +2910,7 @@ export class Agent {
     };
   }
 
-  /** Agent 生命周期 phase → §14 RuntimePhase 的固定投影。 */
+  /** Agent 生命周期 phase → RuntimePhase 的固定投影。 */
   private observationPhase(): RuntimePhase {
     switch (this.phase) {
       case "running":
@@ -2885,7 +2930,7 @@ export class Agent {
 
   /**
    * run 关门时 accepted 却没消费的 steer / followUp（只在 abort / error / 超时 / 轮数用尽 / dispose 时非空）：
-   * **显式报出、当场清空**——不留给下一个 run 捡走（§14：不偷偷转成下一 run），也不静默丢。
+   * **显式报出、当场清空**——不留给下一个 run 捡走（不偷偷转成下一 run），也不静默丢。
    */
   private reportUnconsumed(left: IntakeLeftovers, when: string): void {
     if (left.steers.length === 0 && left.followUps.length === 0) return;
@@ -2901,10 +2946,8 @@ export class Agent {
    * 增量入账。**「哪些事件进 session」这条语义在这里，不在 Store**——
    * 三种：定稿消息、压缩、以 error 结束的 run。
    *
-   * 两条落盘路径：
-   * - `sessionService`（D3 之后）：只交内容，**id / parentId 由 Service 生成**。
-   *   身份归 core 的理由见 `session/service.ts`——它是恢复期才会炸的那类不变量。
-   * - `sessions`（旧 `SessionManager`）：语义在实现方手里，id 只能这边自己拼。保留供过渡。
+   * 只交内容，**id / parentId 由 `SessionService` 生成**。身份归 core 的理由见
+   * `session/service.ts`——它是恢复期才会炸的那类不变量。
    */
   private async persist(input: AgentEventInput): Promise<void> {
     const id = this._state.sessionId;
@@ -2920,21 +2963,7 @@ export class Agent {
       parts.push({ kind: "error", at: Date.now(), error: input.outcome.error });
     }
     if (parts.length === 0) return;
-    await this.appendEntries(id, parts);
-  }
-
-  /** 入账的唯一出口：`persist()`（事件驱动）与 `setWorkspace()`（显式切换）都走这里。 */
-  private async appendEntries(id: string, parts: SessionEntryInput[]): Promise<void> {
-    if (this.sessionService !== undefined) {
-      await this.sessionService.append(id, parts);
-      return;
-    }
-
-    const sessions = this.sessions;
-    if (sessions === undefined) return;
-    const nextId = (n: number): string => `${id}-e${this._state.messages.length}-${n}`;
-    const entries: SessionEntry[] = parts.map((part, n) => ({ ...part, id: nextId(n), parentId: null }) as SessionEntry);
-    await sessions.append(id, entries);
+    await this.sessionService?.append(id, parts);
   }
 }
 
@@ -2952,7 +2981,7 @@ const ALLOW_ALL_PERMISSION: PermissionPolicy = Object.freeze({
 });
 
 /**
- * 构造期校验（§14.10.3）：能进 ask 又不超时，就必须有人回答或明确说没人——不能等 Tool 暂停了才发现。
+ * 构造期校验：能进 ask 又不超时，就必须有人回答或明确说没人——不能等 Tool 暂停了才发现。
  * 有限超时必须是正整数。
  */
 function validatePermissionPolicy(policy: PermissionPolicy | undefined): PermissionPolicy {
@@ -3002,4 +3031,3 @@ function withUserText(m: AgentMessage, text: string): AgentMessage {
   return { ...m, content } as AgentMessage;
 }
 
-export { InMemorySessionManager };

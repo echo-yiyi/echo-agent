@@ -1,4 +1,4 @@
-// StateLock —— 状态根的单写者资格（D6 / §13.12.3）。**纯端口，不碰 `node:`。**
+// StateLock —— 状态根的单写者资格（D6）。**纯端口，不碰 `node:`。**
 //
 // 为什么不塞进 `StorageDir`：那个面只有 read/write/remove/list，**没有原子 create-if-absent
 // 也没有 CAS**，用它模拟锁必然留 TOCTOU 窗口。而且一旦用户换成远程 Store，两个 `stateDir`
@@ -47,7 +47,7 @@ export interface StateLock {
  * 内存锁：**单进程内**互斥，给测试与纯内存跑用。
  *
  * 它不跨进程——所以别拿它当「关掉 single-writer」的开关；真要跨进程互斥就用
- * first-party 的文件锁（`@echo/core` 根入口）或自己的远程实现。
+ * first-party 的文件锁（`@echo-agent/core` 根入口）或自己的远程实现。
  */
 export class InMemoryStateLock implements StateLock {
   private current: { signalLost: (e: Error) => void } | null = null;
@@ -69,7 +69,7 @@ export class InMemoryStateLock implements StateLock {
   }
 
   /**
-   * 模拟租约丢失。**测试专用**——丢锁后的行为是契约要求配单测的不变量（§13.12.3），
+   * 模拟租约丢失。**测试专用**——丢锁后的行为是契约要求配单测的不变量，
    * 没有这个入口就只能等真实租约过期，那种测试要么慢要么飘。
    */
   simulateLost(reason: string): void {

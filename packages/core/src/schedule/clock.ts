@@ -1,11 +1,11 @@
-// Clock —— 时间与定时器的端口（D3 的第四类，见 AGENT-CORE §13.12.1）。**纯的**，能进 engine 面。
+// Clock —— 时间与定时器的端口（D3 的第四类）。**纯的**：不碰 `node:`。
 //
 // 立端口的理由不是「时间可能有多种实现」，而是**确定性测试**：`schedule/harness.ts` 原先
 // 直接 `setInterval` + `Date.now()`，于是「到点了会不会投递」这类判据只能靠 sleep 去撞，
 // 要么慢要么飘。有了 fake clock 才谈得上「拨到那一刻，断言恰好投了一次」。
 //
 // **不暴露 timer handle**：`setInterval` 的返回值在 node 是 `NodeJS.Timeout`、在浏览器是
-// `number`——把它写进接口就等于把宿主类型拖进 engine 面。
+// `number`——把它写进接口就等于把宿主类型拖进公共面。
 // 所以 `setInterval` 返回的是**取消函数**，谁都不用知道底下是什么。
 
 export interface Clock {
@@ -30,7 +30,7 @@ export const systemClock: Clock = {
 /**
  * 假时钟：时间只在 `advance()` 时前进，定时器只在被拨过去时触发。
  *
- * 这是 §13.12.1 说 Clock「非补不可」的那个理由——没有它，schedule 的判据只能写成
+ * 这是 Clock「非补不可」的那个理由——没有它，schedule 的判据只能写成
  * 「sleep 一会儿再看」，那种测试在 CI 上必然变成 flake 源。
  */
 export class FakeClock implements Clock {

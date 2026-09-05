@@ -1,4 +1,4 @@
-// OpenAI 兼容方言 + kimi / deepseek 两个内建 provider。设计见 docs/design/AGENT-CORE.md §8。
+// OpenAI 兼容方言 + kimi / deepseek 两个内建 provider。
 //
 // 一个方言覆盖一整片生态:kimi(moonshot)、deepseek、openai 本尊、任何 chat/completions
 // 兼容网关——它们只差 baseUrl、模型目录、取 key 的环境变量,方言本体一行不差。
@@ -628,7 +628,7 @@ export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
  * **仍未经真 key 实跑验证**：本仓只有 OpenAI 兼容方言（pi 那边 minimax 走 `anthropic-messages`），
  * 假 fetch 只能证明请求体长什么样，证明不了端点接受它。base URL 按账号所在区可能要调
  * （国内站官方文档现在写的是 `https://api.minimax.cn/v1`，传 `minimaxProvider({ baseUrl })`；CLI 没有 `--base-url`）。
- * 这一条如实登记在 `docs/ISSUES.md`，不因为进了 CLI 清单就当它验证过。
+ * 不因为进了 CLI 清单就当它验证过。
  */
 export function minimaxProvider(opts: BuiltinProviderOptions = {}): Provider {
   const baseUrl = opts.baseUrl ?? "https://api.minimax.io/v1";

@@ -23,6 +23,11 @@ import { InMemoryStateLock } from "../src/storage/lock.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { ScriptedTurn } from "../src/testing.ts";
+import { mkdtempSync } from "node:fs";
+
+// **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
+// 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
 // `createEcho` 的契约：**唯一 composition root** = `createAgent()` + 扫 `extensions/` + mount。
 //
@@ -33,8 +38,11 @@ import type { ScriptedTurn } from "../src/testing.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "fixtures/extensions");
 
-/** §14 owner 表里本批搬进来的四条，顺序即 `builtinEntries()` 的顺序。 */
+/** 生命周期 owner 里本批搬进来的四条，顺序即 `builtinEntries()` 的顺序。 */
+// `echo:sessions`（2026-09-03）**不在缺省清单里**：挂不挂它是容器的开关（`CreateEchoOptions.sessions`），
+// 不给就是今天的单会话形态。给了的话它与 `echo:inline-tools` 同代（INLINE），排在 builtin 之后。
 const BUILTIN_NAMES = ["echo:agent", "echo:tasks", "echo:skills", "echo:memory", "echo:scheduler", "echo:tool-search", "echo:compaction"] as const;
+const SESSIONS_NAME = "echo:sessions";
 
 const temps: string[] = [];
 const running: Echo[] = [];
@@ -151,7 +159,7 @@ test("扫 extensions/ → 两个 Extension 都 mount，工具真的进了 agent 
   const echo = await echoAt({ stateDir: join(await tmp(), "state") });
 
   // **清单里内建在前、外部在后**——这正是「内部 extension 先、外部 extension 后」那条顺序的可见面。
-  // 内建四条恒在（§14 owner 表），所以断言要连它们一起写：清单是「这个 agent 会什么」的完整答案。
+  // 内建四条恒在（生命周期 owner），所以断言要连它们一起写：清单是「这个 agent 会什么」的完整答案。
   expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, "adds-tool", "nested"]);
   // 盘上发现的那两条带 file；内建来自内置模块表，没有文件
   expect(echo.extensions.filter((e) => e.file !== undefined).map((e) => e.entryId)).toEqual([
@@ -757,4 +765,40 @@ test("公开清单 = Host 实际挂上的那一份（review 二轮 P1：上一�
   // ② **完全相等**：清单里的每一条都真在 Host 上，Host 上的每一条也都在清单里。
   //    只断言「包含 echo:agent」不够——那样反过来（Host 多挂了没进清单的）仍抓不到。
   expect(echo.extensions.map((e) => e.entryId).sort()).toEqual([...BUILTIN_NAMES].sort());
+});
+
+test("会话面是**容器的开关**：不给 `sessions` 就一件工具都不多；给了才挂（2026-09-03）", async () => {
+  // 没有这条时：三件 session 工具会进每一个产品的 prompt，而单会话形态的用户根本用不上它们。
+  const off = await createEcho({ provider: scripted([textTurn("ok")]), allowNetwork: false, store: new InMemoryDir(), lock: new InMemoryStateLock(), extensionDirs: [] });
+  expect(off.extensions.map((e) => e.name)).not.toContain("echo:sessions");
+  expect([...off.agent.tools.keys()].filter((n) => n.startsWith("session_"))).toEqual([]);
+  await off.stop();
+
+  const on = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    store: new InMemoryDir(),
+    lock: new InMemoryStateLock(),
+    extensionDirs: [],
+    sessions: {}, // 容器要会话面，但不给 runner
+  });
+  expect(on.extensions.map((e) => e.name)).toContain("echo:sessions");
+  // **没给 runner 就没有 session_create**：工具不能承诺系统不交付的事
+  expect([...on.agent.tools.keys()].filter((n) => n.startsWith("session_")).sort()).toEqual([
+    "session_close",
+    "session_list",
+    "session_send",
+  ]);
+  await on.stop();
+
+  const withRunner = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    store: new InMemoryDir(),
+    lock: new InMemoryStateLock(),
+    extensionDirs: [],
+    sessions: { run: async () => {} },
+  });
+  expect([...withRunner.agent.tools.keys()]).toContain("session_create");
+  await withRunner.stop();
 });

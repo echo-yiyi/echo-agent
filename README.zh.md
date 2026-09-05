@@ -22,7 +22,7 @@ printf 'Introduce yourself in one sentence.\n' |
   MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
 ```
 
-持久化状态默认写入 `$ECHO_HOME/agents/<id>`；未设置 `ECHO_HOME` 时写入 `~/.echo/agents/<id>`——所有目录共用同一个 agent，每个工作目录各有一段独立会话。用 `--state-dir <path>` 可以覆盖完整的 state 目录。
+每一段会话就是一个独立的状态根：`$ECHO_HOME/sessions/<session-id>`；未设置 `ECHO_HOME` 时是 `~/.echo/sessions/<session-id>`。它的对话账本、inbox、任务清单、闹钟与锁都在那儿，所以两段会话可以并排跑、不抢同一把锁。记忆与技能是跨会话共享的，放在上一层的 `$ECHO_HOME`。用 `--state-dir <path>` 可以把会话目录挪到别处。
 
 ## 两个产品
 
@@ -62,7 +62,7 @@ bun packages/cli/bin/echo-agent.ts --help
 
 MiniMax adapter 目前有 fixture 覆盖，但还没有用真实服务验证。
 
-重复传入 `--extensions <directory>` 可以指定 extension 搜索目录；未传时默认搜索 `./extensions`。用 `--no-memory` 关闭 Memory 与 Dream，或用 `--agent-id <id>` 选择持久化的 agent 身份。
+重复传入 `--extensions <directory>` 可以指定 extension 搜索目录；未传时默认搜索 `./extensions`。用 `--no-memory` 关闭 Memory 与 Dream，或用 `--agent-id <id>` 选择记进锁里的持有者身份。
 
 每次启动都是新的一段会话。`--continue` 续本命令在当前目录的最近一段；`--resume <id>` 续指定的那一段。会话归属于「目录 + 命令」，所以 `echo-agent` 与 `echo-coding` 即使在同一目录里也不会共用一段对话；续上的会话会说明带回了多少条消息。
 

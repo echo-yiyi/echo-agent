@@ -1,4 +1,4 @@
-// 任务清单。设计见 docs/design/AGENT-CORE.md §5D。
+// 任务清单。
 //
 // 它是什么（2026-08-05 用户拍定，四条）：
 //   ① 一个任务列表，**指导 agent 的实现方向**
@@ -122,7 +122,7 @@ export type TaskSnapshot = {
 };
 
 /**
- * 落盘端口——**字节面，没有语义**（D3 / §13.12.2）。
+ * 落盘端口——**字节面，没有语义**（D3）。
  *
  * 收窄过一次：原先是 `load(): Promise<TaskItem[]>` / `save(items)`，于是 JSON 编解码、
  * 逐条验形、「文件不存在算空清单」这些**语义全在实现方手里**，而 `loadTasks()` 只有三行、
@@ -139,7 +139,7 @@ export type TaskSnapshot = {
  * 不是多写者并发。
  *
  * **终局**：与 `StorageDir` 合并、本类型退役。现在不做是因为 `fileTaskStore(path)` 的调用面
- * 还在用（`@echo/coding-agent`），换成传 `dir` 是另一次改动。
+ * 还在用（`echo-coding`），换成传 `dir` 是另一次改动。
  */
 export interface TaskStore {
   /** 不存在返回 `null`，**不抛**——「还没有清单」不是错误。其余 IO 错照抛。 */

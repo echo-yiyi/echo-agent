@@ -28,7 +28,7 @@ import type {
   SinkDeliveryGap,
 } from "../src/observability/types.ts";
 
-// §15.4.2 / §15.4.2.1 / §15.12 的 Sequencer 契约。全部用 FakeClock + in-memory 参考 store：零 sleep、零真盘。
+// Sequencer 契约。全部用 FakeClock + in-memory 参考 store：零 sleep、零真盘。
 
 const RT = "rt-test";
 
@@ -909,7 +909,7 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
   test("healthy 直接进 terminal：只有 terminalSince，没有 degradedSince", async () => {
     // `degradedSince` 只在**经历过** degraded/recovering 时才有；直接掉进来就不该凭空造一个时间。
     // （degraded → sealed 那条路在本 harness 里够不到：`hang` failpoint 永不 resolve，flush 卡住后
-    //  不会再有第二次 commit，而 degraded 只能由 boundary deadline 产生。已登记在 docs/ISSUES.md，
+    //  不会再有第二次 commit，而 degraded 只能由 boundary deadline 产生。
     //  等 O3a 的真实 store 才测得到——不为它写一个测不到真实路径的假测试。）
     const h = await sealedHarness();
     const p = h.seq.health().persistence;
@@ -1016,7 +1016,7 @@ describe("异步 subscriber 不许绕过 bounded queue（2026-08-27 review P1）
 describe("O2a 不得提交悬空 BlobRef（2026-08-27 review P1）", () => {
   test("binary body → hole + gap，而不是一条指向不存在内容的 digest", async () => {
     // 修复前实测：记录 committed 成功、body 是 {digest,size}，而 store 没有任何 blob 面，
-    // candidate 随 commit 释放后原始 bytes 永久消失（§15.13 明禁悬空 ref）
+    // candidate 随 commit 释放后原始 bytes 永久消失（悬空 ref 是明禁的）
     const h = harness();
     h.seq.offer(bounded({ payload: new Uint8Array([1, 2, 3]) }));
     await h.flush();

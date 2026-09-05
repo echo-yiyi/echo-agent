@@ -1,4 +1,4 @@
-// `createAgent` —— 完整默认装配（D2 / D4 / D5 / D6 / D17，见 AGENT-CORE §13.12.3）。
+// `createAgent` —— 完整默认装配（D2 / D4 / D5 / D6 / D17）。
 //
 // **node-only**：解析 `$PWD` / `$ECHO_HOME`、建 `FileDir` 与文件锁，所以只在根入口，
 // 低层用法走 `new Agent()`，自己给已解析好的 Model 与端口。
@@ -24,6 +24,7 @@ import { createAgentSchedule } from "./schedule/harness.ts";
 import type { Clock } from "./schedule/clock.ts";
 import type { TaskStore } from "./task/types.ts";
 import { SessionService } from "./session/service.ts";
+import { newSessionId } from "./session/types.ts";
 import { fileStateLock } from "./storage/file-lock.ts";
 import { FileDir, echoHome, expandHome } from "./storage/file-dir.ts";
 import type { StateLock } from "./storage/lock.ts";
@@ -40,9 +41,9 @@ import { SqliteCanonicalObservationStore, observationDatabasePath } from "./obse
 /** 默认身份（D5）。 */
 const DEFAULT_AGENT_ID = "default";
 const LOCK_FILE = ".lock";
-/** §14 RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
+/** RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
 const RUNTIME_GENERATION = "boot";
-/** §15 OR9 的缺省 capture policy：metadata。content 要调用方显式打开（`observation.capture`）。 */
+/** OR9 的缺省 capture policy：metadata。content 要调用方显式打开（`observation.capture`）。 */
 const DEFAULT_OBSERVATION_CAPTURE: ObservationCapturePolicy = "metadata";
 /**
  * 观测层唯一还会让 agent 等的地方是 `run.closed` 的有界等待（2026-09-03 用户拍板：观测不得影响 agent 主线）。
@@ -56,6 +57,8 @@ const OBSERVATION_BOUNDARY_DEADLINE_MS = 500;
 const OBSERVATION_BUSY_TIMEOUT_MS = 250;
 const TASKS_FILE = "tasks.json";
 const SKILLS_DIR = "skills";
+const MEMORY_DIR = "memory";
+const SESSIONS_DIR = "sessions";
 
 export type CreateAgentOptions = {
   /** 模型来源。**必需**——没有 provider 就没有可解析的目录。 */
@@ -81,7 +84,7 @@ export type CreateAgentOptions = {
   agentName?: string;
   /**
    * 会话身份（D5）。**不给 = `start()` 时新建一段**（2026-09-01 用户拍板：续上次是显式动作）；
-   * 给了 = create-or-resume 那一段。产品的 `--continue` / `--resume` 用 `SessionService.list()` 挑出 id 后给这里。
+   * 给了 = create-or-resume 那一段。产品的 `--continue` / `--resume` 用 `listSessions()` 挑出 id 后给这里。
    */
   sessionId?: string;
   /**
@@ -89,17 +92,37 @@ export type CreateAgentOptions = {
    * 宿主给绝对路径；core 不读 `process.cwd()`。`createEcho()` 缺省用它自己的 `cwd`（进程目录）。
    */
   workspace?: string;
-  /** 状态根。不给按 D6 解析：`$ECHO_HOME/agents/<agentId>` > `~/.echo/agents/<agentId>`。 */
+  /**
+   * 状态根 = **这一段 session 的目录**。不给就是 `<sessionsRoot>/<sessionId>`
+   * （2026-09-03，见 `resolveStateDir`）。点名它就是「把这一段放这儿」，与 `sessionsRoot` 互斥使用。
+   */
   stateDir?: string;
+  /**
+   * 全部 session 目录的上一层。不给就是 `<ECHO_HOME>/sessions`。
+   *
+   * 这是容器（cli / 宿主程序）该给的那一个：它管的是「我的会话都放哪儿」，
+   * 具体某一段的目录由 `sessionsRoot + sessionId` 得出，容器不必先知道 id。
+   */
+  sessionsRoot?: string;
 
   /**
-   * 存储端口。不给用 `FileDir(stateDir)`。会话与记忆共用它（同一个状态根）。
+   * 存储端口。不给用 `FileDir(stateDir)`——**那就是这一段 session 的目录**（meta、entries、inbox、
+   * tasks、schedule、observability 都在它下面）。记忆与技能不在这里，见 `sharedStore`。
    *
    * **给了 `store` 就必须同时给 `lock`**（见 `createAgent` 里的检查）——
    * 换了远程 Store 却用本机文件锁，两台机器会各自拿到锁、同时写同一份远程状态，
    * 恰好违反 `StateLock` 存在的理由。
    */
   store?: StorageDir;
+  /**
+   * user 层（记忆与技能）的字节面——**与 `store` 是两个根**：`store` 只覆盖这一段 session 的目录，
+   * 记忆与技能跨 session 共享，在它外面。
+   *
+   * 不给的解析顺序：给了自定义 `store` 就跟着它（记忆落在那个 store 的 `memory/` 下），
+   * 否则 `FileDir(<ECHO_HOME>)`。前一条是有意的——「我传了 InMemoryDir」的调用方不该发现
+   * 记忆仍旧写进了真盘 home。
+   */
+  sharedStore?: StorageDir;
   /**
    * 关掉记忆（C6/D7 的装配面）。缺省 **false** = 装配记忆并让 `start()` 打开 Dream 自调度。
    * 评测与一次性跑给 `true`：那时「跨任务变好」不是目标，整理只会让轨迹不确定。
@@ -114,7 +137,7 @@ export type CreateAgentOptions = {
   /** 解析模型时是否允许联网刷新目录。缺省 `true`；离线环境给 `false`。 */
   allowNetwork?: boolean;
   /**
-   * 观测（§15）。`capture` 是采集档（OR9），缺省 `"metadata"`：只记形状与计数——工具名、耗时、参数与结果的字节数、
+   * 观测。`capture` 是采集档（OR9），缺省 `"metadata"`：只记形状与计数——工具名、耗时、参数与结果的字节数、
    * token 用量——没有正文。`"content"` 才把模型回复文本、工具 `params` 与结果正文、报错消息写进状态根的
    * `observability/observations.sqlite`；`"off"` 只留 run 边界，不投影任何 fact。
    *
@@ -126,10 +149,10 @@ export type CreateAgentOptions = {
 
   /**
    * 其余一律透传给低层 `Agent`。
-   * **不含 `model` / `sessionService` / `stateLock` / `agentId` / `sessions`**——那几件由本函数装配。
+   * **不含 `model` / `sessionService` / `stateLock` / `agentId`**——那几件由本函数装配。
    *
-   * `sessionId` 也在 omit 之列：本函数在顶层收 `sessionId`（缺省 `"main"`），
-   * 嵌套里再给一个只会被顶层默认**静默覆盖**——写了没生效是最坏的一种参数。
+   * `sessionId` 也在 omit 之列：本函数在顶层收它、并据此定状态根，
+   * 嵌套里再给一个只会被**静默覆盖**——写了没生效是最坏的一种参数。
    *
    * `memory` / `taskStore` / `schedule` / `inboxStore` / `skillStore` 同理：本函数按状态根装配它们，
    * 嵌套里给的会被 spread 顶掉。**接受配置又静默忽略是最坏的一种参数**——
@@ -142,7 +165,6 @@ export type CreateAgentOptions = {
     | "sessionService"
     | "stateLock"
     | "agentId"
-    | "sessions"
     | "sessionId"
     | "memory"
     | "taskStore"
@@ -164,21 +186,42 @@ export type CreateAgentOptions = {
 };
 
 /**
- * 状态根（D6）：`stateDir` 最高优先，其余归 `echoHome()`——`$ECHO_HOME`，再退到 `~/.echo`。
+ * **状态根 = session 目录**（2026-09-03，sessions.md §2–§3）：`stateDir` 最高优先，
+ * 其余是 `<echoHome()>/sessions/<sessionId>`。
  *
- * **用户级而不是项目内**（2026-09-01 改）：workspace 成了 session 的字段之后，一个 agent
- * 在多个目录里各有一段 session，记忆与技能跨项目共享——状态根若按 `$PWD` 走，换个目录就换了
- * 一个 agent，与此直接冲突。这也消掉了一处不一致：credentials.json 与 settings.json 早就在
- * `echoHome()` 下，只有 agent 状态曾落在项目内。「两个不相干项目共用记忆」由记忆分区的纪律
- * 与 session 隔离承担，不再靠目录隔离。
+ * 一段 session 就是一个独立在跑的 agent，所以按状态根一份的东西——lease、inbox、tasks、
+ * schedule、dream 状态、observability——自动变成按 session 一份，一行代码都不用改。
+ * 同一台机器上两段 echo-coding 各拿各的锁，这是它们能同时起来的全部原因。
+ *
+ * `agentId` **不再进路径**（替代 2026-09-01 的 `agents/<agentId>/`）：一段 session 是谁，
+ * 记在它自己的 `meta.json` 的 `agent` 字段里；agentId 只剩 lease 的 holder 标识。
+ * 跨 session 共享的两件（记忆、技能）不在状态根下，见 `resolveSharedDir()`。
  */
-export function resolveStateDir(opts: { stateDir?: string; agentId?: string }): string {
-  const agentId = opts.agentId ?? DEFAULT_AGENT_ID;
-  // **agentId 也是路径段**。此前只有 sessionId 有校验，于是 `agentId="../../escaped"`
-  // 照样把整个状态根挪出 `.echo/agents`（实测）——防线漏在哪一处，就从哪一处漏掉全部。
-  assertSafePathSegment("agentId ", agentId);
+export function resolveStateDir(opts: { stateDir?: string; sessionsRoot?: string; sessionId: string }): string {
+  // **sessionId 是路径段**：不校验的话 `sessionId="../../escaped"` 会把整个状态根挪出
+  // `.echo/sessions`（`agentId` 曾经实测过同样的洞）——防线漏在哪一处，就从哪一处漏掉全部。
+  assertSafePathSegment("会话 id ", opts.sessionId);
   if (opts.stateDir !== undefined) return opts.stateDir;
-  return join(echoHome(), "agents", agentId);
+  return join(opts.sessionsRoot ?? resolveSessionsRoot(), opts.sessionId);
+}
+
+/**
+ * 全部 session 目录的上一层（`<echoHome()>/sessions`）：`--continue` / `--resume` 与会话列表
+ * 扫的就是它。**不是任何一段的状态根**——`listSessions()` 只读 meta，不写。
+ */
+export function resolveSessionsRoot(opts: { echoHome?: string } = {}): string {
+  return join(opts.echoHome ?? echoHome(), SESSIONS_DIR);
+}
+
+/**
+ * user 层（`<echoHome()>`）：跨 session 共享的东西住在这里——**记忆与技能**。
+ *
+ * 它们不能跟着状态根下沉到 session 目录：那样每开一段就换一套记忆、换一批技能，
+ * 「这个仓库跑测试用 bun test」这种事实一段一份、谁也看不见谁。credentials.json 与
+ * settings.json 本来就在这一层，现在只是把记忆和技能归到它们旁边。
+ */
+export function resolveSharedDir(opts: { echoHome?: string } = {}): string {
+  return opts.echoHome ?? echoHome();
 }
 
 /**
@@ -230,7 +273,7 @@ export function resolveModel(provider: Provider, available: readonly Model[], wa
 /**
  * 装配一个带 first-party 默认件的 Agent。**async**：内部要刷新并解析模型目录。
  *
- * **不是公共面**（2026-08-31 收）：§14.2 的标题是「一个包、两个使用高度、**一个** composition root」，
+ * **不是公共面**（2026-08-31 收）：「一个包、两个使用高度、**一个** composition root」，
  * 而这个函数曾经和 `createEcho()` 一起挂在根入口上——那就是两个装配现场，
  * 「CLI 与 SDK 不得各自装配」那条也就名存实亡。现在它只被 `createEcho()` 调用：
  * 装配现场唯一，低层用户走 `new Agent()`（自己给端口、自己注册工具）。
@@ -240,7 +283,11 @@ export function resolveModel(provider: Provider, available: readonly Model[], wa
  */
 export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   const agentId = opts.agentId ?? DEFAULT_AGENT_ID;
-  const stateDir = expandHome(resolveStateDir({ ...opts, agentId }));
+  assertSafePathSegment("agentId ", agentId);
+  // **会话 id 在装配期就定**（2026-09-03）：状态根就是它的目录，晚一步定就没有目录可建。
+  // 不给 = 新起一段（缺省每次启动新建，2026-09-01）；给了 = create-or-resume 那一段。
+  const sessionId = opts.sessionId ?? newSessionId();
+  const stateDir = expandHome(resolveStateDir({ ...opts, sessionId }));
 
   const models = new Models(opts.credentials);
   models.setProvider(opts.provider);
@@ -275,14 +322,18 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     throw new Error("给了自定义 lock 就必须同时给 store：只换锁不换存储没有意义，多半是漏传了");
   }
   const store = opts.store ?? new FileDir(stateDir);
+  // user 层（记忆、技能）是**另一个根**：状态根成了 session 目录，它们不能跟着下沉。
+  // 缺省两个根各自解析；给了自定义 `store` 而没单独给 `sharedStore` 时**跟着 `store` 走**——
+  // 否则「我传了 InMemoryDir」的调用方会发现记忆仍旧写进了真盘 home，那是最不该有的意外。
+  const sharedStore = opts.sharedStore ?? opts.store ?? new FileDir(expandHome(resolveSharedDir()));
   const lock = opts.lock ?? fileStateLock(join(stateDir, LOCK_FILE));
 
-  // canonical observation store（§15.4.2.2）：固定在状态根下，与自定义 `store` 无关——它是 Runtime 基础设施，不是可换的 Entry。
+  // canonical observation store：固定在状态根下，与自定义 `store` 无关——它是 Runtime 基础设施，不是可换的 Entry。
   // open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——那是状态根坏了 / 文件系统不支持，启动时就该看见。
   // 起来之后的写失败**不再**影响 run（观测层只降级，见 observability/runtime.ts 头注）。
   const observationStore = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir), busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
 
-  // 装配现场（§14.5.1）：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
+  // 装配现场：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
   // 它撑住的是「值已经造好、`new Agent()` 还没成功」那个窗口——上一版那时抛错，root store 就再没人关过。
   const assembly = new AgentAssembly({ provider: "echo:persistence-local" });
 
@@ -293,7 +344,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   // 没要求幂等，注入一个第二次关闭就报错的合法实现，默认 `agent.stop()` 当场失败——实测），
   // 而且可能在 `saveTasks()` 还没写完时就关了。真正的关闭放在 `finalDisposables`：
   // 那是所有收摊 settle 之后才跑的一档。
-  // 它在 assembly 里是 **borrow**（§14.5.1 规则 2）：进程域的值，dispose owner 永远是 provider 侧，
+  // 它在 assembly 里是 **borrow**（规则 2）：进程域的值，dispose owner 永远是 provider 侧，
   // Agent 拿到的 `shared` 是**不带 `close`** 的视图。standalone 下进程域与 Agent 同寿，
   // 所以那次唯一的 close 仍由 `finalDisposables` 触发（见下方装配处）。
   const shared: StorageDir = assembly.borrow<StorageDir>(
@@ -307,6 +358,26 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     { dispose: async () => void (await (store as StorageDir).close?.()) },
   );
 
+  // user 层的字节面（记忆、技能）。与 `shared` 同样是 **borrow**：进程域的值、dispose owner 在
+  // provider 侧、给出去的视图不带 `close`。它是**另一个根**，不在 session 目录里，也不在 lease 覆盖范围内
+  // ——多段 session 同时写它是设计允许的形态（sessions.md §2），互斥不由这把锁提供。
+  //
+  // 调用方把同一个对象同时给了 `store` 与 `sharedStore` 时**不再借第二次**：那会让同一个 store
+  // 被关两次，而 `StorageDir.close()` 的契约没要求幂等（root store 那条注释里的同一个坑）。
+  const sharedUser: StorageDir =
+    sharedStore === store
+      ? shared
+      : assembly.borrow<StorageDir>(
+          "echo:persistence-local/shared-store",
+          {
+            read: (p) => sharedStore.read(p),
+            write: (p, c) => sharedStore.write(p, c),
+            remove: (p) => sharedStore.remove(p),
+            list: (p) => sharedStore.list(p),
+          },
+          { dispose: async () => void (await (sharedStore as StorageDir).close?.()) },
+        );
+
   // **从这里开始到 attach 为止是一个事务**：视图、factory、seal、构造、adopt、接线全在里面。
   // 上一版的 try 从 `new Agent()` 才起，于是 borrow 之后、构造之前的任何一步抛错（比如 `opts` 上一个
   // 会抛的 getter，或某个 factory 自己炸）都不会 unwind——root store 的 close 次数仍是 0（实测）。
@@ -318,12 +389,12 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   let agent: Agent;
   let ledger: AdoptionLedger | undefined;
   try {
-    const parts = prepareCapabilities({ assembly, shared, clock: opts.clock, withoutMemory: opts.withoutMemory });
+    const parts = prepareCapabilities({ assembly, shared, sharedUser, clock: opts.clock, withoutMemory: opts.withoutMemory });
 
     // 形状到此为止。**seal 只冻结形状，不转移所有权**——转移发生在构造成功之后的 `adoptInto()`。
     assembly.seal();
 
-    // 观测 Runtime（§15）：唯一 Sequencer + 上面那条 SQLite；装配快照只封 builtin 槽的身份与安全配置摘要，
+    // 观测 Runtime：唯一 Sequencer + 上面那条 SQLite；装配快照只封 builtin 槽的身份与安全配置摘要，
     // **不放对象本体、凭据、路径正文**（assembly.ts 头注）。每个 run 的 `run.assembly` 记录引用这份 digest。
     const observation = new ObservationRuntime({
       runtimeId: `rt:${crypto.randomUUID()}`,
@@ -348,9 +419,13 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       ...(parts.memory !== undefined ? { memory: parts.memory } : {}),
       streamFunction: opts.agent?.streamFunction ?? ((m, ctx, o) => models.stream(m, ctx, o)),
       agentId,
+      // Agent 拿 clock 只做一件事：定期重扫 inbox（别的进程写进来的消息靠它才看得见）。
+      // 与 schedule 拿到的是**同一个**——测试拨一次 FakeClock，两边一起动。
+      clock: opts.clock ?? systemClock,
       ...(opts.agentName !== undefined ? { agentName: opts.agentName } : {}),
-      // 不给 sessionId 就不填：`start()` 会新建一段（`newSessionId`），这里不该抢先定一个
-      ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+      // 装配期已经定了（状态根就是它的目录），这里必须原样交给 Agent——
+      // 让 `start()` 再抽一个新的，会写进一个**不是自己**的目录里。
+      sessionId,
       ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),
       sessionService: parts.sessionService,
       stateLock: lock,
@@ -360,7 +435,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       skillStore: parts.skillStore,
       // 收摊全部 settle 之后，**唯一的那次** close：进程域（borrow）由 assembly 收，
       // 恰好一次由 slot 的三态保证——不再是这里直接调 `store.close()`。
-      // 观测排在最前：先把 ring 里的尾巴写进 SQLite 再关它，之后才关 root store（§15.12 shutdown 顺序：flush canonical 在前）。
+      // 观测排在最前：先把 ring 里的尾巴写进 SQLite 再关它，之后才关 root store（shutdown 顺序：flush canonical 在前）。
       finalDisposables: [...(opts.agent?.finalDisposables ?? []), { dispose: () => observation.dispose() }, { dispose: () => assembly.disposeProcessScope() }],
     });
 
@@ -387,7 +462,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
 }
 
 /**
- * `createAgent()` 直接构造的 builtin 槽（§15.5.1 sealed AgentAssembly 的 O2a 最小形态）：只有槽名、Entry id、
+ * `createAgent()` 直接构造的 builtin 槽（sealed AgentAssembly 的 O2a 最小形态）：只有槽名、Entry id、
  * 代与**安全**配置摘要输入。O2b 接上正式 Entry owner 后往同一 schema 填值，slot id 不漂移。
  */
 function builtinSlotContributions(input: { customStore: boolean; withoutMemory: boolean; providerIds: readonly string[]; modelId: string }): BuiltinSlotContribution[] {
@@ -423,31 +498,38 @@ type AssembledCapabilities = Readonly<{
 function prepareCapabilities(input: {
   assembly: AgentAssembly;
   shared: StorageDir;
+  sharedUser: StorageDir;
   clock?: Clock;
   withoutMemory?: boolean;
 }): AssembledCapabilities {
-  const { assembly, shared } = input;
-  // **写入资格在这里发**（§14.9）：composition root 建一个总闸，每个能力拿到的是它发的 authority 包过的
+  const { assembly, shared, sharedUser } = input;
+  // **写入资格在这里发**：composition root 建一个总闸，每个能力拿到的是它发的 authority 包过的
   // view——签名与 `StorageDir` 一模一样，领域对象什么都不用改。身份要等 `Agent.start()` acquire 成功才装进去，
   // 所以从这里到 start 之间的任何写都 fail-closed。
-  // 写入格是 **candidate-owned**（§14.5.1 规则 6）：在 assembly 上建、随 adoption 转给唯一那个 Agent，
+  // 写入格是 **candidate-owned**（规则 6）：在 assembly 上建、随 adoption 转给唯一那个 Agent，
   // 只有它 `start()` acquire 成功后才 install。一次装配一个 cell，所以三代之间结构上就不共享。
   const gate = assembly.writeGate;
   const viewFor = (capabilityId: string, lanes: readonly Parameters<typeof gate.openLane>[0][]): StorageDir =>
     adoptStorageView(shared, gate.authorityFor(capabilityId, { lanes, activeBusiness: true }));
-  // lane 划分照 §14.9 那张表：恢复期的写都走 restore-migration，收摊尾写走 lifecycle-finalization，
+  // user 层的能力（记忆、技能）走**同一个写入闸**、不同的根：闸管的是「什么时候允许写」
+  // （拿到 lease 之前 fail-closed、revoke 之后关死），那条纪律与根在哪无关。
+  // 它**不**提供互斥——user 层本来就是多段 session 共写的（sessions.md §2）。
+  const sharedViewFor = (capabilityId: string, lanes: readonly Parameters<typeof gate.openLane>[0][]): StorageDir =>
+    adoptStorageView(sharedUser, gate.authorityFor(capabilityId, { lanes, activeBusiness: true }));
+  // lane 划分：恢复期的写都走 restore-migration，收摊尾写走 lifecycle-finalization，
   // inbox 的 durable delivery 与 schedule 的 catch-up 各有自己的一条。
   const sessionView = viewFor("echo:session", ["restore-migration", "lifecycle-finalization"]);
-  const memoryView = viewFor("echo:memory", ["restore-migration"]);
+  const memoryView = scopedDir(sharedViewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`);
   const taskView = viewFor("echo:task", ["restore-migration", "lifecycle-finalization"]);
   const scheduleView = viewFor("echo:schedule", ["restore-migration", "managed-activation", "lifecycle-finalization"]);
   const inboxView = viewFor("echo:inbox", ["restore-migration", "durable-ingress", "lifecycle-finalization"]);
-  const skillView = viewFor("echo:skill", ["restore-migration", "lifecycle-finalization"]);
+  const skillView = sharedViewFor("echo:skill", ["restore-migration", "lifecycle-finalization"]);
 
-  // 记忆与会话共用状态根下的同一个 store——`createAgentMemories` 只要字节面。
-  // 用户想换存储或策略时给 `store`，或者直接走低层 `new Agent({ memory })` 自己装。
+  // **记忆在 user 层**（2026-09-03，替代 2026-09-01 的「状态根下」）：状态根成了 session 目录之后，
+  // 记忆若跟着下沉就是每开一段换一套记忆。`createAgentMemories` 只要字节面，给它 `<ECHO_HOME>/memory/`。
+  // 用户想换存储或策略时给 `sharedStore`，或者直接走低层 `new Agent({ memory })` 自己装。
   //
-  // 下面五件是 **adopt** slot（§14.5.1 规则 1）：agent 域的值，`new Agent()` 成功后由那一个 Agent 唯一 dispose。
+  // 下面五件是 **adopt** slot（规则 1）：agent 域的值，`new Agent()` 成功后由那一个 Agent 唯一 dispose。
   // 它们的 factory 都是**零外部副作用**的——只把注入的字节视图存起来，不读盘、不取锁、不起 timer；
   // 恢复归 `start()`、timer 与 intake 归 `activate()`。所以 candidate 期的 dispose 没有可关的资源，
   // 这里一个 disposer 都不登记（`assembly.adopt` 的第三参）。这条契约由 `assembly.test.ts` 的探针守着。
@@ -458,7 +540,7 @@ function prepareCapabilities(input: {
 
   // 任务清单与闹钟也落在同一个状态根下。
   // `TaskStore` 是字节面（D3 收窄后），所以这里就是把 `StorageDir` 的两个方法接过去——
-  // 这也印证了 §13.12.2 说的「终局是直接用 StorageDir，TaskStore 类型退役」。
+  // 这也印证了「终局是直接用 StorageDir，TaskStore 类型退役」。
   const taskStore = assembly.adopt<TaskStore>("echo:task", () => ({
     read: () => taskView.read(TASKS_FILE),
     write: (text) => taskView.write(TASKS_FILE, text),
@@ -467,7 +549,7 @@ function prepareCapabilities(input: {
   // 入站事实也落在同一个状态根下——崩溃时未消费的那些在 `start()` 时重放。
   const inboxStore = assembly.adopt("echo:inbox", () => new InboxStore(inboxView));
   const sessionService = assembly.adopt("echo:session", () => new SessionService(sessionView));
-  // skill 落在状态根 `skills/<name>/SKILL.md`（§13.6 布局；§5A.4c「文件实现写 SKILL.md」）。
+  // skill 落在状态根 `skills/<name>/SKILL.md`（「文件实现写 SKILL.md」）。
   // 给 Agent 的是这一层的**字节视图**（D3），发现 / 落盘 / 工具 / 租约门全在 Agent 里。
   // 视图不是独立的值，跟着它上面那层 slot 走，所以不单独占一个 slot。
   const skillStore = scopedDir(skillView, `${SKILLS_DIR}/`);

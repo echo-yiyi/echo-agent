@@ -1,4 +1,4 @@
-// durable ingress 的共享 conformance（§14.2.4）。走 `@echo-agent/core/testing` 子路径，不在生产面上。
+// durable ingress 的共享 conformance。走 `@echo-agent/core/testing` 子路径，不在生产面上。
 //
 // 为什么这一套值得抽出来：`DurableIngressPort` 马上会有**第二个实现**——O3 的 EchoRuntime / AgentHandle
 // 也要提供 stable ingress。第二个实现最容易各自跑偏的不是功能，而是**口径**：
@@ -137,7 +137,7 @@ function acceptedOf(r: DurableDeliveryResult, where: string): Extract<DurableDel
 }
 
 /**
- * `DurableIngressPort` 的完整口径（§14.2.4）。抛错 = 不合格。
+ * `DurableIngressPort` 的完整口径。抛错 = 不合格。
  *
  * 每个场景各开一份 SUT，并在 `finally` 里停掉——常驻实现不收摊会把后面的场景连坐。
  */
@@ -268,7 +268,7 @@ export type DedupeKeyProducerUnderTest = Readonly<{
 }>;
 
 /**
- * producer conformance（§14.2.4 `DurableDeliveryRequest.dedupeKey` 那段）。
+ * producer conformance（`DurableDeliveryRequest.dedupeKey` 那段）。
  *
  * **为什么单独有这一套**：ingress 那边的 suite 自己造 key，所以一个「永远返回同一个常量」的错误 producer
  * 根本不在它的被测面里——Host 从单个非空字符串也证明不了什么。责任在 producer 侧，判据也只能立在这里：

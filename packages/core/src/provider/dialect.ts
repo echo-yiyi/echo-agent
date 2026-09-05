@@ -1,5 +1,4 @@
 // Dialect 工厂：把「方言翻译」加工成完整的 ProviderStreams。
-// 设计见 docs/design/AGENT-CORE.md §8.2。
 //
 // **它不是一层，是造 ProviderStreams 的工厂**——可选的便利：想全权控制的后端，
 // 手写一个 ProviderStreams 即可，createProvider 分不出也不需要分出。

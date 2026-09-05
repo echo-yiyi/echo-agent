@@ -12,7 +12,7 @@ import { inventory } from "../packages/core/scripts/api-inventory.ts";
 //
 // **复用 `inventory()` 数公共面**,不另造第二套数法(`api-inventory.ts` 立的规矩)。
 // 但按 `(origin, name)` 去重:`inventory()` 返回的是**按入口的出现**,同一个符号从
-// `.` 与 `./engine` 各导出一次就会数两遍——上一版报的 273 就是这么虚高的(实际 163)。
+// `.` 与某条子路径各导出一次就会数两遍——上一版报的 273 就是这么虚高的(实际 163)。
 //
 // ## 这道门守不住什么(如实标注)
 //

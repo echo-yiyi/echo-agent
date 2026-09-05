@@ -1,4 +1,4 @@
-// 内层一轮：一次助手响应 + 它的工具执行。设计见 docs/design/AGENT-CORE.md §3.4；接缝加固见 §14.7.5。
+// 内层一轮：一次助手响应 + 它的工具执行。
 //
 // runTurn 只负责跑完这一轮——**没有任何提前 return 的分支**，所有出圈判断集中在 runLoop。
 //
@@ -6,7 +6,7 @@
 // （助手消息之前还有 start/update）——这样 Agent 侧只需要一条 append 路径，
 // 「state = apply(state, event)」对每条消息都成立。
 //
-// 另一条（§14.7.5 第 1、2 条）:**本轮的工具与 hook 在开头定格**。模型看到的菜单、执行到的对象、
+// 另一条:**本轮的工具与 hook 在开头定格**。模型看到的菜单、执行到的对象、
 // 拦截它的 handler，整轮是同一份；中途的注册/卸载/替换全部归下一轮。
 
 import { agentError, errText } from "../errors.ts";
@@ -43,7 +43,7 @@ export class ContextBuildBlocked extends Error {
 export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnResult> {
   const { context, config, emit, signal, streamFn } = deps;
 
-  /* ⓪ 定格本轮工作集（§14.7.5 第 1、2 条）：hook 条目与工具对象在此刻冻结。
+  /* ⓪ 定格本轮工作集：hook 条目与工具对象在此刻冻结。
      **必须在 turn_start 事件之前**：AgentEvent listener 是被 await 的，订阅者收到 turn_start 就能注册/卸载
      Tool 或 Hook——先发事件再冻结，那些改动就混进了已经宣布开始的这一轮。 */
   const workset: TurnWorkset = {
@@ -52,7 +52,7 @@ export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnRe
     hooks: config.hooks.snapshot(),
   };
   const { tools, hooks } = workset;
-  // turn 开门（§14 RunIntakeGate）：同样在 turn_start 之前——订阅者收到 turn_start 就能 steer()
+  // turn 开门（RunIntakeGate）：同样在 turn_start 之前——订阅者收到 turn_start 就能 steer()
   config.intake?.openTurn(`${config.runId}#${iteration}`);
   await emit({ type: "turn_start", iteration });
 
@@ -81,7 +81,7 @@ export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnRe
   /* ③ 每轮重解析 key（短命 token 会在长工具阶段中途过期） */
   const apiKey = await config.getApiKey?.(config.model.provider);
 
-  /* ④ 调模型 + 消费协议（占槽逐字，见 §8.4） */
+  /* ④ 调模型 + 消费协议（占槽逐字） */
   const stream = await streamFn(
     config.model,
     { systemPrompt: context.systemPrompt, messages: llmMessages, tools: toolSchemas(tools) },
@@ -198,7 +198,7 @@ async function runOneTool(
     }
   }
 
-  /* authorization（§14.10.3 固定 stage）：参数已冻结，从这里起不可再改；authorization 只能决定。
+  /* authorization（固定 stage）：参数已冻结，从这里起不可再改；authorization 只能决定。
      ask 里的 params、宿主看到的 params、execute 收到的 params 是**同一份**冻结对象。
      authInput 自身也冻：policy 若 `input.params = 另一份`，在 ESM 严格模式下当场抛 → 下面按 fail-closed 拒。 */
   const authInput = Object.freeze({
@@ -306,7 +306,7 @@ async function runOneTool(
 }
 
 /**
- * 本轮快照里没有这个名字时，给模型一个准确原因（§14.7.5 第 1 条）：
+ * 本轮快照里没有这个名字时，给模型一个准确原因：
  *   - 本轮开始时池里就没有 → 「未知工具」。**即使此刻池里已经有了也一样**——
  *     它是本轮开始后才注册的，归下一轮；实时池不能成为第二条解析路。
  *   - 本轮开始时已知 → 去问实时池要原因：禁用（带来源给的话）/ 已卸载 /

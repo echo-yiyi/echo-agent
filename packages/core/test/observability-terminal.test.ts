@@ -4,7 +4,7 @@ import { ObservationEncodingError } from "../src/observability/normalize.ts";
 import { OBSERVATION_BOUNDARY_LIMITS } from "../src/observability/types.ts";
 import type { CapabilityObservationSummary, EchoObservableState, ObservationSnapshot, RunClosedBodyInput } from "../src/observability/types.ts";
 
-// §15.5.1「boundary body 按构造有界」的纯函数 preflight：不依赖 Runtime admission 就能验
+// 「boundary body 按构造有界」的纯函数 preflight：不依赖 Runtime admission 就能验
 // 「超限自动降级、required body 仍合法」（review P1）。
 
 function summary(i: number, over: Partial<CapabilityObservationSummary> = {}): CapabilityObservationSummary {

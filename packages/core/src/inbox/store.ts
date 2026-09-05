@@ -1,9 +1,9 @@
-// 持久 Inbox 账本 —— **已接受但未消费的入站事实，不因崩溃静默丢失**（§13.9 第 10 条、§14.2.4）。
+// 持久 Inbox 账本 —— **已接受但未消费的入站事实，不因崩溃静默丢失**。
 //
 // 它是**四件东西的唯一 owner**：pending records、pending dedupe index、reservation ledger、batch-ack marker。
-// Runtime / Agent 不建第二份账（§14.2.4「不维护 recordId→batch 镜像」）。
+// Runtime / Agent 不建第二份账（「不维护 recordId→batch 镜像」）。
 //
-// **纯的**：只依赖 `StorageDir` 与 Web Crypto，能进 engine 面。传 `null` = 纯内存模式（评测与一次性跑），
+// **纯的**：只依赖 `StorageDir` 与 Web Crypto。传 `null` = 纯内存模式（评测与一次性跑），
 // 两种模式共用同一套 id / dedupe / reservation 语义，只有「写不写盘」不同。
 //
 // 盘上布局：`inbox/000001.json` 一条一 record，`inbox/acks/<ackCommitId>.json` 一批一 marker。
@@ -31,7 +31,7 @@ import {
   parseAckCommitV1,
   parseRecordV1,
   recordIdFromPath,
-  recordIdOf,
+  createRecordIdSource,
   recordPath,
   serializeAckCommit,
   serializeRecord,
@@ -52,7 +52,7 @@ export type InboxReservedBatch = Readonly<{
   messages: readonly AgentMessage[];
 }>;
 
-/** ack 的三态裁决之一（§14.2.4 的表）。`pre-commit` 与 `indeterminate` 都以 reject 报出。 */
+/** ack 的三态裁决之一。`pre-commit` 与 `indeterminate` 都以 reject 报出。 */
 export class InboxAckError extends Error {
   constructor(
     readonly verdict: "pre-commit" | "indeterminate",
@@ -64,15 +64,17 @@ export class InboxAckError extends Error {
 }
 
 export class InboxStore {
-  private nextSeq = 1;
   /**
-   * 有没有从盘上恢复过序号。**没恢复就不许发号**。
+   * 有没有从盘上恢复过。**没恢复就不许收**。
    *
-   * `nextSeq` 只活在内存里，新实例一律从 1 开始。所以「先投一条、再 restore」这个顺序会让新投的 `000001`
-   * **盖掉盘上已有的 000001**——实测在「锁很慢、start 还卡在 acquire」时就会发生：那时 agent 已经能收投递，
-   * 而 inbox 还没恢复。这不是靠调用方记得先 restore 就能保证的，所以做成本类自己的前置条件。
+   * recordId 现在由写者自己发（`newRecordId`，2026-09-03），撞名的老问题不存在了；但这条前置条件仍在，
+   * 换了理由：restore 之前 `pending` 与 dedupe 索引都是空的，此时收下的投递会**绕过去重**，
+   * 而且随后的 restore 会把内存里这条挤掉。实测在「锁很慢、start 还卡在 acquire」时就会发生：
+   * 那时 agent 已经能收投递，而 inbox 还没恢复。
    */
   private restored = false;
+  /** 本写者的发号器（2026-09-03）。状态在实例上，不共享——见 `createRecordIdSource`。 */
+  private readonly newRecordId = createRecordIdSource();
   private sealedReason: string | null = null;
   /** 未被 reserve 的 pending records，按接受顺序。 */
   private pending: InboxRecordV1[] = [];
@@ -123,7 +125,7 @@ export class InboxStore {
   /* ─────────────── restore ─────────────── */
 
   /**
-   * 恢复顺序写死（§14.2.4）：**先读并验证全部 ack markers**，建立 `logicallyAckedRecordIds`，再扫 record 文件与
+   * 恢复顺序写死：**先读并验证全部 ack markers**，建立 `logicallyAckedRecordIds`，再扫 record 文件与
    * legacy migration——被 marker 覆盖的 record 绝不进 pending queue / dedupe index / reservation，只幂等删除。
    * 反过来先扫 record 就会把已经逻辑 ack 的那批重新投递一遍。
    */
@@ -140,14 +142,12 @@ export class InboxStore {
 
     const pending: InboxRecordV1[] = [];
     const ackedOnDisk = new Set<string>();
-    let maxSeq = 0;
     for (const path of [...(await store.list(`${INBOX_DIR}/`))].sort()) {
       const nameId = recordIdFromPath(path);
       if (nameId === null) continue; // marker 或别的东西，不是 record
       const full = path.startsWith(`${INBOX_DIR}/`) ? path : `${INBOX_DIR}/${path}`;
       const text = await store.read(full);
       if (text === null) continue; // list 与 read 之间被别人删了——不是坏档
-      maxSeq = Math.max(maxSeq, Number(nameId));
       if (acked.has(nameId)) {
         ackedOnDisk.add(nameId);
         continue; // 已逻辑 ack：不进 pending，下面只做 cleanup
@@ -157,13 +157,9 @@ export class InboxStore {
       if (parsed === "legacy") await store.write(full, serializeRecord(record)); // 迁移 rewrite，幂等
       pending.push(record);
     }
-    // marker 里点名的 id 也算用过：cleanup 没做完时不能复用仍受 marker 保护的 recordId
-    for (const id of acked) maxSeq = Math.max(maxSeq, Number(id));
-
     this.pending = pending;
     this.index.clear();
     for (const r of pending) this.indexPush(r.dedupeKey, r.recordId); // 从**全部 pending records** 重建
-    this.nextSeq = maxSeq + 1;
 
     // cleanup：删掉被 marker 覆盖的 record；某个 marker 的 records 全没了才删该 marker
     for (const id of ackedOnDisk) {
@@ -186,6 +182,58 @@ export class InboxStore {
     // 上层（可能已经释放了 Lease、phase 退回 new）的 ingress 还会继续往状态根写（实测）。
     this.restored = true;
     return pending;
+  }
+
+  /**
+   * 重扫盘上的 record，把**别的写者**新写进来的那些收进 pending（2026-09-03，sessions.md §5）。
+   *
+   * 会话之间发消息 = 往对方的 `inbox/` 写一条 record（`session_send`）。写者可以是**另一个进程**，
+   * 而本实例只在 `restore()` 那一刻读过盘——不重扫的话，那条消息要等到对方下次重启才被看见，
+   * 「A 发给 B，B 不重启就收到」这条根本不成立。
+   *
+   * 与 `restore()` 的分工：restore 是**打开账本**（验 ack marker、legacy 迁移、cleanup、置 `ready`），
+   * 一段 session 一辈子只做一次；refresh 是**看看有没有新的**，只加不减：
+   * 不碰 marker、不做 cleanup、不改 `ready`、不动已经 reserve 的那批。
+   *
+   * 坏档在这里**不判红**，只报诊断并跳过：refresh 跑在正常运行途中（idle 轮询），
+   * 让一条别人写坏的 record 把一个健康的 agent 掀翻，代价比跳过它大得多；
+   * 下一次 `restore()`（重启）仍然会按老规矩判红。
+   *
+   * @returns 这一次新收进来的条数。
+   */
+  async refresh(): Promise<number> {
+    const store = this.store;
+    if (store === null || !this.restored || this.sealedReason !== null) return 0;
+    const known = new Set<string>();
+    for (const r of this.pending) known.add(r.recordId);
+    for (const batch of this.reservations.values()) for (const r of batch) known.add(r.recordId);
+    for (const ids of this.index.values()) for (const id of ids) known.add(id);
+
+    const found: InboxRecordV1[] = [];
+    for (const path of [...(await store.list(`${INBOX_DIR}/`))].sort()) {
+      const nameId = recordIdFromPath(path);
+      if (nameId === null || known.has(nameId)) continue;
+      const full = path.startsWith(`${INBOX_DIR}/`) ? path : `${INBOX_DIR}/${path}`;
+      const text = await store.read(full);
+      if (text === null) continue; // list 与 read 之间被别人删了——不是坏档
+      try {
+        const parsed = parseRecordV1(text, full, nameId);
+        // legacy 形状不在这里迁：迁移是 restore 的事（它要 rewrite 盘上的文件），
+        // 运行途中改写别人正在写的目录不是 refresh 该做的
+        if (parsed === "legacy") continue;
+        found.push(parsed);
+      } catch (e) {
+        this.diagnose("inbox_refresh_skipped", `record ${nameId} 读不出来，本次跳过（重启时按坏档判红）：${errText(e)}`);
+      }
+    }
+    if (found.length === 0) return 0;
+    // 按 recordId 排序 = 按时间排序（id 前缀是定长时间戳），所以别人写进来的这些也按它们的发生顺序入队
+    found.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0));
+    for (const r of found) {
+      this.pending.push(r);
+      this.indexPush(r.dedupeKey, r.recordId);
+    }
+    return found.length;
   }
 
   private async readMarkers(store: StorageDir): Promise<Map<string, InboxBatchAckCommitV1>> {
@@ -274,14 +322,14 @@ export class InboxStore {
   }
 
   private async writeRecord(message: AgentMessage, dedupeKey: string): Promise<InboxAcceptOutcome> {
-    // 序号**同步**占：并发 accept 不能拿到同一个 recordId
+    // **写者自己发号**（2026-09-03）：不读盘、不问别人，所以别的进程同时往这个 inbox 写也不会撞名。
     let recordId: string;
     try {
-      recordId = recordIdOf(this.nextSeq++);
+      recordId = this.newRecordId();
     } catch (e) {
-      // 定长序号耗尽：也要有明确结局——封账本、结构化拒绝，不把这条抛给调用方
+      // 时间戳宽度溢出（公元 10889 年之后）：也要有明确结局——封账本、结构化拒绝，不把这条抛给调用方
       this.seal(errText(e));
-      return { kind: "rejected", reason: "store-error", errorDigest: "sequence-exhausted" };
+      return { kind: "rejected", reason: "store-error", errorDigest: "record-id-overflow" };
     }
     const record: InboxRecordV1 = { recordId, dedupeKey, message, acceptedAt: Date.now() };
     if (this.store !== null) {

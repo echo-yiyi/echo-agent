@@ -15,7 +15,7 @@ export type CompactionSpan = {
 
 /**
  * 压缩状态。运行时（`AgentState.compaction` / `AgentContext.compaction`）与盘上（session 的
- * compaction entry）**同一个形状、同一套下标**——恢复不需要换算，这是 §7.4 第 5 条。
+ * compaction entry）**同一个形状、同一套下标**——恢复不需要换算。
  *
  *   · `spans`：按 `from` 升序、互不重叠；每个边界都在**合法切点**上（见 `view.ts` 的 `isLegalCut`）；
  *   · `clearedBefore`：下标 < 它、且不在任何 span 内的 `toolResult`，投影时正文换成占位——

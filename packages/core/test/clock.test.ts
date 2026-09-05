@@ -4,7 +4,7 @@ import { createAgentSchedule, addSchedule, startSchedule, stopSchedule } from ".
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import type { AgentMessage } from "../src/messages.ts";
 
-// Clock 端口（§13.12.1 的第四类）。
+// Clock 端口（D3 的第四类）。
 //
 // **立它的理由不是「时间有多种实现」，是确定性测试**：`schedule/harness.ts` 原先直接
 // `setInterval` + `Date.now()`，于是「到点了会不会投递」只能靠 sleep 去撞——要么慢要么飘。
@@ -47,7 +47,7 @@ test("FakeClock：非正间隔判红（否则 advance 会死循环）", () => {
 });
 
 test("systemClock：真时钟返回取消函数，不暴露 handle", () => {
-  // 类型上就拿不到 handle——这是为了不把 NodeJS.Timeout / number 拖进 engine 面
+  // 类型上就拿不到 handle——这是为了不把 NodeJS.Timeout / number 拖进公共面
   const cancel = systemClock.setInterval(() => {}, 1000);
   expect(typeof cancel).toBe("function");
   cancel();

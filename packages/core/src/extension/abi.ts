@@ -1,4 +1,4 @@
-// Extension Host ABI（docs/design/AGENT-CORE.md §14.7.1）：Extension 模块看到的全部类型，
+// Extension Host ABI：Extension 模块看到的全部类型，
 // 加两个构造器 `defineService()` / `defineExtension()`。
 //
 // 这里只有**声明**：模块求值阶段必须 declaration-only，长期副作用只能在 `apply()` 里经 `ctx.effect()` 建立
@@ -19,7 +19,7 @@ export const RELOAD_BOUNDARY_RANK: Readonly<Record<ReloadBoundary, number>> = Ob
 });
 
 /**
- * Service 的身份。**不是字符串**（§14.7.2）：Host 按 `id + version` canonicalize，
+ * Service 的身份。**不是字符串**：Host 按 `id + version` canonicalize，
  * 相同 id 的不兼容 version 或不同 kind/scope/reload 在 PREPARE fail-loud。
  *   - single：恰好一个 provider；重复 provide fail-loud；
  *   - registry：由 owner 提供稳定 registry，多个 Extension 往里注册条目（Tool / Hook / Skill…）。

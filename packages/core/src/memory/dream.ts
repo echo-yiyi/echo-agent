@@ -1,4 +1,4 @@
-// Dream:记忆的合并整理。设计见 docs/design/parts/memory.md。
+// Dream:记忆的合并整理。
 //
 // 两家的共识原样继承:**存储只做机械事,语义整理是 LLM 任务**(Hermes:storage 提供原子
 // 编辑原语、LLM 负责信息架构;CC:Dream = fork 受限 agent 去重合并剪枝)。

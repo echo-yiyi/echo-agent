@@ -1,9 +1,9 @@
-// Inbox 的持久 schema（docs/design/AGENT-CORE.md §14.2.4「完整 durable ingress 只有一个公共协议」）。
+// Inbox 的持久 schema。**完整 durable ingress 只有一个公共协议**。
 //
-// 两份落盘形状 + 它们的 id 规则。**纯的**（只用 Web Crypto 与字符串），能进 engine 面。
+// 两份落盘形状 + 它们的 id 规则。**纯的**：只用 Web Crypto 与字符串。
 //
 // `causation?: ObservationRef` 是 spec 里的可选字段，Observation 落地（O2f）之前不写进 schema——
-// 同一 schemaVersion 只许**增加** optional 字段（§15.4.3），所以那时补上是合法演进，现在先不占位。
+// 同一 schemaVersion 只许**增加** optional 字段，所以那时补上是合法演进，现在先不占位。
 
 import type { AgentMessage } from "../messages.ts";
 import { assertMessageShape } from "../message-shape.ts";
@@ -26,33 +26,74 @@ export type InboxBatchAckCommitV1 = Readonly<{
 
 export const INBOX_DIR = "inbox";
 export const INBOX_ACK_DIR = "inbox/acks";
-const SEQ_WIDTH = 6;
-export const SEQ_MAX = 10 ** SEQ_WIDTH - 1;
 
 /**
- * recordId 的合法形状：**恰好 6 位数字**，没有第二种可能。
+ * recordId 的合法形状：`<12 位十六进制毫秒>-<16 位十六进制随机>`。
  *
- * 为什么必须校验：它会被直接拼进路径。此前 `remove(id)` 拿到什么拼什么，而 `loadAll()` 又信任 JSON 里的
+ * **由写者自己发号，不由 Store 集中分配**（2026-09-03，sessions.md §5）。集中发号（此前的 6 位序号，
+ * restore 时从盘上校准一次、之后只在内存里递增）在**写者从 1 变成 N** 之后必然撞号：跨 session 发消息
+ * 时，两个进程各自校准、各自递增，会写到同一个文件名上；`FileDir` 的写是 tmp + rename，于是后到的
+ * **静默覆盖**先到的——at-least-once 变成无声丢失，比坏档更难发现。写者自己发号则不需要读目录。
+ *
+ * 前缀是定长时间戳，所以**字典序仍然等于时间序**（`list()` 拿回来直接 sort 即可，投递保序不变）。
+ * 12 位十六进制毫秒够到公元 10889 年；随机尾巴防同一毫秒内的两个写者撞名。
+ *
+ * 为什么必须校验形状：它会被直接拼进路径。此前 `remove(id)` 拿到什么拼什么，而 `loadAll()` 又信任 JSON 里的
  * `record.id`——伪造一条 `{"id":"../tasks"}`，消费完那条 inbox 就把 `tasks.json` **删了**（实测确定性复现）。
  * `FileDir` 那层的 containment 只能挡住「跑出状态根」，挡不住「删掉状态根里**别的**资产」——那是本层自己的责任。
  */
-const SAFE_RECORD_ID = /^[0-9]{6}$/;
+const SAFE_RECORD_ID = /^[0-9a-f]{12}-[0-9a-f]{16}$/;
+const TS_WIDTH = 12;
+/** 定长时间戳的上限：超过它字典序就不再等于时间序，不静默换格式，先判红。 */
+const TS_MAX = 16 ** TS_WIDTH - 1;
 /** ackCommitId 是 content-addressed 的 sha-256 十六进制串。 */
 const SAFE_ACK_ID = /^[0-9a-f]{64}$/;
 
 export function assertSafeRecordId(id: string, where: string): void {
-  if (typeof id !== "string" || !SAFE_RECORD_ID.test(id)) throw new Error(`${where} 的 inbox recordId 不合法：'${String(id)}'——只允许 ${SEQ_WIDTH} 位数字`);
+  if (typeof id !== "string" || !SAFE_RECORD_ID.test(id)) throw new Error(`${where} 的 inbox recordId 不合法：'${String(id)}'——只允许 12 位十六进制毫秒 + '-' + 16 位十六进制随机，见 newRecordId`);
 }
 export function assertSafeAckCommitId(id: string, where: string): void {
   if (typeof id !== "string" || !SAFE_ACK_ID.test(id)) throw new Error(`${where} 的 ackCommitId 不合法：'${String(id)}'——只允许 64 位小写十六进制`);
 }
 
-export function recordIdOf(seq: number): string {
-  if (seq > SEQ_MAX) {
-    // 定长序号溢出会让字典序失效。不静默换格式，先判红。
-    throw new Error(`inbox 累计条数超过 ${SEQ_MAX}，定长序号溢出——需先扩宽序号宽度`);
-  }
-  return String(seq).padStart(SEQ_WIDTH, "0");
+const INTRA_MAX = 0xffff;
+
+/**
+ * 一个**写者**的发号器。`InboxStore` 各持一个——所以状态在实例上，不是模块级：
+ * 模块级的话，一次「把时钟拨到 10889 年」的测试会把同进程里之后所有的发号都毒死（实测）。
+ *
+ * 发出的 id 形如 `<12 位十六进制毫秒>-<4 位同毫秒计数><12 位十六进制随机>`。
+ * - 计数器保证**同一个写者**发出的号严格递增。没有它，同一毫秒内投的几条在字典序里按随机数排，
+ *   restore 之后的顺序就跟投递顺序对不上——inbox 的保序是它的契约之一，不能因为换了 id 形状而破。
+ * - 随机段负责**不同写者**在同一毫秒的区分：跨进程没有共享计数器，只能靠随机。
+ *   用 `crypto.getRandomValues` 而不是 `Math.random`：撞名的后果是一条事实被另一条覆盖。
+ *
+ * 一毫秒内发满 65536 个就借用下一毫秒（单调，不回头），而不是判红——那个量级下
+ * 「排队等下一毫秒」比「这条投递失败」更接近调用方要的语义。
+ */
+export function createRecordIdSource(): (now?: number) => string {
+  let lastMs = 0;
+  let intraMs = 0;
+  return (now: number = Date.now()): string => {
+    const ms = Math.floor(now);
+    if (ms > lastMs) {
+      lastMs = ms;
+      intraMs = 0;
+    } else {
+      intraMs++;
+      if (intraMs > INTRA_MAX) {
+        lastMs++; // 借下一毫秒：单调优先于精确
+        intraMs = 0;
+      }
+    }
+    if (lastMs > TS_MAX) throw new Error(`inbox recordId 的时间戳溢出（${lastMs} > ${TS_MAX}）——需先扩宽 TS_WIDTH 并迁移存量`);
+    const ts = lastMs.toString(16).padStart(TS_WIDTH, "0");
+    const seq = intraMs.toString(16).padStart(4, "0");
+    const rand = crypto.getRandomValues(new Uint8Array(6));
+    let tail = "";
+    for (const b of rand) tail += b.toString(16).padStart(2, "0");
+    return `${ts}-${seq}${tail}`;
+  };
 }
 
 export function recordPath(recordId: string): string {
@@ -102,7 +143,7 @@ export function environmentDedupeKey(source: string, ref: string): string {
 }
 
 /**
- * Schedule 的 dedupeKey = `hash(agentId, schedule.id, schedule.createdAt)`（§14 R6）。
+ * Schedule 的 dedupeKey = `hash(agentId, schedule.id, schedule.createdAt)`（R6）。
  * **incarnation 进 key、scheduledAt 不进**：删掉后以同一 ID 重建的 schedule 是**另一个事实**，不能跟旧的共用
  * 防积压 key（否则新 schedule 被记 fired、Inbox 里却只有旧 prompt，新事实被吞——实测）；而同一 incarnation
  * 的多次到点仍要防积压，所以 scheduledAt 不能进。

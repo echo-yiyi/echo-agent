@@ -1,4 +1,4 @@
-// Memory 的领域观测（§15.9 Memory 行）：module-local fact union + descriptor，与语义 owner 共址。
+// Memory 的领域观测（Memory 行）：module-local fact union + descriptor，与语义 owner 共址。
 //
 // 事实只在**唯一 emission point** 产生——五种公开 mutation 的最外层 `finishMemoryMutation()`（harness.ts），
 // 在 semantic reject、primary storage settle 与 index refresh outcome 都已知之后恰发一次；compose 在

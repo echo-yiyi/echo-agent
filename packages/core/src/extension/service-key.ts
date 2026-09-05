@@ -1,4 +1,4 @@
-// ServiceKey canonicalization（§14.7.2）：同一个 Host 内，相同 id 无论由宿主还是 Extension import，
+// ServiceKey canonicalization：同一个 Host 内，相同 id 无论由宿主还是 Extension import，
 // 都归到**同一个对象引用**；相同 id 但 version / kind / scope / reload 任一不同 → PREPARE fail-loud，
 // 不能因为字符串相同就当作兼容。
 //

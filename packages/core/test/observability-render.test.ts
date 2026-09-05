@@ -12,7 +12,7 @@ import type { AgentEvent } from "../src/events.ts";
 import type { AssistantMessage } from "../src/messages.ts";
 import type { RunObservation } from "../src/observability/types.ts";
 
-// §15.7 renderer golden（硬门 3）：锁层级、相对顺序与 redaction，不锁 wall clock / 随机 ID——
+// renderer golden（硬门 3）：锁层级、相对顺序与 redaction，不锁 wall clock / 随机 ID——
 // 所以 fixture 用 FakeClock + 固定 runId / runtimeId，经**真实** ObservationRuntime + SQLite 走一遍再渲染。
 // 快照文件在 __snapshots__/；改了渲染结构要 `bun test --update-snapshots` 并在 review 里说明为什么。
 
