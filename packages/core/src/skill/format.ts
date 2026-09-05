@@ -1,5 +1,5 @@
 // skill 的**文本格式**：Skill ↔ `SKILL.md`（frontmatter + 正文）。**纯函数，不碰 fs**——
-// `Agent`（engine 面）从 `skillStore` 字节面恢复与落盘时用它，`loader.ts`（扫盘，拖 `node:`）
+// `Agent` 从 `skillStore` 字节面恢复与落盘时用它，`loader.ts`（扫盘，拖 `node:`）
 // 也用同一套，两边判据不漂移。
 //
 // 格式是生态的（Claude Code / pi 的目录式 skill：`<name>/SKILL.md`），不是自造的：

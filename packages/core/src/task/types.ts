@@ -139,7 +139,7 @@ export type TaskSnapshot = {
  * 不是多写者并发。
  *
  * **终局**：与 `StorageDir` 合并、本类型退役。现在不做是因为 `fileTaskStore(path)` 的调用面
- * 还在用（`@echo/coding-agent`），换成传 `dir` 是另一次改动。
+ * 还在用（`echo-coding`），换成传 `dir` 是另一次改动。
  */
 export interface TaskStore {
   /** 不存在返回 `null`，**不抛**——「还没有清单」不是错误。其余 IO 错照抛。 */

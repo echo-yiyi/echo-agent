@@ -3,7 +3,7 @@
 // 它是**四件东西的唯一 owner**：pending records、pending dedupe index、reservation ledger、batch-ack marker。
 // Runtime / Agent 不建第二份账（§14.2.4「不维护 recordId→batch 镜像」）。
 //
-// **纯的**：只依赖 `StorageDir` 与 Web Crypto，能进 engine 面。传 `null` = 纯内存模式（评测与一次性跑），
+// **纯的**：只依赖 `StorageDir` 与 Web Crypto。传 `null` = 纯内存模式（评测与一次性跑），
 // 两种模式共用同一套 id / dedupe / reservation 语义，只有「写不写盘」不同。
 //
 // 盘上布局：`inbox/000001.json` 一条一 record，`inbox/acks/<ackCommitId>.json` 一批一 marker。

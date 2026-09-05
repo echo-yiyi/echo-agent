@@ -7,7 +7,7 @@ import { join } from "node:path";
 // 脱钩前 `@modelcontextprotocol/sdk` 是 core 唯一的运行时依赖，而且是**根入口硬拖的**：
 // `import { Agent } from "@echo-agent/core"` 会一路静态 import 到 `mcp/harness.ts` → SDK。
 // 实测（隔离消费 fixture）证明「只想跑一个 agent」的人被迫装整套 MCP 协议栈。
-// 现在 SDK-backed 实现在 `@echo/mcp`，core 只留 `mcp/port.ts` 的类型。
+// 现在 SDK-backed 实现归适配器一侧（不在本仓），core 只留 `mcp/port.ts` 的类型。
 //
 // 两条一起查，缺一条门就是假绿：
 //   ① manifest 三字段——`optionalDependencies` 仍在运行时依赖图里，
@@ -17,7 +17,7 @@ import { join } from "node:path";
 const RUNTIME_DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"] as const;
 const PKG_ROOT = join(import.meta.dir, "..");
 
-test("@echo/core 的运行时依赖三字段恒空", () => {
+test("@echo-agent/core 的运行时依赖三字段恒空", () => {
   const pkg = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")) as {
     name?: string;
   } & Partial<Record<(typeof RUNTIME_DEP_FIELDS)[number], Record<string, string>>>;

@@ -7,7 +7,7 @@
 //
 // **裁决人不在这一层**（2026-08-31）：原先本文件还有个 `installPermission()`，
 // 订阅 `permissionRequest` 去问一个回调、再 `answerPermission()`。那件事现在归**壳**——
-// `@echo/tui` 的 `echo:tui` 已经在做（摆问题、收 y/n、答复、处理 `permissionCancelled`），
+// `echo-agent` 的 `echo:tui` 已经在做（摆问题、收 y/n、答复、处理 `permissionCancelled`），
 // 而仓库里从来没有调用方给过那个回调。两份实现只有一份被行使，删掉没被行使的那份。
 // 于是本文件只剩「规则怎么判」，`responder` 只声明**有没有人会答**，不自己找人答。
 //

@@ -2,8 +2,8 @@
 //
 // 为什么是端口而不是实现（2026-08-11 开源计划 §4 拍定）：
 // SDK-backed 的 MCP 实现会把 `@modelcontextprotocol/sdk` 拖进 core 的根依赖图——
-// 装 `@echo/core` 只想跑一个 agent 的人，被迫装上整套 MCP 协议栈。
-// 所以 core 只留「怎么接」，「怎么连」出去到 `@echo/mcp`。
+// 装 `@echo-agent/core` 只想跑一个 agent 的人，被迫装上整套 MCP 协议栈。
+// 所以 core 只留「怎么接」，「怎么连」出去到适配器一侧（不在本仓）。
 //
 // 边界一句话：**core 定义 Agent 能观测什么、能收摊什么；适配器定义服务器怎么配、怎么连**。
 // 所以这里没有 McpServerConfig、没有 transport、没有超时选项——那些都是适配器的词汇。
@@ -35,7 +35,7 @@ export type McpServerSnapshot = {
 /**
  * core 交给适配器的东西：工具面 + 三条回调。
  *
- * 适配器**只认这个，不认 Agent**——所以 `@echo/mcp` 不依赖 `Agent` 类，
+ * 适配器**只认这个，不认 Agent**——所以适配器不依赖 `Agent` 类，
  * 测试里拿一个裸 `ToolMap` 就能把整套连接逻辑跑起来。
  */
 export type McpHost = {

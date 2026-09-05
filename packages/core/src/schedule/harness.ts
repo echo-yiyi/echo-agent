@@ -71,7 +71,7 @@ export type AgentSchedule = ScheduleDeps &
     /**
      * 活的定时器的**取消函数**。它是这个上下文的一部分——收摊时要调,不留野定时器。
      * 存取消函数而不是 handle：`setInterval` 的返回类型在 node 与浏览器不同,
-     * 写进类型就把宿主类型拖进了 engine 面。
+     * 写进类型就把宿主类型拖进了公共面。
      */
     cancelTick?: (() => void) | null;
     /** 盘上内容是否已读进来。 */

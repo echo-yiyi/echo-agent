@@ -47,7 +47,7 @@ export interface StateLock {
  * 内存锁：**单进程内**互斥，给测试与纯内存跑用。
  *
  * 它不跨进程——所以别拿它当「关掉 single-writer」的开关；真要跨进程互斥就用
- * first-party 的文件锁（`@echo/core` 根入口）或自己的远程实现。
+ * first-party 的文件锁（`@echo-agent/core` 根入口）或自己的远程实现。
  */
 export class InMemoryStateLock implements StateLock {
   private current: { signalLost: (e: Error) => void } | null = null;

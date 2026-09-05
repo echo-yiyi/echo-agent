@@ -1,6 +1,6 @@
 // Inbox 的持久 schema。**完整 durable ingress 只有一个公共协议**。
 //
-// 两份落盘形状 + 它们的 id 规则。**纯的**（只用 Web Crypto 与字符串），能进 engine 面。
+// 两份落盘形状 + 它们的 id 规则。**纯的**：只用 Web Crypto 与字符串。
 //
 // `causation?: ObservationRef` 是 spec 里的可选字段，Observation 落地（O2f）之前不写进 schema——
 // 同一 schemaVersion 只许**增加** optional 字段（§15.4.3），所以那时补上是合法演进，现在先不占位。

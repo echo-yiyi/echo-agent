@@ -51,7 +51,7 @@ function copyPackage(from: string, to: string): void {
 
       const pkgPath = join(tuiDir, "package.json");
       const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { dependencies: Record<string, string> };
-      // **先断言依赖声明齐全**——漏了 `@echo/core` 下面就装不出来，但报错会指向 npm 404，
+      // **先断言依赖声明齐全**——漏了 `@echo-agent/core` 下面就装不出来，但报错会指向 npm 404，
       // 那时不容易一眼看出根因，所以这里先说清楚。
       expect(Object.keys(pkg.dependencies).sort()).toEqual(["@earendil-works/pi-tui", "@echo-agent/core"]);
       pkg.dependencies["@echo-agent/core"] = `file:${coreDir}`;

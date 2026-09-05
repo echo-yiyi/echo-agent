@@ -16,7 +16,7 @@
 //     改了文件要重启。`mount` 用固定 generation `"boot"`，换代是 O4 的事。
 //   - **不做 singleton resolver**：`ServiceKeyTable` 按 `id + version/kind/scope/reload`
 //     canonicalize（见 `extension/service-key.ts`），所以就算 Extension 解析到了另一份
-//     `@echo/core` 实例，同 id 的 ServiceKey 仍会归一，registry 照样拿得到。
+//     `@echo-agent/core` 实例，同 id 的 ServiceKey 仍会归一，registry 照样拿得到。
 //     §14.8.2 要求的 `extensionServiceKey === hostServiceKey` **引用相等**门这里没有——
 //     它防的是「两份物理实例各持一半状态」，那要等 O4 的编译期 resolver 才有意义。
 //   - **不弹信任确认**（2026-08-28 用户拍板）：`extensions/` 下的文件按用户自己的代码对待。

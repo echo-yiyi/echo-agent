@@ -1,10 +1,10 @@
-# @echo/core 公共 API 清点 · 由脚本生成，勿手改
+# @echo-agent/core 公共 API 清点 · 由脚本生成，勿手改
 #
 # 生成：bun packages/core/scripts/api-inventory.ts --write
 # 门　：packages/core/test/api-snapshot.test.ts（全文比对，不等即红）
 #
 # 每行 `<种类> <符号名>`。种类：value 运行时值 / type 仅类型 / both 同名的值与类型。
-# 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。
+# 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
 符号 304（value 108 · type 177 · both 19）

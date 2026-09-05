@@ -1,6 +1,6 @@
-// `@echo/core` 公共 API 清点（D15）。
+// `@echo-agent/core` 公共 API 清点（D15）。
 //
-// **一份结果，两个用途**：人读它来划 root/engine/subpath（§13.11 M2 的第二件事），
+// **一份结果，两个用途**：人读它来划根入口与子路径（M2 的第二件事），
 // 门读它来防公共面无声漂移。所以清点逻辑只有这一份——`inventory()`——
 // 脚本打印它、测试比对它，不允许再造第二套数法。
 //
@@ -364,13 +364,13 @@ export function inventory(entries: readonly { subpath: string; abs: string }[] =
 /** 渲染成 snapshot 文本。**人读格式就是机器判据**，不做两种渲染。 */
 export function render(entries: readonly ApiEntry[]): string {
   const lines: string[] = [
-    "# @echo/core 公共 API 清点 · 由脚本生成，勿手改",
+    "# @echo-agent/core 公共 API 清点 · 由脚本生成，勿手改",
     "#",
     "# 生成：bun packages/core/scripts/api-inventory.ts --write",
     "# 门　：packages/core/test/api-snapshot.test.ts（全文比对，不等即红）",
     "#",
     "# 每行 `<种类> <符号名>`。种类：value 运行时值 / type 仅类型 / both 同名的值与类型。",
-    "# 按 exports 入口分组，入口内按**声明来源模块**分组——划 root/engine/subpath 读的就是这一层。",
+    "# 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。",
     "",
   ];
 

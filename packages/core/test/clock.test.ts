@@ -47,7 +47,7 @@ test("FakeClock：非正间隔判红（否则 advance 会死循环）", () => {
 });
 
 test("systemClock：真时钟返回取消函数，不暴露 handle", () => {
-  // 类型上就拿不到 handle——这是为了不把 NodeJS.Timeout / number 拖进 engine 面
+  // 类型上就拿不到 handle——这是为了不把 NodeJS.Timeout / number 拖进公共面
   const cancel = systemClock.setInterval(() => {}, 1000);
   expect(typeof cancel).toBe("function");
   cancel();

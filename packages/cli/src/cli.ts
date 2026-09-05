@@ -1,14 +1,14 @@
-// `echo-agent` 的命令行面：**唯一那个可执行文件**（2026-08-31 用户拍板方案 ③）。
+// `echo-agent` 的命令行面：**唯一那个可执行文件**。
 //
 // ## 为什么只有一个
 //
-// 在它之前有两个 CLI：`@echo/runner` 的 `echo-agent`（管道形态）与 `@echo/tui` 的 `echo-tui`
-// （交互形态）。两个包、两套参数解析、两份 `createEcho()` 调用——于是它们**会分家**，
-// 实测已经分了：runner 认五家 provider，TUI 只认两家，加 provider 时漏改了后者。
+// 两个 CLI 就是两套参数解析、两份 `createEcho()` 调用——它们**会分家**：实测过一次，
+// 加 provider 只改了其中一边，另一边就少认几家。所以交互与管道两种形态共用同一个入口、
+// 同一次装配。
 //
-// 归并的落点是 `@echo/tui` 而不是 `@echo/core`，因为 core 的**运行时依赖恒空**是硬门
+// 落点是本包而不是 `@echo-agent/core`，因为 core 的**运行时依赖恒空**是硬门
 // （`packages/core/test/zero-runtime-deps.test.ts`），而交互式终端要 `pi-tui`。
-// core 保持纯库不出 bin；`@echo/tui` 既是默认壳，也是那个可执行文件。
+// core 保持纯库不出 bin；本包既是默认壳，也是那个可执行文件。
 //
 // ## 形态怎么选：看 stdin 是不是终端
 //

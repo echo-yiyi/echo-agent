@@ -82,7 +82,7 @@ test(
     for (const name of ["memory", "TaskCreate", "skill_activate", "skill_create", "schedule_create"]) {
       expect(called[name], `${name} 没被成功调用（undefined = 压根没调）`).toBe(false);
     }
-    // 四件里 Task 与 Skill 是 2026-08-23 才归 Agent 自己装的：此前只有 `@echo/coding-agent`
+    // 四件里 Task 与 Skill 是 2026-08-23 才归 Agent 自己装的：此前只有 `echo-coding`
     // 注册，默认装配出来的 agent 工具面只有 memory + schedule 四件，这两条根本走不通。
     expect(ra.taskCount, "任务没真的建出来").toBe(1);
     expect(ra.activeSkills, "skill 没真的激活").toEqual(["写提交信息"]);

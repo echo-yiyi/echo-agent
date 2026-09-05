@@ -59,7 +59,7 @@ export type ActiveSkill = {
 
 /**
  * 一次 skill 发现的产出（loader 扫盘、或 `skillSource` 端口从状态根恢复）。
- * 住 types.ts 而不是 loader.ts：`Agent`（engine 面）要引用它，loader 拖 `node:`。
+ * 住 types.ts 而不是 loader.ts：`Agent` 要引用它，而 loader 拖 `node:`。
  */
 export type LoadedSkills = {
   skills: Skill[];

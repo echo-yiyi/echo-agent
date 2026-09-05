@@ -24,7 +24,7 @@ import type { LoadedSkills, Skill } from "./types.ts";
 // 格式（parse / serialize / buildSkill）住 `format.ts`（纯）；这里保住既有导出路径。
 export { SKILL_ENTRY_FILE, parseSkillText } from "./format.ts";
 
-export type { LoadedSkills } from "./types.ts"; // 声明移居 types.ts（engine 面要用），这里保住既有导出路径
+export type { LoadedSkills } from "./types.ts"; // 声明移居 types.ts（`Agent` 要用），这里保住既有导出路径
 
 /**
  * 扫多个目录。撞名**先到先得 + 诊断**(目录顺序就是优先级:项目级排前面赢过全局级),

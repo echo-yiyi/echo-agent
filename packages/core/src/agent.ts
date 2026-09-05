@@ -206,7 +206,7 @@ export type AgentOptions = {
   taskStore?: TaskStore;
   /**
    * MCP 端口。不传 = 本 agent 不认识 MCP（`agent.mcp` 为 `undefined`，`state.mcp` 恒空）。
-   * 实现在 `@echo/mcp`——服务器配置、传输、超时都是**它**的词汇，core 不认识。
+   * 实现在适配器一侧（不在本仓）——服务器配置、传输、超时都是**它**的词汇，core 不认识。
    * **装配 ≠ 连接**：`await agent.mcp?.connectAll()` 才连。
    */
   mcp?: AgentMcpPort;
@@ -649,7 +649,7 @@ export class Agent {
     if (opts.tasks !== undefined) createTasks(this.tasks, opts.tasks);
 
     // **Task 与 Skill 是 Agent 自己的能力，不是产品层的挂件**（2026-08-23 用户拍板）。
-    // 此前它们的工具只有 `@echo/coding-agent` 注册，于是默认装配出来的 agent
+    // 此前它们的工具只有 `echo-coding` 注册，于是默认装配出来的 agent
     // 工具面只有 memory + schedule 四件，「由 Agent 创建 Task / 激活 Skill」
     // （§13.9 第 4 条）根本走不通。现在与 memory / schedule 同一个模式：能力在，工具就在。
     //
@@ -657,7 +657,7 @@ export class Agent {
     //   · **task 恒装**——`this.tasks` 总是存在，没有「能力不在」这个状态；
     //   · **skill 池非空才装**——空可选集的工具每轮白占 token，严格 provider 还会拒收
     //     （v1 的教训，`skill/tools.ts` 的注释里记着）。构造之后才 `addSkills` 的用法
-    //     仍由装配方自己注册，`@echo/coding-agent` 走的就是那条。
+    //     仍由装配方自己注册，`echo-coding` 走的就是那条。
     // **改完就落盘，不等到 stop()。** 此前 `saveTasks` 只在 `dispose()` 里调一次：
     // 模型 `TaskCreate` 拿到「已建 1 条任务」的成功回执之后进程崩掉，那条任务就没了——
     // 工具说成功、盘上没有，是最坏的一种谎。resident 测试此前用干净 stop 掩盖了这个缺口。
@@ -1333,7 +1333,7 @@ export class Agent {
     try {
       if (this.stateLock !== undefined) {
         // holder 只是给人看的标识——**不要在这里取 pid**，那是 node 全局，
-        // agent.ts 在 engine 面。进程身份由 Lock 的实现自己记。
+        // agent.ts 不拖 `node:`。进程身份由 Lock 的实现自己记。
         const lease = await this.stateLock.acquire({ holder: `agent:${this.agentId}` });
         if (lease === null) {
           // 拿不到就是拿不到——core 不抢占（§13.12.3）。
