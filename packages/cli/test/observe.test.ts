@@ -138,6 +138,33 @@ test("last / show / export / health：跑一轮落盘后都读得到；stop 之�
   expect(after.out.text).toContain(result.runId);
 });
 
+test("不点名 --session：show 按 run-id 跨会话找到，last 是全部会话里最近的一条，health 每段一块", async () => {
+  const first = await echoAt([textTurn("一")]);
+  const r1 = await first.send("1");
+  const id1 = first.agent.state.sessionId!;
+  await first.stop();
+  const second = await echoAt([textTurn("二")]);
+  const r2 = await second.send("2");
+  const id2 = second.agent.state.sessionId!;
+  expect(id1).not.toBe(id2);
+
+  const show = io();
+  expect(await runObserve(["show", r1.runId, "--state-dir", dir], "echo-agent", show)).toBe(0);
+  expect(show.out.text).toContain(r1.runId);
+  const last = io();
+  expect(await runObserve(["last", "--state-dir", dir], "echo-agent", last)).toBe(0);
+  expect(last.out.text.startsWith(`Run ${r2.runId} ·`)).toBe(true);
+  const health = io();
+  expect(await runObserve(["health", "--state-dir", dir], "echo-agent", health)).toBe(0);
+  expect(health.out.text).toContain(`session               ${id1}`);
+  expect(health.out.text).toContain(`session               ${id2}`);
+  expect(health.out.text.split("observation database  ").length).toBe(3);
+  // 点名就只看那一段：另一段的 run 找不到
+  const other = io();
+  expect(await runObserve(["show", r1.runId, "--state-dir", dir, "--session", id2], "echo-agent", other)).toBe(1);
+  expect(other.err.text).toContain("没有这条 run");
+});
+
 test("main：`observe` 在一切启动逻辑之前分走——不装配、不取锁、不看凭据", async () => {
   const echo = await echoAt([textTurn("一句")]);
   const r = await echo.send("x");

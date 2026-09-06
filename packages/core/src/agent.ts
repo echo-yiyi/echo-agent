@@ -11,7 +11,7 @@ import { redactedLabel } from "./observability/redact.ts";
 import { errText, type AgentError } from "./errors.ts";
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
-import { builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
+import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
 import { memoryFactDescriptor } from "./memory/observe.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
@@ -48,6 +48,7 @@ import type { SessionEntryInput, SessionService } from "./session/service.ts";
 import type { SessionPhase } from "./session/status.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
 import { InboxAckError, InboxStore } from "./inbox/store.ts";
+import { inboxFactDescriptor } from "./inbox/observe.ts";
 import { systemClock, type Clock } from "./schedule/clock.ts";
 import { environmentDedupeKey, scheduleDedupeKey } from "./inbox/records.ts";
 import { stateHostOf } from "./state/host-wiring.ts";
@@ -1202,16 +1203,21 @@ export class Agent {
             reservationId: batch.reservationId,
             reservedRecordIds: batch.recordIds,
           },
-          (scope) => this.executeAdmitted(scope, this.foregroundExecutor(batch.messages, "human")),
+          (scope) =>
+            this.executeAdmitted(scope, async (s, signal) => {
+              // 观测：这批交给了这条 run（此刻 scope 供给已带 runId，事实落在 run 里），再进 loop
+              this.inbox.noteConsumed(batch.reservationId, s.runId);
+              return this.foregroundExecutor(batch.messages, "human")(s, signal);
+            }),
         );
       } catch (e) {
-        this.inbox.releaseBatch(batch.reservationId); // reserve 之后 enqueue 同步抛：整批放回，不能 drain 了又不还
+        this.inbox.releaseBatch(batch.reservationId, "enqueue-failed"); // reserve 之后 enqueue 同步抛：整批放回，不能 drain 了又不还
         throw e;
       }
       const settled = await ticket.settled;
       if (settled.kind === "rejected") {
         // 任一正常 rejected：整批放回（durable facts 一个不丢），不 ack 半批
-        this.inbox.releaseBatch(batch.reservationId);
+        this.inbox.releaseBatch(batch.reservationId, "run-rejected");
         return null;
       }
       // executed / callback-error 都是封口：先归 idle，再整批 ack。
@@ -1223,7 +1229,7 @@ export class Agent {
       // 不假装 ack 成功，也不把已经跑完的 run 说成没跑。
       let indeterminate = false;
       try {
-        await this.inbox.ackBatch(batch.reservationId);
+        await this.inbox.ackBatch(batch.reservationId, { runId: settled.runId });
       } catch (e) {
         if (e instanceof InboxAckError && e.verdict === "indeterminate") {
           this.enterInboxFailure(e); // 先进失败态，再清标记——中间不给任何新 run 可乘之机
@@ -2912,6 +2918,8 @@ export class Agent {
     if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID));
     attachTaskObserver(this.tasks, rt.capabilitySink(taskFactDescriptor, builtinOwner(TASKS_ENTRY_ID)));
     if (this.schedule !== undefined) this.schedule.observe = rt.capabilitySink(scheduleFactDescriptor, builtinOwner(SCHEDULER_ENTRY_ID));
+    // inbox 没有自己的 tool pack，账本是 Agent 自己的一部分：owner 记 echo:agent，instrumentation（echo.inbox）区分它和 agent 事件
+    this.inbox.observe = rt.capabilitySink(inboxFactDescriptor, builtinOwner(AGENT_ENTRY_ID));
     return this.observation;
   }
 
