@@ -1,6 +1,7 @@
-// 循环的入参形状。
+// 循环的入参形状。四层的定义在 docs/design/run-loop-layers.md：run ⊃ reply ⊃ turn ⊃ attempt。
 
 import type { AgentEventInput, AgentOutcome } from "../events.ts";
+import type { AgentError } from "../errors.ts";
 import type { HookContext, HookRuntime } from "../hooks/runtime.ts";
 import type { AgentMessage, AssistantMessage, ConvertToLlm, ToolResultMessage } from "../messages.ts";
 import type { Model, StreamFn, ThinkingLevel } from "../provider/types.ts";
@@ -9,6 +10,7 @@ import type { AgentTool } from "../tools/types.ts";
 import type { ToolResolution } from "../tools/harness.ts";
 import type { PermissionStage } from "../permission/types.ts";
 import type { CompactionStage, CompactionState } from "../compaction/types.ts";
+import type { IntakeLeftovers } from "./intake.ts";
 
 /**
  * 循环拿到的**对话快照**：进来那一刻的 messages，循环内部只往里 push。
@@ -27,20 +29,53 @@ export type AgentContext = {
 
 export type Emit = (event: AgentEventInput) => Promise<void>;
 
+/* ─────────────── 四层的词汇 ─────────────── */
+
+/** 这条 reply 在回应谁：prompt / followUp / stop hook 注入之一，或从 transcript 续跑（没有新输入）。 */
+export type ReplySource = "prompt" | "follow_up" | "stop_hook" | "resume";
+
+/** 为什么开这一 turn：`input` 是 reply 的第一轮；其余三个是「上一轮没干完」。 */
+export type TurnCause = "input" | "tool_use" | "max_tokens" | "steer";
+
+/**
+ * 一次 attempt（一次完整的上下文构建 + 一次 streamFn）的结果。
+ * 只有 `landed` 的定稿被采纳——进 transcript 并交给 reply 判决；其余三种不落地。
+ * 失败 attempt 的定稿也进 transcript（`stopReason: "error"`），送模投影时丢（`messages.ts`）。
+ */
+export type AttemptResult =
+  /** 落地的定稿就是 transcript 里那条（带 `at`）。 */
+  | { kind: "landed"; message: Extract<AgentMessage, { role: "assistant" }> }
+  | { kind: "failed"; error: AgentError }
+  | { kind: "blocked"; reason?: string }
+  | { kind: "aborted" };
+
+/** 一个 turn 跑完交给 reply 判决的东西：最后一个 attempt 的结果、工具批、关门时交出的插话。 */
+export type TurnResult = {
+  turnId: string;
+  /** 最后一个 attempt 的结果。 */
+  result: AttemptResult;
+  /** 只有 landed 才非空。 */
+  toolResults: ToolResultMessage[];
+  /** `closeTurn` 交出的插话：由 reply 决定吸收；没吸收的随 run 关门报出。 */
+  steers: AgentMessage[];
+};
+
 export type LoopIntake = {
-  /** turn 开门：在 turn_start 之前调，之后的 steer() 才 accepted。 */
+  /** turn 开门：在 turn_start 之前调，之后的 steer() 才 accepted。一个 turn 只开一次，重试不重开。 */
   openTurn(turnId: string): void;
   /** 轮末原子：drain 本 turn accepted 的 steer 并关 turn intake。 */
   closeTurn(): Promise<AgentMessage[]>;
-  /** 内层收尾后：drain followUp，run intake 不关。 */
+  /** reply 之间：drain followUp，run intake 不关。 */
   drainFollowUps(): Promise<AgentMessage[]>;
   /** 真要停了：队列空 → 关 run intake 返回 null；否则返回**非空**已准入列表（门仍开），调用方消费后再来关。 */
   tryCloseRun(): Promise<AgentMessage[] | null>;
   /**
    * run 终止（任何原因）：强制关门。**必须在 agent_end 之前调**——agent_end 的订阅者再 followUp() 得到的是
-   * rejected，不是「accepted 随后被丢掉」的假 accepted。accepted 未消费的由 Agent 显式报出。门已关时 no-op。
+   * rejected，不是「accepted 随后被丢掉」的假 accepted。门已关时 no-op。
+   * `leftovers`：loop 已 drain 出来但没吸收进 transcript 的消息（turn 交出的 steer、达 reply 上限时 drain 出的 followUp），
+   * 与门里剩的一起显式报出。
    */
-  closeRun(): void;
+  closeRun(leftovers?: IntakeLeftovers): void;
 };
 
 /**
@@ -71,12 +106,14 @@ export interface AgentLoopConfig {
   /** 仅作追踪标识透传；**循环不碰会话**。 */
   sessionId?: string | null;
   thinkingLevel?: ThinkingLevel;
+  /** 重试退避的上限（毫秒）。重试归 loop：同一 turn 的下一个 attempt。 */
   maxRetryDelayMs?: number;
 
-  /* ── 上下文两道工序：先 transform（AgentMessage 层），再 convert（投影到线上形状） ── */
+  /* ── 上下文两道工序：先 transform（AgentMessage 层），再 convert（投影到线上形状） ──
+     两道都是**每个 attempt** 各跑一次（同一 turn 内重试会再跑）：两次 attempt 之间上下文可能已被应急压缩改过。 */
   /** 契约：**绝不 throw/reject**——抛出会打断循环且不产出正常事件序列；失败返回安全兜底值。 */
   convertToLlm: ConvertToLlm;
-  /** 契约同上；失败原样返回入参。memory / skills 挂件的接入点。 */
+  /** 契约同上；失败原样返回入参。memory / skills 挂件的接入点。同一 turn 内可能被多次调用，有副作用的实现自己去重。 */
   transformContext?: TransformContext;
 
   /** 每次模型调用动态取 key。契约：绝不抛；没有返回 undefined。 */
@@ -101,17 +138,17 @@ export interface AgentLoopConfig {
    */
   resolveTool: (name: string) => ToolResolution;
 
-  /* ── 轮末三个决策钩（turn_end 之后、下一次模型调用之前），契约均为绝不抛 ── */
+  /* ── 轮末三个决策钩（turn_end 之后、下一次模型调用之前），契约均为绝不抛。`iteration` 是该 turn 在它的 reply 里的序号 ── */
   shouldStopAfterTurn?: (ctx: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
   prepareNextTurn?: (
     ctx: PrepareNextTurnContext,
   ) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
   /**
-   * 每轮注入:run 中途会变、但**不属于对话事实**的内容(激活的 skill 正文)。
-   * 每轮重算,拼在 working 副本**末尾**——前缀(真实对话)字节不动,不破缓存;不进 transcript。
-   * 与 getTools 同构:工具每轮重取,注入每轮重算。契约:绝不抛;没有返回 []。
+   * 每个 attempt 注入:run 中途会变、但**不属于对话事实**的内容(激活的 skill 正文)。
+   * 每次重算,拼在 working 副本**末尾**——前缀(真实对话)字节不动,不破缓存;不进 transcript。
+   * 与 getTools 同构:工具每轮重取,注入每次重算。契约:绝不抛;没有返回 []。
+   * `visibleTools` 是本轮冻结的、模型菜单上的工具名——注入里的工具门控只许读它，不读活池。
    */
-  /** 每轮注入。`visibleTools` 是本轮冻结的、模型菜单上的工具名——注入里的工具门控只许读它，不读活池。 */
   getTurnInjections?: (visibleTools: ReadonlySet<string>) => Promise<AgentMessage[]> | AgentMessage[];
   /**
    * RunIntakeGate 的循环侧：turn / run 的开关门与 drain。Agent 实现；drain 出来的消息已过 userPromptSubmit 准入。
@@ -136,21 +173,20 @@ export interface AgentLoopConfig {
    */
   permission: PermissionStage;
 
-  /* ── 闸与策略（重试与压缩收进 core 后带来的） ── */
+  /* ── 闸与策略 ── */
+  /** 每条 reply 的 turn 上限；命中以 `error{max_iterations}` 收场。 */
   maxIterations: number;
+  /** 每个 run 的 reply 上限；达上限且仍有待办以 `error{max_replies}` 收场，无待办则 completed。 */
+  maxReplies: number;
+  /** 可选的墙钟；不承担总闸。 */
   timeoutMs?: number;
+  /** 一个 turn 最多 `maxAttempts` 个 attempt，不分原因。 */
   retryPolicy: RetryPolicy;
   compaction: LoopCompactionConfig;
 
-  /** 透传给工具的 `ToolExecutionContext.workspace`。 */
+  /** 透传给工具的 `ToolExecutionContext.workspace`。**每次工具执行现读**（agent 给的是 getter）：轮中途切目录要立刻生效。 */
   workspace: string;
 }
-
-export type TurnResult = {
-  message: AssistantMessage;
-  toolResults: ToolResultMessage[];
-  stopReason: AssistantMessage["stopReason"];
-};
 
 export type LoopResult = {
   outcome: AgentOutcome;

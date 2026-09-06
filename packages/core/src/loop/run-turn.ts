@@ -1,23 +1,42 @@
-// 内层一轮：一次助手响应 + 它的工具执行。
+// turn 与 attempt——四层里靠里的两层（run ⊃ reply ⊃ turn ⊃ attempt，docs/design/run-loop-layers.md）。
 //
-// runTurn 只负责跑完这一轮——**没有任何提前 return 的分支**，所有出圈判断集中在 runLoop。
+//   turn    = reply 里的一次迭代：调一次模型、处理它落地的响应及其工具批。一个 turn **至多一条落地的** assistant 消息。
+//   attempt = turn 里的一次模型请求：一次完整的上下文构建 + 一次 streamFn。**重试 = 同一 turn 的下一个 attempt**。
+//
+// 每层只管自己的开与关：turn 开一次（openTurn / turn_start）、关一次（closeTurn / turn_end），重试不重开；
+// attempt 的 start / end 永远成对——contextBeforeBuild 说 block 也是一个 attempt_end{blocked}，不用异常出去；
+// streamFn / 投影 / hook 违约抛了也是一个 attempt_end{failed}。配对由结构保证，不靠外层补。
 //
 // 一条贯穿全文件的规则:**每条进入 transcript 的消息都发一个 message_end 事件**
 // （助手消息之前还有 start/update）——这样 Agent 侧只需要一条 append 路径，
 // 「state = apply(state, event)」对每条消息都成立。
 //
 // 另一条:**本轮的工具与 hook 在开头定格**。模型看到的菜单、执行到的对象、
-// 拦截它的 handler，整轮是同一份；中途的注册/卸载/替换全部归下一轮。
+// 拦截它的 handler，整轮（每个 attempt）是同一份；中途的注册/卸载/替换全部归下一轮。
 
 import { agentError, errText } from "../errors.ts";
+import type { createCompactor } from "../compaction/pipeline.ts";
 import type { HookWorkset } from "../hooks/runtime.ts";
 import { deepFreezePlain, normalizeVerdict } from "../permission/ledger.ts";
 import type { PermissionVerdict } from "../permission/types.ts";
-import type { AgentMessage, AssistantMessage, ToolResultMessage, ToolSchema, ToolUseBlock } from "../messages.ts";
+import type { AgentMessage, ToolResultMessage, ToolUseBlock } from "../messages.ts";
 import { toolResultMessage, toolUsesFromMessage } from "../messages.ts";
-import { isModelTool, isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type McpTool, type ModelTool } from "../tools/types.ts";
+import { isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type McpTool, type ModelTool } from "../tools/types.ts";
 import { buildWorkingMessages } from "../compaction/view.ts";
-import type { AgentLoopConfig, Emit, LoopDeps, TurnResult } from "./types.ts";
+import { turnIdOf } from "./ids.ts";
+import type { AgentLoopConfig, AttemptResult, Emit, LoopDeps, TurnCause, TurnResult } from "./types.ts";
+
+type Compactor = ReturnType<typeof createCompactor>;
+
+/** run 内三层共用的依赖：LoopDeps 之外多了 run 级的东西（由 runLoop 建一次）。`signal` 已与 deadline 合并。 */
+export type RunDeps = LoopDeps & {
+  /** 调用方的 signal（未与 deadline 合并）：reply 靠它区分「调用方取消」与「run 超时」。 */
+  readonly callerSignal: AbortSignal;
+  /** run 的 deadline signal；没配 timeoutMs 就没有。 */
+  readonly deadline: AbortSignal | undefined;
+  readonly startedAt: number;
+  readonly compactor: Compactor;
+};
 
 /** 本轮工作集：开头冻一次，整轮只看它。 */
 type TurnWorkset = {
@@ -28,20 +47,9 @@ type TurnWorkset = {
   readonly hooks: HookWorkset;
 };
 
-/**
- * `contextBeforeBuild` 返回 block：**不调模型**。这是本文件唯一的提前出口——block 的含义是「这一轮不该发生」，
- * 没有 assistant 消息可以挂 TurnResult，所以用异常出去，由 runLoop 折成 `aborted` outcome（reason 透传）。
- * 不合成假的 assistant 消息进 transcript：什么都没说过，账本里就不该有一条。
- */
-export class ContextBuildBlocked extends Error {
-  constructor(readonly reason: string | undefined) {
-    super(`contextBeforeBuild blocked the turn${reason !== undefined ? `: ${reason}` : ""}`);
-    this.name = "ContextBuildBlocked";
-  }
-}
-
-export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnResult> {
-  const { context, config, emit, signal, streamFn } = deps;
+export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: TurnCause): Promise<TurnResult> {
+  const { context, config, emit, signal } = deps;
+  const turnId = turnIdOf(replyId, n);
 
   /* ⓪ 定格本轮工作集：hook 条目与工具对象在此刻冻结。
      **必须在 turn_start 事件之前**：AgentEvent listener 是被 await 的，订阅者收到 turn_start 就能注册/卸载
@@ -51,10 +59,107 @@ export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnRe
     knownToolNames: new Set(config.knownToolNames()),
     hooks: config.hooks.snapshot(),
   };
-  const { tools, hooks } = workset;
   // turn 开门（RunIntakeGate）：同样在 turn_start 之前——订阅者收到 turn_start 就能 steer()
-  config.intake?.openTurn(`${config.runId}#${iteration}`);
-  await emit({ type: "turn_start", iteration });
+  config.intake?.openTurn(turnId);
+  await emit({ type: "turn_start", turnId, replyId, cause });
+
+  const toolResults: ToolResultMessage[] = [];
+  let ended = false;
+  try {
+    /* ① attempt 循环：落地或放弃。一个 turn 最多 maxAttempts 个 attempt，不分原因 */
+    const { maxAttempts } = config.retryPolicy;
+    let attempt = 0;
+    let result: AttemptResult;
+    for (;;) {
+      attempt += 1;
+      result = await runAttempt(deps, turnId, attempt, workset);
+      if (result.kind !== "failed") break;
+      const err = result.error;
+      await workset.hooks.notify({ type: "modelCallFailed", error: err, attempt }, config.hookContext);
+      if (attempt >= maxAttempts) break;
+      // 撞窗（provider 说上下文超了）：**应急压缩一次**再来一个 attempt。压不动 / 第二次撞 → 按失败收场。
+      // 它不是重试（上下文变了），所以不发 retry_scheduled——压缩事件已说明原因
+      if (err.code === "context_overflow") {
+        if (await deps.compactor.recover()) continue;
+        break;
+      }
+      if (!err.retryable) break;
+      const next = attempt + 1;
+      const delayMs = clampDelay(config.retryPolicy.backoffMs(attempt), config.maxRetryDelayMs);
+      await emit({ type: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code });
+      await workset.hooks.notify({ type: "retryScheduled", attempt: next, maxAttempts, delayMs, cause: err.code }, config.hookContext);
+      await sleep(delayMs);
+    }
+
+    /* ② 工具批：只在落地后 */
+    if (result.kind === "landed") {
+      for (const use of toolUsesFromMessage(result.message)) {
+        const msg = await runOneTool(use, deps, turnId, n, workset);
+        context.messages.push(msg);
+        await emit({ type: "message_end", message: msg });
+        toolResults.push(msg as ToolResultMessage);
+        if (signal.aborted) break; // 批中断：已跑完的保留，剩下的不跑
+      }
+    }
+
+    /* ③ 关 turn：gate 的 turn 边界与事件的 turn 边界重合。交出的 steer 由 reply 决定吸收 */
+    const steers = (await config.intake?.closeTurn()) ?? [];
+    ended = true;
+    await emit({ type: "turn_end", turnId, result, toolResults });
+    return { turnId, result, toolResults, steers };
+  } catch (e) {
+    // emit / hook / intake 自身坏了：turn 仍由本层关——turn_end 不靠外层补。gate 里的 turn 不在这关，
+    // 留给 run 关门（closeRun）连同它 accepted 的 steer 一起报出
+    if (!ended) {
+      ended = true;
+      await emit({ type: "turn_end", turnId, result: { kind: "failed", error: agentError("internal", "internal", errText(e), false) }, toolResults });
+    }
+    throw e;
+  }
+}
+
+/* ─────────────────── attempt ─────────────────── */
+
+/** 一个 attempt 内 assistant 消息事件的进度：抛出时据此补齐 message_start / message_end，保成对。 */
+type MessageProgress = { opened: boolean; ended: boolean };
+
+async function runAttempt(deps: RunDeps, turnId: string, attempt: number, workset: TurnWorkset): Promise<AttemptResult> {
+  const { context, emit } = deps;
+  await emit({ type: "attempt_start", turnId, attempt });
+  const progress: MessageProgress = { opened: false, ended: false };
+  let ended = false;
+  try {
+    let result: AttemptResult;
+    try {
+      result = await callModel(deps, workset, progress);
+    } catch (e) {
+      // streamFn / 投影 / hook 违约抛出：仍是一次失败的 attempt——不让异常击穿 turn，配对由结构保证。
+      // 与 dialect 的「stream 不许 throw」同一态度：throw 只留给 bug，bug 也要有形状。
+      const error = agentError("internal", "internal", errText(e), false);
+      if (!progress.ended) {
+        if (!progress.opened) await emit({ type: "message_start", role: "assistant" });
+        const failure: AgentMessage = { role: "assistant", content: [], stopReason: "error", usage: null, error, at: Date.now() };
+        context.messages.push(failure);
+        await emit({ type: "message_end", message: failure });
+      }
+      result = { kind: "failed", error };
+    }
+    ended = true;
+    await emit({ type: "attempt_end", turnId, attempt, result });
+    return result;
+  } catch (e) {
+    // 连补失败消息的 emit 都坏了：attempt 仍由本层关，再上抛
+    if (!ended) {
+      ended = true;
+      await emit({ type: "attempt_end", turnId, attempt, result: { kind: "failed", error: agentError("internal", "internal", errText(e), false) } });
+    }
+    throw e;
+  }
+}
+
+async function callModel(deps: RunDeps, workset: TurnWorkset, progress: MessageProgress): Promise<AttemptResult> {
+  const { context, config, emit, signal, streamFn } = deps;
+  const { tools, hooks } = workset;
 
   /* ① AgentMessage 层变换。先按压缩状态投影 transcript（段 → 摘要、旧工具结果 → 占位；transcript 本身不动），
      再拼每轮注入（激活 skill 正文，末尾、不进 transcript），
@@ -70,44 +175,28 @@ export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnRe
   }
   if (hooks.has("contextBeforeBuild")) {
     const r = await hooks.intercept({ type: "contextBeforeBuild", messages: working }, config.hookContext);
-    // block = 这轮不发（2026-09-01 前这里只取 patch 后的 messages、无视 decision——hook 说别调模型，模型照调）
-    if (r.decision === "block") throw new ContextBuildBlocked(r.reason);
+    // block = 这个 attempt 不发：没有 assistant 消息可挂，什么都没说过账本里就不该有一条
+    if (r.decision === "block") return { kind: "blocked", ...(r.reason !== undefined ? { reason: r.reason } : {}) };
     working = r.event.messages;
   }
 
   /* ② 投影：AgentMessage → 线上形状（唯一一道翻译） */
   const llmMessages = await config.convertToLlm(working);
 
-  /* ③ 每轮重解析 key（短命 token 会在长工具阶段中途过期） */
+  /* ③ 每次重解析 key（短命 token 会在长工具阶段中途过期） */
   const apiKey = await config.getApiKey?.(config.model.provider);
 
   /* ④ 调模型 + 消费协议（占槽逐字） */
   const stream = await streamFn(
     config.model,
     { systemPrompt: context.systemPrompt, messages: llmMessages, tools: toolSchemas(tools) },
-    {
-      signal,
-      apiKey,
-      thinkingLevel: config.thinkingLevel,
-      maxRetryDelayMs: config.maxRetryDelayMs,
-    },
+    { signal, apiKey, thinkingLevel: config.thinkingLevel },
   );
 
-  let opened = false;
   for await (const item of stream) {
     if (item.type === "start") {
-      opened = true;
+      progress.opened = true;
       await emit({ type: "message_start", role: "assistant" });
-      continue;
-    }
-    if (item.type === "retry") {
-      await emit({
-        type: "retry_scheduled",
-        attempt: item.attempt,
-        maxAttempts: item.maxAttempts,
-        delayMs: item.delayMs,
-        cause: item.code,
-      });
       continue;
     }
     await emit({ type: "message_update", delta: item, message: item.partial });
@@ -116,35 +205,28 @@ export async function runTurn(deps: LoopDeps, iteration: number): Promise<TurnRe
   // **入账取权威定稿，不是槽里自己攒的 partial**——拿槽当定稿会被重放/丢包污染。
   const final = await stream.result();
   // 退化路径：违约或无流式后端没发过 start，补一个，保「每个定稿消息必有成对 start/end」。
-  if (!opened) await emit({ type: "message_start", role: "assistant" });
+  if (!progress.opened) {
+    progress.opened = true;
+    await emit({ type: "message_start", role: "assistant" });
+  }
 
-  const finalMsg = withAt(final);
+  const finalMsg = { ...final, at: Date.now() };
   context.messages.push(finalMsg);
+  progress.ended = true;
   await emit({ type: "message_end", message: finalMsg });
   if (final.usage !== null) await emit({ type: "usage", usage: final.usage });
 
-  /* ⑤⑥ 工具批 */
-  const toolUses = toolUsesFromMessage(finalMsg);
-  const toolResults: ToolResultMessage[] = [];
-  if (toolUses.length > 0) {
-    for (const use of toolUses) {
-      const msg = await runOneTool(use, deps, iteration, workset);
-      context.messages.push(msg);
-      await emit({ type: "message_end", message: msg });
-      toolResults.push(msg as ToolResultMessage);
-      if (signal.aborted) break; // 批中断：已跑完的保留，剩下的不跑
-    }
-  }
-
-  await emit({ type: "turn_end", iteration, message: final, toolResults });
-  return { message: final, toolResults, stopReason: final.stopReason };
+  if (final.stopReason === "error") return { kind: "failed", error: final.error ?? agentError("provider", "internal", "未标注的失败", false) };
+  if (final.stopReason === "aborted") return { kind: "aborted" };
+  return { kind: "landed", message: finalMsg };
 }
 
 /* ─────────────────── 单次工具调用 ─────────────────── */
 
 async function runOneTool(
   use: ToolUseBlock,
-  deps: LoopDeps,
+  deps: RunDeps,
+  turnId: string,
   iteration: number,
   workset: TurnWorkset,
 ): Promise<AgentMessage> {
@@ -200,10 +282,11 @@ async function runOneTool(
 
   /* authorization（固定 stage）：参数已冻结，从这里起不可再改；authorization 只能决定。
      ask 里的 params、宿主看到的 params、execute 收到的 params 是**同一份**冻结对象。
-     authInput 自身也冻：policy 若 `input.params = 另一份`，在 ESM 严格模式下当场抛 → 下面按 fail-closed 拒。 */
+     authInput 自身也冻：policy 若 `input.params = 另一份`，在 ESM 严格模式下当场抛 → 下面按 fail-closed 拒。
+     turnId 是 loop 产的那一个（`ids.ts`），permission 与观测引用同一份。 */
   const authInput = Object.freeze({
     runId: config.runId,
-    turnId: `${config.runId}#${iteration}`,
+    turnId,
     toolCallId: use.id,
     toolName: use.name,
     params,
@@ -363,8 +446,12 @@ async function notify(
   await hooks.notify(event, config.hookContext);
 }
 
-export function withAt(m: AssistantMessage, at: number = Date.now()): AgentMessage {
-  return { ...m, at };
+function clampDelay(ms: number, cap?: number): number {
+  return cap === undefined ? ms : Math.min(ms, cap);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 export { agentError, toolSchemas };

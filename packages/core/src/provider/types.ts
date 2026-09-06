@@ -81,7 +81,6 @@ export type StreamOptions = {
   apiKey?: string;
   headers?: Record<string, string>;
   thinkingLevel?: ThinkingLevel;
-  maxRetryDelayMs?: number;
   onPayload?: (payload: unknown) => void;
   onResponse?: (response: unknown) => void;
 };

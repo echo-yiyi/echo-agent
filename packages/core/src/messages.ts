@@ -287,7 +287,10 @@ function projectOne(m: AgentMessage): ProviderMessage | null {
 
     case "assistant": {
       // 剥壳：at、stopReason、error、usage、model 不出门。
-      // 空 content 的 assistant 消息是协议违规（纯错误轮可能一个块都没有）→ 整条隐形。
+      // 失败 attempt 的定稿（stopReason=error）留在 transcript 当事实，但**不是模型说过的话**，不当上文送回去
+      // （docs/decisions/proposed/2026-09-05-failed-attempt-in-transcript.md）。
+      if (m.stopReason === "error") return null;
+      // 空 content 的 assistant 消息是协议违规 → 整条隐形。
       if (m.content.length === 0) return null;
       return { role: "assistant", content: [...m.content] };
     }

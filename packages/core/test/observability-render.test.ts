@@ -47,18 +47,24 @@ function script(): readonly AgentEvent[] {
   const ev = (at: number, e: Record<string, unknown>): AgentEvent => ({ seq: ++seq, at, ...e }) as unknown as AgentEvent;
   const m1 = assistant("call ping", "tool_use", 1_010);
   const m2 = assistant("done", "end_turn", 1_120);
+  // turnId 是 loop 产的 `${replyId}#${n}`（loop/ids.ts）；这里只铺 turn 层，reply / attempt 事件不进投影，脚本不带
   return [
     ev(1_001, { type: "agent_start" }),
-    ev(1_002, { type: "turn_start", iteration: 1 }),
+    ev(1_002, { type: "turn_start", turnId: "run:fixed/1#1", replyId: "run:fixed/1", cause: "input" }),
     ev(1_003, { type: "message_start", role: "assistant" }),
     ev(1_010, { type: "message_end", message: m1 }),
     ev(1_011, { type: "tool_execution_start", toolCallId: "c1", toolName: "ping", params: { a: 1 } }),
     ev(1_025, { type: "tool_execution_end", toolCallId: "c1", toolName: "ping", result: { content: "pong", isError: false, images: [], metadata: null } }),
-    ev(1_030, { type: "turn_end", iteration: 1, message: m1, toolResults: [{ role: "toolResult", toolCallId: "c1", toolName: "ping", content: "pong", isError: false, at: 1_025 }] }),
-    ev(1_031, { type: "turn_start", iteration: 2 }),
+    ev(1_030, {
+      type: "turn_end",
+      turnId: "run:fixed/1#1",
+      result: { kind: "landed", message: m1 },
+      toolResults: [{ role: "toolResult", toolCallId: "c1", toolName: "ping", content: "pong", isError: false, at: 1_025 }],
+    }),
+    ev(1_031, { type: "turn_start", turnId: "run:fixed/1#2", replyId: "run:fixed/1", cause: "tool_use" }),
     ev(1_032, { type: "message_start", role: "assistant" }),
     ev(1_120, { type: "message_end", message: m2 }),
-    ev(1_121, { type: "turn_end", iteration: 2, message: m2, toolResults: [] }),
+    ev(1_121, { type: "turn_end", turnId: "run:fixed/1#2", result: { kind: "landed", message: m2 }, toolResults: [] }),
     ev(1_122, { type: "agent_end", outcome: { kind: "completed" } }),
   ];
 }
@@ -80,16 +86,16 @@ async function fixtureRun(): Promise<RunObservation> {
     ]),
   });
   try {
-    let iteration = 0;
-    const sink = rt.eventSink(() => ({ ...identity, runId: "run:fixed", ...(iteration > 0 ? { turnId: `t${iteration}` } : {}) }));
+    let turnId: string | null = null;
+    const sink = rt.eventSink(() => ({ ...identity, runId: "run:fixed", ...(turnId !== null ? { turnId } : {}) }));
     rt.acceptRun({ runId: "run:fixed", source: { kind: "user" }, ...identity, modelBinding: binding });
     clock.advance(1);
     rt.startRun("run:fixed", identity);
     for (const e of script()) {
-      // 与 Agent 的 scope 供给同一规则：turn 归属只在 turn 开着时补（turn_end 自带 turnId，之后清掉）
-      if (e.type === "turn_start") iteration = e.iteration;
+      // 与 Agent 的 scope 供给同一规则：turn 归属只在 turn 开着时补，用的就是事件里的 turnId（turn_end 自带，之后清掉）
+      if (e.type === "turn_start") turnId = e.turnId;
       sink.offer(e);
-      if (e.type === "turn_end") iteration = 0;
+      if (e.type === "turn_end") turnId = null;
     }
     clock.advance(130);
     await rt.closeRun(
@@ -98,7 +104,7 @@ async function fixtureRun(): Promise<RunObservation> {
         outcome: { kind: "completed" },
         finalState: {
           runtime: { phase: "ready", status: "ready", observationPersistence: "healthy", generation: "boot", activeEntryCount: 0 },
-          agent: { status: "generating", activeRunId: "run:fixed", activeTurnId: "t2", iteration: 2, messageCount: 5 },
+          agent: { status: "generating", activeRunId: "run:fixed", activeTurnId: "run:fixed/1#2", iteration: 2, messageCount: 5 },
           capabilities: [],
           omittedCapabilitySummaryCount: 0,
         },

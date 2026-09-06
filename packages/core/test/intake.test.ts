@@ -202,12 +202,13 @@ test("RunIntakeGate：裁决与入队同一同步步；关门那一刻队列里�
   expect(gate.followUp(m("x"))).toEqual({ kind: "rejected", reason: "runtime-disposed" });
 });
 
-test("RunIntakeGate：turn 没关就开下一轮（重试路径）→ accepted 的 steer 顺延到新 turn，不丢", () => {
+test("RunIntakeGate：turn 没关就开下一个 = loop 的 bug，fail-loud（重试是同一 turn 的下一个 attempt，不重开 turn）", () => {
   const gate = new RunIntakeGate("a@1");
   gate.openRun("run:1");
-  gate.openTurn("run:1#1");
+  gate.openTurn("run:1/1#1");
   gate.steer(userMessage("s", "steer"));
-  gate.openTurn("run:1#1"); // 同一 iteration 重跑
+  expect(() => gate.openTurn("run:1/1#2")).toThrow(/还没关门/);
+  // 已 accepted 的 steer 仍在原 turn 里，关门时照常交出
   expect(gate.closeTurn()).toHaveLength(1);
 });
 
@@ -294,6 +295,7 @@ test("退出路径 shouldStopAfterTurn（loop 级决策点，Agent 不暴露）�
   const config: AgentLoopConfig = {
     model: FAKE_MODEL,
     runId: "run:x",
+    maxReplies: 10,
     convertToLlm: defaultConvertToLlm,
     getTools: () => [],
     knownToolNames: () => [],

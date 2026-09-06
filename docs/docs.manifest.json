@@ -30,6 +30,26 @@
       "bilingual": false
     },
     {
+      "path": "docs/design/run-loop-layers.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-05-reply-layer.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-05-retry-owned-by-loop.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-05-failed-attempt-in-transcript.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-05-iteration-budget-per-reply.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/design/context-and-message-flow.md",
       "bilingual": false
     },

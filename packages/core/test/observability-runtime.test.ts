@@ -130,7 +130,7 @@ describe("send → getRun → render（completed）", () => {
     const sourceSeqs = o.records.filter((r) => r.sourceSeq !== undefined).map((r) => r.sourceSeq!);
     expect(sourceSeqs.length).toBeGreaterThan(5);
     for (let i = 1; i < sourceSeqs.length; i++) expect(sourceSeqs[i]!).toBeGreaterThan(sourceSeqs[i - 1]!);
-    expect(o.records.find((r) => r.name === "model.generate")?.scope.turnId).toBe("t1");
+    expect(o.records.find((r) => r.name === "model.generate")?.scope.turnId).toBe(`${result.runId}/1#1`);
     expect(o.records.find((r) => r.name === "tool.execute")?.scope.toolCallId).toBe("c1");
 
     // 装配快照与 model binding 来自 run.assembly（withoutMemory：没有 memory 槽）

@@ -188,18 +188,16 @@ test("401 → auth 不可重试;400 带 context 字样 → context_overflow", as
   expect((e2[0] as { error: { code: string } }).error.code).toBe("context_overflow");
 });
 
-test("429 → 壳重试,第二次成功(方言自己不重试,壳管)", async () => {
+test("429 → 壳不重试：一次 stream = 一次请求，以 error{retryable} 收场——重试是 loop 的下一个 attempt（2026-09-05）", async () => {
   const { fn, calls } = fakeFetch(
     () => new Response("rate limited", { status: 429 }),
     () => new Response(sse([{ choices: [{ delta: { content: "好了" }, finish_reason: "stop" }] }])),
   );
-  const streams = createProviderStreams(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }), {
-    maxAttempts: 3,
-    backoffMs: () => 1, // 测试不真等
-  });
+  const streams = createProviderStreams(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }));
   const msg = await streams.stream(MODEL, CTX, {}).result();
-  expect(calls.length).toBe(2);
-  expect(msg.content).toEqual([{ type: "text", text: "好了" }]);
+  expect(calls.length).toBe(1); // 第二个响应没人去拿：壳不重试
+  expect(msg.stopReason).toBe("error");
+  expect(msg.error).toMatchObject({ code: "rate_limit", retryable: true });
 });
 
 /* ══════════ provider 与 Models 整链 ══════════ */

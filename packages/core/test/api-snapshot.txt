@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 304（value 108 · type 177 · both 19）
+符号 309（value 109 · type 181 · both 19）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -24,13 +24,14 @@ type   RunModelBinding
 type   RunModelSnapshot
 type   RunSource
 
--- src/agent.ts (6) --
+-- src/agent.ts (7) --
 both   Agent
 type   AgentOptions
 type   AgentRunResult
 type   AgentState
 type   AgentStatus
 value  DEFAULT_MAX_ITERATIONS
+value  DEFAULT_MAX_REPLIES
 
 -- src/background/types.ts (2) --
 type   AgentBackground
@@ -177,11 +178,15 @@ type   InboxStore
 type   FollowUpResult
 type   SteerResult
 
--- src/loop/types.ts (4) --
+-- src/loop/types.ts (8) --
 type   AgentContext
+type   AttemptResult
 type   LoopCompactionConfig
 type   LoopResult
+type   ReplySource
 type   TransformContext
+type   TurnCause
+type   TurnResult
 
 -- src/mcp/port.ts (3) --
 type   AgentMcpPort

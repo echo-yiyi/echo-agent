@@ -23,7 +23,7 @@
 //
 // 测试替身不在这条面上——它走 `@echo-agent/core/testing`。
 
-export { Agent, DEFAULT_MAX_ITERATIONS } from "./agent.ts";
+export { Agent, DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_REPLIES } from "./agent.ts";
 export type { AgentOptions, AgentState, AgentStatus } from "./agent.ts";
 
 export * from "./messages.ts";
@@ -161,7 +161,7 @@ export type {
 } from "./task/types.ts";
 
 // `prompt()` 的返回值与它认的几个配置形状
-export type { AgentContext, LoopCompactionConfig, LoopResult, TransformContext } from "./loop/types.ts";
+export type { AgentContext, AttemptResult, LoopCompactionConfig, LoopResult, ReplySource, TransformContext, TurnCause, TurnResult } from "./loop/types.ts";
 /* 压缩（2026-09-02）：状态与阶段契约给写策略的人；视图与估算给他们算字节；缺省阶梯与 prompt 给想改一段的人 */
 export {
   COMPACTION_SLACK_RATIO,

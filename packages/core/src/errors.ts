@@ -25,7 +25,8 @@ export type ErrorCode =
   | "tool_crashed"
   // —— 自身 ——
   | "aborted"
-  | "max_iterations"
+  | "max_iterations" // 一条 reply 的 turn 上限
+  | "max_replies" // 一个 run 的 reply 上限（达上限且仍有待办）
   | "internal";
 
 export type AgentError = {

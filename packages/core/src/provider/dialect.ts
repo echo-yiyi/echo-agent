@@ -3,9 +3,10 @@
 // **它不是一层，是造 ProviderStreams 的工厂**——可选的便利：想全权控制的后端，
 // 手写一个 ProviderStreams 即可，createProvider 分不出也不需要分出。
 //
-// 工厂焊进去的公共逻辑（写一次，全家共用）：瞬时重试与退避、partial 累积、
-// 错误抢救、EventStream 包装。**写新方言的人碰不到也不需要碰**——
-// v1 里 cli-provider 忘写重试那类病，在这个结构下没有地方可以忘。
+// 工厂焊进去的公共逻辑（写一次，全家共用）：partial 累积、错误抢救、EventStream 包装。
+// **重试不在这里**（2026-09-05，docs/decisions/proposed/2026-09-05-retry-owned-by-loop.md）：
+// 一次 stream = 一次请求；流断了以 `error` 收场并标 `retryable`，要不要再来一次、来几次由 loop 决定
+// ——重试是同一 turn 的下一个 attempt，预算只有一份（`RetryPolicy` 仍住这里，loop 读它）。
 
 import { agentError, classifyUnknown, type AgentError } from "../errors.ts";
 import { emptyAssistant, withPartial } from "../event-stream.ts";
@@ -14,6 +15,7 @@ import type { AssistantMessage, Context, ContentBlock, ToolUseBlock } from "../m
 import { lazyStream } from "./lazy.ts";
 import type { Model, ProviderStreams, StreamOptions } from "./types.ts";
 
+/** 一个 turn 最多 `maxAttempts` 个 attempt（不分原因）；`backoffMs(attempt)` 是第 attempt 次失败后等多久。 */
 export type RetryPolicy = {
   maxAttempts: number;
   backoffMs(attempt: number): number;
@@ -29,7 +31,7 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
  *
  * DO：守块不变量（串行块、恰好一个终结）；最低实现只发 done；
  *     预期失败编码成 `error` 事件——**stream 不许 throw**（throw 只留给 bug）。
- * DON'T：不重试（壳管）、不累积 partial（壳管）、**不编造数据**
+ * DON'T：不重试（loop 管）、不累积 partial（壳管）、**不编造数据**
  *     ——没有 usage 就是 null，不许填 0 冒充报了账。
  */
 export interface Dialect {
@@ -39,75 +41,29 @@ export interface Dialect {
   classifyError?(e: unknown): AgentError | null;
 }
 
-export function createProviderStreams(dialect: Dialect, retry: RetryPolicy = DEFAULT_RETRY_POLICY): ProviderStreams {
+export function createProviderStreams(dialect: Dialect): ProviderStreams {
   return {
-    stream: (model, context, options) => lazyStream(async () => pump(dialect, model, context, options, retry)),
+    stream: (model, context, options) => lazyStream(async () => pump(dialect, model, context, options)),
   };
 }
 
-async function* pump(
-  dialect: Dialect,
-  model: Model,
-  context: Context,
-  options: StreamOptions | undefined,
-  retry: RetryPolicy,
-): AsyncGenerator<StreamItem> {
+async function* pump(dialect: Dialect, model: Model, context: Context, options: StreamOptions | undefined): AsyncGenerator<StreamItem> {
   const acc = new MessageAccumulator(model);
-
-  for (let attempt = 1; ; attempt++) {
-    let retrying = false;
-
-    try {
-      for await (const ev of dialect.request(model, context, options)) {
-        if (ev.type === "error" && ev.error.retryable && attempt < retry.maxAttempts) {
-          // 可重试的终结：吞掉它，重来一次。增量从头流——定稿权威兜住正确性。
-          retrying = true;
-          acc.reset();
-          const delayMs = clampDelay(retry.backoffMs(attempt), options?.maxRetryDelayMs);
-          yield withPartial(retryEvent(attempt, retry.maxAttempts, delayMs, ev.error.code), acc.partial());
-          await sleep(delayMs);
-          break;
-        }
-
-        yield withPartial(ev, acc.apply(ev));
-        for (const w of acc.takeWarnings()) yield withPartial(w, acc.partial());
-        if (ev.type === "done" || ev.type === "error") return;
-      }
-
-      if (retrying) continue;
-
-      // 流干涸却没有终结事件 = 方言违约。合成一个 error，保「恰好一个终结」。
-      yield withPartial(
-        { type: "error", error: agentError("provider", "protocol", `方言 '${dialect.api}' 的流结束但没有终结事件`, false) },
-        acc.partial(),
-      );
-      return;
-    } catch (e) {
-      // 走到这说明方言 throw 了（违约或 bug）。壳仍然不上抛。
-      const err = dialect.classifyError?.(e) ?? classifyUnknown(e);
-      if (err.retryable && attempt < retry.maxAttempts) {
-        acc.reset();
-        const delayMs = clampDelay(retry.backoffMs(attempt), options?.maxRetryDelayMs);
-        yield withPartial(retryEvent(attempt, retry.maxAttempts, delayMs, err.code), acc.partial());
-        await sleep(delayMs);
-        continue;
-      }
-      yield withPartial({ type: "error", error: err }, acc.partial());
-      return;
+  try {
+    for await (const ev of dialect.request(model, context, options)) {
+      yield withPartial(ev, acc.apply(ev));
+      for (const w of acc.takeWarnings()) yield withPartial(w, acc.partial());
+      if (ev.type === "done" || ev.type === "error") return;
     }
+    // 流干涸却没有终结事件 = 方言违约。合成一个 error，保「恰好一个终结」。
+    yield withPartial(
+      { type: "error", error: agentError("provider", "protocol", `方言 '${dialect.api}' 的流结束但没有终结事件`, false) },
+      acc.partial(),
+    );
+  } catch (e) {
+    // 走到这说明方言 throw 了（违约或 bug）。壳仍然不上抛。
+    yield withPartial({ type: "error", error: dialect.classifyError?.(e) ?? classifyUnknown(e) }, acc.partial());
   }
-}
-
-function retryEvent(attempt: number, maxAttempts: number, delayMs: number, code: string): ProviderEvent {
-  return { type: "retry", code, attempt, maxAttempts, delayMs };
-}
-
-function clampDelay(ms: number, cap?: number): number {
-  return cap === undefined ? ms : Math.min(ms, cap);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
@@ -241,12 +197,6 @@ class MessageAccumulator {
     const w = this.warnings;
     this.warnings = [];
     return w;
-  }
-
-  reset(): void {
-    this.blocks = [];
-    this.open = null;
-    this.warnings = [];
   }
 }
 

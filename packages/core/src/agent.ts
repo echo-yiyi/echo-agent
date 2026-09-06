@@ -32,11 +32,12 @@ import {
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "./provider/dialect.ts";
 import type { Model, StreamFn, ThinkingLevel } from "./provider/types.ts";
 import { runAgentLoop, runAgentLoopContinue } from "./loop/run-loop.ts";
+import { turnNumberOf } from "./loop/ids.ts";
 import { RunIntakeGate, type FollowUpResult, type IntakeLeftovers, type SteerResult } from "./loop/intake.ts";
 import { StandaloneRunAdmission } from "./admission/standalone.ts";
 import { normalizeModelSnapshot } from "./admission/model-snapshot.ts";
 import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTicket, RunModelBinding, RunSource } from "./admission/types.ts";
-import type { AgentContext, AgentLoopConfig, LoopResult, TransformContext } from "./loop/types.ts";
+import type { AgentContext, AgentLoopConfig, AttemptResult, LoopResult, TransformContext } from "./loop/types.ts";
 import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
@@ -156,7 +157,10 @@ export type AgentOptions = {
   streamFunction: StreamFn;
   tools?: AgentTool[];
   thinkingLevel?: ThinkingLevel;
+  /** 每条 reply 的 turn 上限。 */
   maxIterations?: number;
+  /** 每个 run 的 reply 上限。 */
+  maxReplies?: number;
   timeoutMs?: number;
   retryPolicy?: RetryPolicy;
   maxRetryDelayMs?: number;
@@ -294,6 +298,11 @@ export type AgentRunResult = LoopResult & Readonly<{ runId: string }>;
 const EMPTY_TASK_SNAPSHOT: TaskSnapshot = { total: 0, counts: {}, ready: [], active: [] };
 
 export const DEFAULT_MAX_ITERATIONS = 20;
+/**
+ * 每个 run 的 reply 上限（docs/decisions/proposed/2026-09-05-iteration-budget-per-reply.md）。
+ * 保险丝量级：stop hook 最多贡献 3 条，其余留给一次 run 里 host 的 followUp。常量还是配置项，随 stop hook 三次那条记录同拍。
+ */
+export const DEFAULT_MAX_REPLIES = 10;
 
 /**
  * `deliver()` 与 schedule adapter 的 dedupeKey 派生：有稳定事实身份（environment 的 source + ref，比如
@@ -562,6 +571,7 @@ export class Agent {
 
   /* 闸与策略 */
   public maxIterations: number;
+  public maxReplies: number;
   public timeoutMs?: number;
   public retryPolicy: RetryPolicy;
   public maxRetryDelayMs?: number;
@@ -589,6 +599,11 @@ export class Agent {
   private readonly permissionPolicy: PermissionPolicy;
   /** 当前 run 的稳定身份；permission ask 与事件关联引用它。 */
   private currentRunId: string | null = null;
+  /**
+   * 事件流里此刻还开着的层（reply / turn / attempt）：只从事件归约，不另写。
+   * 用途只有一个——循环违约抛出、终态还没发时，`normalizeAdmittedCallbackFailure` 据此把开着的层按序收掉，不缺一拍也不多补。
+   */
+  private openLayers: { replyId: string | null; turnId: string | null; attempt: number | null } = { replyId: null, turnId: null, attempt: null };
   public getApiKey?: AgentOptions["getApiKey"];
   /**
    * system prompt 的两张表：段（按名）与变量（按名）。**只经 `AgentPrompt` registry 写**
@@ -739,6 +754,7 @@ export class Agent {
       compaction: opts.compaction?.builtin === false ? undefined : defaultCompactionPack(opts.compaction ?? {}, () => this._state.messages),
     };
     this.maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    this.maxReplies = opts.maxReplies ?? DEFAULT_MAX_REPLIES;
     this.timeoutMs = opts.timeoutMs;
     this.retryPolicy = opts.retryPolicy ?? DEFAULT_RETRY_POLICY;
     this.maxRetryDelayMs = opts.maxRetryDelayMs;
@@ -2231,7 +2247,16 @@ export class Agent {
     try {
       await this.processEvents({ type: "message_start", role: "assistant" });
       await this.processEvents({ type: "message_end", message: failure });
-      await this.processEvents({ type: "turn_end", iteration: this._state.iteration, message: failure as never, toolResults: [] });
+      // 收还开着的层（attempt → turn → reply），配对不缺一拍；没开的不补
+      const open = this.openLayers;
+      const result: AttemptResult = aborted ? { kind: "aborted" } : { kind: "failed", error: err };
+      if (open.turnId !== null && open.attempt !== null) {
+        await this.processEvents({ type: "attempt_end", turnId: open.turnId, attempt: open.attempt, result });
+      }
+      if (open.turnId !== null) await this.processEvents({ type: "turn_end", turnId: open.turnId, result, toolResults: [] });
+      if (open.replyId !== null) {
+        await this.processEvents({ type: "reply_end", replyId: open.replyId, outcome, final: null, turns: this._state.iteration });
+      }
       await this.processEvents({ type: "agent_end", outcome });
       return { outcome, messages: [failure] };
     } catch (sinkError) {
@@ -2490,12 +2515,20 @@ export class Agent {
             if (admitted.length > 0) return admitted;
           }
         },
-        closeRun: () => this.reportUnconsumed(this.intake.closeRun(), "run 结束"),
+        // 门里剩的 + loop 已 drain 却没吸收的（turn 交出的 steer、达 reply 上限时 drain 出的 followUp）一起报
+        closeRun: (extra) => {
+          const left = this.intake.closeRun();
+          this.reportUnconsumed(
+            { steers: [...left.steers, ...(extra?.steers ?? [])], followUps: [...left.followUps, ...(extra?.followUps ?? [])] },
+            "run 结束",
+          );
+        },
       },
       toolExecution: this.toolExecution,
       hooks: this.hooks,
       hookContext: this.hookContext(),
       maxIterations: this.maxIterations,
+      maxReplies: this.maxReplies,
       timeoutMs: this.timeoutMs,
       retryPolicy: binding.retryPolicy,
       // 阶段每次流水线跑之前重取——registry 里装卸的策略在轮边界生效
@@ -2688,12 +2721,30 @@ export class Agent {
     switch (input.type) {
       case "agent_start":
         this._state.status = "generating";
+        this.openLayers = { replyId: null, turnId: null, attempt: null };
         // 运行状态落盘（2026-09-03）：只在 idle ↔ working 这条边上写，generating / acting / compacting
         // 是 working 的子态——别人只关心「现在问它，它能马上答吗」。
         this.publishPhase("working");
         break;
+      case "reply_start":
+        this.openLayers.replyId = input.replyId;
+        break;
+      case "reply_end":
+        this.openLayers.replyId = null;
+        break;
       case "turn_start":
-        this._state.iteration = input.iteration;
+        // iteration = turnId 的 n（该 turn 在它的 reply 里的序号）
+        this._state.iteration = turnNumberOf(input.turnId);
+        this.openLayers.turnId = input.turnId;
+        break;
+      case "turn_end":
+        this.openLayers.turnId = null;
+        break;
+      case "attempt_start":
+        this.openLayers.attempt = input.attempt;
+        break;
+      case "attempt_end":
+        this.openLayers.attempt = null;
         break;
       case "message_start":
         this._state.status = "generating";
@@ -2827,18 +2878,19 @@ export class Agent {
 
   /**
    * AgentEvent 到达时刻的 scope（fact-sink 的 scope 供给）：run 归属只在 permit 期间有效（`activeRun` 落位到 `closeRun()`），
-   * turn 归属跟 `_state.iteration`，与 `projectAgentEvent` 里 turn span 自带的 `t<iteration>` 同一格式。**必须返回对象**：
+   * turn 归属跟 gate 里开着的 turnId——loop 产的那一个，与 `projectAgentEvent` 里 turn span 的 scope 同一份。**必须返回对象**：
    * 供给返回 undefined 会被 sink 判成「run 归属不可知」而开 gap。
    */
   private observationScope(): Readonly<Record<string, string>> {
     const runId = this.activeRun !== undefined && this.currentRunId !== null ? this.currentRunId : undefined;
+    const turnId = this.intake.activeTurnId;
     return {
       agentId: this.agentId,
       agentInstanceId: this.agentInstanceId,
       ...(this._state.sessionId === null ? {} : { sessionId: this._state.sessionId }),
       ...(runId === undefined ? {} : { runId }),
       // turn 归属只在 turn 开着时补：agent_end 这类 turn 之外的事实不能被记成「最后一个 turn 里的」
-      ...(runId !== undefined && this.intake.activeTurnId !== null && this._state.iteration > 0 ? { turnId: `t${this._state.iteration}` } : {}),
+      ...(runId !== undefined && turnId !== null ? { turnId } : {}),
     };
   }
 
@@ -2878,7 +2930,7 @@ export class Agent {
       agent: {
         status: this._state.status,
         activeRunId: runId,
-        activeTurnId: this._state.iteration > 0 ? `t${this._state.iteration}` : null,
+        activeTurnId: this.intake.activeTurnId,
         iteration: this._state.iteration,
         messageCount: this._state.messages.length,
       },

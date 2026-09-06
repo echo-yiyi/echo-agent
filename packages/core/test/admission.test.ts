@@ -239,7 +239,7 @@ test("终态之后 listener 抛错（agent_end 已应用、executor 因此 rejec
   expect((await agent.prompt("again")).outcome.kind).toBe("completed");
 });
 
-test("终态之前 listener 抛错（agent_start 就炸）：normalizer 合成 message_start → message_end → turn_end → agent_end，恰好一个 agent_end", async () => {
+test("终态之前 listener 抛错（agent_start 就炸）：runLoop 在 finally 里封口 agent_end，Agent 不再合成第二个；没开过的层不补", async () => {
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("ok")]) });
   const events: string[] = [];
   let armed = true;
@@ -253,7 +253,29 @@ test("终态之前 listener 抛错（agent_start 就炸）：normalizer 合成 m
   const result = await agent.prompt("go");
   expect(result.outcome).toMatchObject({ kind: "error", error: { code: "internal", message: "listener 在开头炸了" } });
   expect(events.filter((t) => t === "agent_end")).toHaveLength(1);
-  expect(events.slice(-4)).toEqual(["message_start", "message_end", "turn_end", "agent_end"]);
+  // reply / turn / attempt 一个都没开（agent_start 就炸），所以一个 *_end 都不合成——配对由结构成立，不靠外层补
+  expect(events).toEqual(["agent_start", "agent_end"]);
+  expect(agent.status).toBe("idle");
+});
+
+test("终态之前 listener 抛错（attempt 中途炸）：Agent 按序收掉开着的 attempt → turn → reply，恰好一个 agent_end", async () => {
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("ok")]) });
+  const events: string[] = [];
+  let armed = true;
+  agent.subscribe((e) => {
+    events.push(e.type);
+    // attempt_end 上炸：runAttempt 的 catch 已经过了（它只兜 callModel），异常从 emit 穿出 runLoop 的 finally
+    if (e.type === "attempt_end" && armed) {
+      armed = false;
+      throw new Error("listener 在 attempt_end 炸了");
+    }
+  });
+  const result = await agent.prompt("go");
+  expect(result.outcome).toMatchObject({ kind: "error", error: { code: "internal" } });
+  expect(events.filter((t) => t === "agent_end")).toHaveLength(1);
+  expect(events.filter((t) => t === "turn_end")).toHaveLength(1);
+  expect(events.filter((t) => t === "reply_end")).toHaveLength(1);
+  expect(events.slice(-3)).toEqual(["turn_end", "reply_end", "agent_end"]);
 });
 
 test("Inbox：同一个 message 对象投递两次 = 两条事实、两个 recordId、一次批量 run，最终没有 reservation 泄漏", async () => {

@@ -202,7 +202,7 @@ transformContext 内修改 messages[0].content[0].text
 
 `contextBeforeBuild` 被列入 hook runtime 的可拦截事件，类型允许 `continue / block / patch`，见 [`INTERCEPTABLE`](../../packages/core/src/hooks/runtime.ts#symbol=INTERCEPTABLE)。2026-09-01 之前 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 只取 `r.event.messages`、不读 `r.decision`——hook 说别调模型，模型照调，run 还是 `completed`。
 
-现在的语义：block = **这一轮不发**。`runTurn` 抛 [`ContextBuildBlocked`](../../packages/core/src/loop/run-turn.ts#symbol=ContextBuildBlocked)，`runLoop` 把它折成 `{ kind: "aborted", reason }`（reason 透传自 hook），模型不被调用，transcript 里**不合成** assistant 消息（什么都没说过，账本里就不该有一条）。选 aborted 而不是 error：这不是故障，是有人在送模前叫停，和 `userPromptSubmit` 的 block 同一档。判据见 [block 不调模型](../../packages/core/test/prompt.test.ts#test=contextbeforebuild-返回-block不调模型run-以-aborted-收场reason-透传transcript-不多一条)。
+现在的语义：block = **这个 attempt 不发**。[`runAttempt`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt) 把它折成 `AttemptResult.blocked`（不是异常），turn / reply 逐层收成 `{ kind: "aborted", reason }`（reason 透传自 hook；[Run Loop 的四层](run-loop-layers.md) §6），模型不被调用，transcript 里**不合成** assistant 消息（什么都没说过，账本里就不该有一条）。选 aborted 而不是 error：这不是故障，是有人在送模前叫停，和 `userPromptSubmit` 的 block 同一档。判据见 [block 不调模型](../../packages/core/test/prompt.test.ts#test=contextbeforebuild-返回-block不调模型run-以-aborted-收场reason-透传transcript-不多一条)。
 
 复现（现在应打印 `{ kind: "aborted", reason: "DO_NOT_CALL_MODEL" } 0`）：
 

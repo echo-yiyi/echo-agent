@@ -373,7 +373,7 @@ test("ask → 宿主 allow：ask 的 params 与 execute 收到的是同一份冻
     expect(Object.isFrozen(e.params)).toBe(true);
     expect(Object.isFrozen((e.params as { nested: { y: number[] } }).nested.y)).toBe(true);
     expect(e.runId.startsWith("run:")).toBe(true);
-    expect(e.turnId).toBe(`${e.runId}#1`);
+    expect(e.turnId).toBe(`${e.runId}/1#1`); // loop 产的 turnId：`${replyId}#${n}`
     expect(e.reason).toBe("动手要问");
     void agent.answerPermission({ permissionId: e.permissionId, decision: "allow" }).then((r) => {
       answer = r;

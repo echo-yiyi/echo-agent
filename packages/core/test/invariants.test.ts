@@ -178,7 +178,8 @@ test("steering 在内层轮末被并入，同一次 run 里继续", async () => 
     streamFunction: scriptedStreamFn([textTurn("第一轮"), textTurn("第二轮")]),
   });
   agent.subscribe((e) => {
-    if (e.type === "turn_end" && agent.state.iteration === 1) agent.steer("补充一句");
+    // 在 turn 还开着时插话（assistant 定稿入账那一刻）：turn_end 发出时 turn intake 已经关了（closeTurn 在前），那时再 steer 是 rejected
+    if (e.type === "message_end" && e.message.role === "assistant" && agent.state.iteration === 1) agent.steer("补充一句");
   });
   const events = collect(agent);
   await agent.prompt("开始");
@@ -290,7 +291,8 @@ test("跑的中途注册：本轮菜单不变，下一轮才出现（工具每�
     },
   });
   agent.subscribe((e) => {
-    if (e.type === "turn_end" && agent.state.iteration === 1) {
+    // turn 还开着时（assistant 定稿入账那一刻）注册 + 插话：turn_end 发出时 turn intake 已关，那时 steer 是 rejected
+    if (e.type === "message_end" && e.message.role === "assistant" && agent.state.iteration === 1) {
       registerTool(agent.tools, late);
       agent.steer("继续"); // 逼出第二轮
     }

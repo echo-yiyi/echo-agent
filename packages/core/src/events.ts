@@ -13,6 +13,7 @@ import type { AgentError } from "./errors.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage, Usage } from "./messages.ts";
 import type { AgentToolResult } from "./tools/types.ts";
 import type { CompactionReason, CompactionState } from "./compaction/types.ts";
+import type { AttemptResult, ReplySource, TurnCause } from "./loop/types.ts";
 
 /* ══════════════════ 1. ProviderEvent ══════════════════ */
 
@@ -39,9 +40,8 @@ export type ProviderEvent =
   | { type: "toolcall_start"; toolCallId: string; name: string }
   | { type: "toolcall_delta"; argsText: string }
   | { type: "toolcall_end" }
-  /* 在途异象，不终结生成 */
+  /* 在途异象，不终结生成（重试不在流里：一次 stream = 一次请求，重试是 loop 的下一个 attempt） */
   | { type: "warning"; code: string; message: string }
-  | { type: "retry"; code: string; attempt: number; maxAttempts: number; delayMs: number }
   /* 终结二选一 */
   | { type: "done"; message: AssistantMessage }
   | { type: "error"; error: AgentError };
@@ -66,12 +66,16 @@ export type AgentOutcome =
   | { kind: "error"; error: AgentError };
 
 export type CoreAgentEvent =
-  /* 任务 */
+  /* 四层（docs/design/run-loop-layers.md）：run ⊃ reply ⊃ turn ⊃ attempt，start / end 严格嵌套、每层至少一对。
+     turn 事件不带 iteration——turnId（`${replyId}#${n}`）的 n 就是它（`loop/ids.ts`）。 */
   | { type: "agent_start" }
   | { type: "agent_end"; outcome: AgentOutcome }
-  /* 轮 */
-  | { type: "turn_start"; iteration: number }
-  | { type: "turn_end"; iteration: number; message: AssistantMessage; toolResults: ToolResultMessage[] }
+  | { type: "reply_start"; replyId: string; source: ReplySource }
+  | { type: "reply_end"; replyId: string; outcome: AgentOutcome; final: AssistantMessage | null; turns: number }
+  | { type: "turn_start"; turnId: string; replyId: string; cause: TurnCause }
+  | { type: "turn_end"; turnId: string; result: AttemptResult; toolResults: ToolResultMessage[] }
+  | { type: "attempt_start"; turnId: string; attempt: number }
+  | { type: "attempt_end"; turnId: string; attempt: number; result: AttemptResult }
   /* 消息（由 StreamFn 消费协议产出，见 loop/run-turn.ts） */
   | { type: "message_start"; role: "assistant" }
   | { type: "message_update"; delta: ProviderEvent; message: AssistantMessage }
@@ -83,8 +87,8 @@ export type CoreAgentEvent =
   /* 压缩（`compaction/pipeline.ts`）：start / end 成对；end 带跑完的状态、真正改了状态的阶段名（空 = 没压动）与估算 */
   | { type: "compaction_start"; reason: CompactionReason }
   | { type: "compaction_end"; reason: CompactionReason; compaction: CompactionState; stages: readonly string[]; contextTokens: number }
-  /* 重试与账 */
-  | { type: "retry_scheduled"; attempt: number; maxAttempts: number; delayMs: number; cause: string }
+  /* 重试与账。retry_scheduled 只出现在同一 turn 的 attempt_end{failed} 与下一个 attempt_start 之间；attempt 是即将开始的那个 */
+  | { type: "retry_scheduled"; turnId: string; attempt: number; maxAttempts: number; delayMs: number; cause: string }
   | { type: "usage"; usage: Usage }
   /**
    * 资源面变了（工具注册/卸载、skill 装入/激活）。

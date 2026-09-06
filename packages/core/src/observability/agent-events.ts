@@ -11,6 +11,7 @@
 
 import type { AgentEvent, AgentOutcome } from "../events.ts";
 import type { AgentMessage, ContentBlock } from "../messages.ts";
+import { turnNumberOf } from "../loop/ids.ts";
 import type { CapabilityFactDescriptor, ObservationFactProjection } from "./fact-sink.ts";
 import { ObservationEncodingError, encodeCanonical, projectionEncodingLimits } from "./normalize.ts";
 import type { ObservationCapturePolicy } from "./types.ts";
@@ -235,30 +236,38 @@ export function projectAgentEvent(event: AgentEvent, policy: ObservationCaptureP
       }
       return { ...base, kind: "event", name: "agent.loop.ended", scope: {}, attributes: attrs, body };
     }
-    case "turn_start":
+    // turn span 的 scope.turnId 就是 loop 产的 turnId（与 Agent 的观测 scope 供给、permission 引用的同一份）；
+    // iteration 从它的 n 取（`loop/ids.ts`），不另外算
+    case "turn_start": {
+      const iteration = turnNumberOf(event.turnId);
       return {
         ...base,
         kind: "span_start",
         name: SPAN_TURN_EXECUTE,
-        scope: { turnId: `t${event.iteration}` },
-        attributes: { iteration: event.iteration },
-        body: { iteration: event.iteration },
+        scope: { turnId: event.turnId },
+        attributes: { iteration, replyId: event.replyId, cause: event.cause },
+        body: { iteration, replyId: event.replyId, cause: event.cause },
       };
+    }
     case "turn_end": {
+      const iteration = turnNumberOf(event.turnId);
+      const landed = event.result.kind === "landed" ? event.result.message : null;
+      const stopReason = landed === null ? event.result.kind : landed.stopReason;
       const body: Record<string, unknown> = {
-        iteration: event.iteration,
-        stopReason: event.message.stopReason,
+        iteration,
+        result: event.result.kind,
+        stopReason,
         toolResultCount: event.toolResults.length,
-        contentBlocks: event.message.content.length,
-        usage: event.message.usage,
+        contentBlocks: landed === null ? 0 : landed.content.length,
+        usage: landed === null ? null : landed.usage,
       };
-      if (event.message.error !== undefined) body.errorCode = event.message.error.code;
+      if (event.result.kind === "failed") body.errorCode = event.result.error.code;
       return {
         ...base,
         kind: "span_end",
         name: SPAN_TURN_EXECUTE,
-        scope: { turnId: `t${event.iteration}` },
-        attributes: { iteration: event.iteration, stopReason: event.message.stopReason, toolResultCount: event.toolResults.length },
+        scope: { turnId: event.turnId },
+        attributes: { iteration, result: event.result.kind, stopReason, toolResultCount: event.toolResults.length },
         body,
       };
     }

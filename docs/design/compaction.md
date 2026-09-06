@@ -77,7 +77,7 @@ system                       不变，每 run 装配一次，不含摘要
 | reason | 入口 | 阈值 |
 | --- | --- | --- |
 | `auto` | 每轮轮首（`runLoop`） | `used ≥ target` 才跑；目录没标 `contextWindow` 就永不自动压 |
-| `overflow` | 本轮 provider 报 `context_overflow` 之后 | 无视阈值；**一个 run 只准一次**，成功就 `iteration -= 1` 重跑本轮，否则按 error 收场 |
+| `overflow` | 本 attempt provider 报 `context_overflow` 之后 | 无视阈值；**一个 run 只准一次**，成功就同一 turn 的下一个 attempt（[Run Loop 的四层](run-loop-layers.md) §2.3），否则按 error 收场 |
 | `manual` | `Agent.compact(instructions?)`（TUI `/compact`） | 无视阈值；走 admission 拿 permit（忙时 rejected），但不是一个 run：没有 agent_start / agent_end |
 
 **预算**（`compactionBudget()`）：

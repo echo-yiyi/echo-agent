@@ -12,16 +12,16 @@ Timeline
   +0ms      run.assembly
   +1ms      run.started
   +1ms        agent.loop.started
-  +2ms        turn.execute …  iteration=1
+  +2ms        turn.execute …  cause=input iteration=1 replyId=run:fixed/1
   +3ms          model.generate …  role=assistant
   +10ms         model.generate 7ms  hasError=false role=assistant stopReason=tool_use
   +11ms         tool.execute …  toolCallId=c1 toolName=ping
   +25ms         tool.execute 14ms  isError=false toolCallId=c1 toolName=ping
-  +30ms       turn.execute 28ms  iteration=1 stopReason=tool_use toolResultCount=1
-  +31ms       turn.execute …  iteration=2
+  +30ms       turn.execute 28ms  iteration=1 result=landed stopReason=tool_use toolResultCount=1
+  +31ms       turn.execute …  cause=tool_use iteration=2 replyId=run:fixed/1
   +32ms         model.generate …  role=assistant
   +120ms        model.generate 88ms  hasError=false role=assistant stopReason=end_turn
-  +121ms      turn.execute 90ms  iteration=2 stopReason=end_turn toolResultCount=0
+  +121ms      turn.execute 90ms  iteration=2 result=landed stopReason=end_turn toolResultCount=0
   +122ms      agent.loop.ended  status=completed
   +131ms    run.closed
 Final State         status generating · iteration 2 · messages 5 · runtime ready/ready · capabilities 0

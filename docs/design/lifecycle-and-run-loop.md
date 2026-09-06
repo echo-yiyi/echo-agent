@@ -133,6 +133,8 @@ Standalone admission 同时只发一个执行许可。用户与 inbox 属于 for
 
 ## 3. 一次 run 的主循环
 
+> **2026-09-05 起本节与 §4 描述的是 2026-08-31 的现状，已被 [Run Loop 的四层](run-loop-layers.md) 取代**：run ⊃ reply ⊃ turn ⊃ attempt，重试归 loop、`maxIterations` 按 reply 计、run 级 `maxReplies`。下文保留作审阅记录，不再维护。
+
 ```mermaid
 flowchart TD
     A["admission 接受工作"] --> B["打开 run intake，状态设为 generating"]
@@ -166,7 +168,7 @@ flowchart TD
 - 当前任务稳定结束后有 `followUp`：留在同一 run，继续 outer loop。
 - 没有 follow-up 时，stop hook 最多可以注入三次继续工作；上限由 [`MAX_STOP_CONTINUATIONS`](../../packages/core/src/loop/run-loop.ts#symbol=MAX_STOP_CONTINUATIONS) 硬编码。
 
-这些分支的决策顺序见 [`decideAfterTurn()`](../../packages/core/src/loop/run-loop.ts#symbol=decideAfterTurn)。顺序本身是行为契约：例如先决定 `tool_use`，再关闭并排空 steer intake，最后才判定任务稳定结束。
+这些分支的决策顺序当时在 `decideAfterTurn()`（2026-09-05 已并入 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply)）。顺序本身是行为契约：例如先决定 `tool_use`，再关闭并排空 steer intake，最后才判定任务稳定结束。
 
 ### 3.2 Run intake 的原子边界
 
@@ -175,6 +177,8 @@ flowchart TD
 run 结束时不是先检查“队列看起来为空”再异步关闭，而是通过 `tryCloseRun()` 在同一同步边界完成最后一次 drain 与关门。这是 late follow-up 不丢失的关键判据。
 
 ## 4. 一个 turn 的执行顺序
+
+> 现状快照（2026-08-31），已被 [Run Loop 的四层](run-loop-layers.md) §2.3–§2.4 取代；§4.1 的 `parallel` 结论仍有效。
 
 每个 turn 按以下顺序执行，见 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn)：
 
@@ -282,7 +286,7 @@ STATUS_AFTER_PROMPT=idle
 | 性质 | 机器判据 |
 | --- | --- |
 | lifecycle 命令串行、停止幂等、丢锁后拒绝工作 | [并发 start 共享一次启动](../../packages/core/test/lifecycle-guard.test.ts#test=并发两个-start-共享同一次启动都成功)、[start/stop 幂等](../../packages/core/test/lifecycle-guard.test.ts#test=stop-幂等start-幂等)、[丢锁成为终态](../../packages/core/test/lifecycle-guard.test.ts#test=丢锁之后-phase-变-lost不能再-start) |
-| run admission 单 permit、优先级、回调失败终止化 | [Standalone admission conformance](../../packages/core/test/admission.test.ts#test=conformancestandalonerunadmission-通过)、[终态前回调失败仍完整封口](../../packages/core/test/admission.test.ts#test=终态之前-listener-抛错agentstart-就炸normalizer-合成-messagestart-messageend-turnend-agentend恰好一个-agentend) |
+| run admission 单 permit、优先级、回调失败终止化 | [Standalone admission conformance](../../packages/core/test/admission.test.ts#test=conformancestandalonerunadmission-通过)、[终态前回调失败仍完整封口](../../packages/core/test/admission.test.ts#test=终态之前-listener-抛错agentstart-就炸runloop-在-finally-里封口-agentendagent-不再合成第二个没开过的层不补) |
 | steer / followUp 的接受窗口与原子关闭 | [RunIntakeGate 原子裁决](../../packages/core/test/intake.test.ts#test=runintakegate裁决与入队同一同步步关门那一刻队列里的全部交出之后的一律-rejected) |
 | tool/hook 的 turn snapshot 边界 | [本轮注册的工具下一轮才可用](../../packages/core/test/seams.test.ts#test=本轮中途注册的工具即使被同一条消息点中也不执行下一轮才可用) |
 | agent / turn / message / tool 事件基本配对 | [规范后端的 start/end 成对](../../packages/core/test/invariants.test.ts#test=规范后端start-在前end-在后成对)、[工具调用与结果入账](../../packages/core/test/invariants.test.ts#test=模型要工具-继续内层工具结果入账) |

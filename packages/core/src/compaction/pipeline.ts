@@ -63,7 +63,7 @@ export function modelCallFor(deps: LoopDeps): CompactionModelCall {
     const stream = await streamFn(
       config.model,
       { systemPrompt, messages: llm, tools: [] },
-      { signal, apiKey, thinkingLevel: "off", maxRetryDelayMs: config.maxRetryDelayMs },
+      { signal, apiKey, thinkingLevel: "off" },
     );
     for await (const _item of stream) {
       /* 只要定稿；流式增量不外发 */
@@ -185,7 +185,9 @@ export function createCompactor(deps: LoopDeps): {
       if (r?.changed === true) anchor = null;
     },
     noteTurn(turn) {
-      const usage = turn.message.usage;
+      // 只有落地的 turn 有可信的 usage；失败 / block / abort 的没有基准可记
+      if (turn.result.kind !== "landed") return;
+      const usage = turn.result.message.usage;
       if (usage === null) return;
       // usage 量的是「那条 assistant 之前的视图 + 它自己的输出」；它之后入账的 toolResult 按字符估
       const index = deps.context.messages.length - turn.toolResults.length;

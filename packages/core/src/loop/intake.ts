@@ -83,13 +83,13 @@ export class RunIntakeGate {
   }
 
   /**
-   * turn 开门（turn_start 之前）。上一 turn 没经 closeTurn 就开了下一轮——只发生在 provider 重试路径
-   * （同一 iteration 重跑）——它 accepted 的 steer 顺延到新 turn，不丢。
+   * turn 开门（turn_start 之前）。一个 turn 只开一次——重试是同一 turn 的下一个 attempt，不重开；
+   * 上一 turn 没关就开下一个是 loop 的 bug，fail-loud。
    */
   openTurn(turnId: string): void {
     if (this.run === null) throw new Error("RunIntakeGate：run 没开门就开 turn");
-    const carried = this.turn?.steers ?? [];
-    this.turn = { turnId, steers: carried };
+    if (this.turn !== null) throw new Error(`RunIntakeGate：turn ${this.turn.turnId} 还没关门就开了 ${turnId}`);
+    this.turn = { turnId, steers: [] };
   }
 
   /** 轮末原子：drain 本 turn accepted 的 steer 并关 turn intake。之后的 steer() 是 rejected(no-active-turn)。 */

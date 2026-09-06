@@ -95,7 +95,6 @@ src/permission/types.ts#PermissionAskHandle
 src/permission/types.ts#PermissionAuthorizer
 src/prompt/types.ts#PromptSection
 src/provider/dialect.ts#DEFAULT_RETRY_POLICY
-src/provider/dialect.ts#RetryPolicy
 src/provider/dialect.ts#createProviderStreams
 src/provider/lazy.ts#lazyStream
 src/provider/models.ts#CreateProviderOptions

@@ -337,7 +337,7 @@ describe("完整 Runtime：run 内的 Memory 事实由 getRun 取得，run 外�
     expect(memoryFacts.length).toBe(1);
     expect(memoryFacts[0]).toMatchObject({
       name: "memory.mutation.committed",
-      scope: { runId: result.runId, turnId: "t1" },
+      scope: { runId: result.runId, turnId: `${result.runId}/1#1` },
       owner: { status: "known", entryId: "echo:memory" },
       attributes: { operation: "create", outcome: "committed", partition: "memory", mode: "indexed", indexOutcome: "ok" },
     });
