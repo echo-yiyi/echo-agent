@@ -194,11 +194,6 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   editor.onSubmit = (text: string): void => {
     const trimmed = text.trim();
     if (trimmed === "") return;
-    // 有问题在等（`ask_user`）：这行字是回答，不是新的一句话——走 answerQuestion，不进 prompt
-    if (question !== null) {
-      answerQuestionFromText(trimmed);
-      return;
-    }
     // 斜杠命令：从 `slashCommands` 表派发（表见 compactNow 之后——菜单、派发、文案同一张表）。
     // 不认识的**报一句并把原文放回**，不发给模型——拼错命令静默变成一条消息，
     // 就是「写了没生效」在对话里的形态。
@@ -213,6 +208,13 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       editor.setText(text);
       transcript.push({ kind: "notice", text: `不认识的命令 /${name}（有 ${slashMenuText}）` });
       rerender();
+      return;
+    }
+    // 有问题在等（`ask_user`）：这行字是回答，不是新的一句话——走 answerQuestion，不进 prompt。
+    // 放在斜杠派发之后：等答的时候 /clear、/model 照样是命令，不能被当成回答送给模型。
+    if (question !== null) {
+      editor.addToHistory(trimmed); // 长回答也要 ↑ 翻得回来
+      answerQuestionFromText(trimmed);
       return;
     }
     if (busy()) {
@@ -250,7 +252,8 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   /**
    * **提问**（`ask_user`，2026-09-05）：协议里与权限询问平行的另一支——那是壳子拦工具的工程机制，
    * 这是模型主动调的工具；回答只能来自 `answerQuestion()`。摆法：问题压在输入行上方，
-   * 单选有选项时用选择器（↑/↓、数字直选、回车），多选打序号、想自己说就在输入行打字，回车发。
+   * 单选有选项时用选择器（↑/↓、回车），或在输入行打序号 / 自己的话再回车；多选打序号串。数字不直答——
+   * 以数字开头的自由文本会被吞掉第一个字。
    * 一次只有一条（工具执行串行）；Esc 仍是中断那一轮，不是撤问题——撤了模型还在等。
    */
   type PendingQuestion = { questionId: string; question: string; options: readonly { label: string; description?: string }[]; multiSelect: boolean };
@@ -528,11 +531,19 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     if (q === null) return;
     const parts = text.split(/[\s,，、]+/).filter((s) => s !== "");
     if (q.options.length > 0 && parts.length > 0 && parts.every((n) => /^\d+$/.test(n))) {
-      const picked = [...new Set(parts.map((n) => q.options[Number(n) - 1]?.label))];
-      if (picked.every((l): l is string => l !== undefined) && (q.multiSelect || picked.length === 1)) {
-        answerQuestion(picked);
+      const picked = [...new Set(parts.map((n) => q.options[Number(n) - 1]?.label))].filter((l): l is string => l !== undefined);
+      // 全是序号但对不上（越界 / 单选给了多个）：放回输入行说一句，**不**当自由文本送出去——「9」不是回答
+      if (picked.length !== new Set(parts).size || (!q.multiSelect && picked.length !== 1)) {
+        editor.setText(text);
+        transcript.push({
+          kind: "notice",
+          text: !q.multiSelect && picked.length > 1 ? "[提问] 这个问题只能选一项" : `[提问] 没有这个序号（1 到 ${q.options.length}）`,
+        });
+        rerender();
         return;
       }
+      answerQuestion(picked);
+      return;
     }
     answerQuestion([], text);
   };
@@ -734,7 +745,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         for (const line of wrapForWidth(clean(question.question), inner)) lines.push(`${ESC}[35m│ ${line}${ESC}[39m`);
         if (questionList !== null) {
           lines.push(...questionList.render(width));
-          lines.push(dim("↑/↓ 选 · 数字直选 · 回车确认 · 或直接打字回答"));
+          lines.push(dim("↑/↓ 选 · 回车确认 · 或输入序号 / 直接打字回答，回车发送"));
         } else if (question.options.length > 0) {
           question.options.forEach((o, i) => {
             for (const line of wrapForWidth(clean(`${i + 1}. ${o.label}${o.description === undefined ? "" : `  ${o.description}`}`), inner)) lines.push(`  ${line}`);
@@ -781,23 +792,15 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         if (keys.matches(data, "app.permission.allow")) return answer("allow");
         if (keys.matches(data, "app.permission.deny")) return answer("deny");
       }
-      // 单选提问、输入行为空：数字直答，↑/↓/回车交给选择器；其它键（打字、Esc 中断、Ctrl+C/D）照常走下面
-      if (question !== null && questionList !== null && editor.getText() === "") {
-        const printable = decodeKittyPrintable(data) ?? data;
-        if (/^[1-9]$/.test(printable)) {
-          const opt = question.options[Number(printable) - 1];
-          if (opt !== undefined) {
-            answerQuestion([opt.label]);
-            return;
-          }
-        }
-        if (isListNavKey(data)) {
-          questionList.handleInput(data);
-          rerender();
-          return;
-        }
+      // 单选提问、输入行为空：↑/↓/回车交给选择器；其它键（打字、序号、Esc 中断、Ctrl+C/D）照常走下面。
+      // 数字**不**直答：以数字开头的自由文本（「2 weeks」）会被吞掉第一个字；序号也要回车才算数
+      if (question !== null && questionList !== null && editor.getText() === "" && isListNavKey(keys, data)) {
+        questionList.handleInput(data);
+        rerender();
+        return;
       }
-      if (keys.matches(data, "app.model.select") && setup === null) {
+      // 问题 / 权限在等时不开选择器：两样叠在一起，按键不知道该给谁
+      if (keys.matches(data, "app.model.select") && setup === null && question === null && pending === null) {
         openModelPicker();
         return;
       }
@@ -950,15 +953,15 @@ function summaryOf(params: unknown): string {
   return text.length > 80 ? `${text.slice(0, 79)}…` : text;
 }
 
+/** 提问选择器只吃上下与回车——走键表，不比字节（本文件的纪律，见 `keybindings.ts` 头注）；其余留给输入行与应用级键。 */
+function isListNavKey(keys: ReturnType<typeof installKeybindings>, data: string): boolean {
+  return keys.matches(data, "tui.select.up") || keys.matches(data, "tui.select.down") || keys.matches(data, "tui.select.confirm");
+}
+
 /**
  * 把冻结后的最终参数渲染成一行行文本。**JSON 是唯一诚实的形状**——
  * 换成「人话摘要」就等于在用户和实际要执行的东西之间又加一层解释，那正是盲批的来源。
  */
-/** 提问选择器只吃这几个键：上下与回车。其余（打字、Esc、Ctrl 组合）留给输入行与应用级键。 */
-function isListNavKey(data: string): boolean {
-  return data === "\r" || data === "\n" || data === "\x1b[13u" || data === "\x1b[A" || data === "\x1b[B" || data === "\x1bOA" || data === "\x1bOB";
-}
-
 function paramsText(params: unknown): string {
   if (params === undefined) return "(无参数)";
   try {

@@ -17,12 +17,16 @@ const ARCHIVE_LIMIT = 256;
 export class QuestionLedger {
   private readonly open = new Map<string, OpenEntry>();
   private readonly tombstones = new Map<string, ClosedReason>();
-  private readonly archivedOrder: string[] = [];
   private disposed = false;
 
   /** 还在等人的提问（壳子重挂时据此补摆）。 */
   get pending(): readonly QuestionAsk[] {
     return [...this.open.values()].map((e) => e.ask);
+  }
+
+  /** 这个 id 还开着（登记了、没封口）。`openAsk` 在中止 / 收摊时交回预结算的句柄，调用方据此决定发不发事件。 */
+  isOpen(questionId: string): boolean {
+    return this.open.has(questionId);
   }
 
   /** 登记一次提问：生成 ID、挂 timeout 与 abort。`settled` 恰好 fulfill 一次，绝不 reject。 */
@@ -64,11 +68,8 @@ export class QuestionLedger {
     if (this.disposed) return { kind: "closed", questionId, reason: "runtime-disposed" };
     const entry = this.open.get(questionId);
     if (entry !== undefined) {
-      this.settle(questionId, "answered", {
-        kind: "answered",
-        selected: [...input.selected],
-        ...(input.text !== undefined && input.text !== "" ? { text: input.text } : {}),
-      });
+      // 文字已在 Agent 的 JS 边界归一（去空白、空的不带），这里照收
+      this.settle(questionId, "answered", { kind: "answered", selected: [...input.selected], ...(input.text !== undefined ? { text: input.text } : {}) });
       return { kind: "accepted", questionId, toolCallId: entry.ask.toolCallId };
     }
     const tomb = this.tombstones.get(questionId);
@@ -94,10 +95,11 @@ export class QuestionLedger {
 
   private remember(questionId: string, reason: ClosedReason): void {
     this.tombstones.set(questionId, reason);
-    this.archivedOrder.push(questionId);
-    while (this.archivedOrder.length > ARCHIVE_LIMIT) {
-      const oldest = this.archivedOrder.shift();
-      if (oldest !== undefined) this.tombstones.delete(oldest);
+    // Map 按插入序：满了淘汰最早封口的（没有 run 维度，不需要另一份序表）
+    while (this.tombstones.size > ARCHIVE_LIMIT) {
+      const oldest = this.tombstones.keys().next().value;
+      if (oldest === undefined) break;
+      this.tombstones.delete(oldest);
     }
   }
 }

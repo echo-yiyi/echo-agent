@@ -427,9 +427,24 @@ test("question（ask_user）摆上屏幕：单选按数字直答；没选项的�
   expect(screen).toContain("用哪个测试框架？");
   expect(screen).toContain("1. vitest");
   expect(screen).toContain("2. bun test");
-  expect(screen).toContain("数字直选"); // 提示语写清怎么答
+  expect(screen).toContain("回车确认"); // 提示语写清怎么答
   expect(answered).toEqual([]); // 还没按键，不许替用户答
+  // 等答时斜杠命令照样是命令，不会被当成回答送出去
+  ui.feed("/model");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered).toEqual([]);
+  expect(ui.screen()).toContain("[模型]"); // 真走了派发（没给 configure 的低层用法会说一句）
+  // 序号越界：放回输入行说一句，不当自由文本发
+  ui.feed("9");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered).toEqual([]);
+  expect(ui.screen()).toContain("没有这个序号");
+  ui.feed(CTRL_C); // 清掉放回的「9」
+  // 序号 + 回车才算数：数字不直答，以数字开头的自由文本不能被吞掉第一个字
   ui.feed("2");
+  ui.feed(ENTER);
   await flush();
   expect(answered).toEqual([{ questionId: "q1", selected: ["bun test"] }]);
   expect(ui.screen()).not.toContain("1. vitest"); // 答完撤掉

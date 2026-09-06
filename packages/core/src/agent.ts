@@ -889,7 +889,9 @@ export class Agent {
     ) {
       throw new TypeError("answerQuestion：需要 { questionId: string, selected: string[], text?: string }，且选项与文字至少给一样");
     }
-    return this.questions.answer(input);
+    // 文字在这道 JS 边界上归一：去首尾空白，空的不带——账本与工具都不再各判一次
+    const text = input.text?.trim();
+    return this.questions.answer({ questionId: input.questionId, selected: input.selected, ...(text !== undefined && text !== "" ? { text } : {}) });
   }
 
   /** 壳子重挂时补摆：还在等人的提问。 */
@@ -904,8 +906,13 @@ export class Agent {
    */
   private async askQuestion(input: Omit<QuestionAsk, "questionId">, signal: AbortSignal | undefined): Promise<QuestionSettlement> {
     const policy = this.questionPolicy;
-    if (policy.responder === "none" || !this.hooks.hasSubscribers()) return { kind: "unanswered", reason: "no-responder" };
+    // 与权限那边同一口径：等人不超时（null）却没人订阅 → 不开 ask；有超时的可以开着等到点
+    if (policy.responder === "none" || (policy.askTimeoutMs === null && !this.hooks.hasSubscribers())) {
+      return { kind: "unanswered", reason: "no-responder" };
+    }
     const handle = this.questions.openAsk(input, { timeoutMs: policy.askTimeoutMs ?? null, signal: signal ?? this.signal ?? new AbortController().signal });
+    // 进 ask 那一刻 run 已在中止 / Agent 已收摊：句柄是预结算的、没登记过——不发事件，壳子不该摆出一个从没 pending 过的问题
+    if (!this.questions.isOpen(handle.questionId)) return handle.settled;
     await this.hooks.notify({ type: "question", ...handle.ask }, this.hookContext());
     const settlement = await handle.settled;
     if (settlement.kind === "unanswered" && settlement.reason !== "no-responder") {
@@ -3031,11 +3038,14 @@ export class Agent {
 function validateQuestionPolicy(p: QuestionPolicy | undefined): QuestionPolicy {
   if (p === undefined) return { responder: "none", askTimeoutMs: null };
   if (p.responder !== "host" && p.responder !== "none") throw new Error('questions.responder 必须是 "host" 或 "none"');
-  const t = p.askTimeoutMs;
-  if (t !== undefined && t !== null && (typeof t !== "number" || !Number.isFinite(t) || t <= 0)) {
-    throw new Error("questions.askTimeoutMs 必须是正数（毫秒）或 null（等人不超时）");
-  }
-  return { responder: p.responder, askTimeoutMs: t ?? null };
+  const t = p.askTimeoutMs ?? null;
+  assertAskTimeoutMs(t, "questions.askTimeoutMs");
+  return { responder: p.responder, askTimeoutMs: t };
+}
+
+/** ask 超时的**唯一**验形：权限与提问同一条规则（正整数毫秒或 null），两边不各写各的。 */
+function assertAskTimeoutMs(t: unknown, label: string): void {
+  if (t !== null && (!Number.isInteger(t) || (t as number) <= 0)) throw new Error(`${label} 必须是正整数毫秒或 null，收到 ${String(t)}`);
 }
 
 function normalizePrompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): AgentMessage[] {
@@ -3058,9 +3068,7 @@ const ALLOW_ALL_PERMISSION: PermissionPolicy = Object.freeze({
 function validatePermissionPolicy(policy: PermissionPolicy | undefined): PermissionPolicy {
   if (policy === undefined) return ALLOW_ALL_PERMISSION;
   const t = policy.askTimeoutMs;
-  if (t !== null && (!Number.isInteger(t) || t <= 0)) {
-    throw new Error(`permission.askTimeoutMs 必须是正整数毫秒或 null，收到 ${String(t)}`);
-  }
+  assertAskTimeoutMs(t, "permission.askTimeoutMs");
   // responder 运行时穷举：TS 的字面量联合挡不住 JS 调用方；"bogus" 既不走 host 检查也不走 none 折叠，
   // 最后就是一个永远等不到人的 ask（实测）。
   if (policy.responder !== undefined && policy.responder !== "host" && policy.responder !== "none") {

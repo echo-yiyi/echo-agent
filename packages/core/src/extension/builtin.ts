@@ -230,7 +230,7 @@ export const ECHO_COMPACTION: ExtensionDefinition<CompactionPackConfig> = define
 });
 
 /**
- * 内建工具按能力分的四组。`Agent` 造好它们，装配层拿去 mount。
+ * 内建工具按能力分组。`Agent` 造好它们，装配层拿去 mount。
  *
  * **`undefined` = 这个能力压根不在**（没给 memory / 没给 schedule），与「在但零工具」
  * （空数组）是两件事——见 `builtinEntries()`。

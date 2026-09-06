@@ -266,7 +266,8 @@ export function echoOptions(
     ...(opts.extensionDirs.length > 0 ? { extensionDirs: opts.extensionDirs } : {}),
     // 提问（`ask_user`，2026-09-05）：有人坐在终端前就 `host`（壳子摆出来等答），管道 / CI 没人可答就 `none`——
     // 工具当场如实回话、不等人。与权限策略是两条通道：那条由产品 preset 定，这条由形态定。
-    agent: { ...(preset.agent ?? {}), questions: { responder: form.interactive ? "host" : "none", askTimeoutMs: null } },
+    // 产品 preset 自己定了 questions 就用它的（类型允许，不能静默盖掉）；没定才按形态给
+    agent: { ...(preset.agent ?? {}), questions: preset.agent?.questions ?? { responder: form.interactive ? "host" : "none", askTimeoutMs: null } },
     // `echo-agent` 恒挂的两段（纪律、项目指令）在前，产品自带的在后。顺序只影响 `echo.extensions`
     // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。
     extensions: [conductEntry(), instructionsEntry(), ...(preset.extensions ?? [])],

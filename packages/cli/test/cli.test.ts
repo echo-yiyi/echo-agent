@@ -817,6 +817,17 @@ test("CLI 打开会话面、但不给 runner：模型能看见别的会话、能
     undefined,
   );
   expect(piped.agent?.questions).toEqual({ responder: "none", askTimeoutMs: null });
+  // 产品 preset 自己定了 questions 就不被形态盖掉（类型允许它定，静默盖掉就是「接受配置又忽略」）
+  const custom = echoOptions(
+    { name: "p", version: "0", preset: () => ({ agent: { questions: { responder: "host", askTimeoutMs: 5000 } } }) },
+    { interactive: false, credentials },
+    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    kimiProvider(),
+    [],
+    credentials,
+    undefined,
+  );
+  expect(custom.agent?.questions).toEqual({ responder: "host", askTimeoutMs: 5000 });
   expect(built.sessions?.run).toBeUndefined();
 });
 

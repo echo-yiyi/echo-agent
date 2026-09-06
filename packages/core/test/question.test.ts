@@ -48,7 +48,7 @@ test("有人答（host + 订阅者）：发 question 事件、pendingQuestions �
     if (e.type !== "question") return;
     seen = e;
     expect(agent.pendingQuestions.map((q) => q.questionId)).toEqual([e.questionId]);
-    void agent.answerQuestion({ questionId: e.questionId, selected: ["B"], text: "" });
+    void agent.answerQuestion({ questionId: e.questionId, selected: ["B"], text: "   " }); // 空白文字在边界上归一掉
   });
   const r = await agent.prompt("go");
   expect(r.outcome.kind).toBe("completed");
@@ -72,10 +72,14 @@ test("自由文本回答：选项与文字都回给模型", async () => {
   expect(toolResult(agent)).toEqual({ isError: false, content: "User said: neither, use C" });
 });
 
-test("声明了 host 但没人订阅 lifecycle：与权限那边同一口径，当场回没人能答", async () => {
+test("声明了 host 但没人订阅 lifecycle：等人不超时的当场回没人能答；给了超时的开着等到点（与权限那边同一口径）", async () => {
   const agent = await agentWith({ responder: "host" });
   await agent.prompt("go");
   expect(toolResult(agent).content).toContain("Nobody can answer");
+
+  const patient = await agentWith({ responder: "host", askTimeoutMs: 20 });
+  await patient.prompt("go");
+  expect(toolResult(patient).content).toContain("did not answer in time");
 });
 
 test("等人时 run 被中止：工具回 aborted、发 questionCancelled(run-aborted)；超时同理（timed-out）", async () => {
