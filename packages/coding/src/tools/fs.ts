@@ -62,6 +62,8 @@ function readFileTool(seen: SeenFiles): ModelTool<{ path: string; offset?: numbe
     kind: "model",
     name: "read_file",
     label: "读文件",
+    // 只读：模型一口气读五个文件时同批同跑。`seen` 只按路径记一条 mtime，同批互不覆盖。
+    concurrent: true,
     description:
       "Read a file with line numbers. Use offset/limit to read a large file in parts. Read a file before editing it.",
     parameters: {

@@ -29,6 +29,10 @@ import type { AgentToolResult } from "../tools/types.ts";
  * `permissionRequest` **不在**这里：授权只能来自正式 authorization stage，
  * hook 对 permission 生命周期事件只能观察——留在可拦截集里，`block` 就是第二条 deny 路径，
  * `patch` 就能改掉已冻结的参数。
+ *
+ * **同一批并行工具内，`preToolUse` / `postToolUse` 可能并发，hook 作者不能假设批内顺序**
+ * （工具自己声明 `concurrent`；见 docs/decisions/implemented/2026-09-07-parallel-tools.md）。
+ * 每个工具各跑各的一遍，按 `toolCallId` 配对；批与批之间仍是顺序的。
  */
 export const INTERCEPTABLE = [
   "preToolUse",

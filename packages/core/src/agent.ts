@@ -169,7 +169,6 @@ export type AgentOptions = {
   maxRetryDelayMs?: number;
   /** 压缩：触发阈值、内建阶梯的参数、要不要内建那组（`compaction/types.ts`）。策略本身经 `AgentCompaction` registry 注册。 */
   compaction?: CompactionOptions;
-  toolExecution?: "sequential" | "parallel";
   convertToLlm?: ConvertToLlm;
   transformContext?: TransformContext;
   hooks?: HookRuntime;
@@ -605,7 +604,6 @@ export class Agent {
    */
   private lastCalibration = 1;
   private lastSystemEstimate = 0;
-  public toolExecution: "sequential" | "parallel";
 
   /* 可替换的决策点 */
   public convertToLlm: ConvertToLlm;
@@ -795,7 +793,6 @@ export class Agent {
     this.retryPolicy = opts.retryPolicy ?? DEFAULT_RETRY_POLICY;
     this.maxRetryDelayMs = opts.maxRetryDelayMs;
     this.compaction = opts.compaction ?? {};
-    this.toolExecution = opts.toolExecution ?? "sequential";
     this.convertToLlm = opts.convertToLlm ?? defaultConvertToLlm;
     this.transformContext = opts.transformContext;
     this.streamFunction = opts.streamFunction;
@@ -2802,7 +2799,6 @@ export class Agent {
           );
         },
       },
-      toolExecution: this.toolExecution,
       hooks: this.hooks,
       hookContext: this.hookContext(),
       maxIterations: this.maxIterations,

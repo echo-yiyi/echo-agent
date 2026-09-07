@@ -59,6 +59,7 @@ function globTool(): ModelTool<{ pattern: string; path?: string }> {
     kind: "model",
     name: "glob",
     label: "找文件",
+    concurrent: true, // 只读
     description:
       'Find files by glob pattern, e.g. "**/*.ts" or "src/**/*.test.ts". Returns paths relative to the workspace.',
     parameters: {
@@ -96,6 +97,7 @@ function listDirTool(): ModelTool<{ path?: string }> {
     kind: "model",
     name: "list_dir",
     label: "列目录",
+    concurrent: true, // 只读
     description:
       "List the entries of one directory, not recursive: subdirectories first and marked with a trailing '/'. Default the workspace root. To find files by pattern use glob.",
     parameters: {
@@ -130,6 +132,7 @@ function grepTool(): ModelTool<{ pattern: string; path?: string; glob?: string }
     kind: "model",
     name: "grep",
     label: "找内容",
+    concurrent: true, // 只读
     description:
       "Search file contents with a regular expression; returns file:line:text with paths relative to the workspace. " +
       "path may be a directory (searched recursively, narrowed by glob) or a single file (searched alone).",

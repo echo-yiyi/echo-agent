@@ -54,6 +54,14 @@ type ToolBase<TParams, TMeta> = {
    * 用途只有一个：schema 全塞进每轮请求会先把上下文吃掉，接了 MCP 之后工具一多这是唯一的止损。
    */
   readonly deferred?: boolean;
+  /**
+   * 可与同批的其他工具**同时执行**（2026-09-07 用户拍板，缺省 false = 独占）。与 `deferred` 同一条规矩：
+   * 状态住在工具身上，改缺省 = 改工具的定义。循环只在切批时看一眼这个字段
+   * （`loop/run-turn.ts` 的 `takeBatch`）：同一条 assistant 消息里**连续的** `concurrent` 调用切成一批同跑，
+   * 碰到没标的就断批、它自己一批。缺省保守：有副作用、出网、或对同一份状态读写的工具**不要标**，
+   * 只读的查询类（读文件、搜索）才标。标了之后作者不能再假设批内的 hook 顺序或执行顺序。
+   */
+  readonly concurrent?: boolean;
   execute(params: TParams, ctx: ToolExecutionContext): Promise<AgentToolResult<TMeta>>;
 };
 

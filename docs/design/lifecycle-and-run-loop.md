@@ -22,7 +22,7 @@ run loop 本身已经形成了一条可解释的主线：同一时刻只执行�
 - `Agent.start()` 表示实例启动，`agent_start` 却表示一次 run 开始；同一个词指两件事。
 - 同一个 `Agent` 类存在两种启动契约：带持久化或状态锁时必须先 `start()`，裸内存 Agent 却可以直接 `prompt()`。
 - `Agent.dispose()` 是公开方法，但直接调用不会释放 `StateLock`；生命周期托管的 Agent 必须走 `stop()`。
-- `toolExecution: "parallel"` 被类型和构造函数接受，实际仍逐个 `await`，是一个假能力。
+- ~~`toolExecution: "parallel"` 被类型和构造函数接受，实际仍逐个 `await`，是一个假能力。~~ 2026-09-07 已解决：选项删掉，并不并行改由工具自己声明 `concurrent`，见 §4.1。
 - `abort(reason)` 接收原因，但 run 的 `AgentOutcome` 丢失该原因。
 - `agent_end` 发出时 Agent 还没有回到 `idle`；事件名容易让订阅者误判。
 
@@ -180,7 +180,7 @@ run 结束时不是先检查“队列看起来为空”再异步关闭，而是�
 
 ## 4. 一个 turn 的执行顺序
 
-> 现状快照（2026-08-31），已被 [Run Loop 的四层](run-loop-layers.md) §2.3–§2.4 取代；§4.1 的 `parallel` 结论仍有效。
+> 现状快照（2026-08-31），已被 [Run Loop 的四层](run-loop-layers.md) §2.3–§2.4 取代；§4.1 的结论已在 2026-09-07 落地。
 
 每个 turn 按以下顺序执行，见 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn)：
 
@@ -196,18 +196,16 @@ run 结束时不是先检查“队列看起来为空”再异步关闭，而是�
 
 工具和 hook 在一个 turn 内稳定；turn 进行中新增或移除的注册，只能在下一个 turn 被看见。这条边界已有判据，见 [本轮中途注册的工具下一轮才可用](../../packages/core/test/seams.test.ts#test=本轮中途注册的工具即使被同一条消息点中也不执行下一轮才可用)。
 
-### 4.1 `parallel` 当前是假能力
+### 4.1 并行工具：声明制，已实现
 
-`AgentOptions` 和 `AgentLoopConfig` 都接受 `toolExecution?: "sequential" | "parallel"`，见 [`AgentOptions.toolExecution`](../../packages/core/src/agent.ts#symbol=AgentOptions.toolExecution) 与 [`AgentLoopConfig.toolExecution`](../../packages/core/src/loop/types.ts#symbol=AgentLoopConfig.toolExecution)。但 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 对工具调用固定使用 `for ... await runOneTool(...)`，没有读取该配置。
+审阅时（2026-08-31）`AgentOptions` 与 `AgentLoopConfig` 都接受 `toolExecution?: "sequential" | "parallel"`，而执行循环固定逐个 `await`，从不读它——公开声明了一个不存在的行为。2026-09-07 拍板并已落地，语义逐条见 [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)（起因记录：[移除还是实现](../decisions/implemented/2026-09-01-tool-execution-parallel.md)）：
 
-用两个工具做阻塞探针，即使指定 `parallel`，事件顺序仍是：
+- **`toolExecution` 选项删掉**，并不并行改由工具自己声明 [`ToolBase.concurrent`](../../packages/core/src/tools/types.ts#symbol=ToolBase)（缺省 false = 独占）。
+- 同一条 assistant 消息里**连续的**可并行调用切成一批同跑，碰到没标的就断批、它自己一批；切批见 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 的 `takeBatch`。
+- 批内：`tool_execution_*` 交错（按 `toolCallId` 配对）；**toolResult 入账按 tool_use 出现顺序**，不按完成顺序；授权询问串行（同一时刻只挂一个问）；`preToolUse` / `postToolUse` 每工具各跑一遍，hook 作者不能假设批内顺序。
+- 中止：已起跑的那一批各自收 signal 结束、结果照样入账，剩下的批不跑。
 
-```text
-BEFORE_RELEASE=a:start
-FINAL=a:start,a:end,b:start
-```
-
-这不是“并行实现得不够好”，而是公开声明了一个不存在的行为。审阅结论：在并行语义、取消和结果排序被完整设计并测试前，删除 `"parallel"` 这个可选值；如果保留，就必须把“第二个工具可在第一个未完成时启动”写成测试判据。
+判据在 [并行工具的行为测试](../../packages/core/test/parallel-tools.test.ts#test=两个-concurrent-工具同批第二个的-toolexecutionstart-在第一个的-toolexecutionend-之前)——同一文件里还有反例：[去掉 `concurrent` 就退回逐个跑](../../packages/core/test/parallel-tools.test.ts#test=缺省不并行同样两个探针去掉-concurrent就退回-astart-aend-bstart)。
 
 ## 5. 快照边界与动态边界
 
@@ -293,10 +291,12 @@ STATUS_AFTER_PROMPT=idle
 | tool/hook 的 turn snapshot 边界 | [本轮注册的工具下一轮才可用](../../packages/core/test/seams.test.ts#test=本轮中途注册的工具即使被同一条消息点中也不执行下一轮才可用) |
 | agent / turn / message / tool 事件基本配对 | [规范后端的 start/end 成对](../../packages/core/test/invariants.test.ts#test=规范后端start-在前end-在后成对)、[工具调用与结果入账](../../packages/core/test/invariants.test.ts#test=模型要工具-继续内层工具结果入账) |
 | 公开 lifecycle 方法的类型形状 | [生命周期方法签名快照](../../packages/core/test/lifecycle-api.test.ts#test=生命周期四个方法的签名快照编译期钉死-运行时确实在公共面上) |
+| 并行工具的批边界、结果顺序、询问串行、批中 abort | [同批真的同跑](../../packages/core/test/parallel-tools.test.ts#test=两个-concurrent-工具同批第二个的-toolexecutionstart-在第一个的-toolexecutionend-之前)、[不标就不并行](../../packages/core/test/parallel-tools.test.ts#test=缺省不并行同样两个探针去掉-concurrent就退回-astart-aend-bstart)、[入账按 tool_use 顺序](../../packages/core/test/parallel-tools.test.ts#test=完成顺序倒过来transcript-里-toolresult-仍按-tooluse-顺序)、[询问批内串行](../../packages/core/test/parallel-tools.test.ts#test=同批两个都要-askpendingpermissions-任一时刻-1问的顺序-tooluse-顺序)、[批中 abort 全员入账](../../packages/core/test/parallel-tools.test.ts#test=批中-abort已起跑的各自收-signal-结束每个-tooluse-都有对应的-toolresult记-error) |
+| `echo-coding` 只给只读工具标 `concurrent` | [identity 里的并发名单](../../packages/coding/test/identity.test.ts#test=identity-的工具集与-prompt-与真装出来的-coding-agent-一致漂移即红) |
 
 ### 当前只是纪律或描述
 
-- `toolExecution: "parallel"` 没有实现，也没有行为测试。
+- 「有副作用 / 出网的工具不要标 `concurrent`」是**纪律**：core 不判断工具做什么，标了就并跑。`echo-coding` 那一份名单有机器判据（下表），别的产品自己负责。
 - `dispose()` 不能作为 lifecycle-managed Agent 的公开停止入口，没有类型限制或防误用测试。
 - abort reason 应进入 terminal outcome，没有测试。
 - `agent_end` 与 `idle` 的关系只有实现注释，没有面向订阅者的契约测试。
@@ -308,7 +308,7 @@ STATUS_AFTER_PROMPT=idle
 
 ### 必须在发布前解决
 
-1. **移除或实现 `toolExecution: "parallel"`。** 当前接口假绿，使用者会据此做错误的时延和副作用假设。
+1. ~~**移除或实现 `toolExecution: "parallel"`。** 当前接口假绿，使用者会据此做错误的时延和副作用假设。~~ 2026-09-07 已解决（实现，选项删掉，声明制），见 §4.1。
 2. **收窄收摊入口。** lifecycle-managed Agent 直接 `dispose()` 会留下 lease。倾向让 `dispose()` 非公开，或让它与 `stop()` 共享同一个完整 single-flight 终止过程。
 3. **给两种 lifecycle 分开命名。** 至少不能让 `Agent.start()` 与 `agent_start` 各自表示实例和 run 的开始。
 
@@ -345,10 +345,12 @@ bun test packages/core/test/lifecycle-api.test.ts \
 
 当前全绿。
 
-核实 `parallel` 是否有执行分支和测试：
+核实并行工具真的有执行分支和测试：
 
 ```bash
-rg -n --text 'toolExecution|parallel' packages/core/src packages/core/test
+rg -n --text 'concurrent' packages/core/src/loop packages/core/src/tools/types.ts
+bun test packages/core/test/parallel-tools.test.ts
 ```
 
-当前结果只看到类型、字段和配置透传；执行循环没有 parallel 分支，测试也没有相应行为断言。
+`takeBatch()` 是唯一读 `concurrent` 的地方，行为判据在 `parallel-tools.test.ts`（当前全绿）。
+`toolExecution` 这个词在源码里应当一处都搜不到。

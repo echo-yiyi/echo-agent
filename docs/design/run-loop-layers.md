@@ -3,7 +3,7 @@
 > 状态：已实现（2026-09-05，分支 `worktree-loop-layers`）；四条决策均已拍板，见导读<br>
 > 读者：要改 run loop、订阅事件流做 UI / 观测、或对循环写评测的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) §2–§4 的现状描述。本文只写目标形态；与现状的差异集中在 §7。实现合入后，该稿 §3–§4 指向本文<br>
-> 决策记录（四条，本文只指向，论证在记录里）：[外层单位叫 reply](../decisions/implemented/2026-09-05-reply-layer.md) · [重试归 loop](../decisions/implemented/2026-09-05-retry-owned-by-loop.md) · [失败 attempt 留 transcript](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) · [迭代预算按 reply 计](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)。**相邻但不在本文范围**的已有记录：[abort reason](../decisions/proposed/2026-09-01-abort-reason.md) · [`agent_end` 是否 idle barrier](../decisions/proposed/2026-09-01-agent-end-barrier.md) · [stop hook 三次](../decisions/proposed/2026-09-01-stop-continuation-limit.md) · [`toolExecution: "parallel"`](../decisions/proposed/2026-09-01-tool-execution-parallel.md)
+> 决策记录（四条，本文只指向，论证在记录里）：[外层单位叫 reply](../decisions/implemented/2026-09-05-reply-layer.md) · [重试归 loop](../decisions/implemented/2026-09-05-retry-owned-by-loop.md) · [失败 attempt 留 transcript](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) · [迭代预算按 reply 计](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)。**相邻但不在本文范围**的已有记录：[abort reason](../decisions/proposed/2026-09-01-abort-reason.md) · [`agent_end` 是否 idle barrier](../decisions/proposed/2026-09-01-agent-end-barrier.md) · [stop hook 三次](../decisions/proposed/2026-09-01-stop-continuation-limit.md) · [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)（`toolExecution` 已删，[来源](../decisions/implemented/2026-09-01-tool-execution-parallel.md)）
 
 ## 导读
 
@@ -14,7 +14,7 @@
 **Non-Goals（已决，不做）。**
 
 - Agent 实例生命周期（`start / stop / dispose / phase`）：归 [Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) §1 与它的决策记录。
-- `toolExecution: "parallel"`、stop hook 三次上限、abort reason、`agent_end` 与 idle 的关系：各有记录（见页首），本文的结构让它们更好落，但不替它们拍板。
+- 并行工具（工具自己声明 `concurrent`）、stop hook 三次上限、abort reason、`agent_end` 与 idle 的关系：各有记录（见页首），本文的结构让它们更好落，但不替它们拍板；并行工具已按它自己的记录落地，本文只在 §2.3 说批的边界。
 - tool call 内部的授权等待：仍只在 hook 侧（`waiting_permission`）可见，本文不加 loop 事件。
 - 新事件的落盘范围（session 账本存不存 reply / attempt、观测 journal 存哪些）：归观测层与 session 设计。
 - TUI 怎么展示 reply / attempt：归 TUI 设计。
@@ -83,7 +83,7 @@
 
 - **开**：冻结工作集（工具、已知名、hooks）→ [`openTurn`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openTurn) → `turn_start{cause}`。**一个 turn 只开一次**，重试不重开。
 - **attempt 循环**：落地 → 出循环；失败且 `error.retryable` 且 `attempt < maxAttempts` → `retry_scheduled` → 等待 → 下一个 attempt；失败且 `code === "context_overflow"` 且应急压缩成功 → 下一个 attempt（不发 `retry_scheduled`，压缩事件已说明原因）；其余失败 / block / abort → 出循环。**一个 turn 最多 `maxAttempts` 个 attempt，不分原因。** 退避受 run 的 signal 管：abort / deadline 一到就提前结束等待，不再发起 attempt，turn 以 `aborted` 收场（reply 据 deadline 折成 `error{timeout}`）。
-- **工具批**：只在落地后，按响应顺序逐个 [`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool)；signal 中止则剩下的不跑（现状）。
+- **工具批**：只在落地后。响应里**连续的**可并行调用（工具自己声明 `concurrent`）切成一批同跑，碰到没标的就断批、它自己一批；批与批之间仍是顺序的。批内每个工具走各自的 [`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool)，`tool_execution_*` 交错、按 `toolCallId` 配对，**toolResult 入账按 tool_use 出现顺序**（不按完成顺序），授权询问批内串行。signal 中止：已起跑的那一批各自收 signal 结束、结果照样入账，**剩下的批不跑**。语义逐条见 [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)。
 - **关**：`closeTurn` 交出 steer → `turn_end{result, toolResults}`。gate 的 turn 边界与事件的 turn 边界重合。
 
 ### 2.4 attempt

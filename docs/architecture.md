@@ -81,7 +81,7 @@
 | `Agent` 类内部化 | 仓外只剩 `createEcho()` / `AgentRuntime` / `./testing`；根入口按「有仓外消费者才公开」砍 | [记录](decisions/proposed/2026-09-07-agent-class-internal.md) |
 | 内建五件留 core | 不搬出 `Agent`；按压缩分法；memory 的 registry 等第一个消费者 | [记录](decisions/proposed/2026-09-07-builtin-capabilities-stay-core.md) |
 | 观测的公开线 | 读面 + extension 发口公开，写面内部；观测 store 从写死的路径分支变成可注入的端口 | [记录](decisions/proposed/2026-09-07-observation-public-face.md) |
-| 并行工具 | 工具声明 `concurrent`，连续批；结果按 tool_use 顺序；`toolExecution` 选项删 | [记录](decisions/proposed/2026-09-07-parallel-tools.md) |
+| 并行工具 | 工具声明 `concurrent`，连续批；结果按 tool_use 顺序；`toolExecution` 选项删 | [记录](decisions/implemented/2026-09-07-parallel-tools.md) |
 | 角色定义 | session 的 agent 定义是产品内的角色，不是产品打包；`section(replace)` 与 `restrict()` 两个口 | [记录](decisions/proposed/2026-09-07-role-agent.md) |
 | 记忆三层切法 | 分区与作用域两个轴；路径前缀选层；session 层先落 | [记录](decisions/proposed/2026-09-03-memory-three-scopes.md) |
 | session 的身份 | meta 记 `product`（哪个产品开的）与 `agent`（角色）；`agentId` / `agentName` 退场 | [记录](decisions/proposed/2026-09-07-session-identity.md) |

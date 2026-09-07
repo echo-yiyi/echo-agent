@@ -13,6 +13,14 @@
 //
 // 另一条:**本轮的工具与 hook 在开头定格**。模型看到的菜单、执行到的对象、
 // 拦截它的 handler，整轮（每个 attempt）是同一份；中途的注册/卸载/替换全部归下一轮。
+//
+// 第三条:**并不并行由工具自己声明**（`ToolBase.concurrent`，2026-09-07 拍板，
+// docs/decisions/implemented/2026-09-07-parallel-tools.md）。落地消息里连续的可并行调用切成一批同跑，
+// 碰到没标的就断批、它自己一批。批内的规矩四条，都在下面各自的位置：
+//   - preToolUse / postToolUse 每个工具各跑各的，**hook 作者不能假设批内顺序**；
+//   - `tool_execution_start / end` 会交错，消费者按 `toolCallId` 配对；
+//   - **toolResult 入账按 tool_use 出现顺序**，不按完成顺序；
+//   - 授权询问批内串行（同一时刻只挂一个问），不需要问的照常并行。
 
 import { agentError, errText } from "../errors.ts";
 import type { createCompactor } from "../compaction/pipeline.ts";
@@ -96,14 +104,29 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
       await sleep(delayMs, signal);
     }
 
-    /* ② 工具批：只在落地后 */
+    /* ② 工具批：只在落地后。切批见 takeBatch——连续的 `concurrent` 工具一批同跑，其余一个一批。 */
     if (result.kind === "landed") {
-      for (const use of toolUsesFromMessage(result.message)) {
-        const msg = await runOneTool(use, deps, turnId, n, workset);
-        context.messages.push(msg);
-        await emit({ type: "message_end", message: msg });
-        toolResults.push(msg as ToolResultMessage);
-        if (signal.aborted) break; // 批中断：已跑完的保留，剩下的不跑
+      const uses = toolUsesFromMessage(result.message);
+      for (let i = 0; i < uses.length; ) {
+        const batch = takeBatch(uses, i, workset.tools);
+        i += batch.length;
+        /* 一把只属于这一批的授权闸：同一时刻只挂一个问，其余在批内排队等
+           （不需要问的工具不进闸，照常并行跑）。批与批之间不共用，闸随批消失。 */
+        const askGate = createAskGate();
+        /* **allSettled 而不是 all**：`runOneTool` 只在 emit / hook / intake 自身违约时抛，
+           用 `Promise.all` 时第一个 rejection 会让同批其余的 rejection 无人接管（unhandled rejection，
+           本文件的 raceAbort 已栽过一次）。这里全部消费掉，再按顺序补抛第一个。 */
+        const settled = await Promise.allSettled(batch.map((use) => runOneTool(use, deps, turnId, n, workset, askGate)));
+        // **入账顺序 = tool_use 出现顺序，不是完成顺序**（`context.messages` 与 message_end 都按这个序）
+        for (const one of settled) {
+          if (one.status === "rejected") throw one.reason; // 与逐个 await 时一样：turn 由外层 catch 关成 failed
+          const msg = one.value;
+          context.messages.push(msg);
+          await emit({ type: "message_end", message: msg });
+          toolResults.push(msg as ToolResultMessage);
+        }
+        // 批中断：**已起跑的这一批各自收 signal 结束、结果照样入账**，剩下的批不跑
+        if (signal.aborted) break;
       }
     }
 
@@ -226,6 +249,46 @@ async function callModel(deps: RunDeps, workset: TurnWorkset, progress: MessageP
   return { kind: "landed", message: finalMsg };
 }
 
+/* ─────────────────── 工具批：切批与批内的授权闸 ─────────────────── */
+
+/**
+ * 从 `from` 起切下一批。规则只有一条：**同一条 assistant 消息里连续的可并行调用同批**，
+ * 碰到不可并行的就断批、它自己一批（长度 1，与逐个 await 的老行为逐字相同）。
+ *
+ * 「可并行」= 本轮快照里找得到这个名字、且那个工具自己声明了 `concurrent: true`。找不到的名字
+ * （未知 / 已卸载 / 本轮才注册）一律**当不可并行**：它只会立刻拿一个错误结果回去，单独跑没有代价，
+ * 而「不认识的东西保守串行」比反过来安全。
+ */
+function takeBatch(uses: readonly ToolUseBlock[], from: number, tools: readonly AgentTool[]): readonly ToolUseBlock[] {
+  const concurrent = (u: ToolUseBlock | undefined): boolean =>
+    u !== undefined && tools.find((t) => t.name === u.name)?.concurrent === true;
+  if (!concurrent(uses[from])) return uses.slice(from, from + 1);
+  let end = from + 1;
+  while (end < uses.length && concurrent(uses[end])) end += 1;
+  return uses.slice(from, end);
+}
+
+/** 批内的授权闸：进闸的段一次只跑一个。 */
+type AskGate = <T>(fn: () => Promise<T>) => Promise<T>;
+
+/**
+ * 串行闸：把进闸的段接成一条链。**账本本来就装得下多个 pending ask，但壳一次只答得了一个**——
+ * 同时挂两个问，人看到的是一个问题被另一个盖住。所以并行的是执行，不是询问。
+ * 闸只锁「挂问 + 等答复」这一段：authorize（策略自己裁决，不惊动人）在闸外，不需要问的工具压根不进闸。
+ * 链尾吞掉结果与异常（只用来排队，不传播）；等在队里时 run 若中止，前面的 ask 会被 signal 封口，队伍随即排空。
+ */
+function createAskGate(): AskGate {
+  let tail: Promise<void> = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const started = tail.then(fn);
+    tail = started.then(
+      () => undefined,
+      () => undefined,
+    );
+    return started;
+  };
+}
+
 /* ─────────────────── 单次工具调用 ─────────────────── */
 
 async function runOneTool(
@@ -234,6 +297,7 @@ async function runOneTool(
   turnId: string,
   iteration: number,
   workset: TurnWorkset,
+  askGate: AskGate,
 ): Promise<AgentMessage> {
   const { config, emit, signal } = deps;
   const { tools, hooks } = workset;
@@ -311,18 +375,23 @@ async function runOneTool(
     verdict = { kind: "deny", reason: `authorization threw (denied, fail-closed): ${errText(e)}` }; // 抛错 = 拒，不放行
   }
   if (verdict.kind === "ask") {
-    // 只有真正进入 ask 才有 permissionId：先登记 ledger，再恰好发一次带同一 ID 的 permissionRequest
-    const handle = config.permission.ask({ ...authInput, reason: verdict.reason }, signal);
-    await notify(hooks, config, { type: "permissionRequest", permissionId: handle.permissionId, ...authInput, reason: verdict.reason });
-    await notify(hooks, config, {
-      type: "notification",
-      kind: "waiting_permission",
-      permissionId: handle.permissionId,
-      message: `等待授权：${use.name}（${verdict.reason}）`,
+    const askReason = verdict.reason;
+    /* 进闸：批内一次只挂一个问。登记 → 两条通知 → 等答复，整段都在闸内，
+       所以 `pendingPermissions` 在批内任一时刻最多一条。 */
+    const { permissionId, settled } = await askGate(async () => {
+      // 只有真正进入 ask 才有 permissionId：先登记 ledger，再恰好发一次带同一 ID 的 permissionRequest
+      const handle = config.permission.ask({ ...authInput, reason: askReason }, signal);
+      await notify(hooks, config, { type: "permissionRequest", permissionId: handle.permissionId, ...authInput, reason: askReason });
+      await notify(hooks, config, {
+        type: "notification",
+        kind: "waiting_permission",
+        permissionId: handle.permissionId,
+        message: `等待授权：${use.name}（${askReason}）`,
+      });
+      return { permissionId: handle.permissionId, settled: await handle.settled };
     });
-    const settled = await handle.settled;
     if (settled.kind === "cancelled") {
-      await notify(hooks, config, { type: "permissionCancelled", permissionId: handle.permissionId, toolCallId: use.id, reason: settled.reason });
+      await notify(hooks, config, { type: "permissionCancelled", permissionId, toolCallId: use.id, reason: settled.reason });
       const message = `Aborted while waiting for approval (${settled.reason})`;
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "aborted", message });
       return toolResultMessage(use.id, use.name, message, true);
@@ -330,7 +399,7 @@ async function runOneTool(
     if (settled.kind === "deny") {
       await notify(hooks, config, {
         type: "permissionDenied",
-        permissionId: handle.permissionId,
+        permissionId,
         toolCallId: use.id,
         toolName: use.name,
         reason: settled.reason,
@@ -339,7 +408,7 @@ async function runOneTool(
       await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "permission", reason: settled.reason });
       return toolResultMessage(use.id, use.name, settled.reason, true);
     }
-    await notify(hooks, config, { type: "permissionGranted", permissionId: handle.permissionId, toolCallId: use.id, decidedBy: "human" });
+    await notify(hooks, config, { type: "permissionGranted", permissionId, toolCallId: use.id, decidedBy: "human" });
   } else if (verdict.kind === "deny") {
     await notify(hooks, config, { type: "permissionDenied", toolCallId: use.id, toolName: use.name, reason: verdict.reason, decidedBy: "policy" });
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "permission", reason: verdict.reason });

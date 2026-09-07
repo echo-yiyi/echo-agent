@@ -1,6 +1,6 @@
 # 并行工具：工具自己声明可并行，连续的一批同跑，结果按 tool_use 顺序入账
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 来源 [移除还是实现 `toolExecution: "parallel"`](2026-09-01-tool-execution-parallel.md)(拍板「实现」,语义在本条)
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头) · 合入 2026-09-07 · 来源 [移除还是实现 `toolExecution: "parallel"`](2026-09-01-tool-execution-parallel.md)(拍板「实现」,语义在本条)
 
 ## 现状(拍板前)
 

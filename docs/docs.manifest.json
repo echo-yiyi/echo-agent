@@ -138,7 +138,7 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-tool-execution-parallel.md",
+      "path": "docs/decisions/implemented/2026-09-01-tool-execution-parallel.md",
       "bilingual": false
     },
     {
@@ -162,7 +162,7 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-parallel-tools.md",
+      "path": "docs/decisions/implemented/2026-09-07-parallel-tools.md",
       "bilingual": false
     },
     {

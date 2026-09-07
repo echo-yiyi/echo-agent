@@ -156,11 +156,9 @@ export interface AgentLoopConfig {
    */
   intake?: LoopIntake;
 
-  /** 缺省 "sequential"（可重放优先）；"parallel" 留着以后启用。 */
-  toolExecution?: "sequential" | "parallel";
-
   /**
    * 工具前后的拦截统一走 hooks 的 preToolUse / postToolUse 挂点，**不是两个字段**。
+   * 同一批并行工具里，两个挂点**各工具各跑一遍、可能并发**，hook 作者不能假设批内顺序。
    * 循环在每轮开头 `snapshot()` 一次、整轮只用那份工作集；
    * 轮与轮之间（stop / preCompact）才看活对象。
    */
