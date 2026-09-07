@@ -5,10 +5,11 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, createProvider, createProviderStreams, openObservationReader, toolError, type Echo, type ModelTool, type Provider } from "@echo-agent/core";
+import { createEcho, createProvider, createProviderStreams, environmentMessage, observationDatabasePath, toolError, type Echo, type ModelTool, type Provider } from "@echo-agent/core";
 import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { OBSERVE_DEFAULT_PORT, parseObserveArgs, runObserve } from "../src/observe.ts";
 import { observePageHtml, startObserveServer } from "../src/observe/server.ts";
+import { SessionObservationReaders } from "../src/observe/sessions.ts";
 import { lexicon } from "../src/observe/lexicon.ts";
 import type { Sink } from "../src/run.ts";
 
@@ -62,9 +63,8 @@ test("/api/runs 顺带给会话摘要：产品名与 workspace 按 sessionId 反
   await general.send("y");
   const generalId = general.agent.state.sessionId!;
 
-  const stateRoot = join(dir, codingId);
-  const reader = await openObservationReader({ stateRoot });
-  const server = startObserveServer({ reader, stateRoot, port: 0 });
+  const reader = new SessionObservationReaders({ sessionsRoot: dir, sessionId: codingId });
+  const server = startObserveServer({ readers: reader, port: 0 });
   try {
     const page = (await (await fetch(`${server.url}/api/runs?limit=10`)).json()) as {
       items: { runId: string; sessionId: string | null }[];
@@ -93,9 +93,8 @@ test("content 档：/api/runs/<id> 的时间线带工具 params 与结果正文�
   };
   const echo = await echoAt([toolTurn("c1", "grep", { pattern: "observationTap" }), textTurn("没搜到。")], { observation: { capture: "content" }, agent: { tools: [grep] } });
   const r = await echo.send("搜一下");
-  const stateRoot = join(dir, echo.agent.state.sessionId!); // 观测库一段一份
-  const reader = await openObservationReader({ stateRoot });
-  const server = startObserveServer({ reader, stateRoot, port: 0 });
+  const reader = new SessionObservationReaders({ sessionsRoot: dir });
+  const server = startObserveServer({ readers: reader, port: 0 });
   try {
     const vm = (await (await fetch(`${server.url}/api/runs/${r.runId}`)).json()) as {
       header: { capturePolicy: string };
@@ -116,6 +115,63 @@ test("content 档：/api/runs/<id> 的时间线带工具 params 与结果正文�
   for (const marker of ["contentSections", "FOLDED_INTO", "argPreview", "--observe content"]) expect(html).toContain(marker);
 });
 
+/** 等 inbox 触发的那条 run 封口（listRuns 只见已 COMMIT 的 header）。 */
+async function waitForInboxRun(echo: Echo): Promise<string> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const page = await echo.observations.listRuns({ limit: 10 });
+    const run = page.items.find((h) => h.source.kind === "inbox" && h.status !== "running");
+    if (run !== undefined) return run.runId;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error("inbox 触发的 run 5s 内没有封口");
+}
+
+test("跨 session：/api/runs 合并各段、/api/runs/<id> 不必知道在哪一段、/api/health 每段一块、/api/activity 有收件与 ack 且带 sessionId", async () => {
+  const a = await echoAt([textTurn("A 说")], { agentName: "echo-coding", workspace: "/tmp/ws-a" });
+  const ra = await a.send("a");
+  const aId = a.agent.state.sessionId!;
+  const b = await echoAt([textTurn("B 说"), textTurn("B 收到")], { agentName: "echo-agent", workspace: "/tmp/ws-b" });
+  const rb = await b.send("b");
+  const bId = b.agent.state.sessionId!;
+  // A 给 B 发一句：与 session_send 同一条路（进 B 的 inbox 账本），B 消费成一条 inbox run
+  await b.agent.ingress.deliverDurable({ message: environmentMessage("A 找你", "session", `${aId}:m1`), dedupeKey: `session:${aId}:m1` });
+  await b.agent.consumeInbox();
+  const inboxRun = await waitForInboxRun(b);
+
+  const readers = new SessionObservationReaders({ sessionsRoot: dir });
+  const server = startObserveServer({ readers, port: 0 });
+  try {
+    const runs = (await (await fetch(`${server.url}/api/runs?limit=10`)).json()) as { items: { runId: string; sessionId: string; acceptedAt: number }[]; nextCursor: null; sessions: Record<string, { agent: string }> };
+    expect(runs.items.map((h) => h.runId).sort()).toEqual([ra.runId, rb.runId, inboxRun].sort());
+    for (let i = 1; i < runs.items.length; i++) expect(runs.items[i - 1]!.acceptedAt).toBeGreaterThanOrEqual(runs.items[i]!.acceptedAt); // 合并后仍按时间倒序
+    expect(runs.nextCursor).toBeNull();
+    expect(runs.sessions[aId]!.agent).toBe("echo-coding");
+    expect(runs.sessions[bId]!.agent).toBe("echo-agent");
+    for (const id of [ra.runId, rb.runId, inboxRun]) {
+      const vm = (await (await fetch(`${server.url}/api/runs/${encodeURIComponent(id)}`)).json()) as { header: { runId: string } };
+      expect(vm.header.runId).toBe(id);
+    }
+    const health = (await (await fetch(`${server.url}/api/health`)).json()) as { sessionsRoot: string; sessions: { sessionId: string; counts: { runs: number } }[] };
+    expect(health.sessionsRoot).toBe(dir);
+    expect(health.sessions.map((s) => s.sessionId).sort()).toEqual([aId, bId].sort());
+    expect(health.sessions.find((s) => s.sessionId === bId)!.counts.runs).toBe(2);
+    const activity = (await (await fetch(`${server.url}/api/activity?limit=20`)).json()) as { items: { sessionId: string; record: { name: string; scope: { runId?: string }; attributes: Record<string, unknown> } }[]; sessions: Record<string, unknown> };
+    const inbox = activity.items.filter((i) => i.record.name.startsWith("inbox."));
+    expect(inbox.map((i) => i.record.name)).toEqual(expect.arrayContaining(["inbox.accepted", "inbox.acked"]));
+    for (const i of inbox) {
+      expect(i.sessionId).toBe(bId);
+      expect(i.record.scope.runId).toBeUndefined(); // run 之外的记录
+    }
+    expect(inbox.find((i) => i.record.name === "inbox.accepted")!.record.attributes).toMatchObject({ source: "session", ref: `${aId}:m1` });
+    expect(inbox.find((i) => i.record.name === "inbox.acked")!.record.attributes).toMatchObject({ runId: inboxRun });
+    expect(Object.keys(activity.sessions)).toEqual(expect.arrayContaining([aId, bId]));
+  } finally {
+    await server.stop();
+    await readers.close();
+  }
+});
+
 test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / --host 只对 serve 有意义", () => {
   expect(parseObserveArgs(["serve"], "x")).toEqual({ command: { kind: "serve", port: OBSERVE_DEFAULT_PORT, host: "127.0.0.1" } });
   expect(parseObserveArgs(["serve", "--port", "0", "--host", "0.0.0.0", "--state-dir", "/s"], "x")).toEqual({ stateDir: "/s", command: { kind: "serve", port: 0, host: "0.0.0.0" } });
@@ -125,7 +181,7 @@ test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / 
   expect(() => parseObserveArgs(["serve", "--format", "json"], "x")).toThrow("serve 没有");
 });
 
-test("术语表：每条四字段齐全，hint 不是同义反复（设计系统 §7）", () => {
+test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   const lex = lexicon();
   for (const group of [lex.runStatus, lex.runSource, lex.integrity, lex.persistence, lex.records]) {
     for (const [key, term] of Object.entries(group)) {
@@ -158,8 +214,8 @@ test("serve：/ 出页面，/api/runs、/api/runs/<id>、/api/health 出 reader 
   const echo = await echoAt([textTurn("你好")]);
   const r = await echo.send("hi");
   const stateRoot = join(dir, echo.agent.state.sessionId!); // 观测库一段一份
-  const reader = await openObservationReader({ stateRoot });
-  const server = startObserveServer({ reader, stateRoot, port: 0 });
+  const reader = new SessionObservationReaders({ sessionsRoot: dir });
+  const server = startObserveServer({ readers: reader, port: 0 });
   try {
     expect(server.url.startsWith("http://127.0.0.1:")).toBe(true);
     const page = await fetch(`${server.url}/`);
@@ -179,10 +235,12 @@ test("serve：/ 出页面，/api/runs、/api/runs/<id>、/api/health 出 reader 
     expect((await fetch(`${server.url}/nope`)).status).toBe(404);
     expect((await fetch(`${server.url}/api/runs`, { method: "POST" })).status).toBe(405);
 
-    const health = (await (await fetch(`${server.url}/api/health`)).json()) as { stateRoot: string; counts: { runs: number }; heads: unknown[] };
-    expect(health.stateRoot).toBe(stateRoot);
-    expect(health.counts.runs).toBe(1);
-    expect(health.heads.length).toBe(1);
+    const health = (await (await fetch(`${server.url}/api/health`)).json()) as { sessionsRoot: string; sessions: { sessionId: string; path: string; counts: { runs: number }; heads: unknown[] }[] };
+    expect(health.sessionsRoot).toBe(dir);
+    expect(health.sessions.map((s) => s.sessionId)).toEqual([echo.agent.state.sessionId!]);
+    expect(health.sessions[0]!.path).toBe(observationDatabasePath(stateRoot));
+    expect(health.sessions[0]!.counts.runs).toBe(1);
+    expect(health.sessions[0]!.heads.length).toBe(1);
   } finally {
     await server.stop();
     await reader.close();

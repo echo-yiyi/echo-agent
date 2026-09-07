@@ -10,6 +10,7 @@
 import { decodeObservationEnvelope, materializeRunObservation } from "./materialize.ts";
 import type { ObservationSequencer } from "./sequencer.ts";
 import { SqliteObservationReader, observationDatabasePath, type RunIndexCursor, type RuntimeHeadRow } from "./sqlite-store.ts";
+import type { ObservationEnvelope } from "./types.ts";
 import type {
   EchoObservationReader,
   EchoObservationSnapshot,
@@ -190,6 +191,16 @@ export class SqliteEchoObservationReader implements EchoObservationReader {
 
   async counts(): Promise<Readonly<{ runs: number; records: number }>> {
     return { runs: await this.store.countRuns(), records: await this.store.countRecords() };
+  }
+
+  /**
+   * run 之外的记录（runtime activity：inbox 收件 / ack / 封账本、闹钟投递与错过、重启恢复），最近 `limit` 条，新的在前。
+   * `getRun()` 只回答「这条 run 里发生了什么」，agent 集群里「谁给谁发了消息、卡在哪」发生在 run 之间，只能从这里看。
+   * 缺省 50 条，上限 500。
+   */
+  async recentActivity(options: Readonly<{ limit?: number }> = {}): Promise<readonly ObservationEnvelope[]> {
+    const limit = Math.min(500, Math.max(1, Math.floor(options.limit ?? 50)));
+    return (await this.store.readActivity(limit)).map((bytes) => decodeObservationEnvelope(bytes));
   }
 
   async close(): Promise<void> {

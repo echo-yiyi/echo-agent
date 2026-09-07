@@ -68,6 +68,9 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
     get pendingPermissions() {
       return base.pendingPermissions;
     },
+    get pendingQuestions() {
+      return base.pendingQuestions;
+    },
     get acceptsWork() {
       return base.acceptsWork;
     },
@@ -87,6 +90,8 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
     setThinkingLevel: (l) => base.setThinkingLevel(l),
     reset: () => base.reset(),
     compact: (i) => base.compact(i),
+    setWorkspace: (w) => base.setWorkspace(w),
+    answerQuestion: (a) => base.answerQuestion(a),
   };
   // **不能用 `Object.assign`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter-only，
   // 赋值会抛 "Attempted to assign to readonly property"（实测）。覆盖项一律走 `defineProperty`，
@@ -157,6 +162,28 @@ test("工具折叠行：摘要再长也截到宽度——pi-tui 对超宽行直�
   for (const line of lines) expect(visibleWidth(line), line).toBeLessThanOrEqual(40);
   expect(lines[0]).toContain("TaskCreate"); // 截的是摘要，不是工具名
   expect(lines[0]).toContain("…"); // 截过要看得出来
+});
+
+test("状态栏在窄终端上按可见列宽裁：宽字符段按码点切会超宽——实测 60 > 55 整屏崩（2026-09-04）；先丢尾部次要段，模型名恒在", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([]);
+  // 崩溃现场那组数：deepseek-v4-flash · 空闲 · ↑279k ↓18k · 缓存 255k (91%) · 上下文 …
+  const state = {
+    ...agent.state,
+    model: { ...agent.state.model, id: "deepseek-v4-flash", capabilities: { contextWindow: 256_000 } },
+    usage: { inputTokens: 279_000, outputTokens: 18_000, cachedInputTokens: 255_000 },
+    contextTokens: 90_000,
+  };
+  const done = runTui({ agent: runtimeOf(agent, { state }), ui });
+  await flush();
+  for (const width of [55, 40, 20]) {
+    const footer = ui.lines(width).at(-1)!;
+    expect(visibleWidth(footer), footer).toBeLessThanOrEqual(width);
+    expect(footer).toContain("deepseek-v4-flash"); // 最重要的在最前；丢的是尾部
+  }
+  expect(ui.lines(120).at(-1)!).toContain("上下文 90k/256k"); // 宽度够时一段不少
+  quit(ui);
+  await done;
 });
 
 test("欢迎头在窄终端上按宽度折：键位提示 95 列，40 列终端上原来启动即崩", async () => {
@@ -368,6 +395,86 @@ test("欢迎头报模型 id（启动是装配层的事，壳子只说自己接�
   await flush();
   expect(ui.screen()).toContain("模型 only");
   expect(ui.screen()).toContain("only"); // FAKE 模型 id
+  quit(ui);
+  await done;
+});
+
+/* ─────────────── 提问：`ask_user`，与权限平行的另一支 ─────────────── */
+
+test("question（ask_user）摆上屏幕：单选按数字直答；没选项的在输入行打字回车；多选打序号串；答完撤掉（2026-09-05）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const answered: { questionId: string; selected: readonly string[]; text?: string }[] = [];
+  const runtime = runtimeOf(agent, {
+    answerQuestion: async (a) => {
+      answered.push({ questionId: a.questionId, selected: a.selected, ...(a.text === undefined ? {} : { text: a.text }) });
+      return { kind: "accepted" as const, questionId: a.questionId, toolCallId: "c" };
+    },
+  });
+  const done = runTui({ agent: runtime, ui });
+  await flush();
+
+  emitLifecycle(agent, {
+    type: "question",
+    questionId: "q1",
+    toolCallId: "c1",
+    question: "用哪个测试框架？",
+    options: [{ label: "vitest" }, { label: "bun test", description: "仓库已在用" }],
+    multiSelect: false,
+  });
+  await flush();
+  const screen = ui.screen();
+  expect(screen).toContain("用哪个测试框架？");
+  expect(screen).toContain("1. vitest");
+  expect(screen).toContain("2. bun test");
+  expect(screen).toContain("回车确认"); // 提示语写清怎么答
+  expect(answered).toEqual([]); // 还没按键，不许替用户答
+  // 等答时斜杠命令照样是命令，不会被当成回答送出去
+  ui.feed("/model");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered).toEqual([]);
+  expect(ui.screen()).toContain("[模型]"); // 真走了派发（没给 configure 的低层用法会说一句）
+  // 序号越界：放回输入行说一句，不当自由文本发
+  ui.feed("9");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered).toEqual([]);
+  expect(ui.screen()).toContain("没有这个序号");
+  ui.feed(CTRL_C); // 清掉放回的「9」
+  // 序号 + 回车才算数：数字不直答，以数字开头的自由文本不能被吞掉第一个字
+  ui.feed("2");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered).toEqual([{ questionId: "q1", selected: ["bun test"] }]);
+  expect(ui.screen()).not.toContain("1. vitest"); // 答完撤掉
+  expect(ui.screen()).toContain("[回答] bun test");
+
+  // 没选项：输入行打字回车就是回答，不会当成新的一句 prompt
+  emitLifecycle(agent, { type: "question", questionId: "q2", toolCallId: "c2", question: "分支叫什么？", options: [], multiSelect: false });
+  await flush();
+  ui.feed("feature/x");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered.at(-1)).toEqual({ questionId: "q2", selected: [], text: "feature/x" });
+
+  // 多选：序号串按序号选，去重
+  emitLifecycle(agent, { type: "question", questionId: "q3", toolCallId: "c3", question: "要哪些？", options: [{ label: "a" }, { label: "b" }, { label: "c" }], multiSelect: true });
+  await flush();
+  expect(ui.screen()).toContain("可多个");
+  ui.feed("1,3,1");
+  ui.feed(ENTER);
+  await flush();
+  expect(answered.at(-1)).toEqual({ questionId: "q3", selected: ["a", "c"] });
+
+  // 没等到答案（那一轮中止）：撤掉
+  emitLifecycle(agent, { type: "question", questionId: "q4", toolCallId: "c4", question: "还在吗？", options: [], multiSelect: false });
+  await flush();
+  expect(ui.screen()).toContain("还在吗？");
+  emitLifecycle(agent, { type: "questionCancelled", questionId: "q4", toolCallId: "c4", reason: "run-aborted" });
+  await flush();
+  expect(ui.screen()).not.toContain("在输入行打字回答");
+
   quit(ui);
   await done;
 });

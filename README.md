@@ -31,7 +31,7 @@ The repository ships two commands on the same runtime. `echo-agent` is the gener
 | | `echo-agent` | `echo-coding` |
 |---|---|---|
 | Capabilities | Memory, tasks, schedule, and skills (built into core) | All of the above, plus file read/write, search, and shell |
-| Tools | Core's `echo:*` builtins | The builtins plus `echo:workspace` and `echo:shell` |
+| Tools | Core's `echo:*` builtins | The builtins plus `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` |
 | Command | `echo-agent` | `echo-coding` |
 
 File and shell tools belong to `echo-coding` only. `echo-coding` does not change a line of `echo-agent`: it hands its own preset (system prompt, permission policy, the two extensions) to `echo-agent`'s startup logic, which is also how a third-party product builds on this runtime.
@@ -97,7 +97,7 @@ For custom hosts, import `Agent` from `@echo-agent/core` and supply the model, s
 |---|---|
 | `@echo-agent/core` | Runtime, engine, provider adapters, persistence, memory, tasks, and the extension API |
 | `echo-agent` | General agent: official CLI with interactive and piped modes; knows no specific product |
-| `echo-coding` | Coding agent: depends on `echo-agent`, adds the `echo:workspace` and `echo:shell` extensions and the `echo-coding` command |
+| `echo-coding` | Coding agent: depends on `echo-agent`, adds the `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions and the `echo-coding` command |
 
 Runnable consumers live in [`examples/`](examples/): a real-provider hello world, a credential-free scripted agent, and extension auto-discovery. The distribution test packs the workspaces, installs the tarballs in clean projects, and runs these public entry points with Bun and Node.
 

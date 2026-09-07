@@ -26,11 +26,13 @@
 
 import { DEFAULT_MAX_ITERATIONS, type AssembleContext } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
 import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extension";
-import type { PermissionPolicy as CorePermissionPolicy, PromptSection, Skill } from "@echo-agent/core";
+import type { CredentialStore, PermissionPolicy as CorePermissionPolicy, PromptSection, Skill } from "@echo-agent/core";
 import { makeBashTool, makeShellTools } from "./tools/bash.ts";
 import { makeFsTools } from "./tools/fs.ts";
 import { makeSearchTools } from "./tools/search.ts";
-import { ECHO_SHELL, ECHO_WORKSPACE } from "./extensions.ts";
+import { makeWebTools } from "./tools/web.ts";
+import { makeWorktreeTools } from "./tools/worktree.ts";
+import { ECHO_SHELL, ECHO_WEB, ECHO_WORKSPACE, ECHO_WORKTREE } from "./extensions.ts";
 import { permissionPolicyFor, type PermissionPolicy } from "./permission.ts";
 import { codingConductSection, codingIdentitySection, shellToolsSection, workspaceToolsSection } from "./prompt.ts";
 
@@ -43,6 +45,11 @@ export type CodingPresetOptions = {
    */
   skills?: Skill[];
   maxIterations?: number;
+  /**
+   * 凭据来源：`web_search` 从这里读搜索服务的 key（`brave`），排在环境变量 `BRAVE_API_KEY` 之后。
+   * 不给 = 只认环境变量（评测、低层装配）。宿主给的是与模型 key 同一个 store（`PresetForm.credentials`）。
+   */
+  credentials?: CredentialStore;
 };
 
 /**
@@ -85,6 +92,7 @@ const AGENT_BUILTIN_TOOLS = [
   "TaskGet",
   "TaskList",
   "TaskUpdate",
+  "ask_user", // 2026-09-05 提问工具，core 恒装；管道形态没人答时它如实回话
   "schedule_cancel",
   "schedule_create",
   "schedule_list",
@@ -132,8 +140,8 @@ export function codingAgentIdentity(): {
     defaultModel: `${CODING_DEFAULT_MODEL.provider}/${CODING_DEFAULT_MODEL.model}`,
     // 执行预算也决定成绩(review 六轮 P1):**读 core 的常量,不手抄**——core 改默认值,digest 跟着变
     maxIterations: DEFAULT_MAX_ITERATIONS,
-    // shell 一组也从工厂取名（bash / job_output / job_stop）：`echo:shell` 注册的就是这份，不手写
-    toolNames: [...makeFsTools(), ...makeSearchTools(), ...makeShellTools()]
+    // shell / worktree / web 各组也从工厂取名：各 extension 注册的就是这份，不手写
+    toolNames: [...makeFsTools(), ...makeSearchTools(), ...makeShellTools(), ...makeWorktreeTools(), ...makeWebTools()]
       .map((t) => t.name)
       .concat(...AGENT_BUILTIN_TOOLS)
       .sort(),
@@ -160,6 +168,10 @@ export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
       // bash 不行：它要 `agent.background`。所以 `echo:shell` 自己 inject 那条能力端口并在 apply 里
       // 注册工具与段，这里只列 definition、不给 config（见 `extensions.ts` 的注释）。
       { entryId: "echo:shell", definition: ECHO_SHELL as never },
+      // worktree 隔离要 `AgentRuntime.setWorkspace`，同 shell 一样自己 inject（2026-09-03）
+      { entryId: "echo:worktree", definition: ECHO_WORKTREE as never },
+      // 取网页 / 搜索：纯函数工具，config 进来；延迟工具，经 tool_search 取过才上菜单
+      { entryId: "echo:web", definition: ECHO_WEB as never, config: { tools: makeWebTools({ credentials: opts.credentials }) } },
     ],
   };
 }

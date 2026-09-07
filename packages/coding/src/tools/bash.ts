@@ -8,7 +8,8 @@
 // 结果「以后作为通知送达」,模型中途看不到输出、也停不掉——「跑起来看日志再改」这条最常见的循环走不通。
 
 import { getBackground, killBackground, listBackground, startBackground } from "@echo-agent/core/background";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { toolError, toolOk, type AgentBackground, type AgentToolResult, type ModelTool } from "@echo-agent/core";
 
 const OUTPUT_CAP = 30_000;
@@ -16,23 +17,54 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 /** job_output 缺省回读的字符数:够看清最近的日志,又不至于一次把缓冲全倒进上下文。 */
 const JOB_TAIL_DEFAULT = 4_000;
 
+/**
+ * 工作目录跨调用保留（2026-09-03，照 Claude Code：cd 保留、shell 变量不保留）。
+ * 每次前台命令包一层——命令跑完打印 `$PWD` 标记再以原退出码退出；解析到的目录就是下一次的起点（后台命令也从那里起）。
+ * 标记用 RS（0x1e）包着,普通输出里不会出现;它只在末尾几百字节里找,输出再长也截不掉它。
+ */
+const CWD_TAIL_KEEP = 512;
+const CWD_MARK_RE = /\u001e__ECHO_CWD__([^\u001e]*)\u001e\n?$/;
+
 export type BashDeps = {
   /** 给了才支持 background: true(接 agent.background);job_output / job_stop 也读同一张表。 */
   background?: AgentBackground;
 };
 
+/**
+ * shell 一组共享的状态:当前工作目录,以及它是在哪个 workspace 下记的。`cwd` 为 `undefined` = 还没 cd 过,
+ * 用 session 的 workspace;workspace 变了(worktree 隔离切了目录)cwd 作废,从新 workspace 起。
+ */
+export type ShellState = { cwd: string | undefined; workspace: string | undefined };
+
 /** shell 一组的全部工具。`echo:shell` 注册的与 `codingAgentIdentity()` 列的是**同一份**,不各写各的名单。 */
 export function makeShellTools(deps: BashDeps = {}): ModelTool[] {
-  return [makeBashTool(deps), jobOutputTool(deps), jobStopTool(deps)] as ModelTool[];
+  const state: ShellState = { cwd: undefined, workspace: undefined };
+  return [makeBashTool(deps, state), jobOutputTool(deps), jobStopTool(deps)] as ModelTool[];
 }
 
-export function makeBashTool(deps: BashDeps = {}): ModelTool<{ command: string; timeout_ms?: number; background?: boolean }> {
+export function makeBashTool(
+  deps: BashDeps = {},
+  state: ShellState = { cwd: undefined, workspace: undefined },
+): ModelTool<{ command: string; timeout_ms?: number; background?: boolean }> {
+  /** 本次命令从哪起：保留的目录还在就用它；workspace 换了或目录被删了就退回 workspace（后者要告诉模型）。 */
+  const startDir = (workspace: string): { cwd: string; note: string } => {
+    if (state.workspace !== workspace) {
+      state.workspace = workspace;
+      state.cwd = undefined;
+    }
+    if (state.cwd === undefined) return { cwd: workspace, note: "" };
+    if (existsSync(state.cwd)) return { cwd: state.cwd, note: "" };
+    const gone = state.cwd;
+    state.cwd = undefined;
+    return { cwd: workspace, note: `\n(previous working directory ${gone} no longer exists; back in the workspace root)` };
+  };
   return {
     kind: "model",
     name: "bash",
     label: "跑命令",
     description:
-      "Run one bash command in the workspace and return stdout and stderr (merged). " +
+      "Run one bash command and return stdout and stderr (merged). The working directory carries over between calls " +
+      "(it starts at the workspace root; cd persists), shell variables and functions do not. " +
       "Times out after 120 s by default; for long-running work (dev servers, watchers) pass background: true — " +
       "read its output with job_output, stop it with job_stop, and you are notified when it ends.",
     parameters: {
@@ -52,10 +84,10 @@ export function makeBashTool(deps: BashDeps = {}): ModelTool<{ command: string; 
           label: command.slice(0, 60),
           run: (bg) =>
             new Promise<void>((resolvePromise, rejectPromise) => {
-              const child = spawn("bash", ["-lc", command], { cwd: ctx.workspace, stdio: ["ignore", "pipe", "pipe"] });
-              child.stdout.on("data", (d: Buffer) => bg.write(d.toString()));
-              child.stderr.on("data", (d: Buffer) => bg.write(d.toString()));
-              bg.signal.addEventListener("abort", () => child.kill("SIGKILL"), { once: true });
+              const child = spawnShell(command, startDir(ctx.workspace).cwd);
+              child.stdout!.on("data", (d: Buffer) => bg.write(d.toString()));
+              child.stderr!.on("data", (d: Buffer) => bg.write(d.toString()));
+              bg.signal.addEventListener("abort", () => killTree(child), { once: true });
               child.on("error", rejectPromise);
               child.on("close", (code) => {
                 if (code === 0 || bg.signal.aborted) resolvePromise();
@@ -76,9 +108,37 @@ export function makeBashTool(deps: BashDeps = {}): ModelTool<{ command: string; 
         );
       }
 
-      return runForeground(command, ctx.workspace, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
+      const start = startDir(ctx.workspace);
+      const result = await runForeground(command, start.cwd, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
+      // 命令跑到了末尾才有标记（exec / 被杀 / 语法错都没有）：没有就保持原来的目录
+      const changed = result.cwd !== undefined && result.cwd !== start.cwd;
+      if (result.cwd !== undefined) state.cwd = result.cwd === ctx.workspace ? undefined : result.cwd;
+      const note = `${start.note}${changed ? `\n(working directory is now ${result.cwd})` : ""}`;
+      return note === "" ? result : { ...result, content: `${result.content}${note}` };
     },
   };
+}
+
+/** 把命令包一层：跑完打印 `$PWD` 标记、再以命令自己的退出码退出。`{ … }` 分组让多行命令与末尾注释都成立。 */
+function withCwdMarker(command: string): string {
+  return `{\n${command}\n}\n__echo_rc=$?\nprintf '\\n\\036__ECHO_CWD__%s\\036\\n' "$PWD"\nexit $__echo_rc`;
+}
+
+/**
+ * 起 shell 时自成一个进程组（detached）：杀的时候按组杀（{@link killTree}）。
+ * 不然 `sleep 10`、dev server 这类由 bash 再起的子进程会活过 bash，攥着输出管道不放——超时/中止要等它自己结束，job_stop 也留孤儿。
+ */
+function spawnShell(command: string, cwd: string): ChildProcess {
+  return spawn("bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true });
+}
+
+function killTree(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
 }
 
 /** 错误里把已知作业列出来:模型丢了 id（压缩之后常见）也能找回来,不用再多一件 job_list。 */
@@ -144,36 +204,44 @@ function runForeground(
   cwd: string,
   timeoutMs: number,
   signal?: AbortSignal,
-): Promise<AgentToolResult> {
+): Promise<AgentToolResult & { cwd?: string }> {
   return new Promise((resolvePromise) => {
-    const child = spawn("bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnShell(withCwdMarker(command), cwd);
     let out = "";
     let truncated = false;
+    let tail = ""; // 末尾几百字节单独留着：cwd 标记在这里找，输出被截断也丢不了
     const append = (d: Buffer): void => {
+      const chunk = d.toString();
+      tail = (tail + chunk).slice(-CWD_TAIL_KEEP);
       if (out.length >= OUTPUT_CAP) {
         truncated = true;
         return;
       }
-      out += d.toString();
+      out += chunk;
     };
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
+    child.stdout!.on("data", append);
+    child.stderr!.on("data", append);
 
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killTree(child);
     }, timeoutMs);
     const onAbort = (): void => {
-      child.kill("SIGKILL");
+      killTree(child);
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
     const finish = (code: number | null, spawnError?: string): void => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      let text = out.slice(0, OUTPUT_CAP);
-      if (truncated || out.length > OUTPUT_CAP) text += `\n…[output truncated: over ${OUTPUT_CAP} characters]`;
+      // 先把 cwd 标记摘出来（在 tail 里），再从正文里剥掉——正文没被截断时标记就在正文末尾
+      const marked = CWD_MARK_RE.exec(tail);
+      const newCwd = marked?.[1];
+      const body = marked === null ? out : out.replace(CWD_MARK_RE, "").replace(/\n$/, "");
+      let text = body.slice(0, OUTPUT_CAP);
+      if (truncated || body.length > OUTPUT_CAP) text += `\n…[output truncated: over ${OUTPUT_CAP} characters]`;
+      const withCwd = (r: AgentToolResult): AgentToolResult & { cwd?: string } => (newCwd === undefined ? r : { ...r, cwd: newCwd });
       if (spawnError !== undefined) {
         resolvePromise(toolError(`The command could not start: ${spawnError}`));
       } else if (timedOut) {
@@ -182,9 +250,9 @@ function runForeground(
         resolvePromise(toolError(`Aborted. Output:\n${text}`));
       } else if (code !== 0) {
         // 非零退出是**结果**不是异常——模型要看到输出来决定下一步
-        resolvePromise(toolError(`exit code ${code}\n${text}`, { exitCode: code }));
+        resolvePromise(withCwd(toolError(`exit code ${code}\n${text}`, { exitCode: code })));
       } else {
-        resolvePromise(toolOk(text === "" ? "(no output)" : text, { exitCode: 0 }));
+        resolvePromise(withCwd(toolOk(text === "" ? "(no output)" : text, { exitCode: 0 })));
       }
     };
     child.on("error", (e) => finish(null, String(e)));

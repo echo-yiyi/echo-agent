@@ -250,6 +250,17 @@ export class SqliteObservationReader {
     return rows.map((r, i) => asBytes(r.envelope_bytes, `runtime(${runtimeId}) record #${i}.envelope_bytes`));
   }
 
+  /**
+   * run 之外的记录（`run_id IS NULL`：inbox 收件 / ack、闹钟投递这类 runtime activity）最近 `limit` 条，新的在前。
+   * 跨 runtimeId（重启前后）的 seq 不可比，按插入顺序（rowid）排——同一进程内 seq 单调，重启后的必然插在后面。
+   */
+  async readActivity(limit: number): Promise<readonly Uint8Array[]> {
+    const rows = this.db
+      .query<{ envelope_bytes: Uint8Array }, [number]>("SELECT envelope_bytes FROM observation_records WHERE run_id IS NULL ORDER BY rowid DESC LIMIT ?")
+      .all(Math.max(1, Math.floor(limit)));
+    return rows.map((r, i) => asBytes(r.envelope_bytes, `activity record #${i}.envelope_bytes`));
+  }
+
   /** 按 `(accepted_at, run_id)` 倒序分页；`after` 是上一页最后一条的游标（exclusive）。 */
   async listRunIndex(opts: Readonly<{ limit: number; after?: RunIndexCursor }>): Promise<readonly RunIndexEntryV1[]> {
     const limit = Math.max(1, Math.floor(opts.limit));

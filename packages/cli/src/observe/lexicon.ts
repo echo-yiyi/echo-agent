@@ -1,4 +1,4 @@
-// observe 面板的术语表（设计系统 `spec/agent-behavior.md` §7：后端枚举 → 界面文案只在这一处翻译）。
+// observe 面板的术语表：后端枚举 → 界面文案只在这一处翻译。
 //
 // 条目四字段缺一不可：`zh` 主标签、`en` 原词（mono 小字并列显示）、`tone` 色调、`hint` **判定口径**（不是同义反复）。
 // 页面通过 `lexiconJson()` 拿到整份，渲染层不再自己猜字面。
@@ -9,7 +9,7 @@ export type Term = Readonly<{ zh: string; en: string; tone: Tone; hint: string }
 
 /**
  * run 的终态 / 进行态。`RunObservationStatus` 五值加一个派生值 `truncated`：
- * 设计系统要求「跑到上限被截断」与「自行收尾」严格区分（§2.1），本仓里它是 `error` 且 `outcome.error.code === "max_iterations"`。
+ * 设计系统要求「跑到上限被截断」与「自行收尾」严格区分，本仓里它是 `error` 且 `outcome.error.code === "max_iterations"`。
  */
 export const RUN_STATUS: Readonly<Record<string, Term>> = {
   running: { zh: "进行中", en: "running", tone: "accent", hint: "已拿到 permit、run.closed 还没落库；页面会持续刷新它" },
@@ -38,7 +38,7 @@ export const PERSISTENCE: Readonly<Record<string, Term>> = {
 };
 
 /**
- * 工具名 → 人话动词（设计系统 §2.3 动词表：读取 / 搜索 / 写入 / 记住 / 回忆 / 运行 / 请求 / 打开 / 修改 / 删除）。
+ * 工具名 → 人话动词（设计系统的动词表：读取 / 搜索 / 写入 / 记住 / 回忆 / 运行 / 请求 / 打开 / 修改 / 删除）。
  * 没登记的工具用「调用」+ 原名。`memory` 工具的动作（记住 / 修改 / 删除 / 回忆）在紧随其后的 `memory.mutation.*` 事实里，
  * 工具 span 本身在 metadata 档看不到参数，所以只能是「调用」。
  */
@@ -62,7 +62,7 @@ export const TOOL_VERBS: Readonly<Record<string, string>> = {
   schedule_cancel: "删除",
 };
 
-/** canonical record 名 → 时间线一行怎么念。没登记的用原名（设计系统 §2.10：未知事件用 generic 呈现，不丢）。 */
+/** canonical record 名 → 时间线一行怎么念。没登记的用原名（设计系统：未知事件用 generic 呈现，不丢）。 */
 export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "run.accepted": { zh: "接受 run", en: "run.accepted", tone: "neutral", hint: "admission 分配 runId、冻结模型绑定" },
   "run.assembly": { zh: "装配快照", en: "run.assembly", tone: "neutral", hint: "本 run 冻结的 builtin 槽与模型绑定 digest" },
@@ -90,6 +90,13 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "schedule.delivered": { zh: "闹钟投递", en: "schedule.delivered", tone: "positive", hint: "到期投进 inbox 并被接受" },
   "schedule.missed": { zh: "闹钟错过", en: "schedule.missed", tone: "caution", hint: "重启补跑判定错过：过期删除或跳过欠账" },
   "schedule.bookkeeping-failed": { zh: "闹钟簿记失败", en: "schedule.bookkeeping-failed", tone: "critical", hint: "投递之后落盘失败，下次 tick 会再投" },
+  "inbox.accepted": { zh: "收件", en: "inbox.accepted", tone: "neutral", hint: "一条投递进了 inbox 账本；via=refresh 是别的进程（另一段会话）写进来的" },
+  "inbox.rejected": { zh: "收件被拒", en: "inbox.rejected", tone: "caution", hint: "账本没收：形状不对、空 key、落盘失败或账本已封" },
+  "inbox.restored": { zh: "收件恢复", en: "inbox.restored", tone: "neutral", hint: "重启时从盘上恢复的、还没消费的那批" },
+  "inbox.consumed": { zh: "收件消费", en: "inbox.consumed", tone: "info", hint: "这批消息交给了这条 run——它就是这次 run 的由头" },
+  "inbox.acked": { zh: "收件已结", en: "inbox.acked", tone: "positive", hint: "run 之后整批 ack 落盘，不会再重投" },
+  "inbox.released": { zh: "收件放回", en: "inbox.released", tone: "caution", hint: "整批放回队列：run 被拒、入队抛错或 ack 没提交，下次再投" },
+  "inbox.sealed": { zh: "收件账本已封", en: "inbox.sealed", tone: "critical", hint: "ack 无法裁决，账本封了：之后一律拒收，要人来处理" },
   "agent.queue.updated": { zh: "队列变化", en: "agent.queue.updated", tone: "neutral", hint: "steering / followUp / inbox 队列长度" },
   "agent.resource.changed": { zh: "资源变化", en: "agent.resource.changed", tone: "neutral", hint: "工具 / skill / MCP 注册或卸载" },
   "agent.custom_event": { zh: "自定义事件", en: "agent.custom_event", tone: "neutral", hint: "上层 agent 的领域事件，metadata 档 body 恒空" },

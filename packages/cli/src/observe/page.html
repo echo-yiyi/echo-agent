@@ -123,6 +123,18 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl--open .res { color: var(--accent-ink); }
 .tl-detail { margin: 0 0 var(--space-4) var(--space-8); padding: var(--ctl-tool-expand-pad); max-height: var(--ctl-tool-expand-max-height); overflow: auto; border-left: 2px solid var(--border); background: var(--ui-inset); font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); }
 .tl-detail[hidden] { display: none; }
+/* 运行时活动（run 之外的记录）：列表底部一小段，行形同时间线（时间 · 动作 对象 · 哪段会话），带 runId 的能点过去 */
+.activity { border-top: 1px solid var(--border); padding: var(--space-8); }
+.activity h3 { margin: 0 0 var(--space-4); font-size: var(--size-caption); font-weight: 600; color: var(--stone); }
+.acts { list-style: none; margin: 0; padding: 0; }
+.act { display: grid; grid-template-columns: 56px 1fr auto; gap: var(--space-6); align-items: baseline; padding: var(--space-2) 0; font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); border-radius: var(--r-sm); }
+.act[role="button"] { cursor: pointer; }
+.act[role="button"]:hover { background: var(--ui-raised); }
+.act .t { color: var(--stone); font-variant-numeric: tabular-nums; }
+.act .what { display: flex; gap: var(--space-4); min-width: 0; }
+.act .verb { white-space: nowrap; }
+.act .obj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act .who { color: var(--stone); white-space: nowrap; }
 /* content 档的正文分段：标签 + 原样文本；报错段用 clay。metadata 档没有这些字段，段落自然不出现 */
 .tl-sec { margin-bottom: var(--space-8); }
 .tl-sec-label { display: block; margin-bottom: var(--space-2); color: var(--stone); font-size: var(--size-micro); }
@@ -156,6 +168,10 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
     <aside class="pane" aria-label="run 列表">
       <div class="filters" id="filters" role="group" aria-label="按来源筛选"></div>
       <ul class="runs" id="runs"></ul>
+      <section class="activity" aria-label="运行时活动">
+        <h3>运行时活动 <span class="muted" id="activity-hint" title="run 之外发生的事：收件、整批 ack、闹钟投递与错过、重启恢复"></span></h3>
+        <ul class="acts" id="acts"></ul>
+      </section>
     </aside>
     <main class="pane detail" id="detail" aria-live="polite"></main>
   </div>
@@ -163,10 +179,13 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 
 <script>
 const LEX = /*__LEXICON__*/ null;
-const STATE = { runs: [], sessions: {}, filter: "all", product: "all", selected: null, follow: true, vm: null, expanded: new Set(), hidden: false };
+const STATE = { runs: [], sessions: {}, filter: "all", product: "all", session: "all", selected: null, follow: true, vm: null, expanded: new Set(), hidden: false, activity: [], root: "" };
 /* run 归哪个产品：header 只有 sessionId，产品名与 workspace 在会话 meta 里（/api/runs 顺带给） */
 const sessionOf = (r) => (r.sessionId ? STATE.sessions[r.sessionId] : undefined);
 const productOf = (r) => sessionOf(r)?.agent ?? (r.sessionId ? "未上报" : "无会话");
+/* 会话怎么称呼：有名字用名字，没有就缩短的 id。集群里几段并行时，列表行、活动行、筛选片都用它 */
+const sessionLabel = (id) => { const s = STATE.sessions[id]; return s && s.name && s.name !== id ? s.name : shortId(id); };
+const multiSession = () => new Set(STATE.runs.map((r) => r.sessionId).filter(Boolean)).size > 1;
 const shortPath = (p) => {
   if (!p) return "";
   const parts = p.split("/").filter(Boolean);
@@ -203,6 +222,20 @@ function badge(term, key) {
 function renderFilters() {
   const box = document.getElementById("filters");
   box.replaceChildren();
+  // 第零组：会话。agent 集群里几段并行时才出现（观测库一段一份，面板把会话根下全部段合起来看）
+  const sessionCounts = {};
+  for (const r of STATE.runs) if (r.sessionId) sessionCounts[r.sessionId] = (sessionCounts[r.sessionId] ?? 0) + 1;
+  const sessionIds = Object.keys(sessionCounts);
+  if (sessionIds.length > 1) {
+    for (const s of ["all", ...sessionIds]) {
+      const n = s === "all" ? STATE.runs.length : sessionCounts[s];
+      box.append(el("button", {
+        class: "chip", "aria-pressed": STATE.session === s, title: s === "all" ? "" : `${s}${STATE.sessions[s] ? ` · ${STATE.sessions[s].workspace}` : ""}`,
+        onclick: () => { STATE.session = s; renderFilters(); renderRuns(); },
+      }, `${s === "all" ? "全部会话" : sessionLabel(s)} ${n}`));
+    }
+    box.append(el("span", { class: "sep", "aria-hidden": "true" }));
+  }
   // 第一组：产品（来自会话 meta）。两个产品缺省共用一个状态根，这是把它们分开看的依据
   const productCounts = {};
   for (const r of STATE.runs) productCounts[productOf(r)] = (productCounts[productOf(r)] ?? 0) + 1;
@@ -232,11 +265,12 @@ function renderFilters() {
     }, `${label} ${n}`));
   }
   const shown = visibleRuns().length;
-  const filtered = STATE.filter !== "all" || STATE.product !== "all";
+  const filtered = STATE.filter !== "all" || STATE.product !== "all" || STATE.session !== "all";
   box.append(el("span", { class: "count", text: filtered ? `${shown} 条（共 ${STATE.runs.length}）` : `${shown} 条` }));
 }
 function visibleRuns() {
-  return STATE.runs.filter((r) => (STATE.filter === "all" || r.source.kind === STATE.filter) && (STATE.product === "all" || productOf(r) === STATE.product));
+  return STATE.runs.filter((r) =>
+    (STATE.filter === "all" || r.source.kind === STATE.filter) && (STATE.product === "all" || productOf(r) === STATE.product) && (STATE.session === "all" || r.sessionId === STATE.session));
 }
 function renderRuns() {
   const list = document.getElementById("runs");
@@ -245,10 +279,11 @@ function renderRuns() {
   if (runs.length === 0) {
     const msg = STATE.runs.length === 0
       ? el("div", { class: "empty" }, "这里会显示 agent 每一次运行的记录。", el("br"), "跑一轮就会出现：", el("br"), el("code", { text: 'echo-agent "帮我看看这个仓库"' }))
-      : el("div", { class: "empty" }, "这个筛选下没有 run。", el("br"), el("button", { class: "btn", onclick: () => { STATE.filter = "all"; STATE.product = "all"; renderFilters(); renderRuns(); } }, "清除筛选"));
+      : el("div", { class: "empty" }, "这个筛选下没有 run。", el("br"), el("button", { class: "btn", onclick: () => { STATE.filter = "all"; STATE.product = "all"; STATE.session = "all"; renderFilters(); renderRuns(); } }, "清除筛选"));
     list.append(el("li", {}, msg));
     return;
   }
+  const multi = multiSession();
   for (const r of runs) {
     const dur = r.endedAt === null ? "进行中" : fmtMs(r.endedAt - r.acceptedAt);
     const item = el("li", {}, el("button", {
@@ -256,7 +291,8 @@ function renderRuns() {
       onclick: () => { STATE.selected = r.runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(r.runId)}`); renderRuns(); loadRun(); },
     },
       // 三行：实体名（产品）+ 时长 / 状态与来源标签 / 时间 · 目录 · runId（console.md §5.1：实体名在上，类型信息在下）
-      el("div", { class: "l1" }, el("span", { class: "name", text: productOf(r), title: sessionOf(r)?.name ?? "" }), el("span", { class: "dur mono", text: dur })),
+      // 集群里几段并行时实体名带上会话：同一产品可能开了好几段
+      el("div", { class: "l1" }, el("span", { class: "name", text: multi && r.sessionId ? `${productOf(r)} · ${sessionLabel(r.sessionId)}` : productOf(r), title: r.sessionId ?? "" }), el("span", { class: "dur mono", text: dur })),
       el("div", { class: "l2" }, badge(LEX.runStatus[r.status], r.status), badge(LEX.runSource[r.source.kind], r.source.kind)),
       el("div", { class: "l2" }, el("span", { class: "mono", text: fmtClock(r.acceptedAt) }), el("span", { class: "ws mono", text: shortPath(sessionOf(r)?.workspace ?? ""), title: sessionOf(r)?.workspace ?? "" }), el("span", { class: "id mono", text: shortId(r.runId) })),
     ));
@@ -289,6 +325,12 @@ function verbFor(name, attrs, body) {
   }
   if (name === "memory.compose") return { verb: "回忆", obj: `${attrs.blocks ?? 0}/${attrs.regions ?? 0} 个分区` };
   if (name === "observation.gap") return { verb: "记录缺口", obj: attrs.reason ?? "" };
+  if (name.startsWith("inbox.")) {
+    // 只有一条时说是谁发的：source 是投递方（session = 另一段会话），ref 是它给的编号；多条只说几条
+    const who = attrs.source ? `${attrs.source}${attrs.ref ? ` ${attrs.ref}` : ""}` : "";
+    const tail = attrs.reason ? ` · ${attrs.reason}` : attrs.deduplicated ? " · 重复" : attrs.via === "refresh" ? " · 别的进程写入" : "";
+    return { verb: LEX.records[name]?.zh ?? name, obj: `${who || `${attrs.count ?? 0} 条`}${tail}` };
+  }
   if (name.startsWith("schedule.")) return { verb: LEX.records[name]?.zh ?? name, obj: attrs.scheduleId ?? "" };
   if (name === "task.state.committed") return { verb: "任务状态", obj: `${attrs.operation ?? ""} ×${attrs.count ?? 0}` };
   return { verb: LEX.records[name]?.zh ?? name, obj: "" };
@@ -359,6 +401,10 @@ function contentSections(t, end) {
     add(start.role === "user" ? "用户" : start.role === "toolResult" ? "工具结果" : "正文", start.text, "body", "text");
   } else if (t.name === "agent.loop.ended") {
     add("报错", start.errorMessage, "body", "errorMessage", "bad");
+  } else if (t.name.startsWith("inbox.") && Array.isArray(start.records)) {
+    const lines = start.records.map((r) => `${r.source ?? r.role}${r.ref ? ` ${r.ref}` : ""}${r.recordId ? ` · ${r.recordId}` : ""}${r.text !== undefined ? `\n${r.text}${r.textTruncated ? "…" : ""}` : ""}`);
+    if (lines.length > 0) add("消息", lines.join("\n\n"), "body", "records");
+    add(t.name === "inbox.sealed" ? "封账本原因" : "原文", start.message, "body", "message", "bad");
   } else if (t.name === "context.compact" && Array.isArray(fin.spans)) {
     const sums = fin.spans.filter((s) => typeof s.summary === "string");
     if (sums.length > 0) add("摘要", sums.map((s) => `[${s.from}–${s.to}]\n${s.summary}`).join("\n\n"), "end", "spans");
@@ -379,8 +425,8 @@ function renderEntry(e, running, gaps) {
   const { verb, obj, arg } = verbFor(t.name, attrs, t.body);
   const term = LEX.records[t.name];
   const isTool = t.name === "tool.execute";
-  const failed = (isTool && attrs.isError === true) || t.name.endsWith(".failed") || t.name.endsWith(".partial") || (t.name === "agent.loop.ended" && attrs.status === "error");
-  const warn = t.name === "observation.gap" || t.name.endsWith(".rejected") || t.name.endsWith(".missed") || t.name === "model.retry.scheduled";
+  const failed = (isTool && attrs.isError === true) || t.name.endsWith(".failed") || t.name.endsWith(".partial") || t.name === "inbox.sealed" || (t.name === "agent.loop.ended" && attrs.status === "error");
+  const warn = t.name === "observation.gap" || t.name.endsWith(".rejected") || t.name.endsWith(".missed") || t.name.endsWith(".released") || t.name === "model.retry.scheduled";
   const isOpen = !e.single && end === null && t.kind === "span_start";
   let prefix = "·";
   if (isTool || t.kind === "span_start") prefix = failed ? "✕" : "▸";
@@ -510,6 +556,47 @@ async function getJson(url) {
   return r.json();
 }
 let lastOk = 0;
+/* run 之外的记录：收件 / ack / 闹钟……每 2s 一次（它们不像 run 那样秒级变化） */
+async function loadActivity() {
+  try {
+    const res = await getJson("/api/activity?limit=30");
+    STATE.activity = res.items;
+    for (const [id, s] of Object.entries(res.sessions ?? {})) if (!STATE.sessions[id]) STATE.sessions[id] = s;
+    renderActivity();
+  } catch {}
+}
+function renderActivity() {
+  const list = document.getElementById("acts");
+  list.replaceChildren();
+  document.getElementById("activity-hint").textContent = STATE.activity.length ? `${STATE.activity.length} 条` : "";
+  if (STATE.activity.length === 0) {
+    list.append(el("li", { class: "muted", text: "还没有 run 之外的事：收件、整批 ack、闹钟投递会出现在这里。" }));
+    return;
+  }
+  const multi = new Set(STATE.activity.map((a) => a.sessionId)).size > 1;
+  for (const { sessionId, record: t } of STATE.activity) {
+    const attrs = t.attributes ?? {};
+    const { verb, obj } = verbFor(t.name, attrs, t.body);
+    const term = LEX.records[t.name];
+    const bad = t.name === "inbox.sealed" || t.name.endsWith(".failed") || t.name.endsWith("-failed");
+    const warn = !bad && (t.name.endsWith(".rejected") || t.name.endsWith(".released") || t.name.endsWith(".missed"));
+    const runId = typeof attrs.runId === "string" ? attrs.runId : null;
+    const row = el("div", {
+      class: `act${bad ? " tl--bad" : warn ? " tl--warn" : ""}`,
+      title: `${term?.hint ?? t.name}${runId ? `\n点开对应的 run：${runId}` : ""}`,
+    },
+      el("span", { class: "t", text: fmtClock(t.occurredAt) }),
+      el("span", { class: "what" }, el("span", { class: "verb", text: verb }), obj ? el("span", { class: "obj", text: obj }) : null),
+      el("span", { class: "who", text: multi ? sessionLabel(sessionId) : "" }),
+    );
+    if (runId) {
+      row.setAttribute("role", "button");
+      row.setAttribute("tabindex", "0");
+      row.addEventListener("click", () => { STATE.selected = runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(runId)}`); renderRuns(); loadRun(); });
+    }
+    list.append(el("li", {}, row));
+  }
+}
 async function loadRuns() {
   try {
     const page = await getJson("/api/runs?limit=50");
@@ -527,7 +614,8 @@ async function loadRuns() {
     }
     renderFilters();
     renderRuns();
-    document.getElementById("desc").textContent = `${STATE.runs.length} 条 run · 只读轮询 SQLite，agent 跑着也能看`;
+    const sessions = new Set(STATE.runs.map((r) => r.sessionId).filter(Boolean)).size;
+    document.getElementById("desc").textContent = `${STATE.root ? `${STATE.root} · ` : ""}${STATE.runs.length} 条 run · ${sessions} 段会话 · 只读轮询 SQLite，agent 跑着也能看`;
   } catch (e) {
     document.getElementById("desc").textContent = `连不上 observe 服务：${e.message}。它退出了？重新跑 echo-agent observe serve`;
   }
@@ -555,10 +643,12 @@ document.addEventListener("visibilitychange", () => { STATE.hidden = document.hi
   if (wanted) { STATE.selected = wanted; STATE.follow = false; renderFollow(); }
   try {
     const h = await getJson("/api/health");
-    document.getElementById("desc").textContent = `${h.stateRoot} · ${h.counts.runs} 条 run`;
+    STATE.root = h.sessionId ? `会话 ${h.sessionId}` : h.sessionsRoot;
   } catch {}
   await loadRuns();
+  await loadActivity();
   setInterval(() => { if (!STATE.hidden) loadRuns(); }, 500);
+  setInterval(() => { if (!STATE.hidden) loadActivity(); }, 2000);
   setInterval(() => {
     if (STATE.hidden || STATE.selected === null) return;
     const cur = STATE.runs.find((r) => r.runId === STATE.selected);

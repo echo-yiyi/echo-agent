@@ -34,6 +34,7 @@ import type { Model, ThinkingLevel } from "../provider/types.ts";
 import type { AgentMessage, ImageBlock } from "../messages.ts";
 import type { FollowUpResult, SteerResult } from "../loop/intake.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionAsk } from "../permission/types.ts";
+import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk } from "../question/types.ts";
 import { defineService, type ServiceKey } from "./abi.ts";
 
 /** 一轮跑完的结果。壳子只关心成没成、错在哪。 */
@@ -102,6 +103,15 @@ export interface AgentRuntime {
   /** 还欠着几个答复。壳子重启 / 重绘时靠它把待答的重新摆出来。 */
   readonly pendingPermissions: readonly PermissionAsk[];
 
+  /**
+   * 回答一次 `question`（模型调了 `ask_user`，2026-09-05）。与 `answerPermission` 平行的另一条通道：
+   * 那边是壳子拦工具的工程机制，这边是模型主动调的工具。壳子两条都得接——不接 `question` 的壳，
+   * `ask_user` 只能等到超时或中止。
+   */
+  answerQuestion(answer: QuestionAnswer): Promise<QuestionAnswerResult>;
+  /** 还在等人的提问。壳子重挂时靠它把问题重新摆出来。 */
+  readonly pendingQuestions: readonly QuestionAsk[];
+
   /* ── 停 ───────────────────────────────────────────────────────────── */
 
   /** 中断在飞的那一轮。**不是停 Agent**——那是装配层的事。 */
@@ -132,6 +142,14 @@ export interface AgentRuntime {
    * 无视阈值；`instructions` 交给摘要阶段作为附加要求。仅 idle；忙时 rejected，不排队。
    */
   compact(instructions?: string): Promise<CompactResult>;
+
+  /**
+   * 切工作目录（2026-09-03 用户拍板：worktree 隔离走这个口，**会话不断**）。与其余「换」不同，**跑着也能换**——
+   * 调用方通常是轮中途的工具（`worktree_enter`）。改的是 `state.workspace`：下一次工具执行与下一轮 prompt 装配
+   * 生效（本轮 system 已冻结）；入账一条 `workspace` entry，resume 以最后一条为准，会话身份（开在哪）不动。
+   * core 不解释路径，存不存在调用方先看；`rejected` 只在空串或入账失败。
+   */
+  setWorkspace(workspace: string): Promise<EquipResult>;
 
   /**
    * 现在能不能收新输入。**壳子必须读它而不是自己猜**：

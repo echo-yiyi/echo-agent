@@ -31,7 +31,7 @@ printf 'Introduce yourself in one sentence.\n' |
 | | `echo-agent` | `echo-coding` |
 |---|---|---|
 | 能力 | 记忆、任务、schedule、skill（core 内建） | 上述全部，加文件读写、搜索、shell |
-| 工具 | core 的 `echo:*` builtin | builtin 之外再加 `echo:workspace` 与 `echo:shell` |
+| 工具 | core 的 `echo:*` builtin | builtin 之外再加 `echo:workspace`、`echo:shell`、`echo:worktree` 与 `echo:web` |
 | 命令 | `echo-agent` | `echo-coding` |
 
 文件工具和 shell 工具只属于 `echo-coding`。`echo-coding` 不改 `echo-agent` 一行代码：它把自己的 preset（系统 prompt、权限策略、那两条 extension）交给 `echo-agent` 的启动逻辑——第三方基于这个 runtime 做产品也是同一条路。
@@ -97,7 +97,7 @@ try {
 |---|---|
 | `@echo-agent/core` | Runtime、engine、provider adapters、持久化、记忆、任务与 extension API |
 | `echo-agent` | 通用 agent：官方 CLI，支持交互与管道两种形态；不认识任何具体产品 |
-| `echo-coding` | coding agent：依赖 `echo-agent`，加 `echo:workspace` 与 `echo:shell` 两条 extension 和 `echo-coding` 命令 |
+| `echo-coding` | coding agent：依赖 `echo-agent`，加 `echo:workspace`、`echo:shell`、`echo:worktree`、`echo:web` 四条 extension 和 `echo-coding` 命令 |
 
 可运行的消费者在 [`examples/`](examples/) 中：真实 provider 的 hello world、无需凭据的 scripted agent，以及 extension 自动发现示例。分发测试会打包各 workspace，在干净项目中安装 tarball，再用 Bun 和 Node 运行这些公共入口。
 

@@ -264,7 +264,10 @@ export function echoOptions(
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
     // 所以这里区分「空数组」与「不传」，不能无脑展开。
     ...(opts.extensionDirs.length > 0 ? { extensionDirs: opts.extensionDirs } : {}),
-    ...(preset.agent !== undefined ? { agent: preset.agent } : {}),
+    // 提问（`ask_user`，2026-09-05）：有人坐在终端前就 `host`（壳子摆出来等答），管道 / CI 没人可答就 `none`——
+    // 工具当场如实回话、不等人。与权限策略是两条通道：那条由产品 preset 定，这条由形态定。
+    // 产品 preset 自己定了 questions 就用它的（类型允许，不能静默盖掉）；没定才按形态给
+    agent: { ...(preset.agent ?? {}), questions: preset.agent?.questions ?? { responder: form.interactive ? "host" : "none", askTimeoutMs: null } },
     // `echo-agent` 恒挂的两段（纪律、项目指令）在前，产品自带的在后。顺序只影响 `echo.extensions`
     // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。
     extensions: [conductEntry(), instructionsEntry(), ...(preset.extensions ?? [])],
@@ -400,7 +403,7 @@ export function mainFor(product: Product): Main {
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
-      const form: PresetForm = { interactive };
+      const form: PresetForm = { interactive, credentials };
       return interactive
         ? await runInteractive(product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, sessionId, notices, controller.signal, deps)
         : await runPiped(product, form, effective, provider, choices, credentials, sessionId, notices, controller.signal);

@@ -10,12 +10,52 @@
 // 上一版这里复制了 core 的实现，于是「注册中途撞名要整组回滚」那个修复得改两处——
 // 复制一份实现就是复制一份将来会漏修的地方。
 
-import { AgentBackgroundService, AgentPrompt, AgentTools, defineExtension, defineToolPack } from "@echo-agent/core/extension";
+import { AgentBackgroundService, AgentPrompt, AgentRuntimeService, AgentTools, defineExtension, defineToolPack } from "@echo-agent/core/extension";
 import { makeShellTools } from "./tools/bash.ts";
+import { makeWorktreeTools } from "./tools/worktree.ts";
 import { shellToolsSection } from "./prompt.ts";
 
-/** 工作区读写与搜索：`read_file` / `write_file` / `edit_file` / `glob` / `grep`。 */
+/** 工作区读写与搜索：`read_file` / `write_file` / `edit_file` / `glob` / `grep` / `list_dir`。 */
 export const ECHO_WORKSPACE = defineToolPack("echo:workspace");
+
+/** 取网页与搜索：`web_fetch` / `web_search`（延迟工具）。纯函数造的工具，config 进来即可。 */
+export const ECHO_WEB = defineToolPack("echo:web");
+
+/**
+ * worktree 隔离：`worktree_enter` / `worktree_exit`（2026-09-03 用户拍板 B）。
+ * 与 `echo:shell` 同一个理由不用 `defineToolPack`：工具要 `AgentRuntime.setWorkspace`，那是 Agent 上的东西，
+ * 装配前拿不到——从 `AgentRuntimeService` 注入（`echo:agent` 恒 provide，排在所有扩展之前）。
+ */
+export const ECHO_WORKTREE = defineExtension({
+  name: "echo:worktree",
+  hostAbiVersion: 1,
+  inject: {
+    tools: { service: AgentTools, required: true },
+    runtime: { service: AgentRuntimeService, required: true },
+  },
+  apply(ctx) {
+    const registry = ctx.get(AgentTools);
+    const tools = makeWorktreeTools({ runtime: ctx.get(AgentRuntimeService) });
+    void ctx.effect({
+      boundary: "turn",
+      start: () => {
+        const offs: (() => unknown)[] = [];
+        try {
+          for (const tool of tools) offs.push(registry.register(tool));
+        } catch (e) {
+          for (const off of offs.reverse()) void off();
+          throw e;
+        }
+        return {
+          value: tools.map((t) => t.name),
+          dispose: () => {
+            for (const off of offs.reverse()) void off();
+          },
+        };
+      },
+    });
+  },
+});
 
 /**
  * 受权限管控的命令执行：`bash`。

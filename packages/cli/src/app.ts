@@ -9,7 +9,19 @@
 
 import { errText, type AgentState, type CredentialStore, type Model, type Provider, type ThinkingLevel } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
-import { decodeKittyPrintable, Editor, fuzzyFilter, isKeyRelease, ProcessTerminal, SelectList, TuiMainScreen, type AutocompleteItem, type TUI } from "@earendil-works/pi-tui";
+import {
+  decodeKittyPrintable,
+  Editor,
+  fuzzyFilter,
+  isKeyRelease,
+  ProcessTerminal,
+  SelectList,
+  truncateToWidth,
+  TuiMainScreen,
+  visibleWidth,
+  type AutocompleteItem,
+  type TUI,
+} from "@earendil-works/pi-tui";
 import { Transcript, clean } from "./transcript.ts";
 import { wrap } from "./text.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -125,9 +137,12 @@ function footerLine(state: Readonly<AgentState>, width: number): string {
   if (state.tasks.total > 0) parts.push(`任务 ${state.tasks.active.length}/${state.tasks.total}`);
   if (state.activeSkills.length > 0) parts.push(`skill ${state.activeSkills.length}`);
   if (state.mcp.length > 0) parts.push(`mcp ${state.mcp.length}`);
-  const text = parts.join(" · ");
-  // 宽字符按一列算会略溢出、被终端折成两行——状态栏不值得为此拖一套字宽库进来
-  return dim([...text].slice(0, Math.max(0, width)).join(""));
+  // 按**可见列宽**裁，不按码点：「空闲 / 缓存 / 上下文」是宽字符，一个占两列，按码点切会超宽——
+  // 而 pi-tui 对超宽行直接抛，实测状态栏 60 > 55 整屏崩（2026-09-04）。次要项排在后面，
+  // 放不下先整段从尾部丢；连第一段都放不下再硬截。字宽算法用 pi-tui 自己那套（与它的判定一致）。
+  let kept = parts;
+  while (kept.length > 1 && visibleWidth(kept.join(" · ")) > width) kept = kept.slice(0, -1);
+  return dim(truncateToWidth(kept.join(" · "), Math.max(0, width), ""));
 }
 
 /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止，返回退出码。**不负责收摊 Agent**——那归装配层。 */
@@ -195,6 +210,13 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       rerender();
       return;
     }
+    // 有问题在等（`ask_user`）：这行字是回答，不是新的一句话——走 answerQuestion，不进 prompt。
+    // 放在斜杠派发之后：等答的时候 /clear、/model 照样是命令，不能被当成回答送给模型。
+    if (question !== null) {
+      editor.addToHistory(trimmed); // 长回答也要 ↑ 翻得回来
+      answerQuestionFromText(trimmed);
+      return;
+    }
     if (busy()) {
       // 还没就绪 / 正在跑：**文字放回输入行**，用户不用重打（不排队、不假装收下）。
       // `Editor.submitValue()` 是**先清空再回调**（与 `Input` 相反），所以这里要主动把它放回去——
@@ -226,6 +248,17 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   // 与 Tool `execute()` 收到的是同一份对象。只显示「允许 bash？」而不显示 `rm -rf /`，
   // 就是让用户**盲批**：他批准的和实际要跑的，屏幕上看不出是不是一回事。
   let pending: { permissionId: string; toolName: string; params: unknown } | null = null;
+
+  /**
+   * **提问**（`ask_user`，2026-09-05）：协议里与权限询问平行的另一支——那是壳子拦工具的工程机制，
+   * 这是模型主动调的工具；回答只能来自 `answerQuestion()`。摆法：问题压在输入行上方，
+   * 单选有选项时用选择器（↑/↓、回车），或在输入行打序号 / 自己的话再回车；多选打序号串。数字不直答——
+   * 以数字开头的自由文本会被吞掉第一个字。
+   * 一次只有一条（工具执行串行）；Esc 仍是中断那一轮，不是撤问题——撤了模型还在等。
+   */
+  type PendingQuestion = { questionId: string; question: string; options: readonly { label: string; description?: string }[]; multiSelect: boolean };
+  let question: PendingQuestion | null = null;
+  let questionList: SelectList | null = null;
 
   /**
    * **凭据配置段**（2026-09-01 用户拍板：配置是运行态，不阻塞启动）。
@@ -470,6 +503,69 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     rerender();
   };
 
+  const answerQuestion = (selected: readonly string[], text?: string): void => {
+    const q = question;
+    if (q === null) return;
+    question = null;
+    questionList = null;
+    transcript.push({ kind: "notice", text: `[回答] ${[...selected, ...(text === undefined ? [] : [text])].join("、")}` });
+    rerender();
+    void agent.answerQuestion({ questionId: q.questionId, selected, ...(text === undefined ? {} : { text }) }).then(
+      (result) => {
+        // 回答可能过期（那一轮已经 abort / 超时）：如实说，别让用户以为模型收到了
+        if (result.kind !== "accepted") {
+          transcript.push({ kind: "notice", text: `[提问] 这次回答没生效：${result.kind}` });
+          rerender();
+        }
+      },
+      (e: unknown) => {
+        transcript.push({ kind: "notice", text: `[提问] 回答失败：${e instanceof Error ? e.message : String(e)}` });
+        rerender();
+      },
+    );
+  };
+
+  /** 输入行里的字作为回答：全是序号（多选可多个，逗号隔开）就按序号选；其余当自由文本。 */
+  const answerQuestionFromText = (text: string): void => {
+    const q = question;
+    if (q === null) return;
+    const parts = text.split(/[\s,，、]+/).filter((s) => s !== "");
+    if (q.options.length > 0 && parts.length > 0 && parts.every((n) => /^\d+$/.test(n))) {
+      const picked = [...new Set(parts.map((n) => q.options[Number(n) - 1]?.label))].filter((l): l is string => l !== undefined);
+      // 全是序号但对不上（越界 / 单选给了多个）：放回输入行说一句，**不**当自由文本送出去——「9」不是回答
+      if (picked.length !== new Set(parts).size || (!q.multiSelect && picked.length !== 1)) {
+        editor.setText(text);
+        transcript.push({
+          kind: "notice",
+          text: !q.multiSelect && picked.length > 1 ? "[提问] 这个问题只能选一项" : `[提问] 没有这个序号（1 到 ${q.options.length}）`,
+        });
+        rerender();
+        return;
+      }
+      answerQuestion(picked);
+      return;
+    }
+    answerQuestion([], text);
+  };
+
+  /** 收下一条提问（新来的、或订阅之前就欠着的）。按 `questionId` 合并，不重复摆。 */
+  const takeQuestion = (q: PendingQuestion): void => {
+    if (question?.questionId === q.questionId) return;
+    question = { questionId: q.questionId, question: q.question, options: q.options, multiSelect: q.multiSelect };
+    questionList = null;
+    if (q.options.length > 0 && !q.multiSelect) {
+      const list = new SelectList(
+        q.options.map((o, i) => ({ value: o.label, label: `${i + 1}. ${o.label}`, description: o.description ?? "" })),
+        8,
+        SELECT_LIST_THEME,
+      );
+      list.onSelect = (item): void => answerQuestion([item.value]);
+      questionList = list;
+    }
+    transcript.push({ kind: "notice", text: `[提问] ${q.question}` });
+    rerender();
+  };
+
   const unsubscribeLifecycle = agent.subscribeLifecycle((event) => {
     switch (event.type) {
       case "sessionStart":
@@ -486,6 +582,17 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       case "permissionCancelled":
         // 那一轮没了（abort / 收摊）：把问题从屏幕上撤掉，别让用户对着一个死问题按键
         if (pending?.permissionId === event.permissionId) pending = null;
+        rerender();
+        return;
+      case "question":
+        takeQuestion(event);
+        return;
+      case "questionCancelled":
+        // 没等到答案（超时 / 中止 / 收摊）：撤掉，同权限那边
+        if (question?.questionId === event.questionId) {
+          question = null;
+          questionList = null;
+        }
         rerender();
         return;
       case "toolUseDenied":
@@ -574,6 +681,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   // 不补的话用户看不到问题，run 一直等到 `askTimeoutMs` 折成 deny，全程无人知情。
   // 顺序不能反：先读后订阅会漏掉两步之间新来的那条。
   for (const ask of agent.pendingPermissions) takeAsk(ask);
+  for (const q of agent.pendingQuestions) takeQuestion(q);
 
   const submit = async (text: string): Promise<void> => {
     transcript.push({ kind: "user", text });
@@ -631,6 +739,22 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         }
         lines.push(`${ESC}[33m允许 ${clean(pending.toolName)}？[y/n]${ESC}[39m`);
       }
+      // 待答的提问（`ask_user`）同样压在输入行上方；文字来自模型，经 `clean()` 再上屏
+      if (question !== null) {
+        const inner = Math.max(1, width - 2);
+        for (const line of wrapForWidth(clean(question.question), inner)) lines.push(`${ESC}[35m│ ${line}${ESC}[39m`);
+        if (questionList !== null) {
+          lines.push(...questionList.render(width));
+          lines.push(dim("↑/↓ 选 · 回车确认 · 或输入序号 / 直接打字回答，回车发送"));
+        } else if (question.options.length > 0) {
+          question.options.forEach((o, i) => {
+            for (const line of wrapForWidth(clean(`${i + 1}. ${o.label}${o.description === undefined ? "" : `  ${o.description}`}`), inner)) lines.push(`  ${line}`);
+          });
+          lines.push(dim(question.multiSelect ? "输入序号（可多个，逗号隔开）或直接打字回答，回车发送" : "输入序号或直接打字回答，回车发送"));
+        } else {
+          lines.push(dim("在输入行打字回答，回车发送"));
+        }
+      }
       // 模型选择器（Ctrl+L）：顶替输入行的位置，选完或 Esc 收起
       if (modelPicker !== null) {
         lines.push(bold("选择模型"));
@@ -668,7 +792,15 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         if (keys.matches(data, "app.permission.allow")) return answer("allow");
         if (keys.matches(data, "app.permission.deny")) return answer("deny");
       }
-      if (keys.matches(data, "app.model.select") && setup === null) {
+      // 单选提问、输入行为空：↑/↓/回车交给选择器；其它键（打字、序号、Esc 中断、Ctrl+C/D）照常走下面。
+      // 数字**不**直答：以数字开头的自由文本（「2 weeks」）会被吞掉第一个字；序号也要回车才算数
+      if (question !== null && questionList !== null && editor.getText() === "" && isListNavKey(keys, data)) {
+        questionList.handleInput(data);
+        rerender();
+        return;
+      }
+      // 问题 / 权限在等时不开选择器：两样叠在一起，按键不知道该给谁
+      if (keys.matches(data, "app.model.select") && setup === null && question === null && pending === null) {
         openModelPicker();
         return;
       }
@@ -819,6 +951,11 @@ function summaryOf(params: unknown): string {
   }
   if (text === "{}" || text === "") return "";
   return text.length > 80 ? `${text.slice(0, 79)}…` : text;
+}
+
+/** 提问选择器只吃上下与回车——走键表，不比字节（本文件的纪律，见 `keybindings.ts` 头注）；其余留给输入行与应用级键。 */
+function isListNavKey(keys: ReturnType<typeof installKeybindings>, data: string): boolean {
+  return keys.matches(data, "tui.select.up") || keys.matches(data, "tui.select.down") || keys.matches(data, "tui.select.confirm");
 }
 
 /**

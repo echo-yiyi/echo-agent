@@ -667,7 +667,7 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
     expect(ui.screen()).toContain("echo-试产品");
     expect(ui.screen()).toContain("v9.9.9");
     // 形态到了 preset 手里，而且只调一次（workspace 不经 preset，`mainFor()` 直接交给 createEcho）
-    expect(forms).toEqual([{ interactive: true }]);
+    expect(forms).toEqual([{ interactive: true, credentials }]); // 凭据 store 原样交给产品（web_search 读 brave）
     expect(applied, "preset 交出的 Extension 没被 mount").toBe(1);
     // 渐进式披露的缺省名单（`DEFAULT_DEFERRED_TOOLS`）进了装配：名单非空 → `tool_search` 在池里；
     // 延迟的工具本身也在池里（只是不上菜单，那半边的判据在 core 的 tool-search.test）
@@ -794,16 +794,40 @@ test("CLI 打开会话面、但不给 runner：模型能看见别的会话、能
   // 选了什么：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此；但「怎么再开一个终端窗口」
   // 不该由 CLI 替用户决定，所以不给 runner——模型那边因此没有 session_create。
   // 判据读的是**装配现场那一份入参**，不是另搭一套。
+  const credentials = new FileCredentialStore(join(dir, "credentials.json"));
   const built = echoOptions(
     ECHO_AGENT,
-    { interactive: true },
+    { interactive: true, credentials },
     { withoutMemory: true, extensionDirs: [], continueLast: false },
     kimiProvider(),
     [],
-    new FileCredentialStore(join(dir, "credentials.json")),
+    credentials,
     undefined,
   );
   expect(built.sessions).toEqual({});
+  // 提问（`ask_user`，2026-09-05）由形态定：交互 = 有人答，管道 = 没人（工具当场如实回话）
+  expect(built.agent?.questions).toEqual({ responder: "host", askTimeoutMs: null });
+  const piped = echoOptions(
+    ECHO_AGENT,
+    { interactive: false, credentials },
+    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    kimiProvider(),
+    [],
+    credentials,
+    undefined,
+  );
+  expect(piped.agent?.questions).toEqual({ responder: "none", askTimeoutMs: null });
+  // 产品 preset 自己定了 questions 就不被形态盖掉（类型允许它定，静默盖掉就是「接受配置又忽略」）
+  const custom = echoOptions(
+    { name: "p", version: "0", preset: () => ({ agent: { questions: { responder: "host", askTimeoutMs: 5000 } } }) },
+    { interactive: false, credentials },
+    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    kimiProvider(),
+    [],
+    credentials,
+    undefined,
+  );
+  expect(custom.agent?.questions).toEqual({ responder: "host", askTimeoutMs: 5000 });
   expect(built.sessions?.run).toBeUndefined();
 });
 

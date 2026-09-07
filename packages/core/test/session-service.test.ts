@@ -581,6 +581,28 @@ test("并发 append 的 messageCount 不丢更新（meta 是读改写，必须�
   expect(resumed.info.messageCount).toBe(10);
 });
 
+test("workspace entry（2026-09-03 worktree 隔离）：切目录记成过程事实，恢复取最后一条；info.workspace（开在哪）不变；缺 workspace 判红", async () => {
+  const dir = new InMemoryDir();
+  const first = new SessionService(dir);
+  const created = await first.createOrResume("main", { workspace: "/repo", agent: "coding" });
+  expect(created.workspace).toBe("/repo");
+  await first.append("main", [
+    { kind: "workspace", at: 1, workspace: "/repo/.echo/worktrees/a" },
+    { kind: "message", message: userMessage("一") },
+    { kind: "workspace", at: 2, workspace: "/repo/.echo/worktrees/b" },
+  ]);
+  await first.settle();
+
+  const again = await new SessionService(dir).createOrResume("main");
+  expect(again.workspace).toBe("/repo/.echo/worktrees/b");
+  expect(again.info.workspace).toBe("/repo"); // 身份不动：`--continue` 按它找
+  expect(again.messages.length).toBe(1);
+
+  // 坏档：workspace entry 没有 workspace → 与其它 kind 同一姿态，判红不修
+  await dir.write("entries/000004.json", JSON.stringify({ id: "main-e4", parentId: "main-e3", kind: "workspace", at: 3 }));
+  await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/workspace/);
+});
+
 test("收摊兜底：一句话都没说过的段撤掉 meta，从此不进清单；说过话的撤不动（2026-09-04）", async () => {
   // 「空会话不留痕」的新做法：活着的时候看得见（别人才能给它带话），收摊时才决定它算不算数。
   const root = new InMemoryDir();

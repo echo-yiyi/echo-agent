@@ -9,7 +9,8 @@
 import { expect, test } from "bun:test";
 import { Agent } from "../src/agent.ts";
 import { agentRuntimeOf } from "../src/extension/builtin.ts";
-import { scriptedStreamFn, textTurn } from "../src/testing.ts";
+import { scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
+import { toolOk, type ModelTool } from "../src/tools/types.ts";
 
 function agentWith(turns: ReturnType<typeof textTurn>[] = [textTurn("好")]): Agent {
   return new Agent({
@@ -113,4 +114,47 @@ test("从没报过缓存：字段全程缺席（没报 ≠ 0）", async () => {
   const rt = agentRuntimeOf(agent);
   await rt.prompt("hi");
   expect(Object.hasOwn(rt.state.usage, "cachedInputTokens")).toBe(false);
+});
+
+test("setWorkspace（2026-09-03 worktree 隔离）：跑着也能换；同一轮里下一个工具就看到新目录；空串 rejected", async () => {
+  let rt!: ReturnType<typeof agentRuntimeOf>;
+  const seen: string[] = [];
+  const switchTool: ModelTool = {
+    kind: "model",
+    name: "switch",
+    label: "switch",
+    description: "switch workspace",
+    parameters: { type: "object", properties: {} },
+    execute: async (_p, ctx) => {
+      seen.push(ctx.workspace);
+      const r = await rt.setWorkspace("/repo/.echo/worktrees/a");
+      return toolOk(r.kind);
+    },
+  };
+  const whereTool: ModelTool = {
+    kind: "model",
+    name: "where",
+    label: "where",
+    description: "report workspace",
+    parameters: { type: "object", properties: {} },
+    execute: async (_p, ctx) => {
+      seen.push(ctx.workspace);
+      return toolOk(ctx.workspace);
+    },
+  };
+  const agent = new Agent({
+    model: { provider: "t", id: "only", api: "scripted" },
+    streamFunction: scriptedStreamFn([toolTurn("t1", "switch", {}), toolTurn("t2", "where", {}), textTurn("好")]),
+    tools: [switchTool, whereTool],
+    workspace: "/repo",
+  });
+  rt = agentRuntimeOf(agent);
+  const r = await rt.prompt("go");
+  expect(r.outcome.kind).toBe("completed");
+  // 第一件工具在 /repo 起，它切了目录；第二件（同一轮）已经在新目录
+  expect(seen).toEqual(["/repo", "/repo/.echo/worktrees/a"]);
+  expect(rt.state.workspace).toBe("/repo/.echo/worktrees/a");
+
+  expect(await rt.setWorkspace("")).toEqual({ kind: "rejected", reason: expect.stringContaining("非空") });
+  expect(rt.state.workspace).toBe("/repo/.echo/worktrees/a");
 });

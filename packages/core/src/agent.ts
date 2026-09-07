@@ -11,7 +11,7 @@ import { redactedLabel } from "./observability/redact.ts";
 import { errText, type AgentError } from "./errors.ts";
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
-import { builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
+import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
 import { memoryFactDescriptor } from "./memory/observe.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
@@ -20,6 +20,8 @@ import type { EchoObservableState, RuntimePhase } from "./observability/types.ts
 import { HookRuntime, type HookContext, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
+import { QuestionLedger } from "./question/ledger.ts";
+import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk, QuestionPolicy, QuestionSettlement } from "./question/types.ts";
 import {
   defaultConvertToLlm,
   userMessage,
@@ -47,6 +49,7 @@ import type { SessionEntryInput, SessionService } from "./session/service.ts";
 import type { SessionPhase } from "./session/status.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
 import { InboxAckError, InboxStore } from "./inbox/store.ts";
+import { inboxFactDescriptor } from "./inbox/observe.ts";
 import { systemClock, type Clock } from "./schedule/clock.ts";
 import { environmentDedupeKey, scheduleDedupeKey } from "./inbox/records.ts";
 import { stateHostOf } from "./state/host-wiring.ts";
@@ -76,6 +79,7 @@ import { newSessionId } from "./session/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
 import { activeTools, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap } from "./tools/harness.ts";
 import { makeToolSearchTool } from "./tools/tool-search.ts";
+import { makeAskUserTool } from "./question/tool.ts";
 import type { Diagnostic } from "./errors.ts";
 import type { StorageDir } from "./storage/types.ts";
 import type { ResourceChange } from "./events.ts";
@@ -176,6 +180,11 @@ export type AgentOptions = {
    * "none" = 诚实缺席，ask 当 policy deny）——两者都不给，构造期 fail-loud。
    */
   permission?: PermissionPolicy;
+  /**
+   * 提问策略（`ask_user`，2026-09-05）：有没有人会答模型的问题。不给 = `none`（库用法的常态，工具当场回「没人能答」）；
+   * 壳子坐着人就给 `responder:"host"`。与 `permission` 是两条平行的通道，各答各的。
+   */
+  questions?: QuestionPolicy;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   sessionId?: string;
   /**
@@ -597,6 +606,9 @@ export class Agent {
   /** permission ask 账本：只有 `answerPermission()` 与 loop 的 ask 路径碰它。 */
   private readonly permissions = new PermissionLedger();
   private readonly permissionPolicy: PermissionPolicy;
+  /** 提问账本：只有 `answerQuestion()` 与 `ask_user` 工具碰它。 */
+  private readonly questions = new QuestionLedger();
+  private readonly questionPolicy: QuestionPolicy;
   /** 当前 run 的稳定身份；permission ask 与事件关联引用它。 */
   private currentRunId: string | null = null;
   /**
@@ -749,6 +761,8 @@ export class Agent {
       // 渐进式披露的入口，恒装：延迟工具是标记、随时可能被 extension / MCP 注册进来；
       // 池里没有待取的延迟工具时它自己不上菜单（`visibleTools`），不多占一格
       toolSearch: { tools: [makeToolSearchTool({ tools: this.tools, loaded: this.loadedTools })] },
+      // 提问 `ask_user`（2026-09-05）：常驻；有没有人答由 `questions` 策略定，没人时工具当场如实回话
+      askUser: { tools: [makeAskUserTool({ ask: (input, signal) => this.askQuestion(input, signal) })] },
       // 压缩阶梯 + transcript_read + 习惯段：与 memory 同款——`builtin: false` 就是「这组不在」，
       // 流水线与 registry 仍在，等别的扩展注册阶段。`transcript_read` 读的是活的 transcript。
       compaction: opts.compaction?.builtin === false ? undefined : defaultCompactionPack(opts.compaction ?? {}, () => this._state.messages),
@@ -765,6 +779,7 @@ export class Agent {
     this.streamFunction = opts.streamFunction;
     this.hooks = opts.hooks ?? new HookRuntime();
     this.permissionPolicy = validatePermissionPolicy(opts.permission);
+    this.questionPolicy = validateQuestionPolicy(opts.questions);
     this.getApiKey = opts.getApiKey;
     // **放在最后**：attach 可能触发 report → hookContext() → this.hooks，
     // 而 hooks 是上面几行才赋的值（实测踩到：放在前面直接 TypeError）。
@@ -872,6 +887,58 @@ export class Agent {
   /** Inspector 用：还在等人的 ask。 */
   get pendingPermissions(): readonly import("./permission/types.ts").PermissionAsk[] {
     return this.permissions.pending;
+  }
+
+  /**
+   * 可信宿主回答一次提问（模型调了 `ask_user`）。accepted / stale / closed 都是正常结果、都 fulfill；
+   * 只有 JS 边界的坏 shape 才以 TypeError reject。**至少给一样**：选项或文字——空回答不是回答。
+   */
+  async answerQuestion(input: QuestionAnswer): Promise<QuestionAnswerResult> {
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      typeof input.questionId !== "string" ||
+      input.questionId === "" ||
+      !Array.isArray(input.selected) ||
+      !input.selected.every((s) => typeof s === "string" && s !== "") ||
+      (input.text !== undefined && typeof input.text !== "string") ||
+      (input.selected.length === 0 && (input.text === undefined || input.text.trim() === ""))
+    ) {
+      throw new TypeError("answerQuestion：需要 { questionId: string, selected: string[], text?: string }，且选项与文字至少给一样");
+    }
+    // 文字在这道 JS 边界上归一：去首尾空白，空的不带——账本与工具都不再各判一次
+    const text = input.text?.trim();
+    return this.questions.answer({ questionId: input.questionId, selected: input.selected, ...(text !== undefined && text !== "" ? { text } : {}) });
+  }
+
+  /** 壳子重挂时补摆：还在等人的提问。 */
+  get pendingQuestions(): readonly QuestionAsk[] {
+    return this.questions.pending;
+  }
+
+  /**
+   * `ask_user` 的落点。策略说没人（`responder:"none"`），或声明了宿主却没人订阅 lifecycle，都当场回 no-responder——
+   * 不生成 ask、不等人（与权限那边「诚实缺席」同一口径）。有人就登记、发 `question` 事件、等结算；
+   * 没等到（超时 / 中止 / 收摊）再发 `questionCancelled`，壳子据此撤掉屏幕上的问题。
+   */
+  private async askQuestion(input: Omit<QuestionAsk, "questionId">, signal: AbortSignal | undefined): Promise<QuestionSettlement> {
+    const policy = this.questionPolicy;
+    // 与权限那边同一口径：等人不超时（null）却没人订阅 → 不开 ask；有超时的可以开着等到点
+    if (policy.responder === "none" || (policy.askTimeoutMs === null && !this.hooks.hasSubscribers())) {
+      return { kind: "unanswered", reason: "no-responder" };
+    }
+    const handle = this.questions.openAsk(input, { timeoutMs: policy.askTimeoutMs ?? null, signal: signal ?? this.signal ?? new AbortController().signal });
+    // 进 ask 那一刻 run 已在中止 / Agent 已收摊：句柄是预结算的、没登记过——不发事件，壳子不该摆出一个从没 pending 过的问题
+    if (!this.questions.isOpen(handle.questionId)) return handle.settled;
+    await this.hooks.notify({ type: "question", ...handle.ask }, this.hookContext());
+    const settlement = await handle.settled;
+    if (settlement.kind === "unanswered" && settlement.reason !== "no-responder") {
+      await this.hooks.notify(
+        { type: "questionCancelled", questionId: handle.questionId, toolCallId: handle.ask.toolCallId, reason: settlement.reason },
+        this.hookContext(),
+      );
+    }
+    return settlement;
   }
 
   subscribe(listener: AgentListener): () => void {
@@ -1152,16 +1219,21 @@ export class Agent {
             reservationId: batch.reservationId,
             reservedRecordIds: batch.recordIds,
           },
-          (scope) => this.executeAdmitted(scope, this.foregroundExecutor(batch.messages, "human")),
+          (scope) =>
+            this.executeAdmitted(scope, async (s, signal) => {
+              // 观测：这批交给了这条 run（此刻 scope 供给已带 runId，事实落在 run 里），再进 loop
+              this.inbox.noteConsumed(batch.reservationId, s.runId);
+              return this.foregroundExecutor(batch.messages, "human")(s, signal);
+            }),
         );
       } catch (e) {
-        this.inbox.releaseBatch(batch.reservationId); // reserve 之后 enqueue 同步抛：整批放回，不能 drain 了又不还
+        this.inbox.releaseBatch(batch.reservationId, "enqueue-failed"); // reserve 之后 enqueue 同步抛：整批放回，不能 drain 了又不还
         throw e;
       }
       const settled = await ticket.settled;
       if (settled.kind === "rejected") {
         // 任一正常 rejected：整批放回（durable facts 一个不丢），不 ack 半批
-        this.inbox.releaseBatch(batch.reservationId);
+        this.inbox.releaseBatch(batch.reservationId, "run-rejected");
         return null;
       }
       // executed / callback-error 都是封口：先归 idle，再整批 ack。
@@ -1173,7 +1245,7 @@ export class Agent {
       // 不假装 ack 成功，也不把已经跑完的 run 说成没跑。
       let indeterminate = false;
       try {
-        await this.inbox.ackBatch(batch.reservationId);
+        await this.inbox.ackBatch(batch.reservationId, { runId: settled.runId });
       } catch (e) {
         if (e instanceof InboxAckError && e.verdict === "indeterminate") {
           this.enterInboxFailure(e); // 先进失败态，再清标记——中间不给任何新 run 可乘之机
@@ -1383,7 +1455,7 @@ export class Agent {
         this._state.messages = [...data.messages];
         this._state.compaction = data.compaction;
         this._state.sessionId = data.info.id;
-        this._state.workspace = data.info.workspace; // resume 以盘上为准
+        this._state.workspace = data.workspace; // resume 以盘上为准：最后一条 workspace entry，没切过 = 开会话的目录
         await this.hooks.notify(
           {
             type: "sessionStart",
@@ -2018,6 +2090,25 @@ export class Agent {
     return this.taskLastWrite ?? Promise.resolve("written");
   }
 
+  /* ───────────── 会话面 ───────────── */
+
+  /**
+   * 切工作目录（2026-09-03 用户拍板：worktree 隔离走 core 的口，**会话不断**）。
+   * 只换 `AgentState.workspace` 并入账一条 `workspace` entry——resume 以最后一条为准；`SessionInfo.workspace`
+   * （会话开在哪）不动，那是会话身份的一维（`--continue` 按它找）。
+   * **不守 idle**：调用方通常是工具（`worktree_enter`），它就在轮中途。生效点是下一次工具执行
+   * （loop 每次执行都现读 `workspace`，见 `createLoopConfig`）与下一轮的 prompt 装配（本轮 system 已冻结）。
+   * core 不解释路径：是不是目录、存不存在由调用方先看；这里只拒空串。
+   */
+  async setWorkspace(workspace: string): Promise<void> {
+    if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必须是非空字符串（宿主给绝对路径）");
+    if (workspace === this._state.workspace) return;
+    this._state.workspace = workspace;
+    const id = this._state.sessionId;
+    if (id === null) return;
+    await this.sessionService?.append(id, [{ kind: "workspace", at: Date.now(), workspace }]);
+  }
+
   /* ───────────── 私有：运行 ───────────── */
 
   /**
@@ -2484,6 +2575,7 @@ export class Agent {
   /** 循环的入参：装备来自这次 admission 冻结的 binding（model seam），不再读 Agent 的活字段。 */
   private createLoopConfig(scope: AgentAdmissionExecuteScope): AgentLoopConfig {
     const binding = scope.modelBinding;
+    const state = this._state; // 给下面 workspace 的 getter 用：切目录在轮中途发生，要现读
     return {
       model: binding.model as Model, // RunModelSnapshot 与 Model 同形——JSON-like 的冻结副本
       runId: scope.runId,
@@ -2537,7 +2629,10 @@ export class Agent {
         getStages: () => [...this.compactionStages.values()],
         calibration: this.lastCalibration,
       },
-      workspace: this._state.workspace,
+      // **现读**：`setWorkspace()`（worktree 隔离）在轮中途改它，下一次工具执行就要看到新目录
+      get workspace() {
+        return state.workspace;
+      },
     };
   }
 
@@ -2599,6 +2694,7 @@ export class Agent {
     this.reportUnconsumed(this.intake.dispose(), "dispose");
     // 再封 ask 账本：还在等人的 ask 以 runtime-disposed 封口（早于下面的 abort，否则会被记成 run-aborted）。
     this.permissions.dispose();
+    this.questions.dispose();
     // 关 admission：排队的 rejected(stopping)、在跑的 abort 并等它 close；之后的 enqueue 一律 rejected
     await this.admission.close("stopping");
     if (this.activeRun !== undefined) {
@@ -2873,6 +2969,8 @@ export class Agent {
     if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID));
     attachTaskObserver(this.tasks, rt.capabilitySink(taskFactDescriptor, builtinOwner(TASKS_ENTRY_ID)));
     if (this.schedule !== undefined) this.schedule.observe = rt.capabilitySink(scheduleFactDescriptor, builtinOwner(SCHEDULER_ENTRY_ID));
+    // inbox 没有自己的 tool pack，账本是 Agent 自己的一部分：owner 记 echo:agent，instrumentation（echo.inbox）区分它和 agent 事件
+    this.inbox.observe = rt.capabilitySink(inboxFactDescriptor, builtinOwner(AGENT_ENTRY_ID));
     return this.observation;
   }
 
@@ -2992,9 +3090,22 @@ export class Agent {
       parts.push({ kind: "error", at: Date.now(), error: input.outcome.error });
     }
     if (parts.length === 0) return;
-
     await this.sessionService?.append(id, parts);
   }
+}
+
+/** `AgentOptions.questions` 验形：不给 = 没人答（库用法的常态）；给了就得说清有没有人、等多久。 */
+function validateQuestionPolicy(p: QuestionPolicy | undefined): QuestionPolicy {
+  if (p === undefined) return { responder: "none", askTimeoutMs: null };
+  if (p.responder !== "host" && p.responder !== "none") throw new Error('questions.responder 必须是 "host" 或 "none"');
+  const t = p.askTimeoutMs ?? null;
+  assertAskTimeoutMs(t, "questions.askTimeoutMs");
+  return { responder: p.responder, askTimeoutMs: t };
+}
+
+/** ask 超时的**唯一**验形：权限与提问同一条规则（正整数毫秒或 null），两边不各写各的。 */
+function assertAskTimeoutMs(t: unknown, label: string): void {
+  if (t !== null && (!Number.isInteger(t) || (t as number) <= 0)) throw new Error(`${label} 必须是正整数毫秒或 null，收到 ${String(t)}`);
 }
 
 function normalizePrompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): AgentMessage[] {
@@ -3017,9 +3128,7 @@ const ALLOW_ALL_PERMISSION: PermissionPolicy = Object.freeze({
 function validatePermissionPolicy(policy: PermissionPolicy | undefined): PermissionPolicy {
   if (policy === undefined) return ALLOW_ALL_PERMISSION;
   const t = policy.askTimeoutMs;
-  if (t !== null && (!Number.isInteger(t) || t <= 0)) {
-    throw new Error(`permission.askTimeoutMs 必须是正整数毫秒或 null，收到 ${String(t)}`);
-  }
+  assertAskTimeoutMs(t, "permission.askTimeoutMs");
   // responder 运行时穷举：TS 的字面量联合挡不住 JS 调用方；"bogus" 既不走 host 检查也不走 none 折叠，
   // 最后就是一个永远等不到人的 ask（实测）。
   if (policy.responder !== undefined && policy.responder !== "host" && policy.responder !== "none") {

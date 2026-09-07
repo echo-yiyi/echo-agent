@@ -14,7 +14,7 @@ This is not a license to widen the change: before altering a public API, a persi
 |---|---|
 | `packages/core/` | Runtime, engine, provider adapters, state, memory, tasks, and the extension API |
 | `packages/cli/` | `echo-agent`: the general agent product, official CLI and interactive TUI; a consumer of the high-level assembly that knows no specific product |
-| `packages/coding/` | `echo-coding`: the coding agent product; depends on `packages/cli` and mounts its own `echo:workspace` / `echo:shell` |
+| `packages/coding/` | `echo-coding`: the coding agent product; depends on `packages/cli` and mounts its own `echo:workspace` / `echo:shell` / `echo:worktree` / `echo:web` |
 | `examples/` | Runnable samples that consume the public API from tarballs |
 | `test/` | Repository-level distribution and documentation gates |
 | `scripts/` | Inventory, documentation checks, and repository tooling |
@@ -25,6 +25,7 @@ Use Bun to manage the workspace, run scripts, and run tests. Do not introduce a 
 
 - Tests describe current behavior; they do not by themselves prove it is correct. When a design decision changes, change the stale implementation and its tests together, and say why.
 - To describe what the code *does*, cite public types, implementations, and reproducible behavior. To describe what it *should* do, cite a design decision the user confirmed.
+- Design authority lives in this repository: `docs/design/` holds the current design, `docs/decisions/` the record. Sibling repositories on this machine are separate lineages — answer design questions from this repository's documents and code, never from theirs.
 - **A document you cannot write may be a code problem.** If one concept has two sources of truth, a boundary cannot be defined, or failure semantics conflict, report both sides with `file:line` and a reproduction command — do not invent a coherent story on the code's behalf.
 - Only a precise machine criterion counts as "guarded." Comments, narrow tests, and review habits are "discipline" — say which one you mean.
 - Every fact has exactly one authoritative home. Link to it from elsewhere; never copy a second version that will rot on its own.
