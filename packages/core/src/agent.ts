@@ -70,7 +70,7 @@ import { assembleSystem } from "./prompt/assemble.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
 import { newSessionId } from "./session/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
-import { activeTools, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap } from "./tools/harness.ts";
+import { activeTools, effectiveRestriction, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap, type ToolRestrictions } from "./tools/harness.ts";
 import { makeToolSearchTool } from "./tools/tool-search.ts";
 import { makeAskUserTool } from "./question/tool.ts";
 import { makeSubagentTool, SUBAGENT_NAME, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
@@ -381,6 +381,13 @@ export class Agent {
         都是纯函数：`registerTool(agent.tools, t)`、`activateSkill(agent.skills, agent.activeSkills, "h5")`。 ── */
   /** 工具池。「能用 / 禁用」是工具自己的状态（`tool.disabled`），不外挂。 */
   readonly tools: ToolMap = new Map();
+  /**
+   * 收紧工作集的那一叠（2026-09-07，角色定义）：`AgentTools.restrict()` 往里压，卸载时摘。
+   * **池与它分开**——池是「装了什么」，这里是「这一段露出什么」，角色卸掉之后池原样还在。
+   * 三个读点（`state.tools` / `getTools()` / `resolveTool()`）都要过 `restriction()`，
+   * 漏一个就是「菜单上没有但点得动」。
+   */
+  readonly toolRestrictions: ToolRestrictions = [];
   /**
    * 内建能力**造好但尚未注册**的工具，按生命周期 owner 分四组。
    *
@@ -838,10 +845,18 @@ export class Agent {
    * 运行时状态快照。`activeSkills` 是**读取时从 harness 算出来的派生视图**——
    * 池的权威在 harness，state 里不存第二份（与 `isStreaming` 同款）。
    */
+  /**
+   * 当前有效的工作集收紧（`toolRestrictions` 的交集）。一条都没有 = `undefined` = 不收紧。
+   * **每次现算**，不缓存——角色可以在 agent 边界装卸，缓存就是又一份会漂的真相。
+   */
+  private restriction(): ReadonlySet<string> | undefined {
+    return effectiveRestriction(this.toolRestrictions);
+  }
+
   get state(): Readonly<AgentState> {
     return {
       ...this._state,
-      tools: activeTools(this.tools),
+      tools: activeTools(this.tools, this.restriction()),
       activeSkills: listActiveSkills(this.activeSkills),
       mcp: this.mcp?.list() ?? [],
       tasks: taskSnapshot(this.tasks),
@@ -2785,9 +2800,15 @@ export class Agent {
       convertToLlm: this.convertToLlm,
       transformContext: this.transformContext,
       getApiKey: binding.getApiKey,
-      getTools: () => visibleTools(this.tools, this.loadedTools), // 菜单 = 常驻 + 已加载的延迟工具
-      knownToolNames: () => [...this.tools.keys()],
-      resolveTool: (name) => resolveTool(this.tools, name, this.loadedTools),
+      getTools: () => visibleTools(this.tools, this.loadedTools, this.restriction()), // 菜单 = 常驻 + 已加载的延迟工具，再交上角色收紧的那一份
+      // 被角色收紧挡住的名字**这里也要不见**：`knownToolNames` 与 `resolveTool` 是同一个口径的两半
+      // （`explainMissingTool` 先问前者、再问后者）。只在后者挡住的话，模型点它会收到
+      // 「Tool 'x' has been unloaded」——它从没装过、更没卸过，这句话是假的。
+      knownToolNames: () => {
+        const only = this.restriction();
+        return [...this.tools.keys()].filter((n) => only === undefined || only.has(n));
+      },
+      resolveTool: (name) => resolveTool(this.tools, name, this.loadedTools, this.restriction()),
       // 通道 B:run 中途会变的内容(激活 skill 正文),每轮从各 PromptSource 重算、
       // 拼在消息末尾、不进 transcript。
       getTurnInjections: (visibleTools) => this.promptSources((n) => visibleTools.has(n)).flatMap((s) => s.turnInjections?.() ?? []),

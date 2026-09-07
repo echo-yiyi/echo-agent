@@ -23,7 +23,7 @@
 // 将来要关掉某一件（`--no-tasks`）也有抓手。打成一包这两件都做不到。
 
 import type { AgentTool } from "../tools/types.ts";
-import type { ToolMap } from "../tools/harness.ts";
+import type { ToolMap, ToolRestrictions } from "../tools/harness.ts";
 import type { HookRuntime } from "../hooks/runtime.ts";
 import type { ActiveSkillMap, SkillMap } from "../skill/harness.ts";
 import type { AgentBackground } from "../background/types.ts";
@@ -312,6 +312,8 @@ export function builtinEntries(
 export type BuiltinMountable = RuntimeSource & {
   readonly builtinTools: BuiltinToolGroups;
   readonly tools: ToolMap;
+  /** 收紧工作集的那一叠。同理：Agent 恒有，默认 Host 要接上，否则 `AgentTools.restrict()` 无处生效。 */
+  readonly toolRestrictions: ToolRestrictions;
   readonly hooks: HookRuntime;
   readonly skills: SkillMap;
   readonly activeSkills: ActiveSkillMap;
@@ -347,6 +349,7 @@ export async function mountBuiltinTools(
   host: ExtensionHost = new ExtensionHost({
     services: agentRegistries({
       tools: agent.tools,
+      toolRestrictions: agent.toolRestrictions,
       hooks: agent.hooks,
       skills: { pool: agent.skills, active: agent.activeSkills },
       // **能力端口也要给**：少了它，`inject` 后台队列的扩展在这条低层路径上装不上

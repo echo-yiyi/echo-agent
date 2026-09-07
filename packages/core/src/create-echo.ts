@@ -333,6 +333,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   const host = new ExtensionHost({
     services: agentRegistries({
       tools: agent.tools,
+      // 收紧工作集的那一叠（2026-09-07）：角色（`echo:inline-agent`）经它把工具集收到子集
+      toolRestrictions: agent.toolRestrictions,
       hooks: agent.hooks,
       skills: { pool: agent.skills, active: agent.activeSkills },
       // **能力端口**（2026-08-31）：扩展要挂后台任务得拿得到这个。不给的话扩展面就只有
