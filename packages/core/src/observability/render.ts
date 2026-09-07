@@ -23,11 +23,20 @@ export const RENDERER_VERSION = 1;
 const DEFAULT_MAX_TIMELINE = 500;
 const LABEL_WIDTH = 20;
 
-/** run 边界在 0 层；turn 在 1 层；turn 里的 model / tool 在 2 层；没有 turn 归属的 agent 级事件在 1 层。 */
+/**
+ * 结构深度，按四层循环（`docs/design/run-loop-layers.md`：run ⊃ reply ⊃ turn ⊃ attempt）：
+ * run 边界 0；reply 与没有 turn 归属的 agent 级事件 1；turn 2；attempt 3；turn 里的 model / tool / 消息 3。
+ *
+ * model / tool 与 attempt 同层而不是更深：工具批发生在 `attempt_end{landed}` 之后、同一 turn 内，
+ * 它们是 turn 的孩子而不是 attempt 的；模型生成确实在 attempt 里，但为它单开第五层只会让缩进吃掉宽度，
+ * 而 attempt 行在页面上单次尝试时本来就折起。
+ */
+const LAYER_DEPTH: Readonly<Record<string, number>> = { "reply.execute": 1, "turn.execute": 2, "attempt.execute": 3 };
 function depthOf(env: ObservationEnvelope): number {
   if (env.name.startsWith("run.") || env.name === "observation.gap") return 0;
-  if (env.scope.turnId === undefined) return 1;
-  return env.name === "turn.execute" ? 1 : 2;
+  const layer = LAYER_DEPTH[env.name];
+  if (layer !== undefined) return layer;
+  return env.scope.turnId === undefined ? 1 : 3;
 }
 
 function finalStateAbsence(o: RunObservation): RunObservationViewModel["finalStateAbsence"] {

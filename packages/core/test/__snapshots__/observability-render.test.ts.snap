@@ -12,22 +12,32 @@ Timeline
   +0ms      run.assembly
   +1ms      run.started
   +1ms        agent.loop.started
-  +2ms        turn.execute …  cause=input iteration=1 replyId=run:fixed/1
-  +3ms          model.generate …  role=assistant
-  +10ms         model.generate 7ms  hasError=false role=assistant stopReason=tool_use
-  +11ms         tool.execute …  toolCallId=c1 toolName=ping
-  +25ms         tool.execute 14ms  isError=false toolCallId=c1 toolName=ping
-  +30ms       turn.execute 28ms  iteration=1 result=landed stopReason=tool_use toolResultCount=1
-  +31ms       turn.execute …  cause=tool_use iteration=2 replyId=run:fixed/1
-  +32ms         model.generate …  role=assistant
-  +120ms        model.generate 88ms  hasError=false role=assistant stopReason=end_turn
-  +121ms      turn.execute 90ms  iteration=2 result=landed stopReason=end_turn toolResultCount=0
-  +122ms      agent.loop.ended  status=completed
+  +2ms        reply.execute …  replyId=run:fixed/1 source=prompt
+  +3ms          turn.execute …  cause=input iteration=1 replyId=run:fixed/1
+  +4ms            attempt.execute …  attempt=1 turnId=run:fixed/1#1
+  +5ms            model.generate …  role=assistant
+  +10ms           model.generate 5ms  hasError=false role=assistant stopReason=tool_use
+  +11ms           attempt.execute 7ms  attempt=1 result=landed turnId=run:fixed/1#1
+  +12ms           tool.execute …  toolCallId=c1 toolName=ping
+  +25ms           tool.execute 13ms  isError=false toolCallId=c1 toolName=ping
+  +30ms         turn.execute 27ms  iteration=1 result=landed stopReason=tool_use toolResultCount=1
+  +31ms         turn.execute …  cause=tool_use iteration=2 replyId=run:fixed/1
+  +32ms           attempt.execute …  attempt=1 turnId=run:fixed/1#2
+  +33ms           model.generate …  role=assistant
+  +40ms           attempt.execute 8ms  attempt=1 errorCode=overloaded result=failed retryable=true turnId=run:fixed/1#2
+  +41ms           model.retry.scheduled  attempt=1 cause=overloaded maxAttempts=3
+  +60ms           attempt.execute …  attempt=2 turnId=run:fixed/1#2
+  +61ms           model.generate …  role=assistant
+  +120ms          model.generate 59ms  hasError=false role=assistant stopReason=end_turn
+  +121ms          attempt.execute 61ms  attempt=2 result=landed turnId=run:fixed/1#2
+  +122ms        turn.execute 91ms  iteration=2 result=landed stopReason=end_turn toolResultCount=0
+  +123ms      reply.execute 121ms  replyId=run:fixed/1 status=completed turns=2
+  +124ms      agent.loop.ended  status=completed
   +131ms    run.closed
 Final State         status generating · iteration 2 · messages 5 · runtime ready/ready · capabilities 0
 Outcome             completed
-Tool Analysis       ping calls=1 ok=1 err=0 denied=0 total=14ms args=7B result=4ch
-Model               calls=2 in=20 out=10 total=95ms
-Observation Health  integrity complete · gaps 0 · persistence stored · redacted yes · records 16
+Tool Analysis       ping calls=1 ok=1 err=0 denied=0 total=13ms args=7B result=4ch
+Model               calls=2 in=20 out=10 total=64ms
+Observation Health  integrity complete · gaps 0 · persistence stored · redacted yes · records 26
 "
 `;

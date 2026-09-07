@@ -183,7 +183,7 @@ test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / 
 
 test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   const lex = lexicon();
-  for (const group of [lex.runStatus, lex.runSource, lex.integrity, lex.persistence, lex.records]) {
+  for (const group of [lex.runStatus, lex.runSource, lex.replySource, lex.integrity, lex.persistence, lex.records]) {
     for (const [key, term] of Object.entries(group)) {
       expect(term.zh.length, key).toBeGreaterThan(0);
       expect(term.en.length, key).toBeGreaterThan(0);
@@ -200,6 +200,11 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   expect(html).not.toContain("进行中 · 已");
   // 列表的三条收敛（2026-09-07）：整理 run 走一行的次要行、只重复区分得开的维度、筛选片标签截断
   for (const marker of ["run--minor", "const varies", "clipLabel"]) expect(html).toContain(marker);
+  // 详情的四条（2026-09-07）：标题是会话不是 runId、运行环境折叠、单支的 reply / attempt 层不占行、耗时条
+  for (const marker of ["foldSingleLayers", "FOLDED_INTO_PREVIOUS", "tl-bar", 'class: "env"']) expect(html).toContain(marker);
+  // 四层循环的两层已是一等 span，不再是 agent.custom_event
+  expect(lex.records["reply.execute"]).toBeDefined();
+  expect(lex.records["attempt.execute"]).toBeDefined();
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
 });
 

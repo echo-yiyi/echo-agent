@@ -29,6 +29,14 @@ export const RUN_SOURCE: Readonly<Record<string, Term>> = {
   extension: { zh: "扩展", en: "extension", tone: "info", hint: "Extension 提交的 run（O2b）" },
 };
 
+/** 一条 reply 是被什么开出来的（四层循环，`docs/design/run-loop-layers.md`）。 */
+export const REPLY_SOURCE: Readonly<Record<string, Term>> = {
+  prompt: { zh: "用户输入", en: "prompt", tone: "neutral", hint: "run 的第一条 reply：用户那句话" },
+  follow_up: { zh: "追加输入", en: "follow_up", tone: "neutral", hint: "上一条 reply 跑完时队列里还有输入，接着开一条" },
+  stop_hook: { zh: "钩子续跑", en: "stop_hook", tone: "info", hint: "stop hook 拦下收尾并注入了新输入，于是又开一条" },
+  resume: { zh: "续跑", en: "resume", tone: "neutral", hint: "从 transcript 未完的地方接着跑" },
+};
+
 export const INTEGRITY: Readonly<Record<string, Term>> = {
   complete: { zh: "完整", en: "complete", tone: "positive", hint: "本 run 没有任何 canonical gap" },
   partial: { zh: "有缺口", en: "partial", tone: "caution", hint: "至少一条 observation.gap：缓冲溢出 / 编码失败 / 采集上限 / 落盘失败；缺的是记录，不是 agent 的产出" },
@@ -73,7 +81,9 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "agent.loop.started": { zh: "循环开始", en: "agent.loop.started", tone: "neutral", hint: "agent_start" },
   "agent.loop.ended": { zh: "循环结束", en: "agent.loop.ended", tone: "neutral", hint: "agent_end，attributes.status 是 outcome" },
   "agent.message.appended": { zh: "消息入账", en: "agent.message.appended", tone: "neutral", hint: "非 assistant 消息进 transcript（用户 / 工具结果 / 环境）" },
+  "reply.execute": { zh: "回应", en: "reply.execute", tone: "neutral", hint: "对一条输入的完整回应，可含多轮；一个 run 只有一条时不单独占行" },
   "turn.execute": { zh: "轮", en: "turn.execute", tone: "neutral", hint: "一次模型调用 + 其工具调用；iteration 是第几轮" },
+  "attempt.execute": { zh: "尝试", en: "attempt.execute", tone: "neutral", hint: "turn 里的一次模型请求；重试就是同一 turn 的下一个 attempt，只跑了一次时不单独占行" },
   "model.generate": { zh: "模型生成", en: "model.generate", tone: "neutral", hint: "一次 provider 调用；span_end 带 stopReason / usage" },
   "model.usage": { zh: "用量", en: "model.usage", tone: "neutral", hint: "provider 回报的 token 数" },
   "model.retry.scheduled": { zh: "重试", en: "model.retry.scheduled", tone: "caution", hint: "provider 出错后内核安排的重试，attempt / cause" },
@@ -108,6 +118,7 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
 export type Lexicon = Readonly<{
   runStatus: typeof RUN_STATUS;
   runSource: typeof RUN_SOURCE;
+  replySource: typeof REPLY_SOURCE;
   integrity: typeof INTEGRITY;
   persistence: typeof PERSISTENCE;
   toolVerbs: typeof TOOL_VERBS;
@@ -115,5 +126,5 @@ export type Lexicon = Readonly<{
 }>;
 
 export function lexicon(): Lexicon {
-  return { runStatus: RUN_STATUS, runSource: RUN_SOURCE, integrity: INTEGRITY, persistence: PERSISTENCE, toolVerbs: TOOL_VERBS, records: RECORD_TERMS };
+  return { runStatus: RUN_STATUS, runSource: RUN_SOURCE, replySource: REPLY_SOURCE, integrity: INTEGRITY, persistence: PERSISTENCE, toolVerbs: TOOL_VERBS, records: RECORD_TERMS };
 }

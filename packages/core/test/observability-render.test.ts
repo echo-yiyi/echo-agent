@@ -47,13 +47,18 @@ function script(): readonly AgentEvent[] {
   const ev = (at: number, e: Record<string, unknown>): AgentEvent => ({ seq: ++seq, at, ...e }) as unknown as AgentEvent;
   const m1 = assistant("call ping", "tool_use", 1_010);
   const m2 = assistant("done", "end_turn", 1_120);
-  // turnId 是 loop 产的 `${replyId}#${n}`（loop/ids.ts）；这里只铺 turn 层，reply / attempt 事件不进投影，脚本不带
+  // 四层齐全（run-loop-layers.md：run ⊃ reply ⊃ turn ⊃ attempt）。turnId 是 loop 产的 `${replyId}#${n}`（loop/ids.ts）。
+  // 第二个 turn 里塞一次**重试**：attempt 1 失败 → retry_scheduled → attempt 2 落地，好让 attempt span 的配对真被走到。
+  const retryable = { source: "provider", code: "overloaded", retryable: true, message: "upstream busy" } as const;
   return [
     ev(1_001, { type: "agent_start" }),
-    ev(1_002, { type: "turn_start", turnId: "run:fixed/1#1", replyId: "run:fixed/1", cause: "input" }),
-    ev(1_003, { type: "message_start", role: "assistant" }),
+    ev(1_002, { type: "reply_start", replyId: "run:fixed/1", source: "prompt" }),
+    ev(1_003, { type: "turn_start", turnId: "run:fixed/1#1", replyId: "run:fixed/1", cause: "input" }),
+    ev(1_004, { type: "attempt_start", turnId: "run:fixed/1#1", attempt: 1 }),
+    ev(1_005, { type: "message_start", role: "assistant" }),
     ev(1_010, { type: "message_end", message: m1 }),
-    ev(1_011, { type: "tool_execution_start", toolCallId: "c1", toolName: "ping", params: { a: 1 } }),
+    ev(1_011, { type: "attempt_end", turnId: "run:fixed/1#1", attempt: 1, result: { kind: "landed", message: m1 } }),
+    ev(1_012, { type: "tool_execution_start", toolCallId: "c1", toolName: "ping", params: { a: 1 } }),
     ev(1_025, { type: "tool_execution_end", toolCallId: "c1", toolName: "ping", result: { content: "pong", isError: false, images: [], metadata: null } }),
     ev(1_030, {
       type: "turn_end",
@@ -62,10 +67,17 @@ function script(): readonly AgentEvent[] {
       toolResults: [{ role: "toolResult", toolCallId: "c1", toolName: "ping", content: "pong", isError: false, at: 1_025 }],
     }),
     ev(1_031, { type: "turn_start", turnId: "run:fixed/1#2", replyId: "run:fixed/1", cause: "tool_use" }),
-    ev(1_032, { type: "message_start", role: "assistant" }),
+    ev(1_032, { type: "attempt_start", turnId: "run:fixed/1#2", attempt: 1 }),
+    ev(1_033, { type: "message_start", role: "assistant" }),
+    ev(1_040, { type: "attempt_end", turnId: "run:fixed/1#2", attempt: 1, result: { kind: "failed", error: retryable } }),
+    ev(1_041, { type: "retry_scheduled", attempt: 1, maxAttempts: 3, delayMs: 10, cause: "overloaded" }),
+    ev(1_060, { type: "attempt_start", turnId: "run:fixed/1#2", attempt: 2 }),
+    ev(1_061, { type: "message_start", role: "assistant" }),
     ev(1_120, { type: "message_end", message: m2 }),
-    ev(1_121, { type: "turn_end", turnId: "run:fixed/1#2", result: { kind: "landed", message: m2 }, toolResults: [] }),
-    ev(1_122, { type: "agent_end", outcome: { kind: "completed" } }),
+    ev(1_121, { type: "attempt_end", turnId: "run:fixed/1#2", attempt: 2, result: { kind: "landed", message: m2 } }),
+    ev(1_122, { type: "turn_end", turnId: "run:fixed/1#2", result: { kind: "landed", message: m2 }, toolResults: [] }),
+    ev(1_123, { type: "reply_end", replyId: "run:fixed/1", outcome: { kind: "completed" }, final: m2, turns: 2 }),
+    ev(1_124, { type: "agent_end", outcome: { kind: "completed" } }),
   ];
 }
 
@@ -142,26 +154,38 @@ describe("renderRunObservation", () => {
     const json = renderRunObservation(o, { format: "json" });
     expect(json.mediaType).toBe("application/json");
     expect(JSON.parse(json.content)).toEqual(JSON.parse(JSON.stringify(a)));
+    // 四层的结构深度：run 0 · reply 与 agent 级事件 1 · turn 2 · attempt 与 turn 里的 model / tool 3
     expect(a.timeline.map((t) => [t.name, t.depth])).toEqual([
       ["run.accepted", 0],
       ["run.assembly", 0],
       ["run.started", 0],
       ["agent.loop.started", 1],
-      ["turn.execute", 1],
-      ["model.generate", 2],
-      ["model.generate", 2],
-      ["tool.execute", 2],
-      ["tool.execute", 2],
-      ["turn.execute", 1],
-      ["turn.execute", 1],
-      ["model.generate", 2],
-      ["model.generate", 2],
-      ["turn.execute", 1],
+      ["reply.execute", 1],
+      ["turn.execute", 2],
+      ["attempt.execute", 3],
+      ["model.generate", 3],
+      ["model.generate", 3],
+      ["attempt.execute", 3],
+      ["tool.execute", 3],
+      ["tool.execute", 3],
+      ["turn.execute", 2],
+      ["turn.execute", 2],
+      ["attempt.execute", 3],
+      ["model.generate", 3],
+      ["attempt.execute", 3],
+      ["model.retry.scheduled", 3], // 排在同一 turn 的两个 attempt 之间，归 turn 而不是 agent 级
+      ["attempt.execute", 3],
+      ["model.generate", 3],
+      ["model.generate", 3],
+      ["attempt.execute", 3],
+      ["turn.execute", 2],
+      ["reply.execute", 1],
       ["agent.loop.ended", 1],
       ["run.closed", 0],
     ]);
-    expect(a.summary.model).toEqual({ calls: 2, inputTokens: 20, outputTokens: 10, totalDurationMs: 95 });
-    expect(a.summary.tools[0]).toMatchObject({ toolId: "ping", calls: 1, successes: 1, totalDurationMs: 14 });
+    // 两次落地的生成：turn1 的 5ms（1_005→1_010）+ turn2 第二个 attempt 的 59ms（1_061→1_120）
+    expect(a.summary.model).toEqual({ calls: 2, inputTokens: 20, outputTokens: 10, totalDurationMs: 64 });
+    expect(a.summary.tools[0]).toMatchObject({ toolId: "ping", calls: 1, successes: 1, totalDurationMs: 13 });
     expect(a.finalStateAbsence).toBe("captured");
     expect(a.health).toEqual({ canonicalGaps: [], persistence: "stored", redacted: true });
   });

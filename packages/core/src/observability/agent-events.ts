@@ -19,7 +19,17 @@ import { OBSERVATION_SYNC_LIMITS } from "./types.ts";
 
 export const AGENT_EVENT_INSTRUMENTATION = { name: "echo.agent-event", version: "1" } as const;
 
-/** 固定 span 名。 */
+/**
+ * 固定 span 名。四层循环（`docs/design/run-loop-layers.md`：run ⊃ reply ⊃ turn ⊃ attempt）里，
+ * run 由 admission 发边界，其余三层各是一对 span。
+ *
+ * reply / attempt 此前没接：它们掉进 `projectCustomEvent`，在 journal 里成了一堆 `agent.custom_event`
+ * ——metadata 档下 body 恒空，于是一条 run 的时间线上四行「自定义事件」谁也分不出（2026-09-07 实测）。
+ * 那份设计把「观测 journal 存哪些」明确留给本层定，这里定为：**四层都是一等 span**，
+ * 重试因此在时间线上看得见（同一 turn 的第二个 attempt），而不是只剩一条 `model.retry.scheduled`。
+ */
+export const SPAN_REPLY_EXECUTE = "reply.execute";
+export const SPAN_ATTEMPT_EXECUTE = "attempt.execute";
 export const SPAN_TURN_EXECUTE = "turn.execute";
 export const SPAN_MODEL_GENERATE = "model.generate";
 export const SPAN_TOOL_EXECUTE = "tool.execute";
@@ -235,6 +245,29 @@ export function projectAgentEvent(event: AgentEvent, policy: ObservationCaptureP
         if (content) body.errorMessage = event.outcome.error.message;
       }
       return { ...base, kind: "event", name: "agent.loop.ended", scope: {}, attributes: attrs, body };
+    }
+    // reply：对一条输入的完整回应。replyId 由 loop 产（`${runId}/${k}`）；scope 没有 replyId 这一维，进 attributes
+    case "reply_start":
+      return { ...base, kind: "span_start", name: SPAN_REPLY_EXECUTE, scope: {}, attributes: { replyId: event.replyId, source: event.source }, body: { replyId: event.replyId, source: event.source } };
+    case "reply_end": {
+      const attrs: Attrs = { replyId: event.replyId, ...outcomeAttrs(event.outcome), turns: event.turns };
+      const body: Record<string, unknown> = { ...attrs, hasFinal: event.final !== null };
+      if (event.outcome.kind === "error" && content) body.errorMessage = event.outcome.error.message;
+      return { ...base, kind: "span_end", name: SPAN_REPLY_EXECUTE, scope: {}, attributes: attrs, body };
+    }
+    // attempt：turn 里的一次模型请求。重试 = 同一 turn 的下一个 attempt，靠 `(turnId, attempt)` 配对
+    case "attempt_start":
+      return { ...base, kind: "span_start", name: SPAN_ATTEMPT_EXECUTE, scope: { turnId: event.turnId }, attributes: { turnId: event.turnId, attempt: event.attempt }, body: { attempt: event.attempt } };
+    case "attempt_end": {
+      const attrs: Attrs = { turnId: event.turnId, attempt: event.attempt, result: event.result.kind };
+      const body: Record<string, unknown> = { attempt: event.attempt, result: event.result.kind };
+      if (event.result.kind === "failed") {
+        body.errorCode = event.result.error.code;
+        attrs.errorCode = event.result.error.code;
+        attrs.retryable = event.result.error.retryable;
+        if (content) body.errorMessage = event.result.error.message;
+      }
+      return { ...base, kind: "span_end", name: SPAN_ATTEMPT_EXECUTE, scope: { turnId: event.turnId }, attributes: attrs, body };
     }
     // turn span 的 scope.turnId 就是 loop 产的 turnId（与 Agent 的观测 scope 供给、permission 引用的同一份）；
     // iteration 从它的 n 取（`loop/ids.ts`），不另外算

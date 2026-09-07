@@ -101,8 +101,20 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 
 /* 详情 */
 .detail { padding: var(--card-padding); min-height: 320px; }
-.detail .head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); margin-bottom: var(--space-12); }
+.detail .head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); margin-bottom: var(--space-4); }
+/* 实体名在最大号（console.md §5.1）：用户认的是「这是哪段对话」。runId 是系统标识符，退到副标题里 */
+.detail .head .title { font-size: var(--size-h3); font-weight: 600; color: var(--ink); }
 .detail .head .id { font-size: var(--size-h3); font-weight: 600; }
+.detail .sub { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-6); margin: 0 0 var(--space-12); font-size: var(--size-caption); color: var(--stone); }
+.detail .sub .runid { font-family: var(--font-mono); }
+/* 运行环境：每条 run 几乎一样的那几行（agent 实例 id、会话 id、装配槽），默认收起，要查时一键展开 */
+.env { margin-bottom: var(--space-12); }
+.env > summary { cursor: pointer; font-size: var(--size-caption); color: var(--stone); list-style: none; }
+.env > summary::-webkit-details-marker { display: none; }
+.env > summary::before { content: "▸ "; }
+.env[open] > summary::before { content: "▾ "; }
+.env > summary:hover { color: var(--ink-70); }
+.env .fields { margin-top: var(--space-8); }
 .detail h3 { margin: var(--space-20) 0 var(--space-8); font-size: var(--size-ui); font-weight: 600; color: var(--ink-70); text-transform: uppercase; letter-spacing: 0.04em; }
 
 /* 字段行（§4）：标签列固定宽，值列自适应；内容槽只有纯文本 / chip 组 / key-value 三种 */
@@ -119,7 +131,11 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
   min-height: var(--ctl-tool-row-height); padding: var(--space-2) var(--space-8); font-family: var(--font-mono); font-size: var(--size-ui); color: var(--ink-70);
   cursor: pointer; border-radius: var(--r-sm);
 }
+.tl { position: relative; }
 .tl:hover { background: var(--ui-raised); }
+/* 耗时条：贴行底的一条细线，左端 = 这条 span 在 run 里的起点，长度 = 它占 run 的比例 */
+.tl-bar { position: absolute; bottom: 0; height: 2px; border-radius: var(--r-full); background: var(--accent); opacity: 0.28; pointer-events: none; }
+.tl--turn .tl-bar { opacity: 0.5; }
 .tl .t { color: var(--stone); text-align: right; font-variant-numeric: tabular-nums; }
 .tl .what { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
 .tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; }
@@ -192,7 +208,7 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 
 <script>
 const LEX = /*__LEXICON__*/ null;
-const STATE = { runs: [], sessions: {}, filter: "all", product: "all", session: "all", selected: null, follow: true, vm: null, expanded: new Set(), hidden: false, activity: [], root: "" };
+const STATE = { runs: [], sessions: {}, filter: "all", product: "all", session: "all", selected: null, follow: true, vm: null, expanded: new Set(), hidden: false, activity: [], root: "", envOpen: false };
 /* run 归哪个产品：header 只有 sessionId，产品名与 workspace 在会话 meta 里（/api/runs 顺带给） */
 const sessionOf = (r) => (r.sessionId ? STATE.sessions[r.sessionId] : undefined);
 const productOf = (r) => sessionOf(r)?.agent ?? (r.sessionId ? "未上报" : "无会话");
@@ -328,7 +344,8 @@ function renderRuns() {
             el("span", { class: "mono", text: fmtClock(r.acceptedAt) }),
             badge(LEX.runStatus[r.status], r.status),
             badge(LEX.runSource[r.source.kind], r.source.kind),
-            showWorkspace ? el("span", { class: "ws mono", text: shortPath(ws), title: ws }) : null));
+            // 只放目录名：列表栏 280px 宽，徽章之后剩给它的位置放不下路径——`…/…` 比不放更糟。全路径在行的 title 与详情里
+            showWorkspace ? el("span", { class: "ws mono", text: ws.split("/").filter(Boolean).pop() ?? "", title: ws }) : null));
     list.append(item);
   }
 }
@@ -351,6 +368,9 @@ function argPreview(body) {
 function verbFor(name, attrs, body) {
   if (name === "tool.execute") return { verb: LEX.toolVerbs[attrs.toolName] ?? "调用", obj: attrs.toolName ?? "?", arg: argPreview(body) };
   if (name === "turn.execute") return { verb: "轮", obj: `#${attrs.iteration ?? "?"}` };
+  // 四层循环里的另外两层（run-loop-layers.md）。只在有分叉时才出现在时间线上，见 foldSingleLayers
+  if (name === "reply.execute") return { verb: "回应", obj: LEX.replySource?.[attrs.source]?.zh ?? attrs.source ?? "" };
+  if (name === "attempt.execute") return { verb: "尝试", obj: `#${attrs.attempt ?? "?"}${attrs.result && attrs.result !== "landed" ? ` · ${attrs.result}` : ""}` };
   if (name === "model.generate") return { verb: "模型生成", obj: attrs.stopReason ?? "" };
   if (name.startsWith("memory.mutation.")) {
     const v = { create: "记住", replace: "修改", insert: "修改", rename: "修改", delete: "删除" }[attrs.operation] ?? attrs.operation;
@@ -376,11 +396,15 @@ function verbFor(name, attrs, body) {
    条数记在 entry.folded 上，展开时能看到 */
 const FOLDED_INTO = { "model.generate.delta": "model.generate", "tool.execute.progress": "tool.execute" };
 
+/* 紧跟在某条 span 之后、说的是同一件事的记录：折进那条，不另起一行。
+   `model.usage` 就是刚结束那次生成的 token 数——模型生成行的结果位已经写着 `10611↑ 867↓`，再来一行是同一句话说两遍。 */
+const FOLDED_INTO_PREVIOUS = { "model.usage": "model.generate" };
+
 /* span_start / span_end 配对成一行（§2.3：进行中的条目留在列表里，end 只补结果，不另起一行） */
 function buildEntries(vm) {
   const entries = [];
   const open = new Map();
-  const keyOf = (t) => `${t.name}|${t.attributes.toolCallId ?? ""}|${t.attributes.iteration ?? ""}|${t.depth}`;
+  const keyOf = (t) => `${t.name}|${t.attributes.toolCallId ?? ""}|${t.attributes.iteration ?? ""}|${t.attributes.attempt ?? ""}|${t.depth}`;
   const findOpen = (name, toolCallId) => {
     let found = null;
     for (const stack of open.values()) for (const e of stack) if (e.start.name === name && (toolCallId === undefined || e.start.attributes.toolCallId === toolCallId)) found = e;
@@ -405,9 +429,40 @@ function buildEntries(vm) {
       const e = stack?.pop();
       if (e) { e.end = t; continue; }
     }
+    const prev = entries[entries.length - 1];
+    if (FOLDED_INTO_PREVIOUS[t.name] !== undefined && prev !== undefined && prev.start.name === FOLDED_INTO_PREVIOUS[t.name]) {
+      prev.folded = (prev.folded ?? 0) + 1;
+      continue;
+    }
     entries.push({ start: t, end: null, key: null, single: true });
   }
-  return entries;
+  return foldSingleLayers(entries);
+}
+
+/**
+ * 四层里**没有分叉的那层不占一行**：一个 run 只有一条 reply、一个 turn 只跑了一次 attempt 时，
+ * 那两行说的都是「就这一个」——不区分任何东西，却各吃掉一行和一级缩进。有分叉时（多条 reply、
+ * 重试出的第二个 attempt）照常显示，那正是要看的东西。折起的层不留占位，后代的缩进相应提一级。
+ */
+function foldSingleLayers(entries) {
+  const replies = entries.filter((e) => e.start.name === "reply.execute").length;
+  const attemptsOfTurn = {};
+  for (const e of entries) {
+    if (e.start.name !== "attempt.execute") continue;
+    const turnId = e.start.attributes.turnId ?? "";
+    attemptsOfTurn[turnId] = (attemptsOfTurn[turnId] ?? 0) + 1;
+  }
+  const hideReply = replies === 1;
+  const out = [];
+  for (const e of entries) {
+    const name = e.start.name;
+    if (name === "reply.execute" && hideReply) continue;
+    if (name === "attempt.execute" && attemptsOfTurn[e.start.attributes.turnId ?? ""] === 1) continue;
+    // reply 折起后 1 层空出来：turn 及更深的都提一级，agent 级事件（本来就在 1 层）不动
+    e.indent = hideReply && e.start.depth >= 2 ? e.start.depth - 1 : e.start.depth;
+    out.push(e);
+  }
+  return out;
 }
 
 /* 展开区最多摆这么多字符；再长去 `observe show <id> --body` 看 */
@@ -454,7 +509,7 @@ function contentSections(t, end) {
   return { secs, strip };
 }
 
-function renderEntry(e, gaps) {
+function renderEntry(e, gaps, runMs = 0) {
   const t = e.start;
   const end = e.end;
   const attrs = { ...t.attributes, ...(end?.attributes ?? {}) };
@@ -492,8 +547,12 @@ function renderEntry(e, gaps) {
     class: cls.join(" "), role: "button", tabindex: 0, title: term?.hint ?? t.name, "aria-expanded": expanded,
     onclick: () => { if (expanded) { STATE.expanded.delete(id); STATE.expanded.add(`-${id}`); } else { STATE.expanded.add(id); STATE.expanded.delete(`-${id}`); } renderDetail(); },
   },
+    // 耗时条：占整条 run 的哪一段。数字要逐行读，条形一眼就看出「12 秒里 9 秒花在第一轮」
+    runMs > 0 && end?.durationMs !== undefined
+      ? el("span", { class: "tl-bar", style: `left: calc(64px + ${(100 * t.relativeMs) / runMs}% * 0.82); width: max(2px, ${(100 * end.durationMs) / runMs}% * 0.82)` })
+      : null,
     el("span", { class: "t", text: `+${fmtMs(t.relativeMs)}` }),
-    el("span", { class: "what", style: `padding-left: calc(var(--space-16) * ${t.depth})` },
+    el("span", { class: "what", style: `padding-left: calc(var(--space-16) * ${e.indent ?? t.depth})` },
       el("span", { class: "prefix", text: prefix }),
       el("span", { class: "verb", text: verb }),
       obj ? el("span", { class: "obj", text: obj }) : null,
@@ -523,37 +582,55 @@ function renderDetail() {
   // 没封口的 run 只说事实：最后一条记录是什么时候。「已跑 N 秒」是在替进程说它还活着，离线读者说不了这句话
   const lastAt = vm.timeline.length > 0 ? vm.timeline[vm.timeline.length - 1].occurredAt : h.acceptedAt;
   const duration = h.endedAt === null ? `未收尾 · 最后记录 ${fmtClock(lastAt)}` : fmtMs(h.endedAt - h.acceptedAt);
+  const sess = h.sessionId ? STATE.sessions[h.sessionId] : undefined;
+  // 标题是这段对话（用户扫读的锚点），不是 runId——那串 uuid 原来是全页最大的字，却谁也不读
+  const title = sess?.name && sess.name !== h.sessionId ? sess.name : h.sessionId ? shortId(h.sessionId) : "临时对话";
   box.append(el("div", { class: "head" },
-    el("span", { class: "id mono", text: h.runId }),
+    el("span", { class: "title", text: title, title: h.sessionId ?? "" }),
     badge(LEX.runStatus[sk], sk),
     badge(LEX.integrity[h.integrity], h.integrity),
     badge(LEX.persistence[h.persistence], h.persistence),
     el("span", { class: "muted mono", text: duration }),
   ));
+  // 副标题一行讲清「谁、什么时候、在哪、用什么模型」；runId 留在末尾可复制
+  const sub = el("div", { class: "sub" },
+    badge(LEX.runSource[h.source.kind], h.source.kind),
+    el("span", { class: "mono", text: fmtClock(h.acceptedAt) }),
+    sess ? el("span", { text: sess.agent }) : el("span", { class: "muted", text: h.sessionId ? "产品未上报" : "无会话" }),
+    sess ? el("span", { class: "mono", text: shortPath(sess.workspace), title: sess.workspace }) : null,
+    el("span", { class: "mono", text: `${vm.modelBinding.providerId}/${vm.modelBinding.modelId}`, title: `目录版本 ${vm.modelBinding.catalogRevision}` }),
+    el("span", { class: "runid", text: h.runId, title: "点一下复制", role: "button", tabindex: 0, onclick: () => navigator.clipboard?.writeText(h.runId) }),
+  );
+  box.append(sub);
   if (sk === "truncated") box.append(el("p", { class: "muted", text: "跑到上限停了，这次的结果可能不完整" }));
   if (vm.outcome && vm.outcome.status === "error" && sk !== "truncated") box.append(el("p", { class: "tl--bad", text: `出了点问题：${vm.outcome.error?.code ?? "unknown"}。看时间线里标红的那一行` }));
+  // 采集档只在「看不到正文」时出现在正文流里——那时它是一句可执行的提示；content 档不必占位，进运行环境
+  if (h.capturePolicy !== "content") {
+    const note = h.capturePolicy === "off" ? "这条 run 只记了边界：起 agent 时给了 --observe off。" : "只有形状与计数，没有正文。要看模型回复与工具参数 / 结果，起 agent 时加 --observe content。";
+    box.append(el("p", { class: "muted", text: note }));
+  }
 
   const dl = el("dl", { class: "fields" });
   const field = (label, ...value) => { dl.append(el("dt", { text: label }), el("dd", {}, ...value)); };
-  field("来源", badge(LEX.runSource[h.source.kind], h.source.kind), el("span", { class: "muted mono", text: ` ${fmtClock(h.acceptedAt)}` }));
   field("agent", el("span", { class: "mono", text: `${h.agentId} · ${h.agentInstanceId}` }));
-  const sess = h.sessionId ? STATE.sessions[h.sessionId] : undefined;
-  field("产品", el("span", { class: "mono", text: sess ? sess.agent : h.sessionId ? "未上报（会话 meta 缺失）" : "无会话（临时对话）" }));
+  field("会话", el("span", { class: "mono", text: h.sessionId ?? "无（临时对话）" }));
   field("工作目录", el("span", { class: "mono", text: sess ? sess.workspace : "—" }));
-  field("会话", el("span", { class: "mono", text: h.sessionId ? `${h.sessionId}${sess?.name && sess.name !== h.sessionId ? ` · ${sess.name}` : ""}` : "无（临时对话）" }));
   field("模型", el("span", { class: "mono", text: `${vm.modelBinding.providerId} / ${vm.modelBinding.modelId} · ${vm.modelBinding.catalogRevision}` }));
   const chips = el("div", { class: "chips" });
   if (vm.assembly.slots.length === 0) chips.append(el("span", { class: "muted", text: vm.assembly.digest === "not-captured" ? "未上报" : "无" }));
   for (const s of vm.assembly.slots) chips.append(el("span", { class: "chip", title: `${s.entryId}@${s.entryGeneration}` }, s.slot));
   field("装配", chips);
-  const captureNote = { metadata: "（只有形状与计数，没有正文；要看正文用 --observe content 起 agent）", content: "（含模型文本、工具参数与结果正文，明文）", off: "（只有 run 边界）" }[h.capturePolicy] ?? "";
-  field("采集档", el("span", { class: "mono", text: `${h.capturePolicy}${captureNote}` }));
-  box.append(dl);
+  field("采集档", el("span", { class: "mono", text: h.capturePolicy }));
+  field("runtime", el("span", { class: "mono", text: `${h.runtimeId} · ${h.runtimeGeneration}` }));
+  // 展开状态存进 STATE：详情每 2s 重绘一次，不存的话展开会被下一次轮询合上
+  const env = el("details", { class: "env", ...(STATE.envOpen ? { open: true } : {}) }, el("summary", { text: "运行环境" }), dl);
+  env.addEventListener("toggle", () => { STATE.envOpen = env.open; });
+  box.append(env);
 
   box.append(el("h3", { text: "时间线" }));
   const tl = el("ul", { class: "timeline" });
   for (const e of buildEntries(vm)) {
-    const [row, detail] = renderEntry(e, vm.health.canonicalGaps);
+    const [row, detail] = renderEntry(e, vm.health.canonicalGaps, h.endedAt === null ? 0 : h.endedAt - h.acceptedAt);
     tl.append(el("li", {}, row, detail));
   }
   box.append(tl);
@@ -566,7 +643,8 @@ function renderDetail() {
       el("th", { text: "工具" }), el("th", { class: "num", text: "调用" }), el("th", { class: "num", text: "成功" }), el("th", { class: "num", text: "出错" }), el("th", { class: "num", text: "耗时" }), el("th", { class: "num", text: "结果字符" }))));
     const tb = el("tbody");
     for (const t of vm.summary.tools) tb.append(el("tr", {},
-      el("td", { class: "mono", text: `${LEX.toolVerbs[t.toolId] ?? "调用"} ${t.toolId}` }), el("td", { class: "num", text: t.calls }), el("td", { class: "num", text: t.successes }),
+      // 表格里只放工具名：动词是时间线上给动作用的，摆进「工具」列只是把同一个词写两遍
+      el("td", { class: "mono", text: t.toolId }), el("td", { class: "num", text: t.calls }), el("td", { class: "num", text: t.successes }),
       el("td", { class: "num", text: t.errors }), el("td", { class: "num", text: fmtMs(t.totalDurationMs) }), el("td", { class: "num", text: t.resultBytes })));
     table.append(tb);
     box.append(table);
