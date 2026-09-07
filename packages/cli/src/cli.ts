@@ -27,6 +27,7 @@
 import {
   createEcho,
   deepseekProvider,
+  errText,
   expandHome,
   FileCredentialStore,
   FileDir,
@@ -551,7 +552,17 @@ async function runPiped(
   return await run({ echo, input: linesOf(process.stdin, signal), signal });
 }
 
-/** 交互形态：壳作为 extension 进装配，进程这一层只剩三件事——装配、启动、等它退出。 */
+/**
+ * 交互形态：壳作为 extension 进装配，进程这一层只剩三件事——装配、启动、等它退出。
+ *
+ * **换段（`/resume <id>`）也归这一层**（2026-09-07）：壳退出时说要换到哪一段，这里
+ * 收摊当前这一段、按新 id 重装一份、把界面开回来。壳子里就地换 `Agent` 是做不到的——
+ * 租约、收件箱、任务清单、闹钟、观测库全挂在那一个实例上，而协议里连 `start`/`stop` 都没有。
+ *
+ * **先放开再去拿**：换段时旧的那一段一定先 `stop()`（锁还回去）再装新的，所以
+ * 「同一进程同时占两把锁」这条路根本不存在。代价是新的那一段可能拿不到（正被别的写者
+ * 占着且不肯让），这时退回刚才那一段——只退一次，退不回去就照旧 fail-loud。
+ */
 async function runInteractive(
   product: Product,
   form: PresetForm,
@@ -564,37 +575,63 @@ async function runInteractive(
   signal: AbortSignal,
   deps: MainDeps,
 ): Promise<number> {
-  const shell = tuiShell({
-    product,
-    signal,
-    ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
-    // 壳子的凭据配置段与 Ctrl+L 跨家选择器要的东西：全部可选的家 + 凭据 + 「换模成功就写设置」的回调（D7）
-    configure: {
-      providers: choices,
-      credentials,
-      onModelChange: (m): void => {
-        void writeSettings({ model: m }).then((w) => {
-          if (w.problem !== undefined) shell.notify(`[设置] ${w.problem}`);
-        });
+  /** 这一轮开哪一段：缺省 = 命令行定的那一段，之后 = `/resume` 点名的那一段。 */
+  let toOpen = sessionId;
+  /** 攒给下一份界面的口信：启动口信，或上一轮换段的结果。 */
+  let pending: readonly string[] = notices;
+  /** 上一段的 id。只在「刚换过段」时有值——换不成就退回它，退一次。 */
+  let fallback: string | undefined;
+  for (;;) {
+    const shell = tuiShell({
+      product,
+      signal,
+      ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
+      // 壳子的凭据配置段与 Ctrl+L 跨家选择器要的东西：全部可选的家 + 凭据 + 「换模成功就写设置」的回调（D7）
+      configure: {
+        providers: choices,
+        credentials,
+        onModelChange: (m): void => {
+          void writeSettings({ model: m }).then((w) => {
+            if (w.problem !== undefined) shell.notify(`[设置] ${w.problem}`);
+          });
+        },
+        ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
       },
-      ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
-    },
-  });
-  const base = echoOptions(product, form, opts, chosen.provider, choices, credentials, sessionId);
-  const echo = await createEcho({
-    ...base,
-    // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的
-    // `AgentRuntime` 由 builtin 那一代提供（`create-echo.ts`），与同代里谁先谁后无关。
-    extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: shell.definition as never }],
-  });
-  // 启动口信与装配诊断（D6）进界面：壳 mount 在先、这里在后，notify 直通或先攒着
-  for (const n of notices) shell.notify(n);
-  for (const d of echo.diagnostics) shell.notify(`[扩展] 没装上：${d.message}${d.path !== undefined ? `（${d.path}）` : ""}`);
-  try {
-    // **启停归这一层**，不归壳：协议里没有 `start`/`stop`，壳子想碰也碰不到。
-    await echo.agent.start();
-    return await shell.exited;
-  } finally {
-    await echo.stop(); // 先卸 Extension（含壳自己）再停 Agent
+    });
+    const base = echoOptions(product, form, opts, chosen.provider, choices, credentials, toOpen);
+    const echo = await createEcho({
+      ...base,
+      // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的
+      // `AgentRuntime` 由 builtin 那一代提供（`create-echo.ts`），与同代里谁先谁后无关。
+      extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: shell.definition as never }],
+    });
+    // 启动口信与装配诊断（D6）进界面：壳 mount 在先、这里在后，notify 直通或先攒着
+    for (const n of pending) shell.notify(n);
+    for (const d of echo.diagnostics) shell.notify(`[扩展] 没装上：${d.message}${d.path !== undefined ? `（${d.path}）` : ""}`);
+    pending = [];
+    try {
+      // **启停归这一层**，不归壳：协议里没有 `start`/`stop`，壳子想碰也碰不到。
+      await echo.agent.start();
+    } catch (e) {
+      await echo.stop();
+      if (fallback === undefined) throw e; // 头一段就起不来：照旧 fail-loud，别把报错吞成一句口信
+      pending = [`[会话] 切不过去：${errText(e)}——回到 ${fallback}`];
+      toOpen = fallback;
+      fallback = undefined;
+      continue;
+    }
+    // 缺省新建时命令行没给 id，真正的 id 只有起来之后才知道——退回去要用它。
+    // `null`（没有状态根的裸跑）= 无处可退，那时换段失败就照旧 fail-loud。
+    const openedId = echo.agent.state.sessionId ?? undefined;
+    let exit;
+    try {
+      exit = await shell.exited;
+    } finally {
+      await echo.stop(); // 先卸 Extension（含壳自己）再停 Agent
+    }
+    if (exit.resume === undefined) return exit.code;
+    toOpen = exit.resume;
+    fallback = openedId;
+    pending = [`[会话] 已切到 ${exit.resume}`];
   }
 }

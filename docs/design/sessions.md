@@ -1,6 +1,6 @@
 # 会话（Session）与 agent 集群
 
-> 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 2 步（角色定义）与第 5 步（壳）未做，记忆三层的切法 2026-09-07 已拍、未实现——逐条见 §9。决策记录留在 `docs/decisions/proposed/` 直到整条实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
+> 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 5 步（壳）实现了看与切两半（`/sessions`、`/resume`），`/clear` 落盘那半还没做；第 2 步（角色定义）未做，记忆三层的切法 2026-09-07 已拍、未实现——逐条见 §9。决策记录留在 `docs/decisions/proposed/` 直到整条实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
 > 读者：要实现会话面、给产品接会话工具、把 echo 嵌进常驻程序（多段会话同时工作）的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) 的实例生命周期与 admission；[Context 与 Message Flow](context-and-message-flow.md) 的 transcript / working context 术语；[Compaction](compaction.md) 的「策略是 extension、状态在 core」这条分法——本文对会话用同一条<br>
 > 决策记录（五条，本文只指向，不复述论证）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) · [agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md)
@@ -157,7 +157,7 @@ type SessionInfo = {
 
 被叫醒的临时宿主该带 `preemptible: true`（`CreateAgentOptions.preemptible`），人开的会话一律留 `false`。
 
-`SessionFace.canWake` 说的就是「这个容器叫不叫得醒」。消费方按它决定**怎么说话**：叫得醒时没在跑的段仍是可以对话的 peer（`session_list` 说「发消息会把它叫起来」）；叫不醒时它们只是盘上的记录（说「从这儿够不着，`--resume` 打开它」）。
+`SessionFace.canWake` 说的就是「这个容器叫不叫得醒」。消费方按它决定**怎么说话**：叫得醒时没在跑的段仍是可以对话的 peer（`session_list` 说「发消息会把它叫起来」）；叫不醒时它们只是盘上的记录（说「从这儿够不着，`/resume` 切过去」）。
 
 **`wait`**：`session_send({ to, message, wait: true })` 让这次工具调用挂着，直到自己的 inbox 里出现一条 `replyTo` 指回本条 record id 的回信。这是通道上的一次等待，不是父子关系：等的时候本段仍是一个普通 session，别人照样能给它发消息。core 要给 extension 开一个「盯我的 inbox、等到匹配那条」的口（§7 第 2 条），规则是**命中即消费**：匹配的那条作为工具结果返回，同时 ack 掉，不会再以 environment 消息进来一次；超时返回 `{ timedOut: true }`，什么都不消费，回信之后到了就走普通路径、下一轮以 environment 消息进来。等的过程中进程崩了，那条回信还在盘上，重启后照普通路径投递，at-least-once 不破。
 
@@ -268,7 +268,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 | `AgentRuntime` 协议 | `reset()` | 删 `reset()`；不加会话方法，壳走 `Echo.sessions` |
 | cli `--continue` / `--resume` | 装配前另起 `SessionService(FileDir)` 扫状态根 | 同一个函数，扫 `~/.echo/sessions/`；筛选加 `main` 与 `status` |
 | observe（含 `serve` 面板） | 一个状态根装多段会话，一份观测库能同时看几段 | **观测库一段一份**（它在 session 目录里）：一个 reader / 一个面板只看得到那一段的 run。`--session` 点名看哪一段，不给就是最近更新的那一段；会话摘要仍从上一层扫，所以面板里出现的任何 sessionId 都反查得到名字与 workspace |
-| TUI | `/clear` = `reset()` | `/clear` = close + create + attach；`/sessions` = `list` + attach（同容器） |
+| TUI | `/clear` = `reset()` | `/clear` = close + create + attach；`/sessions` = `list`，`/resume <id>` = 换段（壳只挑段，装配层重装） |
 | memory | 一层，状态根下 | 三层（§2）；`remember` 加 `scope`；dream 只整理 session 层 |
 | schedule / tasks / dream / observability | 按状态根一份 | 不改代码，随状态根变成按 session 一份 |
 
@@ -293,16 +293,23 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
    `SessionRunner` 才挂 `session_create`**，是不是 main 读盘上的 meta。会话命名 2026-09-07 补上（见 §3）。
    **还没做**：`wait`——不过它的主要用例（派活出去、等一个答复）2026-09-06 已由 `subagent` 工具覆盖
    （进程内的短命子 agent，前台调用就是阻塞等结果），所以这条的紧要程度已经下来了。
-5. **壳**（`--continue` 的新筛选已随第 1 步实现；`/sessions` 的**看**这一半 2026-09-07 已实现）：
+5. **壳**（`--continue` 的新筛选已随第 1 步实现；`/sessions` 与 `/resume` 2026-09-07 已实现）：
    `/sessions` 列出别的会话——id、名字、哪个 agent、在跑没在跑、忙不忙、在哪个目录，一行一段，
    自己那一段不列。用的是 core 合成好的那份行（`alive` 为假时 `phase` 恒为 null），壳不自己组合。
-   **切换那一半没做**，`/clear` 也没做——两件都要换一个 `Agent` 实例，见下。
+   `/resume <id>` 切过去：认 id、id 前缀、名字的一截，对上多段就摆候选**不猜**；不空（`busy()`，
+   「还没就绪」也在里面）就不切，让人自己按 Esc。
 
-   **`/clear` 为什么没顺手做**：它要「关掉当前一段、开新的一段、attach 过去」，而 attach 就是**换一个
-   `Agent` 实例**——lease、inbox、tasks、schedule、观测库都得跟着重来。这在今天的壳里意味着
-   `runInteractive` 拆开重建 `Echo`、`app.ts` 闭包里的 `agent` 变成可换的，是一次 TUI 重构，
-   不该顺手塞进会话这条线。在那之前 `/clear` 仍是 `reset()`：只清内存、盘上那段照旧，
-   `--resume` 回来还是清之前的对话——这条**已知不一致**记在这里，别当它已经解决。
+   **换实例归装配层，不在壳里**。`/resume` 没有在 `app.ts` 里就地换 `AgentRuntime`——
+   lease、inbox、tasks、schedule、观测库全挂在那一个 `Agent` 上，而壳看到的协议里连 `start`/`stop`
+   都没有。壳只做一件事：说出要换到哪一段（`TuiAppOptions.onResume`），然后退出这一份界面；
+   `runInteractive` 收到 `TuiExit.resume` 后收摊这一段、按新 id 重装一份 `Echo`、把界面开回来。
+   **先放开再去拿**：旧的一定先 `stop()`（锁还回去）再装新的，所以同一进程同时占两把锁这条路不存在；
+   代价是新的可能拿不到（被别的写者占着且不肯让），这时**退回刚才那一段**，退一次，退不回去照旧 fail-loud。
+
+   **`/clear` 仍没做**——但卡它的那件事已经没了：`/clear` 要的「关掉当前一段、开新的一段、attach 过去」，
+   attach 就是 `/resume` 现在这条路（`onResume` → 装配层重装），只差 close + create 那两步。
+   在那之前 `/clear` 仍是 `reset()`：只清内存、盘上那段照旧，`--resume` 回来还是清之前的对话——
+   这条**已知不一致**记在这里，别当它已经解决。
 
 ## 10. 验收判据
 

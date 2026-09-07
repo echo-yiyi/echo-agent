@@ -48,6 +48,16 @@ export type TuiAppOptions = Readonly<{
    * 「一段都没有」是个诚实的答案，不是缺件；低层用户自己装壳时不必先有容器。
    */
   sessions?: SessionFace;
+  /**
+   * `/resume <id>` 的出口（2026-09-07）：**壳不换 Agent，壳只说「我要换到哪一段」然后退出**。
+   *
+   * 真正的换段在装配层（`runInteractive`）——它收摊这一段、按新 id 重装一份再把界面开回来。
+   * 壳子里就地换 `AgentRuntime` 是做不到的：租约、收件箱、任务清单、闹钟、观测库都挂在
+   * 那一个 `Agent` 上，换实例是装配的事，协议里连 `start`/`stop` 都没有。
+   *
+   * 不给 = 这个壳没有换段的去处（裸 `runTui()` 的低层用法），`/resume` 如实说一句、不动。
+   */
+  onResume?: (sessionId: string) => void;
   /** 欢迎头里的名字与版本（`product.ts`）。不给 = `echo-agent` 自己。 */
   product?: Pick<Product, "name" | "version">;
   /** 进程信号。abort = 停止收新输入并中断在飞的那一轮。 */
@@ -161,7 +171,7 @@ function footerLine(
 
 /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止，返回退出码。**不负责收摊 Agent**——那归装配层。 */
 export async function runTui(options: TuiAppOptions): Promise<number> {
-  const { agent, signal, configure, announcer } = options;
+  const { agent, signal, configure, announcer, onResume } = options;
   const sessions = options.sessions ?? NO_SESSION_FACE;
   const ui: TUI = options.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
 
@@ -497,9 +507,9 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   /**
    * `/sessions`：把**别的会话**摆出来——同一台机器上另开的终端、别人派出去的那些段。
    *
-   * **只看不切**：切过去要换一个 `Agent` 实例（lease、inbox、任务清单、闹钟、观测库都得重来），
-   * 那是另一件事，得带着具体界面单独提。这里先把「谁在跑、在哪、忙不忙」说清楚——
-   * 两个终端各跑一段时，这是唯一能一眼看到对面的地方。
+   * **只看不切**：切是 `/resume <id>` 的事（切过去要换一个 `Agent` 实例——lease、inbox、
+   * 任务清单、闹钟、观测库都得重来，所以由装配层收摊重装，见 `onResume`）。这里只把
+   * 「谁在跑、在哪、忙不忙」说清楚——两个终端各跑一段时，这是唯一能一眼看到对面的地方。
    *
    * 一行一段，用的是 core 合成好的那份（`alive` 为假时 `phase` 恒为 null，见 sessions.md §6），
    * 壳不自己组合——三个消费者各组合一遍就会各错一遍。
@@ -527,7 +537,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
               : "在跑 · 空闲"
           : sessions.canWake
             ? "没在跑 · 发消息会把它叫起来"
-            : "没在跑 · 从这儿够不着（--resume 打开它）";
+            : "没在跑 · 从这儿够不着（/resume 切过去）";
         return `  ${r.id}  ${r.name}  [${r.agent}]  ${where}  ${r.workspace}`;
       });
       transcript.push({ kind: "notice", text: `[会话] 另外 ${others.length} 段：\n${lines.join("\n")}` });
@@ -535,11 +545,46 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     rerender();
   };
 
+  /**
+   * `/resume <id>`：切到另一段会话。**壳只挑段并退出，换实例归装配层**（见 `onResume`）。
+   *
+   * 点名可以给 id、id 的前缀、或名字的一截——id 是 16 位十六进制，指望人照着敲全是不现实的。
+   * 认不准就把候选摆出来让人再点一次，**不猜**：切错段的代价是打断另一段的活。
+   */
+  const resumeSession = async (rest: string): Promise<void> => {
+    const say = (text: string): void => {
+      transcript.push({ kind: "notice", text });
+      rerender();
+    };
+    if (onResume === undefined) return say("[会话] 这个壳没有换段的去处（低层用法自己装配，换段归装配层）");
+    if (rest === "") return say("[会话] 要点名切到哪一段：/resume <id>——敲 /sessions 看有哪些");
+    // 不空就不切：切 = 收摊这一段，会把在飞的那一轮掐掉。让人自己按 Esc，别替他决定。
+    // 判据与收输入同一条（`busy()`），所以「还没就绪」也在里面——`start()` 落位前照样顶回去。
+    if (busy()) return say("[会话] 还没就绪 / 正在跑，先 Esc 中断或等它空下来再切");
+    const rows = await sessions.list().catch((e: unknown) => e as Error);
+    if (rows instanceof Error) return say(`[会话] 列不出来：${rows.message}`);
+    const needle = rest.toLowerCase();
+    const exact = rows.find((r) => r.id === rest);
+    const hits = exact !== undefined ? [exact] : rows.filter((r) => r.id.startsWith(needle) || r.name.toLowerCase().includes(needle));
+    if (hits.length === 0) return say(`[会话] 没有匹配 '${rest}' 的段——敲 /sessions 看有哪些`);
+    if (hits.length > 1) return say(`[会话] '${rest}' 对上了 ${hits.length} 段，说全一点：\n${hits.map((r) => `  ${r.id}  ${r.name}`).join("\n")}`);
+    const target = hits[0]!;
+    if (target.id === agent.state.sessionId) return say("[会话] 已经在这一段了");
+    onResume(target.id); // 装配层收到之后：收摊这一段 → 按新 id 重装 → 界面开回来
+    quit();
+  };
+
   // 斜杠命令：**一张表喂三处**——编辑器的补全菜单、onSubmit 的派发、报错文案里的清单。
   // 加命令只改这里；三处各写一份就是漂移的起点。
   const slashCommands: readonly SlashSpec[] = [
     { name: "clear", description: "清空对话，重新开始", run: () => clearConversation() },
     { name: "sessions", description: "列出别的会话（只看，不切）", run: () => void listSessionsNow() },
+    {
+      name: "resume",
+      argumentHint: "<id>",
+      description: "切到另一段会话",
+      run: (rest) => void resumeSession(rest),
+    },
     {
       name: "model",
       argumentHint: "[模型id]",
