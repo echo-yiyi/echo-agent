@@ -87,7 +87,8 @@ export type CoreAgentEvent =
   /* 压缩（`compaction/pipeline.ts`）：start / end 成对；end 带跑完的状态、真正改了状态的阶段名（空 = 没压动）与估算 */
   | { type: "compaction_start"; reason: CompactionReason }
   | { type: "compaction_end"; reason: CompactionReason; compaction: CompactionState; stages: readonly string[]; contextTokens: number }
-  /* 重试与账。retry_scheduled 只出现在同一 turn 的 attempt_end{failed} 与下一个 attempt_start 之间；attempt 是即将开始的那个 */
+  /* 重试与账。retry_scheduled 只出现在同一 turn 的 attempt_end{failed} 之后，attempt 是即将开始的那个；
+     退避被 abort / deadline 打断时其后是 turn_end{aborted}，那个 attempt 不会开始 */
   | { type: "retry_scheduled"; turnId: string; attempt: number; maxAttempts: number; delayMs: number; cause: string }
   | { type: "usage"; usage: Usage }
   /**

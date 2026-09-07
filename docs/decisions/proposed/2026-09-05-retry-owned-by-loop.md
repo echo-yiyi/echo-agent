@@ -27,4 +27,4 @@ hook 侧 `modelCallFailed` / `retryScheduled` 现状没有任何发送点;`runTu
 
 ## 验收
 
-`dialect.ts` 不再读 `maxAttempts`,`ProviderEvent` 没有 `retry` 变体;provider 持续返回 retryable 错误时一个 run 的请求总数 = `maxAttempts`;`retry_scheduled` 只出现在同一 turn 的 `attempt_end{failed}` 与下一个 `attempt_start` 之间;`transformContext` 在有重试的 turn 里被调用的次数 = attempt 数;`modelCallFailed` / `retryScheduled` 有测试证明被发出。
+`dialect.ts` 不再读 `maxAttempts`,`ProviderEvent` 没有 `retry` 变体;provider 持续返回 retryable 错误时一个 run 的请求总数 = `maxAttempts`;`retry_scheduled` 只出现在同一 turn 的 `attempt_end{failed}` 之后,其后是下一个 `attempt_start` 或(退避被 abort / deadline 打断时)`turn_end{aborted}`;退避受 run 的 signal 管,打断后在远小于 backoff 的时间内收场;`transformContext` 在有重试的 turn 里被调用的次数 = attempt 数;`modelCallFailed` / `retryScheduled` 有测试证明被发出。

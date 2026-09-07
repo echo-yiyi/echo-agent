@@ -71,6 +71,11 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
     let attempt = 0;
     let result: AttemptResult;
     for (;;) {
+      // 取消路径：backoff 被 signal 提前结束（或开圈前就已中止）→ 不再发起 attempt，turn 以 aborted 收场
+      if (signal.aborted) {
+        result = { kind: "aborted" };
+        break;
+      }
       attempt += 1;
       result = await runAttempt(deps, turnId, attempt, workset);
       if (result.kind !== "failed") break;
@@ -88,7 +93,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
       const delayMs = clampDelay(config.retryPolicy.backoffMs(attempt), config.maxRetryDelayMs);
       await emit({ type: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code });
       await workset.hooks.notify({ type: "retryScheduled", attempt: next, maxAttempts, delayMs, cause: err.code }, config.hookContext);
-      await sleep(delayMs);
+      await sleep(delayMs, signal);
     }
 
     /* ② 工具批：只在落地后 */
@@ -450,8 +455,21 @@ function clampDelay(ms: number, cap?: number): number {
   return cap === undefined ? ms : Math.min(ms, cap);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * 可中止的退避：signal 一到就提前 resolve（不 reject——由循环顶部的判断收场），timer 同时清掉。
+ * 裸 `setTimeout` 会把 abort / deadline 拖到整段 backoff 走完（缺省最长 30s），还撑着 event loop。
+ */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 export { agentError, toolSchemas };

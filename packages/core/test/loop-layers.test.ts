@@ -3,7 +3,7 @@
 // 同一个栈式校验器扫每种 run 的事件流，断言五条结构规则：
 //   ① 四层 start / end 严格嵌套，每层至少一对
 //   ② assistant 的 message_* 与 usage 只在 attempt 内；tool_execution_* 与 toolResult 的 message_end 只在 attempt_end{landed} 之后、同一 turn 内
-//   ③ retry_scheduled 只在同一 turn 的 attempt_end{failed} 与下一个 attempt_start 之间
+//   ③ retry_scheduled 只在同一 turn 的 attempt_end{failed} 与下一个 attempt_start 之间（退避被打断时其后是 turn_end{aborted}）
 //   ④ turnId 在 run 内唯一，n 在每条 reply 内从 1 起、每个 turn 加 1（重试不消耗）
 //   ⑤ 输入消息的 message_end 在它引发的 turn_start 之前，中间只允许 compaction_*
 // 校验器只看 loop 事件；queue_update / resource_changed 不参与。
@@ -59,7 +59,8 @@ function validate(events: readonly AgentEvent[]): string[] {
       pendingInput = false;
     }
     if (afterRetry && e.type !== "attempt_start") {
-      v.push(`#${e.seq} retry_scheduled 之后来了 ${e.type}（必须是 attempt_start）`);
+      // 退避被 abort / deadline 打断：不再发起 attempt，turn 直接以 aborted 关门——这是唯一的例外
+      if (!(e.type === "turn_end" && e.result.kind === "aborted")) v.push(`#${e.seq} retry_scheduled 之后来了 ${e.type}（必须是 attempt_start，或退避被打断时的 turn_end{aborted}）`);
       afterRetry = false;
     }
     switch (e.type) {
@@ -287,6 +288,36 @@ test("持续 retryable 错误：一个 run 的请求总数 = maxAttempts，outco
   expect(types(events).filter((t) => t === "retry_scheduled")).toHaveLength(2);
   const turnEnd = events.find((e) => e.type === "turn_end");
   expect(turnEnd?.type === "turn_end" && turnEnd.result.kind).toBe("failed");
+});
+
+test("backoff 中 abort：retryable 失败进入退避后 abort，run 在远小于 backoff 的时间内以 aborted 收场，不再发起 attempt", async () => {
+  const { fn, requests } = capturing([errorTurn("rate_limit", "限流", true), textTurn("不该到")]);
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, retryPolicy: { maxAttempts: 3, backoffMs: () => 5_000 } });
+  const events = collect(agent);
+  agent.subscribe((e) => {
+    if (e.type === "retry_scheduled") agent.abort("测试");
+  });
+  const started = Date.now();
+  const r = await agent.prompt("go");
+  expect(r.outcome.kind).toBe("aborted");
+  expect(Date.now() - started).toBeLessThan(500);
+  expect(validate(events)).toEqual([]);
+  expect(requests).toHaveLength(1); // 退避被打断，第二个 attempt 没有发起
+  const turnEnd = events.find((e) => e.type === "turn_end");
+  expect(turnEnd?.type === "turn_end" && turnEnd.result.kind).toBe("aborted");
+  expect(agent.status).toBe("idle");
+});
+
+test("backoff 中 deadline：退避期间 run 超时，以 error{timeout} 收场，不等 backoff 走完", async () => {
+  const { fn, requests } = capturing([errorTurn("rate_limit", "限流", true), textTurn("不该到")]);
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, retryPolicy: { maxAttempts: 3, backoffMs: () => 5_000 }, timeoutMs: 20 });
+  const events = collect(agent);
+  const started = Date.now();
+  const r = await agent.prompt("go");
+  expect(r.outcome).toMatchObject({ kind: "error", error: { code: "timeout" } });
+  expect(Date.now() - started).toBeLessThan(500);
+  expect(validate(events)).toEqual([]);
+  expect(requests).toHaveLength(1);
 });
 
 test("撞窗应急后成功：同一 turn 的第二个 attempt，compaction_* 夹在两个 attempt 之间，不发 retry_scheduled", async () => {

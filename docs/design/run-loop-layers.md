@@ -26,7 +26,7 @@
 3. [失败 attempt 的消息留 transcript、投影时丢](../decisions/proposed/2026-09-05-failed-attempt-in-transcript.md) —— 拍板 2026-09-05。
 4. [`maxIterations` 按 reply 计，run 级加 `maxReplies`](../decisions/proposed/2026-09-05-iteration-budget-per-reply.md) —— 拍板 2026-09-05（条件「run 级 reply 上限」已纳入）。
 
-**验收判据（机器可判）。** 在 `packages/core/test/` 下新增 `loop-layers.test.ts`（随实现一起提交），对下列每种 run 用同一个栈式校验器扫事件流：只有文本、要工具、transport 错误后成功、撞窗应急后成功、`contextBeforeBuild` block、工具执行中 abort、run 超时、followUp、stop hook 注入、`shouldStopAfterTurn`、从 transcript 续跑、reply 数达上限。校验器只看 loop 事件（`agent_* / reply_* / turn_* / attempt_* / message_* / tool_execution_* / compaction_* / retry_scheduled / usage`），`queue_update` 与 `resource_changed` 不参与排序规则。断言：① `agent / reply / turn / attempt` 四层 start / end 严格嵌套且每层至少一对；② assistant 的 `message_start / message_end` 与 `usage` 只出现在 attempt 内，`tool_execution_*` 与 toolResult 的 `message_end` 只出现在 `attempt_end{landed}` 之后、同一 turn 内；③ `retry_scheduled` 只出现在同一 turn 的 `attempt_end{failed}` 与下一个 `attempt_start` 之间；④ `turnId` 在一个 run 内唯一，其 n 在每条 reply 内从 1 起、每个 turn 加 1（重试不消耗）；⑤ 输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`。另断言：失败 attempt 之后的 provider 请求不含那条失败消息；provider 持续返回 retryable 错误时一个 run 的请求总数 = `maxAttempts`；reply 数达 `maxReplies` 且仍有待办 → `agent_end{error, code: "max_replies"}` 且未吸收的消息经 `queue_dropped` 报出，达上限但无待办 → `completed`；异常路径下进程不被 deadline timer 撑住。现有 `bun test packages/core` 全绿。
+**验收判据（机器可判）。** 在 `packages/core/test/` 下新增 `loop-layers.test.ts`（随实现一起提交），对下列每种 run 用同一个栈式校验器扫事件流：只有文本、要工具、transport 错误后成功、退避中 abort、退避中 deadline、撞窗应急后成功、`contextBeforeBuild` block、工具执行中 abort、run 超时、followUp、stop hook 注入、`shouldStopAfterTurn`、从 transcript 续跑、reply 数达上限。校验器只看 loop 事件（`agent_* / reply_* / turn_* / attempt_* / message_* / tool_execution_* / compaction_* / retry_scheduled / usage`），`queue_update` 与 `resource_changed` 不参与排序规则。断言：① `agent / reply / turn / attempt` 四层 start / end 严格嵌套且每层至少一对；② assistant 的 `message_start / message_end` 与 `usage` 只出现在 attempt 内，`tool_execution_*` 与 toolResult 的 `message_end` 只出现在 `attempt_end{landed}` 之后、同一 turn 内；③ `retry_scheduled` 只出现在同一 turn 的 `attempt_end{failed}` 之后，其后是下一个 `attempt_start`，或退避被 abort / deadline 打断时的 `turn_end{aborted}`；④ `turnId` 在一个 run 内唯一，其 n 在每条 reply 内从 1 起、每个 turn 加 1（重试不消耗）；⑤ 输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`。另断言：失败 attempt 之后的 provider 请求不含那条失败消息；provider 持续返回 retryable 错误时一个 run 的请求总数 = `maxAttempts`；reply 数达 `maxReplies` 且仍有待办 → `agent_end{error, code: "max_replies"}` 且未吸收的消息经 `queue_dropped` 报出，达上限但无待办 → `completed`；异常路径下进程不被 deadline timer 撑住。现有 `bun test packages/core` 全绿。
 
 ## 1. 术语
 
@@ -80,7 +80,7 @@
 ### 2.3 turn
 
 - **开**：冻结工作集（工具、已知名、hooks）→ [`openTurn`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openTurn) → `turn_start{cause}`。**一个 turn 只开一次**，重试不重开。
-- **attempt 循环**：落地 → 出循环；失败且 `error.retryable` 且 `attempt < maxAttempts` → `retry_scheduled` → 等待 → 下一个 attempt；失败且 `code === "context_overflow"` 且应急压缩成功 → 下一个 attempt（不发 `retry_scheduled`，压缩事件已说明原因）；其余失败 / block / abort → 出循环。**一个 turn 最多 `maxAttempts` 个 attempt，不分原因。**
+- **attempt 循环**：落地 → 出循环；失败且 `error.retryable` 且 `attempt < maxAttempts` → `retry_scheduled` → 等待 → 下一个 attempt；失败且 `code === "context_overflow"` 且应急压缩成功 → 下一个 attempt（不发 `retry_scheduled`，压缩事件已说明原因）；其余失败 / block / abort → 出循环。**一个 turn 最多 `maxAttempts` 个 attempt，不分原因。** 退避受 run 的 signal 管：abort / deadline 一到就提前结束等待，不再发起 attempt，turn 以 `aborted` 收场（reply 据 deadline 折成 `error{timeout}`）。
 - **工具批**：只在落地后，按响应顺序逐个 [`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool)；signal 中止则剩下的不跑（现状）。
 - **关**：`closeTurn` 交出 steer → `turn_end{result, toolResults}`。gate 的 turn 边界与事件的 turn 边界重合。
 
@@ -129,7 +129,7 @@ export type LoopLayerEvent =
   | { type: "turn_end"; turnId: string; result: AttemptResult; toolResults: ToolResultMessage[] }
   | { type: "attempt_start"; turnId: string; attempt: number }
   | { type: "attempt_end"; turnId: string; attempt: number; result: AttemptResult }
-  /** 只出现在同一 turn 的 attempt_end{failed} 与下一个 attempt_start 之间；attempt 是即将开始的那个。 */
+  /** 只出现在同一 turn 的 attempt_end{failed} 之后；attempt 是即将开始的那个。退避被 abort / deadline 打断时其后是 turn_end{aborted}，那个 attempt 不会开始。 */
   | { type: "retry_scheduled"; turnId: string; attempt: number; maxAttempts: number; delayMs: number; cause: string };
 ```
 
