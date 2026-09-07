@@ -287,9 +287,12 @@ function projectOne(m: AgentMessage): ProviderMessage | null {
 
     case "assistant": {
       // 剥壳：at、stopReason、error、usage、model 不出门。
-      // 失败 attempt 的定稿（stopReason=error）留在 transcript 当事实，但**不是模型说过的话**，不当上文送回去
-      // （docs/decisions/implemented/2026-09-05-failed-attempt-in-transcript.md）。
-      if (m.stopReason === "error") return null;
+      // 失败 attempt 的定稿（stopReason=error）与中止的半截回复（stopReason=aborted）留在 transcript 当事实，
+      // 但**不是模型说完的话**，不当上文送回去
+      // （docs/decisions/implemented/2026-09-05-failed-attempt-in-transcript.md，2026-09-07 修订把范围从 error 扩到 error | aborted）。
+      // 丢在 healOrphanToolUses **之前**：被丢的消息压根不登记 tool_use，也就不会被补上工具结果——
+      // 否则等于给一句没说完的话补齐工具结果再当上文。
+      if (m.stopReason === "error" || m.stopReason === "aborted") return null;
       // 空 content 的 assistant 消息是协议违规 → 整条隐形。
       if (m.content.length === 0) return null;
       return { role: "assistant", content: [...m.content] };
@@ -340,7 +343,7 @@ const NO_TOOL_RESULT = "No result: this tool call was never executed.";
  * **补在哪个位置**：紧跟在那批已有结果之后、下一条 assistant 或真正的 user 消息之前。
  * 补出来的是一条 tool-result-only 的 user 消息，`mergeAdjacentToolResults` 随后把它并进同一条里。
  *
- * `stopReason === "error"` 的 assistant 消息在 `projectOne` 里已经整条隐形，所以它的 `tool_use`
+ * `stopReason` 是 `error` / `aborted` 的 assistant 消息在 `projectOne` 里已经整条隐形，所以它的 `tool_use`
  * 压根不会进到这里来登记——与 pi 的「错误 / 中止的 assistant 消息不登记 pending」同一个效果。
  */
 function healOrphanToolUses(msgs: ProviderMessage[]): ProviderMessage[] {

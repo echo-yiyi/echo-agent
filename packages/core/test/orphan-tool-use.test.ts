@@ -10,7 +10,7 @@
 //   3. 欠账在**下一条 assistant 之前**结清
 //   4. 欠账在**真正的 user 消息之前**结清（不是塞到它后面）
 //   5. 全都配上时投影一个字不多（不误伤）
-//   6. `stopReason: "error"` 的 assistant 整条隐形，它的 tool_use 不登记、也就不补
+//   6. `stopReason: "error"` / `"aborted"` 的 assistant 整条隐形，它的 tool_use 不登记、也就不补
 
 import { test, expect } from "bun:test";
 import { Agent } from "../src/agent.ts";
@@ -170,7 +170,7 @@ test("全都配上时投影一个字不多", async () => {
   expect(wire).toHaveLength(3); // user + assistant + 合并后的一条结果
 });
 
-/* ─────────────── 6. 失败 attempt 不登记 ─────────────── */
+/* ─────────────── 6. 失败 attempt / 中止的半截回复都不登记 ─────────────── */
 
 test("stopReason error 的 assistant 整条隐形，它的 tool_use 不补结果", async () => {
   const wire = await defaultConvertToLlm([
@@ -181,4 +181,29 @@ test("stopReason error 的 assistant 整条隐形，它的 tool_use 不补结果
   expect(usesOf(wire)).toEqual([]);
   expect(resultsOf(wire)).toEqual([]);
   expect(wire.map((m) => m.role)).toEqual(["user", "assistant"]);
+});
+
+// 中止的半截回复与失败 attempt 同一条理由：账本里是真事，但不是模型**说完**的话
+// （docs/decisions/implemented/2026-09-05-failed-attempt-in-transcript.md，2026-09-07 修订）。
+test("stopReason aborted 的 assistant 整条隐形", async () => {
+  const wire = await defaultConvertToLlm([
+    userMessage("go"),
+    assistantMessage([{ type: "text", text: "我先看一" }], "aborted"),
+    assistantMessage([{ type: "text", text: "重来一遍" }], "end_turn"),
+  ]);
+  expect(wire.map((m) => m.role)).toEqual(["user", "assistant"]);
+  expect(wire[1]!.content).toEqual([{ type: "text", text: "重来一遍" }]);
+});
+
+// 顺序判据：丢在 healOrphanToolUses **之前**发生，所以被丢的那条压根不登记 tool_use。
+// 若两者顺序反了（或只丢在补齐之后），这里会多出一条 id 为 "x" 的 error tool_result。
+test("aborted 的 assistant 带 tool_use 时不会被补结果", async () => {
+  const wire = await defaultConvertToLlm([
+    userMessage("go"),
+    assistantMessage([{ type: "tool_use", id: "x", name: "x", input: {} }], "aborted"),
+    userMessage("换个说法"),
+  ]);
+  expect(usesOf(wire)).toEqual([]);
+  expect(resultsOf(wire)).toEqual([]);
+  expect(wire.map((m) => m.role)).toEqual(["user", "user"]);
 });

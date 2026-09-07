@@ -43,7 +43,7 @@ A 还剩一条没被驳倒的理由:`Agent.convertToLlm` 是公共可替换字�
 
 落点:`defaultConvertToLlm` 里的 `healOrphanToolUses`——按 assistant 逐条登记 `tool_use` id,配上的划掉,欠账在**下一条 assistant 或下一条真正的 user 消息之前**、以及会话末尾结清,补出来的是 `is_error: true` 的 `tool_result`,随后由 `mergeAdjacentToolResults` 并进同一条 user 消息。`stopReason === "error"` 的 assistant 在 `projectOne` 里已整条隐形,它的 `tool_use` 不登记也就不补——与 pi 的「错误 assistant 不登记 pending」同一个效果。
 
-**登记一条相邻的、本条不管的**:`stopReason === "aborted"` 的 assistant 消息今天**不**被投影丢掉(只有 `error` 丢),所以它若带 `tool_use`,这次补齐会给它补结果。请求因此合法,但「中止的半截回复要不要整条不送回去」是失败 attempt 那条决策的邻居,没人拍过,本条不顺手改。
+**相邻的那一条,当天就拍了**:本条上线时 `stopReason === "aborted"` 的 assistant 消息还**不**被投影丢掉(只有 `error` 丢),于是它若带 `tool_use`,这次补齐会给这条半截回复补上结果再送回去。同日([失败 attempt ⋯ 投影时丢](2026-09-05-failed-attempt-in-transcript.md) 的「2026-09-07 修订」)把丢弃范围扩到 `error | aborted`,`aborted` 的消息因此在 `projectOne` 里就整条隐形,不再进到这里登记 pending。
 
 ## 验收
 
