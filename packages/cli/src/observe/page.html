@@ -50,13 +50,19 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .chip {
   height: 22px; padding: 0 var(--space-8); border-radius: var(--r-full); border: 1px solid var(--border); background: transparent;
   font-size: var(--size-caption); color: var(--ink-70); cursor: pointer;
+  /* 会话名就是那段对话的第一句话，可以很长：片子恒单行、超出打点，全名在 title 里（§7 筛选片不换行） */
+  max-width: 148px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-wash); }
 .chip--dimmed { opacity: 0.45; }
 .filters .count { margin-left: auto; font-size: var(--size-caption); color: var(--stone); }
 
+/* 列表栏整体不超过一屏：筛选栏与「运行时活动」定高，中间的 run 列表吃剩下的高度并自己滚。
+   原来只给 .runs 定 max-height，底部的活动区就被视口切掉了（实测看不到最后几条）。 */
+.split > aside { display: flex; flex-direction: column; max-height: calc(100vh - 96px); /* 96px = 页头 + 页边距 */ }
+.split > aside > .filters { flex: 0 0 auto; }
 /* 实体行（§5.2）：selected = 左侧 2px 声色条 + accent-wash；hover 只换底 */
-.runs { list-style: none; margin: 0; padding: 0; max-height: calc(100vh - 180px); overflow: auto; }
+.runs { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-height: 120px; overflow: auto; }
 .run {
   display: block; width: 100%; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--ui-line-soft);
   padding: var(--ctl-list-item-pad-y) var(--ctl-list-item-pad-x); cursor: pointer;
@@ -65,12 +71,19 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .run:hover { background: var(--ui-raised); }
 .run[aria-selected="true"] { background: var(--accent-wash); box-shadow: inset 2px 0 0 var(--accent); }
 .run .l1 { display: flex; align-items: center; gap: var(--space-6); }
-.run .l1 .dur { margin-left: auto; font-size: var(--size-caption); color: var(--stone); }
-.run .l2 { margin-top: var(--space-2); display: flex; gap: var(--space-8); font-size: var(--size-caption); color: var(--stone); }
-.run .l2 .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 实体标识（console.md §5.1）：用户认的是产品名 + 目录，不是 runId；runId 仍在第二行与 title 里可得 */
+.run .l1 .dur { margin-left: auto; flex-shrink: 0; font-size: var(--size-caption); color: var(--stone); }
+.run .l2 { margin-top: var(--space-2); display: flex; align-items: center; gap: var(--space-6); font-size: var(--size-caption); color: var(--stone); }
+/* 实体标识（console.md §5.1）：用户扫读时找的是「这是哪段对话」，不是 runId——runId 在 title 与详情里可得 */
 .run .name { flex: 1; min-width: 0; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run .l2 .ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/*
+ * 整理（dream）run：记忆整理，每轮用户对话之后自动排一条、几毫秒就完。它是系统自理，不是用户干的活，
+ * 却和真正的对话一样多——实测 16 条里 8 条。**不隐藏**（§7：筛选面与数据都不藏），改成一行的次要行：
+ * 同样可选可看，但不与对话争扫读。
+ */
+.run--minor { padding-top: var(--space-2); padding-bottom: var(--space-2); color: var(--stone); }
+.run--minor .l1 { gap: var(--space-8); font-size: var(--size-caption); }
+.run--minor .name { font-weight: 400; color: var(--stone); flex: 0 1 auto; }
 .filters .sep { width: 1px; height: 14px; background: var(--border); margin: 0 var(--space-2); }
 
 /* 状态标签三件套（DESIGN §6.2）：主色文字 + 极浅底 + 同色浅描边，绝不整块高饱和填充 */
@@ -124,9 +137,9 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl-detail { margin: 0 0 var(--space-4) var(--space-8); padding: var(--ctl-tool-expand-pad); max-height: var(--ctl-tool-expand-max-height); overflow: auto; border-left: 2px solid var(--border); background: var(--ui-inset); font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); }
 .tl-detail[hidden] { display: none; }
 /* 运行时活动（run 之外的记录）：列表底部一小段，行形同时间线（时间 · 动作 对象 · 哪段会话），带 runId 的能点过去 */
-.activity { border-top: 1px solid var(--border); padding: var(--space-8); }
-.activity h3 { margin: 0 0 var(--space-4); font-size: var(--size-caption); font-weight: 600; color: var(--stone); }
-.acts { list-style: none; margin: 0; padding: 0; }
+.activity { flex: 0 0 auto; display: flex; flex-direction: column; max-height: 40%; border-top: 1px solid var(--border); padding: var(--space-8); }
+.activity h3 { flex: 0 0 auto; margin: 0 0 var(--space-4); font-size: var(--size-caption); font-weight: 600; color: var(--stone); }
+.acts { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-height: 0; overflow: auto; }
 .act { display: grid; grid-template-columns: 56px 1fr auto; gap: var(--space-6); align-items: baseline; padding: var(--space-2) 0; font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); border-radius: var(--r-sm); }
 .act[role="button"] { cursor: pointer; }
 .act[role="button"]:hover { background: var(--ui-raised); }
@@ -183,9 +196,12 @@ const STATE = { runs: [], sessions: {}, filter: "all", product: "all", session: 
 /* run 归哪个产品：header 只有 sessionId，产品名与 workspace 在会话 meta 里（/api/runs 顺带给） */
 const sessionOf = (r) => (r.sessionId ? STATE.sessions[r.sessionId] : undefined);
 const productOf = (r) => sessionOf(r)?.agent ?? (r.sessionId ? "未上报" : "无会话");
-/* 会话怎么称呼：有名字用名字，没有就缩短的 id。集群里几段并行时，列表行、活动行、筛选片都用它 */
+/* 会话怎么称呼：有名字用名字（那是它的第一句话，可以很长），没有就缩短的 id。列表行、活动行、筛选片都用它 */
 const sessionLabel = (id) => { const s = STATE.sessions[id]; return s && s.name && s.name !== id ? s.name : shortId(id); };
-const multiSession = () => new Set(STATE.runs.map((r) => r.sessionId).filter(Boolean)).size > 1;
+/* 筛选片是一行的固定宽度控件：标签在这里就截断，全名进 title（CSS 的 ellipsis 兜底，这里保证 DOM 也不长） */
+const clipLabel = (s, n = 14) => (s.length > n ? `${s.slice(0, n)}…` : s);
+/** 这一组 run 在某个维度上是不是有多个值——只有多个值时才值得在每行重复它（同一个值写 16 遍不区分任何东西）。 */
+const varies = (runs, of) => new Set(runs.map(of).filter((v) => v !== undefined && v !== "")).size > 1;
 const shortPath = (p) => {
   if (!p) return "";
   const parts = p.split("/").filter(Boolean);
@@ -230,9 +246,10 @@ function renderFilters() {
     for (const s of ["all", ...sessionIds]) {
       const n = s === "all" ? STATE.runs.length : sessionCounts[s];
       box.append(el("button", {
-        class: "chip", "aria-pressed": STATE.session === s, title: s === "all" ? "" : `${s}${STATE.sessions[s] ? ` · ${STATE.sessions[s].workspace}` : ""}`,
+        class: "chip", "aria-pressed": STATE.session === s,
+        title: s === "all" ? "" : `${sessionLabel(s)}\n${s}${STATE.sessions[s] ? ` · ${STATE.sessions[s].workspace}` : ""}`,
         onclick: () => { STATE.session = s; renderFilters(); renderRuns(); },
-      }, `${s === "all" ? "全部会话" : sessionLabel(s)} ${n}`));
+      }, `${s === "all" ? "全部会话" : clipLabel(sessionLabel(s))} ${n}`));
     }
     box.append(el("span", { class: "sep", "aria-hidden": "true" }));
   }
@@ -283,19 +300,35 @@ function renderRuns() {
     list.append(el("li", {}, msg));
     return;
   }
-  const multi = multiSession();
+  // 只重复真正区分得开的那几维：一个产品跑 16 条时把产品名写 16 遍，占着位却不告诉你任何事
+  const showProduct = varies(runs, productOf);
+  const showSession = varies(runs, (r) => r.sessionId ?? undefined);
+  const showWorkspace = varies(runs, (r) => sessionOf(r)?.workspace);
   for (const r of runs) {
     const dur = r.endedAt === null ? "未收尾" : fmtMs(r.endedAt - r.acceptedAt);
-    const item = el("li", {}, el("button", {
-      class: "run", role: "option", "aria-selected": STATE.selected === r.runId, title: r.runId,
-      onclick: () => { STATE.selected = r.runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(r.runId)}`); renderRuns(); loadRun(); },
-    },
-      // 三行：实体名（产品）+ 时长 / 状态与来源标签 / 时间 · 目录 · runId（console.md §5.1：实体名在上，类型信息在下）
-      // 集群里几段并行时实体名带上会话：同一产品可能开了好几段
-      el("div", { class: "l1" }, el("span", { class: "name", text: multi && r.sessionId ? `${productOf(r)} · ${sessionLabel(r.sessionId)}` : productOf(r), title: r.sessionId ?? "" }), el("span", { class: "dur mono", text: dur })),
-      el("div", { class: "l2" }, badge(LEX.runStatus[r.status], r.status), badge(LEX.runSource[r.source.kind], r.source.kind)),
-      el("div", { class: "l2" }, el("span", { class: "mono", text: fmtClock(r.acceptedAt) }), el("span", { class: "ws mono", text: shortPath(sessionOf(r)?.workspace ?? ""), title: sessionOf(r)?.workspace ?? "" }), el("span", { class: "id mono", text: shortId(r.runId) })),
-    ));
+    const ws = sessionOf(r)?.workspace ?? "";
+    const minor = r.source.kind === "dream"; // 记忆整理：系统自理，一行带过
+    const parts = [];
+    if (showProduct) parts.push(productOf(r));
+    if (showSession && r.sessionId) parts.push(sessionLabel(r.sessionId));
+    if (parts.length === 0) parts.push(LEX.runSource[r.source.kind]?.zh ?? r.source.kind); // 都不区分时，至少说清这是哪一类
+    const open = () => { STATE.selected = r.runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(r.runId)}`); renderRuns(); loadRun(); };
+    const attrs = { class: `run${minor ? " run--minor" : ""}`, role: "option", "aria-selected": STATE.selected === r.runId, title: `${r.runId}${ws ? `\n${ws}` : ""}`, onclick: open };
+    const item = minor
+      // 整理：时间 · 一句话 · 时长。终态不正常时才补状态标签——平静时不占位，出事时看得见
+      ? el("button", attrs, el("div", { class: "l1" },
+          el("span", { class: "mono", text: fmtClock(r.acceptedAt) }),
+          el("span", { class: "name", text: `${LEX.runSource.dream.zh}${showSession && r.sessionId ? ` · ${sessionLabel(r.sessionId)}` : ""}` }),
+          r.status === "completed" ? null : badge(LEX.runStatus[r.status], r.status),
+          el("span", { class: "dur mono", text: dur })))
+      // 对话：实体名在上、类型信息在下（console.md §5.1）。时间与徽章同一行，工作目录只在多目录时出现
+      : el("button", attrs,
+          el("div", { class: "l1" }, el("span", { class: "name", text: parts.join(" · ") }), el("span", { class: "dur mono", text: dur })),
+          el("div", { class: "l2" },
+            el("span", { class: "mono", text: fmtClock(r.acceptedAt) }),
+            badge(LEX.runStatus[r.status], r.status),
+            badge(LEX.runSource[r.source.kind], r.source.kind),
+            showWorkspace ? el("span", { class: "ws mono", text: shortPath(ws), title: ws }) : null));
     list.append(item);
   }
 }
@@ -333,6 +366,9 @@ function verbFor(name, attrs, body) {
   }
   if (name.startsWith("schedule.")) return { verb: LEX.records[name]?.zh ?? name, obj: attrs.scheduleId ?? "" };
   if (name === "task.state.committed") return { verb: "任务状态", obj: `${attrs.operation ?? ""} ×${attrs.count ?? 0}` };
+  // 上层 agent 的领域事件：名字都叫 agent.custom_event，真正是哪件事在 customEventType 上（metadata 档 body 恒空，
+  // 不把它摆出来的话一行里什么都没有——实测一条 run 里四行「自定义事件」谁也分不出）
+  if (name === "agent.custom_event") return { verb: LEX.records[name]?.zh ?? name, obj: attrs.customEventType ?? "" };
   return { verb: LEX.records[name]?.zh ?? name, obj: "" };
 }
 
@@ -588,7 +624,7 @@ function renderActivity() {
     },
       el("span", { class: "t", text: fmtClock(t.occurredAt) }),
       el("span", { class: "what" }, el("span", { class: "verb", text: verb }), obj ? el("span", { class: "obj", text: obj }) : null),
-      el("span", { class: "who", text: multi ? sessionLabel(sessionId) : "" }),
+      el("span", { class: "who", text: multi ? clipLabel(sessionLabel(sessionId), 10) : "", title: multi ? sessionLabel(sessionId) : "" }),
     );
     if (runId) {
       row.setAttribute("role", "button");
@@ -617,7 +653,10 @@ async function loadRuns() {
     renderFilters();
     renderRuns();
     const sessions = new Set(STATE.runs.map((r) => r.sessionId).filter(Boolean)).size;
-    document.getElementById("desc").textContent = `${STATE.root ? `${STATE.root} · ` : ""}${STATE.runs.length} 条 run · ${sessions} 段会话 · 只读轮询 SQLite，agent 跑着也能看`;
+    // 副标题只放会变的两个数；会话根与「只读」那句是常量，进 title（页头一行装不下就会换行，把标题挤下去）
+    const desc = document.getElementById("desc");
+    desc.textContent = `${STATE.runs.length} 条 run · ${sessions} 段会话`;
+    desc.title = `${STATE.root}\n只读轮询 SQLite，agent 跑着也能看`;
   } catch (e) {
     document.getElementById("desc").textContent = `连不上 observe 服务：${e.message}。它退出了？重新跑 echo-agent observe serve`;
   }

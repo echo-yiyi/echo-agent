@@ -196,7 +196,10 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   expect(lex.runStatus.completed!.zh).not.toBe(lex.runStatus.truncated!.zh);
   // 「running」只是没封口，不是「进行中」：agent 停没停不由观测判断（2026-09-06 用户定）
   expect(lex.runStatus.running!.zh).toBe("未收尾");
-  expect(observePageHtml()).not.toContain("进行中 · 已");
+  const html = observePageHtml();
+  expect(html).not.toContain("进行中 · 已");
+  // 列表的三条收敛（2026-09-07）：整理 run 走一行的次要行、只重复区分得开的维度、筛选片标签截断
+  for (const marker of ["run--minor", "const varies", "clipLabel"]) expect(html).toContain(marker);
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
 });
 
