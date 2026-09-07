@@ -1,6 +1,6 @@
 # 给两种 lifecycle 分开命名
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:rejected · 提出 2026-09-01 · 2026-09-07 被 [`Agent` 类收进 core 内部](../proposed/2026-09-07-agent-class-internal.md) 取代 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -22,7 +22,7 @@
 
 ## 决定
 
-待拍板。
+**不拍,冲突消失**(2026-09-07)。`Agent.start()` 随 `Agent` 类收进内部,仓外看得到的只剩 `agent_start` / `agent_end` 这对 run 事件与 `echo.agent.start()` 这一次实例启动;两者不再在同一个公共类型上撞名。`agent_end` 保留名字,见 [`agent_end` 是否 idle barrier](../proposed/2026-09-01-agent-end-barrier.md)。
 
 ## 验收
 

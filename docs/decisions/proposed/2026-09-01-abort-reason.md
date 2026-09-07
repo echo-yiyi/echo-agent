@@ -1,6 +1,6 @@
 # abort reason 是否调用者可依赖的终止信息
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:proposed · 提出 2026-09-01 · 拍板 2026-09-07(口头,选 A) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -21,7 +21,7 @@
 
 ## 决定
 
-待拍板。
+**A,一路保留到 terminal outcome**(2026-09-07 用户拍板:「reason 肯定要保留」)。形状:`reason` 是自由字符串,core 自己的几种中断(lease-lost、dispose、run 超时、用户中断)用常量并在文档里列出,不做枚举——枚举会把宿主的中断理由挤成 other。
 
 ## 验收
 

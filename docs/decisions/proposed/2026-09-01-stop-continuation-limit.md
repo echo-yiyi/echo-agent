@@ -1,6 +1,6 @@
 # stop hook 最多继续三次是不是产品约束
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:proposed · 提出 2026-09-01 · 拍板 2026-09-07(口头,留硬编码) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -17,7 +17,7 @@
 
 ## 决定
 
-待拍板。
+**留硬编码,不进配置**(2026-09-07 用户拍板)。它是防死循环的保险丝,不是产品约束;公开文档提一句「stop hook 最多把 agent 拉回三次」即可,不成为契约、不加配置面。验收改为:数字出现在 run loop 文档里,`MAX_STOP_CONTINUATIONS` 仍是 engine 常量。
 
 ## 验收
 

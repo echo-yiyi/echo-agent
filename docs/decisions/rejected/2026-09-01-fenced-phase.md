@@ -1,6 +1,6 @@
 # acquire 后启动失败是否应成为显式 `fenced` phase
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:rejected · 提出 2026-09-01 · 2026-09-07 被 [`Agent` 类收进 core 内部](../proposed/2026-09-07-agent-class-internal.md) 取代 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -21,7 +21,7 @@
 
 ## 决定
 
-待拍板。
+**不拍,降为内部实现项**(2026-09-07)。`phase` 随 `Agent` 类收进内部,状态机不再是公共契约;「fenced 是隐藏 latch」作为内部整洁问题随内部化一起修(倾向选项 A:显式 phase),不需要单独决策。
 
 ## 验收
 

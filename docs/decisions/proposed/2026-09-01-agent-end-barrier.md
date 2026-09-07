@@ -1,6 +1,6 @@
 # `agent_end` 是否 idle barrier
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:proposed · 提出 2026-09-01 · 拍板 2026-09-07(口头,保留名字、文档写清) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -17,7 +17,7 @@ run loop 先原子关闭 intake、发出 `agent_end` 并返回;admission ticket 
 
 ## 决定
 
-待拍板。
+**保留 `agent_end` 这个名字,公开契约写清它不是 idle barrier**(2026-09-07 用户拍板)。不另加 barrier API:调用方要等的是 `prompt()` 的 resolve,那就是它的 barrier;订阅者要的是状态变化,`onChange` 已经带。验收里「若提供 barrier」那一半作废。
 
 ## 验收
 

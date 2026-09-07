@@ -1,6 +1,6 @@
 # `start()` 是否所有 Agent 的统一前置条件
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:rejected · 提出 2026-09-01 · 2026-09-07 被 [`Agent` 类收进 core 内部](../proposed/2026-09-07-agent-class-internal.md) 取代 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -22,7 +22,7 @@
 
 ## 决定
 
-待拍板。
+**不拍,问题消失**(2026-09-07)。`Agent` 类收进 core 内部后,仓外只有 `createEcho()` 一条装配路径、`AgentRuntime` 一份协议,「用前要不要 `start()`」不再是公共契约问题;`createEcho()` 出来的 agent 由宿主显式 `agent.start()`,这一条写在 README 的用法里即可。
 
 ## 验收
 

@@ -114,11 +114,11 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-fenced-phase.md",
+      "path": "docs/decisions/rejected/2026-09-01-fenced-phase.md",
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-lifecycle-naming.md",
+      "path": "docs/decisions/rejected/2026-09-01-lifecycle-naming.md",
       "bilingual": false
     },
     {
@@ -126,7 +126,7 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-start-precondition.md",
+      "path": "docs/decisions/rejected/2026-09-01-start-precondition.md",
       "bilingual": false
     },
     {
@@ -134,11 +134,47 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-teardown-entry.md",
+      "path": "docs/decisions/rejected/2026-09-01-teardown-entry.md",
       "bilingual": false
     },
     {
       "path": "docs/decisions/proposed/2026-09-01-tool-execution-parallel.md",
+      "bilingual": false
+    },
+    {
+      "path": "CONTEXT.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/architecture.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-07-agent-class-internal.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-07-builtin-capabilities-stay-core.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-07-observation-public-face.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-07-parallel-tools.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-07-role-agent.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/proposed/2026-09-07-session-identity.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-07-preemptible-lease.md",
       "bilingual": false
     }
   ],

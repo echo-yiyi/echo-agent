@@ -1,6 +1,6 @@
 # 收窄收摊入口:`dispose()` 与 `stop()` 的关系
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:rejected · 提出 2026-09-01 · 2026-09-07 被 [`Agent` 类收进 core 内部](../proposed/2026-09-07-agent-class-internal.md) 取代 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -21,7 +21,7 @@
 
 ## 决定
 
-待拍板。
+**不拍,问题消失**(2026-09-07)。`Agent` 类内部化后 `dispose()` 不在公共面上,仓外的收摊入口只有 `echo.stop()`。「直接 `dispose()` 留下 lease」变成 core 内部的实现项,随内部化一起修(与 `stop()` 合成一条 single-flight 收摊),不再需要决策。
 
 ## 验收
 

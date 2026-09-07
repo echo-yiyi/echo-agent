@@ -1,6 +1,6 @@
 # 第二个用户 prompt:fail-fast 还是排队
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:proposed · 提出 2026-09-01 · 拍板 2026-09-07(口头,选 A,先留着) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -18,7 +18,7 @@ run 进行中,`prompt()` **同步抛 busy**;而 inbox 的工作会**排队**等 
 
 ## 决定
 
-待拍板。
+**A,保持 fail-fast**(2026-09-07 用户拍板:「先留着」)。`steer()` / `followUp()` 已经是 run 中的两个排队入口,再让 `prompt()` 也排队就是三种排队语义。壳按 `acceptsWork` 决定输入框状态。
 
 ## 验收
 

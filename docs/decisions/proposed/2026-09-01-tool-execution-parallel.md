@@ -1,6 +1,6 @@
 # 移除还是实现 `toolExecution: "parallel"`
 
-> 状态:proposed · 提出 2026-09-01 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:proposed · 提出 2026-09-01 · 拍板 2026-09-07(口头,选 B,语义见 [并行工具](2026-09-07-parallel-tools.md)) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -21,7 +21,7 @@
 
 ## 决定
 
-待拍板。
+**B,实现**(2026-09-07 用户拍板:「并行 tool 肯定需要实现」)。取消、排序、并发询问、hook 顺序四件在 [并行工具](2026-09-07-parallel-tools.md) 里逐条定;`toolExecution` 这个选项随之删掉,并不并行由工具自己声明。
 
 ## 验收
 

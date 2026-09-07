@@ -1,6 +1,6 @@
 # 会话（Session）与 agent 集群
 
-> 状态：设计 2026-09-03 口头拍板。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 2 步（agent 打包）与第 5 步（壳）未做，记忆三层待拍板——逐条见 §9。决策记录留在 `docs/decisions/proposed/` 直到整条实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
+> 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 2 步（角色定义）与第 5 步（壳）未做，记忆三层的切法 2026-09-07 已拍、未实现——逐条见 §9。决策记录留在 `docs/decisions/proposed/` 直到整条实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
 > 读者：要实现会话面、给产品接会话工具、把 echo 嵌进常驻程序（多段会话同时工作）的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) 的实例生命周期与 admission；[Context 与 Message Flow](context-and-message-flow.md) 的 transcript / working context 术语；[Compaction](compaction.md) 的「策略是 extension、状态在 core」这条分法——本文对会话用同一条<br>
 > 决策记录（五条，本文只指向，不复述论证）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) · [agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md)
@@ -23,27 +23,22 @@
 - memory 目录的多写者保护（多段 session 同时往 project 级记）。归 memory 线，本文只定作用域。
 - 会话的回收（GC / TTL）。`closed` 的段留在盘上；不会跑的段靠 §7 的挂载条件与 runner 失败判红不产生，而不是事后清。
 
-**待拍板。** 一条，来自实现（2026-09-03）：**记忆的三层怎么切**。§2 定了 session / project / user 三层，
-但 core 里的记忆是**按分区**组织的（`agent.md` 常驻、`user.md` 常驻、`memory/` 索引，路由靠路径前缀），
-没有 `remember(scope)` 这个工具，也没有「同一套分区在三层各来一份」的形状。所以布局那一步先把记忆整体放在
-**user 层**（`<ECHO_HOME>/memory/`，行为与 2026-09-01 相同，不回退），三层留给 memory 线单独一次改动。
-要拍的是分区与作用域怎么对：哪些分区是 user 级、哪些跟 session 走（dream 只整理 session 那份），
-还是同一套分区在每层各一份、由路径前缀选层。
+**待拍板。** 没有了。记忆三层怎么切 2026-09-07 拍了：分区（`agent.md` / `user.md` / 笔记索引）与作用域（session / project / user）分开，哪层放什么、注入什么、怎么选层、什么顺序落地，全在 [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) 的「切法」一段。**落地前仍成立的后果**：记忆今天整体在 user 层被多段 session 共写，dream 可能被两段同时跑，挡它的只有 `.dream` 里那个带过期的软锁——所以 session 层排在第一步落。
 
-**这条不拍板的直接后果**（现在就成立，不是将来）：记忆在 user 层被多段 session 共写，dream 也就可能被
-两段同时跑。今天挡它的只有 `.dream` 里那个带过期的软锁（读改写，不是 lease），并发下不牢靠。
-
-其余五项决策已拍（2026-09-03，口头），见决策记录。
+其余五项决策已拍（2026-09-03，口头；§4 那条 2026-09-07 修正），见决策记录。
 
 **验收判据（机器可判）。** 见 §10。核心四条：同一台机器两段 session 各自的进程同时 `start()` 都成功；A 进程 `session_send` 之后 B 进程不重启就在下一轮看到那条 environment 消息；非 main 的 session 工具表里没有 `session_create`；inline 定义点名了创建者池外的工具，`create` 判红、盘上不建目录。
 
 ## 1. 术语（只定义一次，全文同一个词）
 
+> 规范词表在仓库根 [CONTEXT.md](../../CONTEXT.md)；本表只列本文用到的，定义以那里为准。
+
 | 词 | 指什么 | 对应操作系统的词 |
 |---|---|---|
-| **agent（定义）** | 一个 extension：打包 identity 段、工具组、模型缺省。echo-agent、echo-coding、一个现写的 inline 定义都是 | 程序 |
+| **agent（定义）** | **产品内的一个角色**：identity 段、工具子集、模型缺省（2026-09-07 修正）。reviewer、前端、缺省，或一个现写的 inline 定义都是；**产品本身不是 agent 定义**，它是容器级的事。挂载时变成一条 extension（§4） | 程序 |
 | **session** | agent 的一个实例：盘上一个目录，运行时一个 `Agent` 实例。**session = 运行中的 agent**，两个词指同一个实体，从盘上看叫 session，从运行时看叫 agent | 进程 |
 | **容器** | 一个 OS 进程，装一个或多个 session。终端里的 echo-coding 装一个；findjob 这类常驻程序装几十个 | 机器 |
+| **产品** | 容器跑的那个：echo-agent、echo-coding、findjob。一段 session 记着自己是哪个产品开的（`product`），角色在它之下 | 发行版 |
 | **main** | 容器起的 session（人起的、宿主程序起的）。`session_create` 建出来的都不是 main | init 起的进程 |
 | **作用域** | session / project / user 三层目录，见 §2 | 进程私有 / 项目共享 / 用户共享 |
 
@@ -62,7 +57,7 @@ project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自
 三层里唯一的共享写方是 project / user 级 memory：多段 session 同时 `remember` 到同一层。dream 只整理 session 自己那份，不碰上两层，所以整理不冲突；`remember` 的并发写归 memory 线（Non-Goals）。
 
 **这一节里只有记忆的三层还没实现**（2026-09-03）：今天记忆整体在 user 层，session 与 project 两级还没有；
-分区与作用域怎么对是导读「待拍板」那一条。目录解析、session 层与 user 层的分家已经落地。
+分区与作用域怎么对 2026-09-07 已拍，见 [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) 的「切法」。session 层与 user 层的分家已经落地；project 目录的解析（`projects/<hash>/` 与 `workspace.json` 校验）还没有，随记忆落地一起做。
 
 `ECHO_HOME` 覆盖 `~/.echo`，与今天的 [`resolveStateDir()`](../../packages/core/src/create-agent.ts#symbol=resolveStateDir) 同一个来源；`agents/<agentId>/` 这一层退场，session 的 meta 里记着自己是哪个 agent。
 
@@ -86,11 +81,10 @@ project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自
 
 ```ts
 type AgentRef =
-  | { readonly kind: "extension"; readonly name: string }
+  | { readonly kind: "named"; readonly name: string }
   | {
       readonly kind: "inline";
       readonly identity: string;
-      readonly extensions?: readonly string[];
       readonly tools?: readonly string[];
       readonly model?: string;
     };
@@ -99,6 +93,7 @@ type SessionInfo = {
   readonly id: string;
   readonly name: string;
   readonly workspace: string;
+  readonly product: string;
   readonly agent: AgentRef;
   readonly main: boolean;
   readonly status: "active" | "closed";
@@ -108,7 +103,7 @@ type SessionInfo = {
 };
 ```
 
-相对今天的 [`SessionInfo`](../../packages/core/src/session/types.ts#symbol=SessionInfo)：`agent` 从产品名字符串变成 `AgentRef`；加 `main`、`status`。`--continue` 的筛选条件「本产品在本目录的最近一段」改成 `workspace` 相同、`agent` 是同名 extension、`main` 为真、`status` 为 active。
+相对今天的 [`SessionInfo`](../../packages/core/src/session/types.ts#symbol=SessionInfo)：产品名从 `agent` 字段挪到新的 `product` 字段（容器给，创建时写）；`agent` 变成 `AgentRef`（`named` 引用一个角色文件、`inline` 现写；2026-09-07 起没有 `extensions` 字段，角色不打包 extension）；加 `main`、`status`。`--continue` 的筛选条件「本产品在本目录的最近一段」= `workspace` 相同、`product` 相同、`main` 为真、`status` 为 active。`agentId` / `agentName` 随之退场，见 [session 的身份](../decisions/proposed/2026-09-07-session-identity.md)。
 
 三条不变量沿用：**每段一个写者**（lease）、**坏档判红不给半截**、**transcript 只增不改**。两条新规矩：
 
@@ -125,23 +120,17 @@ type SessionInfo = {
 
 `/clear` 的语义改为：关掉当前一段（`status = closed`）、新建一段、壳 attach 过去。旧段留在盘上可 `--resume`。协议上的 `reset()` 因此没有消费者，删。**还没做**，代价见 §9 第 5 步。
 
-## 4. agent 是 extension
+## 4. agent 定义是产品内的角色
 
-一个 agent 定义 = 一个 extension，打包它的 identity 段、纪律段、工具组、模型缺省。今天 echo-coding 是 `Product.preset` 返回的一组 [`ExtensionEntry`](../../packages/core/src/extension/host.ts#symbol=ExtensionEntry)（`packages/coding/src/agent.ts` 的 `codingPreset`），不是一个 extension，所以按名引用不了。
+> 2026-09-07 修正。此前本节写的是「agent 定义 = extension bundle，echo-agent / echo-coding 各打成一个」，那是把产品当成了 agent 定义。决策记录：[角色定义](../decisions/proposed/2026-09-07-role-agent.md)；被修正的那条：[agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md)。
 
-**ABI 加一个字段**：`ExtensionDefinition` 加 `extensions?: readonly ExtensionEntry[]`，一个 extension 可以打包别的。mount 时先按拓扑装它打包的，再装它自己；卸载逆序。这是本设计唯一的 ABI 改动。echo-agent 与 echo-coding 各写成一个 bundle：
+**产品是容器级的事**：一个 echo-coding 容器开出来的段全是 coding 方向。一段 session 挂的 agent 定义是**产品内的一个角色**——reviewer、前端、缺省——对应 Claude Code 的 subagent 定义。角色是数据，不是代码：一个 markdown 文件，frontmatter 带 `name` / `description` / `tools` / `model`，正文就是 identity。来源三处、按优先级合并：产品自带、user 层 `~/.echo/agents/`、项目层 `<workspace>/.echo/agents/`（放仓库里、随 git 走，与项目指令文件同一条规矩）。[`Product`](../../packages/cli/src/product.ts#symbol=Product) 与 `preset` 不动，ABI 不加字段。
 
-```
-echo-coding  =  echo:coding（identity + conduct:coding 段）
-              + echo:workspace（fs / search 工具与习惯段）
-              + echo:shell（bash，自己 inject background 端口）
-```
+**能替代什么，各自可选，没给的项产品原样生效**：identity 段**替换**产品的 identity（纪律段、工具习惯段照旧）；`tools` 是产品工具池的子集，只能少不能多；`model` 可选。权限策略继承产品的，角色改不了。其他 prompt 段不可替换——它们是产品对自己工具的承诺。
 
-[`Product`](../../packages/cli/src/product.ts#symbol=Product) 只剩 `name` 与 `version` 给可执行文件用，`preset` 退场，装配改成 `extensions: [bundle]`。
+**挂载走已有的先例**：`CreateEchoOptions` 今天把 `agent.tools` 变成一条内联 extension `echo:inline-tools`。角色（按名读到的文件，或 `AgentRef.kind === "inline"` 现写的）同样在 mount 时变成一条 `echo:inline-agent`，`apply()` 里三件事：有 identity 就替换 identity 段，有 `tools` 就收紧工作集，有 `model` 就换模型。为此在现有 registry 上开两个最小的口，都带 disposer、卸载复原：`AgentPrompt.section(s, { replace: true })`（同名存在才成功，不带 `replace` 照旧 fail-loud）与 `AgentTools.restrict(names)`（工作集 = 池 ∩ names，只能收紧；池不动）。角色就是 `registries.ts` 注释里等的那个「受控 replace 的真实消费者」。定义整份存在 meta 里，`--resume` 原样重挂。
 
-**inline 定义**走已有的先例：`CreateEchoOptions` 今天把 `agent.tools` 变成一条内联 extension `echo:inline-tools`。`AgentRef.kind === "inline"` 同样在 mount 时变成一条 `echo:inline-agent`：`identity` 成 identity 段，`extensions` 按名从内建表与已发现的扩展里取，`tools` 从取到的池里过滤，`model` 从模型目录解析。定义整份存在 meta 里，`--resume` 原样重挂。
-
-**不越权**（core 的 `sessions.create` 里验，不靠工具自觉）：inline 的 `tools` 必须是创建者当前工具集的子集，`extensions` 必须是创建者已挂的子集，权限策略继承创建者的、不能放宽。违反判红，盘上不建目录。
+**不越权**（core 的 `sessions.create` 里验，不靠工具自觉）：角色的 `tools` 必须是创建者当前工具集的子集，权限策略继承创建者的、不能放宽。违反判红，盘上不建目录。
 
 **快照权威、只能收紧。** 检查在创建那一刻做一次，通过的定义整份存进 meta，之后它就是这段 session 的权威定义，不再回头看创建者（创建者可能已经 closed）。`--resume` 时工具集取「快照 ∩ 容器此刻能提供的」，只会更小；快照里有、容器没有的工具不挂、不报错。任何路径都不能让它比快照更宽。
 
@@ -203,7 +192,7 @@ type SessionRow = {
 
 type CreateSessionInput = {
   readonly name: string;
-  readonly agent: string | { readonly identity: string; readonly extensions?: readonly string[]; readonly tools?: readonly string[]; readonly model?: string };
+  readonly agent: string | { readonly identity: string; readonly tools?: readonly string[]; readonly model?: string };
   readonly workspace?: string;
   /** 第一条消息，投进新段的 inbox。工具面必填：一段 session 是为了做某件事才开的，没有这条就是一个永远躺着的空目录。 */
   readonly message: string;
@@ -240,7 +229,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 1. `sessions`（**已实现 2026-09-07**）：`AgentSessionsService`，交出去的是容器那一份 `EchoSessions`（`SessionFace` 接口）。壳的 `/sessions`、第三方自己的会话工具都从这里拿——同一份实现，不会长出第二套「会话是什么」。
    **恒有**：裸 `new Agent()` 上给 `NO_SESSION_FACE`（`list()` 返回空、`send()` 说 not-found、`create` / `close` 如实说做不到）。不做成可选依赖是因为 ABI 里没有读 optional 的方法——声明成 optional 只会在缺它时装不上却说成可选。
-   还没做的两点：经这里建的段应当 `main = false`（§6）、`create` 应当做不越权检查（§4，等 agent 打包落地）。
+   还没做的两点：经这里建的段应当 `main = false`（§6）、`create` 应当做不越权检查（§4，等角色定义落地）。
 2. `inbox.watch(predicate, opts)`：等到匹配的那条 record，**命中即消费**（§5），给 `wait` 用。
 3. `session.main` 与 `session.agent` 可读，工具组据此决定挂什么。
 
@@ -259,7 +248,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 **CLI 这个容器选的是**：开会话面、**不给 runner**。同一台机器上多开几个终端就是多段 agent，让它们看得见彼此、能互相带个话；而「怎么再开一个终端窗口」不该由 CLI 替用户决定，所以模型那边没有 `session_create`——开新的一段仍然是人的动作。
 
-`session_create` 现在**没有 `agent` 参数**：按名挑一个 agent 定义要等 §4 的 agent 打包落地。在那之前收下这个参数等于收下一个没人兑现的值——新建的那段仍然跑容器挂的那一套。
+`session_create` 现在**没有 `agent` 参数**：它随 §4 的角色定义一起回来，形状是 `agent: "reviewer" | { identity, tools?, model? }`，按名从三处来源找、找不到判红（2026-09-07 拍板）。在那之前收下这个参数等于收下一个没人兑现的值——新建的那段仍然跑容器挂的那一套。
 
 ## 8. 与现有件的对接
 
@@ -285,7 +274,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 1. **布局（已实现，2026-09-03）**：状态根 = session 目录；`SessionService` 扁平化，清单改自由函数 `listSessions()`（扫上一层）；memory / skills 提到 user 层；空会话延迟写 meta；`SessionInfo` 加 `main` / `status`；删旧 `SessionManager` / `InMemorySessionManager` / `AgentOptions.sessions`；`CreateAgentOptions` 加 `sessionsRoot` 与 `sharedStore`；`observe` 的 `--agent-id` 换成 `--session`。lease 每段一把随之成立。
    **与本文其余部分的一处差异**：memory 落在 user 层**一层**，还不是 §2 的三层——把哪个记忆分区放哪一层要改 `AgentMemories` 的分区表与 dream 的整理范围，是 memory 线自己的一次改动，登记在下面的「未决」里，不在本步顺手做。
-2. **agent 打包**：ABI 加 `extensions`；echo-agent / echo-coding 写成 bundle；`AgentRef` 进 meta；inline → `echo:inline-agent`；不越权检查。
+2. **角色定义**（2026-09-07 改，原「agent 打包」作废，见 §4）：角色文件的加载（产品自带 / user 层 / 项目层三处合并）；`AgentPrompt.section(…, { replace: true })` 与 `AgentTools.restrict()` 两个口；`AgentRef` 进 meta；角色 → `echo:inline-agent`；不越权检查；`session_create` 的 `agent` 参数回来。**排在第 5 步之前做**（2026-09-07 拍板：`/clear` 与 `wait` 都会碰 AgentRef 与「这段挂什么」）。
 3. **通道（已实现，2026-09-03）**：record id 改**写者自己发号**（`createRecordIdSource`，
    `<12 位十六进制毫秒>-<4 位同毫秒计数><12 位十六进制随机>`；同一写者严格递增，跨写者靠随机区分）；
    `InboxStore.refresh()` 重扫盘上别人写进来的 record；`Agent` 每秒轮询一次自己的 inbox 目录
@@ -322,13 +311,13 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 - **runner 失败不留孤儿**：runner 抛错或超过 `runTimeoutMs` 不 resolve，`create` 判红，那段在盘上 `status = closed`，`session_list` 缺省不列它；runner 成功时 `create` 返回的行 `alive = true`。
 - **project 哈希校验**：把一个 project 目录的 `workspace.json` 改成别的路径，从原 workspace 起的 session 打开时判红。
 - **快照只能收紧**：一段 inline 定义的 session，在工具比创建时少的容器里 `--resume`，工具集是交集、不报错；没有任何路径能让它多出快照外的工具。
-- **留言**：send 到没进程的段返回 `alive: false`；之后 `--resume` 那段，第一轮看到这条消息。
+- **只跟活着的段说话**（2026-09-07 替代原「留言」判据）：send 到没进程的段，容器给了 runner 就先叫醒再投递、返回 `accepted` 且对方此刻活着；叫不醒（没给 runner 或 runner 失败）返回 `rejected: unreachable`，盘上 `inbox/` 里不多任何 record。
 - **wait**：A `wait: true` 发给 B，B 回信带 `replyTo`，A 的工具调用在回信落盘后返回；超时返回 `timedOut`。
 - **main**：非 main 的 session 工具表里没有 `session_create`；宿主 API 的 `create` 不受限。
 - **不越权**：inline 点名创建者池外的工具，`create` 判红、`~/.echo/sessions/` 下不多目录。
 - **`/clear` 落盘**：`/clear` 后旧段 `status = closed`，新段 id 不同；`--resume` 旧段回来的是清之前的对话，`--continue` 挑到的是新段。
 - **活着就找得到**：一段刚 `start()`、一句话没说的 session，在别的进程的 `session_list` 里在，`session_send` 给它是 `accepted`。
-- **空会话**：启动即退出，那一段不在清单里（meta 被撤）；但**有人给它留过话就不撤**——撤了那条留言就成了没人认领的孤儿。
+- **空会话**：启动即退出，那一段不在清单里（meta 被撤）；但 **inbox 里还有没消费的 record 就不撤**（活着时收到、退出前没处理完的）——撤了那条消息就成了没人认领的孤儿。
 - **旧决策失效**：`~/.echo/agents/` 不再被创建；`docs` 门与 API 快照重录。
 
 ## 11. 判据落在哪一层测试
@@ -337,7 +326,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 | 层 | 夹具 | 落哪些判据 |
 |---|---|---|
-| **单元（`InMemoryDir`，零盘）** | `packages/core/test/session-service.test.ts`、`inbox-durable.test.ts`（含 durable ingress 的 conformance suite）、`extension-host.test.ts`、`create-agent.test.ts` | 布局扁平化与 `list()` 扫上级目录；空会话延迟写 meta；meta 的 `agent` / `main` / `status` 验形；**多写者不撞号**（两个 `InboxStore` 实例对同一个 `StorageDir` 各投 100 条）；`watch` 命中即消费、超时不消费；bundle 的拓扑装卸与整代回滚；三层作用域解析与 `workspace.json` 校验；inline 不越权判红、快照只能收紧 |
+| **单元（`InMemoryDir`，零盘）** | `packages/core/test/session-service.test.ts`、`inbox-durable.test.ts`（含 durable ingress 的 conformance suite）、`extension-host.test.ts`、`create-agent.test.ts` | 布局扁平化与 `list()` 扫上级目录；空会话延迟写 meta；meta 的 `agent` / `main` / `status` 验形；**多写者不撞号**（两个 `InboxStore` 实例对同一个 `StorageDir` 各投 100 条）；`watch` 命中即消费、超时不消费；`echo:inline-agent` 装上时 identity 段替换、工作集收紧，卸下时复原；三层作用域解析与 `workspace.json` 校验；角色不越权判红、快照只能收紧 |
 | **单进程集成（真盘，脚本化 provider）** | `create-agent.test.ts` 的 `fakeProvider`、`packages/cli/test/cli.test.ts` 的 `scriptedProvider`：脚本让模型按顺序调 `session_create` / `session_send` | 同一个容器里两段互发、先落盘再投、ack marker；`wait` 的回信不双送；runner 失败 / 超时判红并置 closed、成功时 `alive = true`；非 main 的工具表；`alive = false` 则 `phase = null` |
 | **跨进程（真 spawn，已实现）** | `packages/core/test/sessions-cross-process.test.ts` + `fixtures/session-peer.ts`：一个真进程起一段 session 然后**待着**，末行吐 JSON 报告 | 别的进程写进它 inbox 的一条，它不重启就看见（反证过：把轮询摘掉这条立刻红）；两段各拿各的锁、同时活着、收摊都还回去。留言之后 `--resume` 第一轮看到那条仍在 `resident-v0.test.ts` 里。注意 `resident-v0` 的 replay 阶段本来就有 ack 裁决窗口的抖动，别把新判据挂在那个窗口上 |
 | **壳（真 spawn `bin`）** | `cli.test.ts` 的 `spawnBin` | `--continue` 只挑 main 且 active；`/clear` 后旧段 closed、新段 main、`--resume` 旧段是清之前的对话；启动即退出不留目录；续了壳有提示 |
