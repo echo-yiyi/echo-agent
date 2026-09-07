@@ -304,24 +304,6 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
 
   // **Host 在 try 外面造**：catch 要按 boot → builtin 逆序把已 mount 的代卸掉，
   // 声明在 try 里的话它在 catch 里根本不可见（上一版就是这样，于是 builtin 那代永远没人卸）。
-  const host = new ExtensionHost({
-    services: agentRegistries({
-      tools: agent.tools,
-      hooks: agent.hooks,
-      skills: { pool: agent.skills, active: agent.activeSkills },
-      // **能力端口**（2026-08-31）：扩展要挂后台任务得拿得到这个。不给的话扩展面就只有
-      // 「往里注册」没有「用起来」，产品层只能绕到 `createEcho()` 外面自己造 Agent。
-      background: agent.background,
-      // prompt 段与变量：内建 `echo:*` 与产品 extension 都从这条 Service 进（2026-09-01）
-      prompt: { sections: agent.promptSections, variables: agent.promptVariables },
-      // 压缩阶段：`echo:compaction` 与产品自己的策略同一条 Service（2026-09-02）
-      compaction: agent.compactionStages,
-    }),
-  });
-
-  // 从这里起 Agent 已经存在：任何（fail-loud 路径上的）失败都必须把它停掉，否则 store 与文件锁没人收。
-  const diagnostics: Diagnostic[] = [];
-  /** 已经 mount 上的**非 builtin** 代，按 mount 顺序。收摊与失败回滚都按它逆序卸。 */
   // 会话面（2026-09-03）：一个容器一个实例，三个消费者共用（工具 / 壳 / 宿主）。
   //
   // 这里注进去的两件都是**宿主知识**，core 自己给不出：
@@ -348,6 +330,27 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     ...(opts.sessions?.runTimeoutMs !== undefined ? { runTimeoutMs: opts.sessions.runTimeoutMs } : {}),
   });
 
+  const host = new ExtensionHost({
+    services: agentRegistries({
+      tools: agent.tools,
+      hooks: agent.hooks,
+      skills: { pool: agent.skills, active: agent.activeSkills },
+      // **能力端口**（2026-08-31）：扩展要挂后台任务得拿得到这个。不给的话扩展面就只有
+      // 「往里注册」没有「用起来」，产品层只能绕到 `createEcho()` 外面自己造 Agent。
+      background: agent.background,
+      // prompt 段与变量：内建 `echo:*` 与产品 extension 都从这条 Service 进（2026-09-01）
+      prompt: { sections: agent.promptSections, variables: agent.promptVariables },
+      // 压缩阶段：`echo:compaction` 与产品自己的策略同一条 Service（2026-09-02）
+      compaction: agent.compactionStages,
+      // 会话面（2026-09-07）：壳的 `/sessions`、第三方自己的会话工具都从这条 Service 拿，
+      // 与内建 `echo:sessions` 是同一份实现——不会长出第二套「会话是什么」
+      sessions,
+    }),
+  });
+
+  // 从这里起 Agent 已经存在：任何（fail-loud 路径上的）失败都必须把它停掉，否则 store 与文件锁没人收。
+  const diagnostics: Diagnostic[] = [];
+  /** 已经 mount 上的**非 builtin** 代，按 mount 顺序。收摊与失败回滚都按它逆序卸。 */
   // **会话的缺省命名**（2026-09-07，sessions.md §3）：拿第一句人话的首行当名字。
   //
   // 名字是给人看的——`session_list`、会话列表、`--continue` 的界面里认哪一段全靠它，

@@ -32,6 +32,7 @@ export {
   AgentCompaction,
   AgentHooks,
   AgentPrompt,
+  AgentSessionsService,
   AgentSkills,
   AgentTools,
   agentRegistries,

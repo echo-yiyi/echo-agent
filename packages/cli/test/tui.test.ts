@@ -5,7 +5,7 @@
 // 真终端只在 `bin/echo-tui.ts` 里出现，测试一行都不碰它。
 
 import { test, expect } from "bun:test";
-import { Agent, deepseekProvider, InMemoryCredentialStore, kimiProvider, type CredentialStore, type ProviderEvent } from "@echo-agent/core";
+import { Agent, deepseekProvider, InMemoryCredentialStore, kimiProvider, NO_SESSION_FACE, type CredentialStore, type ProviderEvent, type SessionFace, type SessionRow } from "@echo-agent/core";
 import { agentRuntimeOf, type AgentRuntime } from "@echo-agent/core/extension";
 import { scriptedStreamFn, textTurn, toolTurn } from "@echo-agent/core/testing";
 import { CURSOR_MARKER, visibleWidth, type TUI } from "@earendil-works/pi-tui";
@@ -2061,4 +2061,99 @@ test("`/zz` 什么都不匹配：不弹菜单", async () => {
   } finally {
     restore();
   }
+});
+
+/* ═══════════════ /sessions：只看不切 ═══════════════ */
+
+/** 造几行会话，形状与 core 合成出来的那份一致（`alive` 为假时 `phase` 恒为 null）。 */
+function sessionsWith(rows: readonly SessionRow[], fail?: Error): SessionFace {
+  return {
+    ...NO_SESSION_FACE,
+    list: async () => {
+      if (fail !== undefined) throw fail;
+      return rows;
+    },
+  };
+}
+
+const row = (over: Partial<SessionRow> & { id: string }): SessionRow => ({
+  name: over.id,
+  workspace: "/repo",
+  agent: "echo-agent",
+  main: true,
+  status: "active",
+  alive: false,
+  phase: null,
+  ...over,
+});
+
+test("/sessions：把别的会话摆出来——在跑 / 忙着 / 没在跑各说各的，自己那一段不列", async () => {
+  // 两个终端各跑一段时，这是唯一能一眼看到对面的地方。没有它只能去翻 ~/.echo/sessions/。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const runtime = runtimeOf(agent, { state: { ...agent.state, sessionId: "s-me" } as never });
+  const done = runTui({
+    agent: runtime,
+    ui,
+    sessions: sessionsWith([
+      row({ id: "s-me", name: "我自己" }),
+      row({ id: "s-busy", name: "改接口", alive: true, phase: "working", workspace: "/repo/back" }),
+      row({ id: "s-idle", name: "看 PR", alive: true, phase: "idle", agent: "echo-coding" }),
+      row({ id: "s-away", name: "昨天那段" }),
+    ]),
+  });
+  await flush();
+  ui.feed("/sessions");
+  ui.feed(ENTER);
+  await flush();
+  const screen = ui.screen();
+  expect(screen).toContain("另外 3 段"); // 自己那一段不算
+  expect(screen).not.toContain("s-me");
+  expect(screen).toContain("改接口");
+  expect(screen).toContain("忙着");
+  expect(screen).toContain("空闲");
+  expect(screen).toContain("没在跑");
+  quit(ui);
+  await done;
+});
+
+test("/sessions：只有自己在跑时说一句，不摆一张空表", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui, sessions: sessionsWith([]) });
+  await flush();
+  ui.feed("/sessions");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("只有这一段在跑");
+  quit(ui);
+  await done;
+});
+
+test("/sessions：列不出来时如实说，不把界面掀了", async () => {
+  // 会话目录在别人手里、盘上有坏 meta 都可能让它抛——那不该让正在用的这一段崩掉。
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui, sessions: sessionsWith([], new Error("meta 解不开")) });
+  await flush();
+  ui.feed("/sessions");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("列不出来");
+  expect(ui.screen()).toContain("meta 解不开");
+  quit(ui);
+  await done;
+});
+
+test("不给 sessions 也能跑：/sessions 说只有这一段（低层用户自己装壳的场合）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  ui.feed("/sessions");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("只有这一段在跑");
+  quit(ui);
+  await done;
 });

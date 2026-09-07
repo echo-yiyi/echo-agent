@@ -223,9 +223,11 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 登记一条不动的观察：`session_create` 的挂载条件（main 且有 runner）和 inline 定义的「快照 ∩ 容器此刻能提供的」都在表达「工具面随容器变」，走的是两条路（挂载条件 / 快照求交）。现在各自都对；将来出现第三种随容器变的东西时再考虑收成一条规则。
 
-**core 为 extension 新开三个口**（extension 拿到的 agent handle 上）：
+**core 为 extension 新开三个口**：
 
-1. `sessions`：上面这组 `EchoSessions`，就是宿主 API 同一份，只差两点：经这里建的段 `main = false`（§6）；`create` 在这里做不越权检查（§4），检查用的是调用方 session 的当前工具集。
+1. `sessions`（**已实现 2026-09-07**）：`AgentSessionsService`，交出去的是容器那一份 `EchoSessions`（`SessionFace` 接口）。壳的 `/sessions`、第三方自己的会话工具都从这里拿——同一份实现，不会长出第二套「会话是什么」。
+   **恒有**：裸 `new Agent()` 上给 `NO_SESSION_FACE`（`list()` 返回空、`send()` 说 not-found、`create` / `close` 如实说做不到）。不做成可选依赖是因为 ABI 里没有读 optional 的方法——声明成 optional 只会在缺它时装不上却说成可选。
+   还没做的两点：经这里建的段应当 `main = false`（§6）、`create` 应当做不越权检查（§4，等 agent 打包落地）。
 2. `inbox.watch(predicate, opts)`：等到匹配的那条 record，**命中即消费**（§5），给 `wait` 用。
 3. `session.main` 与 `session.agent` 可读，工具组据此决定挂什么。
 
@@ -285,7 +287,10 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
    `SessionRunner` 才挂 `session_create`**，是不是 main 读盘上的 meta。会话命名 2026-09-07 补上（见 §3）。
    **还没做**：`wait`——不过它的主要用例（派活出去、等一个答复）2026-09-06 已由 `subagent` 工具覆盖
    （进程内的短命子 agent，前台调用就是阻塞等结果），所以这条的紧要程度已经下来了。
-5. **壳**（`--continue` 的新筛选已随第 1 步实现）：`/clear`、`/sessions` 还没做。
+5. **壳**（`--continue` 的新筛选已随第 1 步实现；`/sessions` 的**看**这一半 2026-09-07 已实现）：
+   `/sessions` 列出别的会话——id、名字、哪个 agent、在跑没在跑、忙不忙、在哪个目录，一行一段，
+   自己那一段不列。用的是 core 合成好的那份行（`alive` 为假时 `phase` 恒为 null），壳不自己组合。
+   **切换那一半没做**，`/clear` 也没做——两件都要换一个 `Agent` 实例，见下。
 
    **`/clear` 为什么没顺手做**：它要「关掉当前一段、开新的一段、attach 过去」，而 attach 就是**换一个
    `Agent` 实例**——lease、inbox、tasks、schedule、观测库都得跟着重来。这在今天的壳里意味着

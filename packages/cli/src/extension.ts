@@ -15,7 +15,7 @@
 // **谁收摊**：`exited` resolve 之后由进程调 `echo.stop()`，那一步会 unmount 本 Extension，
 // Fiber 的 disposer 把终端还回去。壳子自己不碰 `agent.stop()`——协议里根本没有它。
 
-import { AgentPrompt, AgentRuntimeService, defineExtension, type ExtensionDefinition } from "@echo-agent/core/extension";
+import { AgentPrompt, AgentRuntimeService, AgentSessionsService, defineExtension, type ExtensionDefinition } from "@echo-agent/core/extension";
 import type { TUI } from "@earendil-works/pi-tui";
 import { runTui, type TuiConfigureOptions } from "./app.ts";
 import type { Product } from "./product.ts";
@@ -71,9 +71,13 @@ export function tuiShell(
     inject: {
       runtime: { service: AgentRuntimeService, required: true },
       prompt: { service: AgentPrompt, required: true },
+      // 会话面（2026-09-07）：`/sessions` 读它。**恒有**，所以 required 装得上——
+      // 容器给真的那一份，裸 `new Agent()` 上是 `NO_SESSION_FACE`。
+      sessions: { service: AgentSessionsService, required: true },
     },
     apply(ctx) {
       const runtime = ctx.get(AgentRuntimeService);
+      const sessions = ctx.get(AgentSessionsService);
       // 交互面段（2026-09-01）：「模型看到的是什么界面」这个事实归壳——壳在，段在；换壳换段。
       const prompt = ctx.get(AgentPrompt);
       void ctx.effect({
@@ -115,6 +119,7 @@ export function tuiShell(
 
           const loop = runTui({
             agent: runtime,
+            sessions,
             signal: stopper.signal,
             announcer: attachAnnouncer,
             ...(opts.product !== undefined ? { product: opts.product } : {}),

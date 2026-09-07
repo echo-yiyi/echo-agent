@@ -23,6 +23,7 @@ import { addSkills, type ActiveSkillMap, type SkillMap } from "../skill/harness.
 import type { Skill } from "../skill/types.ts";
 import { PROMPT_VARIABLE_NAME, type PromptSection, type PromptVariable } from "../prompt/types.ts";
 import type { CompactionStage } from "../compaction/types.ts";
+import { NO_SESSION_FACE, type SessionFace } from "../session/sessions.ts";
 import { defineService, type Disposer, type ServiceKey } from "./abi.ts";
 
 export interface AgentToolsRegistry {
@@ -130,6 +131,26 @@ export const AgentBackgroundService: ServiceKey<AgentBackground> = defineService
 });
 
 /**
+ * 会话面（2026-09-07，sessions.md §7）：开一段、列一遍、发一句、关一段。
+ *
+ * `kind: "single"`、`scope: "agent"`，与 `AgentBackgroundService` 同款——不收注册，
+ * 把容器已有的那一个交出去。壳的 `/sessions`、第三方自己的会话工具都从这里拿，
+ * 与内建的 `echo:sessions` 是同一份实现，不会长出第二套「会话是什么」。
+ *
+ * **恒有**：由容器（`createEcho()`）装出来的给真的那一份；裸 `new Agent()` 上给
+ * `NO_SESSION_FACE`（一段都没有是事实，开与关如实说做不到）。之所以不做成可选依赖——
+ * ABI 里没有读 optional 的方法，声明成 optional 只会在缺它时**装不上却说成可选**
+ * （与 `AgentBackgroundService` 那段注释同一条理由）。
+ */
+export const AgentSessionsService: ServiceKey<SessionFace> = defineService<SessionFace>({
+  id: "echo.agent.sessions",
+  version: 1,
+  kind: "single",
+  scope: "agent",
+  reload: "agent",
+});
+
+/**
  * 给 `new ExtensionHost({ services })` 用：把一个 Agent 已公开的 Map / HookRuntime / 能力端口
  * 包成 Service。Agent 本身一行不改——它仍直接拥有原始领域对象。
  *
@@ -154,6 +175,11 @@ export function agentRegistries(input: {
   prompt?: { sections: Map<string, PromptSection>; variables: Map<string, PromptVariable> };
   /** 压缩阶段表（`agent.compactionStages`）。与 `prompt` 同款：Agent 恒有，由 Agent 造的 Host 应当恒传。 */
   compaction?: Map<string, CompactionStage>;
+  /**
+   * 会话面（2026-09-07）。**只有容器有**——`createEcho()` 传真的那一份；
+   * 不传就提供 `NO_SESSION_FACE`，因为这个 Service 恒有（理由见它的定义处）。
+   */
+  sessions?: SessionFace;
 }): ReadonlyArray<readonly [ServiceKey<unknown>, unknown]> {
   const tools: AgentToolsRegistry = {
     register: (tool) => {
@@ -179,6 +205,8 @@ export function agentRegistries(input: {
     out.push([AgentSkills, skills]);
   }
   if (input.background !== undefined) out.push([AgentBackgroundService, input.background]);
+  // **恒有**：没有容器就是 `NO_SESSION_FACE`，不是「这个 Service 缺席」——消费方声明 required 才装得上
+  out.push([AgentSessionsService, input.sessions ?? NO_SESSION_FACE]);
   if (input.prompt !== undefined) out.push([AgentPrompt, promptRegistry(input.prompt.sections, input.prompt.variables)]);
   if (input.compaction !== undefined) out.push([AgentCompaction, compactionRegistry(input.compaction)]);
   return out;

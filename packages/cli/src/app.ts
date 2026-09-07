@@ -7,7 +7,7 @@
 // 于是这个文件**只认协议、不认 Agent**：`start` / `stop` / `deliver` 都不在协议里，
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
-import { errText, type AgentState, type CredentialStore, type Model, type Provider, type ThinkingLevel } from "@echo-agent/core";
+import { errText, NO_SESSION_FACE, type AgentState, type CredentialStore, type Model, type Provider, type SessionFace, type ThinkingLevel } from "@echo-agent/core";
 import type { AgentRuntime } from "@echo-agent/core/extension";
 import {
   decodeKittyPrintable,
@@ -43,6 +43,11 @@ export type TuiAppOptions = Readonly<{
    * 因为进程级启停归装配层；没有 `deliver`，因为那是投递侧不是 UI。
    */
   agent: AgentRuntime;
+  /**
+   * 会话面（2026-09-07）：`/sessions` 读它。不给 = `NO_SESSION_FACE`——
+   * 「一段都没有」是个诚实的答案，不是缺件；低层用户自己装壳时不必先有容器。
+   */
+  sessions?: SessionFace;
   /** 欢迎头里的名字与版本（`product.ts`）。不给 = `echo-agent` 自己。 */
   product?: Pick<Product, "name" | "version">;
   /** 进程信号。abort = 停止收新输入并中断在飞的那一轮。 */
@@ -148,6 +153,7 @@ function footerLine(state: Readonly<AgentState>, width: number): string {
 /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止，返回退出码。**不负责收摊 Agent**——那归装配层。 */
 export async function runTui(options: TuiAppOptions): Promise<number> {
   const { agent, signal, configure, announcer } = options;
+  const sessions = options.sessions ?? NO_SESSION_FACE;
   const ui: TUI = options.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
 
   const transcript = new Transcript();
@@ -451,10 +457,42 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     return filtered.length === 0 ? null : filtered;
   };
 
+  /**
+   * `/sessions`：把**别的会话**摆出来——同一台机器上另开的终端、别人派出去的那些段。
+   *
+   * **只看不切**：切过去要换一个 `Agent` 实例（lease、inbox、任务清单、闹钟、观测库都得重来），
+   * 那是另一件事，得带着具体界面单独提。这里先把「谁在跑、在哪、忙不忙」说清楚——
+   * 两个终端各跑一段时，这是唯一能一眼看到对面的地方。
+   *
+   * 一行一段，用的是 core 合成好的那份（`alive` 为假时 `phase` 恒为 null，见 sessions.md §6），
+   * 壳不自己组合——三个消费者各组合一遍就会各错一遍。
+   */
+  const listSessionsNow = async (): Promise<void> => {
+    const rows = await sessions.list().catch((e: unknown) => e as Error);
+    if (rows instanceof Error) {
+      transcript.push({ kind: "notice", text: `[会话] 列不出来：${rows.message}` });
+      rerender();
+      return;
+    }
+    const mine = agent.state.sessionId;
+    const others = rows.filter((r) => r.id !== mine);
+    if (others.length === 0) {
+      transcript.push({ kind: "notice", text: "[会话] 只有这一段在跑" });
+    } else {
+      const lines = others.map((r) => {
+        const where = !r.alive ? "没在跑" : r.phase === null ? "在跑" : r.phase === "working" ? "在跑 · 忙着" : "在跑 · 空闲";
+        return `  ${r.id}  ${r.name}  [${r.agent}]  ${where}  ${r.workspace}`;
+      });
+      transcript.push({ kind: "notice", text: `[会话] 另外 ${others.length} 段：\n${lines.join("\n")}` });
+    }
+    rerender();
+  };
+
   // 斜杠命令：**一张表喂三处**——编辑器的补全菜单、onSubmit 的派发、报错文案里的清单。
   // 加命令只改这里；三处各写一份就是漂移的起点。
   const slashCommands: readonly SlashSpec[] = [
     { name: "clear", description: "清空对话，重新开始", run: () => clearConversation() },
+    { name: "sessions", description: "列出别的会话（只看，不切）", run: () => void listSessionsNow() },
     {
       name: "model",
       argumentHint: "[模型id]",

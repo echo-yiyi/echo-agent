@@ -143,8 +143,8 @@ export type { InboxBatchAckCommitV1, InboxRecordV1 } from "./inbox/records.ts";
  * 得自己在状态根的 `FileDir` 上开一个实例调 `list()`——列表归 core，不让产品各自扫 meta 文件。
  */
 export { SessionService, listSessions, setSessionStatus } from "./session/service.ts";
-export { EchoSessions, SESSION_SOURCE, DEFAULT_RUN_TIMEOUT_MS } from "./session/sessions.ts";
-export type { CreateSessionInput, EchoSessionsDeps, SendResult, SessionRow, SessionRunner } from "./session/sessions.ts";
+export { EchoSessions, NO_SESSION_FACE, SESSION_SOURCE, DEFAULT_RUN_TIMEOUT_MS } from "./session/sessions.ts";
+export type { CreateSessionInput, EchoSessionsDeps, SendResult, SessionFace, SessionListFilter, SessionRow, SessionRunner } from "./session/sessions.ts";
 export { readSessionPhase, writeSessionPhase, STATUS_FILE } from "./session/status.ts";
 export type { SessionPhase, SessionStatusFile } from "./session/status.ts";
 export type { AgentBackground, BackgroundLimits } from "./background/types.ts";

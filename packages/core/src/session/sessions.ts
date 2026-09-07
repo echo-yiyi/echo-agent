@@ -84,8 +84,42 @@ export type EchoSessionsDeps = {
   readonly runTimeoutMs?: number;
 };
 
+/** 清单的筛选条件。缺省只列 `active` 的——`closed` 的还在盘上，要看得显式要。 */
+export type SessionListFilter = {
+  readonly workspace?: string;
+  readonly agent?: string;
+  readonly includeClosed?: boolean;
+};
+
+/**
+ * 会话面：开一段、列一遍、发一句、关一段。
+ *
+ * **抽成接口是为了让「没有容器」也有一个诚实的答案**（2026-09-07）：`echo:tui` 这类扩展会被挂在
+ * 裸 `new Agent()` 上，那里没有容器、也就没有会话面。ABI 没有「可选依赖」的读法
+ * （`ctx.get()` 遇到没有 provider 的 optional 直接抛），所以能力端口只能**恒有**——
+ * 缺容器时提供 `NO_SESSION_FACE`，它不说谎：没有别的会话就是没有。
+ */
+export interface SessionFace {
+  create(input: CreateSessionInput): Promise<SessionRow>;
+  list(filter?: SessionListFilter): Promise<readonly SessionRow[]>;
+  send(to: string, message: string): Promise<SendResult>;
+  close(sessionId: string): Promise<void>;
+}
+
+/** 没有容器时的会话面。**不是「假装能用」**：一段都没有是事实，开与关则如实说做不到。 */
+export const NO_SESSION_FACE: SessionFace = Object.freeze({
+  create: async () => {
+    throw new Error("这个 agent 没有会话面：它不是由容器（`createEcho()`）装出来的，开不了新的一段");
+  },
+  list: async () => [],
+  send: async (to: string) => ({ kind: "rejected", reason: "not-found", detail: `没有会话 ${to}（这个 agent 没有会话面）` }) as SendResult,
+  close: async () => {
+    throw new Error("这个 agent 没有会话面：关不了别的一段");
+  },
+});
+
 /** 会话面的实现。一个容器一个实例。 */
-export class EchoSessions {
+export class EchoSessions implements SessionFace {
   /**
    * 每个收件人一个发号器。**不缓存 `InboxStore`**：那会把对方的整个 inbox 读进内存，
    * 而且随着对方消费而过期；只缓存发号器则既保序又没有增长。
@@ -152,7 +186,7 @@ export class EchoSessions {
   }
 
   /** 清单。缺省只列 `active` 的；`closed` 的还在盘上，要看得显式要。 */
-  async list(filter?: { readonly workspace?: string; readonly agent?: string; readonly includeClosed?: boolean }): Promise<readonly SessionRow[]> {
+  async list(filter?: SessionListFilter): Promise<readonly SessionRow[]> {
     const infos = await listSessions(this.deps.root);
     const out: SessionRow[] = [];
     for (const info of infos) {

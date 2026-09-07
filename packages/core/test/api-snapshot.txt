@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 316（value 109 · type 188 · both 19）
+符号 319（value 110 · type 190 · both 19）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -342,13 +342,16 @@ value  listSessions
 both   SessionService
 value  setSessionStatus
 
--- src/session/sessions.ts (8) --
+-- src/session/sessions.ts (11) --
 type   CreateSessionInput
 value  DEFAULT_RUN_TIMEOUT_MS
 both   EchoSessions
 type   EchoSessionsDeps
+value  NO_SESSION_FACE
 type   SendResult
 value  SESSION_SOURCE
+type   SessionFace
+type   SessionListFilter
 type   SessionRow
 type   SessionRunner
 
@@ -446,7 +449,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 58（value 27 · type 27 · both 4）
+符号 59（value 28 · type 27 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -499,7 +502,7 @@ both   ExtensionHost
 both   ExtensionMountError
 type   FiberInfo
 
--- src/extension/registries.ts (12) --
+-- src/extension/registries.ts (13) --
 value  AgentBackgroundService
 value  AgentCompaction
 type   AgentCompactionRegistry
@@ -508,6 +511,7 @@ type   AgentHooksRegistry
 value  AgentPrompt
 type   AgentPromptRegistry
 value  agentRegistries
+value  AgentSessionsService
 value  AgentSkills
 type   AgentSkillsRegistry
 value  AgentTools
