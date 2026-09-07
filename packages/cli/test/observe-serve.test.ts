@@ -205,6 +205,10 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   // 四层循环的两层已是一等 span，不再是 agent.custom_event
   expect(lex.records["reply.execute"]).toBeDefined();
   expect(lex.records["attempt.execute"]).toBeDefined();
+  // 视觉分工（2026-09-07 用户评审）：正常状态走圆点、色块留给要立刻注意的；时间线四列 + 条形轨；筛选恒两行
+  for (const marker of ["function statusMark", "function dot(", "class: \"track\"", "class: \"selrow\"", "class: \"chiprow\""]) expect(html).toContain(marker);
+  // 标签不再中英双写：badge 只出中文，英文进 title
+  expect(html).not.toContain('el("span", { class: "en", text: t.en })');
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
 });
 

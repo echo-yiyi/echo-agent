@@ -45,8 +45,17 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 @media (max-width: 720px) { .split { grid-template-columns: 1fr; } }
 .pane { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); }
 
-/* 筛选栏（§7）：筛选片用 aria-pressed；无数据只降透明度不移除；计数是筛后数 */
-.filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-6); padding: var(--space-8) var(--ctl-list-item-pad-x); border-bottom: 1px solid var(--border); }
+/* 筛选栏（§7）：恒两行——上行会话下拉、下行来源片；筛选片用 aria-pressed；无数据只降透明度不移除；计数是筛后数 */
+.filters { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-8) var(--ctl-list-item-pad-x); border-bottom: 1px solid var(--border); }
+.filters .selrow { display: flex; align-items: center; gap: var(--space-6); }
+/* 来源片一行放得下就别换行：列表栏只有 280px，片子被 flex 压扁会变成「全...」「用...」，等于没有标签 */
+.filters .chiprow { display: flex; align-items: center; gap: var(--space-4); }
+.filters .chiprow .chip { flex: 0 0 auto; max-width: none; padding: 0 var(--space-6); }
+.select {
+  flex: 1 1 auto; min-width: 0; height: 24px; padding: 0 var(--space-6); border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--ink); font-size: var(--size-ui); cursor: pointer;
+}
+.select:hover { background: var(--ui-raised); }
 .chip {
   height: 22px; padding: 0 var(--space-8); border-radius: var(--r-full); border: 1px solid var(--border); background: transparent;
   font-size: var(--size-caption); color: var(--ink-70); cursor: pointer;
@@ -55,7 +64,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 }
 .chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-wash); }
 .chip--dimmed { opacity: 0.45; }
-.filters .count { margin-left: auto; font-size: var(--size-caption); color: var(--stone); }
+.filters .count { flex: 0 0 auto; font-size: var(--size-caption); color: var(--stone); font-variant-numeric: tabular-nums; }
 
 /* 列表栏整体不超过一屏：筛选栏与「运行时活动」定高，中间的 run 列表吃剩下的高度并自己滚。
    原来只给 .runs 定 max-height，底部的活动区就被视口切掉了（实测看不到最后几条）。 */
@@ -70,25 +79,37 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 }
 .run:hover { background: var(--ui-raised); }
 .run[aria-selected="true"] { background: var(--accent-wash); box-shadow: inset 2px 0 0 var(--accent); }
-.run .l1 { display: flex; align-items: center; gap: var(--space-6); }
+.run .l1 { display: flex; align-items: baseline; gap: var(--space-6); }
 .run .l1 .dur { margin-left: auto; flex-shrink: 0; font-size: var(--size-caption); color: var(--stone); }
-.run .l2 { margin-top: var(--space-2); display: flex; align-items: center; gap: var(--space-6); font-size: var(--size-caption); color: var(--stone); }
+.run .l2 { margin-top: var(--space-2); display: flex; align-items: center; gap: var(--space-8); font-size: var(--size-caption); color: var(--stone); }
 /* 实体标识（console.md §5.1）：用户扫读时找的是「这是哪段对话」，不是 runId——runId 在 title 与详情里可得 */
 .run .name { flex: 1; min-width: 0; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run .l2 .ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /*
- * 整理（dream）run：记忆整理，每轮用户对话之后自动排一条、几毫秒就完。它是系统自理，不是用户干的活，
- * 却和真正的对话一样多——实测 16 条里 8 条。**不隐藏**（§7：筛选面与数据都不藏），改成一行的次要行：
- * 同样可选可看，但不与对话争扫读。
+ * 整理（dream）run：记忆整理，每轮用户对话之后自动排一条、几毫秒就完，实测 16 条里占 8 条。
+ * 它是系统自理，不是用户干的活。**不隐藏**（§7：筛选面与数据都不藏）、**也不换一副骨架**——
+ * 排版节奏统一为两行，只把整行调暗，让它退到背景里。
  */
-.run--minor { padding-top: var(--space-2); padding-bottom: var(--space-2); color: var(--stone); }
-.run--minor .l1 { gap: var(--space-8); font-size: var(--size-caption); }
-.run--minor .name { font-weight: 400; color: var(--stone); flex: 0 1 auto; }
+.run--minor .name { font-weight: 400; color: var(--ink-70); }
+.run--minor .l1 .dur, .run--minor .l2 { opacity: 0.75; }
 .filters .sep { width: 1px; height: 14px; background: var(--border); margin: 0 var(--space-2); }
 
-/* 状态标签三件套（DESIGN §6.2）：主色文字 + 极浅底 + 同色浅描边，绝不整块高饱和填充 */
+/*
+ * 状态的三种重量（2026-09-07 用户定的视觉分工）。此前每一处状态都用色块，一页几十个小方块，
+ * 结果是「每条记录都显得很重要」，真正可点的筛选片反而不好认。现在按「要不要立刻注意」分：
+ *   · 需要立刻注意（失败 / 有缺口 / 降级）→ 色块 `.badge`（DESIGN §6.2 三件套：主色文字 + 极浅底 + 同色浅描边）
+ *   · 正常终态（已完成 / 完整 / 已落盘）→ `.dot` 小圆点 + 文字，无边框无底
+ *   · 次要属性（来源、产品）→ 普通文本
+ * 中英双写也收了：默认只出中文，英文技术标识进 title（`已完成 completed` 这类双写把每个标签撑成两倍宽）。
+ */
 .badge { display: inline-flex; align-items: center; gap: var(--space-4); height: 18px; padding: 0 var(--space-6); border-radius: var(--r-sm); font-size: var(--size-caption); border: 1px solid var(--border); color: var(--ink-70); background: var(--ui-inset); white-space: nowrap; }
-.badge .en { font-family: var(--font-mono); font-size: var(--size-micro); opacity: 0.8; }
+.dot { display: inline-flex; align-items: center; gap: var(--space-4); font-size: var(--size-caption); color: var(--stone); white-space: nowrap; }
+.dot::before { content: ""; width: 5px; height: 5px; border-radius: var(--r-full); background: currentColor; flex-shrink: 0; } /* 圆点直径取 components.md §5.2 标准密度 */
+.dot--positive::before { background: var(--moss); }
+.dot--accent::before { background: var(--accent); }
+.dot--info::before { background: var(--accent); opacity: 0.55; }
+/* 「没有数据」有自己的样子（components.md §5.3）：中性色 + 虚线，绝不借用成功的绿 */
+.dot--none::before { background: transparent; border: 1px dashed var(--ui-ink-4); }
 .badge--positive { color: var(--moss); background: var(--moss-soft); border-color: var(--moss-line); }
 .badge--caution { color: var(--marigold); background: var(--marigold-soft); border-color: var(--marigold-line); }
 .badge--critical { color: var(--clay); background: var(--clay-soft); border-color: var(--clay-line); }
@@ -101,7 +122,10 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 
 /* 详情 */
 .detail { padding: var(--card-padding); min-height: 320px; }
-.detail .head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); margin-bottom: var(--space-4); }
+.detail .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-8); margin-bottom: var(--space-4); }
+.detail .head .dur { font-size: var(--size-ui); }
+/* 状态一组靠右：三枚圆点聚在一处，不夹在标题与时长中间把标题切碎 */
+.detail .head .marks { margin-left: auto; display: flex; align-items: center; gap: var(--space-8); }
 /* 实体名在最大号（console.md §5.1）：用户认的是「这是哪段对话」。runId 是系统标识符，退到副标题里 */
 .detail .head .title { font-size: var(--size-h3); font-weight: 600; color: var(--ink); }
 .detail .head .id { font-size: var(--size-h3); font-weight: 600; }
@@ -124,38 +148,55 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .chips { display: flex; flex-wrap: wrap; gap: var(--space-4); }
 .chips .chip { cursor: default; }
 
-/* 时间线：每行 = 相对时间 · 缩进 · 前缀 · 动作 对象 · 结果（agent-behavior §2.3 的条目形态） */
+/*
+ * 时间线：**固定四列 + 一条条形轨**（2026-09-07 用户定）——时间 | 事件 | 用量 | 耗时 | 条。
+ * 此前是「时间 | 1fr | 结果靠最右」，容器一宽，耗时与 token 被推到几百像素之外，一行信息要横跨整屏才读得全。
+ * 事件列限阅读宽度（46ch），剩下的宽度交给条形轨——留白因此参与表达，而不是纯粹的空。
+ */
 .timeline { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
 .tl {
-  display: grid; grid-template-columns: 64px 1fr auto; align-items: baseline; gap: var(--space-8);
-  min-height: var(--ctl-tool-row-height); padding: var(--space-2) var(--space-8); font-family: var(--font-mono); font-size: var(--size-ui); color: var(--ink-70);
-  cursor: pointer; border-radius: var(--r-sm);
+  position: relative;
+  display: grid; grid-template-columns: 52px minmax(0, 46ch) minmax(0, max-content) 58px minmax(64px, 1fr);
+  align-items: baseline; gap: var(--space-8);
+  min-height: var(--ctl-tool-row-height); padding: var(--space-2) var(--space-8);
+  font-size: var(--size-ui); color: var(--ink-70); cursor: pointer; border-radius: var(--r-sm);
 }
-.tl { position: relative; }
 .tl:hover { background: var(--ui-raised); }
-/* 耗时条：贴行底的一条细线，左端 = 这条 span 在 run 里的起点，长度 = 它占 run 的比例 */
-.tl-bar { position: absolute; bottom: 0; height: 2px; border-radius: var(--r-full); background: var(--accent); opacity: 0.28; pointer-events: none; }
-.tl--turn .tl-bar { opacity: 0.5; }
-.tl .t { color: var(--stone); text-align: right; font-variant-numeric: tabular-nums; }
+/* 条形轨占最后一列：左端 = 这条 span 在 run 里的起点，长度 = 它占 run 的比例 */
+.tl .track { position: relative; align-self: center; height: 4px; }
+.tl-bar { position: absolute; top: 0; height: 4px; border-radius: var(--r-full); background: var(--accent); opacity: 0.24; }
+.tl--turn .tl-bar { opacity: 0.45; }
+.tl--bad .tl-bar { background: var(--clay); opacity: 0.4; }
+/* 字体分工：数字与技术标识走等宽，人读的词走界面字体——整行 mono 会让页面变成终端输出 */
+.tl .t { font-family: var(--font-mono); color: var(--stone); text-align: right; font-variant-numeric: tabular-nums; font-size: var(--size-caption); }
 .tl .what { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
-.tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; }
-.tl .what .obj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tl .what .arg { color: var(--ink-70); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tl .what .en { color: var(--stone); font-size: var(--size-micro); }
-.tl .res { color: var(--stone); white-space: nowrap; }
+.tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; color: var(--stone); }
+.tl .what .verb { flex-shrink: 0; color: var(--ink-70); }
+.tl .what .obj { font-family: var(--font-mono); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl .what .arg { font-family: var(--font-mono); color: var(--stone); flex: 0 2 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 底层事件名再降一级，但保留可读对比度：它是查证用的锚，不是扫读目标。
+   宽度不够时**它先让**（flex-shrink 大）——被截断的该是 `agent.custom_event`，不是那条事件说的对象 */
+.tl .what .en { font-family: var(--font-mono); color: var(--stone); font-size: var(--size-micro); opacity: 0.85; flex: 0 999 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl .usage, .tl .res { font-family: var(--font-mono); font-size: var(--size-caption); color: var(--stone); white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 .tl--boundary { color: var(--ink); }
-.tl--turn { color: var(--ink); font-weight: 600; }
+/* 「轮 #1」要明显重过它旁边的 turn.execute：加重只加在动词上，不整行加粗 */
+.tl--turn .verb { color: var(--ink); font-weight: 600; font-size: var(--size-content); }
+.tl--turn .obj { color: var(--ink); font-weight: 600; }
 .tl--bad { color: var(--clay); }
-.tl--bad .res { color: var(--clay); }
+.tl--bad .res, .tl--bad .verb { color: var(--clay); }
 .tl--warn { color: var(--marigold); }
-.tl--warn .res { color: var(--marigold); }
+.tl--warn .res, .tl--warn .verb { color: var(--marigold); }
 .tl--open .res { color: var(--accent-ink); }
 .tl-detail { margin: 0 0 var(--space-4) var(--space-8); padding: var(--ctl-tool-expand-pad); max-height: var(--ctl-tool-expand-max-height); overflow: auto; border-left: 2px solid var(--border); background: var(--ui-inset); font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); }
 .tl-detail[hidden] { display: none; }
 /* 运行时活动（run 之外的记录）：列表底部一小段，行形同时间线（时间 · 动作 对象 · 哪段会话），带 runId 的能点过去 */
 .activity { flex: 0 0 auto; display: flex; flex-direction: column; max-height: 40%; border-top: 1px solid var(--border); padding: var(--space-8); }
-.activity h3 { flex: 0 0 auto; margin: 0 0 var(--space-4); font-size: var(--size-caption); font-weight: 600; color: var(--stone); }
-.acts { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-height: 0; overflow: auto; }
+.activity > summary { flex: 0 0 auto; cursor: pointer; font-size: var(--size-caption); font-weight: 600; color: var(--stone); list-style: none; }
+.activity > summary::-webkit-details-marker { display: none; }
+.activity > summary::before { content: "▸ "; font-weight: 400; }
+.activity[open] > summary::before { content: "▾ "; }
+.activity > summary:hover { color: var(--ink-70); }
+.acts { list-style: none; margin: var(--space-4) 0 0; padding: 0; flex: 1 1 auto; min-height: 0; overflow: auto; }
 .act { display: grid; grid-template-columns: 56px 1fr auto; gap: var(--space-6); align-items: baseline; padding: var(--space-2) 0; font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); border-radius: var(--r-sm); }
 .act[role="button"] { cursor: pointer; }
 .act[role="button"]:hover { background: var(--ui-raised); }
@@ -197,10 +238,11 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
     <aside class="pane" aria-label="run 列表">
       <div class="filters" id="filters" role="group" aria-label="按来源筛选"></div>
       <ul class="runs" id="runs"></ul>
-      <section class="activity" aria-label="运行时活动">
-        <h3>运行时活动 <span class="muted" id="activity-hint" title="run 之外发生的事：收件、整批 ack、闹钟投递与错过、重启恢复"></span></h3>
+      <!-- 后台活动折起（2026-09-07 用户定）：它是 run 之外的事，默认不该和 run 列表抢同一段视线 -->
+      <details class="activity">
+        <summary>运行时活动 <span class="muted" id="activity-hint" title="run 之外发生的事：收件、整批 ack、闹钟投递与错过、重启恢复"></span></summary>
         <ul class="acts" id="acts"></ul>
-      </section>
+      </details>
     </aside>
     <main class="pane detail" id="detail" aria-live="polite"></main>
   </div>
@@ -245,9 +287,23 @@ function statusKey(header, outcome) {
   if (header.status === "error" && outcome && outcome.error && outcome.error.code === "max_iterations") return "truncated";
   return header.status;
 }
+const termOf = (term, key) => term ?? { zh: key, en: key, tone: "neutral", hint: "" };
+/** 英文标识与解释都进 title：默认只出中文，鼠标停下来才给技术名。 */
+const termTitle = (t) => `${t.en}${t.hint ? ` — ${t.hint}` : ""}`;
+/** 色块：只给「要立刻注意」的状态。 */
 function badge(term, key) {
-  const t = term ?? { zh: key, en: key, tone: "neutral", hint: "" };
-  return el("span", { class: `badge badge--${t.tone}`, title: t.hint }, t.zh, el("span", { class: "en", text: t.en }));
+  const t = termOf(term, key);
+  return el("span", { class: `badge badge--${t.tone}`, title: termTitle(t) }, t.zh);
+}
+/** 圆点 + 文字：正常状态用它，不与内容争注意力。 */
+function dot(term, key, tone) {
+  const t = termOf(term, key);
+  return el("span", { class: `dot dot--${tone ?? t.tone}`, title: termTitle(t) }, t.zh);
+}
+/** 按「要不要立刻注意」自动选重量：critical / caution 走色块，其余走圆点。 */
+function statusMark(term, key) {
+  const t = termOf(term, key);
+  return t.tone === "critical" || t.tone === "caution" ? badge(t, key) : dot(t, key);
 }
 
 /* ── 列表 ── */
@@ -258,48 +314,44 @@ function renderFilters() {
   const sessionCounts = {};
   for (const r of STATE.runs) if (r.sessionId) sessionCounts[r.sessionId] = (sessionCounts[r.sessionId] ?? 0) + 1;
   const sessionIds = Object.keys(sessionCounts);
-  if (sessionIds.length > 1) {
-    for (const s of ["all", ...sessionIds]) {
-      const n = s === "all" ? STATE.runs.length : sessionCounts[s];
-      box.append(el("button", {
-        class: "chip", "aria-pressed": STATE.session === s,
-        title: s === "all" ? "" : `${sessionLabel(s)}\n${s}${STATE.sessions[s] ? ` · ${STATE.sessions[s].workspace}` : ""}`,
-        onclick: () => { STATE.session = s; renderFilters(); renderRuns(); },
-      }, `${s === "all" ? "全部会话" : clipLabel(sessionLabel(s))} ${n}`));
+  // 第一行：会话选择。会话名就是那段对话的第一句话，长且条数不定——用下拉而不是一串换行的片子，
+  // 筛选区因此恒为两行高（2026-09-07 用户定：同一类信息始终在同一位置，才扫得动）。产品并进这里分组，
+  // 不再单开一组：产品是会话的属性，两处筛同一件事只会把筛选区撑开。
+  const sel = el("select", {
+    class: "select", "aria-label": "按会话筛选",
+    onchange: (ev) => { const v = ev.target.value; STATE.session = v.startsWith("p:") ? "all" : v; STATE.product = v.startsWith("p:") ? v.slice(2) : "all"; renderFilters(); renderRuns(); },
+  });
+  sel.append(el("option", { value: "all", text: `全部会话（${STATE.runs.length}）` }));
+  const byProduct = {};
+  for (const s of sessionIds) (byProduct[STATE.sessions[s]?.agent ?? "未上报"] ??= []).push(s);
+  for (const [product, ids] of Object.entries(byProduct).sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const group = el("optgroup", { label: product });
+    if (ids.length > 1) group.append(el("option", { value: `p:${product}`, text: `全部 ${product}（${ids.reduce((n, s) => n + sessionCounts[s], 0)}）` }));
+    for (const s of ids.sort((a, b) => sessionCounts[b] - sessionCounts[a])) {
+      group.append(el("option", { value: s, text: `${clipLabel(sessionLabel(s), 22)}（${sessionCounts[s]}）`, title: `${s}\n${STATE.sessions[s]?.workspace ?? ""}` }));
     }
-    box.append(el("span", { class: "sep", "aria-hidden": "true" }));
+    sel.append(group);
   }
-  // 第一组：产品（来自会话 meta）。两个产品缺省共用一个状态根，这是把它们分开看的依据
-  const productCounts = {};
-  for (const r of STATE.runs) productCounts[productOf(r)] = (productCounts[productOf(r)] ?? 0) + 1;
-  const products = Object.keys(productCounts).sort();
-  if (products.length > 1) {
-    for (const p of ["all", ...products]) {
-      const n = p === "all" ? STATE.runs.length : productCounts[p];
-      box.append(el("button", {
-        class: "chip", "aria-pressed": STATE.product === p, title: p === "all" ? "" : "会话 meta 里的产品名（SessionInfo.agent）",
-        onclick: () => { STATE.product = p; renderFilters(); renderRuns(); },
-      }, `${p === "all" ? "全部产品" : p} ${n}`));
-    }
-    box.append(el("span", { class: "sep", "aria-hidden": "true" }));
-  }
-  // 第二组：来源。无数据只降透明度不移除（console.md §7）
+  sel.value = STATE.product !== "all" ? `p:${STATE.product}` : STATE.session;
+  const shown = visibleRuns().length;
+  const filtered = STATE.filter !== "all" || STATE.product !== "all" || STATE.session !== "all";
+  // 计数跟着下拉那一行右对齐：放在片子那一行会把最后一枚片子挤到换行（console.md §7：计数是筛后数）
+  box.append(el("div", { class: "selrow" }, sel, el("span", { class: "count", text: filtered ? `${shown}/${STATE.runs.length}` : `${shown} 条` })));
+  // 第二行：来源。四五个短词，一行放得下，用片子——可点的东西长得像可点的东西。
+  // 无数据只降透明度不移除（console.md §7）
+  const row = el("div", { class: "chiprow", role: "group", "aria-label": "按来源筛选" });
   const counts = {};
   for (const r of STATE.runs) counts[r.source.kind] = (counts[r.source.kind] ?? 0) + 1;
-  const kinds = ["all", ...Object.keys(LEX.runSource)];
-  for (const k of kinds) {
+  for (const k of ["all", ...Object.keys(LEX.runSource)]) {
     const n = k === "all" ? STATE.runs.length : (counts[k] ?? 0);
-    const label = k === "all" ? "全部来源" : LEX.runSource[k].zh;
-    box.append(el("button", {
+    row.append(el("button", {
       class: `chip${n === 0 && k !== "all" ? " chip--dimmed" : ""}`,
       "aria-pressed": STATE.filter === k,
       title: k === "all" ? "" : LEX.runSource[k].hint,
       onclick: () => { STATE.filter = k; renderFilters(); renderRuns(); },
-    }, `${label} ${n}`));
+    }, `${k === "all" ? "全部" : LEX.runSource[k].zh} ${n}`));
   }
-  const shown = visibleRuns().length;
-  const filtered = STATE.filter !== "all" || STATE.product !== "all" || STATE.session !== "all";
-  box.append(el("span", { class: "count", text: filtered ? `${shown} 条（共 ${STATE.runs.length}）` : `${shown} 条` }));
+  box.append(row);
 }
 function visibleRuns() {
   return STATE.runs.filter((r) =>
@@ -323,29 +375,28 @@ function renderRuns() {
   for (const r of runs) {
     const dur = r.endedAt === null ? "未收尾" : fmtMs(r.endedAt - r.acceptedAt);
     const ws = sessionOf(r)?.workspace ?? "";
-    const minor = r.source.kind === "dream"; // 记忆整理：系统自理，一行带过
+    const minor = r.source.kind === "dream"; // 记忆整理：系统自理，整行调暗，不与对话争扫读
     const parts = [];
     if (showProduct) parts.push(productOf(r));
     if (showSession && r.sessionId) parts.push(sessionLabel(r.sessionId));
     if (parts.length === 0) parts.push(LEX.runSource[r.source.kind]?.zh ?? r.source.kind); // 都不区分时，至少说清这是哪一类
     const open = () => { STATE.selected = r.runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(r.runId)}`); renderRuns(); loadRun(); };
-    const attrs = { class: `run${minor ? " run--minor" : ""}`, role: "option", "aria-selected": STATE.selected === r.runId, title: `${r.runId}${ws ? `\n${ws}` : ""}`, onclick: open };
-    const item = minor
-      // 整理：时间 · 一句话 · 时长。终态不正常时才补状态标签——平静时不占位，出事时看得见
-      ? el("button", attrs, el("div", { class: "l1" },
-          el("span", { class: "mono", text: fmtClock(r.acceptedAt) }),
-          el("span", { class: "name", text: `${LEX.runSource.dream.zh}${showSession && r.sessionId ? ` · ${sessionLabel(r.sessionId)}` : ""}` }),
-          r.status === "completed" ? null : badge(LEX.runStatus[r.status], r.status),
-          el("span", { class: "dur mono", text: dur })))
-      // 对话：实体名在上、类型信息在下（console.md §5.1）。时间与徽章同一行，工作目录只在多目录时出现
-      : el("button", attrs,
-          el("div", { class: "l1" }, el("span", { class: "name", text: parts.join(" · ") }), el("span", { class: "dur mono", text: dur })),
-          el("div", { class: "l2" },
-            el("span", { class: "mono", text: fmtClock(r.acceptedAt) }),
-            badge(LEX.runStatus[r.status], r.status),
-            badge(LEX.runSource[r.source.kind], r.source.kind),
-            // 只放目录名：列表栏 280px 宽，徽章之后剩给它的位置放不下路径——`…/…` 比不放更糟。全路径在行的 title 与详情里
-            showWorkspace ? el("span", { class: "ws mono", text: ws.split("/").filter(Boolean).pop() ?? "", title: ws }) : null));
+    // **每行恒两行**（2026-09-07 用户定）：第一行名称 + 右对齐耗时，第二行时间 · 状态 · 来源。
+    // 整理 run 走同一副骨架，只把整行调暗——此前它是一行、对话是三行，两种读法交替，视线一直在切换。
+    const item = el("button", {
+      class: `run${minor ? " run--minor" : ""}`, role: "option", "aria-selected": STATE.selected === r.runId,
+      title: `${r.runId}${ws ? `\n${ws}` : ""}`, onclick: open,
+    },
+      el("div", { class: "l1" },
+        el("span", { class: "name", text: minor && parts.length === 0 ? LEX.runSource.dream.zh : parts.join(" · ") }),
+        el("span", { class: "dur mono", text: dur })),
+      el("div", { class: "l2" },
+        el("span", { class: "mono", text: fmtClock(r.acceptedAt) }),
+        statusMark(LEX.runStatus[r.status], r.status),
+        // 来源只用文字：它是次要属性，不该每行都戴一个色块（用户评审：来源主要靠文字区分）
+        el("span", { class: "src", text: LEX.runSource[r.source.kind]?.zh ?? r.source.kind, title: LEX.runSource[r.source.kind]?.hint ?? "" }),
+        // 只放目录名：列表栏 280px 宽，放不下整条路径——`…/…` 比不放更糟。全路径在行的 title 与详情里
+        showWorkspace ? el("span", { class: "ws mono", text: ws.split("/").filter(Boolean).pop() ?? "", title: ws }) : null));
     list.append(item);
   }
 }
@@ -523,12 +574,15 @@ function renderEntry(e, gaps, runMs = 0) {
   if (isTool || t.kind === "span_start") prefix = failed ? "✕" : "▸";
   if (t.name === "observation.gap") prefix = "⚠";
   if (t.name === "context.compact") prefix = "⤓";
+  // 耗时与用量分两列：它们是两种量，混在一格里就只能靠 `·` 分辨，也没法上下对齐（用户评审第 1 条）
   let res = "";
   if (end && end.durationMs !== undefined) res = fmtMs(end.durationMs);
   else if (isOpen) res = "未收尾"; // 没有 span_end：账本不知道它是还在跑还是没了，不替进程说话
-  if (isTool && failed) res = `${res ? `${res} · ` : ""}出错`;
+  if (isTool && failed) res = res || "出错";
   if (t.name === "observation.gap") res = `丢 ${t.body?.dropped ?? "?"} 条`;
-  if (t.name === "model.generate" && end?.body?.usage && (end.body.usage.inputTokens || end.body.usage.outputTokens)) res = `${res} · ${end.body.usage.inputTokens ?? 0}↑ ${end.body.usage.outputTokens ?? 0}↓`;
+  let usage = "";
+  const u = end?.body?.usage;
+  if (t.name === "model.generate" && u && (u.inputTokens || u.outputTokens)) usage = `${u.inputTokens ?? 0}↑ ${u.outputTokens ?? 0}↓`;
   const cls = ["tl"];
   if (t.name.startsWith("run.")) cls.push("tl--boundary");
   if (t.name === "turn.execute") cls.push("tl--turn");
@@ -547,10 +601,6 @@ function renderEntry(e, gaps, runMs = 0) {
     class: cls.join(" "), role: "button", tabindex: 0, title: term?.hint ?? t.name, "aria-expanded": expanded,
     onclick: () => { if (expanded) { STATE.expanded.delete(id); STATE.expanded.add(`-${id}`); } else { STATE.expanded.add(id); STATE.expanded.delete(`-${id}`); } renderDetail(); },
   },
-    // 耗时条：占整条 run 的哪一段。数字要逐行读，条形一眼就看出「12 秒里 9 秒花在第一轮」
-    runMs > 0 && end?.durationMs !== undefined
-      ? el("span", { class: "tl-bar", style: `left: calc(64px + ${(100 * t.relativeMs) / runMs}% * 0.82); width: max(2px, ${(100 * end.durationMs) / runMs}% * 0.82)` })
-      : null,
     el("span", { class: "t", text: `+${fmtMs(t.relativeMs)}` }),
     el("span", { class: "what", style: `padding-left: calc(var(--space-16) * ${e.indent ?? t.depth})` },
       el("span", { class: "prefix", text: prefix }),
@@ -559,7 +609,13 @@ function renderEntry(e, gaps, runMs = 0) {
       arg ? el("span", { class: "arg", text: `"${arg}"` }) : null,
       el("span", { class: "en", text: t.name }),
     ),
+    el("span", { class: "usage", text: usage }),
     el("span", { class: "res", text: res }),
+    // 条形轨占最后一列：数字要逐行读，条形一眼就看出「12 秒里 9 秒花在第一轮」
+    el("span", { class: "track" },
+      runMs > 0 && end?.durationMs !== undefined
+        ? el("span", { class: "tl-bar", style: `left: ${(100 * t.relativeMs) / runMs}%; width: max(2px, ${(100 * end.durationMs) / runMs}%)` })
+        : null),
   );
   return [row, detail];
 }
@@ -585,16 +641,19 @@ function renderDetail() {
   const sess = h.sessionId ? STATE.sessions[h.sessionId] : undefined;
   // 标题是这段对话（用户扫读的锚点），不是 runId——那串 uuid 原来是全页最大的字，却谁也不读
   const title = sess?.name && sess.name !== h.sessionId ? sess.name : h.sessionId ? shortId(h.sessionId) : "临时对话";
+  // 三枚状态里通常只有「已完成 · 完整 · 已落盘」三个正常值：它们走圆点，出事才升级成色块
   box.append(el("div", { class: "head" },
     el("span", { class: "title", text: title, title: h.sessionId ?? "" }),
-    badge(LEX.runStatus[sk], sk),
-    badge(LEX.integrity[h.integrity], h.integrity),
-    badge(LEX.persistence[h.persistence], h.persistence),
-    el("span", { class: "muted mono", text: duration }),
+    el("span", { class: "muted mono dur", text: duration }),
+    el("span", { class: "marks" },
+      statusMark(LEX.runStatus[sk], sk),
+      statusMark(LEX.integrity[h.integrity], h.integrity),
+      statusMark(LEX.persistence[h.persistence], h.persistence)),
   ));
   // 副标题一行讲清「谁、什么时候、在哪、用什么模型」；runId 留在末尾可复制
   const sub = el("div", { class: "sub" },
-    badge(LEX.runSource[h.source.kind], h.source.kind),
+    // 来源是次要属性，普通文本即可——副标题这一行整体就是次要信息，不必再嵌一个带框的小块
+    el("span", { text: LEX.runSource[h.source.kind]?.zh ?? h.source.kind, title: LEX.runSource[h.source.kind]?.hint ?? "" }),
     el("span", { class: "mono", text: fmtClock(h.acceptedAt) }),
     sess ? el("span", { text: sess.agent }) : el("span", { class: "muted", text: h.sessionId ? "产品未上报" : "无会话" }),
     sess ? el("span", { class: "mono", text: shortPath(sess.workspace), title: sess.workspace }) : null,
@@ -627,7 +686,8 @@ function renderDetail() {
   env.addEventListener("toggle", () => { STATE.envOpen = env.open; });
   box.append(env);
 
-  box.append(el("h3", { text: "时间线" }));
+  // 三个区块：运行摘要（上面的标题 / 副标题 / 运行环境）→ 执行过程 → 工具与用量。靠间距与小标题分节，不再层层套卡片
+  box.append(el("h3", { text: "执行过程" }));
   const tl = el("ul", { class: "timeline" });
   for (const e of buildEntries(vm)) {
     const [row, detail] = renderEntry(e, vm.health.canonicalGaps, h.endedAt === null ? 0 : h.endedAt - h.acceptedAt);
@@ -635,7 +695,7 @@ function renderDetail() {
   }
   box.append(tl);
 
-  box.append(el("h3", { text: "工具" }));
+  box.append(el("h3", { text: "工具与用量" }));
   if (vm.summary.tools.length === 0) {
     box.append(el("p", { class: "muted", text: h.capturePolicy === "off" ? "未采集（capture policy off）" : "这次没有调用工具" }));
   } else {
@@ -656,11 +716,11 @@ function renderDetail() {
 
   const gaps = vm.health.canonicalGaps;
   box.append(el("div", { class: "health" },
-    badge(LEX.integrity[h.integrity], h.integrity),
-    el("span", { text: gaps.length === 0 ? "缺口 0" : `缺口 ${gaps.length}：${gaps.map((g) => `${g.reason}（丢 ${g.dropped}）`).join("、")}` }),
-    badge(LEX.persistence[vm.health.persistence], vm.health.persistence),
-    el("span", { text: vm.health.redacted ? "已脱敏（metadata 档不含正文）" : "含正文" }),
-    el("span", { class: "muted mono", text: `记录 ${vm.summary.recordCount}` }),
+    statusMark(LEX.integrity[h.integrity], h.integrity),
+    gaps.length === 0 ? null : el("span", { text: `缺口 ${gaps.length}：${gaps.map((g) => `${g.reason}（丢 ${g.dropped}）`).join("、")}` }),
+    statusMark(LEX.persistence[vm.health.persistence], vm.health.persistence),
+    el("span", { text: vm.health.redacted ? "不含正文" : "含正文" }),
+    el("span", { class: "mono", text: `记录 ${vm.summary.recordCount}` }),
   ));
 }
 
