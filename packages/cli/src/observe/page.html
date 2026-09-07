@@ -105,16 +105,20 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .badge { display: inline-flex; align-items: center; gap: var(--space-4); height: 18px; padding: 0 var(--space-6); border-radius: var(--r-sm); font-size: var(--size-caption); border: 1px solid var(--border); color: var(--ink-70); background: var(--ui-inset); white-space: nowrap; }
 .dot { display: inline-flex; align-items: center; gap: var(--space-4); font-size: var(--size-caption); color: var(--stone); white-space: nowrap; }
 .dot::before { content: ""; width: 5px; height: 5px; border-radius: var(--r-full); background: currentColor; flex-shrink: 0; } /* 圆点直径取 components.md §5.2 标准密度 */
-.dot--positive::before { background: var(--moss); }
-.dot--accent::before { background: var(--accent); }
-.dot--info::before { background: var(--accent); opacity: 0.55; }
+/*
+ * 颜色规则（2026-09-07 用户定，全页只有这一条）：
+ *   · **紫（accent）只表示「你能操作 / 你选中了」**——选中的 run、按下的筛选片、焦点环。数据里一律不用它。
+ *   · **正常状态用中性点**：已完成 / 完整 / 已落盘走 stone。它们该看得见，但不该是每行最醒目的东西——
+ *     16 行全是「已完成」时，那点绿不携带任何信息，只是把每条记录都渲染成很重要。
+ *   · **只有失败（clay）与警告（marigold）拿强色**，且升级成色块而不是圆点。
+ *   · 来源、产品这类属性靠文字区分，不给颜色。
+ * 所以这里没有 `.dot--positive` / `.dot--info`：正常与信息性状态共用 `.dot` 的 stone。
+ */
 /* 「没有数据」有自己的样子（components.md §5.3）：中性色 + 虚线，绝不借用成功的绿 */
 .dot--none::before { background: transparent; border: 1px dashed var(--ui-ink-4); }
-.badge--positive { color: var(--moss); background: var(--moss-soft); border-color: var(--moss-line); }
+/* 色块只有这两种：其余色调走 `.dot`，见上面的颜色规则 */
 .badge--caution { color: var(--marigold); background: var(--marigold-soft); border-color: var(--marigold-line); }
 .badge--critical { color: var(--clay); background: var(--clay-soft); border-color: var(--clay-line); }
-.badge--accent { color: var(--accent-ink); background: var(--accent-wash); border-color: var(--accent-wash); }
-.badge--info { color: var(--ui-info); background: var(--ui-info-soft); border-color: var(--ui-info-line); }
 
 /* 空态（components §9）：说明这里会出现什么 + 明确的下一步 */
 .empty { padding: var(--space-32) var(--space-16); text-align: center; color: var(--stone); font-size: var(--size-ui); }
@@ -139,7 +143,13 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .env[open] > summary::before { content: "▾ "; }
 .env > summary:hover { color: var(--ink-70); }
 .env .fields { margin-top: var(--space-8); }
-.detail h3 { margin: var(--space-20) 0 var(--space-8); font-size: var(--size-ui); font-weight: 600; color: var(--ink-70); text-transform: uppercase; letter-spacing: 0.04em; }
+/*
+ * 详情栏分三个区块：运行摘要（标题 / 副标题 / 运行环境）→ 执行过程 → 工具与用量。
+ * 分节靠「一段留白 + 一条淡分隔线 + 小标题」，**不给每块再套卡片**——卡里套卡只会让边框更多（用户评审第 6 条）。
+ * 首块不需要线：标题本身就是它的开头。`text-transform: uppercase` 去掉了，中文上它什么都不做，
+ * 只会让夹着的英文字母突然喊起来。
+ */
+.detail h3 { margin: var(--space-24) 0 var(--space-12); padding-top: var(--space-16); border-top: 1px solid var(--ui-line-soft); font-size: var(--size-ui); font-weight: 600; color: var(--ink); }
 
 /* 字段行（§4）：标签列固定宽，值列自适应；内容槽只有纯文本 / chip 组 / key-value 三种 */
 .fields { display: grid; grid-template-columns: var(--ctl-field-label-width) 1fr; row-gap: var(--ctl-field-row-gap); column-gap: var(--space-12); }
@@ -164,9 +174,10 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl:hover { background: var(--ui-raised); }
 /* 条形轨占最后一列：左端 = 这条 span 在 run 里的起点，长度 = 它占 run 的比例 */
 .tl .track { position: relative; align-self: center; height: 4px; }
-.tl-bar { position: absolute; top: 0; height: 4px; border-radius: var(--r-full); background: var(--accent); opacity: 0.24; }
-.tl--turn .tl-bar { opacity: 0.45; }
-.tl--bad .tl-bar { background: var(--clay); opacity: 0.4; }
+/* 条形轨是数据不是交互，所以用中性墨色——紫留给「可操作 / 已选中」。失败那行的条才染色 */
+.tl-bar { position: absolute; top: 0; height: 4px; border-radius: var(--r-full); background: var(--ink-70); opacity: 0.22; }
+.tl--turn .tl-bar { opacity: 0.4; }
+.tl--bad .tl-bar { background: var(--clay); opacity: 0.45; }
 /* 字体分工：数字与技术标识走等宽，人读的词走界面字体——整行 mono 会让页面变成终端输出 */
 .tl .t { font-family: var(--font-mono); color: var(--stone); text-align: right; font-variant-numeric: tabular-nums; font-size: var(--size-caption); }
 .tl .what { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
@@ -186,7 +197,8 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl--bad .res, .tl--bad .verb { color: var(--clay); }
 .tl--warn { color: var(--marigold); }
 .tl--warn .res, .tl--warn .verb { color: var(--marigold); }
-.tl--open .res { color: var(--accent-ink); }
+/* 「未收尾」比别的时长重一点，但不用紫——紫是交互色，见上面的颜色规则 */
+.tl--open .res { color: var(--ink-70); }
 .tl-detail { margin: 0 0 var(--space-4) var(--space-8); padding: var(--ctl-tool-expand-pad); max-height: var(--ctl-tool-expand-max-height); overflow: auto; border-left: 2px solid var(--border); background: var(--ui-inset); font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); }
 .tl-detail[hidden] { display: none; }
 /* 运行时活动（run 之外的记录）：列表底部一小段，行形同时间线（时间 · 动作 对象 · 哪段会话），带 runId 的能点过去 */
@@ -211,12 +223,16 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl-sec--bad .tl-text { color: var(--clay); }
 .tl-text { margin: 0; font: inherit; white-space: pre-wrap; word-break: break-all; }
 
-table { border-collapse: collapse; width: 100%; font-size: var(--size-ui); }
+/* 表格也限阅读宽度：容器一宽，六列数字会被拉到屏幕两端，读一行要横扫整屏（与时间线同一条毛病） */
+table { border-collapse: collapse; width: 100%; max-width: 76ch; font-size: var(--size-ui); }
 th, td { text-align: left; padding: var(--ctl-table-cell-pad-y) var(--ctl-table-cell-pad-x); border-bottom: 1px solid var(--ui-line-soft); }
 th { color: var(--stone); font-weight: 500; }
 td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
-.health { margin-top: var(--space-20); padding-top: var(--space-12); border-top: 1px solid var(--border); font-size: var(--size-ui); color: var(--ink-70); display: flex; flex-wrap: wrap; gap: var(--space-8); align-items: center; }
+.usageline { max-width: 76ch; margin-top: var(--space-10); display: flex; flex-wrap: wrap; gap: var(--space-12); font-size: var(--size-ui); color: var(--ink-70); }
+.usageline > span:first-child { color: var(--stone); }
+/* 记录健康是页脚：比区块更淡一档，不与「工具与用量」争成一个新区块 */
+.health { margin-top: var(--space-24); padding-top: var(--space-12); border-top: 1px solid var(--ui-line-soft); font-size: var(--size-caption); color: var(--stone); display: flex; flex-wrap: wrap; gap: var(--space-12); align-items: center; }
 .muted { color: var(--stone); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
@@ -629,7 +645,7 @@ function renderDetail() {
     return;
   }
   if (vm.kind === "pruned") {
-    box.append(el("div", { class: "head" }, el("span", { class: "id mono", text: vm.header.runId }), badge(LEX.runStatus[vm.header.status], vm.header.status)),
+    box.append(el("div", { class: "head" }, el("span", { class: "title mono", text: vm.header.runId }), statusMark(LEX.runStatus[vm.header.status], vm.header.status)),
       el("p", { class: "muted", text: "这条 run 的记录 body 已被清理（retention），只剩 header 与缺口。" }));
     return;
   }
@@ -712,7 +728,12 @@ function renderDetail() {
   const m = vm.summary.model;
   // 「未上报」不是 0（agent-behavior §4.3）：provider 没给 usage 就说没给，不显示 0↑ 0↓
   const tokens = m.calls > 0 && m.inputTokens === 0 && m.outputTokens === 0 ? "token 未上报" : `${m.inputTokens}↑ ${m.outputTokens}↓ tokens`;
-  box.append(el("p", { class: "muted mono", text: `模型 ${m.calls} 次 · ${tokens} · 合计 ${fmtMs(m.totalDurationMs)}` }));
+  // 模型用量与工具表同宽同块：它是「工具与用量」的另一半，不是段落末尾的一句旁白
+  box.append(el("div", { class: "usageline" },
+    el("span", { text: "模型" }),
+    el("span", { class: "mono", text: `${m.calls} 次` }),
+    el("span", { class: "mono", text: tokens }),
+    el("span", { class: "mono", text: `合计 ${fmtMs(m.totalDurationMs)}` })));
 
   const gaps = vm.health.canonicalGaps;
   box.append(el("div", { class: "health" },

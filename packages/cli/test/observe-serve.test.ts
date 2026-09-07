@@ -2,7 +2,7 @@
 // 服务停得下来、`runObserve serve` 打 URL 并在 signal 之后以 0 退出。
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEcho, createProvider, createProviderStreams, environmentMessage, observationDatabasePath, toolError, type Echo, type ModelTool, type Provider } from "@echo-agent/core";
@@ -210,6 +210,31 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   // 标签不再中英双写：badge 只出中文，英文进 title
   expect(html).not.toContain('el("span", { class: "en", text: t.en })');
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
+});
+
+test("颜色规则可判（2026-09-07 用户定）：紫只用于交互态、成功色不再出现、强色只给失败与警告", () => {
+  // 读**未注入 token 的源文件**：那才是页面自己的样式，注入后的 token 块里出现颜色名是应该的。
+  // 注释先剥掉：这条规则本身就写在注释里，不剥的话它会把自己判红。
+  const raw = readFileSync(new URL("../src/observe/page.html", import.meta.url), "utf8").split("</style>")[0] ?? "";
+  expect(raw).toContain("/*__TOKENS__*/");
+  const css = raw.replace(/\/\*[\s\S]*?\*\//g, "");
+  expect(css.length).toBeGreaterThan(500);
+
+  // ① 紫（accent）只表示「你能操作 / 你选中了」：每一条用到它的规则，选择器必须是交互态
+  const interaction = /:focus-visible|\[aria-pressed="true"\]|\[aria-selected="true"\]/;
+  const offenders = css
+    .split("\n")
+    .filter((line) => line.includes("var(--accent"))
+    .filter((line) => !interaction.test(line));
+  expect(offenders).toEqual([]);
+
+  // ② 正常状态不再用成功色：整页一次 `var(--moss)` 都没有（16 行全「已完成」时那点绿不携带信息）
+  expect(observePageHtml()).not.toContain("var(--moss");
+
+  // ③ 强色只给失败与警告：色块只剩 caution / critical 两种，没有「正常也发光」的类
+  expect(css).not.toMatch(/\.(badge|dot)--(positive|info|accent)\b/);
+  expect(css).toContain(".badge--caution");
+  expect(css).toContain(".badge--critical");
 });
 
 test("页面自足：token CSS 与术语表内联，不引外部资源", () => {
