@@ -1,10 +1,10 @@
 # 记忆三级作用域(session / project / user),`remember` 带 scope,替代「记忆用户级」
 
-> 状态:proposed · 提出 2026-09-03 · 拍板 2026-09-03(口头,三级作用域) · **切法拍板 2026-09-07**(口头,分区与作用域怎么对、选层、顺序、落地次序,见「决定」末段;实现后移入 implemented) · 来源 [会话与 agent 集群](../../design/sessions.md) §2 · 替代 2026-09-01「记忆用户级、跨项目共享」
+> 状态:implemented · 提出 2026-09-03 · 拍板 2026-09-03(口头,三级作用域) · **切法拍板 2026-09-07**(口头,分区与作用域怎么对、选层、顺序、落地次序,见「决定」末段) · 合入 2026-09-07 · 来源 [会话与 agent 集群](../../design/sessions.md) §2 · 替代 2026-09-01「记忆用户级、跨项目共享」
 
 ## 现状(拍板前)
 
-memory 一层,在状态根下(`~/.echo/agents/default/memory/`),所有会话共用;dream 在每个 `Agent` 实例 idle 时整理这一份。状态根变成 session 目录之后(见 [状态根 = session 目录](2026-09-03-session-is-the-state-root.md)),memory 若跟着下去就变成每段一份、互不可见;若留在共享层,N 段 session 的 dream 同时整理同一份是真冲突。
+memory 一层,在状态根下(`~/.echo/agents/default/memory/`),所有会话共用;dream 在每个 `Agent` 实例 idle 时整理这一份。状态根变成 session 目录之后(见 [状态根 = session 目录](../proposed/2026-09-03-session-is-the-state-root.md)),memory 若跟着下去就变成每段一份、互不可见;若留在共享层,N 段 session 的 dream 同时整理同一份是真冲突。
 
 ## 不拍板的代价
 

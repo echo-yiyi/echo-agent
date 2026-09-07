@@ -22,8 +22,8 @@ async function readyMemory(): Promise<AgentMemories> {
   // 用内建三层（agent/user 常驻 + memory 索引分区），只把门调到测试量级——
   // 判据本身不变，只是不必真写 10 个文件、等 24 小时
   const mem = createAgentMemories(new InMemoryDir(), { dream: { minWritesSinceLast: 2, minFiles: 2 } });
-  await memoryCreate(mem, "memory/a.md", "---\ndescription: 第一条\n---\n\n甲");
-  await memoryCreate(mem, "memory/b.md", "---\ndescription: 第二条\n---\n\n乙");
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 第一条\n---\n\n甲");
+  await memoryCreate(mem, "session/memory/b.md", "---\ndescription: 第二条\n---\n\n乙");
   return mem;
 }
 
@@ -58,7 +58,7 @@ test("门满足 → 回到 idle 自动整理并提交（装配方不写 timer �
 
 test("门不满足 → 不跑（写入数没到）", async () => {
   const mem = createAgentMemories(new InMemoryDir(), { dream: { minWritesSinceLast: 99, minFiles: 1 } });
-  await memoryCreate(mem, "memory/a.md", "---\ndescription: 只有一条\n---\n\n甲");
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 只有一条\n---\n\n甲");
   expect(await shouldDream(mem)).toBe(false);
 
   const agent = agentWith(mem, [textTurn("前台答完")]);
@@ -189,8 +189,8 @@ test("整理不进主 transcript（它是 agent 对自己记忆的操作，不�
 test("进程重启：dream 状态在盘上，新实例接着算（不是每次起来都重新攒）", async () => {
   const dir = new InMemoryDir();
   const first = createAgentMemories(dir, { dream: { minWritesSinceLast: 2, minFiles: 2 } });
-  await memoryCreate(first, "memory/a.md", "---\ndescription: 甲\n---\n\n一");
-  await memoryCreate(first, "memory/b.md", "---\ndescription: 乙\n---\n\n二");
+  await memoryCreate(first, "session/memory/a.md", "---\ndescription: 甲\n---\n\n一");
+  await memoryCreate(first, "session/memory/b.md", "---\ndescription: 乙\n---\n\n二");
   const a = agentWith(first, [textTurn("答完"), textTurn("整理完")]);
   await a.prompt("干活");
   await settle();
@@ -206,18 +206,18 @@ test("进程重启：dream 状态在盘上，新实例接着算（不是每次�
 test("锁陈尸：上次整理没提交（进程崩了），锁过期后能重新触发", async () => {
   const dir = new InMemoryDir();
   const mem = createAgentMemories(dir, { dream: { minWritesSinceLast: 1, minFiles: 1 } });
-  await memoryCreate(mem, "memory/a.md", "---\ndescription: 甲\n---\n\n一");
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 甲\n---\n\n一");
 
   // 伪造一把两小时前的锁——DREAM_LOCK_STALE_MS 是 1 小时。
   // **写计数也要带上**：计数现在住在同一个文件里（盘上是真相源），手写整份会把它抹掉。
   await dir.write(
-    ".dream/state.json",
+    "session/.dream/state.json",
     JSON.stringify({ lastAt: null, startedAt: Date.now() - 2 * 3600_000, writes: 1, turns: 0 }),
   );
   expect(await shouldDream(mem)).toBe(true); // 陈尸锁不该永久堵住
 
   // 新鲜的锁则挡住
-  await dir.write(".dream/state.json", JSON.stringify({ lastAt: null, startedAt: Date.now(), writes: 1, turns: 0 }));
+  await dir.write("session/.dream/state.json", JSON.stringify({ lastAt: null, startedAt: Date.now(), writes: 1, turns: 0 }));
   expect(await shouldDream(mem)).toBe(false);
 });
 
@@ -237,7 +237,7 @@ async function hangingDreamAgent(
     started = r;
   });
   let call = 0;
-  const scripted = scriptedStreamFn([textTurn("前台答完"), toolTurn("d1", "memory", { command: "view", path: "memory/" }), textTurn("整理完")]);
+  const scripted = scriptedStreamFn([textTurn("前台答完"), toolTurn("d1", "memory", { command: "view", path: "session/memory/" }), textTurn("整理完")]);
   const agent = new Agent({
     model: FAKE_MODEL,
     streamFunction: async (model, context, options) => {
@@ -295,7 +295,7 @@ test("并发写记忆不丢计数——「单写者」防的是跨进程，防�
   const mem = createAgentMemories({
     read: async (p) => {
       const v = await inner.read(p);
-      if (p === ".dream/state.json") {
+      if (p === "session/.dream/state.json") {
         arrived += 1;
         if (arrived === 2) open();
         else await Promise.race([gate, new Promise((r) => setTimeout(r, 200))]);
@@ -308,8 +308,8 @@ test("并发写记忆不丢计数——「单写者」防的是跨进程，防�
   });
 
   await Promise.all([
-    memoryCreate(mem, "memory/a.md", "---\ndescription: 甲\n---\n\n一"),
-    memoryCreate(mem, "memory/b.md", "---\ndescription: 乙\n---\n\n二"),
+    memoryCreate(mem, "session/memory/a.md", "---\ndescription: 甲\n---\n\n一"),
+    memoryCreate(mem, "session/memory/b.md", "---\ndescription: 乙\n---\n\n二"),
   ]);
 
   // 两次写都得算上
@@ -339,7 +339,7 @@ test("还卡在门控里的整理也要被 stop() 收掉——不许在 stop() �
     },
     { dream: { minWritesSinceLast: 1, minFiles: 1 } },
   );
-  await memoryCreate(mem, "memory/a.md", "---\ndescription: 甲\n---\n\n一");
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 甲\n---\n\n一");
 
   const agent = agentWith(mem, [textTurn("答完"), textTurn("整理完")]);
   await agent.prompt("干点活"); // 触发 maybeDream，它正卡在 shouldDream 的 read 上
@@ -367,7 +367,7 @@ test("两次触发撞在 shouldDream 的 await 窗口里 → 只跑一次整理"
     },
     { dream: { minWritesSinceLast: 1, minFiles: 1 } },
   );
-  await memoryCreate(mem, "memory/a.md", "---\ndescription: 甲\n---\n\n一");
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 甲\n---\n\n一");
 
   let dreamCalls = 0;
   const scripted = scriptedStreamFn([
@@ -480,12 +480,12 @@ test("计数落盘：换进程接着算，不从头攒", async () => {
   // 对长期跑的 agent 反而更难满足，恰好和门的意图相反。
   const dir = new InMemoryDir();
   const first = createAgentMemories(dir, { dream: { minWritesSinceLast: 2, minFiles: 1 } });
-  await memoryCreate(first, "memory/a.md", "---\ndescription: 甲\n---\n\n一");
+  await memoryCreate(first, "session/memory/a.md", "---\ndescription: 甲\n---\n\n一");
   expect(await shouldDream(first)).toBe(false); // 才写了 1 次
 
   // 换进程：同一个盘、全新实例
   const second = createAgentMemories(dir, { dream: { minWritesSinceLast: 2, minFiles: 1 } });
-  await memoryCreate(second, "memory/b.md", "---\ndescription: 乙\n---\n\n二");
+  await memoryCreate(second, "session/memory/b.md", "---\ndescription: 乙\n---\n\n二");
   expect(await shouldDream(second)).toBe(true); // 1 + 1，计数接着算
   expect(second.writesSinceDream).toBe(2);
 });

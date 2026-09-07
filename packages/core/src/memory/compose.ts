@@ -9,8 +9,10 @@
 import { composeMemoryRegion, listMemories, type AgentMemories } from "./harness.ts";
 import { parseFrontmatter } from "../prompt/markdown.ts";
 import { singleLine, truncateMarked } from "../prompt/sanitize.ts";
+import { splitScopePath, type MemoryScope } from "./scope.ts";
 import {
   MEMORY_INDEX_FILE,
+  memoryPaths,
   type AnyMemory,
   type CheckWrite,
   type ComposeMemory,
@@ -36,15 +38,17 @@ function entryOf(path: string, content: string): IndexEntry {
 }
 
 /**
- * 渲染一份 indexed 记忆的全部索引条目。
+ * 渲染一份 indexed 记忆**某一层**的全部索引条目。条目里的 path 带作用域前缀——
+ * 模型照着索引 view 哪个文件、往哪一层写,都只看这一个路径。
  * `override` 给写入校验用:某文件按「即将写入的内容」参与计算,不必先写盘再验。
  */
 export async function indexEntries(
   m: IndexedMemory,
   dir: MemoryDir,
+  scope: MemoryScope,
   override?: { path: string; content: string },
 ): Promise<IndexEntry[]> {
-  const paths = (await dir.list(m.path)).filter((p) => !p.endsWith(`/${MEMORY_INDEX_FILE}`)); // 索引不索引自己
+  const paths = (await dir.list(`${scope}/${m.path}`)).filter((p) => !p.endsWith(`/${MEMORY_INDEX_FILE}`)); // 索引不索引自己
   const seen = new Set<string>();
   const out: IndexEntry[] = [];
   for (const p of paths) {
@@ -67,22 +71,34 @@ export function renderIndex(entries: IndexEntry[]): string {
 
 /* ───────────────────────── 缺省分发:组装 ───────────────────────── */
 
+/**
+ * 一个分区**每一层各出一段**,按 user → project → session,都渲染、不去重、各带自己的路径
+ * (「切法」第 2 条):模型改哪一份就写哪个路径,靠的就是段标题上那个路径。空的那层不出段。
+ */
 export const defaultComposeMemory: ComposeMemory = async (m, dir) => {
   switch (m.mode) {
     case "resident": {
       const r = m as ResidentMemory;
-      const text = ((await dir.read(r.path)) ?? "").trim();
-      if (text === "") return "";
-      return `## ${r.name} (${r.path})\n${truncateMarked(text, r.budget)}`;
+      const blocks: string[] = [];
+      for (const { path } of memoryPaths(r)) {
+        const text = ((await dir.read(path)) ?? "").trim();
+        if (text === "") continue;
+        blocks.push(`## ${r.name} (${path})\n${truncateMarked(text, r.budget)}`);
+      }
+      return blocks.join("\n\n");
     }
     case "indexed": {
       const im = m as IndexedMemory;
-      // 索引是落盘真文件(写方法每次重建);还没有(比如目录是人手预置的)就现场扫一遍补上口径
-      const stored = await dir.read(`${im.path}${MEMORY_INDEX_FILE}`);
-      const index = stored !== null && stored.trim() !== "" ? stored.trim() : renderIndex(await indexEntries(im, dir));
-      if (index === "") return "";
-      // 组装侧也 cap:文件可能绕过工具落进来(人手放的),超预算截尾并留标记
-      return `## ${im.name} (index — view <path> for a file)\n${truncateMarked(index, im.budget)}`;
+      const blocks: string[] = [];
+      for (const { scope, path } of memoryPaths(im)) {
+        // 索引是落盘真文件(写方法每次重建);还没有(比如目录是人手预置的)就现场扫一遍补上口径
+        const stored = await dir.read(`${path}${MEMORY_INDEX_FILE}`);
+        const index = stored !== null && stored.trim() !== "" ? stored.trim() : renderIndex(await indexEntries(im, dir, scope));
+        if (index === "") continue;
+        // 组装侧也 cap:文件可能绕过工具落进来(人手放的),超预算截尾并留标记
+        blocks.push(`## ${im.name} (${path} — index; view a listed path to read that file)\n${truncateMarked(index, im.budget)}`);
+      }
+      return blocks.join("\n\n");
     }
     default:
       return ""; // 自定义种类:缺省隐形
@@ -101,7 +117,10 @@ export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
   if (regions.length === 0) return "";
   const rules = regions
     .filter((m) => m.instructions !== undefined && m.instructions !== "")
-    .map((m) => `- ${m.name} (${typeof m.path === "string" ? m.path : "?"}): ${m.instructions}`);
+    .map((m) => {
+      const paths = memoryPaths(m).map((p) => p.path);
+      return `- ${m.name} (${paths.length > 0 ? paths.join(", ") : "?"}): ${m.instructions}`;
+    });
   const blocks: string[] = [];
   for (const m of regions) {
     const block = await composeMemoryRegion(ctx, m);
@@ -117,6 +136,8 @@ export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
     "# Memory",
     "You have persistent memory that survives across sessions, read and written through the memory tool. Regions:",
     rules.join("\n"),
+    "The first path segment picks who will see an entry: user/ every session of this user · project/ every session in this workspace · session/ only this session. " +
+      "Pick the widest scope the fact is actually true for, and write the whole path — there is no scope argument.",
     "Before writing, check for an existing entry to merge into. Delete what is outdated. When a region is over budget, consolidate before adding. " +
       "Do not record progress on the current task — that is the session's job; record reusable lessons. Never store secrets or credentials.",
     ...blocks,
@@ -144,13 +165,16 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
       if (next.length > im.fileBudget) {
         return { ok: false, reason: `File too large: ${next.length} characters, limit ${im.fileBudget}. Split or condense it, then write.` };
       }
-      const entries = await indexEntries(im, dir, { path, content: next });
+      // 预算按层各算一份:同一分区在 user / project / session 各有各的索引
+      const at = splitScopePath(path);
+      if (at === null) throw new Error(`记忆路径缺作用域前缀:'${path}'`);
+      const entries = await indexEntries(im, dir, at.scope, { path, content: next });
       const size = renderIndex(entries).length;
       if (size > im.budget) {
         return {
           ok: false,
           reason:
-            `The '${im.name}' index is full: ${size} characters, limit ${im.budget}. ` +
+            `The '${im.name}' index at ${at.scope}/ is full: ${size} characters, limit ${im.budget}. ` +
             `Consolidate first (merge similar files, delete stale ones), then add the new one.`,
         };
       }

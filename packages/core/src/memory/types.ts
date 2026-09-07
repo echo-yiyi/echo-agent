@@ -10,18 +10,27 @@
 // Hermes 那句格言是分界依据:「小而关键的全量冻结注入;大而稀疏的才索引召回」。
 
 import type { StorageDir } from "../storage/types.ts";
+import { MEMORY_SCOPES, isMemoryScope, orderScopes, splitScopePath, type MemoryScope } from "./scope.ts";
 
 /**
  * 存储端口 = 通用 StorageDir(哑文件面,memory / schedule 共用一个抽象)。
  * default 真盘实现 FileDir 在 core 内(storage/file-dir.ts),缺省根 ~/.echo/。
+ *
+ * 三级作用域之后,交给 harness 的那一份是 `memoryScopeDir()` 出的**带作用域前缀的树**
+ * (`user/…`、`project/…`、`session/…`),三个真根由装配层接上。
  */
 export type MemoryDir = StorageDir;
 
 type MemoryBase = {
-  /** 分区名,harness 内唯一。 */
+  /** 分区名,harness 内唯一。**只是分区**(记的是什么),作用域是另一个轴。 */
   readonly name: string;
-  /** 在记忆树里的位置:resident 是一个文件("agent.md"),indexed 是一个目录("memory/",恒以 / 结尾)。 */
+  /** 分区内的位置,**不带作用域前缀**:resident 是一个文件("agent.md"),indexed 是一个目录("memory/",恒以 / 结尾)。 */
   readonly path: string;
+  /**
+   * 这个分区在哪几层有(「切法」的落盘表):`agent` / `user` 两个分区是 user + project,
+   * 笔记分区三层都有。落盘路径 = `<scope>/<path>`,同一分区每层各一份、各有各的预算。
+   */
+  readonly scopes: readonly MemoryScope[];
   /** resident:全文字符上限;indexed:索引渲染后的字符上限。超限的写入被拒,要求模型先整理。 */
   readonly budget: number;
   /** 这份记忆存什么 / 不存什么——拼进 system 的记忆使用规则,是分层纪律的第一道门。 */
@@ -48,11 +57,12 @@ export type Memory = ResidentMemory | IndexedMemory;
  */
 export interface CustomMemories {}
 
-/** 自定义种类至少要有名字和判别符;有 path 才参与工具写入的路由。 */
+/** 自定义种类至少要有名字和判别符;有 path **且**有 scopes 才参与工具写入的路由。 */
 export type MemoryShape = {
   readonly name: string;
   readonly mode: string;
   readonly path?: string;
+  readonly scopes?: readonly MemoryScope[];
   readonly instructions?: string;
 };
 
@@ -60,14 +70,18 @@ export type AnyMemory = Memory | (CustomMemories[keyof CustomMemories] & MemoryS
 
 /* ───────────────────────── 构造器与内建值 ───────────────────────── */
 
+/** 不点名作用域 = 只在 user 层(与三层引入前同形):多层是分区自己声明出来的,不是缺省长出来的。 */
+const DEFAULT_SCOPES: readonly MemoryScope[] = ["user"];
+
 export function residentMemory(
   name: string,
-  opts?: { path?: string; budget?: number; instructions?: string },
+  opts?: { path?: string; budget?: number; scopes?: readonly MemoryScope[]; instructions?: string },
 ): ResidentMemory {
   return {
     mode: "resident",
     name,
     path: opts?.path ?? `${name}.md`,
+    scopes: orderScopes(opts?.scopes ?? DEFAULT_SCOPES),
     budget: opts?.budget ?? 2000,
     instructions: opts?.instructions ?? "",
   };
@@ -75,7 +89,7 @@ export function residentMemory(
 
 export function indexedMemory(
   name: string,
-  opts?: { path?: string; budget?: number; fileBudget?: number; instructions?: string },
+  opts?: { path?: string; budget?: number; fileBudget?: number; scopes?: readonly MemoryScope[]; instructions?: string },
 ): IndexedMemory {
   const path = opts?.path ?? `${name}/`;
   if (!path.endsWith("/")) throw new Error(`an indexed memory region's path must end with / (a directory): '${path}'`);
@@ -83,28 +97,35 @@ export function indexedMemory(
     mode: "indexed",
     name,
     path,
+    scopes: orderScopes(opts?.scopes ?? DEFAULT_SCOPES),
     budget: opts?.budget ?? 25_000,
     fileBudget: opts?.fileBudget ?? 4096,
     instructions: opts?.instructions ?? "",
   };
 }
 
-/** agent 自己的稳定经验(预算量级取自 Hermes MEMORY.md 的 2200 chars)。 */
+/** agent 自己的稳定经验(预算量级取自 Hermes MEMORY.md 的 2200 chars)。user + project 两层。 */
 export const agentMemory: ResidentMemory = residentMemory("agent", {
   budget: 2200,
+  scopes: ["user", "project"],
   instructions: "your own stable knowledge — environment facts, project conventions, tool quirks, lessons learned. Keep it dense; delete what is stale.",
 });
 
-/** 用户是谁(预算量级取自 Hermes USER.md 的 1375 chars)。 */
+/** 用户是谁(预算量级取自 Hermes USER.md 的 1375 chars)。user + project 两层。 */
 export const userMemory: ResidentMemory = residentMemory("user", {
   budget: 1400,
+  scopes: ["user", "project"],
   instructions: "who the user is — identity, preferences, how they communicate, corrections they gave you. Keep it dense.",
 });
 
-/** 大而稀疏的知识仓库(索引 cap 取自 Claude Code MEMORY.md 的 25KB,单文件 4096 取其注入预算)。 */
+/**
+ * 大而稀疏的知识仓库(索引 cap 取自 Claude Code MEMORY.md 的 25KB,单文件 4096 取其注入预算)。
+ * **三层都有**,session 那一层是 dream 唯一整理的地方。
+ */
 export const notesMemory: IndexedMemory = indexedMemory("memory", {
   budget: 25_000,
   fileBudget: 4096,
+  scopes: MEMORY_SCOPES,
   instructions:
     "knowledge worth keeping across sessions, one .md file per item, with frontmatter (name, description — the description decides whether you will find it again). " +
     "Only the index is shown in the system prompt; view a file to read it.",
@@ -126,9 +147,28 @@ export type ComposeMemory = (memory: AnyMemory, dir: MemoryDir) => Promise<strin
 /** 一次写入(写完后的全文)能不能落。拒绝时 reason 原样回给模型——要说清怎么腾地方。 */
 export type CheckWrite = (memory: AnyMemory, dir: MemoryDir, path: string, next: string) => Promise<WriteVerdict>;
 
-/** path 归不归这份记忆管(工具按它路由写入)。 */
+/** 这个分区在哪几层有。自定义种类没声明 scopes = 不参与路由(与没有 path 同一条 fail-closed)。 */
+export function memoryScopes(m: AnyMemory): readonly MemoryScope[] {
+  const raw = (m as { scopes?: readonly string[] }).scopes;
+  if (!Array.isArray(raw)) return [];
+  return orderScopes(raw.filter(isMemoryScope));
+}
+
+/** 这个分区落盘的全部路径,按 user → project → session。`agent` → `["user/agent.md", "project/agent.md"]`。 */
+export function memoryPaths(m: AnyMemory): readonly { scope: MemoryScope; path: string }[] {
+  if (typeof m.path !== "string" || m.path === "") return [];
+  return memoryScopes(m).map((scope) => ({ scope, path: `${scope}/${m.path as string}` }));
+}
+
+/**
+ * path 归不归这份记忆管(工具按它路由写入)。收的是**带作用域前缀的全路径**。
+ * 分区在那一层没有(比如 `session/agent.md`)就是不归——写入被拒并列出可用分区,
+ * 这正是「session 层没有 agent.md」那条判红。
+ */
 export function memoryOwns(m: AnyMemory, path: string): boolean {
   if (typeof m.path !== "string" || m.path === "") return false;
-  if (m.path.endsWith("/")) return path.startsWith(m.path) && path.length > m.path.length;
-  return path === m.path;
+  const at = splitScopePath(path);
+  if (at === null || !memoryScopes(m).includes(at.scope)) return false;
+  if (m.path.endsWith("/")) return at.rest.startsWith(m.path) && at.rest.length > m.path.length;
+  return at.rest === m.path;
 }

@@ -1,9 +1,9 @@
 # 会话（Session）与 agent 集群
 
-> 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 5 步（壳）实现了看与切两半（`/sessions`、`/resume`），`/clear` 落盘那半还没做；第 2 步（角色定义）未做，记忆三层的切法 2026-09-07 已拍、未实现——逐条见 §9。决策记录留在 `docs/decisions/proposed/` 直到整条实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
+> 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 5 步（壳）实现了看与切两半（`/sessions`、`/resume`），`/clear` 落盘那半还没做；第 2 步（角色定义）未做；记忆三层 2026-09-07 已实现（那一条的决策记录随之移入 `implemented/`）——逐条见 §9。其余决策记录留在 `docs/decisions/proposed/` 直到各自实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
 > 读者：要实现会话面、给产品接会话工具、把 echo 嵌进常驻程序（多段会话同时工作）的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) 的实例生命周期与 admission；[Context 与 Message Flow](context-and-message-flow.md) 的 transcript / working context 术语；[Compaction](compaction.md) 的「策略是 extension、状态在 core」这条分法——本文对会话用同一条<br>
-> 决策记录（五条，本文只指向，不复述论证）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) · [agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md)
+> 决策记录（五条，本文只指向，不复述论证）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) · [agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md)
 
 ## 导读
 
@@ -19,11 +19,11 @@
 - 跨进程把别的 session 的事件流拉到本进程的壳上（IPC）。壳只 attach 自己容器里的 session。
 - 分支会话（pi 的 `/tree` `/fork`）。entry 的 `parentId` 保持树形状，不提供分支命令。
 - 会话调度器。一个容器里同时跑几段模型调用只给一个并发上限，不做优先级。
-- 记忆从 session 级往 project / user 级的自动提升。`remember` 带 `scope`，dream 不跨级。
+- 记忆从 session 级往 project / user 级的自动提升。选哪一层由模型写路径前缀决定，dream 不跨级。
 - memory 目录的多写者保护（多段 session 同时往 project 级记）。归 memory 线，本文只定作用域。
 - 会话的回收（GC / TTL）。`closed` 的段留在盘上；不会跑的段靠 §7 的挂载条件与 runner 失败判红不产生，而不是事后清。
 
-**待拍板。** 没有了。记忆三层怎么切 2026-09-07 拍了：分区（`agent.md` / `user.md` / 笔记索引）与作用域（session / project / user）分开，哪层放什么、注入什么、怎么选层、什么顺序落地，全在 [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) 的「切法」一段。**落地前仍成立的后果**：记忆今天整体在 user 层被多段 session 共写，dream 可能被两段同时跑，挡它的只有 `.dream` 里那个带过期的软锁——所以 session 层排在第一步落。
+**待拍板。** 没有了。记忆三层怎么切 2026-09-07 拍了：分区（`agent.md` / `user.md` / 笔记索引）与作用域（session / project / user）分开，哪层放什么、注入什么、怎么选层、什么顺序落地，全在 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」一段，2026-09-07 已实现。dream 的计数与锁跟着整理范围下到 session 层，「两段 session 同时整理同一份」于是不再成立。
 
 其余五项决策已拍（2026-09-03，口头；§4 那条 2026-09-07 修正），见决策记录。
 
@@ -54,10 +54,9 @@
 
 project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自动写的东西不该进 git，也不该要求每个仓库改 `.gitignore`。哈希只有 48 位，撞了就是两个项目的记忆混在一起而没人发现，所以 project 目录里放一份 `workspace.json` 记原路径，打开时对一遍，不匹配判红。项目指令文件（AGENTS.md / CLAUDE.md）仍从 workspace 里读（prompt 决策 7），那是人写给 agent 的，方向相反。
 
-三层里唯一的共享写方是 project / user 级 memory：多段 session 同时 `remember` 到同一层。dream 只整理 session 自己那份，不碰上两层，所以整理不冲突；`remember` 的并发写归 memory 线（Non-Goals）。
+三层里唯一的共享写方是 project / user 级 memory：多段 session 同时往同一层记。dream 只整理 session 自己那份，不碰上两层，所以整理不冲突；上两层的并发写归 memory 线（Non-Goals）。
 
-**这一节里只有记忆的三层还没实现**（2026-09-03）：今天记忆整体在 user 层，session 与 project 两级还没有；
-分区与作用域怎么对 2026-09-07 已拍，见 [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) 的「切法」。session 层与 user 层的分家已经落地；project 目录的解析（`projects/<hash>/` 与 `workspace.json` 校验）还没有，随记忆落地一起做。
+**这一节已全部实现**（记忆三层 2026-09-07 补上）：分区（`agent.md` / `user.md` / 笔记与索引）与作用域（session / project / user）怎么对、注入哪几层、怎么选层，见 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」。选层走**路径前缀**（`user/agent.md`、`project/user.md`、`session/memory/x.md`），`memory` 工具不加参数；project 目录的解析在 [`projectPrefix()`](../../packages/core/src/memory/scope.ts#symbol=projectPrefix)，`workspace.json` 的校验在 [`assertProjectWorkspace()`](../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace)，三层的字节面在 `createAgent` 的 `prepareCapabilities` 里接上。**已知限制**：project 层按装配期的 `workspace` 定，resume 到另一个目录、或运行中 `setWorkspace()` 换了目录，它不跟着变。
 
 `ECHO_HOME` 覆盖 `~/.echo`，与今天的 [`resolveStateDir()`](../../packages/core/src/create-agent.ts#symbol=resolveStateDir) 同一个来源；`agents/<agentId>/` 这一层退场，session 的 meta 里记着自己是哪个 agent。
 
@@ -70,14 +69,13 @@ project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自
   inbox/000001.json  入站 record；inbox/acks/ 是 ack marker（今天的形状，不变）
   tasks.json
   schedule/
-  .dream
-  memory/            session 级记忆
+  memory/            session 级记忆（`memory/memory/` 是笔记分区，`memory/.dream/` 是整理的计数与锁）
   .lock              lease，每段一把
   status.json        运行态快照（§6）
   observability/
 ```
 
-**已实现**（2026-09-03）：meta 与 entries 在目录根，`SessionService` 一个实例管一段（同一个 store 上开第二个 id 判红）；清单是自由函数 [`listSessions()`](../../packages/core/src/session/service.ts#symbol=listSessions)，扫的是上一层；坏档判红、序号连续、parent 链、compaction 投影一行没动。上表里 `memory/`（session 级记忆）与 `status.json` 还没有，见 §2 与 §6。
+**已实现**（2026-09-03）：meta 与 entries 在目录根，`SessionService` 一个实例管一段（同一个 store 上开第二个 id 判红）；清单是自由函数 [`listSessions()`](../../packages/core/src/session/service.ts#symbol=listSessions)，扫的是上一层；坏档判红、序号连续、parent 链、compaction 投影一行没动。`memory/`（session 级记忆，含 dream 的计数与锁）2026-09-07 随记忆三层补上；`status.json` 见 §6。
 
 ```ts
 type AgentRef =
@@ -269,7 +267,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 | cli `--continue` / `--resume` | 装配前另起 `SessionService(FileDir)` 扫状态根 | 同一个函数，扫 `~/.echo/sessions/`；筛选加 `main` 与 `status` |
 | observe（含 `serve` 面板） | 一个状态根装多段会话，一份观测库能同时看几段 | **观测库一段一份**（它在 session 目录里）：一个 reader / 一个面板只看得到那一段的 run。`--session` 点名看哪一段，不给就是最近更新的那一段；会话摘要仍从上一层扫，所以面板里出现的任何 sessionId 都反查得到名字与 workspace |
 | TUI | `/clear` = `reset()` | `/clear` = close + create + attach；`/sessions` = `list`，`/resume <id>` = 换段（壳只挑段，装配层重装） |
-| memory | 一层，状态根下 | 三层（§2）；`remember` 加 `scope`；dream 只整理 session 层 |
+| memory | 一层，状态根下 | **已实现**（2026-09-07）：三层（§2）；选层走路径前缀、工具不加参数；dream 只整理 session 层（它那把 `memory` 工具够不到上两层） |
 | schedule / tasks / dream / observability | 按状态根一份 | 不改代码，随状态根变成按 session 一份 |
 
 **替代的旧决策**（原文保留在各自的记录里，本文的决策记录标明替代关系）：2026-09-01「状态根用户级 `agents/<agentId>/`」→ 状态根 = session 目录；「记忆用户级、跨项目共享」→ 三级作用域；「会话身份 = workspace + agent」保留，加 `main` 与 `status`。
@@ -277,7 +275,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 ## 9. 实施顺序（每步独立可验）
 
 1. **布局（已实现，2026-09-03）**：状态根 = session 目录；`SessionService` 扁平化，清单改自由函数 `listSessions()`（扫上一层）；memory / skills 提到 user 层；空会话延迟写 meta；`SessionInfo` 加 `main` / `status`；删旧 `SessionManager` / `InMemorySessionManager` / `AgentOptions.sessions`；`CreateAgentOptions` 加 `sessionsRoot` 与 `sharedStore`；`observe` 的 `--agent-id` 换成 `--session`。lease 每段一把随之成立。
-   **与本文其余部分的一处差异**：memory 落在 user 层**一层**，还不是 §2 的三层——把哪个记忆分区放哪一层要改 `AgentMemories` 的分区表与 dream 的整理范围，是 memory 线自己的一次改动，登记在下面的「未决」里，不在本步顺手做。
+   **补齐（2026-09-07）**：这一步只把 memory 提到 user 层**一层**；§2 的三层由 memory 线自己那次改动落地——分区表加 `scopes`、路径带作用域前缀、dream 的整理范围与状态一起下到 session 层。
 2. **角色定义**（2026-09-07 改，原「agent 打包」作废，见 §4）：角色文件的加载（产品自带 / user 层 / 项目层三处合并）；`AgentPrompt.section(…, { replace: true })` 与 `AgentTools.restrict()` 两个口；`AgentRef` 进 meta；角色 → `echo:inline-agent`；不越权检查；`session_create` 的 `agent` 参数回来。**排在第 5 步之前做**（2026-09-07 拍板：`/clear` 与 `wait` 都会碰 AgentRef 与「这段挂什么」）。
 3. **通道（已实现，2026-09-03）**：record id 改**写者自己发号**（`createRecordIdSource`，
    `<12 位十六进制毫秒>-<4 位同毫秒计数><12 位十六进制随机>`；同一写者严格递增，跨写者靠随机区分）；

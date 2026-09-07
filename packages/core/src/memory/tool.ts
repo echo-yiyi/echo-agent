@@ -14,6 +14,7 @@ import {
   memoryCreate, memoryDelete, memoryInsert, memoryRename, memoryStrReplace, memoryView,
   type AgentMemories,
 } from "./harness.ts";
+import type { MemoryScope } from "./scope.ts";
 
 export const MEMORY_TOOL_NAME = "memory";
 
@@ -53,6 +54,26 @@ export function normalizeMemoryPath(raw: string): string {
   return segments.join("/") + (trailingSlash ? "/" : "");
 }
 
+/**
+ * 限定层的那把工具:路径不在这一层就拒,拒因原样回给模型。
+ * 规范化失败(越狱路径)这里**不**判——让它照常走下去,由 jail 出那条更准的报错。
+ */
+function outsideScope(raw: string, scope: MemoryScope): string | null {
+  let path: string;
+  try {
+    path = normalizeMemoryPath(raw);
+  } catch {
+    return null;
+  }
+  if (path === `${scope}/` || path.startsWith(`${scope}/`)) return null;
+  return `This memory tool only reaches the '${scope}/' layer; '${path}' is outside it.`;
+}
+
+/** 点开头的段是内部状态(`.dream/`):jail 不许读写,列目录时也不许出现。 */
+export function hasHiddenSegment(path: string): boolean {
+  return path.split("/").some((seg) => seg.startsWith("."));
+}
+
 export type MemoryCommandHandler = (
   params: MemoryToolParams,
   memory: AgentMemories,
@@ -64,10 +85,16 @@ export type CreateMemoryToolOptions = {
   description?: string;
   /** 细粒度复写:只换某个动词的行为,其余走缺省(缺省 = 调 harness 同名方法)。 */
   handlers?: Partial<Record<MemoryCommand, MemoryCommandHandler>>;
+  /**
+   * 只许碰这一层(路径第一段)。**dream 用它**:整理只归 session 层,别的层是别的 session 也在写的。
+   * 不给 = 三层都能碰(前台那份工具)。检查在 `execute` 的最前面,复写了 handlers 也照样管。
+   */
+  scope?: MemoryScope;
 };
 
 const DEFAULT_DESCRIPTION =
-  "Read and write your persistent memory (kept across sessions). The regions and what goes in each are in the Memory section of the system prompt. " +
+  "Read and write your persistent memory (kept across sessions). The regions, their paths and what goes in each are in the Memory section of the system prompt. " +
+  "Every path starts with the scope that decides who sees it: user/ (every session), project/ (this workspace), session/ (this session only) — e.g. user/agent.md, project/user.md, session/memory/x.md. " +
   "Commands: view (a directory — path ending in / or empty for everything — or a file), create (create or overwrite a whole file), " +
   "str_replace (replace the single occurrence of old_str with new_str), insert (insert after line insert_line), " +
   "delete, rename. A write that exceeds a region's budget is refused with the current numbers: consolidate (merge, delete stale entries) first, then write.";
@@ -80,7 +107,7 @@ const PARAMETERS: Record<string, unknown> = {
       enum: ["view", "create", "str_replace", "insert", "delete", "rename"],
       description: "The operation to perform",
     },
-    path: { type: "string", description: "Target path, e.g. agent.md or memory/xxx.md; for view, '' shows everything" },
+    path: { type: "string", description: "Target path, scope first: user/agent.md, project/user.md, session/memory/xxx.md; for view, '' shows everything" },
     file_text: { type: "string", description: "create: the full file content" },
     old_str: { type: "string", description: "str_replace: the exact text to replace (must occur exactly once)" },
     new_str: { type: "string", description: "str_replace: the replacement text" },
@@ -117,6 +144,16 @@ export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolO
       return params;
     },
     async execute(params, ctx): Promise<AgentToolResult> {
+      const scope = opts?.scope;
+      if (scope !== undefined) {
+        // 「看全部」对限定层的那把工具就是「看这一层」——不然 dream 的第一条 view 就先撞一次拒绝
+        if (params.path.trim() === "" || params.path.trim() === "/memories") params = { ...params, path: `${scope}/` };
+        for (const p of [params.path, params.new_path]) {
+          if (p === undefined) continue;
+          const denied = outsideScope(p, scope);
+          if (denied !== null) return { content: denied, isError: true, metadata: null };
+        }
+      }
       const custom = opts?.handlers?.[params.command];
       if (custom !== undefined) return custom(params, memory, ctx);
       switch (params.command) {

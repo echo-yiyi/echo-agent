@@ -21,6 +21,7 @@ import { AgentAssembly, type AdoptionLedger } from "./assembly/ledger.ts";
 import { adoptStorageView } from "./state/write-gate.ts";
 import { attachStateHost } from "./state/host-wiring.ts";
 import { createAgentMemories } from "./memory/harness.ts";
+import { assertProjectWorkspace, memoryScopeDir, projectPrefix, withWorkspaceStamp } from "./memory/scope.ts";
 import { createAgentSchedule } from "./schedule/harness.ts";
 import type { Clock } from "./schedule/clock.ts";
 import type { TaskStore } from "./task/types.ts";
@@ -108,7 +109,8 @@ export type CreateAgentOptions = {
 
   /**
    * 存储端口。不给用 `FileDir(stateDir)`——**那就是这一段 session 的目录**（meta、entries、inbox、
-   * tasks、schedule、observability 都在它下面）。记忆与技能不在这里，见 `sharedStore`。
+   * tasks、schedule、observability、**session 层记忆**都在它下面）。记忆的另外两层（user / project）
+   * 与技能不在这里，见 `sharedStore`。
    *
    * **给了 `store` 就必须同时给 `lock`**（见 `createAgent` 里的检查）——
    * 换了远程 Store 却用本机文件锁，两台机器会各自拿到锁、同时写同一份远程状态，
@@ -116,12 +118,12 @@ export type CreateAgentOptions = {
    */
   store?: StorageDir;
   /**
-   * user 层（记忆与技能）的字节面——**与 `store` 是两个根**：`store` 只覆盖这一段 session 的目录，
-   * 记忆与技能跨 session 共享，在它外面。
+   * 跨 session 共享那两层（记忆的 user / project 层、技能）的字节面——**与 `store` 是两个根**：
+   * `store` 只覆盖这一段 session 的目录，这两层在它外面。
    *
-   * 不给的解析顺序：给了自定义 `store` 就跟着它（记忆落在那个 store 的 `memory/` 下），
-   * 否则 `FileDir(<ECHO_HOME>)`。前一条是有意的——「我传了 InMemoryDir」的调用方不该发现
-   * 记忆仍旧写进了真盘 home。
+   * 不给的解析顺序：给了自定义 `store` 就跟着它（记忆的 user 层落在那个 store 的 `memory/` 下、
+   * project 层落在 `projects/<hash>/memory/` 下），否则 `FileDir(<ECHO_HOME>)`。前一条是有意的——
+   * 「我传了 InMemoryDir」的调用方不该发现记忆仍旧写进了真盘 home。
    */
   sharedStore?: StorageDir;
   /**
@@ -222,7 +224,8 @@ export function resolveSessionsRoot(opts: { echoHome?: string } = {}): string {
 }
 
 /**
- * user 层（`<echoHome()>`）：跨 session 共享的东西住在这里——**记忆与技能**。
+ * user 层（`<echoHome()>`）：跨 session 共享的东西住在这里——**记忆的 user / project 两层与技能**
+ * （project 层是这下面的 `projects/<hash>/`，按 workspace 分）。
  *
  * 它们不能跟着状态根下沉到 session 目录：那样每开一段就换一套记忆、换一批技能，
  * 「这个仓库跑测试用 bun test」这种事实一段一份、谁也看不见谁。credentials.json 与
@@ -335,6 +338,13 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   // 否则「我传了 InMemoryDir」的调用方会发现记忆仍旧写进了真盘 home，那是最不该有的意外。
   const sharedStore = opts.sharedStore ?? opts.store ?? new FileDir(expandHome(resolveSharedDir()));
   const lock = opts.lock ?? fileStateLock(join(stateDir, LOCK_FILE));
+  // project 层记忆按哪个 workspace 分。缺省与 `Agent` 那边同一个("/"),不然两处对不上。
+  //
+  // **已知限制**:它在装配期定死,而 workspace 是 session 级事实——resume 时以盘上为准
+  // （`start()` 才读得到），运行中还能被 `setWorkspace()` 换掉（echo-coding 的 worktree 隔离）。
+  // 这两种情况下 project 层仍指着装配期这一个。要跟着走得让记忆的字节面能重新解析，
+  // 那是 memory 与 session 两条线的下一次改动，不在三级作用域这一刀里。
+  const memoryWorkspace = opts.workspace ?? "/";
 
   // canonical observation store：open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——
   // 那是状态根坏了 / 文件系统不支持，启动时就该看见。起来之后的写失败**不再**影响 run
@@ -404,7 +414,13 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   let agent: Agent;
   let ledger: AdoptionLedger | undefined;
   try {
-    const parts = prepareCapabilities({ assembly, shared, sharedUser, clock: opts.clock, withoutMemory: opts.withoutMemory });
+    // **打开 project 层时对一遍**(sessions.md §2):目录名是 workspace 的 48 位哈希,
+    // 撞了就是两个项目的记忆混在一起而没人发现。留痕对不上 = 装配当场失败,不是「先跑着再说」。
+    // 读不受写入闸管,所以这一步能在拿到租约之前做;**写**留痕要等第一次真往这层写(见 `withWorkspaceStamp`)。
+    if (opts.withoutMemory !== true) {
+      await assertProjectWorkspace(sharedUser, projectPrefix(memoryWorkspace), memoryWorkspace);
+    }
+    const parts = prepareCapabilities({ assembly, shared, sharedUser, clock: opts.clock, withoutMemory: opts.withoutMemory, workspace: memoryWorkspace });
 
     // 形状到此为止。**seal 只冻结形状，不转移所有权**——转移发生在构造成功之后的 `adoptInto()`。
     assembly.seal();
@@ -528,6 +544,8 @@ function prepareCapabilities(input: {
   sharedUser: StorageDir;
   clock?: Clock;
   withoutMemory?: boolean;
+  /** project 层记忆按它分目录(`projects/<hash>/`)。 */
+  workspace: string;
 }): AssembledCapabilities {
   const { assembly, shared, sharedUser } = input;
   // **写入资格在这里发**：composition root 建一个总闸，每个能力拿到的是它发的 authority 包过的
@@ -546,14 +564,26 @@ function prepareCapabilities(input: {
   // lane 划分：恢复期的写都走 restore-migration，收摊尾写走 lifecycle-finalization，
   // inbox 的 durable delivery 与 schedule 的 catch-up 各有自己的一条。
   const sessionView = viewFor("echo:session", ["restore-migration", "lifecycle-finalization"]);
-  const memoryView = scopedDir(sharedViewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`);
+  // 记忆的三层各一个真根,交给 harness 的是一棵**带作用域前缀的树**(memory/scope.ts)：
+  //   user    → `<ECHO_HOME>/memory/`
+  //   project → `<ECHO_HOME>/projects/<hash>/memory/`(`hash` = workspace 的 fnv1a64 前 12 位)
+  //   session → `<状态根>/memory/`(状态根就是 session 目录,所以它天然一段一份)
+  // 三层都过同一个写入闸(闸管的是「什么时候允许写」,与根在哪无关);project / user 两层
+  // **不提供互斥**——多段 session 同时写是设计允许的形态(sessions.md §2)。
+  const memoryUserView = scopedDir(sharedViewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`);
+  const memoryProjectRoot = withWorkspaceStamp(scopedDir(sharedViewFor("echo:memory", ["restore-migration"]), projectPrefix(input.workspace)), input.workspace);
+  const memoryView = memoryScopeDir({
+    user: memoryUserView,
+    project: scopedDir(memoryProjectRoot, `${MEMORY_DIR}/`),
+    session: scopedDir(viewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`),
+  });
   const taskView = viewFor("echo:task", ["restore-migration", "lifecycle-finalization"]);
   const scheduleView = viewFor("echo:schedule", ["restore-migration", "managed-activation", "lifecycle-finalization"]);
   const inboxView = viewFor("echo:inbox", ["restore-migration", "durable-ingress", "lifecycle-finalization"]);
   const skillView = sharedViewFor("echo:skill", ["restore-migration", "lifecycle-finalization"]);
 
-  // **记忆在 user 层**（2026-09-03，替代 2026-09-01 的「状态根下」）：状态根成了 session 目录之后，
-  // 记忆若跟着下沉就是每开一段换一套记忆。`createAgentMemories` 只要字节面，给它 `<ECHO_HOME>/memory/`。
+  // **记忆分三层**（2026-09-07，替代 2026-09-03 的「整体在 user 层」）：user 与 project 两层跨 session
+  // 共享（换一段不失忆），session 一层只有笔记、是 dream 唯一整理的地方。`createAgentMemories` 只要字节面。
   // 用户想换存储或策略时给 `sharedStore`，或者直接走低层 `new Agent({ memory })` 自己装。
   //
   // 下面五件是 **adopt** slot（规则 1）：agent 域的值，`new Agent()` 成功后由那一个 Agent 唯一 dispose。
@@ -588,7 +618,7 @@ function prepareCapabilities(input: {
  * core 自己会往 session 目录里写的东西。**只删这些**——目录里出现别的，说明有人另有用处，
  * 那就一个字都不动。收摊阶段删错东西的代价远大于留下一个空目录。
  */
-const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.json", "status.json", "inbox", "entries", ".lock", ".dream"]);
+const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.json", "status.json", "inbox", "entries", ".lock", ".dream", "memory"]);
 
 /**
  * 收摊时清掉「一句话都没说过」的那个 session 目录。

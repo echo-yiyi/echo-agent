@@ -24,19 +24,22 @@ import { defaultCheckWrite, defaultComposeMemory, indexEntries, renderIndex, ren
 import {
   DEFAULT_DREAM_GATES,
   DREAM_LOCK_STALE_MS,
+  DREAM_SCOPE,
   defaultDreamPrompt,
   readDreamState,
   writeDreamState,
   type DreamGates,
   type DreamState,
 } from "./dream.ts";
-import { createMemoryTool, normalizeMemoryPath, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
+import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
+import { splitScopePath } from "./scope.ts";
 import {
   agentMemory,
   MEMORY_INDEX_FILE,
   notesMemory,
   userMemory,
   memoryOwns,
+  memoryPaths,
   type AnyMemory,
   type CheckWrite,
   type ComposeMemory,
@@ -113,16 +116,20 @@ export function createAgentMemories(dir: MemoryDir, opts?: MemoryHarnessOptions)
 
 /* ───────────── 分区注册表(开的地方) ───────────── */
 
-/** 撞名与**路径重叠**都 fail-loud——重叠会让写入路由二义(一个 path 两个预算域)。 */
+/**
+ * 撞名与**路径重叠**都 fail-loud——重叠会让写入路由二义(一个 path 两个预算域)。
+ * 比的是**带作用域的全路径**:同一个分区内路径只要不在同一层就不重叠。
+ */
 export function addMemory(ctx: AgentMemories, memory: AnyMemory): void {
   if (ctx.memories.has(memory.name)) {
     throw new Error(`记忆分区 '${memory.name}' 已存在;先 remove 再 add`);
   }
-  if (typeof memory.path === "string" && memory.path !== "") {
+  for (const mine of memoryPaths(memory)) {
     for (const existing of ctx.memories.values()) {
-      if (typeof existing.path !== "string" || existing.path === "") continue;
-      if (covers(existing.path, memory.path) || covers(memory.path, existing.path)) {
-        throw new Error(`记忆分区路径重叠:'${memory.name}'(${memory.path}) 与 '${existing.name}'(${existing.path})`);
+      for (const theirs of memoryPaths(existing)) {
+        if (covers(theirs.path, mine.path) || covers(mine.path, theirs.path)) {
+          throw new Error(`记忆分区路径重叠:'${memory.name}'(${mine.path}) 与 '${existing.name}'(${theirs.path})`);
+        }
       }
     }
   }
@@ -155,17 +162,20 @@ export async function memoryView(ctx: AgentMemories, rawPath: string): Promise<A
   try {
     const path = normalizeMemoryPath(rawPath);
     if (path === "" || path.endsWith("/")) {
-      const files = await ctx.dir.list(path);
+      // 点开头的段是内部状态(.dream/):jail 不许读写,列目录时也不许露出来
+      const files = (await ctx.dir.list(path)).filter((f) => !hasHiddenSegment(f));
       if (path !== "") return toolOk(files.length > 0 ? files.join("\n") : `${path} (empty directory)`);
+      // 概览:一个分区在每一层各一行,顺序 user → project → session
       const lines: string[] = [];
       for (const m of ctx.memories.values()) {
-        if (typeof m.path !== "string" || m.path === "") continue;
-        if (m.path.endsWith("/")) {
-          const inside = files.filter((f) => f.startsWith(m.path as string));
-          lines.push(`${m.name}/ (${inside.length} files)`);
-          for (const f of inside) lines.push(`  ${f}`);
-        } else {
-          lines.push(`${m.path}${files.includes(m.path) ? "" : " (empty)"}`);
+        for (const { path: full } of memoryPaths(m)) {
+          if (full.endsWith("/")) {
+            const inside = files.filter((f) => f.startsWith(full));
+            lines.push(`${full} (${inside.length} files)`);
+            for (const f of inside) lines.push(`  ${f}`);
+          } else {
+            lines.push(`${full}${files.includes(full) ? "" : " (empty)"}`);
+          }
         }
       }
       return toolOk(lines.length > 0 ? lines.join("\n") : "(no memories yet)");
@@ -242,7 +252,7 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise
   }
   if (!removed) return finishMemoryMutation(ctx, frame, rejected("not_found", `'${path}' does not exist`));
   await bumpWriteCounter(ctx);
-  const indexOutcome = await refreshIndex(ctx, frame.owner);
+  const indexOutcome = await refreshIndex(ctx, frame.owner, path);
   return finishMemoryMutation(ctx, frame, committed(undefined, indexOutcome, `Deleted ${path}`));
 }
 
@@ -266,6 +276,16 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
   const toOwner = memoryFor(ctx, to);
   if (fromOwner === undefined || toOwner === undefined || fromOwner.name !== toOwner.name) {
     return finishMemoryMutation(ctx, frame, rejected("cross_region", `rename must stay within one region (${String(fromOwner?.name)} → ${String(toOwner?.name)})`));
+  }
+  // 换层 = 换「谁看得见」,也换预算域:同样不许靠 rename 静默发生——读出来在目标层重新 create
+  const fromScope = splitScopePath(from)?.scope;
+  const toScope = splitScopePath(to)?.scope;
+  if (fromScope !== toScope) {
+    return finishMemoryMutation(
+      ctx,
+      frame,
+      rejected("cross_scope", `rename must stay within one scope (${String(fromScope)} → ${String(toScope)}); create it in the other layer instead`),
+    );
   }
   const guard = guardIndexFile(from) ?? guardIndexFile(to);
   if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
@@ -295,10 +315,10 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
   try {
     await ctx.dir.remove(from);
   } catch (e) {
-    const indexOutcome = await refreshIndex(ctx, fromOwner);
+    const indexOutcome = await refreshIndex(ctx, fromOwner, to);
     return finishMemoryMutation(ctx, frame, partial("remove-source", indexOutcome, `Renamed ${from} to ${to} but failed to remove the source: ${errText(e)}`));
   }
-  const indexOutcome = await refreshIndex(ctx, fromOwner);
+  const indexOutcome = await refreshIndex(ctx, fromOwner, to);
   return finishMemoryMutation(ctx, frame, committed(content.length, indexOutcome, `Renamed ${from} to ${to}`));
 }
 
@@ -416,22 +436,34 @@ export async function shouldDream(ctx: AgentMemories): Promise<boolean> {
   if (g.minWritesSinceLast !== undefined && state.writes < g.minWritesSinceLast) return false;
   if (g.minTurnsSinceLast !== undefined && state.turns < g.minTurnsSinceLast) return false;
   if (g.minFiles !== undefined) {
+    // **只数 session 层**:整理的范围就这一层,拿别的层的文件数来开这道门是把门开在别人身上
     let count = 0;
     for (const m of ctx.memories.values()) {
-      if (typeof m.path !== "string" || !m.path.endsWith("/")) continue;
-      const files = await ctx.dir.list(m.path);
-      count += files.filter((f) => !f.endsWith(`/${MEMORY_INDEX_FILE}`)).length; // 索引不是一条记忆
+      for (const { scope, path } of memoryPaths(m)) {
+        if (scope !== DREAM_SCOPE || !path.endsWith("/")) continue;
+        const files = await ctx.dir.list(path);
+        count += files.filter((f) => !f.endsWith(`/${MEMORY_INDEX_FILE}`)).length; // 索引不是一条记忆
+      }
     }
     if (count < g.minFiles) return false;
   }
   return true;
 }
 
-/** 备整理任务的料并上锁。拿去派一个**只带这套工具**的 subagent;跑完调 markDreamed()。 */
+/**
+ * 备整理任务的料并上锁。拿去派一个**只带这套工具**的 subagent;跑完调 markDreamed()。
+ *
+ * 工具是**限定在 session 层**的那一把(不是前台那把):project / user 两层是别的 session
+ * 也在写的,dream 不碰(「切法」第 3 条)。限定在工具上而不是只写进 prompt 里——
+ * 后者是纪律,前者才是门。
+ */
 export async function dreamTask(ctx: AgentMemories): Promise<{ prompt: string; tools: ModelTool[] }> {
   // 上锁也走串行链：它是同一份状态的读改写，和计数并发时会互相盖掉
   await updateDreamState(ctx, (s) => ({ ...s, startedAt: Date.now() }));
-  return { prompt: defaultDreamPrompt(listMemories(ctx)), tools: [memoryTool(ctx)] };
+  return {
+    prompt: defaultDreamPrompt(listMemories(ctx), DREAM_SCOPE),
+    tools: [createMemoryTool(ctx, { ...ctx.toolOpts, scope: DREAM_SCOPE })],
+  };
 }
 
 /** 整理成功后:记时间、放锁、清计数。整理失败不调它——锁 1 小时后自动过期。 */
@@ -578,7 +610,7 @@ async function writeMemory(
     return finishMemoryMutation(ctx, frame, failed("write", errText(e)));
   }
   await bumpWriteCounter(ctx);
-  const indexOutcome = await refreshIndex(ctx, owner);
+  const indexOutcome = await refreshIndex(ctx, owner, path);
   return finishMemoryMutation(ctx, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length)));
 }
 
@@ -592,25 +624,30 @@ function guardIndexFile(path: string): string | null {
 
 /**
  * indexed 分区的落盘索引:每次写方法成功后重建(CC 的 MEMORY.md 同款)。
+ * **只重建被写的那一层**——索引一层一份,别的层是别的 session 在写的,不该被这次写入顺手覆盖。
  * 保持 no-throw + report，但把结果交出去：主 mutation 仍 committed，`indexOutcome:"failed"` 必须可见。
  */
-async function refreshIndex(ctx: AgentMemories, owner: AnyMemory | undefined): Promise<MemoryIndexOutcome> {
+async function refreshIndex(ctx: AgentMemories, owner: AnyMemory | undefined, path: string): Promise<MemoryIndexOutcome> {
   if (owner === undefined || owner.mode !== "indexed") return "not-applicable";
   const im = owner as IndexedMemory;
+  const scope = splitScopePath(path)?.scope;
+  if (scope === undefined) return "not-applicable";
+  const dirPath = `${scope}/${im.path}`;
   try {
-    const entries = await indexEntries(im, ctx.dir);
-    await ctx.dir.write(`${im.path}${MEMORY_INDEX_FILE}`, renderIndex(entries));
+    const entries = await indexEntries(im, ctx.dir, scope);
+    await ctx.dir.write(`${dirPath}${MEMORY_INDEX_FILE}`, renderIndex(entries));
     return "ok";
   } catch (e) {
-    ctx.report?.({ code: "memory_index_rebuild_failed", message: errText(e), path: im.path });
+    ctx.report?.({ code: "memory_index_rebuild_failed", message: errText(e), path: dirPath });
     return "failed";
   }
 }
 
 function describeRegions(ctx: AgentMemories): string {
   return [...ctx.memories.values()]
-    .filter((m) => typeof m.path === "string" && m.path !== "")
-    .map((m) => `${m.name} (${String(m.path)})`)
+    .map((m) => ({ m, paths: memoryPaths(m).map((p) => p.path) }))
+    .filter((r) => r.paths.length > 0)
+    .map((r) => `${r.m.name} (${r.paths.join(", ")})`)
     .join(", ");
 }
 

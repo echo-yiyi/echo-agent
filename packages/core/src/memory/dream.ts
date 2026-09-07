@@ -9,7 +9,8 @@
 // 满足就自己跑一轮只带 memory 工具的整理(2026-08-19 归属变更,此前写的是「调度归装配方、执行归 subagent」)。
 // 计数(writes/turns)也落在这个 state.json 里:只在内存的话进程一重启就归零。
 
-import type { AnyMemory, MemoryDir } from "./types.ts";
+import type { MemoryScope } from "./scope.ts";
+import { memoryPaths, type AnyMemory, type MemoryDir } from "./types.ts";
 
 export type DreamGates = {
   /** 上次整理以来的记忆写入次数 ≥ N 才触发。 */
@@ -32,7 +33,15 @@ export const DEFAULT_DREAM_GATES: DreamGates = {
 /** 锁的崩溃恢复:整理 agent 死了没 markDreamed,1 小时后锁自动过期(CC 同款)。 */
 export const DREAM_LOCK_STALE_MS = 3600_000;
 
-export const DREAM_STATE_PATH = ".dream/state.json";
+/**
+ * **状态住在 session 层**(2026-09-07,三级作用域):计数与锁都是这一段 session 自己的事。
+ * 从前它在共享的那一层,于是 N 段 session 共用一份计数、抢同一把软锁——
+ * dream 只整理 session 层之后,状态跟着下来,并发整理这件事在结构上就不成立了。
+ */
+export const DREAM_STATE_PATH = "session/.dream/state.json";
+
+/** dream 只整理这一层(「切法」第 3 条:不碰 project / user 两层)。 */
+export const DREAM_SCOPE: MemoryScope = "session";
 
 export type DreamState = {
   lastAt: number | null;
@@ -75,17 +84,21 @@ export async function writeDreamState(dir: MemoryDir, state: DreamState): Promis
   await dir.write(DREAM_STATE_PATH, JSON.stringify(state));
 }
 
-/** 整理任务的缺省 prompt。上层要换语气 / 换策略,整段替换即可(它只是文本)。 */
-export function defaultDreamPrompt(memories: readonly AnyMemory[]): string {
+/**
+ * 整理任务的缺省 prompt。上层要换语气 / 换策略,整段替换即可(它只是文本)。
+ * **只讲 `scope` 那一层的分区**——别的层不在这次整理的范围里,列出来只会诱它去写。
+ */
+export function defaultDreamPrompt(memories: readonly AnyMemory[], scope: MemoryScope): string {
   const regions = memories
-    .filter((m) => typeof m.path === "string" && m.path !== "")
-    .map((m) => {
+    .flatMap((m) => memoryPaths(m).filter((p) => p.scope === scope).map((p) => ({ m, path: p.path })))
+    .map(({ m, path }) => {
       const budget = "budget" in m && typeof m.budget === "number" ? `, budget ${m.budget} characters` : "";
-      return `- ${m.name} (${String(m.path)}${budget}): ${m.instructions ?? ""}`;
+      return `- ${m.name} (${path}${budget}): ${m.instructions ?? ""}`;
     })
     .join("\n");
   return (
-    "Consolidate your persistent memory (use only the memory tool; view everything before changing anything):\n" +
+    `Consolidate the ${scope}/ layer of your persistent memory (use only the memory tool; view everything before changing anything).\n` +
+    `Stay inside ${scope}/: the other layers are shared with other sessions and are not yours to reorganize here.\n` +
     "1. Deduplicate: the same fact recorded in several places becomes one denser entry.\n" +
     "2. Prune: delete what is outdated, contradicted by later facts, or clearly one-off.\n" +
     "3. Conflicts: when two entries disagree, keep the one with evidence; if unsure, keep both and mark the doubt.\n" +

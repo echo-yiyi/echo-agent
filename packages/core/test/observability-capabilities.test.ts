@@ -65,11 +65,11 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
 
   test("committed：create / str_replace / insert / delete / rename 各一条；indexed 分区 indexOutcome=ok；rename 不双发 create", async () => {
     const { ctx, facts } = memoriesWith(new InMemoryDir());
-    expect((await memoryCreate(ctx, "memory/a.md", "hello")).isError).toBe(false);
-    expect((await memoryStrReplace(ctx, "memory/a.md", "hello", "hi")).isError).toBe(false);
-    expect((await memoryInsert(ctx, "memory/a.md", 1, "more")).isError).toBe(false);
-    expect((await memoryRename(ctx, "memory/a.md", "memory/b.md")).isError).toBe(false);
-    expect((await memoryDelete(ctx, "memory/b.md")).isError).toBe(false);
+    expect((await memoryCreate(ctx, "user/memory/a.md", "hello")).isError).toBe(false);
+    expect((await memoryStrReplace(ctx, "user/memory/a.md", "hello", "hi")).isError).toBe(false);
+    expect((await memoryInsert(ctx, "user/memory/a.md", 1, "more")).isError).toBe(false);
+    expect((await memoryRename(ctx, "user/memory/a.md", "user/memory/b.md")).isError).toBe(false);
+    expect((await memoryDelete(ctx, "user/memory/b.md")).isError).toBe(false);
     expect(facts.map((f) => (f.kind === "mutation" ? `${f.operation}:${f.outcome}` : f.kind))).toEqual([
       "create:committed",
       "replace:committed",
@@ -78,31 +78,31 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
       "delete:committed",
     ]);
     const rename = facts[3];
-    expect(rename).toMatchObject({ kind: "mutation", operation: "rename", path: "memory/a.md", toPath: "memory/b.md", partition: "memory", mode: "indexed", indexOutcome: "ok" });
+    expect(rename).toMatchObject({ kind: "mutation", operation: "rename", path: "user/memory/a.md", toPath: "user/memory/b.md", partition: "memory", mode: "indexed", indexOutcome: "ok" });
     expect(facts[0]).toMatchObject({ chars: 5, indexOutcome: "ok" });
     // resident 分区：indexOutcome not-applicable
-    expect((await memoryCreate(ctx, "agent.md", "resident")).isError).toBe(false);
+    expect((await memoryCreate(ctx, "user/agent.md", "resident")).isError).toBe(false);
     expect(facts[5]).toMatchObject({ operation: "create", outcome: "committed", partition: "agent", mode: "resident", indexOutcome: "not-applicable" });
   });
 
   test("rejected：语义拒绝各有 reasonCode，原文保持从前的报文", async () => {
     const { ctx, facts } = memoriesWith(new InMemoryDir());
-    await memoryCreate(ctx, "memory/a.md", "x");
+    await memoryCreate(ctx, "user/memory/a.md", "x");
     facts.length = 0;
     // thunk 而不是 promise：逐个顺序跑，`facts.at(-1)` 才对应当前这一条
     const cases: [() => Promise<{ isError: boolean; content: string }>, string, string][] = [
-      [() => memoryStrReplace(ctx, "memory/a.md", "nope", "y"), "old_str_not_found", "old_str not found"],
-      [() => memoryStrReplace(ctx, "memory/a.md", "", "y"), "empty_old_str", "str_replace needs old_str"],
-      [() => memoryInsert(ctx, "memory/a.md", -1, "y"), "bad_line", "insert_line must be an integer"],
-      [() => memoryInsert(ctx, "memory/a.md", 99, "y"), "line_out_of_range", "out of range"],
-      [() => memoryInsert(ctx, "memory/zzz.md", 0, "y"), "not_found", "does not exist"],
-      [() => memoryDelete(ctx, "memory/zzz.md"), "not_found", "does not exist"],
-      [() => memoryDelete(ctx, "memory/"), "not_a_file", "not a directory"],
-      [() => memoryCreate(ctx, "memory/INDEX.md", "x"), "index_file_protected", "system-maintained index"],
+      [() => memoryStrReplace(ctx, "user/memory/a.md", "nope", "y"), "old_str_not_found", "old_str not found"],
+      [() => memoryStrReplace(ctx, "user/memory/a.md", "", "y"), "empty_old_str", "str_replace needs old_str"],
+      [() => memoryInsert(ctx, "user/memory/a.md", -1, "y"), "bad_line", "insert_line must be an integer"],
+      [() => memoryInsert(ctx, "user/memory/a.md", 99, "y"), "line_out_of_range", "out of range"],
+      [() => memoryInsert(ctx, "user/memory/zzz.md", 0, "y"), "not_found", "does not exist"],
+      [() => memoryDelete(ctx, "user/memory/zzz.md"), "not_found", "does not exist"],
+      [() => memoryDelete(ctx, "user/memory/"), "not_a_file", "not a directory"],
+      [() => memoryCreate(ctx, "user/memory/INDEX.md", "x"), "index_file_protected", "system-maintained index"],
       [() => memoryCreate(ctx, "elsewhere/x.md", "x"), "outside_regions", "not inside any memory region"],
-      [() => memoryCreate(ctx, "agent.md", "a".repeat(61)), "budget_exceeded", "would exceed its budget"],
-      [() => memoryRename(ctx, "memory/a.md", "agent.md"), "cross_region", "must stay within one region"],
-      [() => memoryRename(ctx, "memory/nope.md", "memory/c.md"), "not_found", "does not exist"],
+      [() => memoryCreate(ctx, "user/agent.md", "a".repeat(61)), "budget_exceeded", "would exceed its budget"],
+      [() => memoryRename(ctx, "user/memory/a.md", "user/agent.md"), "cross_region", "must stay within one region"],
+      [() => memoryRename(ctx, "user/memory/nope.md", "user/memory/c.md"), "not_found", "does not exist"],
       [() => memoryCreate(ctx, "../escape.md", "x"), "invalid_path", "Invalid path"],
     ];
     for (const [run, code, text] of cases) {
@@ -114,9 +114,9 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
       const f = facts.at(-1);
       expect(f).toMatchObject({ kind: "mutation", outcome: "rejected", reasonCode: code, message: r.content });
     }
-    await memoryCreate(ctx, "memory/c.md", "x");
+    await memoryCreate(ctx, "user/memory/c.md", "x");
     facts.length = 0;
-    const r = await memoryRename(ctx, "memory/a.md", "memory/c.md");
+    const r = await memoryRename(ctx, "user/memory/a.md", "user/memory/c.md");
     expect(r.content).toContain("already exists");
     expect(facts).toEqual([expect.objectContaining({ operation: "rename", outcome: "rejected", reasonCode: "target_exists" })]);
     expect(facts.length).toBe(1);
@@ -125,28 +125,28 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
   test("failed：primary I/O 抛错且数据未变 → failed + stage；partial：rename 目标已建、源删失败 → partial(remove-source)", async () => {
     const base = new InMemoryDir();
     const { ctx: seed } = memoriesWith(base);
-    await memoryCreate(seed, "memory/a.md", "x");
+    await memoryCreate(seed, "user/memory/a.md", "x");
 
-    const writeFails = memoriesWith(faultyDir(base, { write: (p) => p === "memory/b.md" }));
-    const w = await memoryCreate(writeFails.ctx, "memory/b.md", "y");
+    const writeFails = memoriesWith(faultyDir(base, { write: (p) => p === "user/memory/b.md" }));
+    const w = await memoryCreate(writeFails.ctx, "user/memory/b.md", "y");
     expect(w.isError).toBe(true);
     expect(writeFails.facts).toEqual([expect.objectContaining({ operation: "create", outcome: "failed", stage: "write" })]);
 
-    const readFails = memoriesWith(faultyDir(base, { read: (p) => p === "memory/a.md" }));
-    const r = await memoryStrReplace(readFails.ctx, "memory/a.md", "x", "y");
+    const readFails = memoriesWith(faultyDir(base, { read: (p) => p === "user/memory/a.md" }));
+    const r = await memoryStrReplace(readFails.ctx, "user/memory/a.md", "x", "y");
     expect(r.isError).toBe(true);
     expect(readFails.facts).toEqual([expect.objectContaining({ operation: "replace", outcome: "failed", stage: "read" })]);
 
-    const removeFails = memoriesWith(faultyDir(base, { remove: (p) => p === "memory/a.md" }));
-    const d = await memoryDelete(removeFails.ctx, "memory/a.md");
+    const removeFails = memoriesWith(faultyDir(base, { remove: (p) => p === "user/memory/a.md" }));
+    const d = await memoryDelete(removeFails.ctx, "user/memory/a.md");
     expect(d.isError).toBe(true);
     expect(removeFails.facts).toEqual([expect.objectContaining({ operation: "delete", outcome: "failed", stage: "remove" })]);
 
-    const rn = await memoryRename(removeFails.ctx, "memory/a.md", "memory/moved.md");
+    const rn = await memoryRename(removeFails.ctx, "user/memory/a.md", "user/memory/moved.md");
     expect(rn.isError).toBe(true);
     expect(rn.content).toContain("failed to remove the source");
     expect(removeFails.facts[1]).toMatchObject({ operation: "rename", outcome: "partial", stage: "remove-source", indexOutcome: "ok" });
-    expect(await base.read("memory/moved.md")).toBe("x"); // 目标确实建了：partial 不是谎报
+    expect(await base.read("user/memory/moved.md")).toBe("x"); // 目标确实建了：partial 不是谎报
     expect(removeFails.facts.length).toBe(2);
   });
 
@@ -155,7 +155,7 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
     const diags: string[] = [];
     const { ctx, facts } = memoriesWith(faultyDir(base, { write: (p) => p.endsWith("/INDEX.md") }));
     ctx.report = (d) => void diags.push(d.code);
-    const r = await memoryCreate(ctx, "memory/a.md", "x");
+    const r = await memoryCreate(ctx, "user/memory/a.md", "x");
     expect(r.isError).toBe(false);
     expect(facts).toEqual([expect.objectContaining({ operation: "create", outcome: "committed", indexOutcome: "failed" })]);
     expect(diags).toContain("memory_index_rebuild_failed");
@@ -163,7 +163,7 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
 
   test("compose：renderMemorySystem 出数据时发一条 compose 计数", async () => {
     const { ctx, facts } = memoriesWith(new InMemoryDir());
-    await memoryCreate(ctx, "agent.md", "who I am");
+    await memoryCreate(ctx, "user/agent.md", "who I am");
     facts.length = 0;
     const text = await renderMemorySystem(ctx);
     expect(text).toContain("who I am");
@@ -172,7 +172,7 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
 
   test("descriptor：metadata 只有 pathDigest（HMAC）与 reasonDigest，无明文 path / message；content 才有；off 不投影；rename 有 from/to digest", () => {
     const d = memoryFactDescriptor({ pathDigestKey: "k".repeat(32) });
-    const fact: MemoryFact = { kind: "mutation", operation: "rename", outcome: "rejected", path: "memory/a.md", toPath: "memory/b.md", partition: "memory", mode: "indexed", reasonCode: "target_exists", message: "Target 'memory/b.md' already exists", occurredAt: 1 };
+    const fact: MemoryFact = { kind: "mutation", operation: "rename", outcome: "rejected", path: "user/memory/a.md", toPath: "user/memory/b.md", partition: "memory", mode: "indexed", reasonCode: "target_exists", message: "Target 'memory/b.md' already exists", occurredAt: 1 };
     const meta = d.project(fact, "metadata")!;
     expect(meta.name).toBe("memory.mutation.rejected");
     expect(meta.attributes).toEqual({ operation: "rename", outcome: "rejected", partition: "memory", mode: "indexed", reasonCode: "target_exists" });
@@ -180,11 +180,11 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
     expect(typeof body.fromPathDigest).toBe("string");
     expect(typeof body.toPathDigest).toBe("string");
     expect(body.fromPathDigest).not.toBe(body.toPathDigest);
-    expect(JSON.stringify(meta)).not.toContain("memory/a.md");
+    expect(JSON.stringify(meta)).not.toContain("user/memory/a.md");
     expect(JSON.stringify(meta)).not.toContain("already exists");
     expect(typeof body.reasonDigest).toBe("string");
     const content = d.project(fact, "content")!.body as Record<string, unknown>;
-    expect(content.path).toBe("memory/a.md");
+    expect(content.path).toBe("user/memory/a.md");
     expect(content.message).toContain("already exists");
     expect(d.project(fact, "off")).toBeNull();
     // 同一 key 同一 path → 同一 digest（跨 run 可关联）；不同 key → 不同 digest
@@ -322,7 +322,7 @@ describe("完整 Runtime：run 内的 Memory 事实由 getRun 取得，run 外�
     const root = await mkdtemp(join(tmpdir(), "echo-obs-cap-"));
     temps.push(root);
     const echo = await createEcho({
-      provider: scripted([toolTurn("c1", "memory", { command: "create", path: "memory/note.md", file_text: "remember this" }), textTurn("saved")]),
+      provider: scripted([toolTurn("c1", "memory", { command: "create", path: "user/memory/note.md", file_text: "remember this" }), textTurn("saved")]),
       allowNetwork: false,
       stateDir: join(root, "state"),
       extensionDirs: [],

@@ -1,9 +1,10 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "../src/create-agent.ts";
+import { projectPrefix } from "../src/memory/scope.ts";
 import { SessionService, listSessions } from "../src/session/service.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
 import { createProvider } from "../src/provider/models.ts";
@@ -181,23 +182,73 @@ test("缺省每次启动新建会话，各占一个目录；显式 sessionId 才
   expect((await new SessionService(new InMemoryDir()).createOrResume("x", { workspace: "/w" })).info.agent).toBe("default");
 });
 
-test("记忆与技能在 user 层，不跟着状态根下沉到 session 目录", async () => {
-  // 没有这条时：状态根成了 session 目录之后记忆也跟着一段一份——每开一段就失忆一次。
+test("记忆三层各落各的根：user 在 home、project 按 workspace 分、session 才跟着状态根", async () => {
+  // 没有前两层时：状态根成了 session 目录之后记忆也跟着一段一份——每开一段就失忆一次。
+  // 没有第三层时：dream 整理的是所有 session 共写的那一份，两段同时整理就是真冲突。
   const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
   process.env.ECHO_HOME = home;
   const provider = fakeProvider({ id: "t", models: ["only"] });
-  const agent = await createAgent({ provider, allowNetwork: false });
+  const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a" });
   await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
   await agent.start();
+  await agent.prompt("你好"); // 说一句：一句话没说的段收摊时连目录一起撤，session 层记忆跟着它走
   const memoryTool = agent.tools.get("memory");
   expect(memoryTool).toBeDefined();
-  await memoryTool!.execute(
-    { command: "create", path: "memory/fact.md", file_text: "bun test 跑测试" },
-    { toolCallId: "c1", workspace: "/w", sessionId: agent.state.sessionId, iteration: 0 },
-  );
+  const write = async (path: string, text: string): Promise<void> => {
+    const r = await memoryTool!.execute(
+      { command: "create", path, file_text: text },
+      { toolCallId: "c1", workspace: "/repo/a", sessionId: agent.state.sessionId, iteration: 0 },
+    );
+    expect([path, r.isError]).toEqual([path, false]);
+  };
+  await write("user/memory/fact.md", "bun test 跑测试");
+  await write("project/agent.md", "这个仓库用 bun");
+  await write("session/memory/scratch.md", "这一段在查的东西");
+  const sessionId = agent.state.sessionId!;
   await agent.stop();
+
+  const projectDir = join(home, projectPrefix("/repo/a"));
   expect(existsSync(join(home, "memory", "memory", "fact.md"))).toBe(true);
-  expect(existsSync(join(home, "sessions", agent.state.sessionId!, "memory"))).toBe(false);
+  expect(existsSync(join(projectDir, "memory", "agent.md"))).toBe(true);
+  expect(existsSync(join(home, "sessions", sessionId, "memory", "memory", "scratch.md"))).toBe(true);
+  // 哈希撞了没人会发现，所以目录里留一份原路径
+  expect(JSON.parse(readFileSync(join(projectDir, "workspace.json"), "utf8"))).toEqual({ workspace: "/repo/a" });
+});
+
+test("project 层的 workspace.json 对不上 = 装配判红（48 位哈希撞了不许静默混记忆）", async () => {
+  const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  // 伪造一次哈希撞车：这个目录说自己是另一个项目的
+  const dir = join(home, projectPrefix("/repo/a"));
+  await mkdir(dir, { recursive: true });
+  writeFileSync(join(dir, "workspace.json"), JSON.stringify({ workspace: "/somewhere/else" }));
+  await expect(createAgent({ provider, allowNetwork: false, workspace: "/repo/a" })).rejects.toThrow("project 层目录撞了");
+  // 关了记忆的那条路不该被它挡住
+  const ok = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", withoutMemory: true });
+  await ok.stop();
+});
+
+test("两个 workspace 的 project 层互不可见，user 层是同一份", async () => {
+  const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const exec = async (agent: Awaited<ReturnType<typeof createAgent>>, params: Record<string, unknown>) =>
+    agent.tools.get("memory")!.execute(params, { toolCallId: "c", workspace: "/w", sessionId: agent.state.sessionId, iteration: 0 });
+
+  const a = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a" });
+  await mountBuiltinTools(a);
+  await a.start();
+  await exec(a, { command: "create", path: "project/agent.md", file_text: "A 的项目事实" });
+  await exec(a, { command: "create", path: "user/agent.md", file_text: "跨项目的事实" });
+  await a.stop();
+
+  const b = await createAgent({ provider, allowNetwork: false, workspace: "/repo/b" });
+  await mountBuiltinTools(b);
+  await b.start();
+  expect((await exec(b, { command: "view", path: "project/agent.md" })).isError).toBe(true); // 看不到 A 的
+  expect((await exec(b, { command: "view", path: "user/agent.md" })).content).toContain("跨项目的事实");
+  await b.stop();
 });
 
 test("resume 时 workspace 以盘上为准：换个目录打开同一个 session，workspace 不跟着进程走", async () => {
