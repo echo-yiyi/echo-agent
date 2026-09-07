@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { EchoSessions, NO_SESSION_FACE, type SessionRow } from "../src/session/sessions.ts";
 import { makeSessionTools, sessionToolsSection } from "../src/session/tools.ts";
 import { listSessions, SessionService } from "../src/session/service.ts";
-import type { AgentRef } from "../src/agent-def/types.ts";
+import type { AgentDefinition, AgentRef } from "../src/agent-def/types.ts";
 import { InboxStore } from "../src/inbox/store.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { writeSessionPhase } from "../src/session/status.ts";
@@ -38,7 +38,17 @@ type Harness = {
   readonly ran: SessionRow[];
 };
 
-function harness(opts: { selfId?: string; run?: (row: SessionRow) => Promise<void>; runTimeoutMs?: number } = {}): Harness {
+function harness(
+  opts: {
+    selfId?: string;
+    run?: (row: SessionRow) => Promise<void>;
+    runTimeoutMs?: number;
+    /** 创建者此刻的工作集——不越权检查读它。 */
+    tools?: readonly string[];
+    /** 容器认得的具名 agent 定义。不给 = 一份都没有，点名一律判红。 */
+    agentDefs?: ReadonlyMap<string, AgentDefinition>;
+  } = {},
+): Harness {
   const root = new InMemoryDir();
   const alive = new Set<string>();
   const ran: SessionRow[] = [];
@@ -46,7 +56,8 @@ function harness(opts: { selfId?: string; run?: (row: SessionRow) => Promise<voi
     root,
     storeFor: (id) => scoped(root, `${id}/`),
     isAlive: async (id) => alive.has(id),
-    self: () => ({ sessionId: opts.selfId ?? "s-self", product: "echo-agent", workspace: "/repo" , tools: [] }),
+    self: () => ({ sessionId: opts.selfId ?? "s-self", product: "echo-agent", workspace: "/repo", tools: opts.tools ?? [] }),
+    ...(opts.agentDefs !== undefined ? { agentDefs: () => opts.agentDefs! } : {}),
     ...(opts.run !== undefined
       ? {
           run: async (row: SessionRow) => {
@@ -264,6 +275,55 @@ test("工具面：习惯段只在能派活时讲派活；异步这条两种情�
   for (const text of [withCreate, without]) {
     expect(text).toContain("does not wait for a reply"); // 异步是这组工具最容易被误解的一条
   }
+});
+
+test("工具面：session_create 的 agent 参数——按名点中、现写一份、不点就是产品原样", async () => {
+  // 没有这个参数时（2026-09-07 之前）模型开不出 reviewer 段：角色只有容器给得了，
+  // 而「派一个只读审查去看 PR」正是这组工具最该能干的事。
+  // 创建者手上要有 read_file——**不越权对具名定义一视同仁**：人写在 reviewer.md 里的工具，
+  // 也不能让一个被收紧过的段派出比自己更宽的段。
+  const h = harness({
+    run: async () => {},
+    tools: ["read_file", "shell"],
+    agentDefs: new Map([["reviewer", { identity: "你是代码审查员。", tools: ["read_file"] }]]),
+  });
+  const create = makeSessionTools(h.sessions, { canCreate: true })[0]!;
+
+  const byName = await create.execute({ message: "看 PR 42", agent: "reviewer" }, ctx());
+  expect(byName.isError).toBe(false);
+  expect(JSON.stringify(byName)).toContain("agent reviewer"); // 点中了要说出来，模型才确认得了
+  expect((await listSessions(h.root)).find((i) => i.agent.name === "reviewer")?.agent.definition.identity).toBe("你是代码审查员。");
+
+  const inline = await create.execute({ message: "跑一下", agent: { identity: "你只跑测试。", tools: ["read_file"] } }, ctx());
+  expect(inline.isError).toBe(false);
+  expect(JSON.stringify(inline)).toContain("agent inline");
+
+  const plain = await create.execute({ message: "随便干点啥" }, ctx());
+  expect(JSON.stringify(plain)).toContain("agent default"); // 不点 = 产品原样，**不继承创建者的**
+});
+
+test("工具面：agent 参数验形——名字不存在、越权、形状不对，各说各的且盘上不留半段", async () => {
+  // 三条都必须在**动盘之前**判掉：判红却留下一个目录，清单里就多一段永远不会跑的会话。
+  const h = harness({ run: async () => {}, tools: ["read_file"], agentDefs: new Map() });
+  const create = makeSessionTools(h.sessions, { canCreate: true })[0]!;
+
+  const noSuch = await create.execute({ message: "干活", agent: "nobody" }, ctx());
+  expect(noSuch.isError).toBe(true);
+  expect(JSON.stringify(noSuch)).toContain("nobody");
+
+  // 越权：创建者手上只有 read_file，点了它没有的 shell
+  const escalate = await create.execute({ message: "干活", agent: { tools: ["read_file", "shell"] } }, ctx());
+  expect(escalate.isError).toBe(true);
+  expect(JSON.stringify(escalate)).toContain("shell");
+
+  const badShape = await create.execute({ message: "干活", agent: { identity: "x", persona: "y" } }, ctx());
+  expect(badShape.isError).toBe(true);
+  expect(JSON.stringify(badShape)).toContain("persona"); // 多出来的键不静默丢掉
+
+  const empty = await create.execute({ message: "干活", agent: {} }, ctx());
+  expect(empty.isError).toBe(true);
+
+  expect(await listSessions(h.root)).toEqual([]); // 四次判红，盘上一段都没有
 });
 
 test("工具面：session_create 建出来的一律不是 main（扇出只有一层）", async () => {

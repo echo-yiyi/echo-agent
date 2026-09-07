@@ -14,12 +14,8 @@ import { errText } from "../errors.ts";
 import { PROMPT_ORDER, type PromptSection } from "../prompt/types.ts";
 import { toolError, toolOk, type ModelTool } from "../tools/types.ts";
 import type { EchoSessions, SessionRow } from "./sessions.ts";
+import type { AgentDefinition } from "../agent-def/types.ts";
 
-/**
- * **暂时没有 `agent` 参数**：「按名挑一个 agent 定义」要等 agent 打包那一步（sessions.md §4）落地。
- * 在那之前让模型点名一个身份，等于工具收下了一个没人兑现的参数——新建的那段仍然跑容器挂的那一套。
- * 少一个参数比多一个假参数好。
- */
 export type SessionToolsOptions = {
   /** 挂不挂 `session_create`。装配层按「是不是 main」与「容器给没给 runner」决定。 */
   readonly canCreate: boolean;
@@ -41,7 +37,9 @@ export function makeSessionTools(sessions: EchoSessions, opts: SessionToolsOptio
 export function sessionToolsSection(opts: SessionToolsOptions): PromptSection {
   const create = opts.canCreate
     ? "Use session_create when a piece of work is better done by a separate agent working on its own: it gets its own " +
-      "conversation, its own working directory, and its own inbox. The new session cannot create further sessions.\n"
+      "conversation, its own working directory, and its own inbox. The new session cannot create further sessions.\n" +
+      "It is not a copy of you: it starts as the plain product unless you give it an agent, and it never inherits yours. " +
+      "Whatever you give it can only narrow what you already have, never widen it.\n"
     : "";
   return {
     name: "tool:sessions",
@@ -77,27 +75,82 @@ function describe(row: SessionRow, canWake: boolean): string {
   return `${row.id}  ${row.name}  [${row.agent}]  ${where}  ${row.workspace}`;
 }
 
-function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?: string; workspace?: string }> {
+/**
+ * `agent` 参数的验形。**两种形状**（2026-09-07，角色定义）：
+ * 名字（从三处来源那张表里找）或现写一份。给了别的东西就说清楚要什么，别猜。
+ *
+ * 现写的那份**只认三项**：多出来的键一律判红——静默丢掉一个模型以为生效了的字段，
+ * 是「看起来能用其实没用」的典型，而它写下那个键正是因为它想要那个效果。
+ */
+function parseAgentParam(raw: unknown): { ok: true; value: string | AgentDefinition } | { ok: false; why: string } {
+  if (typeof raw === "string") {
+    return raw.trim() === "" ? { ok: false, why: "agent must not be empty: give a defined agent's name, or an inline definition" } : { ok: true, value: raw };
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, why: "agent must be a name (string) or an inline definition object with identity / tools / model" };
+  }
+  const d = raw as Record<string, unknown>;
+  const extra = Object.keys(d).filter((k) => k !== "identity" && k !== "tools" && k !== "model");
+  if (extra.length > 0) return { ok: false, why: `inline agent definition has no field(s) ${extra.join(", ")}; only identity, tools and model exist` };
+  if (d["identity"] !== undefined && typeof d["identity"] !== "string") return { ok: false, why: "agent.identity must be a string" };
+  if (d["model"] !== undefined && typeof d["model"] !== "string") return { ok: false, why: "agent.model must be a string" };
+  if (d["tools"] !== undefined && (!Array.isArray(d["tools"]) || d["tools"].some((t) => typeof t !== "string"))) {
+    return { ok: false, why: "agent.tools must be an array of tool names" };
+  }
+  if (d["identity"] === undefined && d["tools"] === undefined && d["model"] === undefined) {
+    return { ok: false, why: "inline agent definition is empty: give at least one of identity, tools, model" };
+  }
+  return { ok: true, value: d as AgentDefinition };
+}
+
+function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?: string; workspace?: string; agent?: unknown }> {
   return {
     kind: "model",
     name: "session_create",
     label: "开一段会话",
     description:
       "Start another session and give it a first instruction. It runs on its own from then on: " +
-      "separate conversation, separate inbox, no access to yours, same agent as you. Returns its id — " +
-      "use session_send to say more to it. Its answers come back to you as messages, not as the result of this call.",
+      "separate conversation, separate inbox, no access to yours. Returns its id — " +
+      "use session_send to say more to it. Its answers come back to you as messages, not as the result of this call.\n" +
+      "By default it runs the plain product with no agent definition. Pass 'agent' to give it one: the name of a " +
+      "defined agent, or an inline definition. An inline definition may only narrow what you already have — " +
+      "its tools must be a subset of yours, or the call is refused.",
     parameters: {
       type: "object",
       properties: {
         message: { type: "string", description: "The first instruction for the new session — what you want it to do" },
         name: { type: "string", description: "Short human-readable name, e.g. 'review PR 42'" },
         workspace: { type: "string", description: "Absolute path it works in; defaults to yours" },
+        agent: {
+          description:
+            "Which agent the new session is: the name of a defined agent (e.g. 'reviewer'), or an inline definition. " +
+            "Omit for the plain product. Not inherited from you.",
+          oneOf: [
+            { type: "string", description: "Name of a defined agent; refused if no agent by that name exists" },
+            {
+              type: "object",
+              description: "An agent written out here and now",
+              properties: {
+                identity: { type: "string", description: "Replaces the product identity: who this session is" },
+                tools: { type: "array", items: { type: "string" }, description: "Tool names it may use — must be a subset of yours" },
+                model: { type: "string", description: "Model id; defaults to the product's" },
+              },
+            },
+          ],
+        },
       },
       required: ["message"],
     },
     async execute(params) {
       if (typeof params.message !== "string" || params.message.trim() === "") {
         return toolError("message is required: a session is started to do something");
+      }
+      // 验形在**动盘之前**，与 `sessions.create` 里的不越权检查同一条纪律：判红时盘上不留半段会话
+      let agent: string | AgentDefinition | undefined;
+      if (params.agent !== undefined) {
+        const parsed = parseAgentParam(params.agent);
+        if (!parsed.ok) return toolError(parsed.why);
+        agent = parsed.value;
       }
       try {
         // **main: false**：经工具建的一律不是 main，所以它自己没有 session_create（扇出只有一层）
@@ -106,8 +159,10 @@ function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?:
           main: false,
           ...(params.name !== undefined ? { name: params.name } : {}),
           ...(params.workspace !== undefined ? { workspace: params.workspace } : {}),
+          ...(agent !== undefined ? { agent } : {}),
         });
-        return toolOk(`Started session ${row.id} (${row.name}). It has your first message; its replies arrive as messages.`);
+        // 把它**是谁**说出来：模型点了名的话得能确认点中了，没点就该看到它是产品原样
+        return toolOk(`Started session ${row.id} (${row.name}), agent ${row.agent}. It has your first message; its replies arrive as messages.`);
       } catch (e) {
         return toolError(errText(e));
       }
@@ -121,13 +176,13 @@ function listTool(sessions: EchoSessions): ModelTool<{ workspace?: string; agent
     name: "session_list",
     label: "会话列表",
     description:
-      "List the other sessions: id, name, which agent it is, whether it is running right now, and its working directory. " +
+      "List the other sessions: id, name, which agent it runs, whether it is running right now, and its working directory. " +
       "Closed sessions are left out unless you ask for them.",
     parameters: {
       type: "object",
       properties: {
         workspace: { type: "string", description: "Only sessions working in this directory" },
-        agent: { type: "string", description: "Only sessions of this agent" },
+        agent: { type: "string", description: "Only sessions running this agent, by name ('default' means no agent definition)" },
         include_closed: { type: "boolean", description: "Include sessions that were closed" },
       },
       required: [],
