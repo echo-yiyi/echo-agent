@@ -17,6 +17,7 @@ import {
   createProviderStreams,
   FileCredentialStore,
   FileDir,
+  fileStateLock,
   kimiProvider,
   SessionService,
   listSessions,
@@ -788,6 +789,79 @@ test("缺省不续：同一目录再起一次是新的一段，旧的原样；�
     restore();
   }
 });
+
+/**
+ * 反复敲同一条命令，直到它生效。**不是等一个固定的 sleep**：`start()` 落位之前
+ * `acceptsWork` 是 false，那一小段窗口里 `/resume` 会被顶回去（与收 prompt 同一条判据）。
+ * 赌那个窗口有多长 = 抖动的红。
+ */
+async function feedUntil(ui: ReturnType<typeof fakeTui>, line: string, check: () => boolean, what: string, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  let lastFeed = 0;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    if (Date.now() - lastFeed > 800) {
+      ui.feed(line);
+      ui.feed("\r");
+      lastFeed = Date.now();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`等不到：${what}`);
+}
+
+test("/resume：在界面里换段——收摊这一段、按新 id 重装、界面开回来（续了多少也照说）", async () => {
+  // 没有它就得退出终端、重敲 `--resume <id>`。换实例归这一层：壳只说要去哪一段。
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    const stateDir = join(dir, "state");
+    await seedSession(stateDir, "s-other", { agent: "echo-agent", text: "另一段里说过的" });
+
+    const running = main(["--state-dir", stateDir, "--no-memory", "--extensions", dir], true, { ui, credentials, verify: async () => ({ ok: true }) });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
+    await feedUntil(ui, "/resume s-other", () => ui.screen().includes("[会话] 已切到 s-other"), "换段的口信");
+    // 换过去的那一段是**真起来了**：续了几条是 `agent_start` 报的，不是这层编的
+    await waitFor(() => ui.screen().includes("带着上一场的 1 条"), "续上的条数");
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+}, 20_000);
+
+test("/resume：那一段正被别的写者占着——如实说切不过去，退回刚才那一段，不把终端赔进去", async () => {
+  // 「先放开再去拿」的代价：新的可能拿不到。这时必须回得去，否则一次手滑就把正在用的那段也弄没了。
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    const stateDir = join(dir, "state");
+    await seedSession(stateDir, "s-held", { agent: "echo-agent", text: "别人占着的那段" });
+    await seedSession(stateDir, "s-here", { agent: "echo-agent", text: "我在的这段" });
+    // 冒充另一个终端：**不可被抢占**地占着 s-held，于是换段时的交还请求一律被拒
+    const lease = await fileStateLock(join(stateDir, "s-held", ".lock")).acquire({ holder: "另一个终端" });
+    expect(lease).not.toBeNull();
+
+    const running = main(["--resume", "s-here", "--state-dir", stateDir, "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+      verify: async () => ({ ok: true }),
+    });
+    await waitFor(() => ui.screen().includes("[会话] 续 s-here"), "先在 s-here");
+    await feedUntil(ui, "/resume s-held", () => ui.screen().includes("切不过去"), "换段失败的口信");
+    expect(ui.screen()).toContain("回到 s-here");
+    await waitFor(() => ui.screen().includes("带着上一场的 1 条"), "退回去的那段真起来了");
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+    await lease?.release();
+  } finally {
+    restore();
+  }
+}, 20_000);
 
 test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，也能把没在跑的那段叫起来", async () => {
   // 会话面是**容器的开关**（`CreateEchoOptions.sessions`），core 缺省不挂。这条盯的是 CLI 这个容器

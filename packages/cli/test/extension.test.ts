@@ -75,7 +75,7 @@ test("进程信号才结算 exited——那是「真要退出」", async () => {
   for (let i = 0; i < 50; i++) await Promise.resolve();
 
   controller.abort();
-  expect(await shell.exited).toBe(0);
+  expect(await shell.exited).toEqual({ code: 0 }); // 没有 `resume`：这是「退出」不是「换段」
 });
 
 test("**已经 abort 过**的进程信号：不许挂着——注册监听器等不到一个已经过去的事件", async () => {

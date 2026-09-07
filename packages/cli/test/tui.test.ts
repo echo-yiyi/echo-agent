@@ -2158,6 +2158,130 @@ test("不给 sessions 也能跑：/sessions 说只有这一段（低层用户自
   await done;
 });
 
+/* ─────────────── /resume：挑一段、退出，换实例归装配层 ─────────────── */
+
+/** `/resume` 的常备场景：自己是 s-me，另外两段在盘上。 */
+function resumeFixture(): { ui: ReturnType<typeof fakeTui>; runtime: AgentRuntime; sessions: SessionFace } {
+  const agent = agentWith([textTurn("好")]);
+  return {
+    ui: fakeTui(),
+    runtime: runtimeOf(agent, { state: { ...agent.state, sessionId: "s-me" } as never }),
+    sessions: sessionsWith([
+      row({ id: "a1b2c3d4e5f60000", name: "改接口" }),
+      row({ id: "9988776655443322", name: "看 PR", alive: true, phase: "idle" }),
+      row({ id: "s-me", name: "我自己" }),
+    ]),
+  };
+}
+
+test("/resume <id>：说出要换到哪一段，然后界面自己退出——壳不换 Agent", async () => {
+  // 换实例（租约、收件箱、任务清单、闹钟、观测库）归装配层，壳子只挑段。
+  const { ui, runtime, sessions } = resumeFixture();
+  const resumed: string[] = [];
+  const done = runTui({ agent: runtime, ui, sessions, onResume: (id) => resumed.push(id) });
+  await flush();
+  ui.feed("/resume a1b2c3d4e5f60000");
+  ui.feed(ENTER);
+  await done; // 不用 quit(ui)：切段本身就是退出这一份界面
+  expect(resumed).toEqual(["a1b2c3d4e5f60000"]);
+});
+
+test("/resume：认 id 的前缀，也认名字的一截——16 位十六进制没人照着敲全", async () => {
+  const { ui, runtime, sessions } = resumeFixture();
+  const resumed: string[] = [];
+  const done = runTui({ agent: runtime, ui, sessions, onResume: (id) => resumed.push(id) });
+  await flush();
+  ui.feed("/resume a1b2");
+  ui.feed(ENTER);
+  await done;
+  expect(resumed).toEqual(["a1b2c3d4e5f60000"]);
+
+  const second = resumeFixture();
+  const alsoResumed: string[] = [];
+  const done2 = runTui({ agent: second.runtime, ui: second.ui, sessions: second.sessions, onResume: (id) => alsoResumed.push(id) });
+  await flush();
+  second.ui.feed("/resume 看 PR");
+  second.ui.feed(ENTER);
+  await done2;
+  expect(alsoResumed).toEqual(["9988776655443322"]);
+});
+
+test("/resume：对上多段就把候选摆出来，**不猜**——切错段是打断别人的活", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const resumed: string[] = [];
+  const done = runTui({
+    agent: runtimeOf(agent),
+    ui,
+    sessions: sessionsWith([row({ id: "aa11", name: "前端" }), row({ id: "aa22", name: "后端" })]),
+    onResume: (id) => resumed.push(id),
+  });
+  await flush();
+  ui.feed("/resume aa");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("对上了 2 段");
+  expect(ui.screen()).toContain("aa22");
+  expect(resumed).toEqual([]);
+  quit(ui);
+  await done;
+});
+
+test("/resume：没匹配、不带参数、点到自己——各说各的，都不切", async () => {
+  const { ui, runtime, sessions } = resumeFixture();
+  const resumed: string[] = [];
+  const done = runTui({ agent: runtime, ui, sessions, onResume: (id) => resumed.push(id) });
+  await flush();
+  ui.feed("/resume 不存在的");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("没有匹配");
+  ui.feed("/resume");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("要点名切到哪一段");
+  ui.feed("/resume s-me");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("已经在这一段了");
+  expect(resumed).toEqual([]);
+  quit(ui);
+  await done;
+});
+
+test("/resume：不空就不切——切=收摊这一段，会把在飞的那一轮掐掉（「还没就绪」同一条判据）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const resumed: string[] = [];
+  const done = runTui({
+    agent: runtimeOf(agent, { acceptsWork: false }),
+    ui,
+    sessions: sessionsWith([row({ id: "aa11", name: "前端" })]),
+    onResume: (id) => resumed.push(id),
+  });
+  await flush();
+  ui.feed("/resume aa11");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("先 Esc 中断或等它空下来再切");
+  expect(resumed).toEqual([]);
+  quit(ui);
+  await done;
+});
+
+test("不给 onResume 的低层用法：/resume 如实说一句没地方去，不假装切了", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(agent), ui, sessions: sessionsWith([row({ id: "aa11" })]) });
+  await flush();
+  ui.feed("/resume aa11");
+  ui.feed(ENTER);
+  await flush();
+  expect(ui.screen()).toContain("没有换段的去处");
+  quit(ui);
+  await done;
+});
+
 /* ─────────────── 动效：busy 时状态段转 spinner + 计秒，执行中的工具标记也转；空闲全静止 ─────────────── */
 
 const BRAILLE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;

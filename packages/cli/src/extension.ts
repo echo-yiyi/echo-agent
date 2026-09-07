@@ -21,11 +21,25 @@ import { runTui, type TuiConfigureOptions } from "./app.ts";
 import type { Product } from "./product.ts";
 import { surfaceSection } from "./prompt.ts";
 
+/**
+ * 界面为什么停下来。**退出与换段是两种停法**（2026-09-07）：前者进程收摊，
+ * 后者装配层收摊这一段、按 `resume` 那个 id 重装一份、再把界面开回来。
+ *
+ * 不做成判别联合是因为两者不互斥也不平行：换段之后进程还没有退出码，
+ * `code` 只在没有 `resume` 时才是「进程该以什么码退出」。
+ */
+export type TuiExit = Readonly<{
+  /** 进程退出码。带 `resume` 时它不算数——那一路还没轮到退出。 */
+  code: number;
+  /** 用户敲了 `/resume <id>`：装配层该换到这一段。不换段时缺省。 */
+  resume?: string;
+}>;
+
 export type TuiShell = {
   /** 交给 `createEcho({ extensions: [...] })` 去 mount。 */
   readonly definition: ExtensionDefinition<void>;
-  /** 跑到用户退出（Ctrl+C / Ctrl+D）或被中止。resolve 的是进程退出码。 */
-  readonly exited: Promise<number>;
+  /** 跑到用户退出（Ctrl+C / Ctrl+D）、要换段（`/resume`）或被中止。 */
+  readonly exited: Promise<TuiExit>;
   /**
    * 往运行中的界面塞一条旁白（D6：装配诊断这类**壳外产生**的消息走这里进屏幕）。
    * 界面还没起来时先攒着，起来后一次放行——`createEcho()` 返回在壳 mount 之后，时序天然成立。
@@ -41,12 +55,14 @@ export type TuiShell = {
 export function tuiShell(
   opts: { product?: Pick<Product, "name" | "version">; signal?: AbortSignal; ui?: TUI; configure?: TuiConfigureOptions } = {},
 ): TuiShell {
-  let settle: (code: number) => void = () => {};
+  let settle: (exit: TuiExit) => void = () => {};
   let fail: (e: unknown) => void = () => {};
-  const exited = new Promise<number>((resolve, reject) => {
+  const exited = new Promise<TuiExit>((resolve, reject) => {
     settle = resolve;
     fail = reject;
   });
+  // `/resume <id>` 记在这儿，界面随后就退出——**壳不换 Agent**，它只说要换到哪一段（见 `app.ts` 的 `onResume`）
+  let resumeTo: string | null = null;
 
   // 旁白通道：界面起来前攒着，起来后（runTui 注册 sink）先放行积压、再直通。
   const backlog: string[] = [];
@@ -122,6 +138,9 @@ export function tuiShell(
             sessions,
             signal: stopper.signal,
             announcer: attachAnnouncer,
+            onResume: (id: string): void => {
+              resumeTo = id;
+            },
             ...(opts.product !== undefined ? { product: opts.product } : {}),
             ...(opts.ui !== undefined ? { ui: opts.ui } : {}),
             ...(opts.configure !== undefined ? { configure: opts.configure } : {}),
@@ -129,7 +148,7 @@ export function tuiShell(
           // 用户自己按 Ctrl+C 退出时 `runTui` 也会返回——那同样是「真要退出」
           loop.then(
             (code) => {
-              if (!fiberSignal.aborted || userQuit) settle(code);
+              if (!fiberSignal.aborted || userQuit) settle(resumeTo === null ? { code } : { code, resume: resumeTo });
             },
             (e: unknown) => {
               if (!fiberSignal.aborted || userQuit) fail(e);
