@@ -98,6 +98,12 @@ export type AgentStatus = "idle" | "generating" | "acting" | "compacting";
  */
 const INBOX_POLL_MS = 1_000;
 
+/**
+ * 请人让位最多等多久。上限存在的理由是**不要把人挂住**：等不到就退回今天那句
+ * 「已被另一个写者持有」，人自己决定怎么办。
+ */
+const HANDOFF_TIMEOUT_MS = 10_000;
+
 export type AgentState = {
   /* 装备（慢变；仅 idle 可换） */
   readonly model: Model;
@@ -259,6 +265,14 @@ export type AgentOptions = {
    * inbox 轮询。**Agent 自己只用它做一件事**：定期重扫 inbox 目录（见 `INBOX_POLL_MS`）。
    */
   clock?: Clock;
+  /**
+   * 本实例可不可以被请走（2026-09-07 用户拍板：人优先，后台让位）。缺省 `false`。
+   *
+   * `true` 只该给「为了处理一条消息被叫醒」的那种临时宿主：别人（人开的那种会话）来拿同一段的
+   * lease 时，它会把手上的活 drain 完、`stop()` 让开。人开的会话一律留 `false`——
+   * 不然一次后台唤醒就能把你正在用的界面顶下去。
+   */
+  preemptible?: boolean;
   /** agent 身份（D5，缺省 `"default"`）。目前只用于 lease 的 holder 标识。 */
   agentId?: string;
   /**
@@ -452,6 +466,8 @@ export class Agent {
   private readonly sessionService?: SessionService;
   private readonly stateLock?: StateLock;
   private readonly clock: Clock;
+  /** 见 `AgentOptions.preemptible`。 */
+  private readonly preemptible: boolean;
   /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
   private inboxPollCancel?: () => void;
   private readonly agentId: string;
@@ -795,6 +811,7 @@ export class Agent {
     this.sessionService = opts.sessionService;
     this.sessionService?.attachDiagnostics((d) => this.reportDiagnostic(d));
     this.clock = opts.clock ?? systemClock;
+    this.preemptible = opts.preemptible === true;
     this.stateLock = opts.stateLock;
     this.agentId = opts.agentId ?? "default";
     this.agentName = opts.agentName ?? this.agentId;
@@ -1449,7 +1466,19 @@ export class Agent {
       if (this.stateLock !== undefined) {
         // holder 只是给人看的标识——**不要在这里取 pid**，那是 node 全局，
         // agent.ts 不拖 `node:`。进程身份由 Lock 的实现自己记。
-        const lease = await this.stateLock.acquire({ holder: `agent:${this.agentId}` });
+        const holder = `agent:${this.agentId}`;
+        let lease = await this.stateLock.acquire({ holder, preemptible: this.preemptible });
+        if (lease === null && !this.preemptible) {
+          // **人优先，后台让位**（2026-09-07 用户拍板）：拿不到时先问一句「能让吗」。
+          // 只有自称可被抢占的持有者会让——那种「为了处理一条消息被叫醒」的临时宿主。
+          // 人开的会话不会被顶掉，锁也不会被从谁手里夺走：让不让是持有者自己决定的，
+          // 所以「core 不抢占」那条一个字没变。
+          //
+          // **只有不可被抢占的启动方才问**：两个后台宿主互相请来请去没有意义。
+          if ((await this.stateLock.requestHandoff?.({ by: holder, timeoutMs: HANDOFF_TIMEOUT_MS })) === true) {
+            lease = await this.stateLock.acquire({ holder, preemptible: this.preemptible });
+          }
+        }
         if (lease === null) {
           // 拿不到就是拿不到——core 不抢占。
           // 但**必须说清是谁占着**：不接管的代价是人工删锁，而人工删锁得先看得见对面是谁。
@@ -1462,6 +1491,7 @@ export class Agent {
         acquired = lease;
         this.lease = lease;
         void this.watchLease(lease);
+        void this.watchHandoff(lease);
         // acquire 成功后才有写入身份：**cell 与根闸同一步装上**，随后才打开 restore-migration。
         // 装之前任何写都 fail-closed——PREPARE / 尚未 start 的 view 就是这个状态。
         this.gate?.install({ agentInstanceId: this.agentInstanceId, acquisitionId: crypto.randomUUID() });
@@ -1834,6 +1864,25 @@ export class Agent {
    *
    * **不能 drain**：drain 的定义是「做完手上的事」，而做完必然要写盘——那正是 ① 禁止的。
    */
+  /**
+   * **有人在等这把锁就让开**（2026-09-07 用户拍板：人优先，后台让位）。
+   *
+   * 只有 `preemptible` 的实例会收到这个信号（锁的实现只给它们一个会 settle 的 Promise）。
+   * 收到就 `stop()`：drain 完手上的活、把该落的落完、release、收摊——**不是丢锁**。
+   * 这条路与丢锁（`watchLease`）分得很清：丢锁是「已经不归我了，一个字都不许再写」，
+   * 让位是「我还在，做完手上的事再交出去」。
+   *
+   * 让出去之后本实例就完了：它本来就是为了处理一条消息被叫醒的，交出去也就没事可干。
+   */
+  private async watchHandoff(lease: Lease): Promise<void> {
+    const requested = lease.handoffRequested;
+    if (requested === undefined) return;
+    const by = await requested;
+    if (this.lease !== lease) return; // 已经正常 release 过了，这条信号过期
+    this.reportDiagnostic({ code: "lease_handoff", message: `${by.by} 要这一段的写入权，让给它` });
+    await this.stop();
+  }
+
   private async watchLease(lease: Lease): Promise<void> {
     const error = await lease.lost;
     if (this.lease !== lease) return; // 已经正常 release 过了，这条信号过期

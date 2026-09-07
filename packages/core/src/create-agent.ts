@@ -130,6 +130,12 @@ export type CreateAgentOptions = {
   withoutMemory?: boolean;
   /** 单写者端口。不给用状态根下的 first-party 文件锁。 */
   lock?: StateLock;
+  /**
+   * 本实例可不可以被请走（2026-09-07：人优先，后台让位）。缺省 `false`。
+   * 只该给「为了处理一条消息被叫醒」的那种临时宿主——人开的会话留 false，
+   * 否则一次后台唤醒就能把正在用的界面顶下去。透传给 `Agent`。
+   */
+  preemptible?: boolean;
   /** 时间与定时器。不给用真时钟；测试给 `FakeClock` 才能零 sleep 地驱动 schedule。 */
   clock?: Clock;
   /** 凭据存储，透传给 `Models`。 */
@@ -165,6 +171,7 @@ export type CreateAgentOptions = {
     | "sessionService"
     | "stateLock"
     | "agentId"
+    | "preemptible"
     | "sessionId"
     | "memory"
     | "taskStore"
@@ -419,6 +426,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       ...(parts.memory !== undefined ? { memory: parts.memory } : {}),
       streamFunction: opts.agent?.streamFunction ?? ((m, ctx, o) => models.stream(m, ctx, o)),
       agentId,
+      ...(opts.preemptible === true ? { preemptible: true } : {}),
       // Agent 拿 clock 只做一件事：定期重扫 inbox（别的进程写进来的消息靠它才看得见）。
       // 与 schedule 拿到的是**同一个**——测试拨一次 FakeClock，两边一起动。
       clock: opts.clock ?? systemClock,

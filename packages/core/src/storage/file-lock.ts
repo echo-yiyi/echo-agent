@@ -23,15 +23,36 @@
 // 那是另一个实现，不是在这段逻辑上打补丁。
 
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Lease, StateLock } from "./lock.ts";
+
+/** 交还请求的轮询间隔。请求是人触发的、一次性的，不值得为它上 fs.watch。 */
+const HANDOFF_POLL_MS = 50;
+
+/** 每 `HANDOFF_POLL_MS` 问一次 `probe`，第一次拿到非 null 就 resolve。**永不 reject**。 */
+function waitFor<T>(probe: () => Promise<T | null>): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const tick = (): void => {
+      void probe().then(
+        (v) => (v === null ? void setTimeout(tick, HANDOFF_POLL_MS) : resolve(v)),
+        () => void setTimeout(tick, HANDOFF_POLL_MS),
+      );
+    };
+    setTimeout(tick, HANDOFF_POLL_MS);
+  });
+}
 
 /** 锁文件里记的东西——报错时要能说清「是谁占着」。**我们写出去的一定四个字段都全**。 */
 type LockRecord = {
   readonly holder: string;
   readonly pid: number;
   readonly at: number;
+  /**
+   * 这个持有者可不可以被请走（2026-09-07）。**写进锁文件**是因为要请它走的人在另一个进程里，
+   * 只能从盘上看出来——看不出来就只能盲等，而不可被抢占的持有者是永远不会让的。
+   */
+  readonly preemptible?: boolean;
   /**
    * 这把锁的身份。**`pid + at` 不够**：pid 会被复用，`at` 只有毫秒精度，
    * 同一毫秒内起的两个进程可以撞成同一对，于是 A 的 `release()` 会把 B 的锁删掉。
@@ -57,6 +78,8 @@ type LockRecord = {
  * 缺 token 的记录在所有权比较里天然不等于任何 token，照样删不得。
  */
 export type PeekedLockRecord = {
+  /** 这个持有者可不可以被请走。旧锁文件里没有这个字段 = 不可以（缺省最保守）。 */
+  readonly preemptible?: boolean;
   readonly holder: string;
   readonly pid: number;
   readonly at: number;
@@ -107,10 +130,20 @@ async function peek(path: string): Promise<StateLockInspection> {
  * **拿不到就是拿不到**：不接管、不重试、不等待。`release()` 只删自己那把。
  */
 export function fileStateLock(path: string): StateLock {
+  /** 交还请求：锁文件旁边的一个小文件。用文件而不是信号，因为要跨进程、而且要能被崩溃后清掉。 */
+  const handoffPath = `${path}.handoff`;
   return {
-    async acquire(opts: { holder: string }): Promise<Lease | null> {
+    async acquire(opts: { holder: string; preemptible?: boolean }): Promise<Lease | null> {
       await mkdir(dirname(path), { recursive: true });
-      const record: LockRecord = { holder: opts.holder, pid: process.pid, at: Date.now(), token: randomUUID() };
+      // 上一轮别人留下的请求不该算在这一把头上：拿到锁的第一件事是把旧请求擦掉
+      await rm(handoffPath, { force: true }).catch(() => undefined);
+      const record: LockRecord = {
+        holder: opts.holder,
+        pid: process.pid,
+        at: Date.now(),
+        token: randomUUID(),
+        ...(opts.preemptible === true ? { preemptible: true } : {}),
+      };
 
       let fh: Awaited<ReturnType<typeof open>>;
       try {
@@ -155,7 +188,52 @@ export function fileStateLock(path: string): StateLock {
         },
         // 本地文件锁没有租约到期这回事：拿住了就一直拿着，直到 release。
         lost: new Promise<Error>(() => {}),
+        // **只有可被抢占的持有者才盯这个文件**：别人不该被请走，也就不该为此每秒读一次盘。
+        handoffRequested:
+          opts.preemptible === true
+            ? waitFor(async () => {
+                const raw = await readFile(handoffPath, "utf8").catch(() => null);
+                if (raw === null) return null;
+                try {
+                  const by = (JSON.parse(raw) as { by?: unknown }).by;
+                  return { by: typeof by === "string" ? by : "（没说是谁）" };
+                } catch {
+                  return { by: "（请求文件是坏的）" }; // 坏了也算有人在等：宁可让出去，不要卡住人
+                }
+              })
+            : new Promise<{ by: string }>(() => {}),
       };
+    },
+
+    /**
+     * 请当前持有者交还（2026-09-07：人优先，后台让位）。
+     *
+     * **只对自称 `preemptible` 的持有者生效**——不可被抢占的立刻返回 `false`，调用方按老规矩
+     * fail-loud。这样人开的那种会话不会被后台顶掉，而后台为处理一条消息叫醒的那种临时宿主会让开。
+     *
+     * 请求写在锁文件旁边的 `<lock>.handoff` 里。持有者自己在轮询它（见 `acquire`），
+     * 看到就 drain 完手上的活、release。这里等锁文件消失，超时就如实说没让成。
+     * **不删对方的锁**——core 不抢占那条一个字没变。
+     */
+    async requestHandoff(opts: { by: string; timeoutMs: number }): Promise<boolean> {
+      const cur = await peek(path);
+      if (cur.state === "missing") return true; // 已经空着
+      if (cur.state === "corrupt") return false; // 坏档要人来看，不是请一下就能解决的
+      if (cur.record.preemptible !== true) return false;
+
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(handoffPath, JSON.stringify({ by: opts.by, at: Date.now() }));
+      const deadline = Date.now() + opts.timeoutMs;
+      try {
+        while (Date.now() < deadline) {
+          if ((await peek(path)).state === "missing") return true;
+          await new Promise((r) => setTimeout(r, HANDOFF_POLL_MS));
+        }
+        return (await peek(path)).state === "missing";
+      } finally {
+        // 请求是一次性的：让没让成都不该留在盘上，否则下一个持有者一上来就以为有人在等
+        await rm(handoffPath, { force: true }).catch(() => undefined);
+      }
     },
 
     /**
