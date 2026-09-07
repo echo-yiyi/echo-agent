@@ -279,7 +279,7 @@ export function echoOptions(
     // `--state-dir` 是**会话目录的上一层**（2026-09-03）：容器管「会话都放哪儿」，
     // 某一段的目录由 core 用 sessionsRoot + sessionId 得出。
     ...(opts.stateDir !== undefined ? { sessionsRoot: opts.stateDir } : {}),
-    // 会话面开着（2026-09-03）：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此、
+    // 会话面开着（2026-09-03）：同一台机器上多开几个终端就是多段 session，让它们看得见彼此、
     // 能互相带个话。**runner 也给**（2026-09-07）：给一段没在跑的会话发消息时，容器 spawn
     // 一个 `--serve` 的进程当它的宿主——「只跟活着的段说话」那条要有人兑现才成立。
     // 那种宿主是可被请走的，所以你 `--resume` 它的时候它会让开。

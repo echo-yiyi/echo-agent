@@ -3,13 +3,15 @@
 > 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 5 步（壳）实现了看与切两半（`/sessions`、`/resume`），`/clear` 落盘那半还没做；第 2 步（角色定义）未做；记忆三层 2026-09-07 已实现（那一条的决策记录随之移入 `implemented/`）——逐条见 §9。其余决策记录留在 `docs/decisions/proposed/` 直到各自实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
 > 读者：要实现会话面、给产品接会话工具、把 echo 嵌进常驻程序（多段会话同时工作）的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) 的实例生命周期与 admission；[Context 与 Message Flow](context-and-message-flow.md) 的 transcript / working context 术语；[Compaction](compaction.md) 的「策略是 extension、状态在 core」这条分法——本文对会话用同一条<br>
-> 决策记录（五条，本文只指向，不复述论证）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) · [agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md)
+> 决策记录（八条，本文只指向，不复述论证。状态见各自文件头，`implemented/` 的已落地）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md) · [人优先，后台让位](../decisions/implemented/2026-09-07-preemptible-lease.md) · [agent 定义 = 产品内的角色](../decisions/proposed/2026-09-07-role-agent.md) · [session 的身份三件](../decisions/proposed/2026-09-07-session-identity.md) · [agent 是身份，session 是它的实例](../decisions/proposed/2026-09-07-agent-is-an-identity.md)
+>
+> 被后来的记录**改掉了一半**、读的时候要连着后一条看：[agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md)（产品打包成 bundle 那一半由 [agent 定义 = 产品内的角色](../decisions/proposed/2026-09-07-role-agent.md) 撤回）
 
 ## 导读
 
 **解决什么。** 今天一个 `Agent` 实例绑死一段会话、一把锁锁整个状态根（`~/.echo/agents/default/.lock`），于是：同一台机器上两个 echo-coding 同时起不来（第二个拿不到锁直接 fail-loud）；会话之间没有任何通道；`Agent` 上的 `newSession` / `loadSession` 走的是旧 `SessionManager`，生产装配只注入 `SessionService`，一调就抛；`/clear` 只清内存、不落盘，`--resume` 会把清掉的对话整个带回来。用户要的形态是一个 **agent 集群**：agent 能自己开会话，会话之间能互发消息，既能在终端里各起各的进程，也能嵌进一个常驻程序里同时跟几十个对象聊。
 
-**最终形态。** 一段 session 就是一个独立的 agent，和操作系统里的进程是同一个抽象：有 id、有它跑的程序（agent 定义，是一个 extension）、有 cwd（workspace）、有内存（transcript）、有邮箱（inbox）、能被列出、能被关掉。**状态根就是 session 目录**，今天按状态根一份的东西（lease、inbox、tasks、schedule、dream、observability）自动变成按 session 一份，代码不动。跨 session 共享的只有 memory 与 skills，提到 project / user 两层。会话之间的通道是 inbox 落盘：发消息 = 往对方目录写一条 record，同进程与跨进程一条路。**core 不管进程**：谁把一段 session 跑起来（终端里人起的、常驻程序在进程内起的、产品自己 spawn 的）是容器的事。会话的用法（四个工具、等回信、命名、筛选、agent 打包、起进程）全是 extension；会话的盘与协议（布局、lease、inbox、状态、不越权）在 core。
+**最终形态。** 一段 session 是某个 agent 的一次运行实例，和操作系统里的进程是同一个抽象：有 id、有它跑的程序（agent 定义，是一个 extension）、有 cwd（workspace）、有内存（transcript）、有邮箱（inbox）、能被列出、能被关掉。**一个 agent 可以有多段 session**——10 个 HR 是 10 个 agent，跟其中一个的两条并行对话是那一个 agent 的两段（[agent 是身份](../decisions/proposed/2026-09-07-agent-is-an-identity.md)）。**状态根就是 session 目录**，今天按状态根一份的东西（lease、inbox、tasks、schedule、dream、observability）自动变成按 session 一份，代码不动。跨 session 共享的只有 memory 与 skills，提到 project / user 两层。会话之间的通道是 inbox 落盘：发消息 = 往对方目录写一条 record，同进程与跨进程一条路。**core 不管进程**：谁把一段 session 跑起来（终端里人起的、常驻程序在进程内起的、产品自己 spawn 的）是容器的事。会话的用法（四个工具、等回信、命名、筛选、agent 打包、起进程）全是 extension；会话的盘与协议（布局、lease、inbox、状态、不越权）在 core。
 
 **Non-Goals（已决，不做）。**
 
@@ -23,7 +25,9 @@
 - memory 目录的多写者保护（多段 session 同时往 project 级记）。归 memory 线，本文只定作用域。
 - 会话的回收（GC / TTL）。`closed` 的段留在盘上；不会跑的段靠 §7 的挂载条件与 runner 失败判红不产生，而不是事后清。
 
-**待拍板。** 没有了。记忆三层怎么切 2026-09-07 拍了：分区（`agent.md` / `user.md` / 笔记索引）与作用域（session / project / user）分开，哪层放什么、注入什么、怎么选层、什么顺序落地，全在 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」一段，2026-09-07 已实现。dream 的计数与锁跟着整理范围下到 session 层，「两段 session 同时整理同一份」于是不再成立。
+**待拍板。** 一条：**agent 这个身份有没有跨 session 的持久状态**——同一个 HR 的两段 session 要不要共享一份「我跟这个候选人聊到哪了」。不要 = agent 就是「定义 + 名字」，作用域仍是 session / project / user 三层；要 = 三层之外多一层 agent 作用域，`AgentRef.name` 也从「来历」变成外键。两条后果与判据见 [agent 是身份](../decisions/proposed/2026-09-07-agent-is-an-identity.md) 的「待拍板」。**这条不定，`--resume` 与 `session_create` 的行为一个字都不用改**；定了才动记忆那条线。
+
+其余的：记忆三层怎么切 2026-09-07 拍了：分区（`agent.md` / `user.md` / 笔记索引）与作用域（session / project / user）分开，哪层放什么、注入什么、怎么选层、什么顺序落地，全在 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」一段，2026-09-07 已实现。dream 的计数与锁跟着整理范围下到 session 层，「两段 session 同时整理同一份」于是不再成立。
 
 其余五项决策已拍（2026-09-03，口头；§4 那条 2026-09-07 修正），见决策记录。
 
@@ -35,14 +39,16 @@
 
 | 词 | 指什么 | 对应操作系统的词 |
 |---|---|---|
-| **agent（定义）** | **产品内的一个角色**：identity 段、工具子集、模型缺省（2026-09-07 修正）。reviewer、前端、缺省，或一个现写的 inline 定义都是；**产品本身不是 agent 定义**，它是容器级的事。挂载时变成一条 extension（§4） | 程序 |
-| **session** | agent 的一个实例：盘上一个目录，运行时一个 `Agent` 实例。**session = 运行中的 agent**，两个词指同一个实体，从盘上看叫 session，从运行时看叫 agent | 进程 |
+| **agent（定义）** | **一个身份**：identity 段、工具子集、模型缺省，加上它的名字（2026-09-07 两次修正，见 [agent 是身份](../decisions/proposed/2026-09-07-agent-is-an-identity.md)）。产品内的角色（reviewer、前端）是它，findjob 里的一个 HR 也是它；现写的 inline 定义同样是。**产品本身不是 agent**，它是容器级的事。挂载时变成一条 extension（§4） | 程序 |
+| **session** | 某个 agent 的**一次运行实例**：盘上一个目录，运行时一个 `Agent` 类实例。**一个 agent 可以有多段 session**（跟同一个 HR 的两条并行对话 = 那一个 agent 的两段），所以 10 个 HR 是 10 个 agent、不是 10 段 session | 进程 |
 | **容器** | 一个 OS 进程，装一个或多个 session。终端里的 echo-coding 装一个；findjob 这类常驻程序装几十个 | 机器 |
 | **产品** | 容器跑的那个：echo-agent、echo-coding、findjob。一段 session 记着自己是哪个产品开的（`product`），角色在它之下 | 发行版 |
 | **main** | 容器起的 session（人起的、宿主程序起的）。`session_create` 建出来的都不是 main | init 起的进程 |
 | **作用域** | session / project / user 三层目录，见 §2 | 进程私有 / 项目共享 / 用户共享 |
 
-`Agent` 类不改名，`SessionInfo.agent` 字段不改名：类是运行中的 session，字段是它跑的哪个定义。
+**类比是 1 : N，别再压成 1 : 1**：一份程序可以有多个进程，一个 agent 可以有多段 session。
+
+`Agent` 类不改名，`SessionInfo.agent` 字段不改名：**类是一段 session 的运行时**（不是 agent），字段是这一段属于哪个 agent。
 
 ## 2. 作用域
 
@@ -246,7 +252,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 它**不在 builtin 表里**，与 `echo:inline-tools` 同代（INLINE）：builtin 表是从一个 `Agent` 派生的，而会话面是**容器**级的——一个容器管着好几段。同理它**不进产品的行为身份快照**（`codingAgentIdentity`）：挂不挂是容器的选择，写进产品身份换个宿主就对不上。
 
-**CLI 这个容器选的是**：开会话面，**并且给 runner**（2026-09-07）。同一台机器上多开几个终端就是多段 agent，让它们看得见彼此、能互相带话；给一段没在跑的会话发消息时，容器 spawn 一个自己的副本、以 `--serve --resume <id>` 无界面地当它的宿主——「只跟活着的段说话」那条要有人兑现才成立。
+**CLI 这个容器选的是**：开会话面，**并且给 runner**（2026-09-07）。同一台机器上多开几个终端就是多段 session（缺省都跑同一个 agent 定义），让它们看得见彼此、能互相带话；给一段没在跑的会话发消息时，容器 spawn 一个自己的副本、以 `--serve --resume <id>` 无界面地当它的宿主——「只跟活着的段说话」那条要有人兑现才成立。
 
 `--serve` 与人开的会话有三处不同：不装壳、不读 stdin（没人坐在它前面）；**可被请走**（你 `--resume` 这一段时它把手上的活做完就让开）；**连着空闲一分钟就退**（它是为了处理一条消息才起来的）。
 

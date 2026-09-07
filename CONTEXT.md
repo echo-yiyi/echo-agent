@@ -23,11 +23,11 @@ _Avoid_：宿主进程、runner 进程
 ## 会话与作用域
 
 **session**：
-agent 定义的一个运行实例：盘上一个目录，运行时一个 Agent 实例。session 与运行中的 agent 是同一个实体的两个视角。
-_Avoid_：会话记录（那是 transcript）、对话
+某个 agent 的一次运行实例：盘上一个目录，运行时一个 `Agent` 类实例。**一个 agent 可以有多段 session**（跟同一个 HR 的两条并行对话就是两段）——session 自己不是 agent，它的身份字段指向的那个才是。
+_Avoid_：会话记录（那是 transcript）、对话、「运行中的 agent」
 
-**agent 定义**：
-产品内的一个角色：identity 段、工具子集、模型缺省，写成一个 markdown 文件。reviewer、前端、缺省都是；产品本身不是 agent 定义。
+**agent（定义）**：
+一个身份：identity 段、工具子集、模型缺省，写成一个 markdown 文件，加上它的名字。产品内的一个角色（reviewer、前端、缺省）是它，findjob 里的一个 HR 也是它。**产品本身不是 agent**，它是容器级的事。10 个 HR = 10 个 agent，每个 agent 可以有 1 到 N 段 session。
 _Avoid_：产品、bundle、模版、subagent 定义
 
 **main**：
