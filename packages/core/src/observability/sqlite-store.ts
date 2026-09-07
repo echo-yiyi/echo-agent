@@ -41,6 +41,13 @@ type SqliteDatabase = Readonly<{
 }>;
 
 /** `<stateRoot>/observability/observations.sqlite`。 */
+/**
+ * 「不落盘」的库路径。给的是 SQLite 自己的 `:memory:`——调用方注入了自定义 store 时用它，
+ * 免得观测库偷偷落进真盘的 `<ECHO_HOME>`（见 `createAgent`）。
+ */
+export const MEMORY_PATH = ":memory:";
+
+/** 一个状态根的观测库在哪：`<stateRoot>/observability/observations.sqlite`。 */
 export function observationDatabasePath(stateRoot: string): string {
   return join(stateRoot, OBSERVATION_DB_RELATIVE_PATH);
 }
@@ -308,7 +315,7 @@ export class SqliteCanonicalObservationStore extends SqliteObservationReader imp
 
   static async open(opts: SqliteObservationOpenOptions): Promise<SqliteCanonicalObservationStore> {
     const { Database } = await import("bun:sqlite");
-    mkdirSync(dirname(opts.path), { recursive: true });
+    if (opts.path !== MEMORY_PATH) mkdirSync(dirname(opts.path), { recursive: true });
     let db: SqliteDatabase;
     try {
       db = new Database(opts.path, { create: true, readwrite: true, strict: true }) as unknown as SqliteDatabase;
@@ -316,7 +323,7 @@ export class SqliteCanonicalObservationStore extends SqliteObservationReader imp
       throw new ObservationStoreOpenError(`open observation database failed: ${opts.path}`, { cause: e });
     }
     try {
-      applyWriterPragmas(db, opts.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS);
+      applyWriterPragmas(db, opts.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS, opts.path === MEMORY_PATH);
       migrate(db);
     } catch (e) {
       db.close();
@@ -456,11 +463,19 @@ function pragmaValue<T>(db: SqliteDatabase, sql: string): T | undefined {
   return values[0];
 }
 
-/** 固定验证：WAL / NORMAL / foreign_keys / bounded busy_timeout。不满足 = 不进 READY。 */
-function applyWriterPragmas(db: SqliteDatabase, busyTimeoutMs: number): void {
-  const journal = pragmaValue<string>(db, "PRAGMA journal_mode = WAL");
-  if (typeof journal !== "string" || journal.toLowerCase() !== "wal") {
-    throw new ObservationStoreOpenError(`journal_mode 不是 WAL（实际 ${String(journal)}）：这个文件系统不支持所需的 locking，拒绝进入 READY`);
+/**
+ * 固定验证：WAL / NORMAL / foreign_keys / bounded busy_timeout。不满足 = 不进 READY。
+ *
+ * `inMemory` 时**跳过 WAL 这一条**（2026-09-07）：那道门是为「多个进程共享同一个文件」立的
+ * （journal_mode=WAL 才有我们要的 locking），而内存库按定义只有本进程一个读者写者，
+ * SQLite 也压根不支持给它开 WAL（返回 `memory`）。其余三条照验——它们与介质无关。
+ */
+function applyWriterPragmas(db: SqliteDatabase, busyTimeoutMs: number, inMemory = false): void {
+  if (!inMemory) {
+    const journal = pragmaValue<string>(db, "PRAGMA journal_mode = WAL");
+    if (typeof journal !== "string" || journal.toLowerCase() !== "wal") {
+      throw new ObservationStoreOpenError(`journal_mode 不是 WAL（实际 ${String(journal)}）：这个文件系统不支持所需的 locking，拒绝进入 READY`);
+    }
   }
   db.run("PRAGMA synchronous = NORMAL");
   const sync = pragmaValue<number>(db, "PRAGMA synchronous");

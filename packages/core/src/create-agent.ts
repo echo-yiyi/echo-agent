@@ -10,6 +10,7 @@
 // 那会变成两个类。Session/Memory/Task 等状态恢复一律归 `start()`。
 // **解析模型不看凭据**：目录里有它就能装，key 有没有是运行态（见 `createAgent` 里的说明）。
 
+import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Agent, type AgentOptions } from "./agent.ts";
 import { errText } from "./errors.ts";
@@ -36,7 +37,7 @@ import { sealAgentAssemblyObservation, type BuiltinSlotContribution } from "./ob
 import { attachObservationHost } from "./observability/host-wiring.ts";
 import { ObservationRuntime } from "./observability/runtime.ts";
 import type { ObservationCapturePolicy } from "./observability/types.ts";
-import { SqliteCanonicalObservationStore, observationDatabasePath } from "./observability/sqlite-store.ts";
+import { MEMORY_PATH, SqliteCanonicalObservationStore, observationDatabasePath } from "./observability/sqlite-store.ts";
 
 /** 默认身份（D5）。 */
 const DEFAULT_AGENT_ID = "default";
@@ -335,10 +336,17 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   const sharedStore = opts.sharedStore ?? opts.store ?? new FileDir(expandHome(resolveSharedDir()));
   const lock = opts.lock ?? fileStateLock(join(stateDir, LOCK_FILE));
 
-  // canonical observation store：固定在状态根下，与自定义 `store` 无关——它是 Runtime 基础设施，不是可换的 Entry。
-  // open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——那是状态根坏了 / 文件系统不支持，启动时就该看见。
-  // 起来之后的写失败**不再**影响 run（观测层只降级，见 observability/runtime.ts 头注）。
-  const observationStore = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir), busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
+  // canonical observation store：open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——
+  // 那是状态根坏了 / 文件系统不支持，启动时就该看见。起来之后的写失败**不再**影响 run
+  // （观测层只降级，见 observability/runtime.ts 头注）。
+  //
+  // **注入了自定义 store 又没点名 stateDir 时，观测库落内存**（2026-09-07）。此前它无条件按
+  // `<ECHO_HOME>/sessions/<id>` 落真盘——于是每一次 `createAgent({ store: new InMemoryDir() })`
+  // 都在开发机的家目录里留一个真目录。实测：805 个空壳、68 MB，里面只有观测库，
+  // 连测试夹具的会话 id（`bad` / `main` / `s`）都在。
+  // 与 `sharedStore ?? store` 同一条理由：说了「我自己给存储」的调用方，不该发现东西仍旧写进了真盘。
+  const observationPath = opts.store !== undefined && opts.stateDir === undefined ? MEMORY_PATH : observationDatabasePath(stateDir);
+  const observationStore = await SqliteCanonicalObservationStore.open({ path: observationPath, busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
 
   // 装配现场：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
   // 它撑住的是「值已经造好、`new Agent()` 还没成功」那个窗口——上一版那时抛错，root store 就再没人关过。
@@ -444,7 +452,18 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       // 收摊全部 settle 之后，**唯一的那次** close：进程域（borrow）由 assembly 收，
       // 恰好一次由 slot 的三态保证——不再是这里直接调 `store.close()`。
       // 观测排在最前：先把 ring 里的尾巴写进 SQLite 再关它，之后才关 root store（shutdown 顺序：flush canonical 在前）。
-      finalDisposables: [...(opts.agent?.finalDisposables ?? []), { dispose: () => observation.dispose() }, { dispose: () => assembly.disposeProcessScope() }],
+      finalDisposables: [
+        ...(opts.agent?.finalDisposables ?? []),
+        { dispose: () => observation.dispose() },
+        { dispose: () => assembly.disposeProcessScope() },
+        // **一句话都没说过的那一段，连目录一起清掉**（2026-09-07）。排在最后：观测库先关，
+        // 否则删的是一个还开着的 SQLite。
+        //
+        // `discardIfUnused()` 只撤了 `meta.json` / `status.json`（它只有字节面，没有 rmdir），
+        // 目录与里面的观测库还留着——实测在开发机上攒了 805 个这样的空壳、68 MB。
+        // 目录是本函数建的，路径也只有本函数知道，所以这一步归它。
+        { dispose: () => removeIfEmptySession(stateDir, opts.store !== undefined) },
+      ],
     });
 
     // **Host-internal 接线在构造之后挂**：写入总闸与所有权账本都不进公共 `AgentOptions`
@@ -563,6 +582,39 @@ function prepareCapabilities(input: {
   const skillStore = scopedDir(skillView, `${SKILLS_DIR}/`);
 
   return { memory, taskStore, schedule, inboxStore, sessionService, skillStore };
+}
+
+/**
+ * core 自己会往 session 目录里写的东西。**只删这些**——目录里出现别的，说明有人另有用处，
+ * 那就一个字都不动。收摊阶段删错东西的代价远大于留下一个空目录。
+ */
+const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.json", "status.json", "inbox", "entries", ".lock", ".dream"]);
+
+/**
+ * 收摊时清掉「一句话都没说过」的那个 session 目录。
+ *
+ * **判据落在 `meta.json` 在不在上**，而不是重新推一遍：`SessionService.discardIfUnused()` 已经
+ * 判过了「这一段没有任何 entry、inbox 里也没有待消费的留言」，判过才撤 meta。所以
+ * **没有 meta = 那两条都成立**——这里再推一遍只会推出一条不一样的规矩来。
+ *
+ * 不能只看「除了 observability 什么都没有」：收摊会无条件刷一次 `tasks.json`（哪怕一条任务都没有），
+ * 于是那条判据永远不满足（实测）。
+ *
+ * 注入了自定义 store 时**不动**：那时这个路径下本来就没有我们写的东西（观测库也在内存里），
+ * 而路径本身可能是调用方另有用处的目录。
+ *
+ * 失败只当没发生：收摊阶段为了删一个空目录而抛错，代价远大于留下它。
+ */
+async function removeIfEmptySession(stateDir: string, customStore: boolean): Promise<void> {
+  if (customStore) return;
+  try {
+    const entries = await readdir(stateDir);
+    if (entries.includes("meta.json")) return; // 这一段算数：说过话，或有人给它留了话
+    if (entries.some((e) => !SESSION_DIR_OWNED.has(e))) return; // 有不是我们写的东西：不碰
+    await rm(stateDir, { recursive: true, force: true });
+  } catch {
+    // 目录不在、没权限、正被别人用——都不值得为它把收摊搅黄
+  }
 }
 
 /**

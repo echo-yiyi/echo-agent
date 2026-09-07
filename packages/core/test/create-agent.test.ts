@@ -633,3 +633,39 @@ test("留过话的空会话不撤：撤了那条留言就成了没人认领的�
 
   expect((await listSessions(sessionsRoot)).map((s) => s.id), "有人留了话，这段不该被撤").toContain(id);
 });
+
+test("起来就退的段连目录一起清掉——不只是撤 meta（2026-09-07）", async () => {
+  // 没有这条时实测过：`discardIfUnused()` 只撤了 meta.json，目录与里面的观测库还留着，
+  // 于是开发机上攒了 805 个这样的空壳、68 MB。
+  const home = await mkdtemp(join(tmpdir(), "echo-empty-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+
+  const silent = await createAgent({ provider, allowNetwork: false, workspace: "/repo" });
+  await silent.start();
+  const id = silent.state.sessionId!;
+  expect(existsSync(join(home, "sessions", id)), "跑着的时候目录当然在").toBe(true);
+  await silent.stop(); // 一个字没说
+  expect(existsSync(join(home, "sessions", id)), "空段的目录没清掉").toBe(false);
+
+  // 说过话的那一段一个字都不许动
+  const spoke = await createAgent({ provider, allowNetwork: false, workspace: "/repo" });
+  await spoke.start();
+  const spokeId = spoke.state.sessionId!;
+  await spoke.prompt("说一句");
+  await spoke.stop();
+  expect(existsSync(join(home, "sessions", spokeId, "meta.json"))).toBe(true);
+});
+
+test("留过话的空段也不清：目录里还有别的东西就原样留着", async () => {
+  const home = await mkdtemp(join(tmpdir(), "echo-empty-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo" });
+  await agent.start();
+  agent.autoConsumeInbox = false; // 留着不消费
+  const id = agent.state.sessionId!;
+  await agent.ingress.deliverDurable({ message: environmentMessage("有人给你留了话", "session", "s-x:1"), dedupeKey: "s-x:1" });
+  await agent.stop();
+  expect(existsSync(join(home, "sessions", id)), "有留言的段被清掉了").toBe(true);
+});
