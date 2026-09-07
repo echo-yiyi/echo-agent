@@ -191,20 +191,20 @@ test("parseArgs:认识的都认得出", () => {
   // 就是「按缺省起来」——交互形态下那才是用户要的（原 `echo-agent start` 的 start
   // 是唯一的子命令，等于噪音，2026-08-31 一并去掉）。
   // D7 起 `provider` 不再有解析期缺省：**不给 = 没说**，缺省与「记住上次」的合成在 main() 里做
-  expect(parseArgs([])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false });
+  expect(parseArgs([])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, serve: false });
   expect(parseArgs(["--provider", "deepseek", "--no-memory", "--agent-id", "a1"])).toEqual({
     provider: "deepseek",
     withoutMemory: true,
     agentId: "a1",
     extensionDirs: [],
-    continueLast: false,
+    continueLast: false, serve: false,
   });
   expect(parseArgs(["--help"])).toBeNull();
   expect(parseArgs(["-h"])).toBeNull();
 });
 
 test("parseArgs:`--observe <档>` 只认 off / metadata / content，不给就不出现在结果里（core 缺省 metadata）", () => {
-  expect(parseArgs(["--observe", "content"])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, observe: "content" });
+  expect(parseArgs(["--observe", "content"])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, serve: false, observe: "content" });
   expect(parseArgs(["--observe", "off"])?.observe).toBe("off");
   expect(parseArgs([])).not.toHaveProperty("observe");
   expect(() => parseArgs(["--observe", "full"])).toThrow("--observe 只能是 off / metadata / content");
@@ -214,7 +214,7 @@ test("parseArgs:`--observe <档>` 只认 off / metadata / content，不给就不
 test("parseArgs:`--continue` / `--resume <id>` 各自认得，两个一起给就报错", () => {
   // 2026-09-01 用户拍板：缺省每次启动新建会话，续上次是显式动作
   expect(parseArgs(["--continue"])).toMatchObject({ continueLast: true });
-  expect(parseArgs(["--resume", "s-abc"])).toMatchObject({ resume: "s-abc", continueLast: false });
+  expect(parseArgs(["--resume", "s-abc"])).toMatchObject({ resume: "s-abc", continueLast: false, serve: false });
   expect(() => parseArgs(["--resume"])).toThrow("缺一个值");
   expect(() => parseArgs(["--continue", "--resume", "s-abc"])).toThrow("只能给一个");
 });
@@ -789,28 +789,28 @@ test("缺省不续：同一目录再起一次是新的一段，旧的原样；�
   }
 });
 
-test("CLI 打开会话面、但不给 runner：模型能看见别的会话、能带话，开新的一段仍是人的动作", async () => {
+test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，也能把没在跑的那段叫起来", async () => {
   // 会话面是**容器的开关**（`CreateEchoOptions.sessions`），core 缺省不挂。这条盯的是 CLI 这个容器
-  // 选了什么：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此；但「怎么再开一个终端窗口」
-  // 不该由 CLI 替用户决定，所以不给 runner——模型那边因此没有 session_create。
+  // 选了什么：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此；**并且给 runner**（2026-09-07）——
+  // 「只跟活着的段说话」那条要有人兑现才成立，兑现的办法是 spawn 一个 `--serve` 的宿主。
   // 判据读的是**装配现场那一份入参**，不是另搭一套。
   const credentials = new FileCredentialStore(join(dir, "credentials.json"));
   const built = echoOptions(
     ECHO_AGENT,
     { interactive: true, credentials },
-    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false },
     kimiProvider(),
     [],
     credentials,
     undefined,
   );
-  expect(built.sessions).toEqual({});
+  expect(typeof built.sessions?.run).toBe("function"); // 有 runner = 叫得醒没在跑的那段
   // 提问（`ask_user`，2026-09-05）由形态定：交互 = 有人答，管道 = 没人（工具当场如实回话）
   expect(built.agent?.questions).toEqual({ responder: "host", askTimeoutMs: null });
   const piped = echoOptions(
     ECHO_AGENT,
     { interactive: false, credentials },
-    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false },
     kimiProvider(),
     [],
     credentials,
@@ -821,14 +821,13 @@ test("CLI 打开会话面、但不给 runner：模型能看见别的会话、能
   const custom = echoOptions(
     { name: "p", version: "0", preset: () => ({ agent: { questions: { responder: "host", askTimeoutMs: 5000 } } }) },
     { interactive: false, credentials },
-    { withoutMemory: true, extensionDirs: [], continueLast: false },
+    { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false },
     kimiProvider(),
     [],
     credentials,
     undefined,
   );
   expect(custom.agent?.questions).toEqual({ responder: "host", askTimeoutMs: 5000 });
-  expect(built.sessions?.run).toBeUndefined();
 });
 
 test("--resume 点名不存在的会话 / --continue 没有可续的 → 退出码 1，且不建任何状态（不静默新建）", async () => {

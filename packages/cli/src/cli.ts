@@ -39,8 +39,11 @@ import {
   type CredentialStore,
   type ObservationCapturePolicy,
   type Provider,
+  type SessionRunner,
 } from "@echo-agent/core";
 import type { TUI } from "@earendil-works/pi-tui";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { tuiShell } from "./extension.ts";
 import { instructionsEntry } from "./instructions.ts";
 import { conductEntry, pipeSurfaceEntry } from "./prompt.ts";
@@ -73,6 +76,13 @@ export type CliOptions = {
   continueLast: boolean;
   resume?: string;
   /**
+   * 无界面地把一段会话跑起来（2026-09-07）：不装壳、不读 stdin，起来消费收件箱，空闲一会儿就退出。
+   *
+   * **这是给 runner 用的，不是给人敲的**：别的会话给这一段发消息时，容器 spawn 一个
+   * `--serve --resume <id>` 的进程当它的宿主。人开的会话照旧走交互或管道形态。
+   */
+  serve: boolean;
+  /**
    * `--observe <档>`：观测采集档。**不给 = 没说**，由 core 缺省（metadata）。`content` 把模型文本、
    * 工具参数与结果正文明文写进状态根的 observations.sqlite——看 `echo-agent observe serve` 时才需要。
    */
@@ -81,6 +91,18 @@ export type CliOptions = {
 
 /** `--observe` 能接的值。与 `ObservationCapturePolicy` 同一份枚举——多写少写 `satisfies` 都会报。 */
 const CAPTURE_POLICIES = ["off", "metadata", "content"] as const satisfies readonly ObservationCapturePolicy[];
+
+/** 无界面形态的轮询节拍。只用来判「还忙着吗」，不参与任何投递。 */
+const SERVE_TICK_MS = 250;
+/**
+ * 无界面形态连着空闲多久就收摊。
+ *
+ * 短一点更省，但也更容易在「一条消息刚处理完、下一条正在路上」时白退一次；
+ * 一分钟足够覆盖一来一回，也不至于让一个没人再理的宿主占着锁过夜。
+ */
+const SERVE_IDLE_MS = 60_000;
+/** 叫醒一段最多等多久拿到它的锁。超过就当没叫起来（`SessionRunner` 的契约）。 */
+const WAKE_TIMEOUT_MS = 20_000;
 
 const PROVIDERS: Record<ProviderName, () => Provider> = {
   kimi: () => kimiProvider(),
@@ -107,6 +129,8 @@ export function usage(name: string): string {
   --model <id>         模型 id（缺省：上次选的，其次由 provider 声明）
   --continue           续本命令在当前目录的最近一段会话
   --resume <id>        续指定的那一段会话
+  --serve              无界面地把那一段跑起来（配 --resume）：消费收件箱，空闲就退出。
+                       给容器叫醒会话用的，人不必敲它
   --extensions <目录>  去哪里找扩展，可重复（缺省 ./extensions）
   --no-memory          不装记忆与 Dream
   --observe <档>       观测采集档：metadata（缺省，只记形状与计数）| content（带模型文本、工具参数与结果正文，明文落盘）| off
@@ -144,7 +168,7 @@ export function usage(name: string): string {
 export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.name): CliOptions | null {
   if (argv[0] === "-h" || argv[0] === "--help") return null;
 
-  const opts: CliOptions = { withoutMemory: false, extensionDirs: [], continueLast: false };
+  const opts: CliOptions = { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false };
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]!;
@@ -182,6 +206,9 @@ export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.nam
       case "--no-memory":
         opts.withoutMemory = true;
         break;
+      case "--serve":
+        opts.serve = true;
+        break;
       case "--continue":
         opts.continueLast = true;
         break;
@@ -200,6 +227,7 @@ export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.nam
   }
   // 两个「续」互斥：都给了就不知道听谁的，静默取一个是「写了没生效」
   if (opts.continueLast && opts.resume !== undefined) throw new Error("--continue 与 --resume 只能给一个");
+  if (opts.serve && opts.resume === undefined && !opts.continueLast) throw new Error("--serve 要点名跑哪一段：配 --resume <id>");
   return opts;
 }
 
@@ -255,9 +283,10 @@ export function echoOptions(
     // 某一段的目录由 core 用 sessionsRoot + sessionId 得出。
     ...(opts.stateDir !== undefined ? { sessionsRoot: opts.stateDir } : {}),
     // 会话面开着（2026-09-03）：同一台机器上多开几个终端就是多段 agent，让它们看得见彼此、
-    // 能互相带个话。**不给 `run`**——「怎么再开一个终端窗口」不是 CLI 该替用户决定的事，
-    // 所以模型这边没有 `session_create`，开新的一段仍然是人的动作。
-    sessions: {},
+    // 能互相带个话。**runner 也给**（2026-09-07）：给一段没在跑的会话发消息时，容器 spawn
+    // 一个 `--serve` 的进程当它的宿主——「只跟活着的段说话」那条要有人兑现才成立。
+    // 那种宿主是可被请走的，所以你 `--resume` 它的时候它会让开。
+    sessions: { run: sessionRunner(opts) },
     ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     ...(opts.observe !== undefined ? { observation: { capture: opts.observe } } : {}),
@@ -404,6 +433,8 @@ export function mainFor(product: Product): Main {
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
       const form: PresetForm = { interactive, credentials };
+      // 无界面形态排在最前：它既不是交互也不是管道——不装壳、不读 stdin，跑完就退。
+      if (effective.serve) return await runServe(product, form, effective, provider, choices, credentials, sessionId, controller.signal);
       return interactive
         ? await runInteractive(product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, sessionId, notices, controller.signal, deps)
         : await runPiped(product, form, effective, provider, choices, credentials, sessionId, notices, controller.signal);
@@ -422,6 +453,82 @@ export function mainFor(product: Product): Main {
 export const main: Main = mainFor(ECHO_AGENT);
 
 /** 管道形态：`run()` 自己会 `echo.stop()`（它的 `finally`），所以这里不重复收摊。 */
+/**
+ * 容器怎么让一段会话跑起来（`SessionRunner`，2026-09-07）：**spawn 一个自己的副本**，
+ * 让它以 `--serve --resume <id>` 无界面地当那一段的宿主。
+ *
+ * 契约是「resolve = 那一段已经持有自己的 lease」，所以这里等的是**它的锁文件出现**——
+ * 不是等进程起来（进程起来了但装配失败、或者锁被别人占着，都不算跑起来了）。
+ *
+ * 为什么起独立进程而不是在自己进程里多跑一段：**一段 session 一个宿主**是这条线的原话。
+ * 起在自己进程里的话，你关掉这个终端就把别人的会话一起带走了；而独立进程会一直活到
+ * 它自己空闲退出，或者你 `--resume` 它、它让开为止（那条让位协议就是为它准备的）。
+ *
+ * 子进程 `unref()`：它不该拖着本进程不退。stdio 全丢——没人看，写出来的东西只会污染终端。
+ */
+function sessionRunner(opts: CliOptions): SessionRunner {
+  const self = process.argv[1];
+  return async (row) => {
+    if (self === undefined) throw new Error("认不出自己的可执行文件路径，起不了会话宿主");
+    const args = [self, "--serve", "--resume", row.id];
+    if (opts.stateDir !== undefined) args.push("--state-dir", opts.stateDir);
+    if (opts.agentId !== undefined) args.push("--agent-id", opts.agentId);
+    if (opts.withoutMemory) args.push("--no-memory");
+    for (const dir of opts.extensionDirs) args.push("--extensions", dir);
+    const child = Bun.spawn([process.execPath, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    child.unref();
+
+    const lock = join(expandHome(opts.stateDir ?? resolveSessionsRoot()), row.id, ".lock");
+    const deadline = Date.now() + WAKE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (existsSync(lock)) return; // 它拿到锁了 = 真的跑起来了
+      if (child.exitCode !== null) throw new Error(`会话 ${row.id} 的宿主进程退了（exit ${child.exitCode}），没跑起来`);
+      await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
+    }
+    throw new Error(`会话 ${row.id} 的宿主 ${WAKE_TIMEOUT_MS}ms 内没拿到锁`);
+  };
+}
+
+/**
+ * 无界面形态（2026-09-07）：**把一段会话跑起来，仅此而已**。
+ *
+ * 谁会用它：`sessionRunner()` spawn 出来的进程。别的会话给这一段发消息时，容器先把它叫醒
+ * （sessions.md §5 的虚拟 actor），叫醒的办法就是起一个这样的进程。
+ *
+ * 三条与人开的会话不同：
+ *   · **不装壳、不读 stdin**——没人坐在它前面；
+ *   · **可被请走**（`preemptible`）——你哪天 `--resume` 这一段，它把手上的活做完就让开；
+ *   · **空闲就退**——它是为了处理一条消息才起来的，处理完没理由继续占着锁。
+ */
+async function runServe(
+  product: Product,
+  form: PresetForm,
+  opts: CliOptions,
+  provider: Provider,
+  choices: readonly FirstRunChoice[],
+  credentials: CredentialStore,
+  sessionId: string | undefined,
+  signal: AbortSignal,
+): Promise<number> {
+  const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId);
+  const echo = await createEcho({ ...base, preemptible: true });
+  try {
+    await echo.agent.start();
+    // 起来这一下就会把盘上攒着的 inbox 吃掉（`start()` 里那句 `consumeInbox()`）。
+    // 之后靠每秒一拍的轮询接着收别人写进来的；连着空闲够久就收摊。
+    let idleSince = Date.now();
+    while (!signal.aborted) {
+      await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
+      if (!echo.agent.acceptsWork) break; // 被请走了（handoff）或已经收摊
+      if (echo.agent.state.status !== "idle") idleSince = Date.now();
+      else if (Date.now() - idleSince >= SERVE_IDLE_MS) break;
+    }
+    return 0;
+  } finally {
+    await echo.stop();
+  }
+}
+
 async function runPiped(
   product: Product,
   form: PresetForm,
