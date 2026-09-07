@@ -276,7 +276,7 @@ export const defaultConvertToLlm: ConvertToLlm = (messages) => {
     const p = projectOne(m);
     if (p !== null) out.push(p);
   }
-  return mergeAdjacentToolResults(out);
+  return mergeAdjacentToolResults(healOrphanToolUses(out));
 };
 
 function projectOne(m: AgentMessage): ProviderMessage | null {
@@ -315,6 +315,66 @@ function projectOne(m: AgentMessage): ProviderMessage | null {
     default:
       return null; // 自定义种类：缺省隐形
   }
+}
+
+/**
+ * 落单 `tool_use` 的补齐正文。模型据此知道那次调用**没跑过**（不是跑了没结果），可以重发。
+ * 不导出：`index.ts` 是 `export * from "./messages.ts"`，导出就等于进公共面，而它今天没有仓外消费者。
+ */
+const NO_TOOL_RESULT = "No result: this tool call was never executed.";
+
+/**
+ * 给没有配对结果的 `tool_use` 补一条 error `tool_result`
+ * （docs/decisions/implemented/2026-09-07-orphan-tool-use.md，选项 B）。
+ *
+ * **为什么要补**：一轮工具批中途被 abort 之后，没轮到的那几个调用在 transcript 里就没有结果——
+ * `run-turn.ts` 的批循环判到 `signal.aborted` 就 break，剩下的从来没进过 `runOneTool`（它是全函数，
+ * 进去必有结果出来），而账本这一侧没有任何清点。带着这样一份 transcript 续跑，
+ * OpenAI 兼容端点会拒收：`tool_calls` 里的每个 id 都必须有对应的 `tool` 消息。
+ *
+ * **为什么补在这里而不是补进账本**：与[失败 attempt 留 transcript、投影时丢]
+ * (docs/decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) 同一口径——
+ * 账本记真实发生的事（模型确实要了三件、确实只跑了一件），送模前的形状归投影。
+ * 往账本里塞一条模型没收到过的结果，反而是记了一件没发生的事。
+ *
+ * **补在哪个位置**：紧跟在那批已有结果之后、下一条 assistant 或真正的 user 消息之前。
+ * 补出来的是一条 tool-result-only 的 user 消息，`mergeAdjacentToolResults` 随后把它并进同一条里。
+ *
+ * `stopReason === "error"` 的 assistant 消息在 `projectOne` 里已经整条隐形，所以它的 `tool_use`
+ * 压根不会进到这里来登记——与 pi 的「错误 / 中止的 assistant 消息不登记 pending」同一个效果。
+ */
+function healOrphanToolUses(msgs: ProviderMessage[]): ProviderMessage[] {
+  const out: ProviderMessage[] = [];
+  /** 上一条 assistant 里还没拿到结果的 tool_use id，按出现顺序。 */
+  let pending: string[] = [];
+  const flush = (): void => {
+    if (pending.length === 0) return;
+    out.push({
+      role: "user",
+      content: pending.map((id) => ({ type: "tool_result", tool_use_id: id, content: NO_TOOL_RESULT, is_error: true })),
+    });
+    pending = [];
+  };
+
+  for (const m of msgs) {
+    if (m.role === "assistant") {
+      flush(); // 上一条 assistant 的欠账在下一条 assistant 之前结清
+      pending = m.content.filter((b): b is ToolUseBlock => b.type === "tool_use").map((b) => b.id);
+      out.push(m);
+      continue;
+    }
+    if (isToolResultOnly(m)) {
+      const done = new Set(m.content.map((b) => (b as ProviderToolResultBlock).tool_use_id));
+      pending = pending.filter((id) => !done.has(id));
+      out.push(m);
+      continue;
+    }
+    // 真正的 user / environment 消息：工具阶段到此为止，欠账在它**之前**结清
+    flush();
+    out.push(m);
+  }
+  flush(); // 会话末尾还欠着的（最常见的一种：abort 之后就没有下一条了）
+  return out;
 }
 
 /**

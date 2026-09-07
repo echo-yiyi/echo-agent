@@ -1,6 +1,6 @@
 # 落单的 `tool_use`：中止之后没跑的那几个调用，transcript 里没有配对的结果
 
-> 状态:proposed · 提出 2026-09-07 · **待拍板** · 来源 2026-09-07 [并行工具](../implemented/2026-09-07-parallel-tools.md) 实现时点出的既有缺口(不是它引入的)
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头,选 B) · 合入 2026-09-07 · 来源 2026-09-07 [并行工具](../implemented/2026-09-07-parallel-tools.md) 实现时点出的既有缺口(不是它引入的)
 
 ## 现状
 
@@ -35,13 +35,15 @@ bun -e 'const {Agent}=await import("./packages/core/src/agent.ts");const {FAKE_M
 
 **pi 的做法是 B,而且在生产里跑着**(2026-09-07 读源,`~/Code/pi`;pi 是另一条血脉,只作参考不作依据)。它的 agent / session 层与本仓一样:中止后 `break`,剩下的 tool call 没有事件、没有结果、在会话文件里落单,整层没有任何清点步骤。补齐发生在**构造 provider 请求**那一层(pi 的 `ai` 包里那个 `transform-messages` 模块;这里不写全路径,那是另一个仓的路径,写了会被本仓的 filerefs 门当成死链):按 assistant 逐条清点 pending 的 tool call id,没配上的插一条 `"No result provided"`、`isError: true`,六条 provider 路径全都调它。它多一条讲究:`stopReason` 是 error / aborted 的 assistant 消息**整条丢掉**、压根不登记 pending——所以流中途中止不需要补,只有「消息完整、工具批被砍断」才补,正好是本条描述的场景。反过来,pi 下一代 harness 的**规格文档**写的是「计划中的 tool call 给一个 aborted 错误结果」(往 A 走),但那只是规格,代码里没有对应实现。
 
-## 倾向
+## 决定
 
-**B**(2026-09-07 改;此前写的是 A,被上面两条推翻)。理由是**口径一致**:本仓已经拍过「账本记真实发生的事、送模前投影」,失败 attempt 与压缩都在这条线上;orphan 的账本状态本身是真实的——模型确实要了三件、确实只跑了一件,往账本里塞一条它没收到过的结果反而是在记一件没发生的事。
+**B**(2026-09-07 用户拍板;记录里一度写过倾向 A,被上面两条推翻)。理由是**口径一致**:本仓已经拍过「账本记真实发生的事、送模前投影」,失败 attempt 与压缩都在这条线上;orphan 的账本状态本身是真实的——模型确实要了三件、确实只跑了一件,往账本里塞一条它没收到过的结果反而是在记一件没发生的事。
 
 A 还剩一条没被驳倒的理由:`Agent.convertToLlm` 是公共可替换字段,把「请求必须合法」这条不变量放进缺省实现,换一份实现就悄悄丢了。但失败 attempt 那条已经接受了同样的代价,再为这一条单开一种口径就是两套规矩。
 
-真要拍 A,实现时三处别漏:同批里因抛错被丢掉的结果也算没拿到;补出来的结果要在**同一个 turn 内**入账(不能等到 run 收尾,否则 turn 事件已经关了);补的顺序按 `tool_use` 出现顺序,与并行批的入账顺序同一条规矩。
+落点:`defaultConvertToLlm` 里的 `healOrphanToolUses`——按 assistant 逐条登记 `tool_use` id,配上的划掉,欠账在**下一条 assistant 或下一条真正的 user 消息之前**、以及会话末尾结清,补出来的是 `is_error: true` 的 `tool_result`,随后由 `mergeAdjacentToolResults` 并进同一条 user 消息。`stopReason === "error"` 的 assistant 在 `projectOne` 里已整条隐形,它的 `tool_use` 不登记也就不补——与 pi 的「错误 assistant 不登记 pending」同一个效果。
+
+**登记一条相邻的、本条不管的**:`stopReason === "aborted"` 的 assistant 消息今天**不**被投影丢掉(只有 `error` 丢),所以它若带 `tool_use`,这次补齐会给它补结果。请求因此合法,但「中止的半截回复要不要整条不送回去」是失败 attempt 那条决策的邻居,没人拍过,本条不顺手改。
 
 ## 验收
 
