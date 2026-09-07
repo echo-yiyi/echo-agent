@@ -170,6 +170,8 @@ export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
 export const ECHO_TOOL_SEARCH = defineToolPack("echo:tool-search");
 /** 提问 `ask_user`（2026-09-05）：恒装；有没有人答由 `AgentOptions.questions` 定，没人时工具如实回话。 */
 export const ECHO_ASK = defineToolPack("echo:ask");
+/** 委派 `subagent`（2026-09-06）：恒装；子 agent 的 prompt / system / 工具集由模型在调用时决定。 */
+export const ECHO_SUBAGENT = defineToolPack("echo:subagent");
 
 function isStageArray(v: unknown): v is readonly CompactionStage[] {
   return (
@@ -244,6 +246,8 @@ export type BuiltinToolGroups = {
   readonly toolSearch: BuiltinToolGroup | undefined;
   /** 提问 `ask_user`，恒在。 */
   readonly askUser: BuiltinToolGroup | undefined;
+  /** 委派 `subagent`，恒在。 */
+  readonly subagent: BuiltinToolGroup | undefined;
   /** `undefined` = `compaction.builtin === false`：不装缺省阶梯（流水线与 registry 仍在，等别的扩展注册阶段）。 */
   readonly compaction: CompactionPackConfig | undefined;
 };
@@ -281,6 +285,7 @@ export function builtinEntries(
     ["echo:scheduler", ECHO_SCHEDULER as ExtensionDefinition<unknown>, groups.scheduler],
     ["echo:tool-search", ECHO_TOOL_SEARCH as ExtensionDefinition<unknown>, groups.toolSearch],
     ["echo:ask", ECHO_ASK as ExtensionDefinition<unknown>, groups.askUser],
+    ["echo:subagent", ECHO_SUBAGENT as ExtensionDefinition<unknown>, groups.subagent],
     ["echo:compaction", ECHO_COMPACTION as ExtensionDefinition<unknown>, groups.compaction],
   ];
   return [

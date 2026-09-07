@@ -54,6 +54,7 @@ export {
   ECHO_TASKS,
   ECHO_TOOL_SEARCH,
   ECHO_ASK,
+  ECHO_SUBAGENT,
   type BuiltinToolGroup,
   type BuiltinToolGroups,
   type BuiltinToolsConfig,

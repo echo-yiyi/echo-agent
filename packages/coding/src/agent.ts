@@ -93,6 +93,7 @@ const AGENT_BUILTIN_TOOLS = [
   "TaskList",
   "TaskUpdate",
   "ask_user", // 2026-09-05 提问工具，core 恒装；管道形态没人答时它如实回话
+  "subagent", // 2026-09-06 委派工具，core 恒装；子 agent 的样子由模型在调用时决定
   "schedule_cancel",
   "schedule_create",
   "schedule_list",

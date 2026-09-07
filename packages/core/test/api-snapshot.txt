@@ -446,7 +446,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 57（value 26 · type 27 · both 4）
+符号 58（value 27 · type 27 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -464,7 +464,7 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (19) --
+-- src/extension/builtin.ts (20) --
 value  agentRuntimeOf
 value  BUILTIN_GENERATION
 value  builtinEntries
@@ -479,6 +479,7 @@ value  ECHO_COMPACTION
 value  ECHO_MEMORY
 value  ECHO_SCHEDULER
 value  ECHO_SKILLS
+value  ECHO_SUBAGENT
 value  ECHO_TASKS
 value  ECHO_TOOL_SEARCH
 value  mountBuiltinTools

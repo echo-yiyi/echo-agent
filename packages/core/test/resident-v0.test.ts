@@ -94,7 +94,7 @@ test(
     // `transcript_read`（`echo:compaction`）标了 `deferred`，模型经 tool_search 取过 schema 才上菜单——
     // 宿主脚本里第一轮就是 tool_search，所以后面的轮次能调 skill_create / schedule_create（上面 `called` 已证）
     // 2026-09-05 `ask_user`（提问）常驻：菜单上多它一件
-    expect(ra.seen[0]!.tools).toEqual(["TaskCreate", "TaskList", "TaskUpdate", "ask_user", "memory", "skill_activate", "tool_search"].sort());
+    expect(ra.seen[0]!.tools).toEqual(["TaskCreate", "TaskList", "TaskUpdate", "ask_user", "memory", "skill_activate", "subagent", "tool_search"].sort());
     // 取过之后：后面某一轮的菜单里延迟的两件已经在，tool_search 仍在（还有别的延迟工具没取）；
     // 没取过的（transcript_read）任何一轮都不在菜单上
     expect(ra.seen.some((s) => ["skill_create", "schedule_create", "tool_search"].every((n) => s.tools.includes(n)))).toBe(true);

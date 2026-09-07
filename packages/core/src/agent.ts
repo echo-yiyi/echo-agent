@@ -22,15 +22,7 @@ import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
 import { QuestionLedger } from "./question/ledger.ts";
 import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk, QuestionPolicy, QuestionSettlement } from "./question/types.ts";
-import {
-  defaultConvertToLlm,
-  userMessage,
-  type AgentMessage,
-  type ContentBlock,
-  type ConvertToLlm,
-  type ImageBlock,
-  type Usage,
-} from "./messages.ts";
+import { defaultConvertToLlm, userMessage, type AgentMessage, type ContentBlock, type ConvertToLlm, type ImageBlock, type Usage, environmentMessage } from "./messages.ts";
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "./provider/dialect.ts";
 import type { Model, StreamFn, ThinkingLevel } from "./provider/types.ts";
 import { runAgentLoop, runAgentLoopContinue } from "./loop/run-loop.ts";
@@ -39,7 +31,7 @@ import { RunIntakeGate, type FollowUpResult, type IntakeLeftovers, type SteerRes
 import { StandaloneRunAdmission } from "./admission/standalone.ts";
 import { normalizeModelSnapshot } from "./admission/model-snapshot.ts";
 import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTicket, RunModelBinding, RunSource } from "./admission/types.ts";
-import type { AgentContext, AgentLoopConfig, AttemptResult, LoopResult, TransformContext } from "./loop/types.ts";
+import type { AgentContext, AgentLoopConfig, AttemptResult, LoopResult, TransformContext, Emit } from "./loop/types.ts";
 import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
@@ -80,6 +72,7 @@ import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.t
 import { activeTools, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap } from "./tools/harness.ts";
 import { makeToolSearchTool } from "./tools/tool-search.ts";
 import { makeAskUserTool } from "./question/tool.ts";
+import { makeSubagentTool, SUBAGENT_NAME, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
 import type { Diagnostic } from "./errors.ts";
 import type { StorageDir } from "./storage/types.ts";
 import type { ResourceChange } from "./events.ts";
@@ -89,7 +82,7 @@ import { renderSkillCatalog, renderSkillInjections } from "./skill/compose.ts";
 import type { ActiveSkill, Skill } from "./skill/types.ts";
 import { parseSkillText, roundTripError, serializeSkill, skillEntryPath, skillNameOfEntry } from "./skill/format.ts";
 import type { AgentMcpPort, McpServerSnapshot } from "./mcp/port.ts";
-import { killAllBackground } from "./background/harness.ts";
+import { killAllBackground, startBackground, BACKGROUND_KIND } from "./background/harness.ts";
 import type { AgentBackground, BackgroundLimits } from "./background/types.ts";
 import { createTasks, loadTasks, saveTasks, taskSnapshot, type TaskMap } from "./task/harness.ts";
 import { makeTaskTools, taskInjections } from "./task/tools.ts";
@@ -609,6 +602,8 @@ export class Agent {
   /** 提问账本：只有 `answerQuestion()` 与 `ask_user` 工具碰它。 */
   private readonly questions = new QuestionLedger();
   private readonly questionPolicy: QuestionPolicy;
+  /** 正在跑的那次 run 的 scope（模型绑定、runId）：工具里派子 agent 要复用父的绑定，从这里拿。run 之外为空。 */
+  private activeScope?: AgentAdmissionExecuteScope;
   /** 当前 run 的稳定身份；permission ask 与事件关联引用它。 */
   private currentRunId: string | null = null;
   /**
@@ -763,6 +758,17 @@ export class Agent {
       toolSearch: { tools: [makeToolSearchTool({ tools: this.tools, loaded: this.loadedTools })] },
       // 提问 `ask_user`（2026-09-05）：常驻；有没有人答由 `questions` 策略定，没人时工具当场如实回话
       askUser: { tools: [makeAskUserTool({ ask: (input, signal) => this.askQuestion(input, signal) })] },
+      // 委派 `subagent`（2026-09-06）：常驻；子 agent 的 prompt / system / 工具集由模型在调用时决定，
+      // 机制是 `runSubagent`（与 Dream 同一段隔离循环）
+      subagent: {
+        tools: [
+          makeSubagentTool({
+            availableTools: () => [...this.tools.keys()].filter((n) => n !== SUBAGENT_NAME),
+            runForeground: (spec, ctx) => this.spawnSubagentForeground(spec, ctx),
+            runBackground: (spec, label) => this.spawnSubagentBackground(spec, label),
+          }),
+        ],
+      },
       // 压缩阶梯 + transcript_read + 习惯段：与 memory 同款——`builtin: false` 就是「这组不在」，
       // 流水线与 registry 仍在，等别的扩展注册阶段。`transcript_read` 读的是活的 transcript。
       compaction: opts.compaction?.builtin === false ? undefined : defaultCompactionPack(opts.compaction ?? {}, () => this._state.messages),
@@ -2284,6 +2290,7 @@ export class Agent {
       resolvePromise = resolve;
     });
     this.activeRun = { promise, resolve: resolvePromise, abortController };
+    this.activeScope = scope;
     this._state.status = "generating";
     this._state.startedAt = Date.now();
     this._state.lastError = null;
@@ -2300,6 +2307,7 @@ export class Agent {
       this.reportUnconsumed(this.intake.closeRun(), "run 结束");
       // run 封口：本 run 的 permission tombstone 从「一条不丢」转进有界池（retention 至少到 run closure）
       this.permissions.closeRun(runId);
+      this.activeScope = undefined;
     }
   }
 
@@ -2473,27 +2481,13 @@ export class Agent {
       const task = await dreamTask(memory);
       let result: LoopResult;
       try {
-        result = await runAgentLoop(
-        [userMessage(task.prompt)],
-        // **独立 context**：整理不进主 transcript——它是 agent 对自己记忆的操作，不是这次任务的一部分。主 messages 一个字都不动。
-        { systemPrompt: null, messages: [], compaction: EMPTY_COMPACTION },
-        {
-          ...this.createLoopConfig(scope),
-          // D7：只给 memory 工具。不是「过滤掉危险的」，是**只给这一件**。
-          getTools: () => task.tools,
-          knownToolNames: () => task.tools.map((t) => t.name),
-          resolveTool: (name) => {
-            const tool = task.tools.find((t) => t.name === name);
-            return tool === undefined ? { ok: false as const, reason: "not_found" as const } : { ok: true as const, tool };
-          },
-          // 整理不吃 steering / followUp：那些是给前台 run 的（gate 只认前台 run）
-          intake: undefined,
-        },
-        // **事件不外发**：整理的中间过程不该混进 agent 的对外事件流。
-        async () => {},
-        scope.signal,
-        scope.modelBinding.streamFunction,
-      );
+        // D7：只给 memory 工具。不是「过滤掉危险的」，是**只给这一件**。**事件不外发**：整理的中间过程不该混进对外事件流。
+        result = await this.runSubagent(
+          { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId: scope.runId, turnInjections: "inherit" },
+          scope,
+          scope.signal,
+          async () => {},
+        );
       } finally {
         // Dream 也是一次 run：它的 ask tombstone 同样到 run 封口才进有界池——loop 之外（listener / 持久化）抛错也要封，
         // 否则 live-run / tombstone 状态越积越多
@@ -2514,6 +2508,127 @@ export class Agent {
       this.reportDiagnostic({ code: "dream_failed", message: `记忆整理失败：${errText(e)}` });
       return { outcome: { kind: "error", error: { source: "internal", code: "internal", retryable: false, message: errText(e) } }, messages: [] };
     }
+  }
+
+  /**
+   * 隔离的子循环（2026-09-06 从 Dream 抽出，Dream 与 `subagent` 工具都走这里）：**独立 context**（主 transcript
+   * 一字不动）、只给指定的工具、同一份模型绑定、不吃前台的 steer / followUp。事件去向由调用方给的 `emit` 决定。
+   * `turnInjections`：Dream 沿用父的每轮注入（激活 skill、任务清单），委派的子 agent 不要——它看不到这场对话。
+   */
+  private runSubagent(
+    spec: {
+      prompt: string;
+      systemPrompt: string | null;
+      tools: readonly AgentTool[];
+      runId: string;
+      maxIterations?: number;
+      turnInjections: "inherit" | "none";
+    },
+    scope: AgentAdmissionExecuteScope,
+    signal: AbortSignal,
+    emit: Emit,
+  ): Promise<LoopResult> {
+    const base = this.createLoopConfig(scope);
+    const tools = [...spec.tools];
+    return runAgentLoop(
+      [userMessage(spec.prompt)],
+      { systemPrompt: spec.systemPrompt, messages: [], compaction: EMPTY_COMPACTION },
+      {
+        ...base,
+        runId: spec.runId,
+        maxIterations: spec.maxIterations ?? base.maxIterations,
+        getTools: () => tools,
+        knownToolNames: () => tools.map((t) => t.name),
+        resolveTool: (name) => {
+          const tool = tools.find((t) => t.name === name);
+          return tool === undefined ? { ok: false as const, reason: "not_found" as const } : { ok: true as const, tool };
+        },
+        ...(spec.turnInjections === "none" ? { getTurnInjections: () => [] } : {}),
+        // 不吃 steering / followUp：那些是给前台 run 的（gate 只认前台 run）
+        intake: undefined,
+      },
+      emit,
+      signal,
+      scope.modelBinding.streamFunction,
+    );
+  }
+
+  /** 模型点名的工具 → 父池里的实例。不认识的名字整组判红（不静默少给），`subagent` 自己不给（只扇一层）。 */
+  private subagentTools(names: readonly string[]): AgentTool[] | string {
+    const out: AgentTool[] = [];
+    const missing: string[] = [];
+    for (const n of names) {
+      const tool = n === SUBAGENT_NAME ? undefined : this.tools.get(n);
+      if (tool === undefined) missing.push(n);
+      else out.push(tool);
+    }
+    return missing.length > 0 ? `Unknown tools: ${missing.join(", ")}` : out;
+  }
+
+  /** 前台委派：嵌在父 run 的这次工具执行里跑到完；父的 abort 一路级联进来（用的是工具拿到的 signal）。 */
+  private async spawnSubagentForeground(spec: SubagentSpec, ctx: { signal?: AbortSignal; onProgress?: (text: string) => void }): Promise<SubagentOutcome> {
+    const scope = this.activeScope;
+    if (scope === undefined) return { kind: "error", message: "a subagent can only be spawned from inside a run" };
+    const tools = this.subagentTools(spec.tools);
+    if (typeof tools === "string") return { kind: "error", message: tools };
+    const result = await this.runSubagent(
+      { prompt: spec.prompt, systemPrompt: spec.systemPrompt, tools, runId: scope.runId, turnInjections: "none", ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }) },
+      scope,
+      ctx.signal ?? scope.signal,
+      subagentProgress(ctx.onProgress),
+    );
+    return subagentOutcome(result);
+  }
+
+  /**
+   * 后台委派：后台队列上 kind "subagent" 的任务（`BackgroundTask.kind` 预留的那个）。模型绑定在派出那一刻捕获，
+   * 父 run 结束后子 agent 照跑；随 agent 收摊（`killAllBackground` 抹 signal）。结束时最后一条回复投 inbox。
+   */
+  private spawnSubagentBackground(spec: SubagentSpec, label: string): { ok: true; id: string } | { ok: false; message: string } {
+    const scope = this.activeScope;
+    if (scope === undefined) return { ok: false, message: "a subagent can only be spawned from inside a run" };
+    const tools = this.subagentTools(spec.tools);
+    if (typeof tools === "string") return { ok: false, message: tools };
+    // 后台的子循环是自己一段 run（父 run 早就封口了）：权限 ask 的 tombstone 按它自己的 runId 留到跑完
+    const runId = `subagent-${crypto.randomUUID()}`;
+    let final: SubagentOutcome = { kind: "aborted" };
+    const started = startBackground(this.background, {
+      kind: "subagent",
+      label,
+      run: async (bg) => {
+        try {
+          const result = await this.runSubagent(
+            { prompt: spec.prompt, systemPrompt: spec.systemPrompt, tools, runId, turnInjections: "none", ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }) },
+            scope,
+            bg.signal,
+            subagentProgress((text) => bg.write(text), true),
+          );
+          final = subagentOutcome(result);
+        } finally {
+          this.permissions.closeRun(runId);
+        }
+        if (final.kind === "error") throw new Error(final.message);
+        if (final.kind === "aborted") throw new Error("aborted");
+      },
+      onEnd: (task) =>
+        environmentMessage(
+          final.kind === "completed"
+            ? `Subagent ${task.id} (${label}) finished. Its reply:\n${final.text === "" ? "(no reply)" : final.text}`
+            : `Subagent ${task.id} (${label}) ${task.status}${task.error === null ? "" : `: ${task.error}`}`,
+          BACKGROUND_KIND,
+          task.id,
+        ),
+    });
+    if (!started.ok) {
+      return {
+        ok: false,
+        message:
+          started.reason === "too_many_running"
+            ? `${started.running}/${started.max} background jobs are already running; collect some first`
+            : `The background queue is full (${started.tasks}/${started.max})`,
+      };
+    }
+    return { ok: true, id: started.task.id };
   }
 
   private async createContextSnapshot(scope: AgentAdmissionExecuteScope): Promise<AgentContext> {
@@ -3141,6 +3256,36 @@ function validatePermissionPolicy(policy: PermissionPolicy | undefined): Permiss
   }
   if (typeof policy.authorize !== "function") throw new Error("permission.authorize 必须是函数");
   return policy;
+}
+
+/** 子循环的结果 → 工具看到的结果：完成时带最后一条回复的正文。 */
+function subagentOutcome(result: LoopResult): SubagentOutcome {
+  if (result.outcome.kind === "aborted") return { kind: "aborted" };
+  if (result.outcome.kind === "error") return { kind: "error", message: result.outcome.error.message };
+  const assistant = result.messages.filter((m) => m.role === "assistant");
+  const last = assistant[assistant.length - 1];
+  return { kind: "completed", text: last === undefined ? "" : textOf(last).trim(), assistantMessages: assistant.length };
+}
+
+/**
+ * 子循环的事件 → 一条文字进度：文字增量原样、工具调用一行标记。`delta` 为真时每次只给增量（后台缓冲自己累加），
+ * 否则给累计的尾巴（前台 `onUpdate` 要的是「现在看到的样子」）。
+ */
+function subagentProgress(sink: ((text: string) => void) | undefined, delta = false): Emit {
+  if (sink === undefined) return async () => {};
+  let acc = "";
+  const push = (chunk: string): void => {
+    if (delta) {
+      sink(chunk);
+      return;
+    }
+    acc = (acc + chunk).slice(-2000);
+    sink(acc);
+  };
+  return async (e) => {
+    if (e.type === "message_update" && e.delta.type === "text_delta") push(e.delta.text);
+    else if (e.type === "tool_execution_start") push(`\n[${e.toolName}]\n`);
+  };
 }
 
 function textOf(m: AgentMessage): string {
