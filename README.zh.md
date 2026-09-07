@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-一个自主 agent 的运行时，以及基于它的两个产品：通用 agent `echo-agent` 与 coding agent `echo-coding`。既可以使用装配好的完整 runtime，也可以直接基于底层 engine 构建；同一个 agent 既能交互运行，也能接入 Unix 管道。
+一个自主 agent 的运行时，以及基于它的两个产品：通用 agent `echo-agent` 与 coding agent `echo-coding`。可以装配一个 runtime、用自己的工具与 prompt 扩展它，或者给它换一个壳；同一个 agent 既能交互运行，也能接入 Unix 管道。
 
 > **状态：尚未发布。** workspace 中的 packages 目前均为 private。现阶段请从源码安装；首个 `0.x` 版本发布前，公共 API 仍可能变化。
 
@@ -89,7 +89,7 @@ try {
 }
 ```
 
-自定义 host 可以从 `@echo-agent/core` 导入 `Agent`，自行提供 model、stream function 和 ports。两个使用高度都在同一条入口上：`createEcho()` 装配完整 runtime，`Agent` 则把 ports 留给你自己给。
+`createEcho()` 是装配 runtime 的唯一一处，所以自定义 host 从这里起步。要给运行中的 agent 加工具、prompt 段、压缩阶段或 hook，就写一条 extension：它声明自己注入什么、提供什么，生命周期归 host 管，卸载时不留残骸。壳也是一条 extension，只是它注入的是 `AgentRuntime` 这个 service 并把它渲染出来。`Agent` 类本身是内部的：它有相当一部分是为承载 host 专用接线而存在的，第三方需要的一切都在 extension API 上。
 
 ## Packages
 

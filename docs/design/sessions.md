@@ -56,7 +56,27 @@ project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自
 
 三层里唯一的共享写方是 project / user 级 memory：多段 session 同时往同一层记。dream 只整理 session 自己那份，不碰上两层，所以整理不冲突；上两层的并发写归 memory 线（Non-Goals）。
 
-**这一节已全部实现**（记忆三层 2026-09-07 补上）：分区（`agent.md` / `user.md` / 笔记与索引）与作用域（session / project / user）怎么对、注入哪几层、怎么选层，见 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」。选层走**路径前缀**（`user/agent.md`、`project/user.md`、`session/memory/x.md`），`memory` 工具不加参数；project 目录的解析在 [`projectPrefix()`](../../packages/core/src/memory/scope.ts#symbol=projectPrefix)，`workspace.json` 的校验在 [`assertProjectWorkspace()`](../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace)，三层的字节面在 `createAgent` 的 `prepareCapabilities` 里接上。
+**分区与作用域是两个轴**，不是笛卡尔积。分区是「记的是什么」（`agent.md` / `user.md` / 笔记与它的 `INDEX.md`），作用域是「谁看得见」。哪层有哪些分区、每种分区注入哪几层，是下面两张表（2026-09-07 实现；为什么这么切见 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md)）。
+
+落盘——哪层有什么：
+
+| 作用域 | `agent.md` | `user.md` | 笔记 + `INDEX.md` |
+|---|---|---|---|
+| user | 有 | 有 | 有 |
+| project | 有 | 有 | 有 |
+| session | 无 | 无 | 有（dream 只整理这份） |
+
+注入——system prompt 里给模型看什么：
+
+| 分区 | 注入哪几层 |
+|---|---|
+| `agent.md` | user + project |
+| `user.md` | user + project |
+| `INDEX.md` | user + project + session |
+
+三条配套规矩：**选层走路径前缀**（`user/agent.md`、`project/user.md`、`session/memory/x.md`），`memory` 工具不加参数——注入的每段带自己的路径，模型改哪份就写哪个路径；**顺序**先 `agent.md` / `user.md` 后索引，同一分区内多层按 user → project → session，都渲染、不去重、各带路径标题；**project / user 两层的并发写先接受后写覆盖**（文件不会写坏，tmp + rename），dream 只碰 session 层所以整理不冲突。
+
+实现落点：project 目录的解析在 [`projectPrefix()`](../../packages/core/src/memory/scope.ts#symbol=projectPrefix)，`workspace.json` 的校验在 [`assertProjectWorkspace()`](../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace)，三层的字节面在 `createAgent` 的 `prepareCapabilities` 里接上。
 
 project 层指哪个目录**以 `start()` 从盘上读回的 workspace 为准**（2026-09-07）：装配期先按 `createAgent` 那时已知的 workspace 指着，`start()` 里 `createOrResume` 返回之后 [`projectScopeBinding`](../../packages/core/src/memory/scope.ts#symbol=projectScopeBinding) 的 `pin` 重指一次，撞车检查走的还是 `assertProjectWorkspace`。**只重指这一次**：运行中 `setWorkspace()` 换目录（echo-coding 的 worktree 隔离）故意不跟——同一个仓库换个 worktree 路径就换一套项目记忆，不是想要的行为。
 
@@ -120,15 +140,47 @@ type SessionInfo = {
 
 `/clear` 的语义改为：关掉当前一段（`status = closed`）、新建一段、壳 attach 过去。旧段留在盘上可 `--resume`。协议上的 `reset()` 因此没有消费者，删。**还没做**，代价见 §9 第 5 步。
 
+**待拍板**：关段那一刻旧段 inbox 里还有没消费的 record 怎么办。closed 的段不收信、也不会再被消费，什么都不做等于**静默丢掉别人给你留的话**，而那正是「fail-loud、绝不静默降级」要拦的。提议：**把未消费的 record 转投到新建的那一段**——是同一个人、同一个 workspace 的延续，留言的人要的是「这话有人看」，不是「这话进了哪个目录」。转投走的是 §5 的普通投递路（新 record id、原文照抄、`ref` 指回原来那条），所以 at-least-once 不破。备选是「拒绝 `/clear` 直到 inbox 空」，但那让人按一个清屏键要等别人的消息被处理完，不合适。
+
 ## 4. agent 定义是产品内的角色
 
 > 2026-09-07 修正。此前本节写的是「agent 定义 = extension bundle，echo-agent / echo-coding 各打成一个」，那是把产品当成了 agent 定义。决策记录：[角色定义](../decisions/proposed/2026-09-07-role-agent.md)；被修正的那条：[agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md)。
 
-**产品是容器级的事**：一个 echo-coding 容器开出来的段全是 coding 方向。一段 session 挂的 agent 定义是**产品内的一个角色**——reviewer、前端、缺省——对应 Claude Code 的 subagent 定义。角色是数据，不是代码：一个 markdown 文件，frontmatter 带 `name` / `description` / `tools` / `model`，正文就是 identity。来源三处、按优先级合并：产品自带、user 层 `~/.echo/agents/`、项目层 `<workspace>/.echo/agents/`（放仓库里、随 git 走，与项目指令文件同一条规矩）。[`Product`](../../packages/cli/src/product.ts#symbol=Product) 与 `preset` 不动，ABI 不加字段。
+**产品是容器级的事**：一个 echo-coding 容器开出来的段全是 coding 方向。一段 session 挂的 agent 定义是**产品内的一个角色**——reviewer、前端、缺省——对应 Claude Code 的 subagent 定义。角色是数据，不是代码：一个 markdown 文件，frontmatter 带 `name` / `description` / `tools` / `model`，正文就是 identity。[`Product`](../../packages/cli/src/product.ts#symbol=Product) 与 `preset` 不动，ABI 不加字段。
+
+```md
+---
+name: reviewer
+description: 只读审查，不改代码
+tools: [read_file, grep, glob, bash]     # 必须 ⊆ 产品的工具池
+model: kimi-k3                            # 可省，缺省用产品的
+---
+你是代码审查员。……
+```
+
+**来源三处，同名时离仓库越近越优先**：项目层 `<workspace>/.echo/agents/` > user 层 `~/.echo/agents/` > 产品自带。与项目指令文件（AGENTS.md / CLAUDE.md）同一个方向——角色是人写给 agent 的，具体仓库里那份最知道自己要什么。项目层放仓库里、随 git 走。
 
 **能替代什么，各自可选，没给的项产品原样生效**：identity 段**替换**产品的 identity（纪律段、工具习惯段照旧）；`tools` 是产品工具池的子集，只能少不能多；`model` 可选。权限策略继承产品的，角色改不了。其他 prompt 段不可替换——它们是产品对自己工具的承诺。
 
-**挂载走已有的先例**：`CreateEchoOptions` 今天把 `agent.tools` 变成一条内联 extension `echo:inline-tools`。角色（按名读到的文件，或 `AgentRef.kind === "inline"` 现写的）同样在 mount 时变成一条 `echo:inline-agent`，`apply()` 里三件事：有 identity 就替换 identity 段，有 `tools` 就收紧工作集，有 `model` 就换模型。为此在现有 registry 上开两个最小的口，都带 disposer、卸载复原：`AgentPrompt.section(s, { replace: true })`（同名存在才成功，不带 `replace` 照旧 fail-loud）与 `AgentTools.restrict(names)`（工作集 = 池 ∩ names，只能收紧；池不动）。角色就是 `registries.ts` 注释里等的那个「受控 replace 的真实消费者」。定义整份存在 meta 里，`--resume` 原样重挂。
+**挂载走已有的先例**：`CreateEchoOptions` 今天把 `agent.tools` 变成一条内联 extension `echo:inline-tools`。角色（按名读到的文件，或 `AgentRef.kind === "inline"` 现写的）同样在 mount 时变成一条 `echo:inline-agent`，`apply()` 里三件事：有 identity 就替换 identity 段，有 `tools` 就收紧工作集，有 `model` 就换模型。定义整份存在 meta 里，`--resume` 原样重挂。
+
+为此在现有 registry 上开两个最小的口，都带 disposer、卸载复原。角色就是 `registries.ts` 注释里等的那个「受控 replace 的真实消费者」：
+
+```ts
+import type { PromptSection } from "@echo-agent/core";
+type Disposer = () => void;
+
+interface AgentPromptRegistry {
+  /** replace：同名存在才成功，disposer 把原来那段放回去；不给 replace 照旧同名 fail-loud。 */
+  section(section: PromptSection, opts?: { replace: true }): Disposer;
+}
+interface AgentToolsRegistry {
+  /** 工作集 = 池 ∩ names，只能收紧；disposer 解除。池不动，别的 extension 照常注册。 */
+  restrict(names: ReadonlySet<string>): Disposer;
+}
+```
+
+**`restrict` 与延迟工具叠在一起**：先收紧、再按 `deferred` 过滤，两道都作用在工作集上。所以角色白名单外的工具，模型用 `tool_search` 既查不到也取不出——`tool_search` 看的是工作集，不是池。
 
 **不越权**（core 的 `sessions.create` 里验，不靠工具自觉）：角色的 `tools` 必须是创建者当前工具集的子集，权限策略继承创建者的、不能放宽。违反判红，盘上不建目录。
 

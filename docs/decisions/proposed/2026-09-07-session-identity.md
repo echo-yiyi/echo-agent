@@ -20,12 +20,13 @@
 
 ## 决定
 
-**A**(2026-09-07 用户拍板)。具体:
+**A**(2026-09-07 用户拍板):产品名从 `agent` 字段挪进新的 `product` 字段,`agent` 只放角色;`agentId` / `agentName` 退场,lease holder 标识改成 `${product}:${sessionId}`。
 
-- `SessionInfo = { …, product: string, agent: AgentRef, main: boolean, status }`。`product` 由容器给(`Product.name`),创建时写、之后不改。
-- `--continue` 的条件 = `workspace` 相同 + `product` 相同 + `main` 为真 + `status` 为 active。`--resume <id>` 不看 product(人点名的段就是那段;角色快照按 [角色定义](2026-09-07-role-agent.md) 求交)。
-- `CreateAgentOptions.agentId` / `agentName` 与 `AgentOptions.agentId` / `agentName` 退场;lease holder 标识改成 `${product}:${sessionId}`。
-- 词表里「agent」只剩两个意思:运行中的 session(`Agent` 类,内部化后仓外看不到)与 agent 定义(角色);产品、holder、壳协议各用自己的词。
+**`SessionInfo` 的形状与 `--continue` 的筛选条件在 [会话与 agent 集群](../../design/sessions.md) §3**,本条不复述。
+
+选 A 而不是 B / C 的理由:产品与角色是**两个事实**——「谁开的这一段」与「这一段扮演谁」,B 把它们拼成一个字符串,筛选时要拆字符串,而拆串是漂移的常见来源;C 想靠目录分产品,与「状态根 = session 目录」直接冲突,一段 session 的目录已经由它自己的 id 定了。
+
+附带一条不改代码但要守的:词表里「agent」从此只剩两个意思——运行中的 session(`Agent` 类,内部化后仓外看不到)与 agent 定义(角色);产品、lease holder、壳协议各用自己的词,不再共用「agent」。
 
 ## 验收
 

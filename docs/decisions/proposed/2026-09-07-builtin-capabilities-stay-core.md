@@ -18,15 +18,11 @@ memory / tasks / schedule / skills / inbox 五件内建能力,「注册走 exten
 
 ## 决定
 
-**A**(2026-09-07 用户拍板:「memory 其实和压缩一样,是 agent 很核心的能力,core 要认识」)。具体到三层:
+**A**(2026-09-07 用户拍板:「memory 其实和压缩一样,是 agent 很核心的能力,core 要认识」)。**五件各自的三层落点在 [架构总览](../../architecture.md) §4 的表**,本条不复述。
 
-| 层 | 压缩(今天) | memory(同样分法) |
-|---|---|---|
-| 状态与机制,core 拥有 | `CompactionState`、流水线、轮首阈值判断 | `AgentMemories` 容器、dream 调度、轮次门、恢复 dream 状态 |
-| 别人往里注册的口 | `AgentCompaction` registry | 分区 registry——**暂不开**,今天零消费者;第一个仓外扩展出现时再开 |
-| 缺省内容,一条 `echo:*` extension | `echo:compaction` | `echo:memory`:`memory` 工具、记忆段、缺省分区 |
+为什么按压缩那个分法:能力的**机制**(什么时候压、什么时候整理记忆、任务的拓扑约束)决定的是 agent 会不会做错事,它必须有唯一一份、由 core 拥有;而**缺省内容**(装哪几件工具、出哪几段 prompt)是可以换的,所以它走 extension、和第三方同一条注册路。搬出去(选项 B)会把机制也变成可替换的——那意味着换一条 extension 就能改掉 dream 什么时候跑、压缩什么时候触发,而这些是 core 对「agent 不失控」的承诺,不该是配置。
 
-附带:`AgentLifecycle` 端口的提议**撤回**;架构 review 里「把能力搬出 Agent」那条**撤回**;tasks / schedule / skills / inbox 同此,不逐件另拍。
+附带:为了搬能力而提的 `AgentLifecycle` 端口**撤回**;架构 review 里「把能力搬出 Agent」那条**撤回**;tasks / schedule / skills / inbox 同此,不逐件另拍。memory 的分区 registry **暂不开**——今天零消费者,第一个仓外扩展出现时再开(受众定成第三方之后这条要重看,见 [受众与版本](2026-09-07-audience-and-versioning.md))。
 
 ## 验收
 

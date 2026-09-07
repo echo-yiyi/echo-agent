@@ -1,6 +1,8 @@
 # `Agent` 类收进 core 内部：仓外只剩 `createEcho()` 与 `AgentRuntime` 两条缝
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 来源 2026-09-07 架构 review · 取代 [start 前置条件](../rejected/2026-09-01-start-precondition.md) · [收摊入口](../rejected/2026-09-01-teardown-entry.md) · [两种 lifecycle 命名](../rejected/2026-09-01-lifecycle-naming.md) · [fenced phase](../rejected/2026-09-01-fenced-phase.md)
+> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · **判据 2026-09-07 改**(见「决定」第 1 条,原来那条以「零仓外消费者」为据,受众定成第三方之后失效) · 来源 2026-09-07 架构 review · 判据的上位记录:[受众与版本](2026-09-07-audience-and-versioning.md) · 取代 [start 前置条件](../rejected/2026-09-01-start-precondition.md) · [收摊入口](../rejected/2026-09-01-teardown-entry.md) · [两种 lifecycle 命名](../rejected/2026-09-01-lifecycle-naming.md) · [fenced phase](../rejected/2026-09-01-fenced-phase.md)
+
+> **形态的家就是本条**:公共面这件事没有设计文档([架构总览](../../architecture.md) §6 只列门,不列该公开什么)。有了之后把清单搬过去,本条只留取舍。
 
 ## 现状(拍板前)
 
@@ -24,7 +26,11 @@ README 说「两个使用高度」:高 = `createEcho()`,低 = `new Agent()`。�
 
 **A**(2026-09-07 用户拍板)。附带三条:
 
-1. **根入口的取舍判据**:有仓外消费者或 examples 用到的才公开,其余内部;API 快照记的就是这条线。按它收回去的有 `Agent` / `AgentOptions`、压缩阶梯的作者工具包(`frameFull`、`snipStage`、估算函数一族,今天零仓外消费者)、session 状态文件的读写(`readSessionPhase` 等)。留下的:装配、provider、写工具的词汇、hooks / permission / question 类型、消息与事件、`AgentRuntime`、落盘默认件、`listSessions`。以后第一个产品要写自己的压缩阶段时再开子路径。
+1. **根入口的取舍判据**(2026-09-07 改,见 [受众与版本](2026-09-07-audience-and-versioning.md)):**第三方建产品 / 写扩展 / 换壳需要不需要**——需要就公开,否则内部;API 快照记的就是这条线。
+
+   原来写的是「有仓外消费者或 examples 用到的才公开」,依据是「`new Agent()` 零仓外消费者」。受众定成第三方之后那条失效了:两者差在**时态**,旧判据问「现在有没有人用」,新判据问「将来那个人要不要」。**结论没变**(`Agent` 类照旧内部化),但理由换了——见下面第 4 条;按新判据的两处翻案也在那里。
+
+   按新判据收回去的:`Agent` / `AgentOptions`(理由见第 4 条)、session 状态文件的读写(`readSessionPhase` 等——那是容器内部的事,第三方经 `Echo.sessions` 拿 core 合成好的行)。**留下的**:装配、provider、写工具的词汇、hooks / permission / question 类型、消息与事件、`AgentRuntime`、落盘默认件、`listSessions`,**以及压缩阶梯的作者函数**(`frameFull` / `snipStage` / 估算一族——第三方要写自己的压缩策略就得用;旧判据把它们判成「零消费者→收内部」,是错的)。它们留在根入口还是下沉到 `./compaction` 子路径,是实现时的一步,不改「留」这个结论。
 2. **评测与 core 自己的测试走 `createEcho()`**,不走 `new Agent()`。它要的零盘路径**已经有了**:给了自定义 `store` 又没点名 `stateDir` 时观测库开 `:memory:`(71150f0),配上 `InMemoryDir` 与 `InMemoryStateLock` 就是一次不碰盘的完整装配。想换掉观测 store 本身是另一件事,见 [观测的公开线](2026-09-07-observation-public-face.md)。
 3. **四条 2026-09-01 记录移入 `rejected/`**,状态行指向本条。它们讲的公共契约不存在了;剩下两个内部实现项(`dispose()` 不还锁、fenced 是隐藏 latch)随内部化一起修,不再是决策。
 

@@ -150,6 +150,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/proposed/2026-09-07-audience-and-versioning.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/proposed/2026-09-07-agent-class-internal.md",
       "bilingual": false
     },

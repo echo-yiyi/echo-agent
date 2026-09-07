@@ -22,43 +22,11 @@
 
 **A**(2026-09-07 用户拍板:「我们的这个 agent 就是走的 extension,这样做就对了。然后这个 agent 可以选择性的去替代」)。
 
-**形状**,照 skill 的样子,一个 markdown 文件、frontmatter 带字段,正文就是 identity:
+**形态在 [会话与 agent 集群](../../design/sessions.md) §4**——文件长什么样、三个来源与撞名优先级、能替代哪三样、挂载怎么走、要开的两个 registry 口、`restrict` 与延迟工具怎么叠,都在那里,本条不复述。实现照 §4 做。
 
-```md
----
-name: reviewer
-description: 只读审查,不改代码
-tools: [read_file, grep, glob, bash]     # 必须 ⊆ 产品的工具池
-model: kimi-k3                            # 可省,缺省用产品的
----
-你是代码审查员。……
-```
+选 A 而不是 B / C 的理由:角色是**数据不是代码**(写一个 reviewer 不该要写 TypeScript),而「把数据在 mount 时变成一条 extension」是仓里已有的先例(`agent.tools` → `echo:inline-tools`),所以不必为它另立一套注册机制——C 的代价正是第二套机制会与 extension 并行、迟早分叉。B 保住了机制唯一,但把写角色的门槛抬到写代码,与「产品内的一个角色」这个定位不符。
 
-**来源三处,按优先级合并**:产品自带(echo-coding 可以自带 reviewer)、user 层 `~/.echo/agents/`、项目层 `<workspace>/.echo/agents/`(放仓库里、随 git 走——角色是人写给 agent 的,与项目指令文件同一条规矩)。
-
-**能替代什么,各自可选,没给的项产品原样生效**:identity 段**替换**产品的 identity(纪律段、工具习惯段照旧);`tools` 是产品工具池的子集,只能少不能多;`model` 可选。权限策略不让角色改,继承产品的。任何其他 prompt 段不可替换——纪律段和工具习惯段是产品对自己工具的承诺,角色换掉它们等于换了产品;真有需要再按 registry 那条规矩开。
-
-**mount** 走已有先例(`echo:inline-tools`):定义在 mount 时变成一条 `echo:inline-agent`,`apply()` 里三行——有 identity 就 `section(identity, { replace: true })`,有 tools 就 `restrict(tools)`,有 model 就走 `setModel`。为此在现有 registry 上开两个最小的口,都带 disposer、卸载复原:
-
-```ts
-import type { PromptSection } from "@echo-agent/core";
-type Disposer = () => void;
-
-interface AgentPromptRegistry {
-  /** replace:同名存在才成功,disposer 把原来那段放回去;不给 replace 照旧同名 fail-loud。 */
-  section(section: PromptSection, opts?: { replace: true }): Disposer;
-}
-interface AgentToolsRegistry {
-  /** 工作集 = 池 ∩ names,只能收紧;disposer 解除。池不动,别的 extension 照常注册。 */
-  restrict(names: ReadonlySet<string>): Disposer;
-}
-```
-
-角色就是 registry 注释里等的那个「真实消费者」。
-
-**`session_create` 的 `agent` 参数回来**:`agent: "reviewer" | { identity, tools?, model? }`,按名从上面三处找,找不到判红。不越权与快照权威两条沿用 2026-09-03 的记录:`tools` ⊆ 创建者当前工具集在 core 的 `sessions.create` 里验;通过的定义整份存进 meta,`--resume` 用「快照 ∩ 容器此刻的工具」,不需要按名找任何东西,名字只是来历。
-
-**从 2026-09-03 记录撤回的**:ABI 不加 `extensions` 字段;echo-agent / echo-coding 不写成 bundle;`Product` 与 `preset` 不动。**留下的**:inline → `echo:inline-agent`、不越权、快照权威只能收紧。
+**从 [agent 是 extension](2026-09-03-agent-is-an-extension.md) 撤回的**:ABI 不加 `extensions` 字段;echo-agent / echo-coding 不写成 bundle;`Product` 与 `preset` 不动。**留下的**:inline → `echo:inline-agent`、不越权、快照权威只能收紧。
 
 **待拍板**(本次未议):`subagent` 工具(`packages/core/src/subagent/tool.ts`,今天由模型逐次给 `system` / `tools`)要不要也接受角色名,让「派一个 reviewer 子 agent」和「开一段 reviewer session」用同一份定义。
 

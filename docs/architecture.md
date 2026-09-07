@@ -78,7 +78,8 @@
 
 | 决定 | 一句话 | 记录 |
 |---|---|---|
-| `Agent` 类内部化 | 仓外只剩 `createEcho()` / `AgentRuntime` / `./testing`；根入口按「有仓外消费者才公开」砍 | [记录](decisions/proposed/2026-09-07-agent-class-internal.md) |
+| 受众与版本（根决策） | 受众 = 第三方可装的内核；公共面按「第三方需要不需要」划；0.x，`hostAbiVersion` 独立成线，tag 由人定 | [记录](decisions/proposed/2026-09-07-audience-and-versioning.md) |
+| `Agent` 类内部化 | 仓外只剩 `createEcho()` / `AgentRuntime` / `./testing`；正门是 extension ABI，不是裸 `Agent` | [记录](decisions/proposed/2026-09-07-agent-class-internal.md) |
 | 内建五件留 core | 不搬出 `Agent`；按压缩分法；memory 的 registry 等第一个消费者 | [记录](decisions/proposed/2026-09-07-builtin-capabilities-stay-core.md) |
 | 观测的公开线 | 读面 + extension 发口公开，写面内部；观测 store 从写死的路径分支变成可注入的端口 | [记录](decisions/proposed/2026-09-07-observation-public-face.md) |
 | 并行工具（已合入 59beb8c，本表只为指路） | 工具声明 `concurrent`，连续批；结果按 tool_use 顺序；`toolExecution` 选项删 | [记录](decisions/implemented/2026-09-07-parallel-tools.md) |

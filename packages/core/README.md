@@ -19,17 +19,17 @@ await echo.stop();                      // 先卸扩展 → 等落盘 settle →
 `createEcho()` 是**唯一的装配现场**：它装好 Agent，再把内建能力（Task / Skill / Memory / Schedule）
 与 `<cwd>/extensions/` 里你自己写的扩展，**用同一套机制**装上去。装了什么在 `echo.extensions` 里看得见。
 
-## 两个使用高度
+## 三条正门
 
 **都在 `@echo-agent/core` 这一条入口上**：
 
-| 高度 | 用法 | 你要自己给什么 |
-|---|---|---|
-| 高 | `createEcho()` | 只给 provider——端口、内建能力与扩展装配都已备好 |
-| 低 | `new Agent()` | 端口自己给、工具自己注册，它不会替你装任何默认件 |
+| 要做什么 | 从哪进 |
+|---|---|
+| 起一个能跑的 agent | `createEcho()`——只给 provider，端口、内建能力与扩展装配都已备好；它是**唯一**的装配现场 |
+| 给它加工具 / prompt 段 / 压缩阶段 / hook | 写一条 extension（`@echo-agent/core/extension`）：声明注入什么、提供什么，生命周期归 host，卸载不留残骸 |
+| 换一个壳（Web、别的终端） | 同样是一条 extension，注入 `AgentRuntime` 这个 service 并把它渲染出来 |
 
-要内建工具但不想走完整装配，调 `mountBuiltinTools(agent)`（`@echo-agent/core/extension`），
-那就是 `createEcho()` 内部用的同一张表、同一条路。
+**`Agent` 类是内部的**（2026-09-07，见 `docs/decisions/`）：它有相当一部分是为承载 host 专用接线（写入闸、所有权账本、观测 writer）而存在的，把它当公共面等于承诺那些。第三方要的深度在 extension ABI 上——那条路带 `hostAbiVersion` 校验、Fiber/Effect 所有权与整代回滚，比裸类安全。
 
 另有 `@echo-agent/core/testing`（FakeProvider 与脚本化流、in-memory 观测 collector）、
 `@echo-agent/core/extension`（写扩展的 ABI）、`@echo-agent/core/task/fs`、`@echo-agent/core/mcp`。

@@ -83,7 +83,7 @@
 
 - **开**：冻结工作集（工具、已知名、hooks）→ [`openTurn`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openTurn) → `turn_start{cause}`。**一个 turn 只开一次**，重试不重开。
 - **attempt 循环**：落地 → 出循环；失败且 `error.retryable` 且 `attempt < maxAttempts` → `retry_scheduled` → 等待 → 下一个 attempt；失败且 `code === "context_overflow"` 且应急压缩成功 → 下一个 attempt（不发 `retry_scheduled`，压缩事件已说明原因）；其余失败 / block / abort → 出循环。**一个 turn 最多 `maxAttempts` 个 attempt，不分原因。** 退避受 run 的 signal 管：abort / deadline 一到就提前结束等待，不再发起 attempt，turn 以 `aborted` 收场（reply 据 deadline 折成 `error{timeout}`）。
-- **工具批**：只在落地后。响应里**连续的**可并行调用（工具自己声明 `concurrent`）切成一批同跑，碰到没标的就断批、它自己一批；批与批之间仍是顺序的。批内每个工具走各自的 [`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool)，`tool_execution_*` 交错、按 `toolCallId` 配对，**toolResult 入账按 tool_use 出现顺序**（不按完成顺序），授权询问批内串行。signal 中止：已起跑的那一批各自收 signal 结束、结果照样入账，**剩下的批不跑**。语义逐条见 [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)。
+- **工具批**：只在落地后。响应里**连续的**可并行调用（工具自己声明 `concurrent`）切成一批同跑，碰到没标的就断批、它自己一批；批与批之间仍是顺序的。批内每个工具走各自的 [`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool)，`tool_execution_*` 交错、按 `toolCallId` 配对，**toolResult 入账按 tool_use 出现顺序**（不按完成顺序），授权询问批内串行。signal 中止：已起跑的那一批各自收 signal 结束、结果照样入账，**剩下的批不跑**。为什么是声明制、为什么询问要串行，见 [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)。
 - **关**：`closeTurn` 交出 steer → `turn_end{result, toolResults}`。gate 的 turn 边界与事件的 turn 边界重合。
 
 ### 2.4 attempt

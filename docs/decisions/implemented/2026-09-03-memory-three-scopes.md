@@ -20,29 +20,11 @@ memory 一层,在状态根下(`~/.echo/agents/default/memory/`),所有会话共�
 
 **A**(2026-09-03 用户拍板)。附带:project 一层存 home 下、不放进仓库(agent 自动写的东西不进 git);目录名是 workspace 的 48 位哈希,撞了没人会发现,所以目录里放 `workspace.json` 记原路径、打开时对一遍、不匹配判红;dream 不跨级提升;project / user 级的多写者保护归 memory 线,不在会话设计里解。
 
-**切法(2026-09-07 用户拍板)。** 两个轴分开:**分区**是记的是什么(`agent.md` / `user.md` / 笔记与其索引 `INDEX.md`),**作用域**是谁看得见(session / project / user)。不是笛卡尔积,按下面两张表:
+**切法(2026-09-07 用户拍板)。** 两个轴分开:**分区**是记的是什么(`agent.md` / `user.md` / 笔记与其索引 `INDEX.md`),**作用域**是谁看得见(session / project / user),**不是笛卡尔积**。
 
-落盘(哪层有什么):
+**哪层有哪些分区、每种分区注入哪几层、怎么选层、什么顺序,两张表加三条配套规矩在 [会话与 agent 集群](../../design/sessions.md) §2**,本条不复述。
 
-| 作用域 | `agent.md` | `user.md` | 笔记 + `INDEX.md` |
-|---|---|---|---|
-| user | 有 | 有 | 有 |
-| project | 有 | 有 | 有 |
-| session | 无 | 无 | 有(dream 只整理这份) |
-
-注入(system prompt 里给模型看什么):
-
-| 分区 | 注入哪几层 |
-|---|---|
-| `agent.md` | user + project |
-| `user.md` | user + project |
-| `INDEX.md` | user + project + session |
-
-四条附带:
-1. **选层走路径前缀,工具不加参数**:`/memories/user/agent.md`、`/memories/project/user.md`、`/memories/session/memory/x.md`。六动词文件工具的形状不变;注入的每段带自己的路径,模型改哪份就写哪个路径。
-2. **顺序**:先 `agent.md` / `user.md`,后索引;同一分区内多层按 user → project → session,都渲染、不去重、各带路径标题。
-3. **project / user 层多段 session 同时写先接受**:文件不会写坏(tmp + rename),后写的盖掉先写的改动,记成已知限制;dream 只碰 session 层,等常驻程序那种真多段场景出现再看。
-4. **落地次序**:今天盘上那一层就是 user 层。先落 session 层(dream 改成只整理它,解掉 user 层多段同跑 dream 的冲突),project 层第二并带上 `remember` 的 `scope`。project 目录解析(`projects/<hash>/` 与 `workspace.json` 校验)core 里还没有,随这次一起做。
+为什么这么切:`user.md`(这个人是谁)与 `agent.md`(我是谁)在换一个项目之后仍然成立,所以它们要跨 session 活着——落 session 层就是每开一段失忆一次;而笔记是 dream 的工作面,dream 一旦整理跨 session 共享的那份,多段同时跑就是多写者,今天挡它的只有一个带过期的软锁。**session 层只放笔记**,正是为了让 dream 的整理范围与它的写者数量对上——一段 session 只有一个写者,冲突从结构上没有了。选层走路径前缀而不是给工具加参数,是因为六动词文件工具的形状不该为了作用域这件事变;路径本来就要出现在注入的文本里,让它同时当选择器,不多一个概念。
 
 **project 层指哪个目录(2026-09-07 用户拍板)。** 切法落地时它按**装配期**的 `opts.workspace` 定死,而 workspace 是 session 级事实,于是两处不对:
 

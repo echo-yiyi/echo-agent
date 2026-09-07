@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-An agent runtime and two products built on it: `echo-agent`, the general agent, and `echo-coding`, the coding agent. Use the assembled runtime, build directly on the engine, or run the same agent interactively and through a Unix pipe.
+An agent runtime and two products built on it: `echo-agent`, the general agent, and `echo-coding`, the coding agent. Assemble a runtime, extend one with your own tools and prompt, or put a different shell in front of it; the same agent runs interactively and through a Unix pipe.
 
 > **Status: pre-release and not published.** The workspace packages are currently private. Install from source for now; the public API may change before the first `0.x` release.
 
@@ -89,7 +89,7 @@ try {
 }
 ```
 
-For custom hosts, import `Agent` from `@echo-agent/core` and supply the model, stream function, and ports yourself. Both heights sit on the same entry point: `createEcho()` assembles the full runtime, while `Agent` leaves the ports to you.
+`createEcho()` is the one place a runtime is put together, so a host starts there. An extension is how you add tools, prompt sections, compaction stages, or hooks to a running agent: it declares what it injects and what it provides, and the host owns its lifetime, so it can be unmounted without leaving anything behind. A shell is an extension too, one that injects the `AgentRuntime` service and renders it. The `Agent` class itself is internal: much of it exists to carry host-only wiring, and everything a third party needs is on the extension API.
 
 ## Packages
 
