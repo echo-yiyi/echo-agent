@@ -25,16 +25,28 @@ bun -e 'const {Agent}=await import("./packages/core/src/agent.ts");const {FAKE_M
 ## 选项
 
 - **A. turn 收尾补齐。** 落地消息里每个没拿到结果的 `tool_use`,按出现顺序补一条 error toolResult(内容如「aborted before execution」),照常走 `message_end`——于是状态投影、session 账本、观测、压缩、UI 一次全对。代价:transcript 里多出模型没要求过的消息,但那与今天「被拒 / 执行失败」合成的 error 结果是同一类东西。
-- **B. 投影时丢掉落单的。** `defaultConvertToLlm` 过滤掉没有配对结果的 `tool_use` 块。代价:账本仍然是坏的,只是不给模型看;`convertToLlm` 可整体替换,换一份实现就得再写一遍这条规则;压缩的投影是另一条路,也要补。
+- **B. 投影时补齐。** `defaultConvertToLlm` 清点每条 assistant 消息的 `tool_use`,没配上的就地补一条 error 结果(内容如「No result provided」)。账本一个字不动。代价:直接读 transcript 的消费者(观测渲染、UI、压缩)看到的仍是不配对的账本;`convertToLlm` 可整体替换,换一份实现就得再写一遍这条规则。
 - **C. A + B。** 账本补齐,投影再兜一道底(防外部写入的坏档)。
 - **D. 不做,登记为已知限制。**
 
+## 两条参考(都是事实,不是判据)
+
+**本仓的先例更像 B。** [失败 attempt 的 assistant 消息留在 transcript,投影时丢](../implemented/2026-09-05-failed-attempt-in-transcript.md) 拍的就是这个形状:账本留住「那次 provider 挂了」这个事实,`convertToLlm` 负责别送回去,理由原话是「与压缩『transcript 全量原文、送模前投影』同一口径」。那条也接受了「过滤住在一个可替换的扩展点里」这个代价。
+
+**pi 的做法是 B,而且在生产里跑着**(2026-09-07 读源,`~/Code/pi`;pi 是另一条血脉,只作参考不作依据)。它的 agent / session 层与本仓一样:中止后 `break`,剩下的 tool call 没有事件、没有结果、在会话文件里落单,整层没有任何清点步骤。补齐发生在**构造 provider 请求**那一层(pi 的 `ai` 包里那个 `transform-messages` 模块;这里不写全路径,那是另一个仓的路径,写了会被本仓的 filerefs 门当成死链):按 assistant 逐条清点 pending 的 tool call id,没配上的插一条 `"No result provided"`、`isError: true`,六条 provider 路径全都调它。它多一条讲究:`stopReason` 是 error / aborted 的 assistant 消息**整条丢掉**、压根不登记 pending——所以流中途中止不需要补,只有「消息完整、工具批被砍断」才补,正好是本条描述的场景。反过来,pi 下一代 harness 的**规格文档**写的是「计划中的 tool call 给一个 aborted 错误结果」(往 A 走),但那只是规格,代码里没有对应实现。
+
 ## 倾向
 
-**A**。账本是会话事实的唯一真源,一个没有答复的调用在账本里就是错的,不是「送模时才需要处理」的事;补在 turn 这一层,配对由结构保证,与四层循环那条「每层只管自己的开与关」同一条规矩。B 把一条不变量挪进一个**可整体替换**的扩展点,与「一份逻辑一个数法」冲突。
+**B**(2026-09-07 改;此前写的是 A,被上面两条推翻)。理由是**口径一致**:本仓已经拍过「账本记真实发生的事、送模前投影」,失败 attempt 与压缩都在这条线上;orphan 的账本状态本身是真实的——模型确实要了三件、确实只跑了一件,往账本里塞一条它没收到过的结果反而是在记一件没发生的事。
+
+A 还剩一条没被驳倒的理由:`Agent.convertToLlm` 是公共可替换字段,把「请求必须合法」这条不变量放进缺省实现,换一份实现就悄悄丢了。但失败 attempt 那条已经接受了同样的代价,再为这一条单开一种口径就是两套规矩。
 
 真要拍 A,实现时三处别漏:同批里因抛错被丢掉的结果也算没拿到;补出来的结果要在**同一个 turn 内**入账(不能等到 run 收尾,否则 turn 事件已经关了);补的顺序按 `tool_use` 出现顺序,与并行批的入账顺序同一条规矩。
 
 ## 验收
 
-一条测试:一条 assistant 消息带三个 `tool_use`,第一个工具在执行中 `abort()`;跑完之后 transcript 里 toolResult 的 `toolCallId` 集合等于三个 `tool_use` 的 id 集合,顺序一致,后两条标 error;`defaultConvertToLlm` 的输出里每个 `tool_calls` 项都有对应的 `tool` 消息。同批某个工具抛出内部错误时同样成立。
+一条测试:一条 assistant 消息带三个 `tool_use`,第一个工具在执行中 `abort()`。
+
+拍 B 时:`defaultConvertToLlm` 的输出里,每个 `tool_use` 都有配对的 `tool_result`,补出来的两条标 `isError`;**transcript 不变**(仍只有一条 toolResult)。同批某个工具抛出内部错误时同样成立。
+
+拍 A 时:transcript 里 toolResult 的 `toolCallId` 集合等于三个 `tool_use` 的 id 集合、顺序一致、后两条标 error;投影自然配对,不另加过滤。
