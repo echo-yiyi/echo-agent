@@ -3,7 +3,7 @@
 > 状态：已实现（2026-09-05，分支 `worktree-loop-layers`）；四条决策均已拍板，见导读<br>
 > 读者：要改 run loop、订阅事件流做 UI / 观测、或对循环写评测的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) §2–§4 的现状描述。本文只写目标形态；与现状的差异集中在 §7。实现合入后，该稿 §3–§4 指向本文<br>
-> 决策记录（四条，本文只指向，论证在记录里）：[外层单位叫 reply](../decisions/proposed/2026-09-05-reply-layer.md) · [重试归 loop](../decisions/proposed/2026-09-05-retry-owned-by-loop.md) · [失败 attempt 留 transcript](../decisions/proposed/2026-09-05-failed-attempt-in-transcript.md) · [迭代预算按 reply 计](../decisions/proposed/2026-09-05-iteration-budget-per-reply.md)。**相邻但不在本文范围**的已有记录：[abort reason](../decisions/proposed/2026-09-01-abort-reason.md) · [`agent_end` 是否 idle barrier](../decisions/proposed/2026-09-01-agent-end-barrier.md) · [stop hook 三次](../decisions/proposed/2026-09-01-stop-continuation-limit.md) · [`toolExecution: "parallel"`](../decisions/proposed/2026-09-01-tool-execution-parallel.md)
+> 决策记录（四条，本文只指向，论证在记录里）：[外层单位叫 reply](../decisions/implemented/2026-09-05-reply-layer.md) · [重试归 loop](../decisions/implemented/2026-09-05-retry-owned-by-loop.md) · [失败 attempt 留 transcript](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) · [迭代预算按 reply 计](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)。**相邻但不在本文范围**的已有记录：[abort reason](../decisions/proposed/2026-09-01-abort-reason.md) · [`agent_end` 是否 idle barrier](../decisions/proposed/2026-09-01-agent-end-barrier.md) · [stop hook 三次](../decisions/proposed/2026-09-01-stop-continuation-limit.md) · [`toolExecution: "parallel"`](../decisions/proposed/2026-09-01-tool-execution-parallel.md)
 
 ## 导读
 
@@ -21,10 +21,10 @@
 
 **待拍板。** 四条已各成记录：
 
-1. [外层单位叫 `reply`](../decisions/proposed/2026-09-05-reply-layer.md) —— 拍板 2026-09-05。
-2. [重试归 loop，dialect 不再重试](../decisions/proposed/2026-09-05-retry-owned-by-loop.md) —— 拍板 2026-09-05。
-3. [失败 attempt 的消息留 transcript、投影时丢](../decisions/proposed/2026-09-05-failed-attempt-in-transcript.md) —— 拍板 2026-09-05。
-4. [`maxIterations` 按 reply 计，run 级加 `maxReplies`](../decisions/proposed/2026-09-05-iteration-budget-per-reply.md) —— 拍板 2026-09-05（条件「run 级 reply 上限」已纳入）。
+1. [外层单位叫 `reply`](../decisions/implemented/2026-09-05-reply-layer.md) —— 拍板 2026-09-05。
+2. [重试归 loop，dialect 不再重试](../decisions/implemented/2026-09-05-retry-owned-by-loop.md) —— 拍板 2026-09-05。
+3. [失败 attempt 的消息留 transcript、投影时丢](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) —— 拍板 2026-09-05。
+4. [`maxIterations` 按 reply 计，run 级加 `maxReplies`](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md) —— 拍板 2026-09-05（条件「run 级 reply 上限」已纳入）。
 
 **验收判据（机器可判）。** 在 `packages/core/test/` 下新增 `loop-layers.test.ts`（随实现一起提交），对下列每种 run 用同一个栈式校验器扫事件流：只有文本、要工具、transport 错误后成功、退避中 abort、退避中 deadline、撞窗应急后成功、`contextBeforeBuild` block、工具执行中 abort、run 超时、followUp、stop hook 注入、`shouldStopAfterTurn`、从 transcript 续跑、reply 数达上限。校验器只看 loop 事件（`agent_* / reply_* / turn_* / attempt_* / message_* / tool_execution_* / compaction_* / retry_scheduled / usage`），`queue_update` 与 `resource_changed` 不参与排序规则。断言：① `agent / reply / turn / attempt` 四层 start / end 严格嵌套且每层至少一对；② assistant 的 `message_start / message_end` 与 `usage` 只出现在 attempt 内，`tool_execution_*` 与 toolResult 的 `message_end` 只出现在 `attempt_end{landed}` 之后、同一 turn 内；③ `retry_scheduled` 只出现在同一 turn 的 `attempt_end{failed}` 之后，其后是下一个 `attempt_start`，或退避被 abort / deadline 打断时的 `turn_end{aborted}`；④ `turnId` 在一个 run 内唯一，其 n 在每条 reply 内从 1 起、每个 turn 加 1（重试不消耗）；⑤ 输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`。另断言：失败 attempt 之后的 provider 请求不含那条失败消息；provider 持续返回 retryable 错误时一个 run 的请求总数 = `maxAttempts`；reply 数达 `maxReplies` 且仍有待办 → `agent_end{error, code: "max_replies"}` 且未吸收的消息经 `queue_dropped` 报出，达上限但无待办 → `completed`；异常路径下进程不被 deadline timer 撑住。现有 `bun test packages/core` 全绿。
 

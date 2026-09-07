@@ -4,7 +4,7 @@
 // 手写一个 ProviderStreams 即可，createProvider 分不出也不需要分出。
 //
 // 工厂焊进去的公共逻辑（写一次，全家共用）：partial 累积、错误抢救、EventStream 包装。
-// **重试不在这里**（2026-09-05，docs/decisions/proposed/2026-09-05-retry-owned-by-loop.md）：
+// **重试不在这里**（2026-09-05，docs/decisions/implemented/2026-09-05-retry-owned-by-loop.md）：
 // 一次 stream = 一次请求；流断了以 `error` 收场并标 `retryable`，要不要再来一次、来几次由 loop 决定
 // ——重试是同一 turn 的下一个 attempt，预算只有一份（`RetryPolicy` 仍住这里，loop 读它）。
 

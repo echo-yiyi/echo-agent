@@ -308,7 +308,7 @@ const EMPTY_TASK_SNAPSHOT: TaskSnapshot = { total: 0, counts: {}, ready: [], act
 
 export const DEFAULT_MAX_ITERATIONS = 20;
 /**
- * 每个 run 的 reply 上限（docs/decisions/proposed/2026-09-05-iteration-budget-per-reply.md）。
+ * 每个 run 的 reply 上限（docs/decisions/implemented/2026-09-05-iteration-budget-per-reply.md）。
  * 保险丝量级：stop hook 最多贡献 3 条，其余留给一次 run 里 host 的 followUp。常量还是配置项，随 stop hook 三次那条记录同拍。
  */
 export const DEFAULT_MAX_REPLIES = 10;

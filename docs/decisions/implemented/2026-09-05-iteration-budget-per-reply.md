@@ -1,6 +1,6 @@
 # `maxIterations` 按 reply 计,run 级另加 `maxReplies`
 
-> 状态:proposed · 提出 2026-09-05 · 拍板 2026-09-05(口头;条件「run 级必须保留一个总闸」已纳入本记录;实现后移入 implemented) · 来源 [Run Loop 的四层](../../design/run-loop-layers.md) §1
+> 状态:implemented · 提出 2026-09-05 · 拍板 2026-09-05(条件「run 级必须保留一个总闸」已纳入本记录) · 合入 2026-09-06(24e919c) · 来源 [Run Loop 的四层](../../design/run-loop-layers.md) §1
 
 ## 现状
 
@@ -19,7 +19,7 @@
 
 ## 决定
 
-**C。** `maxReplies` 缺省 10(`DEFAULT_MAX_REPLIES`,保险丝量级:stop hook 最多贡献 3 条,其余留给一次 run 里的 host followUp);它是常量还是配置项,与 [stop hook 三次](2026-09-01-stop-continuation-limit.md) 同拍——两者必须同形。
+**C。** `maxReplies` 缺省 10(`DEFAULT_MAX_REPLIES`,保险丝量级:stop hook 最多贡献 3 条,其余留给一次 run 里的 host followUp);它是常量还是配置项,与 [stop hook 三次](../proposed/2026-09-01-stop-continuation-limit.md) 同拍——两者必须同形。
 
 ## 验收
 

@@ -1,6 +1,6 @@
 # 「agent 对一条输入的完整回应」这一层叫 `reply`
 
-> 状态:proposed · 提出 2026-09-05 · 拍板 2026-09-05(口头,实现后移入 implemented) · 来源 [Run Loop 的四层](../../design/run-loop-layers.md) 导读
+> 状态:implemented · 提出 2026-09-05 · 拍板 2026-09-05 · 合入 2026-09-06(24e919c) · 来源 [Run Loop 的四层](../../design/run-loop-layers.md) 导读
 
 ## 现状
 

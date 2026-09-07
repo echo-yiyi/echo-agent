@@ -1,6 +1,6 @@
 # 重试归 loop:attempt 是唯一的重试单位,dialect 不再重试
 
-> 状态:proposed · 提出 2026-09-05 · 拍板 2026-09-05(口头,实现后移入 implemented) · 来源 [Run Loop 的四层](../../design/run-loop-layers.md) §6
+> 状态:implemented · 提出 2026-09-05 · 拍板 2026-09-05 · 合入 2026-09-06(24e919c) · 来源 [Run Loop 的四层](../../design/run-loop-layers.md) §6
 
 ## 现状
 
