@@ -12,7 +12,9 @@ export type Term = Readonly<{ zh: string; en: string; tone: Tone; hint: string }
  * 设计系统要求「跑到上限被截断」与「自行收尾」严格区分，本仓里它是 `error` 且 `outcome.error.code === "max_iterations"`。
  */
 export const RUN_STATUS: Readonly<Record<string, Term>> = {
-  running: { zh: "进行中", en: "running", tone: "accent", hint: "已拿到 permit、run.closed 还没落库；页面会持续刷新它" },
+  // 「running」是 RunIndex 里的原值：run.accepted 落了、run.closed 没落。离线读者只知道它没封口，不知道进程还在不在
+  // （2026-09-06 用户定：agent 停没停不由观测判断），所以给人看的词是「未收尾」，不说「进行中」；页面仍会持续刷新它。
+  running: { zh: "未收尾", en: "running", tone: "neutral", hint: "没有终态记录：可能还在跑，也可能进程没了——账本只知道它没封口" },
   completed: { zh: "已完成", en: "completed", tone: "positive", hint: "agent 自行收尾，run.closed 已 COMMIT" },
   truncated: { zh: "已截停", en: "truncated", tone: "caution", hint: "跑到迭代上限被截断、未自行收尾——产出可能不完整（error code = max_iterations）" },
   aborted: { zh: "已中止", en: "aborted", tone: "neutral", hint: "用户或宿主主动 abort；已产出的部分保留" },

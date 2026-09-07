@@ -66,6 +66,11 @@ function harness(limits: Partial<ObservationSequencerOptions["limits"]> = {}): H
   };
 }
 
+/** 等异步回放（store 读是 Promise，不走 FakeClock）交付到位；最多等 `ticks` 个宏任务。 */
+async function settle(done: () => boolean, ticks = 50): Promise<void> {
+  for (let i = 0; i < ticks && !done(); i++) await new Promise((r) => setTimeout(r, 0));
+}
+
 function bounded(body: unknown, over: Partial<BoundedObservationDraft> = {}): BoundedObservationDraft {
   return {
     lane: "bounded",
@@ -384,6 +389,47 @@ describe("live 扇出", () => {
     await h.flush();
     await Promise.resolve();
     expect(seen).toEqual([2, 3]);
+  });
+
+  test("回放窗口有界：早于窗口的从 store 分页读，先旧后新、无重复无漏；窗口之外的不再占内存", async () => {
+    const h = harness({ replayWindowRecords: 3 });
+    for (let i = 1; i <= 8; i++) h.seq.offer(bounded({ i }));
+    await h.seq.flushPending();
+    expect(h.seq.committedSeq).toBe(8);
+    expect(h.seq.committedRecords().map((r) => r.seq)).toEqual([6, 7, 8]); // 内存里只剩最近 3 条
+    const seen: number[] = [];
+    h.seq.subscribe({ afterSeq: 0, listener: (i) => "recordId" in i && seen.push(i.seq) });
+    h.seq.offer(bounded({ i: 9 })); // 回放还没开始就来的 live 记录：要排在旧记录之后
+    await h.flush();
+    await settle(() => seen.length >= 9);
+    expect(seen).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    const sink = h.seq.health().sinks[0]!;
+    expect(sink.status).toBe("healthy");
+    expect(sink.lastDeliveredSeq).toBe(9);
+    expect(sink.gaps).toHaveLength(0);
+  });
+
+  test("回放读 store 失败：该 sink 出 replay_unavailable gap 并降级，live 照常；canonical 与诊断都如实", async () => {
+    const h = harness({ replayWindowRecords: 2 });
+    for (let i = 1; i <= 5; i++) h.seq.offer(bounded({ i }));
+    await h.flush();
+    h.store.readRecordsAfter = async () => {
+      throw new Error("disk gone");
+    };
+    const items: ObservationSubscribeItem[] = [];
+    h.seq.subscribe({ afterSeq: 0, sinkId: "late", listener: (i) => items.push(i) });
+    await settle(() => items.length >= 3);
+    expect(items[0]).toMatchObject({ sinkId: "late", afterSeq: 0, beforeSeq: 4, dropped: 3, reason: "replay_unavailable" });
+    expect(items.slice(1).map((i) => ("recordId" in i ? i.seq : -1))).toEqual([4, 5]); // 窗口内的照常交付
+    h.seq.offer(bounded({ i: 6 }));
+    await h.flush();
+    await settle(() => items.length >= 4);
+    expect("recordId" in items[3]! ? items[3].seq : -1).toBe(6);
+    const sink = h.seq.health().sinks.find((s) => s.sinkId === "late")!;
+    expect(sink.status).toBe("degraded");
+    expect(sink.gaps).toHaveLength(1);
+    expect(h.diags.some((d) => d.code === "observation_replay_failed")).toBe(true);
+    expect(h.seq.health().capture.canonicalGapCount).toBe(0);
   });
 
   test("慢订阅者：队列满只出 SinkDeliveryGap（exclusive 区间），canonical 不受影响", async () => {

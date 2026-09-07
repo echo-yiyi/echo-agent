@@ -28,6 +28,7 @@ import { redactError, redactedLabel, toSafeError } from "./redact.ts";
 import { sha256Hex } from "./hash.ts";
 import { assertIdentifier, materializeRecordFrame, materializeScope } from "./identity.ts";
 import { ObservationCorruptionError, ObservationStoreUnavailableError, runIndexDigest } from "./store.ts";
+import { decodeObservationEnvelope } from "./materialize.ts";
 import { preflightTerminalProjection } from "./terminal.ts";
 import type { CanonicalObservationStore, CanonicalRecordCandidate, CommitBatchInput, RunIndexMutation } from "./store.ts";
 import type {
@@ -104,6 +105,11 @@ export type SequencerLimits = Readonly<{
   subscriberQueueCapacity: number;
   /** read-after-error 明确 not-found 时的重试上限。 */
   maxCommitAttempts: number;
+  /**
+   * 内存里留多少条已 committed 的 envelope 供 `subscribe()` 回放；更早的从 store 分页读。
+   * 上一版 `committed` 数组无界——常驻 agent 跑多久涨多久（2026-09-06）。
+   */
+  replayWindowRecords: number;
 }>;
 
 export const DEFAULT_SEQUENCER_LIMITS: SequencerLimits = {
@@ -114,7 +120,11 @@ export const DEFAULT_SEQUENCER_LIMITS: SequencerLimits = {
   boundaryDeadlineMs: 5000,
   subscriberQueueCapacity: 1024,
   maxCommitAttempts: 3,
+  replayWindowRecords: 1024,
 };
+
+/** 从 store 回放时一页读多少条：读完一页、交付完再读下一页，内存里最多只有一页。 */
+const REPLAY_PAGE_RECORDS = 256;
 
 export type ObservationSequencerOptions = Readonly<{
   runtimeId: string;
@@ -215,11 +225,25 @@ type Waiter = {
   settled: boolean;
 };
 
+/**
+ * subscribe 要的 afterSeq 早于内存窗口时，从 store 分页回放的进度。`undefined` = 不在回放（或已回放完）。
+ * 回放期间 live 记录照常进 `queue`，但先交付 `replay.queue` 里的旧记录——顺序仍按 seq。
+ */
+type ReplayState = {
+  /** 已读到的 seq（exclusive）。 */
+  cursor: number;
+  /** 回放到这里为止（inclusive）：内存窗口最旧那条的前一条。 */
+  readonly upto: number;
+  readonly queue: ObservationSubscribeItem[];
+  fetching: boolean;
+};
+
 type Subscriber = {
   readonly id: string;
   readonly listener: ObservationSubscribeListener;
   readonly runId: string | undefined;
   readonly queue: ObservationSubscribeItem[];
+  replay: ReplayState | undefined;
   lastDeliveredSeq: number;
   status: "healthy" | "degraded" | "closed";
   readonly gaps: SinkDeliveryGap[];
@@ -298,7 +322,8 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
    */
   private readonly runGaps = new Map<string, { count: number; rolling: string }>();
   private canonicalGapCount = 0;
-  private readonly committed: ObservationEnvelope[] = [];
+  /** 最近 `replayWindowRecords` 条已 committed 的 envelope（按 seq，hole 不在其中）。更早的只在 store 里。 */
+  private readonly recentCommitted: ObservationEnvelope[] = [];
 
   private persistence: ObservationPersistenceState = { status: "healthy" };
   private droppedWhileUnavailable = 0;
@@ -340,9 +365,9 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     return this.persistence;
   }
 
-  /** 已 committed 的 envelope（按 seq，hole 不在其中）。O2a 的 in-memory 查询面；O3a 换成 SQLite 分页读。 */
+  /** 内存窗口里最近 `replayWindowRecords` 条已 committed 的 envelope（按 seq，hole 不在其中）。完整历史在 store。 */
   committedRecords(): readonly ObservationEnvelope[] {
-    return this.committed;
+    return this.recentCommitted;
   }
 
   committedRunIndex(runId: string): RunIndexEntryV1 | undefined {
@@ -610,6 +635,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       listener: opts.listener,
       runId: opts.runId,
       queue: [],
+      replay: undefined,
       lastDeliveredSeq: opts.afterSeq,
       status: "healthy",
       gaps: [],
@@ -619,11 +645,15 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       inFlight: false,
       lastErrorDigest: undefined,
     };
-    // critical section：固定当时的 committed head、登记 live、回放 (afterSeq, head]——中间没有 await，没有漏窗
+    // critical section：固定当时的 committed head、登记 live、回放 (afterSeq, head]——中间没有 await，没有漏窗。
+    // 内存窗口之前的那段从 store 分页读（异步），但 live 与窗口内的记录此刻已经入队，drain 会先交付回放的旧记录。
     this.subscribers.set(id, sub);
-    for (const env of this.committed) {
+    const oldest = this.recentCommitted[0]?.seq;
+    if (oldest !== undefined && opts.afterSeq + 1 < oldest) sub.replay = { cursor: opts.afterSeq, upto: oldest - 1, queue: [], fetching: false };
+    for (const env of this.recentCommitted) {
       if (env.seq > opts.afterSeq) this.enqueue(sub, env);
     }
+    if (sub.replay !== undefined) this.scheduleDrain(sub);
     return () => this.closeSink(sub);
   }
 
@@ -1274,7 +1304,8 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     }
     this.committedPrefix = window.nextPrefix;
     for (const m of input.runIndexMutations) this.runIndexCache.set(m.runId, m.nextRunIndex);
-    for (const slot of window.slots) this.committed.push(slot.envelope);
+    for (const slot of window.slots) this.recentCommitted.push(slot.envelope);
+    while (this.recentCommitted.length > this.limits.replayWindowRecords) this.recentCommitted.shift();
     // 封口落库后释放这个 run 的 per-run 状态：gap accumulator 与边界登记都不再有用。
     // （runIndexCache 留着——它是 materialized header 的查询缓存，O3a 由 SQLite 接手。）
     for (const slot of window.slots) {
@@ -1286,7 +1317,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       w.settled = true;
       w.cancelDeadline();
       this.waiters.delete(w.seq);
-      const env = window.slots.find((s) => s.seq === w.seq)?.envelope ?? this.committed.find((e) => e.seq === w.seq);
+      const env = window.slots.find((s) => s.seq === w.seq)?.envelope ?? this.recentCommitted.find((e) => e.seq === w.seq);
       if (env === undefined) w.reject(new Error(`boundary ${w.seq} 已 committed 但找不到 envelope`));
       else w.resolve(env);
     }
@@ -1373,20 +1404,85 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     });
   }
 
+  /**
+   * 回放期按页从 store 读旧记录：一页交付完才读下一页（内存里最多一页），读到 `upto` 或读失败都回到 live 队列。
+   * 读失败 = 这段只在这个 sink 上缺：出一条 `replay_unavailable` gap、sink 降级，canonical 不受影响。
+   */
+  private fetchReplayPage(sub: Subscriber): void {
+    const replay = sub.replay;
+    if (replay === undefined || replay.fetching) return;
+    if (replay.cursor >= replay.upto) {
+      sub.replay = undefined;
+      this.scheduleDrain(sub);
+      return;
+    }
+    replay.fetching = true;
+    const requested = Math.min(REPLAY_PAGE_RECORDS, replay.upto - replay.cursor);
+    void this.store.readRecordsAfter(this.runtimeId, replay.cursor, requested).then(
+      (page) => {
+        replay.fetching = false;
+        if (sub.status === "closed") return;
+        let exhausted = page.length < requested;
+        try {
+          for (const bytes of page) {
+            const env = decodeObservationEnvelope(bytes);
+            if (env.seq > replay.upto) {
+              exhausted = true;
+              break;
+            }
+            replay.cursor = env.seq;
+            if (sub.runId !== undefined && env.scope.runId !== sub.runId) continue;
+            replay.queue.push(env);
+          }
+        } catch (e) {
+          this.failReplay(sub, replay, e);
+          return;
+        }
+        if (exhausted) replay.cursor = replay.upto;
+        this.scheduleDrain(sub);
+      },
+      (e: unknown) => {
+        replay.fetching = false;
+        if (sub.status === "closed") return;
+        this.failReplay(sub, replay, e);
+      },
+    );
+  }
+
+  private failReplay(sub: Subscriber, replay: ReplayState, e: unknown): void {
+    const gap: SinkDeliveryGap = { sinkId: sub.id, afterSeq: replay.cursor, beforeSeq: replay.upto + 1, dropped: replay.upto - replay.cursor, reason: "replay_unavailable" };
+    sub.status = "degraded";
+    this.pushSinkGap(sub, gap);
+    replay.queue.push(gap); // 走同一条交付路径，落在旧记录之后、live 之前
+    replay.cursor = replay.upto;
+    this.report({ code: "observation_replay_failed", message: `subscriber ${sub.id} 回放 (${gap.afterSeq}, ${gap.beforeSeq}) 从 store 读不出来：${redactedLabel(e)}` });
+    this.scheduleDrain(sub);
+  }
+
   private drain(sub: Subscriber): void {
     if (sub.inFlight) return; // 已有一条在途：等它 settle 再继续，队列在此期间正常积压
     for (;;) {
       if (sub.status === "closed") return;
-      if (sub.queue.length === 0) {
-        // 队列排空后，中途丢掉的尾巴要当场物化并交付——不能等下一条 record 才说，流尾 / 封口 / shutdown 前
-        // 可能永远没有下一条（review P1）。**但它必须走同一条交付路径**：原来这里直接调 listener 且
-        // 不设 inFlight，于是 gap 的 Promise 还没 settle 就又开始交付下一条 record（实测 maxActive=2），
-        // 单 in-flight 状态机等于被绕过（2026-08-27 review P1）。
-        const tail = this.takePendingDrop(sub);
-        if (tail === undefined) return;
-        sub.queue.push(tail);
+      let item: ObservationSubscribeItem;
+      if (sub.replay !== undefined) {
+        // 回放期：先交付 store 读回的旧记录；live 记录在 `queue` 里等着，顺序仍按 seq
+        if (sub.replay.queue.length === 0) {
+          this.fetchReplayPage(sub); // 异步：页到了（或回放结束）再 scheduleDrain
+          return;
+        }
+        item = sub.replay.queue.shift()!;
+      } else {
+        if (sub.queue.length === 0) {
+          // 队列排空后，中途丢掉的尾巴要当场物化并交付——不能等下一条 record 才说，流尾 / 封口 / shutdown 前
+          // 可能永远没有下一条（review P1）。**但它必须走同一条交付路径**：原来这里直接调 listener 且
+          // 不设 inFlight，于是 gap 的 Promise 还没 settle 就又开始交付下一条 record（实测 maxActive=2），
+          // 单 in-flight 状态机等于被绕过（2026-08-27 review P1）。
+          const tail = this.takePendingDrop(sub);
+          if (tail === undefined) return;
+          sub.queue.push(tail);
+        }
+        item = sub.queue.shift()!;
       }
-      const item = sub.queue.shift()!;
       try {
         // listener 类型写的是返回 void，但 TypeScript 放行 `async () => {}`：返回了 thenable 就挂
         // `.then(...)` 把 reject 接住——否则它是 unhandled rejection，Node 下能直接终结常驻进程。
@@ -1452,6 +1548,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     this.takePendingDrop(sub); // 只入账，不交付（sink 正在关闭）
     sub.status = "closed";
     sub.queue.length = 0;
+    sub.replay = undefined; // 在途的那页读回来会看到 closed 直接丢掉
     // **按身份删，不按 ID 删**：同 ID 的旧句柄 unsubscribe 时会把新 subscriber 从 Map 里删掉（review P2）。
     if (this.subscribers.get(sub.id) === sub) this.subscribers.delete(sub.id);
     this.closedSinks.push(this.sinkHealthOf(sub));
