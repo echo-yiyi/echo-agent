@@ -2157,3 +2157,84 @@ test("不给 sessions 也能跑：/sessions 说只有这一段（低层用户自
   quit(ui);
   await done;
 });
+
+/* ─────────────── 动效：busy 时状态段转 spinner + 计秒，执行中的工具标记也转；空闲全静止 ─────────────── */
+
+const BRAILLE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+test("跑着的时候：状态段有 spinner 帧和计秒，且帧随时间前进（真 interval）", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const pinned = { ...agent.state, status: "generating" as const };
+    const done = runTui({ agent: runtimeOf(agent, { state: pinned }), ui });
+    await flush();
+
+    const footer = (): string => ui.screen().split("\n").at(-1)!;
+    expect(footer()).toMatch(/生成中 \d+s/); // 计秒挂在状态词后面
+    expect(footer()).toMatch(BRAILLE);
+
+    const before = BRAILLE.exec(footer())![0];
+    await sleep(200); // 80ms 一帧：200ms 必跨帧、不够绕整圈回到原帧
+    const after = BRAILLE.exec(footer())![0];
+    expect(after).not.toBe(before);
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("空闲：状态段没有帧、没有计秒——动效只属于跑着的时候", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const done = runTui({ agent: runtimeOf(agent), ui });
+    await flush();
+
+    const footer = ui.screen().split("\n").at(-1)!;
+    expect(footer).toContain("空闲");
+    expect(footer).not.toMatch(BRAILLE);
+    expect(footer).not.toMatch(/\d+s/);
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
+test("执行中的工具标记跟着帧走（不再是静态 ⋯），完成后回到 ✓", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = agentWith([textTurn("好")]);
+    const emit = tapEvents(agent);
+    const pinned = { ...agent.state, status: "acting" as const };
+    const done = runTui({ agent: runtimeOf(agent, { state: pinned }), ui });
+    await flush();
+
+    emit({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", params: { cmd: "sleep 9" } });
+    await flush();
+    const toolLine = (): string => ui.screen().split("\n").find((l) => l.includes("bash"))!;
+    expect(toolLine()).toMatch(BRAILLE);
+    expect(toolLine()).not.toContain("⋯");
+
+    const before = BRAILLE.exec(toolLine())![0];
+    await sleep(200);
+    expect(BRAILLE.exec(toolLine())![0]).not.toBe(before);
+
+    emit({ type: "tool_execution_end", toolCallId: "c1", result: { content: "ok", isError: false } });
+    await flush();
+    expect(toolLine()).toContain("✓ bash"); // 收尾回静态勾，动效只挂在 running 上
+
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});

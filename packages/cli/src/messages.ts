@@ -80,7 +80,8 @@ export class AssistantMessage implements Component {
  * 展开与否是**全局**开关（pi 的 `app.tools.expand`，Ctrl+O），由 `Transcript` 持有、这里通过
  * `expanded()` 现读——每条自己记一份就得逐条去按，和「一键看全部」的用法不合。
  *
- * 三态标记沿用：`⋯` 跑着 / `✓` 成功 / `✗` 失败。
+ * 三态标记沿用：`⋯` 跑着 / `✓` 成功 / `✗` 失败；注入了 `spinner` 帧源时，跑着的标记显示当前帧
+ * （帧计时器归壳子，组件只在重画时取一帧——与 `expanded` 同一种注入）。
  */
 export class ToolExecution implements Component {
   private name: string;
@@ -89,13 +90,22 @@ export class ToolExecution implements Component {
   private params: unknown;
   private result: AgentToolResult | null = null;
   private readonly expanded: () => boolean;
+  private readonly spinner: (() => string) | undefined;
 
-  constructor(opts: { name: string; detail: string; state: ToolState; params?: unknown; expanded: () => boolean }) {
+  constructor(opts: {
+    name: string;
+    detail: string;
+    state: ToolState;
+    params?: unknown;
+    expanded: () => boolean;
+    spinner?: (() => string) | undefined;
+  }) {
     this.name = opts.name;
     this.detail = opts.detail;
     this.state = opts.state;
     this.params = opts.params;
     this.expanded = opts.expanded;
+    this.spinner = opts.spinner;
   }
 
   /** `result.content` 由调用方先 `clean()` 过再给进来。 */
@@ -107,7 +117,7 @@ export class ToolExecution implements Component {
   }
 
   render(width: number): string[] {
-    const mark = this.state === "running" ? "⋯" : this.state === "done" ? "✓" : "✗";
+    const mark = this.state === "running" ? (this.spinner?.() ?? "⋯") : this.state === "done" ? "✓" : "✗";
     const paint = this.state === "failed" ? red : this.state === "done" ? green : yellow;
     const head = paint(`${mark} ${this.name}`) + (this.detail === "" ? "" : dim(`  ${this.detail}`));
     // 折叠行**只有一行**，摘要再长也截到宽度（全量看展开态）。不截的话 pi-tui 的渲染门直接抛——

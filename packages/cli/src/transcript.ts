@@ -33,6 +33,9 @@ export class Transcript {
   private readonly items: Component[] = [];
   private toolsExpanded = false;
 
+  /** `spinner`：可选帧源，执行中的工具标记用它转起来；不给就是静态 `⋯`（单测与低层用法不付这份依赖）。 */
+  constructor(private readonly opts: { spinner?: (() => string) | undefined } = {}) {}
+
   /**
    * 追加一条。返回它的下标，流式那条之后要按下标续写。
    * **入口即清洗**（四类条目一个不漏，见文件头）：调用方不必记得洗，也没有「忘了洗」这条路。
@@ -53,6 +56,7 @@ export class Transcript {
           state: entry.state,
           params: entry.params,
           expanded: () => this.toolsExpanded,
+          spinner: this.opts.spinner,
         });
         break;
       case "notice":

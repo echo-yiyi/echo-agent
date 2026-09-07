@@ -120,10 +120,19 @@ function short(n: number): string {
  * （`runtime.ts:50-54`），所以这里显示的每一项都不需要壳子自己记一份。
  * 模型 / 状态 / 用量恒显；任务 / skill / MCP 为零就不占地方。
  */
-function footerLine(state: Readonly<AgentState>, width: number): string {
+function footerLine(
+  state: Readonly<AgentState>,
+  width: number,
+  live: { frame: string; since: number | null },
+): string {
+  // 跑着的状态段带当前帧和已跑秒数（`since` 从 idle→busy 那次重画起算）；空闲保持素静
+  const status =
+    state.status === "idle"
+      ? STATUS_LABEL.idle
+      : `${live.frame} ${STATUS_LABEL[state.status]}${live.since === null ? "" : ` ${Math.max(0, Math.floor((Date.now() - live.since) / 1000))}s`}`;
   const parts = [
     state.model.id,
-    STATUS_LABEL[state.status],
+    status,
     `↑${short(state.usage.inputTokens)} ↓${short(state.usage.outputTokens)}`,
   ];
   // 缓存情况（2026-09-01 用户拍板：token 就够，但要看到缓存）。provider 没报就不占地方——
@@ -156,7 +165,32 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   const sessions = options.sessions ?? NO_SESSION_FACE;
   const ui: TUI = options.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
 
-  const transcript = new Transcript();
+  // 动效（2026-09-07）：**一个帧计时器驱动全部**——footer 状态段、执行中的工具标记、计秒。
+  // 帧表与节拍取 pi-tui Loader 同款（Loader 是自带 interval 的组件，而我们的 footer 是每次
+  // 重画现算的一行字，搬组件不如把帧接进自己的渲染流）。只在 `state.status` 非 idle 时设
+  // interval——空闲不空转、不空耗重画；停表在 `syncSpinner`（每次重画核对）与退出 finally 两处。
+  const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const SPINNER_INTERVAL_MS = 80;
+  let spinnerTick = 0;
+  let spinnerTimer: ReturnType<typeof setInterval> | null = null;
+  let busySince: number | null = null;
+  const spinnerFrame = (): string => SPINNER_FRAMES[spinnerTick % SPINNER_FRAMES.length] ?? "⠋";
+  const syncSpinner = (): void => {
+    const running = agent.state.status !== "idle";
+    if (running && spinnerTimer === null) {
+      busySince = Date.now();
+      spinnerTimer = setInterval(() => {
+        spinnerTick += 1;
+        rerender();
+      }, SPINNER_INTERVAL_MS);
+    } else if (!running && spinnerTimer !== null) {
+      clearInterval(spinnerTimer);
+      spinnerTimer = null;
+      busySince = null;
+    }
+  };
+
+  const transcript = new Transcript({ spinner: () => spinnerFrame() });
   const welcome = welcomeLines(options.product ?? ECHO_AGENT, agent.state, agent.state.workspace); // 「在哪」= session 的 workspace
   /**
    * 能不能收下一条输入，只由 `busy()` 决定——**「起来了没」也在里面**。
@@ -188,7 +222,10 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   let streamingIndex: number | null = null;
   const toolRows = new Map<string, number>();
 
-  const rerender = (): void => ui.requestRender();
+  const rerender = (): void => {
+    syncSpinner(); // 每次重画核对一次：busy 起表、idle 停表——状态从事件来，表从状态来
+    ui.requestRender();
+  };
 
   // **用 pi-tui 的 `Editor`，不自己写**（P0，`docs/review/tui-design.md` §二）：多行、按词移动、
   // 撤销、kill-ring、历史、bracketed paste、grapheme 边界、`CURSOR_MARKER`——全是它本身就有的行为。
@@ -799,19 +836,19 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         lines.push(dim("当前 ✓。仅 idle 可换，下一轮生效；↑/↓ 选 · 数字直选 · 回车确认 · Esc 收起"));
         lines.push("");
         lines.push(...modelPicker.render(width));
-        lines.push(footerLine(agent.state, width));
+        lines.push(footerLine(agent.state, width, { frame: spinnerFrame(), since: busySince }));
         return lines;
       }
       // 正在配 key：这一段**顶替**输入行的位置，配好了输入行回来
       if (setup !== null) {
         lines.push(...setup.render(width));
-        lines.push(footerLine(agent.state, width));
+        lines.push(footerLine(agent.state, width, { frame: spinnerFrame(), since: busySince }));
         return lines;
       }
       lines.push(...editor.render(width));
       // 空闲且没打字时给一句提示；有字或在跑就不占地方
       if (editor.getText() === "" && !busy()) lines.push(...wrap(HINT, width)); // 54 列，窄终端要折
-      lines.push(footerLine(agent.state, width));
+      lines.push(footerLine(agent.state, width, { frame: spinnerFrame(), since: busySince }));
       return lines;
     },
     /**
@@ -955,6 +992,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     unsubscribe();
     // `setup` 只在闭包里被赋值，TS 在这个作用域把它收窄成了 null——显式标回类型再调
     (setup as CredentialSetup | null)?.dispose(); // 缓冲区里不留 key
+    if (spinnerTimer !== null) clearInterval(spinnerTimer); // 停表：挂着 interval 进程收不了摊
     ui.stop();
     // **不收摊 Agent**：协议里没有 `stop`，那是装配层（`echo.stop()`）的事。
     // 壳子自己停 Agent 就等于两个所有者——那正是把 `start`/`stop` 挡在协议外面要防的。
