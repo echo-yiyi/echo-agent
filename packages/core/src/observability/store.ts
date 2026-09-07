@@ -61,6 +61,11 @@ export interface CanonicalObservationStore {
   readRunIndex(runId: string): Promise<RunIndexEntryV1 | null>;
   /** commit-unknown 的 read-after-error 与 boundary resolve 都要 read-back head。 */
   readCommittedPrefix(runtimeId: string): Promise<number>;
+  /**
+   * 某个 runtime 在 `seq > afterSeq` 之后按 seq 升序的前 `limit` 条 record bytes：subscribe 回放早于内存窗口那段时按页读。
+   * hole（被 gap 覆盖的 seq）没有行，页里自然跳过；返回不足 `limit` 条 = 这个 runtime 之后没有更多记录。
+   */
+  readRecordsAfter(runtimeId: string, afterSeq: number, limit: number): Promise<readonly Uint8Array[]>;
 }
 
 /** RunIndex 的 CAS 键：canonical bytes 的 SHA-256。两个实现必须算得一样。 */
@@ -167,7 +172,18 @@ export class InMemoryCanonicalObservationStore implements CanonicalObservationSt
     return this.heads.get(runtimeId) ?? 0;
   }
 
-  /** 测试助手：按 seq 读回。是否进正式 seam（replay / getRun 的按 seq 读）待定。 */
+  async readRecordsAfter(runtimeId: string, afterSeq: number, limit: number): Promise<readonly Uint8Array[]> {
+    const head = this.heads.get(runtimeId) ?? 0;
+    const out: Uint8Array[] = [];
+    for (let seq = afterSeq + 1; seq <= head && out.length < limit; seq++) {
+      const id = this.seqIndex.get(`${runtimeId}#${seq}`);
+      const bytes = id === undefined ? undefined : this.records.get(id);
+      if (bytes !== undefined) out.push(bytes);
+    }
+    return out;
+  }
+
+  /** 测试助手：按 seq 读回。 */
   async readRecordBytesBySeq(runtimeId: string, seq: number): Promise<Uint8Array | null> {
     const id = this.seqIndex.get(`${runtimeId}#${seq}`);
     return id === undefined ? null : (this.records.get(id) ?? null);

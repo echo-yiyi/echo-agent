@@ -384,7 +384,8 @@ export type SinkDeliveryGap = Readonly<{
   afterSeq: number;
   beforeSeq: number;
   dropped: number;
-  reason: "subscriber_slow" | "exporter_timeout" | "shutdown_timeout" | "sink_failure";
+  /** `replay_unavailable`：subscribe 要的 afterSeq 早于内存窗口，而从 store 分页回放读失败——这段只在这个 sink 上缺，canonical 不受影响。 */
+  reason: "subscriber_slow" | "exporter_timeout" | "shutdown_timeout" | "sink_failure" | "replay_unavailable";
 }>;
 
 /** 单个 subscriber / exporter 的交付健康：慢、超时、关闭只进这里，不污染 canonical integrity。 */

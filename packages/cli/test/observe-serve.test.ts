@@ -194,6 +194,9 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   }
   // 终态五值 + running 都有；截停与完成是两个词
   expect(lex.runStatus.completed!.zh).not.toBe(lex.runStatus.truncated!.zh);
+  // 「running」只是没封口，不是「进行中」：agent 停没停不由观测判断（2026-09-06 用户定）
+  expect(lex.runStatus.running!.zh).toBe("未收尾");
+  expect(observePageHtml()).not.toContain("进行中 · 已");
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
 });
 

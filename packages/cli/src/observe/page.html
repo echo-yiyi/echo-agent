@@ -285,7 +285,7 @@ function renderRuns() {
   }
   const multi = multiSession();
   for (const r of runs) {
-    const dur = r.endedAt === null ? "进行中" : fmtMs(r.endedAt - r.acceptedAt);
+    const dur = r.endedAt === null ? "未收尾" : fmtMs(r.endedAt - r.acceptedAt);
     const item = el("li", {}, el("button", {
       class: "run", role: "option", "aria-selected": STATE.selected === r.runId, title: r.runId,
       onclick: () => { STATE.selected = r.runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(r.runId)}`); renderRuns(); loadRun(); },
@@ -418,7 +418,7 @@ function contentSections(t, end) {
   return { secs, strip };
 }
 
-function renderEntry(e, running, gaps) {
+function renderEntry(e, gaps) {
   const t = e.start;
   const end = e.end;
   const attrs = { ...t.attributes, ...(end?.attributes ?? {}) };
@@ -434,7 +434,7 @@ function renderEntry(e, running, gaps) {
   if (t.name === "context.compact") prefix = "⤓";
   let res = "";
   if (end && end.durationMs !== undefined) res = fmtMs(end.durationMs);
-  else if (isOpen) res = running ? "进行中" : "未收尾";
+  else if (isOpen) res = "未收尾"; // 没有 span_end：账本不知道它是还在跑还是没了，不替进程说话
   if (isTool && failed) res = `${res ? `${res} · ` : ""}出错`;
   if (t.name === "observation.gap") res = `丢 ${t.body?.dropped ?? "?"} 条`;
   if (t.name === "model.generate" && end?.body?.usage && (end.body.usage.inputTokens || end.body.usage.outputTokens)) res = `${res} · ${end.body.usage.inputTokens ?? 0}↑ ${end.body.usage.outputTokens ?? 0}↓`;
@@ -483,9 +483,10 @@ function renderDetail() {
     return;
   }
   const h = vm.header;
-  const running = h.status === "running";
   const sk = statusKey(h, vm.outcome);
-  const duration = h.endedAt === null ? `进行中 · 已 ${fmtMs(Date.now() - h.acceptedAt)}` : fmtMs(h.endedAt - h.acceptedAt);
+  // 没封口的 run 只说事实：最后一条记录是什么时候。「已跑 N 秒」是在替进程说它还活着，离线读者说不了这句话
+  const lastAt = vm.timeline.length > 0 ? vm.timeline[vm.timeline.length - 1].occurredAt : h.acceptedAt;
+  const duration = h.endedAt === null ? `未收尾 · 最后记录 ${fmtClock(lastAt)}` : fmtMs(h.endedAt - h.acceptedAt);
   box.append(el("div", { class: "head" },
     el("span", { class: "id mono", text: h.runId }),
     badge(LEX.runStatus[sk], sk),
@@ -516,7 +517,7 @@ function renderDetail() {
   box.append(el("h3", { text: "时间线" }));
   const tl = el("ul", { class: "timeline" });
   for (const e of buildEntries(vm)) {
-    const [row, detail] = renderEntry(e, running, vm.health.canonicalGaps);
+    const [row, detail] = renderEntry(e, vm.health.canonicalGaps);
     tl.append(el("li", {}, row, detail));
   }
   box.append(tl);
@@ -604,8 +605,9 @@ async function loadRuns() {
     STATE.sessions = page.sessions ?? {};
     lastOk = Date.now();
     if (STATE.follow) {
-      // 跟随：正在跑的 > 最新的非整理 run > 最新的。dream run 每轮之后都有一条、几毫秒就完，跟着它看不到东西
-      const target = STATE.runs.find((r) => r.status === "running") ?? STATE.runs.find((r) => r.source.kind !== "dream") ?? STATE.runs[0] ?? null;
+      // 跟随：最新的非整理 run > 最新的。列表按 acceptedAt 倒序，活着的 agent 的新 run 自然排最前；
+      // 不再优先「running」——那只是没封口，可能是早就死了的进程留下的，跟着它会被钉住
+      const target = STATE.runs.find((r) => r.source.kind !== "dream") ?? STATE.runs[0] ?? null;
       const next = target ? target.runId : null;
       if (next !== STATE.selected) { STATE.selected = next; STATE.expanded.clear(); await loadRun(); }
     } else if (STATE.selected !== null && !STATE.runs.some((r) => r.runId === STATE.selected)) {
@@ -652,7 +654,7 @@ document.addEventListener("visibilitychange", () => { STATE.hidden = document.hi
   setInterval(() => {
     if (STATE.hidden || STATE.selected === null) return;
     const cur = STATE.runs.find((r) => r.runId === STATE.selected);
-    if (cur && cur.status === "running") loadRun();
+    if (cur && cur.status === "running") loadRun(); // 没封口的就快刷：真在跑就能看到新记录；没了也只是多读几次
   }, 300);
   setInterval(() => { if (!STATE.hidden && STATE.selected !== null) loadRun(); }, 2000);
 })();

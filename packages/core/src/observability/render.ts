@@ -125,7 +125,8 @@ function attrsOf(item: RunObservationTimelineItem): string {
 function renderText(vm: RunObservationViewModel, options: RenderRunObservationOptions): string {
   const h = vm.header;
   const lines: string[] = [];
-  const duration = h.endedAt === null ? "running" : fmtMs(h.endedAt - h.acceptedAt);
+  // 没封口的 run 不说 running：离线读者只知道没有终态记录，不知道进程还在不在（2026-09-06）
+  const duration = h.endedAt === null ? "no terminal record" : fmtMs(h.endedAt - h.acceptedAt);
   lines.push(`Run ${h.runId} · ${h.status} · observation ${h.integrity} · ${duration}`);
   lines.push(`${label("Agent/Session")}agent ${h.agentId} · instance ${h.agentInstanceId} · session ${h.sessionId ?? "none"} · generation ${h.runtimeGeneration} · capture ${h.capturePolicy}`);
   lines.push(`${label("Assembly/Extensions")}assembly ${short(vm.assembly.digest)} · model ${vm.modelBinding.providerId}/${vm.modelBinding.modelId} (catalog ${vm.modelBinding.catalogRevision})`);
