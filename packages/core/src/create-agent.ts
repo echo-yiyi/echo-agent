@@ -21,7 +21,8 @@ import { AgentAssembly, type AdoptionLedger } from "./assembly/ledger.ts";
 import { adoptStorageView } from "./state/write-gate.ts";
 import { attachStateHost } from "./state/host-wiring.ts";
 import { createAgentMemories } from "./memory/harness.ts";
-import { assertProjectWorkspace, memoryScopeDir, projectPrefix, withWorkspaceStamp } from "./memory/scope.ts";
+import { attachMemoryHost } from "./memory/host-wiring.ts";
+import { assertProjectWorkspace, memoryScopeDir, projectPrefix, projectScopeBinding, withWorkspaceStamp } from "./memory/scope.ts";
 import { createAgentSchedule } from "./schedule/harness.ts";
 import type { Clock } from "./schedule/clock.ts";
 import type { TaskStore } from "./task/types.ts";
@@ -338,12 +339,14 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   // 否则「我传了 InMemoryDir」的调用方会发现记忆仍旧写进了真盘 home，那是最不该有的意外。
   const sharedStore = opts.sharedStore ?? opts.store ?? new FileDir(expandHome(resolveSharedDir()));
   const lock = opts.lock ?? fileStateLock(join(stateDir, LOCK_FILE));
-  // project 层记忆按哪个 workspace 分。缺省与 `Agent` 那边同一个("/"),不然两处对不上。
+  // project 层记忆**先**按这个 workspace 分目录。缺省与 `Agent` 那边同一个("/"),不然两处对不上。
   //
-  // **已知限制**:它在装配期定死,而 workspace 是 session 级事实——resume 时以盘上为准
-  // （`start()` 才读得到），运行中还能被 `setWorkspace()` 换掉（echo-coding 的 worktree 隔离）。
-  // 这两种情况下 project 层仍指着装配期这一个。要跟着走得让记忆的字节面能重新解析，
-  // 那是 memory 与 session 两条线的下一次改动，不在三级作用域这一刀里。
+  // 这里只是起点,不是终值:workspace 是 session 级事实,`--resume` 一段在别的目录建的会话时,
+  // 权威值要到 `Agent.start()` 里 `createOrResume` 返回才知道(盘上为准)。project 层在那时
+  // **重指一次**(`projectScopeBinding` 的 `pin`,经 `attachMemoryHost` 挂进 Agent)。
+  //
+  // 运行中的 `setWorkspace()`(echo-coding 的 worktree 隔离)**故意不跟**(2026-09-07 用户拍板):
+  // 同一个仓库换个 worktree 路径就换一套项目记忆,不是想要的行为。
   const memoryWorkspace = opts.workspace ?? "/";
 
   // canonical observation store：open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——
@@ -417,6 +420,9 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     // **打开 project 层时对一遍**(sessions.md §2):目录名是 workspace 的 48 位哈希,
     // 撞了就是两个项目的记忆混在一起而没人发现。留痕对不上 = 装配当场失败,不是「先跑着再说」。
     // 读不受写入闸管,所以这一步能在拿到租约之前做;**写**留痕要等第一次真往这层写(见 `withWorkspaceStamp`)。
+    //
+    // **这一次保留**,尽管 `start()` 还会按盘上权威的 workspace 重指并再对一遍:不给 `sessionId`
+    // 时(缺省每次新建一段)workspace 就是这里这个,早点判红比晚点好。
     if (opts.withoutMemory !== true) {
       await assertProjectWorkspace(sharedUser, projectPrefix(memoryWorkspace), memoryWorkspace);
     }
@@ -489,6 +495,11 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     attachStateHost(agent, { gate: ledger.writeGate, adoption: ledger });
     // canonical writer 同样不进公共 `AgentOptions`（observability/host-wiring.ts 头注）
     attachObservationHost(agent, { runtime: observation });
+    // 记忆 project 层的重指口：`start()` 拿到盘上权威的 workspace 之后调一次（memory/host-wiring.ts 头注）。
+    // 关了记忆就不挂——没有这一层可指。
+    if (parts.pinMemoryProjectWorkspace !== undefined) {
+      attachMemoryHost(agent, { pinProjectWorkspace: parts.pinMemoryProjectWorkspace });
+    }
   } catch (e) {
     const owner = ledger;
     return await failWithUnwind(
@@ -532,6 +543,11 @@ type AssembledCapabilities = Readonly<{
   inboxStore: InboxStore;
   sessionService: SessionService;
   skillStore: StorageDir;
+  /**
+   * 记忆 project 层的一次性重指口，`start()` 拿到盘上权威的 workspace 之后调。
+   * 关了记忆（`withoutMemory`）时是 `undefined`——没有这一层可指。
+   */
+  pinMemoryProjectWorkspace: ((workspace: string) => Promise<void>) | undefined;
 }>;
 
 /**
@@ -544,7 +560,7 @@ function prepareCapabilities(input: {
   sharedUser: StorageDir;
   clock?: Clock;
   withoutMemory?: boolean;
-  /** project 层记忆按它分目录(`projects/<hash>/`)。 */
+  /** project 层记忆**先**按它分目录(`projects/<hash>/`);`start()` 拿到盘上权威的 workspace 后重指一次。 */
   workspace: string;
 }): AssembledCapabilities {
   const { assembly, shared, sharedUser } = input;
@@ -571,10 +587,19 @@ function prepareCapabilities(input: {
   // 三层都过同一个写入闸(闸管的是「什么时候允许写」,与根在哪无关);project / user 两层
   // **不提供互斥**——多段 session 同时写是设计允许的形态(sessions.md §2)。
   const memoryUserView = scopedDir(sharedViewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`);
-  const memoryProjectRoot = withWorkspaceStamp(scopedDir(sharedViewFor("echo:memory", ["restore-migration"]), projectPrefix(input.workspace)), input.workspace);
+  // project 那条腿是**可重指一次**的(`projectScopeBinding`):装配期先按已知的 workspace 指着,
+  // `start()` 从盘上拿到权威值之后重指(resume 到别的目录时才真换)。`open` 把这一层的三件套
+  // ——`projects/<hash>/` 前缀、`workspace.json` 留痕、分区内的 `memory/`——一起造出来,
+  // 重指走的是同一个 `open`,所以新旧两个目录的形状按定义一致。
+  const memorySharedView = sharedViewFor("echo:memory", ["restore-migration"]);
+  const memoryProject = projectScopeBinding({
+    root: memorySharedView,
+    workspace: input.workspace,
+    open: (prefix, workspace) => scopedDir(withWorkspaceStamp(scopedDir(memorySharedView, prefix), workspace), `${MEMORY_DIR}/`),
+  });
   const memoryView = memoryScopeDir({
     user: memoryUserView,
-    project: scopedDir(memoryProjectRoot, `${MEMORY_DIR}/`),
+    project: memoryProject.dir,
     session: scopedDir(viewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`),
   });
   const taskView = viewFor("echo:task", ["restore-migration", "lifecycle-finalization"]);
@@ -611,7 +636,15 @@ function prepareCapabilities(input: {
   // 视图不是独立的值，跟着它上面那层 slot 走，所以不单独占一个 slot。
   const skillStore = scopedDir(skillView, `${SKILLS_DIR}/`);
 
-  return { memory, taskStore, schedule, inboxStore, sessionService, skillStore };
+  return {
+    memory,
+    taskStore,
+    schedule,
+    inboxStore,
+    sessionService,
+    skillStore,
+    pinMemoryProjectWorkspace: input.withoutMemory === true ? undefined : memoryProject.pin,
+  };
 }
 
 /**

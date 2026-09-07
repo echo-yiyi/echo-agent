@@ -13,6 +13,7 @@ import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from ".
 import { observationHostOf } from "./observability/host-wiring.ts";
 import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
 import { memoryFactDescriptor } from "./memory/observe.ts";
+import { memoryHostOf } from "./memory/host-wiring.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import type { CapabilityFactSink } from "./observability/fact-sink.ts";
@@ -1511,6 +1512,18 @@ export class Agent {
         this._state.compaction = data.compaction;
         this._state.sessionId = data.info.id;
         this._state.workspace = data.workspace; // resume 以盘上为准：最后一条 workspace entry，没切过 = 开会话的目录
+        // 记忆的 project 层跟着上一行这个**盘上权威的** workspace 走：装配期指的是 `createAgent`
+        // 那时已知的目录，`--resume` 一段在别处建的会话就指错了项目。位置卡在这里：恢复刚落定、
+        // 任何自主活动（skill 发现、闹钟、inbox 重放）之前，且早于 `sessionStart` 钩子——
+        // 宿主在钩子里碰记忆时看到的已经是对的那一层。
+        //
+        // **只这一次**：之后 `setWorkspace()` 换目录不重指（2026-09-07 用户拍板）——同一个仓库
+        // 换个 worktree 路径就换一套项目记忆，不是想要的行为。「只一次」由 `projectScopeBinding`
+        // 自己保证，不靠这一个调用点。新目录里 `workspace.json` 对不上（48 位哈希撞了）就在这里抛，
+        // `start()` 判红，与装配期那次是同一条 `assertProjectWorkspace`。
+        //
+        // 没挂 host 接线（低层 `new Agent({ memory })` 自己装）或关了记忆 = 空操作。
+        await memoryHostOf(this)?.pinProjectWorkspace?.(this._state.workspace);
         await this.hooks.notify(
           {
             type: "sessionStart",
@@ -2173,6 +2186,9 @@ export class Agent {
    * **不守 idle**：调用方通常是工具（`worktree_enter`），它就在轮中途。生效点是下一次工具执行
    * （loop 每次执行都现读 `workspace`，见 `createLoopConfig`）与下一轮的 prompt 装配（本轮 system 已冻结）。
    * core 不解释路径：是不是目录、存不存在由调用方先看；这里只拒空串。
+   *
+   * **记忆的 project 层不跟着换**（2026-09-07 用户拍板）：同一个仓库换个 worktree 路径就换一套
+   * 项目记忆，不是想要的行为。那一层在 `start()` 里按盘上权威的 workspace 定死一次，此后不动。
    */
   async setWorkspace(workspace: string): Promise<void> {
     if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必须是非空字符串（宿主给绝对路径）");

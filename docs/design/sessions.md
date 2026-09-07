@@ -56,7 +56,9 @@ project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自
 
 三层里唯一的共享写方是 project / user 级 memory：多段 session 同时往同一层记。dream 只整理 session 自己那份，不碰上两层，所以整理不冲突；上两层的并发写归 memory 线（Non-Goals）。
 
-**这一节已全部实现**（记忆三层 2026-09-07 补上）：分区（`agent.md` / `user.md` / 笔记与索引）与作用域（session / project / user）怎么对、注入哪几层、怎么选层，见 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」。选层走**路径前缀**（`user/agent.md`、`project/user.md`、`session/memory/x.md`），`memory` 工具不加参数；project 目录的解析在 [`projectPrefix()`](../../packages/core/src/memory/scope.ts#symbol=projectPrefix)，`workspace.json` 的校验在 [`assertProjectWorkspace()`](../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace)，三层的字节面在 `createAgent` 的 `prepareCapabilities` 里接上。**已知限制**：project 层按装配期的 `workspace` 定，resume 到另一个目录、或运行中 `setWorkspace()` 换了目录，它不跟着变。
+**这一节已全部实现**（记忆三层 2026-09-07 补上）：分区（`agent.md` / `user.md` / 笔记与索引）与作用域（session / project / user）怎么对、注入哪几层、怎么选层，见 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」。选层走**路径前缀**（`user/agent.md`、`project/user.md`、`session/memory/x.md`），`memory` 工具不加参数；project 目录的解析在 [`projectPrefix()`](../../packages/core/src/memory/scope.ts#symbol=projectPrefix)，`workspace.json` 的校验在 [`assertProjectWorkspace()`](../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace)，三层的字节面在 `createAgent` 的 `prepareCapabilities` 里接上。
+
+project 层指哪个目录**以 `start()` 从盘上读回的 workspace 为准**（2026-09-07）：装配期先按 `createAgent` 那时已知的 workspace 指着，`start()` 里 `createOrResume` 返回之后 [`projectScopeBinding`](../../packages/core/src/memory/scope.ts#symbol=projectScopeBinding) 的 `pin` 重指一次，撞车检查走的还是 `assertProjectWorkspace`。**只重指这一次**：运行中 `setWorkspace()` 换目录（echo-coding 的 worktree 隔离）故意不跟——同一个仓库换个 worktree 路径就换一套项目记忆，不是想要的行为。
 
 `ECHO_HOME` 覆盖 `~/.echo`，与今天的 [`resolveStateDir()`](../../packages/core/src/create-agent.ts#symbol=resolveStateDir) 同一个来源；`agents/<agentId>/` 这一层退场，session 的 meta 里记着自己是哪个 agent。
 

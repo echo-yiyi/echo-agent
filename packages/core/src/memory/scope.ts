@@ -161,3 +161,52 @@ export function withWorkspaceStamp(root: StorageDir, workspace: string): Storage
     remove: (path) => root.remove(path),
   };
 }
+
+/**
+ * project 层的字节面 + **一次性重指**。
+ *
+ * workspace 是 **session 级事实,不是装配期事实**:`--resume` 一段在别的目录建的会话时,
+ * 真实的 workspace 要到 `Agent.start()` 里 `createOrResume` 返回才知道(盘上为准)。
+ * 装配期先按当时已知的那个指着,`start()` 拿到权威值之后 `pin()` 重指一次。
+ *
+ * **只重指这一次**(2026-09-07 用户拍板):之后运行中的 `setWorkspace()`(echo-coding 的
+ * worktree 隔离)再换目录也不动它——同一个仓库换个 worktree 路径就换一套项目记忆,
+ * 不是想要的行为。重复调 `pin()` 是空操作,所以「只一次」是这里的**结构性质**,不靠调用方自觉。
+ *
+ * 撞车检查与装配期走**同一条** `assertProjectWorkspace`:新目录里那份 `workspace.json` 与
+ * 新 workspace 对不上 = 48 位哈希撞了,当场抛(于是 `start()` 判红);抛出去时这次 pin 不算生效。
+ *
+ * **重指本身一个字节都不写**:留痕仍归 `withWorkspaceStamp` 的「第一次真写时才落」——
+ * 重指发生在 `start()` 里,那时租约刚拿到,不该顺手在 home 下建一个没人写过的空目录。
+ */
+export function projectScopeBinding(input: {
+  /** project 一层的根(`<ECHO_HOME>` 的字节面):撞车检查从它读 `projects/<hash>/workspace.json`。 */
+  root: StorageDir;
+  /** 装配期已知的 workspace(`createAgent` 的 `opts.workspace ?? "/"`)。 */
+  workspace: string;
+  /** 按 `projects/<hash>/` 前缀造出交给 harness 的那一层(装配层负责套上留痕与 `memory/`)。 */
+  open: (prefix: string, workspace: string) => StorageDir;
+}): { dir: StorageDir; pin: (workspace: string) => Promise<void> } {
+  let bound = input.workspace;
+  let current = input.open(projectPrefix(bound), bound);
+  let pinned = false;
+  return {
+    // 每次操作**现读** `current`:重指之后这同一个对象就指向新目录,上面那层(`memoryScopeDir`
+    // 与 harness)拿在手里的引用不用换。没有 `close`——底层那份只在 `finalDisposables` 里关一次。
+    dir: {
+      read: (path) => current.read(path),
+      write: (path, content) => current.write(path, content),
+      remove: (path) => current.remove(path),
+      list: (prefix) => current.list(prefix),
+    },
+    pin: async (workspace: string): Promise<void> => {
+      if (pinned) return;
+      if (workspace !== bound) {
+        await assertProjectWorkspace(input.root, projectPrefix(workspace), workspace);
+        bound = workspace;
+        current = input.open(projectPrefix(workspace), workspace);
+      }
+      pinned = true;
+    },
+  };
+}

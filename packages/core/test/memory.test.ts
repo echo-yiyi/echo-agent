@@ -33,7 +33,7 @@ import {
 
 import { InMemoryDir } from "../src/memory/in-memory-dir.ts";
 import { createMemoryTool, normalizeMemoryPath, MEMORY_TOOL_NAME } from "../src/memory/tool.ts";
-import { fnv1a64hex, memoryScopeDir, projectPrefix } from "../src/memory/scope.ts";
+import { fnv1a64hex, memoryScopeDir, projectPrefix, projectScopeBinding, withWorkspaceStamp, WORKSPACE_STAMP_FILE } from "../src/memory/scope.ts";
 import { agentMemory, notesMemory, indexedMemory, memoryOwns, memoryPaths, residentMemory } from "../src/memory/types.ts";
 import type { MemoryDir } from "../src/memory/types.ts";
 import type { ToolExecutionContext } from "../src/tools/types.ts";
@@ -482,6 +482,57 @@ describe("project 层目录", () => {
     expect(projectPrefix("/repo/a")).toMatch(/^projects\/[0-9a-f]{12}\/$/);
     expect(projectPrefix("/repo/a")).toBe(projectPrefix("/repo/a")); // 稳定
     expect(projectPrefix("/repo/a")).not.toBe(projectPrefix("/repo/b"));
+  });
+
+  // 装配层把三件套(前缀 / 留痕 / 分区内的 `memory/`)套在一起的那个 `open`,与 create-agent.ts 同形
+  const openAt = (root: MemoryDir) => (prefix: string, workspace: string): MemoryDir => {
+    const at = (base: MemoryDir, p: string): MemoryDir => ({
+      read: (x) => base.read(p + x),
+      write: (x, c) => base.write(p + x, c),
+      remove: (x) => base.remove(p + x),
+      list: async (s) => (await base.list(p + s)).map((k) => k.slice(p.length)),
+    });
+    return at(withWorkspaceStamp(at(root, prefix), workspace), "memory/");
+  };
+
+  test("重指到盘上权威的 workspace:之后的写落新目录,装配期那个目录一个字节都没有", async () => {
+    const root = new InMemoryDir();
+    const b = projectScopeBinding({ root, workspace: "/elsewhere", open: openAt(root) });
+    await b.pin("/repo/a");
+    await b.dir.write("agent.md", "这个仓库用 bun");
+    expect(await root.list("")).toEqual([
+      `${projectPrefix("/repo/a")}memory/agent.md`,
+      `${projectPrefix("/repo/a")}${WORKSPACE_STAMP_FILE}`,
+    ]);
+    expect(JSON.parse((await root.read(`${projectPrefix("/repo/a")}${WORKSPACE_STAMP_FILE}`))!)).toEqual({ workspace: "/repo/a" });
+  });
+
+  test("重指本身不写盘:留痕仍是第一次真写时才落(withWorkspaceStamp 的规矩没变)", async () => {
+    const root = new InMemoryDir();
+    const b = projectScopeBinding({ root, workspace: "/elsewhere", open: openAt(root) });
+    await b.pin("/repo/a");
+    expect(await root.list("")).toEqual([]); // 只读过,没建过目录
+    expect(await b.dir.read("agent.md")).toBeNull(); // 读也不落痕
+    expect(await root.list("")).toEqual([]);
+  });
+
+  test("只重指一次:再 pin(setWorkspace 换 worktree)不动它——「一次」是结构性质,不靠调用方", async () => {
+    const root = new InMemoryDir();
+    const b = projectScopeBinding({ root, workspace: "/elsewhere", open: openAt(root) });
+    await b.pin("/repo/a");
+    await b.pin("/repo/a-worktree");
+    await b.dir.write("agent.md", "x");
+    expect(await root.list(projectPrefix("/repo/a"))).toHaveLength(2);
+    expect(await root.list(projectPrefix("/repo/a-worktree"))).toEqual([]);
+  });
+
+  test("新目录留痕对不上 → pin 抛(与装配期同一条 assertProjectWorkspace);抛了就不算指过", async () => {
+    const root = new InMemoryDir();
+    await root.write(`${projectPrefix("/repo/a")}${WORKSPACE_STAMP_FILE}`, JSON.stringify({ workspace: "/somewhere/else" }));
+    const b = projectScopeBinding({ root, workspace: "/elsewhere", open: openAt(root) });
+    await expect(b.pin("/repo/a")).rejects.toThrow("project 层目录撞了");
+    await b.dir.write("agent.md", "x"); // 仍指着装配期那个
+    expect(await root.list(`${projectPrefix("/elsewhere")}memory/`)).toEqual([`${projectPrefix("/elsewhere")}memory/agent.md`]);
   });
 });
 

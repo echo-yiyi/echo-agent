@@ -264,6 +264,62 @@ test("resume 时 workspace 以盘上为准：换个目录打开同一个 session
   await second.stop();
 });
 
+test("resume：project 层重指到盘上权威的 workspace；同一段里 setWorkspace() 不重指", async () => {
+  const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const write = async (agent: Awaited<ReturnType<typeof createAgent>>, path: string, text: string): Promise<void> => {
+    const r = await agent.tools.get("memory")!.execute(
+      { command: "create", path, file_text: text },
+      { toolCallId: "c1", workspace: agent.state.workspace, sessionId: agent.state.sessionId, iteration: 0 },
+    );
+    expect([path, r.isError]).toEqual([path, false]);
+  };
+
+  // 第一段开在 /repo/a：说一句话才落 meta，盘上才有「这一段的 workspace」
+  const first = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", sessionId: "s" });
+  await first.start();
+  await first.prompt("说一句");
+  await first.stop();
+
+  // 第二段的进程起在 /elsewhere，resume 同一段 → 盘上权威的是 /repo/a
+  const second = await createAgent({ provider, allowNetwork: false, workspace: "/elsewhere", sessionId: "s" });
+  await mountBuiltinTools(second);
+  await second.start();
+  expect(second.state.workspace).toBe("/repo/a");
+  await write(second, "project/agent.md", "这个仓库用 bun");
+  expect(existsSync(join(home, projectPrefix("/repo/a"), "memory", "agent.md"))).toBe(true);
+  // 装配期指的那个目录一次都没建过：重指发生在任何写之前，`withWorkspaceStamp` 也只在真写时才落
+  expect(existsSync(join(home, projectPrefix("/elsewhere")))).toBe(false);
+
+  // 轮中途换 worktree（echo-coding 的隔离）：project 层**故意不跟**
+  await second.setWorkspace("/repo/a-worktree");
+  await write(second, "project/user.md", "他偏好中文");
+  expect(existsSync(join(home, projectPrefix("/repo/a"), "memory", "user.md"))).toBe(true);
+  expect(existsSync(join(home, projectPrefix("/repo/a-worktree")))).toBe(false);
+  await second.stop();
+});
+
+test("重指到的 project 目录留痕对不上 → start() 判红（与装配期同一条规矩、同一个错误）", async () => {
+  const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+
+  const first = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", sessionId: "s" });
+  await first.start();
+  await first.prompt("说一句");
+  await first.stop();
+
+  // 伪造一次哈希撞车：/repo/a 那个目录说自己是别的项目
+  const dir = join(home, projectPrefix("/repo/a"));
+  await mkdir(dir, { recursive: true });
+  writeFileSync(join(dir, "workspace.json"), JSON.stringify({ workspace: "/somewhere/else" }));
+
+  // 装配期看的是 /elsewhere（没撞），所以红出在 start() 的重指那一步
+  const second = await createAgent({ provider, allowNetwork: false, workspace: "/elsewhere", sessionId: "s" });
+  await expect(second.start()).rejects.toThrow("project 层目录撞了");
+});
+
 test("start() create-or-resume：stop() 之后换个实例、**显式给同一个 sessionId** 能读回来", async () => {
   const store = new InMemoryDir();
   const provider = fakeProvider({ id: "t", models: ["only"] });
