@@ -22,6 +22,7 @@ import type { AgentDefinition } from "./types.ts";
 /** 目录名：user 层与项目层共用（`<ECHO_HOME>/agents/`、`<workspace>/.echo/agents/`）。 */
 export const AGENT_DEF_DIR = "agents";
 
+/** 一次加载的结果：合并去重后的定义表，加上路上攒的诊断（坏档、撞名）。 */
 export type LoadedAgentDefs = {
   /** 名字 → 定义。已经按优先级去过重，直接查。 */
   readonly defs: ReadonlyMap<string, AgentDefinition>;

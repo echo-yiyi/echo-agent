@@ -42,7 +42,7 @@ function spawnPeer(home: string, sessionId: string, waitMs: number): Promise<{ r
 /** 预置一段说过话的会话——一句话没说的段不落 meta，`send` 就找不到它。 */
 async function seed(home: string, id: string): Promise<void> {
   const svc = new SessionService(new FileDir(join(home, "sessions", id)));
-  await svc.createOrResume(id, { workspace: "/repo", agent: "echo-agent" });
+  await svc.createOrResume(id, { workspace: "/repo", product: "echo-agent" });
   await svc.append(id, [{ kind: "message", message: userMessage("开场") }]);
   await svc.settle();
 }
@@ -53,7 +53,7 @@ function sessionsOn(home: string): EchoSessions {
     root,
     storeFor: (id) => new FileDir(join(home, "sessions", id)),
     isAlive: async (id) => (await inspectStateLock(join(home, "sessions", id, ".lock"))).state === "valid",
-    self: () => ({ sessionId: "s-sender", agent: "echo-agent", workspace: "/repo" }),
+    self: () => ({ sessionId: "s-sender", product: "echo-agent", workspace: "/repo" , tools: [] }),
   });
 }
 

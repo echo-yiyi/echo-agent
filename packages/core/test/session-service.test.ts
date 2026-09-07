@@ -308,7 +308,7 @@ test("坏 message payload 在恢复时判红——只有 role 是不够的", asy
     const dir = new InMemoryDir();
     await dir.write(
       "meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", product: "default", agent: { definition: {} }, main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
     );
     await dir.write(
       "entries/000001.json",
@@ -322,7 +322,7 @@ test("自定义 role 仍然放行——扩展位不能被验形关掉", async ()
   const dir = new InMemoryDir();
   await dir.write(
     "meta.json",
-    JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+    JSON.stringify({ id: "main", name: "main", workspace: "/", product: "default", agent: { definition: {} }, main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
   );
   await dir.write(
     "entries/000001.json",
@@ -406,36 +406,42 @@ test("meta 缺 workspace → 判红（2026-09-01 之前的旧档，文案指明�
   expect(resumed.info.workspace).toBe("/repo/a");
 });
 
-test("meta 缺 agent / main / status → 判红；新建写入、resume 以盘上为准；缺省 default + main + active", async () => {
-  // 会话身份 = workspace + agent（2026-09-01）；main + status 是 2026-09-03 加的两维。
-  // 三个字段都**不给缺省**：少了 agent 会续错产品的对话，少了 main 会让 --continue 挑到别人派的活，
-  // 少了 status 会让已关的段照样收信——都是静默走错，不是少一个字段。
+test("meta 缺 product / agent / main / status → 判红；新建写入、resume 以盘上为准；缺省 default + main + active", async () => {
+  // 会话身份 = workspace + product（2026-09-01 拍板，2026-09-07 从 `agent` 改名）；
+  // `agent` 现在是角色（`AgentRef`）；main + status 是 2026-09-03 加的两维。
+  // 四个字段都**不给缺省**：少了 product 会续错产品的对话，`agent` 存成老的产品名字符串会被
+  // 当成一份角色定义，少了 main 会让 --continue 挑到别人派的活，少了 status 会让已关的段照样收信。
   const bare = { id: "old", name: "old", workspace: "/w", createdAt: 1, updatedAt: 1, messageCount: 0 };
-  const noAgent = new InMemoryDir();
-  await noAgent.write("meta.json", JSON.stringify(bare));
-  await expect(new SessionService(noAgent).createOrResume("old", { workspace: "/w", agent: "echo-coding" })).rejects.toThrow(
-    /缺 agent.*2026-09-01/,
+  const ref = { definition: {} };
+  const noProduct = new InMemoryDir();
+  await noProduct.write("meta.json", JSON.stringify(bare));
+  await expect(new SessionService(noProduct).createOrResume("old", { workspace: "/w", product: "echo-coding" })).rejects.toThrow(
+    /缺 product.*2026-09-01/,
   );
+  // **2026-09-07 之前的档**：`agent` 那里存的是产品名字符串，读它会把产品名当成一份角色定义
+  const oldAgent = new InMemoryDir();
+  await oldAgent.write("meta.json", JSON.stringify({ ...bare, product: "echo-coding", agent: "echo-coding", main: true, status: "active" }));
+  await expect(new SessionService(oldAgent).createOrResume("old")).rejects.toThrow(/agent 不是 AgentRef.*2026-09-07/);
   const noMain = new InMemoryDir();
-  await noMain.write("meta.json", JSON.stringify({ ...bare, agent: "echo-coding" }));
+  await noMain.write("meta.json", JSON.stringify({ ...bare, product: "echo-coding", agent: ref }));
   await expect(new SessionService(noMain).createOrResume("old")).rejects.toThrow(/缺 main.*2026-09-03/);
   const badStatus = new InMemoryDir();
-  await badStatus.write("meta.json", JSON.stringify({ ...bare, agent: "echo-coding", main: true, status: "running" }));
+  await badStatus.write("meta.json", JSON.stringify({ ...bare, product: "echo-coding", agent: ref, main: true, status: "running" }));
   await expect(new SessionService(badStatus).createOrResume("old")).rejects.toThrow(/status 不认识/);
 
   const dir = new InMemoryDir();
   const s = new SessionService(dir);
-  const created = await s.createOrResume("fresh", { workspace: "/w", agent: "echo-coding" });
-  expect([created.info.agent, created.info.main, created.info.status]).toEqual(["echo-coding", true, "active"]);
+  const created = await s.createOrResume("fresh", { workspace: "/w", product: "echo-coding" });
+  expect([created.info.product, created.info.main, created.info.status]).toEqual(["echo-coding", true, "active"]);
   await s.append("fresh", [{ kind: "message", message: userMessage("说一句才落 meta") }]);
   await s.settle();
-  expect((JSON.parse((await dir.read("meta.json"))!) as { agent: string }).agent).toBe("echo-coding");
+  expect((JSON.parse((await dir.read("meta.json"))!) as { product: string }).product).toBe("echo-coding");
   // 换个产品 resume 同一段：盘上的赢——续别人的对话得是显式动作，续了也不改它的归属
-  const resumed = await new SessionService(dir).createOrResume("fresh", { workspace: "/w", agent: "echo-agent" });
-  expect(resumed.info.agent).toBe("echo-coding");
+  const resumed = await new SessionService(dir).createOrResume("fresh", { workspace: "/w", product: "echo-agent" });
+  expect(resumed.info.product).toBe("echo-coding");
   // 经 extension 面（session_create 工具）建的那一段不是 main
   const spawned = await new SessionService(new InMemoryDir()).createOrResume("spawned", { workspace: "/w", main: false });
-  expect([spawned.info.agent, spawned.info.main]).toEqual(["default", false]);
+  expect([spawned.info.product, spawned.info.main]).toEqual(["default", false]);
 });
 
 test("一个 store 就是一段 session 的目录：在同一个 store 上开第二个 id 判红", async () => {
@@ -449,8 +455,8 @@ test("listSessions()：扫上一层、只读 meta、按 updatedAt 降序；活�
   const root = new InMemoryDir();
   const s1 = new SessionService(scoped(root, "s-1/"));
   const s2 = new SessionService(scoped(root, "s-2/"));
-  await s1.createOrResume("s-1", { workspace: "/a", agent: "echo-agent" });
-  await s2.createOrResume("s-2", { workspace: "/a", agent: "echo-coding", main: false });
+  await s1.createOrResume("s-1", { workspace: "/a", product: "echo-agent" });
+  await s2.createOrResume("s-2", { workspace: "/a", product: "echo-coding", main: false });
   await s1.append("s-1", [{ kind: "message", message: userMessage("一") }]);
   await s1.settle();
 
@@ -463,9 +469,9 @@ test("listSessions()：扫上一层、只读 meta、按 updatedAt 降序；活�
 
   await s2.append("s-2", [{ kind: "message", message: userMessage("二") }]);
   await s2.settle();
-  // 产品的 --continue 靠 workspace + agent + main 三维挑「本产品在本目录、自己起的那一段」
+  // 产品的 --continue 靠 workspace + product + main 三维挑「本产品在本目录、自己起的那一段」
   const listed = await listSessions(root);
-  expect(listed.map((i) => [i.id, i.workspace, i.agent, i.main]).sort()).toEqual([
+  expect(listed.map((i) => [i.id, i.workspace, i.product, i.main]).sort()).toEqual([
     ["s-1", "/a", "echo-agent", true],
     ["s-2", "/a", "echo-coding", false],
   ]);
@@ -513,7 +519,7 @@ test("内容块闭合验形：缺字段与不认识的 type 都判红", async ()
     const dir = new InMemoryDir();
     await dir.write(
       "meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", product: "default", agent: { definition: {} }, main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 1 }),
     );
     await dir.write(
       "entries/000001.json",
@@ -536,7 +542,7 @@ test("compaction / error entry 缺 at 判红", async () => {
     const dir = new InMemoryDir();
     await dir.write(
       "meta.json",
-      JSON.stringify({ id: "main", name: "main", workspace: "/", agent: "default", main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 0 }),
+      JSON.stringify({ id: "main", name: "main", workspace: "/", product: "default", agent: { definition: {} }, main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 0 }),
     );
     await dir.write("entries/000001.json", JSON.stringify(entry));
     await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/缺 at/);
@@ -584,7 +590,7 @@ test("并发 append 的 messageCount 不丢更新（meta 是读改写，必须�
 test("workspace entry（2026-09-03 worktree 隔离）：切目录记成过程事实，恢复取最后一条；info.workspace（开在哪）不变；缺 workspace 判红", async () => {
   const dir = new InMemoryDir();
   const first = new SessionService(dir);
-  const created = await first.createOrResume("main", { workspace: "/repo", agent: "coding" });
+  const created = await first.createOrResume("main", { workspace: "/repo", product: "coding" });
   expect(created.workspace).toBe("/repo");
   await first.append("main", [
     { kind: "workspace", at: 1, workspace: "/repo/.echo/worktrees/a" },
@@ -607,7 +613,7 @@ test("收摊兜底：一句话都没说过的段撤掉 meta，从此不进清单
   // 「空会话不留痕」的新做法：活着的时候看得见（别人才能给它带话），收摊时才决定它算不算数。
   const root = new InMemoryDir();
   const silent = new SessionService(scoped(root, "s-silent/"));
-  await silent.createOrResume("s-silent", { workspace: "/a", agent: "echo-agent" });
+  await silent.createOrResume("s-silent", { workspace: "/a", product: "echo-agent" });
   expect((await listSessions(root)).map((i) => i.id)).toEqual(["s-silent"]); // 开着的时候在
 
   expect(await silent.discardIfUnused("s-silent")).toBe(true);
@@ -615,6 +621,6 @@ test("收摊兜底：一句话都没说过的段撤掉 meta，从此不进清单
   expect(await silent.discardIfUnused("s-silent")).toBe(false); // 幂等：撤过了就不再撤
 
   // 同一个 id 再打开 = 一段全新的会话（与「从没存在过」同一个结果）
-  const again = await new SessionService(scoped(root, "s-silent/")).createOrResume("s-silent", { workspace: "/b", agent: "echo-coding" });
+  const again = await new SessionService(scoped(root, "s-silent/")).createOrResume("s-silent", { workspace: "/b", product: "echo-coding" });
   expect([again.info.workspace, again.messages.length]).toEqual(["/b", 0]);
 });

@@ -62,7 +62,6 @@ export type ProviderName = "kimi" | "deepseek" | "openai" | "zai" | "minimax";
 export type CliOptions = {
   /** 状态根。不给则由 core 决定（`ECHO_HOME`，再退到 `~/.echo`）。 */
   stateDir?: string;
-  agentId?: string;
   /** **不给 = 没说**（D7）：用设置文件记住的那家，其次 kimi。给了永远赢。 */
   provider?: ProviderName;
   model?: string;
@@ -125,7 +124,6 @@ export function usage(name: string): string {
 
 选项：
   --state-dir <路径>   会话目录的上一层（缺省：$ECHO_HOME/sessions，再退到 ~/.echo/sessions）
-  --agent-id <名字>    agent 身份，进 lease 的 holder 标识（缺省 default）
   --provider <名字>    kimi | deepseek | openai | zai | minimax（缺省：上次选的，其次 kimi）
   --model <id>         模型 id（缺省：上次选的，其次由 provider 声明）
   --continue           续本命令在当前目录的最近一段会话
@@ -184,9 +182,6 @@ export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.nam
     switch (flag) {
       case "--state-dir":
         opts.stateDir = value();
-        break;
-      case "--agent-id":
-        opts.agentId = value();
         break;
       case "--model":
         opts.model = value();
@@ -277,8 +272,9 @@ export function echoOptions(
     withoutMemory: opts.withoutMemory,
     // workspace 是 session 级事实（2026-09-01）：宿主给进程目录；core 不读 process.cwd()
     workspace: process.cwd(),
-    // 会话身份的第二维：产品名。同一目录里 `echo-agent` 与 `echo-coding` 各有各的对话（2026-09-01 用户拍板）
-    agentName: product.name,
+    // 会话身份的第二维：产品名。同一目录里 `echo-agent` 与 `echo-coding` 各有各的对话
+    // （2026-09-01 用户拍板；2026-09-07 字段从 `agentName` 改名 `product`，角色占了 `agent` 那个词）
+    product: product.name,
     ...(sessionId !== undefined ? { sessionId } : {}),
     // `--state-dir` 是**会话目录的上一层**（2026-09-03）：容器管「会话都放哪儿」，
     // 某一段的目录由 core 用 sessionsRoot + sessionId 得出。
@@ -288,7 +284,6 @@ export function echoOptions(
     // 一个 `--serve` 的进程当它的宿主——「只跟活着的段说话」那条要有人兑现才成立。
     // 那种宿主是可被请走的，所以你 `--resume` 它的时候它会让开。
     sessions: { run: sessionRunner(opts) },
-    ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     ...(opts.observe !== undefined ? { observation: { capture: opts.observe } } : {}),
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
@@ -324,7 +319,9 @@ async function resolveSessionId(product: Product, opts: CliOptions): Promise<str
     return opts.resume;
   }
   const cwd = process.cwd();
-  const latest = sessions.find((s) => s.workspace === cwd && s.agent === product.name && s.main && s.status === "active");
+  // 身份三维（2026-09-07）：目录 + **产品** + main + active。产品这一维从前存在 `agent` 字段里，
+  // 现在 `agent` 归角色——同一目录里 echo-agent 与 echo-coding 各续各的，靠的是 `product`。
+  const latest = sessions.find((s) => s.workspace === cwd && s.product === product.name && s.main && s.status === "active");
   if (latest === undefined) throw new Error(`${product.name} 在 ${cwd} 还没有可续的会话（${root}）`);
   return latest.id;
 }
@@ -473,7 +470,6 @@ function sessionRunner(opts: CliOptions): SessionRunner {
     if (self === undefined) throw new Error("认不出自己的可执行文件路径，起不了会话宿主");
     const args = [self, "--serve", "--resume", row.id];
     if (opts.stateDir !== undefined) args.push("--state-dir", opts.stateDir);
-    if (opts.agentId !== undefined) args.push("--agent-id", opts.agentId);
     if (opts.withoutMemory) args.push("--no-memory");
     for (const dir of opts.extensionDirs) args.push("--extensions", dir);
     const child = Bun.spawn([process.execPath, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });

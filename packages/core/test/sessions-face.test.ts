@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { EchoSessions, NO_SESSION_FACE, type SessionRow } from "../src/session/sessions.ts";
 import { makeSessionTools, sessionToolsSection } from "../src/session/tools.ts";
 import { listSessions, SessionService } from "../src/session/service.ts";
+import type { AgentRef } from "../src/agent-def/types.ts";
 import { InboxStore } from "../src/inbox/store.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { writeSessionPhase } from "../src/session/status.ts";
@@ -45,7 +46,7 @@ function harness(opts: { selfId?: string; run?: (row: SessionRow) => Promise<voi
     root,
     storeFor: (id) => scoped(root, `${id}/`),
     isAlive: async (id) => alive.has(id),
-    self: () => ({ sessionId: opts.selfId ?? "s-self", agent: "echo-agent", workspace: "/repo" }),
+    self: () => ({ sessionId: opts.selfId ?? "s-self", product: "echo-agent", workspace: "/repo" , tools: [] }),
     ...(opts.run !== undefined
       ? {
           run: async (row: SessionRow) => {
@@ -65,9 +66,14 @@ function ctx(): never {
 }
 
 /** 预置一段说过话的会话（一句话没说的段不落 meta，也就不在清单里）。 */
-async function seed(root: InMemoryDir, id: string, opts: { agent?: string; main?: boolean } = {}): Promise<void> {
+async function seed(root: InMemoryDir, id: string, opts: { product?: string; agent?: AgentRef; main?: boolean } = {}): Promise<void> {
   const svc = new SessionService(scoped(root, `${id}/`));
-  await svc.createOrResume(id, { workspace: "/repo", agent: opts.agent ?? "echo-agent", main: opts.main ?? true });
+  await svc.createOrResume(id, {
+    workspace: "/repo",
+    product: opts.product ?? "echo-agent",
+    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+    main: opts.main ?? true,
+  });
   await svc.append(id, [{ kind: "message", message: userMessage("开场") }]);
   await svc.settle();
 }
@@ -79,7 +85,9 @@ test("create：建目录、立刻落 meta、第一条消息进对方 inbox，然
   const row = await h.sessions.create({ name: "查一下 PR 42", message: "先看 PR 42" });
 
   expect(row.main).toBe(true);
-  expect([row.agent, row.workspace]).toEqual(["echo-agent", "/repo"]); // 不给就继承建它的那一段
+  // product 与 workspace 继承建它的那一段；**角色不继承**——一段 reviewer 派出去的活
+  // 默认不该也是 reviewer，那是它自己要说的事（`CreateSessionInput.agent`）
+  expect([row.product, row.workspace, row.agent]).toEqual(["echo-agent", "/repo", "default"]);
   expect((await listSessions(h.root)).map((i) => [i.id, i.name, i.status])).toEqual([[row.id, "查一下 PR 42", "active"]]);
 
   // 第一条消息真的在对方的 inbox 里，而且是**盘上**那份
@@ -119,7 +127,7 @@ test("刚起来、一句话没说的那段也发得到（活着就找得到，20
   // 「打开第二个终端、从第一个带句话过去」这一步直接断掉。
   const h = harness();
   const svc = new SessionService(scoped(h.root, "s-fresh/"));
-  await svc.createOrResume("s-fresh", { workspace: "/repo", agent: "echo-agent" }); // 只 start，不说话
+  await svc.createOrResume("s-fresh", { workspace: "/repo", product: "echo-agent" }); // 只 start，不说话
   h.alive.add("s-fresh");
 
   expect((await h.sessions.list()).map((r) => r.id)).toContain("s-fresh");
@@ -182,15 +190,19 @@ test("list：alive 为假时 phase 恒为 null——崩在 working 的段不许�
   expect((await h.sessions.list()).map((r) => [r.alive, r.phase])).toEqual([[true, "working"]]);
 });
 
-test("list：按 workspace / agent 筛，closed 要显式要", async () => {
+test("list：按 workspace / product / 角色筛，closed 要显式要", async () => {
   const h = harness();
-  await seed(h.root, "s-a", { agent: "echo-agent" });
-  await seed(h.root, "s-b", { agent: "echo-coding" });
-  await seed(h.root, "s-c", { agent: "echo-agent", main: false });
+  await seed(h.root, "s-a", { product: "echo-agent" });
+  await seed(h.root, "s-b", { product: "echo-coding" });
+  await seed(h.root, "s-c", { product: "echo-agent", main: false });
+  await seed(h.root, "s-r", { product: "echo-agent", agent: { name: "reviewer", definition: { identity: "审查" } } });
   await h.sessions.close("s-c");
 
-  expect((await h.sessions.list({ agent: "echo-agent" })).map((r) => r.id)).toEqual(["s-a"]);
-  expect((await h.sessions.list({ agent: "echo-agent", includeClosed: true })).map((r) => r.id).sort()).toEqual(["s-a", "s-c"]);
+  expect((await h.sessions.list({ product: "echo-agent" })).map((r) => r.id).sort()).toEqual(["s-a", "s-r"]);
+  expect((await h.sessions.list({ product: "echo-agent", includeClosed: true })).map((r) => r.id).sort()).toEqual(["s-a", "s-c", "s-r"]);
+  // 角色是另一维：没挂角色的是 `default`,挂了具名角色的是它的名字
+  expect((await h.sessions.list({ agent: "reviewer" })).map((r) => r.id)).toEqual(["s-r"]);
+  expect((await h.sessions.list({ agent: "default" })).map((r) => r.id).sort()).toEqual(["s-a", "s-b"]);
   expect((await h.sessions.list({ workspace: "/elsewhere" }))).toEqual([]);
   expect((await h.sessions.list()).find((r) => r.id === "s-c")).toBeUndefined();
 });
@@ -212,10 +224,10 @@ test("真盘上跑一遍：两段各占一个目录，互发的消息落在对�
       root,
       storeFor: (id) => new FileDir(join(home, id)),
       isAlive: async (id) => alive.has(id),
-      self: () => ({ sessionId: "s-self", agent: "echo-agent", workspace: "/repo" }),
+      self: () => ({ sessionId: "s-self", product: "echo-agent", workspace: "/repo" , tools: [] }),
     });
     const peerSvc = new SessionService(new FileDir(join(home, "s-peer")));
-    await peerSvc.createOrResume("s-peer", { workspace: "/repo", agent: "echo-agent" });
+    await peerSvc.createOrResume("s-peer", { workspace: "/repo", product: "echo-agent" });
     await peerSvc.append("s-peer", [{ kind: "message", message: userMessage("开场") }]);
     await peerSvc.settle();
 
@@ -359,7 +371,7 @@ test("工具面：list 把「活着 / 在忙 / 没进程」说清楚；一段都
 test("SessionService.rename：只改自己那一段，空名字与同名忽略；改完落盘", async () => {
   const dir = new InMemoryDir();
   const svc = new SessionService(dir);
-  const data = await svc.createOrResume("s-1", { workspace: "/repo", agent: "echo-agent" });
+  const data = await svc.createOrResume("s-1", { workspace: "/repo", product: "echo-agent" });
   expect(data.info.name).toBe("s-1"); // 缺省名 = 会话 id，对人零信息量
 
   svc.rename("s-1", "  修 PR 42  ");
@@ -381,7 +393,7 @@ test("SessionService.rename：只改自己那一段，空名字与同名忽略�
 test("改过名之后，清单与 list 都按新名字认它", async () => {
   const h = harness();
   const svc = new SessionService(scoped(h.root, "s-1/"));
-  await svc.createOrResume("s-1", { workspace: "/repo", agent: "echo-agent" });
+  await svc.createOrResume("s-1", { workspace: "/repo", product: "echo-agent" });
   await svc.append("s-1", [{ kind: "message", message: userMessage("一") }]);
   svc.rename("s-1", "改接口");
   await svc.settle();

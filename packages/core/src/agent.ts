@@ -69,6 +69,7 @@ import { makeScheduleTools } from "./schedule/tools.ts";
 import { assembleSystem } from "./prompt/assemble.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
 import { newSessionId } from "./session/types.ts";
+import { DEFAULT_AGENT_REF, type AgentRef } from "./agent-def/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
 import { activeTools, effectiveRestriction, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap, type ToolRestrictions } from "./tools/harness.ts";
 import { makeToolSearchTool } from "./tools/tool-search.ts";
@@ -273,14 +274,20 @@ export type AgentOptions = {
    * 不然一次后台唤醒就能把你正在用的界面顶下去。
    */
   preemptible?: boolean;
-  /** agent 身份（D5，缺省 `"default"`）。目前只用于 lease 的 holder 标识。 */
-  agentId?: string;
   /**
-   * 会话归属名（2026-09-01 用户拍板：会话身份 = workspace + agent）。写进每个新建会话的
-   * `SessionInfo.agent`；产品（`echo-agent` / `echo-coding`）各给各的名字，同一目录里就各有各的对话。
-   * 缺省与 `agentId` 相同——低层用户不区分产品时，一个状态根一个名字。
+   * 哪个产品（2026-09-07，替代 `agentId` / `agentName`）。写进每个新建会话的
+   * `SessionInfo.product`；产品（`echo-agent` / `echo-coding`）各给各的名字，同一目录里就各有各的
+   * 对话（`--continue` 按 workspace + product 挑）。缺省 `"default"`。
+   *
+   * 另外两处用它：lease 的 holder 标识（`${product}:${sessionId}`）与观测记录的 `agentId` scope。
    */
-  agentName?: string;
+  product?: string;
+  /**
+   * 这一段挂的 agent 定义（角色，2026-09-07）。写进 `SessionInfo.agent`，`--resume` 时以盘上为准。
+   * 不给 = 产品原样（`DEFAULT_AGENT_REF`）。**挂载**是装配层的事（`echo:inline-agent`），
+   * 这里只管把它记进 meta。
+   */
+  agent?: AgentRef;
   /**
    * inbox 的持久面。传了 = 投进来的入站事实先落盘，
    * run 结束后才删；**崩在半路的会在 `start()` 时重放**。不传 = 纯内存（崩了就丢）。
@@ -477,9 +484,10 @@ export class Agent {
   private readonly preemptible: boolean;
   /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
   private inboxPollCancel?: () => void;
-  private readonly agentId: string;
-  /** 新建会话时写进 `SessionInfo.agent` 的名字（`AgentOptions.agentName`，缺省 = `agentId`）。 */
-  private readonly agentName: string;
+  /** 哪个产品（`AgentOptions.product`）。写进新建会话的 `SessionInfo.product`，也是 holder 与观测 scope 的那一半。 */
+  private readonly product: string;
+  /** 这一段挂的 agent 定义（角色）。新建会话时写进 `SessionInfo.agent`。 */
+  private readonly agentRef: AgentRef;
   /** 经 `tool_search` 取过 schema 的延迟工具名（`ToolBase.deferred`）。按 agent 进程记；只有 `tool_search` 会写。 */
   private readonly loadedTools = new Set<string>();
   /** 本代 Agent 的进程内身份：写入格与 RunIntakeGate 共用同一个。 */
@@ -818,9 +826,9 @@ export class Agent {
     this.clock = opts.clock ?? systemClock;
     this.preemptible = opts.preemptible === true;
     this.stateLock = opts.stateLock;
-    this.agentId = opts.agentId ?? "default";
-    this.agentName = opts.agentName ?? this.agentId;
-    this.agentInstanceId = `${this.agentId}@${crypto.randomUUID()}`;
+    this.product = opts.product ?? "default";
+    this.agentRef = opts.agent ?? DEFAULT_AGENT_REF;
+    this.agentInstanceId = `${this.product}@${crypto.randomUUID()}`;
     this.intake = new RunIntakeGate(this.agentInstanceId);
     normalizeModelSnapshot(opts.model); // 装备期就验：binding 在 admission 时冻结 model，不能等到那时才发现它不是 JSON-like
     this.admission = new StandaloneRunAdmission({
@@ -1097,7 +1105,7 @@ export class Agent {
     const ref = message.role === "environment" ? message.ref : undefined;
     const entry = ref === undefined ? undefined : this.schedule?.entries.get(ref);
     if (entry === undefined) return dedupeKeyOf(message);
-    return scheduleDedupeKey(this.agentId, entry.schedule.id, entry.schedule.createdAt);
+    return scheduleDedupeKey(this.product, entry.schedule.id, entry.schedule.createdAt);
   }
 
   /**
@@ -1479,7 +1487,9 @@ export class Agent {
       if (this.stateLock !== undefined) {
         // holder 只是给人看的标识——**不要在这里取 pid**，那是 node 全局，
         // agent.ts 不拖 `node:`。进程身份由 Lock 的实现自己记。
-        const holder = `agent:${this.agentId}`;
+        // `${产品}:${会话 id}`（2026-09-07）：锁文件旁边看一眼就知道是谁占着哪一段。
+        // 裸 `new Agent()` 可能还没有 session（`createAgent` 那条路装配期就定了 id）。
+        const holder = `${this.product}:${this._state.sessionId ?? "unassigned"}`;
         let lease = await this.stateLock.acquire({ holder, preemptible: this.preemptible });
         if (lease === null && !this.preemptible) {
           // **人优先，后台让位**（2026-09-07 用户拍板）：拿不到时先问一句「能让吗」。
@@ -1497,7 +1507,7 @@ export class Agent {
           // 但**必须说清是谁占着**：不接管的代价是人工删锁，而人工删锁得先看得见对面是谁。
           const who = (await this.stateLock.describeHolder?.()) ?? null;
           throw new Error(
-            `状态根已被另一个写者持有（agentId=${this.agentId}）：拒绝启动` +
+            `状态根已被另一个写者持有（${holder}）：拒绝启动` +
               (who !== null ? `。当前持有者：${who}` : "。锁的实现报不出持有者信息"),
           );
         }
@@ -1521,7 +1531,8 @@ export class Agent {
         const sessionId = this._state.sessionId ?? newSessionId();
         const data = await this.sessionService.createOrResume(sessionId, {
           workspace: this._state.workspace,
-          agent: this.agentName,
+          product: this.product,
+          agent: this.agentRef,
         });
         this._state.messages = [...data.messages];
         this._state.compaction = data.compaction;
@@ -2754,7 +2765,7 @@ export class Agent {
     const ctx: AssembleContext = {
       workspace: this._state.workspace,
       model: { provider: model.provider, id: model.id },
-      agentId: this.agentId,
+      agentId: this.product,
       sessionId: this._state.sessionId,
     };
     return assembleSystem([...this.promptSections.values()], this.promptVariables, ctx, ({ section, error }) => {
@@ -3202,7 +3213,7 @@ export class Agent {
     const runId = this.activeRun !== undefined && this.currentRunId !== null ? this.currentRunId : undefined;
     const turnId = this.intake.activeTurnId;
     return {
-      agentId: this.agentId,
+      agentId: this.product,
       agentInstanceId: this.agentInstanceId,
       ...(this._state.sessionId === null ? {} : { sessionId: this._state.sessionId }),
       ...(runId === undefined ? {} : { runId }),
@@ -3212,7 +3223,9 @@ export class Agent {
   }
 
   private observationIdentity(): Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }> {
-    return { agentId: this.agentId, agentInstanceId: this.agentInstanceId, sessionId: this._state.sessionId };
+    // 观测的 `agentId` scope **字段名不动、来源换成 product**（2026-09-07）：记录格式不变,
+    // 值从 `"default"` 变成产品名——比原来那个几乎恒为 "default" 的 id 有信息量。
+    return { agentId: this.product, agentInstanceId: this.agentInstanceId, sessionId: this._state.sessionId };
   }
 
   /** admission 颁发 permit 时：`run.accepted` 只同步预留、不等落盘——观测层永远拦不住也拖不住 run。 */

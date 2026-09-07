@@ -20,7 +20,7 @@ const BIN = join(import.meta.dir, "..", "bin", "echo-agent.ts");
 /** 预置一段说过话的会话——一句话没说的段不落 meta，`--resume` 就找不到它。 */
 async function seed(root: string, id: string): Promise<void> {
   const svc = new SessionService(new FileDir(join(root, id)));
-  await svc.createOrResume(id, { workspace: process.cwd(), agent: "echo-agent" });
+  await svc.createOrResume(id, { workspace: process.cwd(), product: "echo-agent" });
   await svc.append(id, [
     { kind: "message", message: { role: "user", source: "human", content: [{ type: "text", text: "开场" }], at: 1 } },
   ]);

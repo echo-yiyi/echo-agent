@@ -25,6 +25,7 @@ export function parseNameList(raw: string): readonly string[] {
     .filter((s) => s !== "");
 }
 
+/** 解析出来的一份定义，连同它的名字（frontmatter 的 `name`，没写就是文件名）。 */
 export type ParsedAgentFile = {
   /** frontmatter 的 `name`；没写就用文件名（由调用方给 `fallbackName`）。 */
   readonly name: string;

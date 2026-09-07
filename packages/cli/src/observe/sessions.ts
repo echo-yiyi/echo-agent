@@ -7,6 +7,7 @@
 
 import { existsSync } from "node:fs";
 import {
+  describeAgentRef,
   FileDir,
   listSessions,
   observationDatabasePath,
@@ -22,7 +23,16 @@ import {
 import type { ObservationEnvelope } from "@echo-agent/core/observability";
 
 /** 页面要的会话摘要：产品名、workspace、状态。不带 messageCount 之类会随 agent 写盘变化的东西——那是另一份真相。 */
-export type SessionBrief = Readonly<{ agent: string; name: string; workspace: string; updatedAt: number; status: SessionInfo["status"] }>;
+export type SessionBrief = Readonly<{
+  /** 哪个产品开的（2026-09-07：这个字段从前叫 `agent`，那个词现在归角色）。 */
+  product: string;
+  /** 挂的哪份 agent 定义，人读的那个名字（具名角色的名字 / `inline` / `default`）。 */
+  agent: string;
+  name: string;
+  workspace: string;
+  updatedAt: number;
+  status: SessionInfo["status"];
+}>;
 
 /** `/api/runs` 的响应：合并后的一页 header + 这页引用到的会话。跨库没有游标，`nextCursor` 恒 null（一页最多 200 条）。 */
 export type RunsResponse = RunObservationPage & Readonly<{ sessions: Readonly<Record<string, SessionBrief>> }>;
@@ -105,7 +115,9 @@ export class SessionObservationReaders {
     if (!force && Date.now() - this.scannedAt < SESSION_CACHE_MS) return;
     const infos = await listSessions(new FileDir(this.opts.sessionsRoot));
     const briefs: Record<string, SessionBrief> = {};
-    for (const s of infos) briefs[s.id] = { agent: s.agent, name: s.name, workspace: s.workspace, updatedAt: s.updatedAt, status: s.status };
+    for (const s of infos) {
+      briefs[s.id] = { product: s.product, agent: describeAgentRef(s.agent), name: s.name, workspace: s.workspace, updatedAt: s.updatedAt, status: s.status };
+    }
     const wanted = this.opts.sessionId === undefined ? infos.map((s) => s.id) : [this.opts.sessionId];
     const seen = new Set<string>();
     for (const id of wanted) {

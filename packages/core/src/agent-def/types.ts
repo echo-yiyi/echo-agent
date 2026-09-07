@@ -55,7 +55,14 @@ export function isEmptyDefinition(d: AgentDefinition): boolean {
   return d.identity === undefined && d.tools === undefined && d.model === undefined;
 }
 
-/** 人读的名字：按名建的用名字，现写的就说「现写的」。清单、诊断、报错共用这一份措辞。 */
+/**
+ * 人读的名字，清单 / 诊断 / 报错共用这一份措辞：
+ * 按名建的用名字；没名字但确实改了什么的是 `inline`；什么都没改的是 `default`（产品原样）。
+ *
+ * 三种说法必须分得开——`default` 与 `inline` 都没有名字，混成一个词的话，
+ * 人在清单里就分不出「这段是产品缺省」和「这段挂了一份现写的定义」。
+ */
 export function describeAgentRef(ref: AgentRef): string {
-  return ref.name ?? "inline";
+  if (ref.name !== undefined) return ref.name;
+  return isEmptyDefinition(ref.definition) ? "default" : "inline";
 }

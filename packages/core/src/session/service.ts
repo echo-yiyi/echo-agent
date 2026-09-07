@@ -22,6 +22,7 @@
 // 一条一文件时 append 就是写一个新文件——**天然满足「一次 write 要么整份生效」**，
 // 且 `list(prefix)` 正好把它们读得回来。
 
+import { DEFAULT_AGENT_REF, type AgentRef } from "../agent-def/types.ts";
 import type { AgentError } from "../errors.ts";
 import type { AgentMessage } from "../messages.ts";
 import { assertMessageShape } from "../message-shape.ts";
@@ -134,7 +135,7 @@ export class SessionService {
    */
   async createOrResume(
     sessionId: string,
-    opts?: { name?: string; workspace?: string; agent?: string; main?: boolean },
+    opts?: { name?: string; workspace?: string; product?: string; agent?: AgentRef; main?: boolean },
   ): Promise<SessionData> {
     assertSafeSessionId(sessionId);
     if (this.openedId !== null && this.openedId !== sessionId) {
@@ -173,8 +174,10 @@ export class SessionService {
       name: opts?.name ?? sessionId,
       // 只在新建这一刻定；resume 走上面那条路，以盘上为准。缺省 "/" 与 AgentOptions.workspace 同一个缺省
       workspace: opts?.workspace ?? "/",
-      // 归哪个 agent（产品）：会话身份的第二维（2026-09-01 用户拍板）。缺省与 `agentId` 缺省同一个字
-      agent: opts?.agent ?? "default",
+      // 哪个产品开的：会话身份的第二维（2026-09-01 拍板，2026-09-07 从 `agent` 挪到这个字段）
+      product: opts?.product ?? "default",
+      // 挂的哪份 agent 定义（角色，2026-09-07）。不给 = 产品原样
+      agent: opts?.agent ?? DEFAULT_AGENT_REF,
       // 谁建的（2026-09-03）：缺省 true——不经 `session_create` 工具的路径都是容器自己建的
       main: opts?.main ?? true,
       status: "active",
@@ -534,15 +537,24 @@ function assertEntryShape(entry: SessionEntry, where: string): void {
 function assertSessionInfoShape(info: unknown, where: string): void {
   const i = info as Record<string, unknown> | null | undefined;
   if (i === null || i === undefined || typeof i !== "object") throw new Error(`${where} 不是对象`);
-  for (const k of ["id", "name", "workspace", "agent"]) {
+  for (const k of ["id", "name", "workspace", "product"]) {
     if (typeof i[k] !== "string") {
       throw new Error(
-        k === "workspace" || k === "agent"
+        k === "workspace" || k === "product"
           ? `${where} 缺 ${k}——2026-09-01 之前建的 session 没有这个字段；删掉旧的 session 目录或手工补上再启动`
           : `${where} 缺 ${k}（或不是字符串）`,
       );
     }
   }
+  // agent 从产品名字符串变成 `AgentRef`（2026-09-07，角色定义）。**旧档判红**：
+  // 那个字段以前存的是产品名，现在读它会把产品名当成一份角色定义——静默走错比读不出更坏。
+  const ref = i["agent"] as Record<string, unknown> | null | undefined;
+  if (ref === null || ref === undefined || typeof ref !== "object" || typeof ref["definition"] !== "object" || ref["definition"] === null) {
+    throw new Error(
+      `${where} 的 agent 不是 AgentRef（{ name?, definition }）——2026-09-07 之前建的 session 这里存的是产品名；删掉旧的 session 目录再启动`,
+    );
+  }
+  if (ref["name"] !== undefined && typeof ref["name"] !== "string") throw new Error(`${where} 的 agent.name 不是字符串`);
   for (const k of ["createdAt", "updatedAt", "messageCount"]) {
     if (typeof i[k] !== "number") throw new Error(`${where} 缺 ${k}（或不是数字）`);
   }
