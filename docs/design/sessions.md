@@ -1,6 +1,6 @@
 # 会话（Session）与 agent 集群
 
-> 状态：设计 2026-09-03 口头拍板。**§9 第 1 步（布局）已实现**，其余待实现；决策记录留在 `docs/decisions/proposed/` 直到整条实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
+> 状态：设计 2026-09-03 口头拍板。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 2 步（agent 打包）与第 5 步（壳）未做，记忆三层待拍板——逐条见 §9。决策记录留在 `docs/decisions/proposed/` 直到整条实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
 > 读者：要实现会话面、给产品接会话工具、把 echo 嵌进常驻程序（多段会话同时工作）的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) 的实例生命周期与 admission；[Context 与 Message Flow](context-and-message-flow.md) 的 transcript / working context 术语；[Compaction](compaction.md) 的「策略是 extension、状态在 core」这条分法——本文对会话用同一条<br>
 > 决策记录（五条，本文只指向，不复述论证）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/proposed/2026-09-03-memory-three-scopes.md) · [agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md)
@@ -114,7 +114,11 @@ type SessionInfo = {
 - **活着就找得到，空段收摊时撤掉**（2026-09-04 改）。meta 在 `createOrResume` 那一刻就写，所以一段**正开着**的 session 立刻在清单里、也发得进消息；「不留空段」由 `stop()` 兜底：这一段一条 entry 都没写过、inbox 里也没有待消费的记录，就把 `meta.json` 与 `status.json` 撤掉，它便不再进任何清单，`--resume` 它等于「没有这一段」。
 
   **原来的做法（把 meta 推迟到第一次 `append`）是错的**，实测：B 正开着、还没说过话时，A 的 `session_list` 里没有它、`session_send` 给它是 `not-found`——「打开第二个终端、从第一个带句话过去」这一步直接断掉。目标（列表不被空段塞满）没变，换了个不会误伤活人的做法。
-- **名字来自第一条 user 消息的首行**（截 60 字），由 `echo.agent.hooks` 里的一个钩子在 `message_end` 时调 `rename` 写进 meta；core 只出 `rename`。以后要让模型起名，换钩子即可。**还没做**。
+- **名字来自第一句人话的首行**（截 60 字，已实现 2026-09-07）。core 只出 `SessionService.rename()` 与 `Agent.renameSession()`；命名策略是**装配层挂的一个钩子**（`createEcho` 里的 `echo:session-name`），挂在 `userPromptSubmit` 上——那个挂点直接带 `text` 与 `source`，比 `message_end` 少一层「哪条才是人说的」的判断。
+
+  只在**名字还是会话 id 时**动手，所以产品挂一个 `priority` 更小的钩子先改掉名字就能接管（要让模型起名就这么做）。被别的会话叫醒的那一轮也算 `human`（inbox 消费走同一条前台路），所以 `session_create` 派出去、模型没给名字的那一段会被它收到的第一条指令命名。
+
+  **只改自己那一段**：别人那一段正开着时它的 meta 由它自己的 `SessionService` 拥有，从外面改下一次入账就被覆写回去——所以没有「改别人名字」这个口。
 
 `create()` 出来的段同理立刻可见——它是**替别人建的**，runner 还没接手就已经查无此段是错的。
 
@@ -278,7 +282,9 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
    **还没做**：extension 面的 `sessions` / `inbox.watch`（`wait` 与 `replyTo` 跟着它走）。
 4. **工具（大部分已实现，2026-09-03）**：`echo:sessions` 四个工具（`session_create` / `session_list` /
    `session_send` / `session_close`）与它们的习惯段；两条挂载条件在装配层判——**main 且容器给了
-   `SessionRunner` 才挂 `session_create`**，是不是 main 读盘上的 meta。**还没做**：`wait`、命名钩子。
+   `SessionRunner` 才挂 `session_create`**，是不是 main 读盘上的 meta。会话命名 2026-09-07 补上（见 §3）。
+   **还没做**：`wait`——不过它的主要用例（派活出去、等一个答复）2026-09-06 已由 `subagent` 工具覆盖
+   （进程内的短命子 agent，前台调用就是阻塞等结果），所以这条的紧要程度已经下来了。
 5. **壳**（`--continue` 的新筛选已随第 1 步实现）：`/clear`、`/sessions` 还没做。
 
    **`/clear` 为什么没顺手做**：它要「关掉当前一段、开新的一段、attach 过去」，而 attach 就是**换一个

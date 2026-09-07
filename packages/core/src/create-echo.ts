@@ -60,6 +60,8 @@ import type { EchoObservations, EchoRunResult } from "./observability/types.ts";
 export const EXTENSIONS_DIR = "extensions";
 /** 与 `create-agent.ts` 同一个名字：会话面判「那一段活着吗」读的就是它。 */
 const LOCK_FILE = ".lock";
+/** 缺省会话名的长度上限：一行标题，长了在列表里挤掉别的列。 */
+const SESSION_NAME_MAX = 60;
 
 /** 显式传入那一代（`opts.extensions`，含壳）。换代（reload）是后话。 */
 const BOOT_GENERATION = "boot";
@@ -345,6 +347,29 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     ...(opts.sessions?.run !== undefined ? { run: opts.sessions.run } : {}),
     ...(opts.sessions?.runTimeoutMs !== undefined ? { runTimeoutMs: opts.sessions.runTimeoutMs } : {}),
   });
+
+  // **会话的缺省命名**（2026-09-07，sessions.md §3）：拿第一句人话的首行当名字。
+  //
+  // 名字是给人看的——`session_list`、会话列表、`--continue` 的界面里认哪一段全靠它，
+  // 而缺省是会话 id（`s-mtmoe01i-qmeb` 这种），对人零信息量。
+  //
+  // 做成**钩子**而不是写死在 core：产品想让模型起名、或按 workspace 命名，自己挂一个更早的
+  // （`priority` 更小）钩子先改掉名字就行——这个缺省只在「名字还是 id」时动手，改过就不再碰。
+  // 只认 `human`：steer / followUp 是同一场对话的追加，不是这段会话的由头。
+  // 被别的会话叫醒的那一轮也是 `human`（inbox 消费走同一条前台路），所以 `session_create` 派出去、
+  // 模型没给名字的那一段，会被它收到的第一条指令命名——那正是它存在的理由。
+  agent.hooks.on(
+    "userPromptSubmit",
+    (event) => {
+      if (event.source !== "human") return;
+      const id = agent.state.sessionId;
+      if (id === null || agent.sessionName !== id) return; // 已经有名字了（人起的、或别的钩子起的）
+      const first = event.text.split("\n").find((l) => l.trim() !== "");
+      if (first === undefined) return;
+      agent.renameSession(first.trim().slice(0, SESSION_NAME_MAX));
+    },
+    { id: "echo:session-name", priority: 100 },
+  );
 
   const mountedGens: string[] = [];
   try {

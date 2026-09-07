@@ -296,3 +296,39 @@ test("工具面：list 把「活着 / 在忙 / 没进程」说清楚；一段都
   await writeSessionPhase(scoped(h.root, "s-peer/"), "idle");
   expect(String((await list.execute({} as never, ctx())).content)).toContain("running, idle");
 });
+
+/* ═══════════════ 会话命名 ═══════════════ */
+
+test("SessionService.rename：只改自己那一段，空名字与同名忽略；改完落盘", async () => {
+  const dir = new InMemoryDir();
+  const svc = new SessionService(dir);
+  const data = await svc.createOrResume("s-1", { workspace: "/repo", agent: "echo-agent" });
+  expect(data.info.name).toBe("s-1"); // 缺省名 = 会话 id，对人零信息量
+
+  svc.rename("s-1", "  修 PR 42  ");
+  await svc.settle();
+  expect(svc.nameOf("s-1")).toBe("修 PR 42"); // 两头空白掐掉
+  expect(JSON.parse((await dir.read("meta.json"))!).name).toBe("修 PR 42");
+
+  // 空名字与同名都不写：不给「名字是空的」这种状态，也不为一次同名多刷一遍盘
+  svc.rename("s-1", "   ");
+  svc.rename("s-1", "修 PR 42");
+  await svc.settle();
+  expect(svc.nameOf("s-1")).toBe("修 PR 42");
+
+  // 没打开过的那一段：不认识，不动
+  svc.rename("s-别的", "不该生效");
+  expect(svc.nameOf("s-别的")).toBeNull();
+});
+
+test("改过名之后，清单与 list 都按新名字认它", async () => {
+  const h = harness();
+  const svc = new SessionService(scoped(h.root, "s-1/"));
+  await svc.createOrResume("s-1", { workspace: "/repo", agent: "echo-agent" });
+  await svc.append("s-1", [{ kind: "message", message: userMessage("一") }]);
+  svc.rename("s-1", "改接口");
+  await svc.settle();
+
+  expect((await listSessions(h.root)).map((i) => i.name)).toEqual(["改接口"]);
+  expect((await h.sessions.list()).map((r) => r.name)).toEqual(["改接口"]);
+});

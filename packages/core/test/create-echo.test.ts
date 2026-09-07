@@ -802,3 +802,47 @@ test("会话面是**容器的开关**：不给 `sessions` 就一件工具都不�
   expect([...withRunner.agent.tools.keys()]).toContain("session_create");
   await withRunner.stop();
 });
+
+test("会话的缺省命名：第一句人话的首行当名字，之后不再改（2026-09-07）", async () => {
+  // 没有这条时：每段会话的名字就是它的 id（`s-mtmoe01i-qmeb`），`session_list` 与会话列表里
+  // 一眼认不出哪段在干什么——手工用集群时这是最先撞上的墙。
+  const store = new InMemoryDir();
+  const echo = await createEcho({
+    provider: scripted([textTurn("好"), textTurn("再好")]),
+    allowNetwork: false,
+    store,
+    lock: new InMemoryStateLock(),
+    withoutMemory: true,
+    extensionDirs: [],
+  });
+  running.push(echo);
+  await echo.agent.start();
+  const id = echo.agent.state.sessionId!;
+  expect(echo.agent.sessionName).toBe(id); // 起手就是 id
+
+  await echo.send("把登录页的报错改掉\n第二行不该进名字");
+  expect(echo.agent.sessionName).toBe("把登录页的报错改掉"); // 只取首行
+  // **落到盘上才算数**：清单读的是 meta，不是内存里那份
+  expect(JSON.parse((await store.read("meta.json"))!).name).toBe("把登录页的报错改掉");
+
+  // 第二句不再改名：名字是「这段会话是关于什么的」，不是「最后说了什么」
+  await echo.send("再看一下别的");
+  expect(echo.agent.sessionName).toBe("把登录页的报错改掉");
+});
+
+test("会话命名：产品挂一个更早的钩子就能接管（缺省那个只在名字还是 id 时动手）", async () => {
+  const echo = await createEcho({
+    provider: scripted([textTurn("好")]),
+    allowNetwork: false,
+    store: new InMemoryDir(),
+    lock: new InMemoryStateLock(),
+    withoutMemory: true,
+    extensionDirs: [],
+  });
+  running.push(echo);
+  // priority 更小 = 更早跑。它先起了名字，缺省那个看见「名字不是 id 了」就不再碰
+  echo.agent.hooks.on("userPromptSubmit", () => void echo.agent.renameSession("产品说了算"), { priority: 1 });
+  await echo.agent.start();
+  await echo.send("随便说一句");
+  expect(echo.agent.sessionName).toBe("产品说了算");
+});

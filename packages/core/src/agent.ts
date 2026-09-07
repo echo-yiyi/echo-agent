@@ -1151,6 +1151,28 @@ export class Agent {
    * 它是给别人看的提示：`session_list` 里「这段能不能马上答话」就读它。失败不影响本段对话——
    * 读方永远还要再看一眼 lease，`alive` 为假时这份 `phase` 一律作废（进程崩在 working 的那种）。
    */
+  /**
+   * 给这一段会话起个名字（2026-09-07，sessions.md §3）。名字是**给人看的**：
+   * `session_list` 与会话列表里认哪一段靠它，缺省是会话 id——那对人毫无信息量。
+   *
+   * 只改自己那一段：别人那一段正开着时，它自己的 meta 由它自己的 `SessionService` 拥有，
+   * 从外面改下一次入账就被覆写回去了。空名字忽略；没有会话面（纯内存 agent）时是空操作。
+   *
+   * **谁来叫它是装配层的事**——`createEcho()` 挂了一个缺省钩子，拿第一句人话的首行命名；
+   * 产品想让模型起名就自己挂一个更早的钩子，先改了名字，缺省那个就不再动它。
+   */
+  /** 这一段会话现在叫什么。`null` = 没有会话面，或还没打开。缺省名就是会话 id。 */
+  get sessionName(): string | null {
+    const id = this._state.sessionId;
+    return id === null ? null : (this.sessionService?.nameOf(id) ?? null);
+  }
+
+  renameSession(name: string): void {
+    const id = this._state.sessionId;
+    if (id === null) return;
+    this.sessionService?.rename(id, name);
+  }
+
   private publishPhase(phase: SessionPhase): void {
     const id = this._state.sessionId;
     if (id === null || this.phase !== "running") return;

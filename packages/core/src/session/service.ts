@@ -233,6 +233,41 @@ export class SessionService {
     return written;
   }
 
+  /** 这一段现在叫什么。没打开过就是 `null`——用来判「还没起过名字」（缺省名等于会话 id）。 */
+  nameOf(sessionId: string): string | null {
+    return this.cursors.get(sessionId)?.info.name ?? null;
+  }
+
+  /**
+   * 给这一段起个名字（2026-09-07，sessions.md §3）。**只改自己那一段**——别人那一段正开着时，
+   * 它自己的 `bumpMeta` 会用内存里的 `info` 覆写 meta，从外面改名字下一次入账就没了。
+   *
+   * 名字是给人看的：`session_list` 与 `/sessions` 里认哪一段靠它。缺省是会话 id，
+   * 那对人毫无信息量，所以装配层挂了一个钩子拿第一句话的首行来命名（见 `createEcho`）。
+   *
+   * 与入账走同一条串行链，所以它与 entry 的先后是确定的。空名字忽略——不给「名字是空的」这种状态。
+   */
+  rename(sessionId: string, name: string): void {
+    const cursor = this.cursors.get(sessionId);
+    if (cursor === undefined || this.sealed || this.poisoned.has(sessionId)) return;
+    const trimmed = name.trim();
+    if (trimmed === "" || trimmed === cursor.info.name) return;
+    cursor.info = { ...cursor.info, name: trimmed, updatedAt: Date.now() };
+    const info = cursor.info;
+    const prev = this.chain.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .then(async () => {
+        if (this.poisoned.has(sessionId)) return;
+        await this.writeMeta(info);
+      })
+      .catch((e: unknown) => {
+        this.onDiagnostic?.({ code: "session_rename_failed", message: `改名失败：${e instanceof Error ? e.message : String(e)}` });
+      });
+    this.chain.set(sessionId, next);
+    this.track(next);
+    cursor.metaWritten = true;
+  }
+
   /**
    * 收摊时的兜底：**这一段一句话都没说过就把 meta 撤掉**（2026-09-04）。
    *
