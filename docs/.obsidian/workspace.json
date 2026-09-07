@@ -183,6 +183,12 @@
   },
   "active": "914a439825a204ed",
   "lastOpenFiles": [
+    "design/sessions.md",
+    "decisions/proposed/2026-09-03-sessions-are-peers.md",
+    "decisions/proposed/2026-09-03-session-is-the-state-root.md",
+    "decisions/proposed/2026-09-03-memory-three-scopes.md",
+    "decisions/proposed/2026-09-03-main-and-status.md",
+    "decisions/proposed/2026-09-03-agent-is-an-extension.md",
     "design/compaction.md",
     "decisions/implemented/2026-09-02-compaction-threshold.md",
     "decisions/implemented/2026-09-02-compaction-summary-message.md",

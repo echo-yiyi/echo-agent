@@ -51,9 +51,19 @@ export type CreateSessionInput = {
 };
 
 /** `send()` 的结局。`accepted` 带 `alive`：对方没进程时这句话只是留言，发送方得知道。 */
+/**
+ * `send()` 的结局。`accepted` 时对方**一定是活着的**——这是 2026-09-07 拍板的那条
+ * （虚拟 actor）：只跟活着的段说话，没在跑的先叫起来，叫不起来就 `unreachable`。
+ * 所以不存在「存下了但没人读」这种中间态。
+ */
 export type SendResult =
-  | { readonly kind: "accepted"; readonly alive: boolean; readonly recordId: string }
-  | { readonly kind: "rejected"; readonly reason: "not-found" | "closed" | "invalid"; readonly detail: string };
+  | { readonly kind: "accepted"; readonly alive: true; readonly recordId: string }
+  | {
+      readonly kind: "rejected";
+      /** `unreachable` = 它没在跑，而这个容器叫不起来它（没给 `run`，或 runner 失败）。 */
+      readonly reason: "not-found" | "closed" | "invalid" | "unreachable";
+      readonly detail: string;
+    };
 
 /**
  * 容器交给 core 的「怎么让一段新建的 session 跑起来」。core 在 `create()` 里调它一次，之后不监督。
@@ -79,7 +89,12 @@ export type EchoSessionsDeps = {
   isAlive(sessionId: string): Promise<boolean>;
   /** 调用方自己是哪一段（`send` 的落款、`create` 的 agent / workspace 缺省）。 */
   readonly self: () => { sessionId: string | null; agent: string; workspace: string };
-  /** 怎么让新建的一段跑起来。不给 = 宿主自己负责（`session_create` 工具那时不挂）。 */
+  /**
+   * 怎么让一段 session 跑起来。**两处用它**：`create()` 之后把新的那段拉起来；`send()` 发现
+   * 对方没在跑时先把它叫醒（2026-09-07 拍板的虚拟 actor 模型）。
+   *
+   * 不给 = 这个容器起不了会话：`session_create` 工具不挂，`send` 给没在跑的段直接 `unreachable`。
+   */
   readonly run?: SessionRunner;
   readonly runTimeoutMs?: number;
 };
@@ -100,6 +115,13 @@ export type SessionListFilter = {
  * 缺容器时提供 `NO_SESSION_FACE`，它不说谎：没有别的会话就是没有。
  */
 export interface SessionFace {
+  /**
+   * 这个容器能不能把没在跑的会话叫起来（有没有 `SessionRunner`）。
+   *
+   * 消费方按它决定**怎么说话**：能叫醒时，没在跑的段仍是可以对话的 peer；叫不醒时，
+   * 它们只是盘上的记录，工具与界面就该这么讲，而不是许一个兑现不了的「它下次起来会看到」。
+   */
+  readonly canWake: boolean;
   create(input: CreateSessionInput): Promise<SessionRow>;
   list(filter?: SessionListFilter): Promise<readonly SessionRow[]>;
   send(to: string, message: string): Promise<SendResult>;
@@ -108,6 +130,7 @@ export interface SessionFace {
 
 /** 没有容器时的会话面。**不是「假装能用」**：一段都没有是事实，开与关则如实说做不到。 */
 export const NO_SESSION_FACE: SessionFace = Object.freeze({
+  canWake: false,
   create: async () => {
     throw new Error("这个 agent 没有会话面：它不是由容器（`createEcho()`）装出来的，开不了新的一段");
   },
@@ -120,6 +143,11 @@ export const NO_SESSION_FACE: SessionFace = Object.freeze({
 
 /** 会话面的实现。一个容器一个实例。 */
 export class EchoSessions implements SessionFace {
+  /** 有 runner 才叫得醒（见 `SessionFace.canWake`）。 */
+  get canWake(): boolean {
+    return this.deps.run !== undefined;
+  }
+
   /**
    * 每个收件人一个发号器。**不缓存 `InboxStore`**：那会把对方的整个 inbox 读进内存，
    * 而且随着对方消费而过期；只缓存发号器则既保序又没有增长。
@@ -217,6 +245,14 @@ export class EchoSessions implements SessionFace {
     if (target === undefined) return { kind: "rejected", reason: "not-found", detail: `没有会话 ${to}` };
     if (target.status !== "active") return { kind: "rejected", reason: "closed", detail: `会话 ${to} 已经关了` };
 
+    // **先确保它活着，再投递**（2026-09-07：虚拟 actor）。顺序不能反——
+    // 反过来就会留下一条「存在没人读的邮箱里」的纸条：容器起不了它时，那条消息要等人哪天
+    // 手动 `--resume` 才会被看到，而工具已经回了「存下了，它下次起来会读」。那是句空话。
+    if (!(await this.deps.isAlive(to))) {
+      const woke = await this.wake(target);
+      if (woke !== null) return { kind: "rejected", reason: "unreachable", detail: woke };
+    }
+
     const self = this.deps.self();
     const ref = `${self.sessionId ?? "host"}:${newMessageId()}`;
     let recordId: string;
@@ -225,7 +261,37 @@ export class EchoSessions implements SessionFace {
     } catch (e) {
       return { kind: "rejected", reason: "invalid", detail: `写不进对方的 inbox：${e instanceof Error ? e.message : String(e)}` };
     }
-    return { kind: "accepted", alive: await this.deps.isAlive(to), recordId };
+    return { kind: "accepted", alive: true, recordId };
+  }
+
+  /**
+   * 把一段没在跑的会话叫起来。返回 `null` = 现在活着了；否则是给调用方看的拒绝理由。
+   *
+   * **这是「session 一定有一个宿主」那条的落点**（2026-09-07 用户拍板）：一段 session 的地址是
+   * 持久的，但它得有宿主才谈得上通信。容器给了 `run` 就按需激活；没给就诚实说这个容器起不了它，
+   * 而不是把消息塞进一个没人看的邮箱。
+   */
+  private async wake(info: SessionInfo): Promise<string | null> {
+    const run = this.deps.run;
+    if (run === undefined) {
+      return `会话 ${info.id} 没在跑，而这个容器起不了它（没有 SessionRunner）——先把它起起来再说话`;
+    }
+    const row: SessionRow = {
+      id: info.id,
+      name: info.name,
+      workspace: info.workspace,
+      agent: info.agent,
+      main: info.main,
+      status: info.status,
+      alive: false,
+      phase: null,
+    };
+    try {
+      await withTimeout(run(row), this.deps.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS, info.id);
+    } catch (e) {
+      return `会话 ${info.id} 没在跑，叫它也没起来：${e instanceof Error ? e.message : String(e)}`;
+    }
+    return null;
   }
 
   /** 关一段：meta 里置 `closed`。**不删盘上的东西**——旧对话还能 `--resume` 回来看。 */

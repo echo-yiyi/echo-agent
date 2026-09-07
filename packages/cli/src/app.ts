@@ -517,7 +517,17 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       transcript.push({ kind: "notice", text: "[会话] 只有这一段在跑" });
     } else {
       const lines = others.map((r) => {
-        const where = !r.alive ? "没在跑" : r.phase === null ? "在跑" : r.phase === "working" ? "在跑 · 忙着" : "在跑 · 空闲";
+        // 没在跑的分两种说法（2026-09-07）：叫得醒 = 仍是能说话的对象；叫不醒 = 它只是盘上的一份记录，
+        // 得说清楚「从这儿够不着」，否则看着像个能发消息的对象，其实发不过去。
+        const where = r.alive
+          ? r.phase === null
+            ? "在跑"
+            : r.phase === "working"
+              ? "在跑 · 忙着"
+              : "在跑 · 空闲"
+          : sessions.canWake
+            ? "没在跑 · 发消息会把它叫起来"
+            : "没在跑 · 从这儿够不着（--resume 打开它）";
         return `  ${r.id}  ${r.name}  [${r.agent}]  ${where}  ${r.workspace}`;
       });
       transcript.push({ kind: "notice", text: `[会话] 另外 ${others.length} 段：\n${lines.join("\n")}` });

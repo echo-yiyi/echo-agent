@@ -53,15 +53,27 @@ export function sessionToolsSection(opts: SessionToolsOptions): PromptSection {
       "and there is no guarantee one ever comes. If the reply matters, say what you need and then continue with something " +
       "else; the answer arrives later as a message from that session.\n\n" +
       create +
-      "A session that is not running right now still accepts messages — they wait on disk until it starts again. " +
-      "session_send tells you which case you are in.",
+      "A session that is not running right now is started when you message it, so you are always talking to a live " +
+      "session. Where that is not possible, session_send says so and sends nothing — there is no such thing as a " +
+      "message left for a session nobody will start.",
   };
 }
 
-function describe(row: SessionRow): string {
+function describe(row: SessionRow, canWake: boolean): string {
   // `phase` 为 null = **不知道**（它刚起来、状态还没落盘，或那份读不出来），不是「空闲」。
   // 把不知道说成空闲，模型会以为「现在问它马上有答复」——这正是 `status.ts` 里那条不许猜的理由。
-  const where = !row.alive ? "not running" : row.phase === null ? "running" : row.phase === "working" ? "running, busy" : "running, idle";
+  //
+  // 没在跑的那些分两种说法：叫得醒（这个容器有 runner）= 仍然是能说话的对象；
+  // 叫不醒 = 它只是盘上的一份记录，别让模型以为发过去有人看。
+  const where = row.alive
+    ? row.phase === null
+      ? "running"
+      : row.phase === "working"
+        ? "running, busy"
+        : "running, idle"
+    : canWake
+      ? "not running (will be started when you message it)"
+      : "not running (cannot be reached from here)";
   return `${row.id}  ${row.name}  [${row.agent}]  ${where}  ${row.workspace}`;
 }
 
@@ -128,7 +140,7 @@ function listTool(sessions: EchoSessions): ModelTool<{ workspace?: string; agent
           ...(params.include_closed === true ? { includeClosed: true } : {}),
         });
         if (rows.length === 0) return toolOk("No other sessions.");
-        return toolOk(rows.map(describe).join("\n"));
+        return toolOk(rows.map((r) => describe(r, sessions.canWake)).join("\n"));
       } catch (e) {
         return toolError(errText(e));
       }
@@ -143,8 +155,8 @@ function sendTool(sessions: EchoSessions): ModelTool<{ to: string; message: stri
     label: "发给会话",
     description:
       "Send a message to another session. It lands in that session's inbox and it reads it when it is next free. " +
-      "This returns as soon as the message is stored — it does not wait for an answer, and an answer may never come. " +
-      "If that session is not running, the message waits on disk until it starts again.",
+      "This returns as soon as the message is delivered — it does not wait for an answer, and an answer may never come. " +
+      "A session that is not running is started first; if it cannot be started from here, the message is not sent and you are told so.",
     parameters: {
       type: "object",
       properties: {
@@ -158,11 +170,8 @@ function sendTool(sessions: EchoSessions): ModelTool<{ to: string; message: stri
       try {
         const outcome = await sessions.send(params.to, params.message);
         if (outcome.kind === "rejected") return toolError(`Not delivered (${outcome.reason}): ${outcome.detail}`);
-        return toolOk(
-          outcome.alive
-            ? `Delivered to ${params.to}; it is running and will read this when free.`
-            : `Stored for ${params.to}; it is not running, so it will read this when it next starts.`,
-        );
+        // `accepted` 时对方一定活着（没在跑的已经被叫起来了），所以只有一句话可说
+        return toolOk(`Delivered to ${params.to}; it will read this when free.`);
       } catch (e) {
         return toolError(errText(e));
       }

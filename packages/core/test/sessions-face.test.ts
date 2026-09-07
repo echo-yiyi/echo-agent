@@ -11,7 +11,7 @@ import { mkdtempSync } from "node:fs";
 import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EchoSessions, type SessionRow } from "../src/session/sessions.ts";
+import { EchoSessions, NO_SESSION_FACE, type SessionRow } from "../src/session/sessions.ts";
 import { makeSessionTools, sessionToolsSection } from "../src/session/tools.ts";
 import { listSessions, SessionService } from "../src/session/service.ts";
 import { InboxStore } from "../src/inbox/store.ts";
@@ -126,14 +126,14 @@ test("刚起来、一句话没说的那段也发得到（活着就找得到，20
   expect(await h.sessions.send("s-fresh", "在吗")).toMatchObject({ kind: "accepted", alive: true });
 });
 
-test("send：往对方 inbox 落盘一条；对方活着就说活着，没进程就是留言", async () => {
+test("send：只跟活着的段说话——对方在跑就直投，往对方 inbox 落盘一条", async () => {
   // 「同进程直接投内存队列」的抄近路会让同进程与跨进程成为两套语义——所以这里盯的是**盘上**有没有。
   const h = harness();
   await seed(h.root, "s-peer");
-  const away = await h.sessions.send("s-peer", "HR 回你了");
-  expect(away).toMatchObject({ kind: "accepted", alive: false }); // 没进程 = 留言
-
   h.alive.add("s-peer");
+  const away = await h.sessions.send("s-peer", "HR 回你了");
+  expect(away).toMatchObject({ kind: "accepted", alive: true });
+
   const live = await h.sessions.send("s-peer", "再问一句");
   expect(live).toMatchObject({ kind: "accepted", alive: true });
 
@@ -263,20 +263,77 @@ test("工具面：session_create 建出来的一律不是 main（扇出只有一
   expect(row!.main).toBe(false);
 });
 
-test("工具面：send 把「留言」和「对话」说成两句话，失败带原因", async () => {
+test("工具面：send 送到了就一句话；不存在 / 够不着各有各的原因", async () => {
   const h = harness();
   await seed(h.root, "s-peer");
+  h.alive.add("s-peer");
   const send = makeSessionTools(h.sessions, { canCreate: false }).find((t) => t.name === "session_send")!;
 
-  const stored = await send.execute({ to: "s-peer", message: "在吗" } as never, ctx());
-  expect(String(stored.content)).toContain("not running");
-  h.alive.add("s-peer");
-  const live = await send.execute({ to: "s-peer", message: "再问一句" } as never, ctx());
-  expect(String(live.content)).toContain("running");
+  const live = await send.execute({ to: "s-peer", message: "在吗" } as never, ctx());
+  expect(live.isError ?? false).toBe(false);
+  expect(String(live.content)).toContain("Delivered");
 
   const missing = await send.execute({ to: "s-nope", message: "在吗" } as never, ctx());
   expect(missing.isError).toBe(true);
   expect(String(missing.content)).toContain("not-found");
+
+  // 没在跑、又叫不醒：**不投**，如实说够不着——不留一条没人读的纸条
+  await seed(h.root, "s-away");
+  const away = await send.execute({ to: "s-away", message: "在吗" } as never, ctx());
+  expect(away.isError).toBe(true);
+  expect(String(away.content)).toContain("unreachable");
+});
+
+/* ═══════════════ 只跟活着的段说话（2026-09-07 拍板：虚拟 actor） ═══════════════ */
+
+test("send 给没在跑的段：容器能叫醒就先叫醒再投，投完对方一定活着", async () => {
+  // 没有这条时：消息被写进一个没人看的邮箱，工具却回「它下次起来会读」——
+  // 而在没有 runner 的容器里，根本没有任何东西会让它起来。那是句空话。
+  const woken: string[] = [];
+  const h = harness({
+    run: async (row) => {
+      woken.push(row.id);
+      h.alive.add(row.id); // runner 的契约：resolve = 那段已经持有自己的 lease
+    },
+  });
+  await seed(h.root, "s-away");
+  expect((await h.sessions.list()).map((r) => r.alive)).toEqual([false]);
+
+  const out = await h.sessions.send("s-away", "醒醒");
+  expect(out).toMatchObject({ kind: "accepted", alive: true });
+  expect(woken).toEqual(["s-away"]); // 叫过它
+  expect((await new InboxStore(scoped(h.root, "s-away/")).restore()).length).toBe(1);
+
+  // 已经活着的不再叫第二次
+  await h.sessions.send("s-away", "再说一句");
+  expect(woken).toEqual(["s-away"]);
+});
+
+test("send 给没在跑的段：容器叫不醒就 unreachable，**一条消息都不留**", async () => {
+  const h = harness(); // 没给 run
+  expect(h.sessions.canWake).toBe(false);
+  await seed(h.root, "s-away");
+
+  const out = await h.sessions.send("s-away", "在吗");
+  expect(out).toMatchObject({ kind: "rejected", reason: "unreachable" });
+  expect(String((out as { detail: string }).detail)).toContain("起不了它");
+  // 盘上只有 seed 那一条 entry，inbox 一条都没多
+  expect((await new InboxStore(scoped(h.root, "s-away/")).restore()).length).toBe(0);
+});
+
+test("send：runner 抛错也算够不着，同样不留消息", async () => {
+  const h = harness({ run: async () => void (await Promise.reject(new Error("终端没开起来"))) });
+  await seed(h.root, "s-away");
+  const out = await h.sessions.send("s-away", "在吗");
+  expect(out).toMatchObject({ kind: "rejected", reason: "unreachable" });
+  expect(String((out as { detail: string }).detail)).toContain("终端没开起来");
+  expect((await new InboxStore(scoped(h.root, "s-away/")).restore()).length).toBe(0);
+});
+
+test("canWake：容器给没给 runner，会话面如实说", () => {
+  expect(harness().sessions.canWake).toBe(false);
+  expect(harness({ run: async () => {} }).sessions.canWake).toBe(true);
+  expect(NO_SESSION_FACE.canWake).toBe(false);
 });
 
 test("工具面：list 把「活着 / 在忙 / 没进程」说清楚；一段都没有时也是一句话", async () => {
