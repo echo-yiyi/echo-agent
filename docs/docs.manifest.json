@@ -166,6 +166,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/proposed/2026-09-07-orphan-tool-use.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/proposed/2026-09-07-role-agent.md",
       "bilingual": false
     },

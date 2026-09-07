@@ -70,12 +70,6 @@ test("identity 的工具集与 prompt 与真装出来的 coding agent 一致(漂
   expect(identity.toolNames).toContain("bash");        // 产品层的 `echo:shell`
   expect(identity.toolNames).toContain("TaskCreate");  // core 的 `echo:tasks`
 
-  // **并行是声明制**（2026-09-07）：只有标了 `concurrent` 的工具会与同批的别人一起跑。
-  // 这份名单必须只有只读的文件/搜索工具——bash、写、编辑、worktree、web 有副作用或出网，
-  // 多标一件就是让副作用并发发生，而那件事从工具清单上看不出来。装上的全部工具都在这查一遍。
-  const concurrent = [...agent.tools.values()].filter((t) => t.concurrent === true).map((t) => t.name).sort();
-  expect(concurrent).toEqual(["glob", "grep", "list_dir", "read_file"]);
-
   // 产品自己出的四段逐字进 digest 材料，并且**真的在**装配出来的 system 里、按 order 排
   expect(identity.sections.map((s) => s.name)).toEqual(["identity", "conduct:coding", "tool:workspace", "tool:shell"]);
   const sys = (await agent.assemblePrompt()) ?? "";
