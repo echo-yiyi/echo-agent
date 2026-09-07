@@ -70,7 +70,7 @@
 
 - **single-writer**：每段一把 lease（`packages/core/src/storage/file-lock.ts`），core 不猜对面死没死，也不抢占没有自称可让位的持有者（可让位的实例被请走时自己交还，2026-09-07）；门 `packages/core/test/state-lock.test.ts`。lease 之下还有一道 Host-internal 的写入闸（`packages/core/src/state/write-gate.ts`）：拿到 lease 之前、revoke 之后任何状态根 I/O 都被拒，门 `packages/core/test/write-gate.test.ts`。
 - **一次写失败就封存该会话**：`packages/core/src/session/service.ts`，继续写只会产出 parent 指向不存在 entry 的坏档。
-- **观测不得影响执行**：观测库是状态根下的 SQLite（`packages/core/src/observability/sqlite-store.ts`），store 写不动时 run 照跑、`observationPersistence` 报 degraded；`echo-agent observe` 只读它，不装配、不取锁（`packages/cli/src/observe.ts`）。
+- **观测不得影响执行**：观测库是 SQLite（`packages/core/src/observability/sqlite-store.ts`），落状态根下；给了自定义 `store` 又没点名 `stateDir` 时落 `:memory:`，所以注入内存端口的装配一个文件都不写。store 写不动时 run 照跑、`observationPersistence` 报 degraded；`echo-agent observe` 只读它，不装配、不取锁（`packages/cli/src/observe.ts`）。
 
 会话之间只有一种通道：往对方 `inbox/` 写一条 record（`packages/core/src/session/sessions.ts` 的 `EchoSessions`），同进程与跨进程一条路；持 lease 的进程每秒重扫一次自己的 inbox。core 不起进程，谁把一段跑起来是容器的事。
 
@@ -80,7 +80,7 @@
 |---|---|---|
 | `Agent` 类内部化 | 仓外只剩 `createEcho()` / `AgentRuntime` / `./testing`；根入口按「有仓外消费者才公开」砍 | [记录](decisions/proposed/2026-09-07-agent-class-internal.md) |
 | 内建五件留 core | 不搬出 `Agent`；按压缩分法；memory 的 registry 等第一个消费者 | [记录](decisions/proposed/2026-09-07-builtin-capabilities-stay-core.md) |
-| 观测的公开线 | 读面 + extension 发口公开，写面内部；观测 store 可注入，`createEcho()` 有零盘路径 | [记录](decisions/proposed/2026-09-07-observation-public-face.md) |
+| 观测的公开线 | 读面 + extension 发口公开，写面内部；观测 store 从写死的路径分支变成可注入的端口 | [记录](decisions/proposed/2026-09-07-observation-public-face.md) |
 | 并行工具 | 工具声明 `concurrent`，连续批；结果按 tool_use 顺序；`toolExecution` 选项删 | [记录](decisions/proposed/2026-09-07-parallel-tools.md) |
 | 角色定义 | session 的 agent 定义是产品内的角色，不是产品打包；`section(replace)` 与 `restrict()` 两个口 | [记录](decisions/proposed/2026-09-07-role-agent.md) |
 | 记忆三层切法 | 分区与作用域两个轴；路径前缀选层；session 层先落 | [记录](decisions/proposed/2026-09-03-memory-three-scopes.md) |

@@ -25,7 +25,7 @@ README 说「两个使用高度」:高 = `createEcho()`,低 = `new Agent()`。�
 **A**(2026-09-07 用户拍板)。附带三条:
 
 1. **根入口的取舍判据**:有仓外消费者或 examples 用到的才公开,其余内部;API 快照记的就是这条线。按它收回去的有 `Agent` / `AgentOptions`、压缩阶梯的作者工具包(`frameFull`、`snipStage`、估算函数一族,今天零仓外消费者)、session 状态文件的读写(`readSessionPhase` 等)。留下的:装配、provider、写工具的词汇、hooks / permission / question 类型、消息与事件、`AgentRuntime`、落盘默认件、`listSessions`。以后第一个产品要写自己的压缩阶段时再开子路径。
-2. **评测与 core 自己的测试走 `createEcho()`**,不走 `new Agent()`。前提是 `createEcho()` 有零盘路径:观测 store 今天无条件在状态根开 SQLite(`create-agent.ts` 里 `SqliteCanonicalObservationStore.open`),要改成可注入,见 [观测的公开线](2026-09-07-observation-public-face.md)。
+2. **评测与 core 自己的测试走 `createEcho()`**,不走 `new Agent()`。它要的零盘路径**已经有了**:给了自定义 `store` 又没点名 `stateDir` 时观测库开 `:memory:`(71150f0),配上 `InMemoryDir` 与 `InMemoryStateLock` 就是一次不碰盘的完整装配。想换掉观测 store 本身是另一件事,见 [观测的公开线](2026-09-07-observation-public-face.md)。
 3. **四条 2026-09-01 记录移入 `rejected/`**,状态行指向本条。它们讲的公共契约不存在了;剩下两个内部实现项(`dispose()` 不还锁、fenced 是隐藏 latch)随内部化一起修,不再是决策。
 
 ## 验收

@@ -6,7 +6,7 @@
 
 `observability/` 6,195 行,是 core 最大的模块;`observability/types.ts` 650 行经 `@echo-agent/core/observability` 子路径整份公开,唯一仓外消费者是 cli 的 `observe` 子命令。两半混在一个子路径里:**读面**(`RunObservation` 一族、reader、`renderRunObservation`)与**写面**(envelope、draft、sequencer、ingest、sink、identity、限额)。
 
-观测 store 无条件在状态根开 SQLite(`packages/core/src/create-agent.ts` 里 `SqliteCanonicalObservationStore.open`,注释写明「固定在状态根下,与自定义 store 无关」),于是传了 `InMemoryDir` 的调用方仍会往真盘写观测库——正是 `sharedStore` 那条注释自己反对的事;也因此 `createEcho()` 没有零盘路径。
+观测 store **是介质写死的一段路径分支,不是端口**(`packages/core/src/create-agent.ts`):给了自定义 `store` 又没点名 `stateDir` 时开 `:memory:` 的 SQLite,否则在状态根下开文件 SQLite。这条分支 2026-09-07 才补(71150f0,为堵住测试往真 home 写观测库、攒出 805 个空壳),**「零盘路径」那一半它已经解掉了**。剩下的是调用方给不了自己的实现:想把观测导去别处、或在评测里用内存参考实现(`observability/store.ts` 的 `InMemoryCanonicalObservationStore`,今天只有内部消费者)都没有入口——而 `store` / `lock` / `sharedStore` 三个同类的东西都是端口。
 
 ## 不拍板的代价
 
@@ -49,8 +49,8 @@
    };
    ```
 
-   缺省照 `sharedStore` 的先例:没给自定义 `store` → SQLite 在状态根下(今天的行为);给了自定义 `store` 却没给观测 store → 内存实现(`InMemoryCanonicalObservationStore`),**不碰真盘**。`Echo.send()` 回的 `observationPersistence` 报的是所给 store 的结果,不再暗含「一定落盘」。SQLite 作为缺省保留(2026-09-01 拍板不翻)。
+   **缺省不变**:今天那条路径分支(自定义 `store` 且没点名 `stateDir` → `:memory:`,否则状态根下的文件 SQLite)原样保留,本条只是在它前面加一句「给了 `observation.store` 就用给的」。SQLite 作为缺省不翻(2026-09-01 拍板)。`Echo.send()` 回的 `observationPersistence` 报的是**实际那个 store** 的结果,不再暗含「一定落盘」——今天注入 `InMemoryDir` 时它报的已经是内存库的结果,只是调用方无从选择那是哪个库。
 
 ## 验收
 
-`package.json#exports` 里没有 `./observability`;API 快照里观测相关符号只剩读面、`AgentObservation` 端口与 JSON-safe 值类型;`createEcho({ store: new InMemoryDir(), lock: new InMemoryStateLock() })` 不在磁盘上留下任何文件;一条第三方 extension 经 `AgentObservation.offer()` 发的事实在 `openObservationReader().getRun()` 里按 name 读得到。
+`package.json#exports` 里没有 `./observability`;API 快照里观测相关符号只剩读面、`AgentObservation` 端口与 JSON-safe 值类型;给了 `observation.store` 时装配用的就是那一个(注入一个记账的假 store,run 跑完它收到过记录);不给时行为与今天逐字相同;一条第三方 extension 经 `AgentObservation.offer()` 发的事实在 `openObservationReader().getRun()` 里按 name 读得到。「零盘」那条判据归 71150f0 已有的测试,不在本条重记。
