@@ -202,7 +202,21 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl-bar::before { content: ""; position: absolute; left: 0; top: -1px; bottom: -1px; width: 1px; background: currentColor; opacity: 0.5; }
 /* 字体分工：数字与技术标识走等宽，人读的词走界面字体——整行 mono 会让页面变成终端输出 */
 .tl .t { font-family: var(--font-mono); color: var(--stone); text-align: right; font-variant-numeric: tabular-nums; font-size: var(--size-caption); }
-.tl .what { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
+/*
+ * ── 层级看得见（2026-09-08 用户：「我要的是交互可见性，看起来有层次感」）──
+ * 此前每层只有 16px 缩进，六轮 run 看着还是一列平铺的字，谁包着谁全靠数空格。
+ * 设计系统只规定了工具条目的**行内**形态（agent-behavior.md §2.3 的 `▸ 动词 对象 结果`），
+ * 嵌套怎么表达它没写——下面这套是本页定的：
+ *   ① 每一层画一条导轨竖线，子行明确挂在父行下面；
+ *   ② 「轮」是分组头：上方留白 + 顶边线，六轮就是六块；
+ *   ③ 行按类别分轻重：工具与轮实、模型次之、流水事件退到背景。
+ */
+.tl .what { display: flex; align-items: stretch; gap: var(--space-6); min-width: 0; }
+/* 导轨：每层一个定宽格子，左边一条竖线。**用真元素而不是背景渐变**——渐变要靠 calc 出宽度，
+   调不出来时也说不清是没画还是画在了看不见的地方；元素在 DOM 里，量得到、也能单独调色。 */
+.tl .rail { flex: 0 0 var(--space-16); border-left: 1px solid var(--ui-line-strong); }
+/* 其余内容仍按基线对齐；导轨拉满行高 */
+.tl .what > :not(.rail) { align-self: baseline; }
 .tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; color: var(--stone); }
 .tl .what .verb { flex-shrink: 0; color: var(--ink-70); }
 /*
@@ -216,9 +230,22 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl .what .en { font-family: var(--font-mono); color: var(--stone); font-size: var(--size-micro); opacity: 0.85; flex: 0 0 auto; white-space: nowrap; }
 .tl .usage, .tl .res { font-family: var(--font-mono); font-size: var(--size-caption); color: var(--stone); white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 .tl--boundary { color: var(--ink); }
+/* ② 「轮」是分组头：上方留白 + 顶边线把每一轮切开，六轮就是六块可辨识的区域 */
+.tl--turn { margin-top: var(--space-8); padding-top: var(--space-6); border-top: 1px solid var(--ui-line-soft); }
+.timeline > li:first-child .tl--turn { margin-top: 0; border-top: 0; }
 /* 「轮 #1」要明显重过它旁边的 turn.execute：加重只加在动词上，不整行加粗 */
 .tl--turn .verb { color: var(--ink); font-weight: 600; font-size: var(--size-content); }
 .tl--turn .obj { color: var(--ink); font-weight: 600; }
+/*
+ * ③ 按类别分轻重。工具执行是这页最该一眼认出的东西（用户点名的例子）：
+ *    前缀与动词都用 ink，对象（工具名）也用 ink——它是这行的身份。
+ *    模型生成次一级；`消息入账` / `循环开始` 这类流水事件退到 stone + 小一号，让出视线。
+ */
+.tl--tool .prefix, .tl--tool .verb, .tl--tool .obj { color: var(--ink); }
+.tl--tool .verb { font-weight: 500; }
+.tl--model .verb { color: var(--ink-70); }
+.tl--trace { color: var(--stone); }
+.tl--trace .verb, .tl--trace .prefix { color: var(--stone); font-size: var(--size-caption); }
 .tl--bad { color: var(--clay); }
 .tl--bad .res, .tl--bad .verb { color: var(--clay); }
 .tl--warn { color: var(--marigold); }
@@ -670,6 +697,20 @@ function foldSingleLayers(entries) {
   return out;
 }
 
+/**
+ * 只是「流水」的事件：它们标记进度，不是这条 run 做过的事。退到 stone + 小一号，让工具与轮站出来。
+ * 判据是**这条记录说的是不是一个动作**——`memory.compose` 是回忆、`context.compact` 是压缩，都算动作，不在此列。
+ */
+const TRACE_NAMES = new Set([
+  "agent.loop.started",
+  "agent.loop.ended",
+  "agent.message.appended",
+  "agent.queue.updated",
+  "agent.custom_event",
+  "model.usage",
+  "run.assembly",
+]);
+
 /* 展开区最多摆这么多字符；再长去 `observe show <id> --body` 看 */
 const TEXT_LIMIT = 8000;
 function clip(s) {
@@ -740,6 +781,10 @@ function renderEntry(e, gaps, runMs = 0) {
   const cls = ["tl"];
   if (t.name.startsWith("run.")) cls.push("tl--boundary");
   if (t.name === "turn.execute") cls.push("tl--turn");
+  // 三类需要不同视觉重量：工具执行（用户点名要一眼认出）、模型生成、以及只是流水的那些事件
+  if (isTool) cls.push("tl--tool");
+  else if (t.name === "model.generate") cls.push("tl--model");
+  else if (TRACE_NAMES.has(t.name)) cls.push("tl--trace");
   if (warn && !failed) cls.push("tl--warn");
   if (isOpen) cls.push("tl--open");
   if (failed) cls.push("tl--bad");
@@ -760,7 +805,9 @@ function renderEntry(e, gaps, runMs = 0) {
       onclick: (ev) => { ev.stopPropagation(); if (!e.hasChildren) return; if (collapsed) STATE.collapsed.delete(seq); else STATE.collapsed.add(seq); renderDetail(); },
     }),
     el("span", { class: "t", text: `+${fmtMs(t.relativeMs)}` }),
-    el("span", { class: "what", style: `padding-left: calc(var(--space-16) * ${e.indent ?? t.depth})` },
+    el("span", { class: "what" },
+      // 每层一条导轨：子行明确挂在父行下面，六轮 run 一眼看出谁包着谁
+      ...Array.from({ length: e.indent ?? t.depth }, () => el("span", { class: "rail", "aria-hidden": "true" })),
       el("span", { class: "prefix", text: prefix }),
       el("span", { class: "verb", text: verb }),
       obj ? el("span", { class: "obj", text: obj }) : null,
