@@ -389,6 +389,9 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       prompt: { sections: agent.promptSections, variables: agent.promptVariables },
       // 压缩阶段：`echo:compaction` 与产品自己的策略同一条 Service（2026-09-02）
       compaction: agent.compactionStages,
+      // 记忆模块：`echo:memory` 与产品自己的模块同一条 Service（2026-09-08）。没装记忆就不传——
+      // 那时这个 Service 缺席，声明 required 的扩展装不上（而不是装上了没处生效）。
+      ...(agent.memory === undefined ? {} : { memory: agent.memory }),
       // 会话面（2026-09-07）：壳的 `/sessions`、第三方自己的会话工具都从这条 Service 拿，
       // 与内建 `echo:sessions` 是同一份实现——不会长出第二套「会话是什么」
       sessions,

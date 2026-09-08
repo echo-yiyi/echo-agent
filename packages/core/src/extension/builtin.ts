@@ -29,11 +29,13 @@ import type { ActiveSkillMap, SkillMap } from "../skill/harness.ts";
 import type { AgentBackground } from "../background/types.ts";
 import { defineExtension, type ExtensionDefinition } from "./abi.ts";
 import { ExtensionHost, type ExtensionEntry } from "./host.ts";
-import { AgentCompaction, AgentPrompt, AgentTools, agentRegistries } from "./registries.ts";
+import { AgentCompaction, AgentMemory, AgentPrompt, AgentTools, agentRegistries } from "./registries.ts";
 import type { PromptSection, PromptVariable } from "../prompt/types.ts";
 import { builtinVariables, environmentSection } from "../prompt/sections.ts";
 import { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult } from "./runtime.ts";
 import type { CompactionStage } from "../compaction/types.ts";
+import type { AgentMemories } from "../memory/harness.ts";
+import type { AnyMemory } from "../memory/types.ts";
 import type { CompactionPackConfig } from "../compaction/builtin.ts";
 import type { ServiceKey } from "./abi.ts";
 import type { AgentMessage, ImageBlock } from "../messages.ts";
@@ -164,7 +166,51 @@ export function definePromptPack(name: string): ExtensionDefinition<PromptPackCo
 /** 生命周期 owner 的四条（本批只搬工具注册；session/background/mcp 等仍在各自的位置）。 */
 export const ECHO_TASKS = defineToolPack("echo:tasks");
 export const ECHO_SKILLS = defineToolPack("echo:skills");
-export const ECHO_MEMORY = defineToolPack("echo:memory");
+/**
+ * `echo:memory`（2026-09-08 起带模块）：记忆工具 + 记忆段 + **内建的三个记忆模块**。
+ *
+ * **与第三方模块同一条路**：模块经 `AgentMemory.module()`、工具经 `AgentTools.register()`、
+ * 段经 `AgentPrompt.section()`，三者同一个 effect、`boundary: "turn"`——整组一起装、一起撤。
+ * 这与压缩那条（`ECHO_COMPACTION`）是同一个分法：core 拥有机制，`echo:*` 只出缺省内容。
+ *
+ * 不用 `defineToolPack`：它的 inject 只有 tools / prompt，加不了 required 的 `AgentMemory`。
+ */
+export const ECHO_MEMORY: ExtensionDefinition<MemoryPackConfig> = defineExtension<MemoryPackConfig>({
+  name: "echo:memory",
+  hostAbiVersion: 1,
+  inject: {
+    tools: { service: AgentTools, required: true },
+    prompt: { service: AgentPrompt, required: true },
+    memory: { service: AgentMemory, required: true },
+  },
+  config: (input: unknown): MemoryPackConfig => {
+    const tools = (input as { tools?: unknown } | undefined)?.tools;
+    const sections = (input as { sections?: unknown } | undefined)?.sections ?? [];
+    const modules = (input as { modules?: unknown } | undefined)?.modules ?? [];
+    if (!isToolArray(tools) || !isSectionArray(sections) || !Array.isArray(modules)) {
+      throw new Error("echo:memory 的 config 必须是 { tools: AgentTool[], sections?: PromptSection[], modules?: AnyMemory[] }");
+    }
+    return { tools, sections, modules: modules as readonly AnyMemory[] };
+  },
+  apply(ctx, config) {
+    if (config.tools.length === 0 && config.sections.length === 0 && config.modules.length === 0) return;
+    const tools = ctx.get(AgentTools);
+    const prompt = ctx.get(AgentPrompt);
+    const memory = ctx.get(AgentMemory);
+    void ctx.effect({
+      boundary: "turn",
+      start: () =>
+        registerAll([
+          // **模块先注册**：工具与段拿到的是"当前的模块表"，先有模块再有讲它怎么用的那些
+          ...config.modules.map((m) => () => memory.module(m)),
+          ...config.tools.map((t) => () => tools.register(t)),
+          ...config.sections.map((s) => () => prompt.section(s)),
+        ]),
+    });
+  },
+});
+
+export type MemoryPackConfig = { tools: readonly AgentTool[]; sections: readonly PromptSection[]; modules: readonly AnyMemory[] };
 export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
 /** 渐进式披露的入口 `tool_search`（2026-09-02）：恒装；延迟是工具自己的标记（`ToolBase.deferred`）。 */
 export const ECHO_TOOL_SEARCH = defineToolPack("echo:tool-search");
@@ -240,7 +286,7 @@ export const ECHO_COMPACTION: ExtensionDefinition<CompactionPackConfig> = define
 export type BuiltinToolGroups = {
   readonly tasks: BuiltinToolGroup | undefined;
   readonly skills: BuiltinToolGroup | undefined;
-  readonly memory: BuiltinToolGroup | undefined;
+  readonly memory: BuiltinMemoryGroup | undefined;
   readonly scheduler: BuiltinToolGroup | undefined;
   /** 渐进式披露的入口（`tool_search`），恒在；上不上菜单由 `visibleTools()` 按池里有没有待取的延迟工具决定。 */
   readonly toolSearch: BuiltinToolGroup | undefined;
@@ -254,6 +300,9 @@ export type BuiltinToolGroups = {
 
 /** 一组内建：工具 + 这组工具自己的 prompt 段，就是 `defineToolPack` 的 config 形状。 */
 export type BuiltinToolGroup = BuiltinToolsConfig;
+
+/** `echo:memory` 那一组：工具 + 段 + **内建的记忆模块**（模块与工具一起装、一起撤）。 */
+export type BuiltinMemoryGroup = BuiltinToolsConfig & { readonly modules: readonly AnyMemory[] };
 
 /**
  * builtin 表 → `ExtensionEntry[]`。**这就是「内置模块表」**：名字在这里解析成 definition，
@@ -278,7 +327,7 @@ export function builtinEntries(
     runtime === undefined
       ? []
       : [{ entryId: "echo:agent", definition: ECHO_AGENT as ExtensionDefinition<unknown>, config: { runtime } }];
-  const table: readonly [string, ExtensionDefinition<unknown>, BuiltinToolGroup | CompactionPackConfig | undefined][] = [
+  const table: readonly [string, ExtensionDefinition<unknown>, BuiltinToolGroup | CompactionPackConfig | MemoryPackConfig | undefined][] = [
     ["echo:tasks", ECHO_TASKS as ExtensionDefinition<unknown>, groups.tasks],
     ["echo:skills", ECHO_SKILLS as ExtensionDefinition<unknown>, groups.skills],
     ["echo:memory", ECHO_MEMORY as ExtensionDefinition<unknown>, groups.memory],
@@ -330,6 +379,8 @@ export type BuiltinMountable = RuntimeSource & {
   /** prompt 段与变量的两张表。与 `background` 同理：Agent 恒有，默认 Host 要把 `AgentPrompt` 提供出去。 */
   readonly promptSections: Map<string, PromptSection>;
   readonly promptVariables: Map<string, PromptVariable>;
+  /** 记忆的操作面。`undefined` = 这个 agent 没装记忆，那时 `AgentMemory` Service 缺席。 */
+  readonly memory?: AgentMemories;
   /** 压缩阶段表。同理：Agent 恒有，默认 Host 要把 `AgentCompaction` 提供出去，否则 `echo:compaction` 装不上。 */
   readonly compactionStages: Map<string, CompactionStage>;
 };
@@ -356,6 +407,9 @@ export async function mountBuiltinTools(
       background: agent.background,
       prompt: { sections: agent.promptSections, variables: agent.promptVariables },
       compaction: agent.compactionStages,
+      // 记忆模块：`echo:memory` 与产品自己的模块同一条 Service（2026-09-08）。没装记忆就不传——
+      // 那时这个 Service 缺席，声明 required 的扩展装不上（而不是装上了没处生效）。
+      ...(agent.memory === undefined ? {} : { memory: agent.memory }),
     }),
   }),
   /** 调用方已经算好的那份。**传进来就用它**，不再自己算一份——两份就会分家。 */

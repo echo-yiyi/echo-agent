@@ -14,6 +14,12 @@ import { observationHostOf } from "./observability/host-wiring.ts";
 import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
 import { memoryFactDescriptor } from "./memory/observe.ts";
 import { memoryHostOf } from "./memory/host-wiring.ts";
+import { MemoryChannel } from "./memory/channel.ts";
+import { MEMORY_TOOL_NAME } from "./memory/tool.ts";
+import { agentMemory, notesMemory, userMemory } from "./memory/types.ts";
+import { viewAt } from "./compaction/view.ts";
+import { renderTranscriptMessage } from "./compaction/tool.ts";
+import { DEFAULT_EXTRACT_MAX_TURNS, defaultExtractPrompt } from "./memory/extract.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import type { CapabilityFactSink } from "./observability/fact-sink.ts";
@@ -49,9 +55,12 @@ import { stateHostOf } from "./state/host-wiring.ts";
 import { DurableDeliveryDeferred, type DurableDeliveryRequest, type DurableDeliveryResult, type DurableIngressPort } from "./inbox/ingress.ts";
 import {
   disposeMemory,
+  dreamScopes,
   dreamTask,
   markDreamed,
+  listMemories,
   memoryObserver,
+  memoryScopeTableOf,
   memoryPromptSections,
   memoryTool,
   shouldDream,
@@ -634,6 +643,19 @@ export class Agent {
   private readonly questionPolicy: QuestionPolicy;
   /** 正在跑的那次 run 的 scope（模型绑定、runId）：工具里派子 agent 要复用父的绑定，从这里拿。run 之外为空。 */
   private activeScope?: AgentAdmissionExecuteScope;
+  /**
+   * 最近一次 run 的 scope。记忆的两条后台通道用它拿模型绑定——它们**不进 admission**,
+   * 所以没有自己的 permit(与后台委派 `spawnSubagentBackground` 捕获 scope 同一个做法)。
+   */
+  private lastScope?: AgentAdmissionExecuteScope;
+  /** 记忆的两条后台通道:提取与整理,各跑各的,都不与前台抢执行许可(memory/channel.ts 头注)。 */
+  private readonly extractChannel = new MemoryChannel("extract", (d) => this.reportDiagnostic(d));
+  private readonly dreamChannel = new MemoryChannel("dream", (d) => this.reportDiagnostic(d));
+  /**
+   * 这条 reply 里前台自己写过记忆没有。**提取的重叠保护**:写过就跳过这次提取——
+   * 不然前台刚记完一条,提取回头看见"这轮有值得记的",又写一条几乎一样的。
+   */
+  private memoryWrittenThisReply = false;
   /** 当前 run 的稳定身份；permission ask 与事件关联引用它。 */
   private currentRunId: string | null = null;
   /**
@@ -758,6 +780,13 @@ export class Agent {
       // `minTurnsSinceLast` 这道门永远不满足，而且**静默**——看起来配了，实际从没起过作用。
       // 装配方「记得订阅」不是契约，装了记忆就该自动接上。
       this.subscribe(memoryObserver(this.memory));
+      // **提取挂在 reply 收尾**(2026-09-07):reply 是"agent 对一条输入的完整回应",
+      // 是"这轮有结论了"的自然边界。不按 turn——那会在工具执行到一半时插进来,提出来的是半截。
+      this.subscribe((event) => {
+        // 前台这轮动过记忆:置位,供提取的重叠保护读
+        if (event.type === "tool_execution_end" && event.toolName === MEMORY_TOOL_NAME && event.result.isError !== true) this.memoryWrittenThisReply = true;
+        if (event.type === "reply_end") this.enqueueExtract();
+      });
     }
     this.schedule = opts.schedule;
     if (this.schedule !== undefined) {
@@ -781,7 +810,16 @@ export class Agent {
     this.builtinTools = {
       tasks: { tools: taskTools },
       skills: { tools: skillTools, sections: [skillsSection] },
-      memory: memoryTools === undefined || this.memory === undefined ? undefined : { tools: memoryTools, sections: memoryPromptSections(this.memory) },
+      // 内建三个模块与工具、段同一组：整组一起装、一起撤，与第三方模块走同一条 `AgentMemory.module()`。
+      // 传了自定义 `memories` = 完全接管，那时 `builtinModules` 为 false、这里一个模块都不给。
+      memory:
+        memoryTools === undefined || this.memory === undefined
+          ? undefined
+          : {
+              tools: memoryTools,
+              sections: memoryPromptSections(this.memory),
+              modules: this.memory.builtinModules ? [agentMemory, userMemory, notesMemory] : [],
+            },
       scheduler: scheduleTools === undefined ? undefined : { tools: scheduleTools },
       // 渐进式披露的入口，恒装：延迟工具是标记、随时可能被 extension / MCP 注册进来；
       // 池里没有待取的延迟工具时它自己不上菜单（`visibleTools`），不多占一格
@@ -1539,18 +1577,24 @@ export class Agent {
         this._state.compaction = data.compaction;
         this._state.sessionId = data.info.id;
         this._state.workspace = data.workspace; // resume 以盘上为准：最后一条 workspace entry，没切过 = 开会话的目录
-        // 记忆的 project 层跟着上一行这个**盘上权威的** workspace 走：装配期指的是 `createAgent`
-        // 那时已知的目录，`--resume` 一段在别处建的会话就指错了项目。位置卡在这里：恢复刚落定、
-        // 任何自主活动（skill 发现、闹钟、inbox 重放）之前，且早于 `sessionStart` 钩子——
-        // 宿主在钩子里碰记忆时看到的已经是对的那一层。
+        // **记忆的作用域在这里第一次解析并绑定**（2026-09-07）：workspace、角色、产品都是
+        // session 级事实，权威值就是上面刚从盘上读回来的那几个——`--resume` 一段在别的目录、
+        // 别的角色下建的会话时，装配期知道的那些是错的。位置卡在这里：恢复刚落定、任何自主
+        // 活动（skill 发现、闹钟、inbox 重放）之前，且早于 `sessionStart` 钩子——宿主在钩子里
+        // 碰记忆时看到的已经是对的那几层。绑定之前记忆的任何读写都抛（fail-closed）。
         //
-        // **只这一次**：之后 `setWorkspace()` 换目录不重指（2026-09-07 用户拍板）——同一个仓库
-        // 换个 worktree 路径就换一套项目记忆，不是想要的行为。「只一次」由 `projectScopeBinding`
-        // 自己保证，不靠这一个调用点。新目录里 `workspace.json` 对不上（48 位哈希撞了）就在这里抛，
-        // `start()` 判红，与装配期那次是同一条 `assertProjectWorkspace`。
+        // **只这一次**：之后 `setWorkspace()` 换目录不重新解析（2026-09-07 用户拍板）——同一个
+        // 仓库换个 worktree 路径就换一套项目记忆，不是想要的行为。这条不靠调用点自觉：
+        // `lateBoundMemoryDir` 只认第一次绑定，**运行期根本没有第二个解析入口**。
+        // `stamp` 的层里 `workspace.json` 对不上（48 位哈希撞了）就在这里抛，`start()` 判红。
         //
         // 没挂 host 接线（低层 `new Agent({ memory })` 自己装）或关了记忆 = 空操作。
-        await memoryHostOf(this)?.pinProjectWorkspace?.(this._state.workspace);
+        await memoryHostOf(this)?.bindScopes?.({
+          workspace: this._state.workspace,
+          ...(this.agentRef.name === undefined ? {} : { role: this.agentRef.name }),
+          product: this.product,
+          sessionId: data.info.id,
+        });
         await this.hooks.notify(
           {
             type: "sessionStart",
@@ -2403,6 +2447,7 @@ export class Agent {
     });
     this.activeRun = { promise, resolve: resolvePromise, abortController };
     this.activeScope = scope;
+    this.lastScope = scope;
     this._state.status = "generating";
     this._state.startedAt = Date.now();
     this._state.lastError = null;
@@ -2534,91 +2579,134 @@ export class Agent {
   }
 
   /**
-   * Dream 自调度（C6 / D7）：**触发、互斥、预算、中断、提交都在 core**，
-   * 装配方不写 timer 也不派 subagent。
+   * 记忆的后台活还允许跑吗。**每个 await 之后都要重问一次**——`stop()` / 丢锁可能就发生在那当中。
    *
-   * D7 拍定：**Dream 只整理记忆，不许自建 Task / Schedule**——所以它只拿到 memory 工具。
-   * 放开就等于给了它写入未来行为的权力，收回很难。
-   */
-  /**
-   * 现在还允许整理吗。**每个 await 之后都要重问一次**——`stop()` / 丢锁可能就发生在那当中。
+   * 判据与前台一致（`lifecycleManaged` 时只有 running 才算数）：整理与提取都是纯写操作，
+   * 没有任何理由比前台宽松。上一版只看 `leaseLostError`，于是 `stop()` 返回、新 holder 已经
+   * 拿到锁之后，旧 Agent 的 dream 仍能往 memory 里写——单写者当场破。
    *
-   * 判据与前台一致（`lifecycleManaged` 时只有 running 才算数）：整理是纯写操作，
-   * 没有任何理由比前台宽松。上一版只看 `leaseLostError`，于是 `stop()` 返回、
-   * 新 holder 已经拿到锁之后，旧 Agent 的 dream 仍能往 memory 里写——单写者当场破。
+   * 还要 `bound()`：作用域要等 session 加载完才解析，在那之前记忆一个字节都读不了。
    */
-  private get dreamAllowed(): boolean {
+  private get memoryWorkAllowed(): boolean {
     if (this.memory === undefined) return false;
     if (this.leaseLostError !== null) return false;
+    if (!this.memory.binding.bound()) return false;
     return !this.lifecycleManaged || this.phase === "running";
   }
 
-  /** 中断整理并等它真的收完：还没拿到 permit 的 Dream → superseded；在跑的 → abort scope、等 close。stop() / 丢锁共用。 */
+  /**
+   * 中断两条记忆通道并**等它们真的收完**。`stop()` / 丢锁共用。
+   *
+   * 为什么必须等：lease 是跨进程的单写者保证，它不区分写者是主循环还是后台通道——只要这个
+   * 进程还在往记忆里写，锁就不能交出去。这个坑 dream 踩过（不等的话租约已经归了别人、
+   * 旧 dream 还在写，实测复现）。不能只等 dream 不等提取：「提取短」是概率不是保证，
+   * `maxTurns` 限的是轮数，一轮可以卡在一次很慢的模型请求上。
+   */
   private async settleDream(): Promise<void> {
-    await this.admission.abortMaintenance();
+    await Promise.all([this.extractChannel.settle(), this.dreamChannel.settle()]);
   }
 
   /**
-   * finishRun() 里排一次 Dream：只做同步标记 + enqueue 拿到即时 ticket，**不 await、不递归进循环**；
-   * admission 在当前 callback 返回、permit close 之后才调度它，前台一来就让位（还没跑 → superseded；在跑 → abort）。
-   * 门控（shouldDream）在拿到 permit 之后查。
+   * 回 idle 后排一次整理：**同步标记 + 不 await**，通道自己保证同时最多一个在跑。
+   * 门控（`shouldDream`，按层各判各的）在通道里查，不在这里。
    */
   private enqueueDream(): void {
-    if (!this.dreamAllowed || this.dreamTicketOutstanding) return;
-    this.dreamTicketOutstanding = true;
-    const ticket = this.admission.enqueue({ source: { kind: "dream" }, priority: "maintenance", purpose: "maintenance" }, (scope) => this.executeDream(scope));
-    void ticket.settled.then(() => {
-      this.dreamTicketOutstanding = false;
-    });
+    const scope = this.lastScope;
+    if (!this.memoryWorkAllowed || scope === undefined) return;
+    this.dreamChannel.schedule((signal) => this.runDreamPass(scope, signal));
   }
 
   /**
-   * Dream 的 execute（C6 / D7）：**触发、互斥、预算、中断、提交都在 core**，装配方不写 timer 也不派 subagent。
-   * D7 拍定：**Dream 只整理记忆，不许自建 Task / Schedule**——所以它只拿到 memory 工具。
-   * **绝不抛**：失败 → 诊断 + error outcome（Dream 的事件不外发，它的结果体现在记忆文件上）。
-   * 内层 loop 用 `scope.modelBinding` 驱动，不闭包捕获前台的 model / stream function。
+   * 每条 reply 收尾排一次提取。**不进 admission**：走 maintenance 的话，用户连着说十句话，
+   * 十次全被下一条 prompt 抢占、实际提取 0 次——绕一圈回到「320 轮 0 次写入」。
+   * dream 承受得起被抢占（它整理的是已经落盘的东西），提取承受不起。
    */
-  private async executeDream(scope: AgentAdmissionExecuteScope): Promise<LoopResult> {
+  private enqueueExtract(): void {
     const memory = this.memory;
-    const idle: LoopResult = { outcome: { kind: "completed" }, messages: [] };
-    // Dream 也是一次 accepted run：executor 进入即 `run.started`（门控没过也封口成 completed，不留半截）
-    this.observeRunStarted(scope.runId);
-    if (memory === undefined || !this.dreamAllowed) return idle;
+    const scope = this.activeScope ?? this.lastScope;
+    if (memory === undefined || !this.memoryWorkAllowed || scope === undefined) return;
+    // **重叠保护**：这条 reply 里前台自己已经写过记忆就跳过——不然刚写完一条，
+    // 提取回头看见"这轮有值得记的"，又写一条几乎一样的。
+    if (this.memoryWrittenThisReply) {
+      this.memoryWrittenThisReply = false;
+      return;
+    }
+    // working context = 这次实际送给模型的那份（被压缩预算管着，成本有界）。被压掉的原文
+    // 以九节摘要的形态还在它眼前，所以不需要为压缩再加一个联动。
+    const view = viewAt(this._state.messages, this._state.compaction, this._state.messages.length);
+    const transcript = view.map((m, i) => renderTranscriptMessage(m, i)).join("\n");
+    this.extractChannel.schedule((signal) => this.runExtract(memory, scope, transcript, signal));
+  }
+
+  /**
+   * 一次提取：隔离子循环、**全套记忆工具**、`maxTurns` 限死。
+   * **绝不抛**（通道自己也兜一层）：后台活失败不该影响前台，结果体现在记忆文件上。
+   */
+  private async runExtract(
+    memory: AgentMemories,
+    scope: AgentAdmissionExecuteScope,
+    transcript: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (transcript === "" || !this.memoryWorkAllowed || signal.aborted) return;
+    const runId = `extract-${crypto.randomUUID()}`;
+    const table = memoryScopeTableOf(memory);
+    const prompt = defaultExtractPrompt(listMemories(memory), table, transcript);
     try {
-      // 门控：间隔、写入数、轮数、文件数四道，全满足才跑
-      if (!(await shouldDream(memory))) return idle;
-      // await 之后重问：这期间可能已经 stop() / 丢锁 / 前台抢占了
-      if (!this.dreamAllowed || scope.signal.aborted) return { outcome: { kind: "aborted" }, messages: [] };
-      // 门过了才上锁：dreamTask 有副作用（写 startedAt），不能放在判断之前
-      const task = await dreamTask(memory);
-      let result: LoopResult;
+      await this.runSubagent(
+        { prompt, systemPrompt: null, tools: [memoryTool(memory)], runId, maxIterations: DEFAULT_EXTRACT_MAX_TURNS, turnInjections: "none" },
+        scope,
+        signal,
+        async () => {},
+      );
+    } finally {
+      this.permissions.closeRun(runId);
+    }
+  }
+
+  /**
+   * 一次整理：**按层各整理各的**（2026-09-07）。整理哪些模块由模块自己声明 `dream`，
+   * 整理哪几层就是那些模块声明的层；计数、锁、上次时间、水位都是每层一份。
+   * 每层之间重问一次 `memoryWorkAllowed`——`stop()` / 丢锁可能就发生在两层之间。
+   */
+  private async runDreamPass(scope: AgentAdmissionExecuteScope, signal: AbortSignal): Promise<void> {
+    const memory = this.memory;
+    if (memory === undefined || !this.memoryWorkAllowed) return;
+    for (const layer of dreamScopes(memory)) {
+      if (signal.aborted || !this.memoryWorkAllowed) return;
       try {
-        // D7：只给 memory 工具。不是「过滤掉危险的」，是**只给这一件**。**事件不外发**：整理的中间过程不该混进对外事件流。
-        result = await this.runSubagent(
-          { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId: scope.runId, turnInjections: "inherit" },
-          scope,
-          scope.signal,
-          async () => {},
-        );
-      } finally {
-        // Dream 也是一次 run：它的 ask tombstone 同样到 run 封口才进有界池——loop 之外（listener / 持久化）抛错也要封，
-        // 否则 live-run / tombstone 状态越积越多
-        this.permissions.closeRun(scope.runId);
+        // 门控：节流四道全满足，或者水位单独到线
+        if (!(await shouldDream(memory, layer))) continue;
+        if (signal.aborted || !this.memoryWorkAllowed) return;
+        // 门过了才上锁：dreamTask 有副作用（写 startedAt），不能放在判断之前
+        const task = await dreamTask(memory, layer);
+        const runId = `dream-${crypto.randomUUID()}`;
+        let result: LoopResult;
+        try {
+          // 只给这一层的那把记忆工具。不是「过滤掉危险的」，是**只给这一件**，而且够不到别的层。
+          // **事件不外发**：整理的中间过程不该混进对外事件流。
+          result = await this.runSubagent(
+            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, turnInjections: "inherit" },
+            scope,
+            signal,
+            async () => {},
+          );
+        } finally {
+          this.permissions.closeRun(runId);
+        }
+        // **只有真的跑完才算数。** `runAgentLoop` 对失败不抛，它把结果放在 outcome 里；
+        // 无条件 `markDreamed()` 会让一次失败的整理被记成成功、下一次要等满 24 小时（实测过）。
+        // 被中断同理不提交：锁会在 DREAM_LOCK_STALE_MS 后过期，下次重来。
+        if (signal.aborted) return;
+        if (result.outcome.kind !== "completed") {
+          this.reportDiagnostic({ code: "dream_failed", message: `记忆整理没跑完（${layer}/：${result.outcome.kind}）：不记成成功，锁留给下次` });
+          continue;
+        }
+        await markDreamed(memory, layer);
+      } catch (e) {
+        // 实测破坏路径：`shouldDream()` / `dreamTask()` 读写状态文件失败——一层坏了不该拖垮别的层
+        this.reportDiagnostic({ code: "dream_failed", message: `记忆整理失败（${layer}/）：${errText(e)}` });
       }
-      // **只有真的跑完才算数。** `runAgentLoop` 对失败**不抛**，它把结果放在 outcome 里；
-      // 上一版无条件 `markDreamed()`，于是 provider 报错之后 `lastAt` 照样刷新、计数照样清零
-      // ——一次失败的整理被记成成功，下一次要等满 24 小时（实测过）。被中断同理不提交：锁会在 DREAM_LOCK_STALE_MS 后过期，下次重来。
-      if (scope.signal.aborted) return result;
-      if (result.outcome.kind !== "completed") {
-        this.reportDiagnostic({ code: "dream_failed", message: `记忆整理没跑完（${result.outcome.kind}）：不记成成功，锁留给下次` });
-        return result;
-      }
-      await markDreamed(memory);
-      return result;
-    } catch (e) {
-      // 实测破坏路径：`shouldDream()` / `dreamTask()` 读写状态文件失败——不能变成 unhandled rejection
-      this.reportDiagnostic({ code: "dream_failed", message: `记忆整理失败：${errText(e)}` });
-      return { outcome: { kind: "error", error: { source: "internal", code: "internal", retryable: false, message: errText(e) } }, messages: [] };
     }
   }
 

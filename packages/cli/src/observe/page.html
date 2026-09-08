@@ -545,7 +545,7 @@ function verbFor(name, attrs, body) {
     const v = { create: "记住", replace: "修改", insert: "修改", rename: "修改", delete: "删除" }[attrs.operation] ?? attrs.operation;
     return { verb: v, obj: attrs.partition ? `${attrs.partition}${attrs.reasonCode ? ` · ${attrs.reasonCode}` : ""}` : "" };
   }
-  if (name === "memory.compose") return { verb: "回忆", obj: `${attrs.blocks ?? 0}/${attrs.regions ?? 0} 个分区` };
+  if (name === "memory.compose") return { verb: "回忆", obj: `${attrs.blocks ?? 0}/${attrs.regions ?? 0} 个模块` };
   if (name === "observation.gap") return { verb: "记录缺口", obj: attrs.reason ?? "" };
   if (name.startsWith("inbox.")) {
     // 只有一条时说是谁发的：source 是投递方（session = 另一段会话），ref 是它给的编号；多条只说几条

@@ -186,23 +186,23 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-memory-scopes-by-product.md",
+      "path": "docs/decisions/implemented/2026-09-07-memory-scopes-by-product.md",
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-memory-modules.md",
+      "path": "docs/decisions/implemented/2026-09-07-memory-modules.md",
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-memory-extraction.md",
+      "path": "docs/decisions/implemented/2026-09-07-memory-extraction.md",
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-dream-rework.md",
+      "path": "docs/decisions/implemented/2026-09-07-dream-rework.md",
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-memory-concurrency.md",
+      "path": "docs/decisions/implemented/2026-09-07-memory-concurrency.md",
       "bilingual": false
     },
     {

@@ -6,10 +6,10 @@
 // 消毒原语从 ../prompt/sanitize.ts 同源消费,不自持第二份。
 
 
-import { composeMemoryRegion, listMemories, type AgentMemories } from "./harness.ts";
+import { composeMemoryRegion, listMemories, memoryScopeTableOf, type AgentMemories } from "./harness.ts";
 import { parseFrontmatter } from "../prompt/markdown.ts";
 import { singleLine, truncateMarked } from "../prompt/sanitize.ts";
-import { splitScopePath, type MemoryScope } from "./scope.ts";
+import { splitScopePath } from "./scope.ts";
 import {
   MEMORY_INDEX_FILE,
   memoryPaths,
@@ -45,7 +45,7 @@ function entryOf(path: string, content: string): IndexEntry {
 export async function indexEntries(
   m: IndexedMemory,
   dir: MemoryDir,
-  scope: MemoryScope,
+  scope: string,
   override?: { path: string; content: string },
 ): Promise<IndexEntry[]> {
   const paths = (await dir.list(`${scope}/${m.path}`)).filter((p) => !p.endsWith(`/${MEMORY_INDEX_FILE}`)); // 索引不索引自己
@@ -72,15 +72,15 @@ export function renderIndex(entries: IndexEntry[]): string {
 /* ───────────────────────── 缺省分发:组装 ───────────────────────── */
 
 /**
- * 一个分区**每一层各出一段**,按 user → project → session,都渲染、不去重、各带自己的路径
+ * 一个模块**每一层各出一段**,按 user → project → session,都渲染、不去重、各带自己的路径
  * (「切法」第 2 条):模型改哪一份就写哪个路径,靠的就是段标题上那个路径。空的那层不出段。
  */
-export const defaultComposeMemory: ComposeMemory = async (m, dir) => {
+export const defaultComposeMemory: ComposeMemory = async (m, dir, table) => {
   switch (m.mode) {
     case "resident": {
       const r = m as ResidentMemory;
       const blocks: string[] = [];
-      for (const { path } of memoryPaths(r)) {
+      for (const { path } of memoryPaths(table, r)) {
         const text = ((await dir.read(path)) ?? "").trim();
         if (text === "") continue;
         blocks.push(`## ${r.name} (${path})\n${truncateMarked(text, r.budget)}`);
@@ -90,7 +90,7 @@ export const defaultComposeMemory: ComposeMemory = async (m, dir) => {
     case "indexed": {
       const im = m as IndexedMemory;
       const blocks: string[] = [];
-      for (const { scope, path } of memoryPaths(im)) {
+      for (const { scope, path } of memoryPaths(table, im)) {
         // 索引是落盘真文件(写方法每次重建);还没有(比如目录是人手预置的)就现场扫一遍补上口径
         const stored = await dir.read(`${path}${MEMORY_INDEX_FILE}`);
         const index = stored !== null && stored.trim() !== "" ? stored.trim() : renderIndex(await indexEntries(im, dir, scope));
@@ -108,17 +108,18 @@ export const defaultComposeMemory: ComposeMemory = async (m, dir) => {
 /* ───────────────────────── 占位组装(归 prompt 组装层) ───────────────────────── */
 
 /**
- * 记忆整段进 system 的**占位**拼法:使用规则 + 各分区块。
+ * 记忆整段进 system 的**占位**拼法:使用规则 + 各模块块。
  * 怎么拼 prompt 是 prompt 组装层的设计(专门一轮);在那之前 agent 用这个缺省顶着,
  * 那轮落地后由组装管线接管——MemoryHarness 只出数据(list/composeRegion),不拥有拼法。
  */
 export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
   const regions = listMemories(ctx);
   if (regions.length === 0) return "";
+  const table = memoryScopeTableOf(ctx);
   const rules = regions
     .filter((m) => m.instructions !== undefined && m.instructions !== "")
     .map((m) => {
-      const paths = memoryPaths(m).map((p) => p.path);
+      const paths = memoryPaths(table, m).map((p) => p.path);
       return `- ${m.name} (${paths.length > 0 ? paths.join(", ") : "?"}): ${m.instructions}`;
     });
   const blocks: string[] = [];
@@ -126,20 +127,36 @@ export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
     const block = await composeMemoryRegion(ctx, m);
     if (block !== "") blocks.push(block);
   }
-  // compose counts：这次进 system 的分区数 / 非空块数 / 字符数（sink 永不抛，兜一层不让观测影响 prompt）
+  // compose counts：这次进 system 的模块数 / 非空块数 / 字符数（sink 永不抛，兜一层不让观测影响 prompt）
   try {
     ctx.observe?.offer({ kind: "compose", regions: regions.length, blocks: blocks.length, chars: blocks.reduce((n, b) => n + b.length, 0), occurredAt: Date.now() });
   } catch {
     // 观测层的异常不进 prompt 组装
   }
+  // 选层说明从**作用域表**生成:core 不认识任何具体层名,但每层带一句 `describe`,
+  // 按 order(同时是宽度序,小 = 宽)列出来就够模型选层了。
+  const layers = table.entries.map((e) => `${e.def.name}/ — ${e.def.describe}`);
   return [
     "# Memory",
-    "You have persistent memory that survives across sessions, read and written through the memory tool. Regions:",
+    "You have persistent memory that survives across sessions, read and written through the memory tool. Modules:",
     rules.join("\n"),
-    "The first path segment picks who will see an entry: user/ every session of this user · project/ every session in this workspace · session/ only this session. " +
-      "Pick the widest scope the fact is actually true for, and write the whole path — there is no scope argument.",
-    "Before writing, check for an existing entry to merge into. Delete what is outdated. When a region is over budget, consolidate before adding. " +
-      "Do not record progress on the current task — that is the session's job; record reusable lessons. Never store secrets or credentials.",
+    layers.length === 0
+      ? "No memory layers are configured for this session."
+      : "The first path segment of every path picks who will see an entry, widest first:\n" +
+        layers.map((l) => `- ${l}`).join("\n") +
+        "\nPick the widest layer the fact is actually true for, and write the whole path — there is no layer argument.",
+    "When to write. Four things are usually worth keeping: the user corrected you, or told you how they want you to work; " +
+      "you hit something that would trip you again — an environment quirk, a tool that behaves differently than its docs say; " +
+      "a decision got settled, together with the reasoning behind it; " +
+      "a fact about this project or this person that you had to discover rather than read. " +
+      "Before writing any of them, ask whether it will still be true, and still useful, in a different session next month. If not, drop it.",
+    "What not to keep. Progress on the current task — the transcript is for that. " +
+      "Anything the repository already states: its layout, code structure, git history, its own instruction files; if it is one command away, it is not memory. " +
+      "Anything true only inside this conversation. Credentials, tokens and keys — in any region, ever.",
+    "How to write. One fact per entry; if you are joining two with \"and\", they are two entries. " +
+      "Give every entry a one-line description — it is the only thing a future session sees when deciding whether to open it, so write it to be found by what it is about. " +
+      "Use absolute dates, never \"yesterday\". Merge into an existing entry instead of adding a near-duplicate, and delete an entry you find out is wrong. " +
+      "When a module is over budget, consolidate before adding.",
     ...blocks,
   ].join("\n\n");
 }
@@ -154,8 +171,8 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
         return {
           ok: false,
           reason:
-            `Region '${r.name}' would exceed its budget: ${next.length} characters after this write, limit ${r.budget}. ` +
-            `Keep this region small and dense: merge duplicates and delete stale entries with str_replace/delete first, then write.`,
+            `Module '${r.name}' would exceed its budget: ${next.length} characters after this write, limit ${r.budget}. ` +
+            `Keep this module small and dense: merge duplicates and delete stale entries with str_replace/delete first, then write.`,
         };
       }
       return { ok: true };
@@ -165,7 +182,7 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
       if (next.length > im.fileBudget) {
         return { ok: false, reason: `File too large: ${next.length} characters, limit ${im.fileBudget}. Split or condense it, then write.` };
       }
-      // 预算按层各算一份:同一分区在 user / project / session 各有各的索引
+      // 预算按层各算一份:同一模块在 user / project / session 各有各的索引
       const at = splitScopePath(path);
       if (at === null) throw new Error(`记忆路径缺作用域前缀:'${path}'`);
       const entries = await indexEntries(im, dir, at.scope, { path, content: next });

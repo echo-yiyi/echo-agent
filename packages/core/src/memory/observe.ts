@@ -19,7 +19,7 @@ export type MemoryMutationOutcome = "committed" | "rejected" | "failed" | "parti
 /** 失败 / 半提交发生在哪一段：read（读现有内容）/ check（写入校验）/ write（主存储写）/ remove（删）/ remove-source（rename 的第二段） */
 export type MemoryMutationStage = "read" | "check" | "write" | "remove" | "remove-source";
 
-/** `refreshIndex()` 的结果：非 indexed 分区 not-applicable；重建失败仍 report 不抛，但要让 outcome 可见。 */
+/** `refreshIndex()` 的结果：非 indexed 模块 not-applicable；重建失败仍 report 不抛，但要让 outcome 可见。 */
 export type MemoryIndexOutcome = "not-applicable" | "ok" | "failed";
 
 export type MemoryFact =

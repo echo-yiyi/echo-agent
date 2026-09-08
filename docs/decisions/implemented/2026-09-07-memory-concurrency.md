@@ -1,12 +1,12 @@
 # 记忆文件的并发:跨进程文件锁,锁的范围是「读到写」整段;`stop()` 等两个后台通道收完再交 lease
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 偿还 [会话与 agent 集群](../../design/sessions.md) Non-Goals 里挂着的「memory 目录的多写者保护,归 memory 线」
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头) · 实现并合入 2026-09-08 · 偿还 [会话与 agent 集群](../../design/sessions.md) Non-Goals 里挂着的「memory 目录的多写者保护,归 memory 线」
 
 ## 现状(拍板前)
 
 记忆文件的写全部是直接 `dir.write`。`FileDir` 走 tmp + rename,所以**文件不会写成半截**;但"读出来—改好—写回"这个序列中间如果别人写了同一个文件,写回会把它盖掉,**一点痕迹都没有**。
 
-今天这属于已知限制:[记忆三级作用域](../implemented/2026-09-03-memory-three-scopes.md) 明写"project / user 两层的并发写先接受后写覆盖",[会话与 agent 集群](../../design/sessions.md) 的 Non-Goals 把它挂给 memory 线。当时成立的前提是**共享层的写很稀疏**——只有前台模型偶尔记一条。
+今天这属于已知限制:[记忆三级作用域](2026-09-03-memory-three-scopes.md) 明写"project / user 两层的并发写先接受后写覆盖",[会话与 agent 集群](../../design/sessions.md) 的 Non-Goals 把它挂给 memory 线。当时成立的前提是**共享层的写很稀疏**——只有前台模型偶尔记一条。
 
 同一进程内也有一份:`AgentMemories` 上的写方法之间没有互斥。`memory/harness.ts` 里 `dreamStateChain` 那条 `WeakMap` + Promise 链只串行化了 dream 状态的读改写(实测过并发会丢计数),记忆文件本身没有。
 
