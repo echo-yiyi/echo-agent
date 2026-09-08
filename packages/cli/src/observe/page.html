@@ -217,7 +217,10 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl .rail { flex: 0 0 var(--space-16); border-left: 1px solid var(--ui-line-strong); }
 /* 其余内容仍按基线对齐；导轨拉满行高 */
 .tl .what > :not(.rail) { align-self: baseline; }
-.tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; color: var(--stone); }
+/* 类别记号：工具与模型的记号要看得清（它们是 run 里真正花时间的两类），流水事件的点保持安静 */
+.tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; color: var(--stone); text-align: center; }
+.tl--tool .prefix, .tl--model .prefix { color: var(--ink-70); }
+.tl--cap .prefix { color: var(--ink-70); }
 .tl .what .verb { flex-shrink: 0; color: var(--ink-70); }
 /*
  * 一行里谁先让：**参数预览先让，工具名与记录名不让**。
@@ -383,6 +386,15 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 
 <script>
 const LEX = /*__LEXICON__*/ null;
+/** 记录名 → 类别记号；表在术语表里（`lexicon.ts` 的 `RECORD_MARKS`），这里只做最长前缀匹配。 */
+function recordMark(name) {
+  let best = "·";
+  let bestLen = -1;
+  for (const [prefix, mark] of LEX.marks) {
+    if (name.startsWith(prefix) && prefix.length > bestLen) { best = mark; bestLen = prefix.length; }
+  }
+  return best;
+}
 const STATE = {
   runs: [], sessions: {}, filter: "all", product: "all", session: "all", selected: null, follow: true, vm: null,
   hidden: false, activity: [], root: "", envOpen: false,
@@ -701,6 +713,12 @@ function foldSingleLayers(entries) {
  * 只是「流水」的事件：它们标记进度，不是这条 run 做过的事。退到 stone + 小一号，让工具与轮站出来。
  * 判据是**这条记录说的是不是一个动作**——`memory.compose` 是回忆、`context.compact` 是压缩，都算动作，不在此列。
  */
+/**
+ * 能力事实：不是循环本身，是 agent 的能力（记忆 / 任务 / 闹钟 / 收件）留下的痕迹。
+ * 它们与工具、模型一样是「发生过的事」，所以不退到流水那一档，但归成一类、共用 `◇`。
+ */
+const CAPABILITY_PREFIXES = ["memory.", "task.", "schedule.", "inbox."];
+
 const TRACE_NAMES = new Set([
   "agent.loop.started",
   "agent.loop.ended",
@@ -765,10 +783,8 @@ function renderEntry(e, gaps, runMs = 0) {
   const failed = (isTool && attrs.isError === true) || t.name.endsWith(".failed") || t.name.endsWith(".partial") || t.name === "inbox.sealed" || (t.name === "agent.loop.ended" && attrs.status === "error");
   const warn = t.name === "observation.gap" || t.name.endsWith(".rejected") || t.name.endsWith(".missed") || t.name.endsWith(".released") || t.name === "model.retry.scheduled";
   const isOpen = !e.single && end === null && t.kind === "span_start";
-  let prefix = "·";
-  if (isTool || t.kind === "span_start") prefix = failed ? "✕" : "▸";
-  if (t.name === "observation.gap") prefix = "⚠";
-  if (t.name === "context.compact") prefix = "⤓";
+  // 类别记号来自术语表（`recordMark`，最长前缀优先），不在这里散着写 if。失败一律 `✕`（agent-behavior.md §2.3）
+  const prefix = failed ? "✕" : recordMark(t.name);
   // 耗时与用量分两列：它们是两种量，混在一格里就只能靠 `·` 分辨，也没法上下对齐（用户评审第 1 条）
   let res = "";
   if (end && end.durationMs !== undefined) res = fmtMs(end.durationMs);
@@ -784,6 +800,7 @@ function renderEntry(e, gaps, runMs = 0) {
   // 三类需要不同视觉重量：工具执行（用户点名要一眼认出）、模型生成、以及只是流水的那些事件
   if (isTool) cls.push("tl--tool");
   else if (t.name === "model.generate") cls.push("tl--model");
+  else if (CAPABILITY_PREFIXES.some((p) => t.name.startsWith(p))) cls.push("tl--cap");
   else if (TRACE_NAMES.has(t.name)) cls.push("tl--trace");
   if (warn && !failed) cls.push("tl--warn");
   if (isOpen) cls.push("tl--open");

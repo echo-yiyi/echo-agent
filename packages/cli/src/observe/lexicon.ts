@@ -115,6 +115,51 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "observation.gap": { zh: "记录缺口", en: "observation.gap", tone: "caution", hint: "这段 seq 的记录没能进账本；reason 说为什么" },
 };
 
+/**
+ * 时间线每行开头的类别记号。**按记录名前缀匹配，最长的前缀赢**；表在这里，与术语同一个出处。
+ *
+ * 为什么是文字记号而不是图标：设计系统的图标是 Lucide + 语义映射层（`spec/icons.md` §7），
+ * 而这个面板是零外部资源的自足 HTML，拉不了图标库——那要先做 vendor 决策。
+ * 而 `spec/agent-behavior.md` §2.3 规定工具条目本来就用文字记号（进行中 / 成功 `▸`、失败 `✕`），
+ * 所以在这一处用文字记号是它认的做法。下面只在它之外补三个，且都从最通用的几何字符里挑，避免字体缺字：
+ *
+ * | 记号 | 给谁 | 为什么 |
+ * |---|---|---|
+ * | `▸` / `✕` | 工具执行 / 工具失败 | agent-behavior.md §2.3 逐字规定 |
+ * | `◆` | 模型生成 | 一轮里最花时间的那件事，实心与工具的空心三角分开 |
+ * | `◇` | 能力事实（记忆 / 任务 / 闹钟 / 收件） | 它们不是循环本身，是 agent 的能力留下的痕迹，归一类 |
+ * | `⤓` | 上下文压缩 | 往下压 |
+ * | `⚠` | 记录缺口 | 与警告同形 |
+ * | `·` | 其余（循环开始 / 结束、消息入账、run 边界） | 只标记进度，不该有形状 |
+ */
+export const RECORD_MARKS: readonly (readonly [prefix: string, mark: string])[] = [
+  // 容器（回应 / 轮 / 尝试）不给记号：它左边已经有折叠箭头，再来一个点是同一件事说两遍
+  ["reply.execute", ""],
+  ["turn.execute", ""],
+  ["attempt.execute", ""],
+  ["tool.execute", "▸"],
+  ["model.generate", "◆"],
+  ["memory.", "◇"],
+  ["task.", "◇"],
+  ["schedule.", "◇"],
+  ["inbox.", "◇"],
+  ["context.compact", "⤓"],
+  ["observation.gap", "⚠"],
+];
+
+/** 记录名 → 类别记号；没有匹配就回落到 `·`。最长前缀优先，`tool.execute.progress` 不会被 `tool.` 抢走。 */
+export function recordMark(name: string): string {
+  let best = "·";
+  let bestLen = -1;
+  for (const [prefix, mark] of RECORD_MARKS) {
+    if (name.startsWith(prefix) && prefix.length > bestLen) {
+      best = mark;
+      bestLen = prefix.length;
+    }
+  }
+  return best;
+}
+
 export type Lexicon = Readonly<{
   runStatus: typeof RUN_STATUS;
   runSource: typeof RUN_SOURCE;
@@ -123,8 +168,10 @@ export type Lexicon = Readonly<{
   persistence: typeof PERSISTENCE;
   toolVerbs: typeof TOOL_VERBS;
   records: typeof RECORD_TERMS;
+  /** 类别记号表，页面按最长前缀匹配（见 `recordMark`）。 */
+  marks: typeof RECORD_MARKS;
 }>;
 
 export function lexicon(): Lexicon {
-  return { runStatus: RUN_STATUS, runSource: RUN_SOURCE, replySource: REPLY_SOURCE, integrity: INTEGRITY, persistence: PERSISTENCE, toolVerbs: TOOL_VERBS, records: RECORD_TERMS };
+  return { runStatus: RUN_STATUS, runSource: RUN_SOURCE, replySource: REPLY_SOURCE, integrity: INTEGRITY, persistence: PERSISTENCE, toolVerbs: TOOL_VERBS, records: RECORD_TERMS, marks: RECORD_MARKS };
 }
