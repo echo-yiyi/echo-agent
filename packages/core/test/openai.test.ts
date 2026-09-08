@@ -13,7 +13,7 @@ import {
 } from "../src/provider/openai.ts";
 import { createProviderStreams, type Dialect } from "../src/provider/dialect.ts";
 import { Models } from "../src/provider/models.ts";
-import type { Model } from "../src/provider/types.ts";
+import type { Model, ThinkingLevel } from "../src/provider/types.ts";
 import type { Context } from "../src/messages.ts";
 import type { ProviderEvent } from "../src/events.ts";
 import { agentError } from "../src/errors.ts";
@@ -177,6 +177,33 @@ test("thinkingLevel → reasoning_effort：按目录里的 thinkingLevelMap 写�
   await collect(d.request(MODEL, ctx, { apiKey: "k", thinkingLevel: "high" })); // 没映射表的模型：不发
   const bodies = calls.map((c) => c.body as { reasoning_effort?: string });
   expect(bodies.map((b) => b.reasoning_effort)).toEqual(["high", undefined, undefined]);
+});
+
+test("目录的 thinkingLevelMap 按官方文档：GLM / K3 两两折、DeepSeek 照官方兼容表（xhigh → high）、没档位的不填（2026-09-08 刷表）", async () => {
+  // 走真 provider 目录 + 假 fetch：证明的是「选了这档、请求体里是哪个值」，不是端点真的接受它
+  const reply = (): Response => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]));
+  const { fn, calls } = fakeFetch(reply);
+  const opts = { fetchFn: fn };
+  type P = ReturnType<typeof kimiProvider>;
+  const pick = (p: P, id: string): Model => p.getModels().find((m) => m.id === id)!;
+  const cases: [P, string, ThinkingLevel, string | undefined][] = [
+    [kimiProvider(opts), "kimi-k3", "xhigh", "max"],
+    [kimiProvider(opts), "kimi-k3", "minimal", "low"],
+    [zaiCodingProvider(opts), "glm-5.3-flash", "medium", "high"],
+    [deepseekProvider(opts), "deepseek-v4-pro", "xhigh", "high"], // 官方兼容表：xhigh → high，不是 max
+    [deepseekProvider(opts), "deepseek-v4-flash", "medium", "high"],
+    [deepseekProvider(opts), "deepseek-v4-flash", "off", undefined], // 关思考是另一个参数（thinking.type），这张表不写
+    [deepseekProvider(opts), "deepseek-v4-flash-vision-exp", "max", undefined], // 文档没点名，真 key 实测参数不按文档走
+    [kimiProvider(opts), "kimi-k2.7-code", "max", undefined], // 官方没给深度参数
+    [kimiProvider(opts), "kimi-k2.6", "max", undefined], // 只有 K2.x 的 thinking 开关
+    [minimaxProvider(opts), "MiniMax-M3", "max", undefined], // chat completions 上只有 thinking.type 开关
+    [openaiProvider(opts), "gpt-5.6-sol", "max", "none"], // params 里被迫 none，档位选了也不算数
+  ];
+  for (const [p, id, level, want] of cases) {
+    await collect(p.stream(pick(p, id), CTX, { apiKey: "k", thinkingLevel: level }));
+    const body = calls.at(-1)!.body as { reasoning_effort?: string };
+    expect([id, level, body.reasoning_effort]).toEqual([id, level, want]);
+  }
 });
 
 test("model.params 最后合并:显式调参赢过缺省", async () => {

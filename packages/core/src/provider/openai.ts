@@ -514,8 +514,9 @@ function readEnv(name: string): string | undefined {
  *
  * 目录按 2026-09-01 官方文档（platform.kimi.com；`platform.moonshot.cn/docs` 已 301 过去，API 域名没变）：
  * 现役四款；`kimi-k2` 整个系列 2026-05-25 下线（含上一版表里的 `kimi-k2-turbo-preview`，调用回 404）。
- * 四款都收图、思考都走 `reasoning_content`：K3 与 K2.7-code 思考常开（K3 的深度走 `reasoning_effort`，
- * 缺省 `max`），K2.6 缺省开、可关。`.cn` 与 `.ai` 两站模型 id 相同，key 不通用。
+ * 四款都收图、思考都走 `reasoning_content`：K3 与 K2.7-code 思考常开，K2.6 缺省开、可关（K2.x 的 `thinking` 参数）。
+ * 深度只有 K3 有：请求顶层 `reasoning_effort` low / high / max，缺省 `max`（2026-09-08 官方 use-reasoning-effort 指南），
+ * 目录映射 `LOW_HIGH_MAX_FOLD`；K2.7-code / K2.6 官方没给深度参数，不填表。`.cn` 与 `.ai` 两站模型 id 相同，key 不通用。
  *
  * **不填 `maxOutputTokens`**：官方只给缺省输出（K3 131,072、K2.x 32,768），上限没有明确数字，
  * 而且 K3 的 `max_tokens` 已标 deprecated（改 `max_completion_tokens`）。方言只在该字段有值时才发
@@ -532,7 +533,7 @@ export function kimiProvider(opts: BuiltinProviderOptions = {}): Provider {
     // 选 K3 是官方口径：「建议优先从 Kimi K3 开始」；追求出字速度的编程场景官方推 k2.7-code-highspeed。
     defaultModelId: "kimi-k3",
     models: [
-      { id: "kimi-k3", api: OPENAI_COMPLETIONS_API, name: "Kimi K3", capabilities: { reasoning: true, vision: true, contextWindow: 1_048_576 } },
+      { id: "kimi-k3", api: OPENAI_COMPLETIONS_API, name: "Kimi K3", capabilities: { reasoning: true, vision: true, contextWindow: 1_048_576 }, thinkingLevelMap: LOW_HIGH_MAX_FOLD },
       { id: "kimi-k2.7-code", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.7 Code", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
       { id: "kimi-k2.7-code-highspeed", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.7 Code HighSpeed", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
       { id: "kimi-k2.6", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.6", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
@@ -547,6 +548,7 @@ export function kimiProvider(opts: BuiltinProviderOptions = {}): Provider {
  * values other than `none`」。本仓只有 chat/completions 方言、每个请求都带工具，所以 GPT-5.x 进目录
  * 就得把推理关掉：它们在这里是**高配的非推理模型**，因此不标 `reasoning`（chat/completions 本来也
  * 不回传任何 reasoning 文本，标了就是许诺一个不存在的思考通道）。要推理 + 工具，得先有 Responses 方言。
+ * 同理没有 `thinkingLevelMap`：`params` 最后合并，`reasoning_effort` 永远是 `none`，选了档位也不算数。
  */
 const OPENAI_REASONING_OFF = { reasoning_effort: "none" } as const;
 
@@ -584,11 +586,17 @@ export function openaiProvider(opts: BuiltinProviderOptions = {}): Provider {
 }
 
 /**
- * GLM 5.3 系的深度映射（review 2026-09-07 接上 thinkingLevel 之后目录里第一份）：七档折到官方的三档
- * `reasoning_effort` low / high / max，**没有 `off`**——关不掉就不假装能关，那一档不发参数、服务端按缺省 max 跑。
- * Kimi / DeepSeek / MiniMax 的目录先不填：仓里没有它们深度参数的官方依据，按「目录静态、过期按官方文档刷表」的规矩不猜。
+ * 七档 `ThinkingLevel` 折到厂商三档 `reasoning_effort` low / high / max（review 2026-09-07 接上 thinkingLevel 后填的表，
+ * 2026-09-08 按官方文档刷到 Kimi / DeepSeek）。两张表都是目录数据、各按各家文档：
+ * - `LOW_HIGH_MAX_FOLD`：官方只给三档、没给折法的（GLM 5.3 系、Kimi K3），两两一折。
+ * - `DEEPSEEK_THINKING_LEVELS`：DeepSeek 官方自己给了兼容表（thinking_mode 指南：medium / high / **xhigh → high**），照抄；
+ *   `minimal` 表里没有，按最低档发 low。服务端也认 medium / xhigh，但请求体只发文档里的三个值。
+ * 两张表都**没有 `off`**：GLM 5.3 与 K3 思考关不掉，不假装能关；DeepSeek 能关（`thinking: { type: "disabled" }`），
+ * 但那是另一个参数，这张表只写 `reasoning_effort`——`off` 一档不发参数 = 服务端缺省，照样思考（见 `buildRequest`）。
+ * 官方没给档位的模型不填表，选了档位请求体也一个字节不变（Shift+Tab 对它们无效）；哪款为什么没有，看各家 provider 的 JSDoc。
  */
-const GLM_THINKING_LEVELS = { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max", max: "max" } as const;
+const LOW_HIGH_MAX_FOLD = { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max", max: "max" } as const;
+const DEEPSEEK_THINKING_LEVELS = { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "high", max: "max" } as const;
 
 /**
  * 智谱 GLM 的 coding 端点（pi 那边叫 `zai-coding-cn`）。key:`ZAI_CODING_CN_API_KEY`。
@@ -603,7 +611,7 @@ const GLM_THINKING_LEVELS = { minimal: "low", low: "low", medium: "high", high: 
  * preserved thinking 要求工具结果回来时原样带回上一轮 `reasoning_content`——方言两侧都做到了
  * （收时记来源字段进 `ThinkingBlock.signature`，发时写回同一个字段）。
  * `maxOutputTokens` 官方口径「128K」，沿用上一版（取自 pi 同一端点的目录）的 131_072。
- * 深度映射见上面的 `GLM_THINKING_LEVELS`。
+ * 深度映射见上面的 `LOW_HIGH_MAX_FOLD`。
  */
 export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
   const baseUrl = opts.baseUrl ?? "https://open.bigmodel.cn/api/coding/paas/v4";
@@ -615,8 +623,8 @@ export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
     // 官方旗舰；flash 是 1/10 价、唯一收图的那个
     defaultModelId: "glm-5.3",
     models: [
-      { id: "glm-5.3", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3", capabilities: { reasoning: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED, thinkingLevelMap: GLM_THINKING_LEVELS },
-      { id: "glm-5.3-flash", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3-Flash", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED, thinkingLevelMap: GLM_THINKING_LEVELS },
+      { id: "glm-5.3", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3", capabilities: { reasoning: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED, thinkingLevelMap: LOW_HIGH_MAX_FOLD },
+      { id: "glm-5.3-flash", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3-Flash", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED, thinkingLevelMap: LOW_HIGH_MAX_FOLD },
     ],
     api: createProviderStreams(openAiDialect({ baseUrl, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) })),
   });
@@ -632,6 +640,7 @@ export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
  * **M3 官方明确可以关 thinking**（`thinking: { type: "disabled" }`；不传 = `adaptive`，开着），所以这一批不必先改
  * 消息契约：`params` 直发 disabled（形状与 GLM 那边**恰好相同**，共用同一个常量只是省一份字面量，
  * 不是在声称两家是同一套协议——各自依据各自厂商文档）。M3 收图（`image_url` / `video_url`），1M 上下文（官方保底 512K）。
+ * 没有 `thinkingLevelMap`：chat completions 上 M3 只有 `thinking.type` 开关，没有深度档位（2026-09-08 查官方文档）。
  *
  * **`maxOutputTokens` 故意留空**：官方上限 524,288 是 `max_completion_tokens` 的口径，`max_tokens` 已标 legacy；
  * 而方言只在该字段有值时才发 `max_tokens`（见 `buildRequest`），留空即不发，由服务端用自己的默认值（官方建议 131,072）。
@@ -668,6 +677,10 @@ export function minimaxProvider(opts: BuiltinProviderOptions = {}): Provider {
  * 三款都是 1M 上下文、思考缺省**开**（`thinking: { type: "enabled" }`，可传 `disabled` 关掉；深度 `reasoning_effort`
  * low / high / max，缺省 high），思考走 `reasoning_content`；只有 `-vision-exp` 收图，别的模型给图回 400。
  *
+ * **深度映射只填 flash / pro**（`DEEPSEEK_THINKING_LEVELS`，官方 thinking_mode 指南点名的就这两款）。`-vision-exp` 不填：
+ * 文档没点名；2026-09-08 真 key 实测 4 组同题，`low` 的 reasoning_tokens 全部比 `max` 多（均值 321 对 88，flash 对照组
+ * 方向正常 10 对 52）——参数在它身上不按文档走，填了就是「选的是 A、跑的是 B」。
+ *
  * **`alwaysSendReasoningField` 只在这一家开**：官方明文——带 `tools` 的请求，后续每一轮都必须把 `reasoning_content`
  * 原样回传（**包括没发生工具调用的轮次**），缺了回 400。自建网关指向 DeepSeek 的话，调用方要自己传这个选项——**我们不按 URL 猜**。
  *
@@ -683,8 +696,8 @@ export function deepseekProvider(opts: BuiltinProviderOptions = {}): Provider {
     // 旧缺省 `deepseek-chat` 官方就是路由到 v4-flash，价格连续；pro 是 3 倍价，官方自己的 agent 配置把它当主模型、flash 给子代理
     defaultModelId: "deepseek-v4-flash",
     models: [
-      { id: "deepseek-v4-flash", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Flash", capabilities: { reasoning: true, contextWindow: 1_000_000 } },
-      { id: "deepseek-v4-pro", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Pro", capabilities: { reasoning: true, contextWindow: 1_000_000 } },
+      { id: "deepseek-v4-flash", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Flash", capabilities: { reasoning: true, contextWindow: 1_000_000 }, thinkingLevelMap: DEEPSEEK_THINKING_LEVELS },
+      { id: "deepseek-v4-pro", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Pro", capabilities: { reasoning: true, contextWindow: 1_000_000 }, thinkingLevelMap: DEEPSEEK_THINKING_LEVELS },
       { id: "deepseek-v4-flash-vision-exp", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Flash Vision (exp)", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000 } },
     ],
     api: createProviderStreams(
