@@ -1,4 +1,4 @@
-// 应用级键位（P0）。**照 pi**（`docs/review/tui-design.md` §九 D2）：编辑器内的键是 pi-tui 的缺省
+// 应用级键位（P0）。**照 pi**（`docs/design/tui.md` §九 D2）：编辑器内的键是 pi-tui 的缺省
 // （`TUI_KEYBINDINGS`），一条不改；这里只登记 pi 的 `app.*` 里本轮要接的那几个，
 // 名字、缺省键都照抄 pi 仓 `~/Code/pi/packages/coding-agent/src/core/keybindings.ts:92-94`
 // （写全路径是因为那是 pi 仓的目录，写短路径文档门会当成本地文件去找）。

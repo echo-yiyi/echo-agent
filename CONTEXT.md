@@ -18,7 +18,7 @@ _Avoid_：前端、UI 层、外面套的一层
 
 **容器**：
 一个 OS 进程，装一个或多个 session。终端里的 echo-coding 装一个，常驻程序装几十个。
-_Avoid_：宿主进程、runner 进程
+_Avoid_：宿主进程、宿主程序、runner 进程（「宿主」这个词留给 extension 语境，见「宿主」词条）
 
 ## 会话与作用域
 
@@ -31,7 +31,7 @@ _Avoid_：会话记录（那是 transcript）、对话、「运行中的 agent�
 _Avoid_：产品、bundle、模版、subagent 定义
 
 **main**：
-容器自己起的 session（人起的、宿主程序起的）。只有 main 能经 `session_create` 再开一段；开出来的都不是 main。
+容器自己起的 session（人起的、常驻程序起的）。只有 main 能经 `session_create` 再开一段；开出来的都不是 main。
 _Avoid_：父 session、根 session
 
 **状态根**：
@@ -55,7 +55,7 @@ _Avoid_：cwd、项目目录（project 是作用域名）
 _Avoid_：锁文件（那是它的实现）、mutex
 
 **可让位**：
-一个自称可以被请走的 session 实例：有人来要它的 lease 时它交还并退出。只给「为处理一条消息被叫醒」的临时宿主用；人开的会话不可让位。代码里叫 `preemptible`。
+一个自称可以被请走的 session 实例：有人来要它的 lease 时它交还并退出。只给「为处理一条消息被叫醒」的临时容器用；人开的会话不可让位。代码里叫 `preemptible`。
 _Avoid_：抢占（那是对面的动作，不是这一方的属性）、后台实例
 
 **subagent**：
@@ -63,7 +63,7 @@ _Avoid_：抢占（那是对面的动作，不是这一方的属性）、后台�
 _Avoid_：子 session、子进程、委派会话
 
 **消息来源**：
-一条入账消息是谁给的：人、steer、harness（stop hook 注入之类），或环境（schedule、session、subagent 回信）。它决定壳怎么显示、评测怎么归因，不改变 role。
+一条入账消息是谁给的：人、steer、harness（stop hook 注入之类），或环境（schedule、session、subagent 回信）。它决定壳怎么显示、评测怎么归因，不改变 role。代码里是 `UserMessage.source`（`human | steer | harness`）与环境消息的 `source`（见 [Context 与 Message Flow](docs/design/context-and-message-flow.md) §2）。
 _Avoid_：sender、origin
 
 **inbox**：
@@ -140,12 +140,16 @@ _Avoid_：任务（口语指 run 时别用这个词）、job
 经 `defineExtension()` 声明、由 ExtensionHost 装卸的一个单元。内建的 `echo:*`、产品自带的、`extensions/` 下用户写的、壳，全是。
 _Avoid_：插件、plugin
 
+**宿主**：
+extension 语境里装卸 extension、持有其 disposer 的那一方（代码 `ExtensionHost`；注释里的「Host-internal」指它）。它不是进程——进程叫容器。旧文档里指嵌入程序的「宿主」一律读作容器。
+_Avoid_：把宿主当进程用、host 程序
+
 **registry**：
 extension 往 agent 里注册东西的口：工具、prompt 段、压缩阶段、hook、skill。
 _Avoid_：注册表（可用作译名，代码用 registry）
 
 **能力端口**：
-extension 用 agent 已有东西的口：后台队列、会话面、观测发口。
+extension 用 agent 已有东西的口：后台队列（`AgentBackgroundService`）、会话面（`AgentSessionsService`）。观测发口已拍板、尚未实现（[观测的公开线](docs/decisions/proposed/2026-09-07-observation-public-face.md)）。
 _Avoid_：service（那是 ABI 里的泛称）
 
 **代**：

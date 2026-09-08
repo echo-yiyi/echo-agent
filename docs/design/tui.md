@@ -1,5 +1,7 @@
 # 产品级 TUI 设计方案
 
+> 状态：P0–P2 与 P3 的 `/model`、`/clear` 已落地（2026-09-01 前后）；2026-09-08 从 `docs/review/` 搬入 `docs/design/` 并登记（八处源码与测试把它当设计权威引用，不该住在免门目录里）。正文仍按当时的方案写、未按现状重写——「现在的 TUI」指 2026-08-31 的样子。§九 的 D1–D8 是这条线的决策留痕，尚未各自成条进 `docs/decisions/`。
+
 ## 导读
 
 **给谁看**：要实现这份方案的人。假设你已经知道 `AgentRuntime` 是什么、`packages/cli/` 现在长什么样，
@@ -86,7 +88,7 @@ Container 真正带来的是：**每条消息是一个组件，持有自己的�
 
 ### 用 `Editor`，不是 `Input`
 
-```ts
+```text
 import { Editor, setKeybindings } from "@earendil-works/pi-tui";
 ```
 
@@ -176,9 +178,9 @@ P0 交付物里要有一份写死的 `EditorTheme` 常量（放 `packages/cli/sr
 为什么是门不是纪律：**假 TUI 测不出这类 bug**——`fake-tui.ts` 的 `feed()` 直接把字符串交给
 `handleInput`，绕过了终端编码这一层。所以：
 
-- `test/key-discipline.test.ts`：`packages/cli/src/` 里 `fromCharCode` 只许出现在拼 ANSI **输出**常量的
+- `packages/cli/test/key-discipline.test.ts`：`packages/cli/src/` 里（递归）`fromCharCode` 只许出现在拼 ANSI **输出**常量的
   那种行上（`const ESC = String.fromCharCode(27);`）与注释里，其余一律红；门自带正反例自检。
-- `test/tui-pty.test.ts`（驱动在 `test/pty-driver.py`，python3 标准库的 `pty`——Bun 1.3 没有 pty）：
+- `packages/cli/test/tui-pty.test.ts`（驱动在 `packages/cli/test/pty-driver.py`，python3 标准库的 `pty`——Bun 1.3 没有 pty）：
   真 PTY 里把 `ESC[100;5u`（Kitty 的 Ctrl+D）、`ESC[99;5u`（Kitty 的 Ctrl+C）、`ESC O B`（应用光标键 ↓）
   送进去，断言**行为**（退没退出、光标到没到下一家）而不是抓屏——差分渲染下旧帧还在缓冲里，
   抓屏会把「清掉了」误判成「还在」。没有 python3 时这条门**红而不是跳过**。

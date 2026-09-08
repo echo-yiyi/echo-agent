@@ -1,5 +1,5 @@
 {
-  "$comment": "文档花名册。只登记已存在且明确纳入维护的文档;登记表示受门约束,不表示内容已经批准。计划中的文档放 issue,不放这里当 CI 判据。docs/review 只放 prompt 与未纳入维护的 scratch,整个目录不受文档门约束;有明确读者与退出条件的审阅稿必须移出并登记。字段只有两个:path 与 bilingual。曾经有过的 sections / maxWords / tier 已撤(它们用结构近似代替内容判断,两头都不准)。fileRefsExclude 按定义就是装「举例路径」的文件——filerefs 分不清引用与举例,这是它已知的边界,豁免必须写明理由,不许无声扩大。 决策记录:状态即目录(proposed / implemented / rejected),移动目录即变更状态;每条都要登记——登记的动作本身是一次人审。proposed 指「提出到实现之间」:拍没拍板写在记录头部的状态行里(拍板日期),不另设目录——已拍板未实现的记录留在 proposed/,实现合入时移入 implemented/。 docs/code-review 放按日期归档的代码 review 记录:点时快照,不随代码维护,历史留在提交历史里,所以整个目录不受文档门约束;里面的发现要关闭就变成提交或决策记录,不改快照本身。",
+  "$comment": "文档花名册。只登记已存在且明确纳入维护的文档;登记表示受门约束,不表示内容已经批准。计划中的文档放 issue,不放这里当 CI 判据。docs/review 只放 prompt 与未纳入维护的 scratch,整个目录不受文档门约束;有明确读者与退出条件的审阅稿必须移出并登记。字段只有两个:path 与 bilingual。曾经有过的 sections / maxWords / tier 已撤(它们用结构近似代替内容判断,两头都不准)。fileRefsExclude 按定义就是装「举例路径」的文件——filerefs 分不清引用与举例,这是它已知的边界,豁免必须写明理由,不许无声扩大。豁免理由:test/docs-lint-fixtures.test.ts 是门自己的正反例;docs/design/tui.md 引用 pi 仓(pi-tui 的源码仓)的路径作为出处,不是本仓路径。 决策记录:状态即目录(proposed / implemented / rejected),移动目录即变更状态;每条都要登记——登记的动作本身是一次人审。proposed 指「提出到实现之间」:拍没拍板写在记录头部的状态行里(拍板日期),不另设目录——已拍板未实现的记录留在 proposed/,实现合入时移入 implemented/。 docs/code-review 放按日期归档的代码 review 记录:点时快照,不随代码维护,历史留在提交历史里,所以整个目录不受文档门约束;里面的发现要关闭就变成提交或决策记录,不改快照本身。",
   "docs": [
     {
       "path": "CLAUDE.md",
@@ -50,7 +50,15 @@
       "bilingual": false
     },
     {
+      "path": "docs/design/tui.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-05-reply-layer.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-08-loop-layers-allow-empty.md",
       "bilingual": false
     },
     {
@@ -78,7 +86,7 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-03-session-is-the-state-root.md",
+      "path": "docs/decisions/implemented/2026-09-03-session-is-the-state-root.md",
       "bilingual": false
     },
     {
@@ -235,6 +243,7 @@
     "docs/code-review"
   ],
   "fileRefsExclude": [
-    "test/docs-lint-fixtures.test.ts"
+    "test/docs-lint-fixtures.test.ts",
+    "docs/design/tui.md"
   ]
 }

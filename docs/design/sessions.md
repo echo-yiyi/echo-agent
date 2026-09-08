@@ -3,7 +3,7 @@
 > 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 5 步（壳）实现了看与切两半（`/sessions`、`/resume`），`/clear` 落盘那半还没做；第 2 步（角色定义）未做；记忆三层 2026-09-07 已实现（那一条的决策记录随之移入 `implemented/`）——逐条见 §9。其余决策记录留在 `docs/decisions/proposed/` 直到各自实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
 > 读者：要实现会话面、给产品接会话工具、把 echo 嵌进常驻程序（多段会话同时工作）的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) 的实例生命周期与 admission；[Context 与 Message Flow](context-and-message-flow.md) 的 transcript / working context 术语；[Compaction](compaction.md) 的「策略是 extension、状态在 core」这条分法——本文对会话用同一条<br>
-> 决策记录（八条，本文只指向，不复述论证。状态见各自文件头，`implemented/` 的已落地）：[状态根 = session 目录](../decisions/proposed/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md) · [人优先，后台让位](../decisions/implemented/2026-09-07-preemptible-lease.md) · [agent 定义 = 产品内的角色](../decisions/proposed/2026-09-07-role-agent.md) · [session 的身份三件](../decisions/proposed/2026-09-07-session-identity.md) · [agent 是身份，session 是它的实例](../decisions/proposed/2026-09-07-agent-is-an-identity.md)
+> 决策记录（八条，本文只指向，不复述论证。状态见各自文件头，`implemented/` 的已落地）：[状态根 = session 目录](../decisions/implemented/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md) · [人优先，后台让位](../decisions/implemented/2026-09-07-preemptible-lease.md) · [agent 定义 = 产品内的角色](../decisions/proposed/2026-09-07-role-agent.md) · [session 的身份三件](../decisions/proposed/2026-09-07-session-identity.md) · [agent 是身份，session 是它的实例](../decisions/proposed/2026-09-07-agent-is-an-identity.md)
 >
 > 被后来的记录**改掉了一半**、读的时候要连着后一条看：[agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md)（产品打包成 bundle 那一半由 [agent 定义 = 产品内的角色](../decisions/proposed/2026-09-07-role-agent.md) 撤回）
 
@@ -231,29 +231,36 @@ type SessionRow = {
   readonly id: string;
   readonly name: string;
   readonly workspace: string;
-  readonly agentName: string;
+  /** 哪个产品开的（2026-09-07 从 agent 分出来）。 */
+  readonly product: string;
+  /** 挂的哪份 agent 定义，人读的名字：具名角色是它的名字，现写的是 "inline"，产品原样的是 "default"。 */
+  readonly agent: string;
   readonly main: boolean;
   readonly status: "active" | "closed";
   readonly alive: boolean;
+  /** 没活着就是 null——盘上那份是死状态，不许被读成「空闲」。 */
   readonly phase: "idle" | "working" | null;
 };
 
 type CreateSessionInput = {
-  readonly name: string;
-  readonly agent: string | { readonly identity: string; readonly tools?: readonly string[]; readonly model?: string };
+  readonly name?: string;
+  /** 名字（从三处来源那张表里找）或现写一份定义（形状见 packages/core/src/agent-def/types.ts 的 AgentDefinition）；不给 = 产品原样，不继承创建者的角色。 */
+  readonly agent?: string | { readonly identity: string; readonly tools?: readonly string[]; readonly model?: string };
   readonly workspace?: string;
   /** 第一条消息，投进新段的 inbox。工具面必填：一段 session 是为了做某件事才开的，没有这条就是一个永远躺着的空目录。 */
   readonly message: string;
+  /** 经 extension 面（session_create 工具）建的传 false；容器自己建的是 main。 */
+  readonly main?: boolean;
 };
 
 type SendResult =
-  | { readonly kind: "accepted"; readonly alive: boolean; readonly recordId: string }
-  | { readonly kind: "rejected"; readonly reason: "not-found" | "closed" | "invalid" };
+  | { readonly kind: "accepted"; readonly alive: true; readonly recordId: string }
+  | { readonly kind: "rejected"; readonly reason: "not-found" | "closed" | "invalid" | "unreachable"; readonly detail: string };
 
 interface EchoSessions {
   create(input: CreateSessionInput): Promise<SessionRow>;
-  list(filter?: { readonly workspace?: string; readonly includeClosed?: boolean }): Promise<readonly SessionRow[]>;
-  send(to: string, message: string, opts?: { readonly replyTo?: string }): Promise<SendResult>;
+  list(filter?: { readonly workspace?: string; readonly agent?: string; readonly product?: string; readonly includeClosed?: boolean }): Promise<readonly SessionRow[]>;
+  send(to: string, message: string): Promise<SendResult>;
   close(id: string): Promise<void>;
 }
 

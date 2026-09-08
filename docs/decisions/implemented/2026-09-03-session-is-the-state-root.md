@@ -1,6 +1,6 @@
 # 状态根 = session 目录，替代「状态根用户级 agents/<agentId>/」
 
-> 状态:proposed · 提出 2026-09-03 · 拍板 2026-09-03(口头,实现后移入 implemented) · 来源 [会话与 agent 集群](../../design/sessions.md) §2–§3 · 替代 2026-09-01「状态根用户级」(`packages/core/src/create-agent.ts` 的 `resolveStateDir()` 注释)
+> 状态:implemented · 提出 2026-09-03 · 拍板 2026-09-03(口头) · 实现 2026-09-03(d893c6e;门 `packages/core/test/sessions-cross-process.test.ts`,2026-09-08 review 复核后移入) · 来源 [会话与 agent 集群](../../design/sessions.md) §2–§3 · 替代 2026-09-01「状态根用户级」(`packages/core/src/create-agent.ts` 的 `resolveStateDir()` 注释)
 
 ## 现状(拍板前)
 

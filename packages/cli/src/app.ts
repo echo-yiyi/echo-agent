@@ -98,7 +98,7 @@ export function bannerLines(product: Pick<Product, "name" | "version">, cwd: str
 }
 
 /**
- * 欢迎头（P1，`docs/review/tui-design.md` §三）：启动时一次，在文档流最上面，跟着内容滚走。
+ * 欢迎头（P1，`docs/design/tui.md` §三）：启动时一次，在文档流最上面，跟着内容滚走。
  * 四行：是什么 / 在哪 / 用什么模型 / 键怎么按。模型来自 `AgentState.model`，cwd 是壳自己拿的。
  */
 function welcomeLines(product: Pick<Product, "name" | "version">, state: Readonly<AgentState>, cwd: string): string[] {
@@ -237,7 +237,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     ui.requestRender();
   };
 
-  // **用 pi-tui 的 `Editor`，不自己写**（P0，`docs/review/tui-design.md` §二）：多行、按词移动、
+  // **用 pi-tui 的 `Editor`，不自己写**（P0，`docs/design/tui.md` §二）：多行、按词移动、
   // 撤销、kill-ring、历史、bracketed paste、grapheme 边界、`CURSOR_MARKER`——全是它本身就有的行为。
   // 上一版用的是 `Input`（单行、无历史）；再上一版自写的 `PromptLine` 三条都错，review 逐条实测过。
   //

@@ -65,12 +65,12 @@
 ### 2.1 run
 
 - **开**：admission 通过，[`RunIntakeGate.openRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openRun) 与 `agent_start`。
-- **关**：intake 关门（[`tryCloseRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.tryCloseRun) 或 [`closeRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.closeRun)）→ `agent_end`。**`agent_end` 是 run 事件流的封口，不是 idle barrier**：它发出时 admission ticket 还没 settle，监听器里读到的 `status` 仍是 `generating`；要等空闲，等 `prompt()` / `continue()` 的 resolve（那就是 barrier），或订阅 `onChange` 看状态变化。不另设 barrier API（[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。**关门三件事（清 deadline timer、`closeRun`、`agent_end`）在 `finally` 里**，任何异常路径都走——现状只有 `break outer` 走得到，§7。
+- **关**：intake 关门（[`tryCloseRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.tryCloseRun) 或 [`closeRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.closeRun)）→ `agent_end`。**`agent_end` 是 run 事件流的封口，不是 idle barrier**：它发出时 admission ticket 还没 settle，监听器里读到的 `status` 仍是 `generating`；要等空闲，等 `prompt()` / `continue()` 的 resolve（那就是 barrier），或订阅 `onChange` 看状态变化。不另设 barrier API（[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。**关门三件事（清 deadline timer、`closeRun`、`agent_end`）在 `finally` 里**，任何异常路径都走（§8 第二个探针）。
 - **reply 之间**，按序：
-  1. 上一条 reply 是被 `shouldStopAfterTurn` 叫停的 → 直接关门（不 drain、不问 stop hook；现状语义）。
+  1. 上一条 reply 是被 `shouldStopAfterTurn` 叫停的 → 直接关门（不 drain、不问 stop hook）。
   2. reply 数 < `maxReplies`：drain followUp 有货 → 新 reply（`follow_up`）；没货 → 问 stop hook，block 且注入次数未到上限 → 新 reply（`stop_hook`）。**stop hook 最多把 agent 拉回来 3 次**（[`MAX_STOP_CONTINUATIONS`](../../packages/core/src/loop/run-loop.ts#symbol=MAX_STOP_CONTINUATIONS)），第 4 次 block 被忽略、run 照常关门。这是防死循环的保险丝，不是产品契约、不进配置（[决策](../decisions/implemented/2026-09-01-stop-continuation-limit.md)）。
   3. `tryCloseRun`：队列空 → 关门，`completed`；非空且 reply 数 < `maxReplies` → 新 reply（`follow_up`）；非空且已达上限 → `closeRun`，`error{max_replies}`。
-- **未吸收的消息**：drain 出来但没吸收进 transcript 的（turn 交出的 steer、达上限时 drain 出的 followUp）随关门作为 leftovers 经 `queue_dropped` 报出，与现状 `closeRun` 的报法同一条路。
+- **未吸收的消息**：drain 出来但没吸收进 transcript 的（turn 交出的 steer、达上限时 drain 出的 followUp）随关门作为 leftovers 经 `queue_dropped` 报出（`closeRun` 的报法）。
 
 ### 2.2 reply
 
@@ -90,12 +90,12 @@
 
 - **开**：`attempt_start`。
 - **内容**：压缩投影 → 每轮注入 → `transformContext` → `contextBeforeBuild`（block 则结果 `blocked`，不调模型）→ `convertToLlm` → 取 key → `streamFn` → 消费流（`message_start / message_update`）→ 定稿入 transcript（`message_end`、`usage`）。
-- **每个 attempt 完整重建。** 同一 turn 内重试时，`getTurnInjections`、`transformContext`、`contextBeforeBuild`、`convertToLlm`、`getApiKey` **每个 attempt 各调一次**。这是有意的：两次 attempt 之间上下文可能已被应急压缩改过，短命 key 可能已过期。代价是这些回调的契约要补一句「同一 turn 内可能被多次调用，有副作用的实现自己去重」——现状 dialect 重试是同一份请求体重发，不重建（§7）。
+- **每个 attempt 完整重建。** 同一 turn 内重试时，`getTurnInjections`、`transformContext`、`contextBeforeBuild`、`convertToLlm`、`getApiKey` **每个 attempt 各调一次**。这是有意的：两次 attempt 之间上下文可能已被应急压缩改过，短命 key 可能已过期。代价是这些回调的契约要补一句「同一 turn 内可能被多次调用，有副作用的实现自己去重」。方言层不再自带重试（`packages/core/src/provider/dialect.ts` 只剩 `RetryPolicy` 类型）。
 - **关**：`attempt_end{result}`。定稿的 `stopReason` 决定 `result.kind`：`end_turn / tool_use / max_tokens` → `landed`；`error` → `failed`；`aborted` → `aborted`。
 
 ### 2.5 tool call
 
-现状不变：[`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool) 的跨度从落地消息的 `message_end` 到 toolResult 的 `message_end`；`tool_execution_start` 只标记执行阶段开始，它前面的找不到 / 修参失败 / hook 拦 / 授权拒等出口只走 hook notify（见 Non-Goals）。
+[`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool) 的跨度从落地消息的 `message_end` 到 toolResult 的 `message_end`；`tool_execution_start` 只标记执行阶段开始，它前面的找不到 / 修参失败 / hook 拦 / 授权拒等出口只走 hook notify（见 Non-Goals）。
 
 ## 3. 类型与事件
 
@@ -164,7 +164,7 @@ run-turn.ts
 规则三条：
 
 1. **四层成对且严格嵌套；允许空层。** run 内至少一条 reply；reply 内**可以零 turn**——输入吸收之后轮首硬闸就命中（abort / deadline / `max_iterations`，§6 那一行）；turn 内**可以零 attempt**——`turn_start` 之后、发请求之前被 abort。消费者按栈配对消费永远成立；「取 turn 的最后一个 attempt」「按 attempt 数算重试率」这类非空假设不成立。（2026-09-08 review 放宽：此前写「每层至少一对」，而 §6 的轮首硬闸行自己就承认 n=0，普通用户 Ctrl-C 落在 `turn_start` 期间就能造出零 attempt 的 turn；为满足文档去造一对假的 attempt 事件不如把话说准。）
-2. **输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`**（轮首 `maybeCompact()` 触发时插在这里）；轮首硬闸在吸收之后就命中时没有 `turn_start`，紧接着是 `reply_end`（规则 1 的零 turn reply）。prompt / followUp / stop hook 的在 `reply_start` 之后；steer 的在上一个 `turn_end` 之后。现状 prompt 的 `message_end` 落在 `agent_start` 之前（§7），按 run 分组事件时它在区间外。
+2. **输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`**（轮首 `maybeCompact()` 触发时插在这里）；轮首硬闸在吸收之后就命中时没有 `turn_start`，紧接着是 `reply_end`（规则 1 的零 turn reply）。prompt / followUp / stop hook 的在 `reply_start` 之后；steer 的在上一个 `turn_end` 之后。
 3. **失败不破配对。** 失败 attempt 的 assistant 消息照常 `message_start … message_end`，随后 `attempt_end{failed}`；只是不落地。
 
 `queue_update`、`resource_changed` 不是 loop 事件，可以出现在任何位置，排序规则不管它们。
@@ -219,9 +219,11 @@ agent_end{completed}
 | — | — | 轮首硬闸：`aborted` / `error{max_iterations}` / `error{timeout}` | 同 reply |
 | — | — | — | reply 之间：达 `maxReplies` 且仍有待办 → `error{max_replies}` |
 
-## 7. 与现状的差异
+## 7. 落地记录（2026-09-05 的现状 → 目标）
 
-| 现状 | 目标 | 影响面 |
+左栏是写这份设计时的现状，**已全部按右栏落地**（2026-09-08 逐行复核）；表留作迁移记录，读现状看 §2–§5。与表里写的三处出入：block 用例的事件序列断言落在 `packages/core/test/loop-layers.test.ts`，`prompt.test.ts` 的用例仍只断 outcome；失败定稿的投影丢弃在 `packages/core/src/messages.ts`（不是 `message-shape.ts`），且范围是 `stopReason` 为 `error` 或 `aborted`（2026-09-07 修订）；压缩摘要器自带的重试环（`packages/core/src/compaction/pipeline.ts`）是独立模型调用、只发 hook 事件，不是 turn 的 attempt。
+
+| 现状（2026-09-05） | 目标（已落地） | 影响面 |
 |---|---|---|
 | [`runTurn`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 每次重跑都发一对 `turn_start / turn_end`，同一 `iteration`；[`openTurn`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openTurn) 为此专门顺延上一 turn 的 steer | 一个 turn 一对事件；重跑是 attempt；`openTurn` 的顺延分支删除 | 事件消费者：`agent.ts`、`memory/dream.ts`、`memory/harness.ts`、`observability/agent-events.ts`；10 个测试文件 |
 | `turn_end` 在工具批之后立即发，早于 `decideAfterTurn`（已删）里的 `closeTurn` | `closeTurn` 之后发；gate 与事件边界重合 | 同上 |
@@ -240,24 +242,24 @@ agent_end{completed}
 
 ## 8. 复核
 
-`contextBeforeBuild` block 时事件不配对（现状）：
+`contextBeforeBuild` block 时四层仍配对（回归探针）：
 
 ```bash
 bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRuntime } from "./packages/core/src/hooks/runtime.ts"; import { FAKE_MODEL, scriptedStreamFn, textTurn } from "./packages/core/src/testing.ts"; const h = new HookRuntime(); h.on("contextBeforeBuild", () => ({ decision: "block", reason: "NO" })); const a = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("x")]), hooks: h }); const ev: string[] = []; a.subscribe((e) => { ev.push(e.type); }); await a.prompt("go"); console.log(ev.join(","));'
 ```
 
-当前输出：`message_end,agent_start,turn_start,agent_end`——`turn_start` 一个、`turn_end` 零个，且 `message_end` 在 `agent_start` 之前。
+应打印 `agent_start,reply_start,message_end,turn_start,attempt_start,attempt_end,turn_end,reply_end,agent_end`（2026-09-08 实测）：四层各自成对，输入在 `reply_start` 之后吸收。落地前这里是 `message_end,agent_start,turn_start,agent_end`。
 
-`runTurn` 抛出时 deadline timer 泄漏（现状）：
+`runTurn` 抛出时 deadline timer 不撑住进程（回归探针）：
 
 ```bash
 bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { FAKE_MODEL } from "./packages/core/src/testing.ts"; const boom = (() => { throw new Error("BOOM"); }) as any; const a = new Agent({ model: FAKE_MODEL, streamFunction: boom, timeoutMs: 8000 }); const r = await a.prompt("go"); console.log(r.outcome.kind, "logic done — process should exit now");'
 ```
 
-当前行为：打印后进程再挂 8 秒才退出（timer 撑住 event loop）。
+应打印 `error logic done — process should exit now` 后立即退出（2026-09-08 实测 0.04s；timer 在 `finally` 里清）。落地前进程会再挂 8 秒。
 
 主路径回归：
 
 ```bash
-bun test packages/core/test/invariants.test.ts packages/core/test/intake.test.ts packages/core/test/prompt.test.ts packages/core/test/compaction.test.ts
+bun test packages/core/test/loop-layers.test.ts packages/core/test/invariants.test.ts packages/core/test/intake.test.ts packages/core/test/prompt.test.ts packages/core/test/compaction.test.ts
 ```

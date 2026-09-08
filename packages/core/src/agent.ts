@@ -3,7 +3,8 @@
 // 为什么是类不是函数（三条，函数形态给不出）：
 //   ① 生命周期跨越多次调用——`streamingMessage` / `pendingToolCalls` 这些「正在发生什么」
 //      在函数里无处安放，UI 也就永远拿不到逐字流。
-//   ② 状态需要唯一所有者——`apply` 私有，「状态只能被事件改」从纪律升级成**结构保证**。
+//   ② 状态需要唯一所有者——事件应用集中在私有 `processEvents()`；run 内投影的主要字段由事件驱动，
+//      装备面 setter / reset / 恢复 / setWorkspace 与 run 开合处的直写是另一条显式路径，两条都在类内（是纪律不是门）。
 //   ③ 决策点需要具名外露——convertToLlm / transformContext / streamFunction / hooks
 //      是公共可替换字段：上层换行为不改内核，评测塞假 streamFn 就能跑。
 
@@ -3143,7 +3144,7 @@ export class Agent {
     };
   }
 
-  /* ───────────── 私有：事件 → 状态的唯一写路径 ───────────── */
+  /* ───────────── 私有：事件 → 状态的归约路径 ───────────── */
 
   private async emit(event: AgentEventInput): Promise<void> {
     await this.processEvents(event);

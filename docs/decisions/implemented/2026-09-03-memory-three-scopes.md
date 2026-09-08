@@ -4,7 +4,7 @@
 
 ## 现状(拍板前)
 
-memory 一层,在状态根下(`~/.echo/agents/default/memory/`),所有会话共用;dream 在每个 `Agent` 实例 idle 时整理这一份。状态根变成 session 目录之后(见 [状态根 = session 目录](../proposed/2026-09-03-session-is-the-state-root.md)),memory 若跟着下去就变成每段一份、互不可见;若留在共享层,N 段 session 的 dream 同时整理同一份是真冲突。
+memory 一层,在状态根下(`~/.echo/agents/default/memory/`),所有会话共用;dream 在每个 `Agent` 实例 idle 时整理这一份。状态根变成 session 目录之后(见 [状态根 = session 目录](2026-09-03-session-is-the-state-root.md)),memory 若跟着下去就变成每段一份、互不可见;若留在共享层,N 段 session 的 dream 同时整理同一份是真冲突。
 
 ## 不拍板的代价
 

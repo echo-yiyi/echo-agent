@@ -1,4 +1,4 @@
-// 真 PTY 里的按键判据（`docs/review/tui-design.md` §二「按键处理的纪律」第二条门）。
+// 真 PTY 里的按键判据（`docs/design/tui.md` §二「按键处理的纪律」第二条门）。
 //
 // 假 TUI 证明不了这件事：`fake-tui.ts` 的 `feed()` 直接把字符串交给 `handleInput`，
 // 终端编码这一层（raw mode、StdinBuffer 切包、Kitty 协议探测）全绕过了。

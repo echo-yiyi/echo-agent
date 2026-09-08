@@ -1,4 +1,4 @@
-// 按键处理的纪律，做成门（`docs/review/tui-design.md` §二「按键处理的纪律」）。
+// 按键处理的纪律，做成门（`docs/design/tui.md` §二「按键处理的纪律」）。
 //
 // 事实：同一个按键在不同终端下有多种字节形式。pi-tui 探测并启用 Kitty 键盘协议之后
 // （`dist/terminal.js:120`），Ctrl+C 到达是 `ESC[99;5u` 而不是 `0x03`；↓ 可能是应用光标键的

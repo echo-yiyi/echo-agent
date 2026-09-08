@@ -54,17 +54,22 @@ await echo.stop();                      // 先卸扩展 → 等落盘 settle →
 闹钟、观测库——都变成按 session 一份。同一台机器上两段 `echo-coding` 因此各拿各的锁、能同时起来；
 在旧布局（`agents/<agentId>/`）下第二段直接 fail-loud。
 
-跨 session 共享的两件**不在**状态根下，在 user 层（`$ECHO_HOME`，缺省 `~/.echo`）：
+跨 session 共享的记忆与技能**不在**状态根下，在 `$ECHO_HOME`（缺省 `~/.echo`）下面：
 
 | 放什么 | 在哪 |
 | --- | --- |
 | 这一段的账本、inbox、tasks、schedule、lease、观测库 | `<ECHO_HOME>/sessions/<id>/` |
-| 记忆 | `<ECHO_HOME>/memory/` |
+| 记忆 · user 层（这个用户的所有 session） | `<ECHO_HOME>/memory/` |
+| 记忆 · project 层（在同一个目录下工作的 session） | `<ECHO_HOME>/projects/<workspace 哈希>/memory/` |
+| 记忆 · role 层（跑同一个角色定义的 session；没有角色名就没有这层） | `<ECHO_HOME>/agents/<角色名>/memory/` |
 | 技能 | `<ECHO_HOME>/skills/` |
 | 凭据、设置、扩展 | `<ECHO_HOME>/` |
 
+记忆作用域**由产品声明**，core 不认识具体层名；上面三层是 core 的缺省表（`DEFAULT_MEMORY_SCOPES`，`packages/core/src/create-agent.ts`），
+产品给 `memoryScopes` 就整份替换。
+
 工作目录是 **session** 的字段（`SessionInfo.workspace`），不是状态根的一部分——换个目录起就是新的一段，
-记忆与技能仍是同一份。**要整体隔离（评测、单测）就设 `ECHO_HOME`**：只给 `stateDir` 只挪走 session 那一半。
+user 层记忆与技能仍是同一份，project 层按 workspace 哈希换一套。**要整体隔离（评测、单测）就设 `ECHO_HOME`**：只给 `stateDir` 只挪走 session 那一半。
 
 ## 公共面
 
