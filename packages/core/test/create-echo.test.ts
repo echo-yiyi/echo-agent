@@ -173,6 +173,14 @@ test("扫 extensions/ → 两个 Extension 都 mount，工具真的进了 agent 
   expect(names).toContain("fixture_nested");
 });
 
+test("Echo.start()：第三方的启动入口，就是 agent.start() 的转发，幂等（2026-09-08，Agent 内部化前先开这条缝）", async () => {
+  const echo = await echoAt({ stateDir: join(await tmp(), "state"), turns: [textTurn("在")] });
+  await echo.start();
+  await echo.start(); // 幂等：与 agent.start() 同一份判据
+  const result = await echo.send("在吗");
+  expect(result.outcome.kind).toBe("completed");
+});
+
 test("**装上了 ≠ 用得上**：模型点名调扩展里的工具，execute 真的被执行、结果回到会话里", async () => {
   const echo = await echoAt({
     stateDir: join(await tmp(), "state"),

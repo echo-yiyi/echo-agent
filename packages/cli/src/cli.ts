@@ -522,7 +522,7 @@ async function runServe(
       if (e.type === "notification" && (e.message.startsWith("[lease_handoff]") || e.message.startsWith("[lease_lost]"))) gone = true;
     });
     try {
-      await echo.agent.start();
+      await echo.start();
       // 起来这一下就会把盘上攒着的 inbox 吃掉（`start()` 里那句 `consumeInbox()`）。
       // 之后靠每秒一拍的轮询接着收别人写进来的；连着空闲够久就收摊。
       let idleSince = Date.now();
@@ -623,7 +623,7 @@ async function runInteractive(
     pending = [];
     try {
       // **启停归这一层**，不归壳：协议里没有 `start`/`stop`，壳子想碰也碰不到。
-      await echo.agent.start();
+      await echo.start();
     } catch (e) {
       await echo.stop();
       if (fallback === undefined) throw e; // 头一段就起不来：照旧 fail-loud，别把报错吞成一句口信

@@ -23,7 +23,7 @@
 3. **mount**，按代：`builtin`（`echo:*` 表，`packages/core/src/extension/builtin.ts`）→ `boot:inline`（`agent.tools` 转成的 `echo:inline-tools`，加容器开了会话面时的 `echo:sessions`）→ 盘上发现的每个扩展**各一代**（坏一个只回滚它自己、记一条 `Echo.diagnostics`，agent 照起）→ `boot`（显式传入的 `opts.extensions`，含壳；失败 fail-loud 整体不起）。
 4. 返回 `Echo` 句柄：`agent`、`send()`、`observations`、`extensions`、`diagnostics`、`sessions`、`stop()`。`stop()` single-flight，按 mount 的逆序卸所有代再停 Agent。
 
-宿主随后显式 `await echo.agent.start()`：取单写者 lease、恢复 session / skill / tasks / schedule / inbox、打开 intake 与自主活动。装配不启动，启动不装配。
+容器随后显式 `await echo.start()`（就是 `agent.start()`，2026-09-08 起 `Echo` 自己带，第三方不必碰 `agent`）：取单写者 lease、恢复 session / skill / tasks / schedule / inbox、打开 intake 与自主活动。装配不启动，启动不装配。
 
 ## 3. Agent 与四层循环
 
@@ -66,7 +66,7 @@
 
 ## 6. 状态落在哪
 
-**状态根 = 一段 session 的目录**（`resolveStateDir()`，`packages/core/src/create-agent.ts`）：`<ECHO_HOME>/sessions/<id>/` 下是 meta、transcript 账本（一条 entry 一个文件）、inbox、tasks、schedule、dream 状态、lease、`status.json`、观测库。布局与不变量见 [会话与 agent 集群](design/sessions.md) §3。记忆分三层：session 层在状态根的 `memory/` 下（dream 的计数与锁也在那里），跨 session 共享的 project 层在 `<ECHO_HOME>/projects/<hash>/`、user 层与技能在 `<ECHO_HOME>/`。
+**状态根 = 一段 session 的目录**（`resolveStateDir()`，`packages/core/src/create-agent.ts`）：`<ECHO_HOME>/sessions/<id>/` 下是 meta、transcript 账本（一条 entry 一个文件）、inbox、tasks、schedule、dream 状态、lease、`status.json`、观测库。布局与不变量见 [会话与 agent 集群](design/sessions.md) §3。记忆的作用域由产品声明（`packages/core/src/memory/scope.ts`，core 不认识层名）；core 的缺省表是 user / project / role 三层（`DEFAULT_MEMORY_SCOPES`，`packages/core/src/create-agent.ts`）：user 层在 `<ECHO_HOME>/memory/`，project 层在 `<ECHO_HOME>/projects/<workspace 哈希>/memory/`，role 层在 `<ECHO_HOME>/agents/<角色名>/memory/`（没有角色名的 session 没有这层）；每层的 dream 状态（`.dream/`）跟着那层走。技能在 `<ECHO_HOME>/skills/`。
 
 三条硬约定怎么守：
 
@@ -103,7 +103,7 @@
 | 守什么 | 在哪 |
 |---|---|
 | 公共符号表不漂 | `packages/core/test/api-snapshot.test.ts`（清点脚本 `packages/core/scripts/api-inventory.ts`） |
-| core 零运行时依赖（manifest 三字段恒空；源码闭包那半只拦 MCP SDK，其余裸 import 靠纪律） | `packages/core/test/zero-runtime-deps.test.ts` |
+| core 零运行时依赖（manifest 三字段恒空；`src/**` 里 import 只许 `node:` / `bun` / 相对路径） | `packages/core/test/zero-runtime-deps.test.ts` |
 | 四层事件成对且严格嵌套（允许空层：reply 可零 turn、turn 可零 attempt） | `packages/core/test/loop-layers.test.ts` |
 | 单写者（互斥、可让位交还）与写入闸 | `packages/core/test/state-lock.test.ts`、`packages/core/test/lease-handoff.test.ts`、`packages/core/test/write-gate.test.ts` |
 | 装配所有权（adopt / borrow、失败 unwind） | `packages/core/test/assembly.test.ts`、`packages/core/test/create-echo.test.ts` |

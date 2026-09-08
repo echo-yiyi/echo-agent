@@ -13,9 +13,10 @@ import { join } from "node:path";
 //   ① manifest 三字段——`optionalDependencies` 仍在运行时依赖图里，
 //     `peerDependencies` 把依赖推给宿主，只查 `dependencies` 留了两个绕行口；
 //   ② 源码闭包——manifest 干净但源码里 import 了，装的时候不报错、跑的时候才炸。
-//     **这条今天只拦 `@modelcontextprotocol` 一个包名**（`SDK_IMPORT`），不是泛查裸 specifier：
-//     某个子路径 import 了根 node_modules 里恰好有的别的包，typecheck 与本门都绿、装出去才炸——
-//     那一片靠纪律（review 2026-09-07 登记）。要扩成「`src/**` 的裸 specifier 只许 `node:` / `bun:`」是另一次拍板。
+//     `src/**` 里的 import / `import()` / `require()` 只许 `node:` / `bun` / `bun:` 前缀和相对路径
+//     （2026-09-08 用户拍板扩到全部裸 specifier；此前只拦 `@modelcontextprotocol` 一个包名，
+//     子路径 import 了根 node_modules 里恰好有的别的包时 typecheck 与本门都绿、装出去才炸）。
+//     `@echo-agent/core` 自己的子路径也放行——它不是运行时依赖，只在注释示例里出现。
 
 const RUNTIME_DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"] as const;
 const PKG_ROOT = join(import.meta.dir, "..");
@@ -33,29 +34,51 @@ test("@echo-agent/core 的运行时依赖三字段恒空", () => {
 
 // 查的是 **import 语句**，不是「文件里出现过这个字符串」——
 // 注释里写清「为什么把 SDK 挪出去」是应该的，不该被门判红（首次跑就撞到了这一条）。
-// 静态 import、动态 `import(...)`、`require(...)` 三种写法都盖住：
+// 静态 import / export-from、动态 `import(...)`、`require(...)` 三种写法都盖住：
 // 曾经 `harness.ts` 就用动态 import 藏着一条 StreamableHTTP 传输。
-const SDK_IMPORT = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["'`]@modelcontextprotocol/;
+const IMPORT_SPECIFIER = /(?:\bfrom[ \t]*|\bimport[ \t]*\(?[ \t]*|\brequire[ \t]*\([ \t]*)["'`]([^"'`\n]+)["'`]/g;
+/** 放行的 specifier：Node / Bun 内建、相对路径、自己包的子路径。别的一律是运行时依赖。 */
+const ALLOWED_SPECIFIER = /^(?:node:|bun(?::|$)|\.{1,2}\/|@echo-agent\/core(?:\/|$))/;
+/** 注释先剥掉：JSDoc 里「见 `from` … `x`」这种散文会被上面的正则当成 import（实测 compaction/types.ts 撞到）。 */
+const COMMENTS = /\/\*[\s\S]*?\*\/|(?:^|\s)\/\/.*$/gm;
 
-test("core 源码里没有任何 MCP SDK import（端口留下，实现出去）", () => {
+/** 一段源码里违规的 specifier（去重，按出现顺序）。 */
+function bareImports(source: string): string[] {
+  const out: string[] = [];
+  for (const m of source.replace(COMMENTS, " ").matchAll(IMPORT_SPECIFIER)) {
+    const spec = m[1]!;
+    if (!ALLOWED_SPECIFIER.test(spec) && !out.includes(spec)) out.push(spec);
+  }
+  return out;
+}
+
+test("core 源码里的 import 只许 node: / bun / 相对路径（MCP SDK 在内的任何包都不许，端口留下、实现出去）", () => {
   const offenders: string[] = [];
   for (const file of walk(join(PKG_ROOT, "src"))) {
-    if (SDK_IMPORT.test(readFileSync(file, "utf8"))) offenders.push(file.slice(PKG_ROOT.length + 1));
+    const bad = bareImports(readFileSync(file, "utf8"));
+    if (bad.length > 0) offenders.push(`${file.slice(PKG_ROOT.length + 1)}: ${bad.join(", ")}`);
   }
   expect(offenders).toEqual([]);
 });
 
 // 上面那条门只要 `src/` 干净就恒绿——**恒绿的门等于没有门**。
 // 这条用已知正反例证明它的判据真能分辨，改正则时先在这里加一行。
-test("上一条门的判据真能分辨（3 正例抓到 / 2 反例放行）", () => {
-  const caught = (src: string): boolean => SDK_IMPORT.test(src);
+test("上一条门的判据真能分辨（5 正例抓到 / 7 反例放行）", () => {
+  const caught = (src: string): boolean => bareImports(src).length > 0;
   expect(caught('import { Client } from "@modelcontextprotocol/sdk/client/index.js";')).toBe(true);
   expect(caught('const { T } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");')).toBe(true);
   expect(caught('const x = require("@modelcontextprotocol/sdk");')).toBe(true);
-  // 注释里写清「为什么把 SDK 挪出去」不该判红
-  expect(caught("// 会把 `@modelcontextprotocol/sdk` 拖进 core 的根依赖图")).toBe(false);
-  // core 自己的端口子路径不是 SDK
+  expect(caught('import ts from "typescript";')).toBe(true); // 根 node_modules 里恰好有的包，装出去才炸
+  expect(caught('export { z } from "zod";')).toBe(true); // export-from 也是一条依赖
+  // 内建、相对路径、自己包的子路径都放行
+  expect(caught('import { join } from "node:path";')).toBe(false);
+  expect(caught('import { Database } from "bun:sqlite"; import { file } from "bun";')).toBe(false);
+  expect(caught('import { x } from "./x.ts"; export * from "../y.ts";')).toBe(false);
   expect(caught('import { MCP_KIND } from "@echo-agent/core/mcp";')).toBe(false);
+  // 注释里写清「为什么把 SDK 挪出去」不该判红；JSDoc 散文里的 `from` 后面跟着反引号也不是 import
+  expect(caught("// 会把 `@modelcontextprotocol/sdk` 拖进 core 的根依赖图")).toBe(false);
+  expect(caught("/** 切点从 `from`\n *   升序、互不重叠；见 `lodash` */\nimport { a } from './a.ts';")).toBe(false);
+  expect(caught("const x = 1; // import 'lodash' 只是句注释")).toBe(false);
 });
 
 function walk(dir: string): string[] {

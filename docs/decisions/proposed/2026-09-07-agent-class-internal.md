@@ -33,6 +33,7 @@ README 说「两个使用高度」:高 = `createEcho()`,低 = `new Agent()`。�
    按新判据收回去的:`Agent` / `AgentOptions`(理由见第 4 条)、session 状态文件的读写(`readSessionPhase` 等——那是容器内部的事,第三方经 `Echo.sessions` 拿 core 合成好的行)。**留下的**:装配、provider、写工具的词汇、hooks / permission / question 类型、消息与事件、`AgentRuntime`、落盘默认件、`listSessions`,**以及压缩阶梯的作者函数**(`frameFull` / `snipStage` / 估算一族——第三方要写自己的压缩策略就得用;旧判据把它们判成「零消费者→收内部」,是错的)。它们留在根入口还是下沉到 `./compaction` 子路径,是实现时的一步,不改「留」这个结论。
 2. **评测与 core 自己的测试走 `createEcho()`**,不走 `new Agent()`。它要的零盘路径**已经有了**:给了自定义 `store` 又没点名 `stateDir` 时观测库开 `:memory:`(71150f0),配上 `InMemoryDir` 与 `InMemoryStateLock` 就是一次不碰盘的完整装配。想换掉观测 store 本身是另一件事,见 [观测的公开线](2026-09-07-observation-public-face.md)。
 3. **四条 2026-09-01 记录移入 `rejected/`**,状态行指向本条。它们讲的公共契约不存在了;剩下两个内部实现项(`dispose()` 不还锁、fenced 是隐藏 latch)随内部化一起修,不再是决策。
+4. **`Echo.start()` 先开出来**(2026-09-08 用户拍板,review 批 5 发现):内部化之前第三方就得有一条不经 `agent` 的启动入口,否则 README 的 quickstart 只能教 `echo.agent.start()`。`Echo` 加 `start()`,就是 `agent.start()` 的转发;README / examples / cli 改走它,`echo.agent` 字段随内部化退场。
 
 ## 验收
 

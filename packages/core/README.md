@@ -11,7 +11,7 @@ import { createEcho, type Provider } from "@echo-agent/core";
 declare const myProvider: Provider;
 
 const echo = await createEcho({ provider: myProvider });
-await echo.agent.start();               // 取单写锁 → 恢复会话（今天还得经 echo.agent：Echo 自己没有 start()）
+await echo.start();                     // 取单写锁 → 恢复会话
 const result = await echo.send("把 README 翻成英文"); // = agent.prompt() + 观测三元组，第三方走这条
 await echo.stop();                      // 先卸扩展 → 等落盘 settle → 释放锁
 ```

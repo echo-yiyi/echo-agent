@@ -83,7 +83,7 @@ const echo = await createEcho({
   // 注意：**没有 `agent: { tools: [...] }`**。工具全部来自扩展。
 });
 
-await echo.agent.start();
+await echo.start();
 try {
   const result = await echo.agent.prompt("今年是哪一年？用工具查。");
   const toolResults = echo.agent.messages.filter((m) => m.role === "toolResult");

@@ -126,6 +126,12 @@ export type LoadedExtension = Readonly<{
 export type Echo = Readonly<{
   agent: Agent;
   /**
+   * 启动（2026-09-08）：就是 `agent.start()`——取单写者 lease、恢复 session / skill / tasks / schedule / inbox、打开 intake。
+   * 装配不启动，启动不装配；第三方走这条，不碰 `agent`（`Agent` 类内部化后 `agent` 字段退场，见
+   * `docs/decisions/proposed/2026-09-07-agent-class-internal.md` 第 4 条）。幂等，与 `agent.start()` 同一份判据。
+   */
+  start(options?: { activation?: "immediate" | "deferred" }): Promise<void>;
+  /**
    * 完整 Runtime 的一次 user run（OR5）：`agent.prompt()` 加上观测三元组。
    * 观测层永远拦不住 run：store 写不动时 run 照跑，只是 `observationPersistence` 报 `degraded`（2026-09-03 用户拍板）。
    */
@@ -292,8 +298,8 @@ export async function loadExtensionFile(file: string): Promise<ExtensionDefiniti
  *
  * ```ts
  * const echo = await createEcho({ provider: kimiProvider() });
- * await echo.agent.start();
- * await echo.agent.prompt("hello");
+ * await echo.start();
+ * await echo.send("hello");
  * await echo.stop();
  * ```
  *
@@ -567,6 +573,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
 
     return Object.freeze({
       agent,
+      start: (options?: { activation?: "immediate" | "deferred" }): Promise<void> => agent.start(options),
       send,
       sessions,
       observations: observation.observations,
