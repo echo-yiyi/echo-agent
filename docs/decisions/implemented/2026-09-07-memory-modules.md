@@ -1,14 +1,14 @@
-# 「分区」改称记忆模块,走 registry 注册(内建的和第三方同一条),动词集按模块配置
+# 「模块」改称记忆模块,走 registry 注册(内建的和第三方同一条),动词集按模块配置
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 与 [作用域由产品声明](2026-09-07-memory-scopes-by-product.md) 是同一次设计的两个轴
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头) · 实现并合入 2026-09-08 · 与 [作用域由产品声明](2026-09-07-memory-scopes-by-product.md) 是同一次设计的两个轴
 
 ## 现状(拍板前)
 
-**术语。** 今天叫「分区」([CONTEXT.md](../../../CONTEXT.md) 有词条),指"记的是什么"这一维——`agent.md` / `user.md` / 笔记及其索引。
+**术语。** 今天叫「模块」([CONTEXT.md](../../../CONTEXT.md) 有词条),指"记的是什么"这一维——`agent.md` / `user.md` / 笔记及其索引。
 
 **装配。** 内建三个是 [`createAgentMemories`](../../../packages/core/src/memory/harness.ts#symbol=createAgentMemories) 的默认值,`memories` 选项的注释写着"不传 = 内建三层;传了 = 完全接管,内建一个都不带"——这是**全有全无的开关,不是注册口**。`CustomMemories` 这个声明合并的扩展位存在,但没有任何注册路径,要让它生效得整体替换 `composeMemory` / `checkWrite` 两个分发函数。[docs/architecture.md](../../architecture.md) 那句"memory 的 registry 等第一个消费者"因此一直等着。
 
-**动词。** 六动词(view / create / str_replace / insert / delete / rename)是**照抄 Anthropic memory tool 的命令面**(`memory/tool.ts` 开头写明判据是"别人训练好的行为能不能在我们这直接跑"),一把工具服务全部分区,任何分区都能收任何动词。
+**动词。** 六动词(view / create / str_replace / insert / delete / rename)是**照抄 Anthropic memory tool 的命令面**(`memory/tool.ts` 开头写明判据是"别人训练好的行为能不能在我们这直接跑"),一把工具服务全部模块,任何模块都能收任何动词。
 
 **语义。** `agentMemory` 的 instructions 是"your own stable knowledge — environment facts, project conventions, tool quirks, lessons learned",预算 2200 字符、全文常驻 system。
 
@@ -30,9 +30,9 @@
 
 **B**(2026-09-07 用户拍板)。C 会让 `echo-agent`(它自己也是个产品)为了拿到默认模块先写一份 preset;而这三样按用户给的定义是通用的,不是哪个产品特有的。
 
-### 术语:分区 → 记忆模块
+### 术语:模块 → 记忆模块
 
-「分区」这个词退役,统一叫**记忆模块**。改名跟着实现一次性做(枚举文件逐个过 diff,不全仓 `sed`),涉及 [CONTEXT.md](../../../CONTEXT.md) 词条、[会话与 agent 集群](../../design/sessions.md) §2、[记忆三级作用域](../implemented/2026-09-03-memory-three-scopes.md),以及 `memory/` 下的注释与错误文案。不留"新写的用新词、旧的不回填"的中间态——同一个概念两个词,正是词表存在的理由。
+「模块」这个词退役,统一叫**记忆模块**。改名跟着实现一次性做(枚举文件逐个过 diff,不全仓 `sed`),涉及 [CONTEXT.md](../../../CONTEXT.md) 词条、[会话与 agent 集群](../../design/sessions.md) §2、[记忆三级作用域](2026-09-03-memory-three-scopes.md),以及 `memory/` 下的注释与错误文案。不留"新写的用新词、旧的不回填"的中间态——同一个概念两个词,正是词表存在的理由。
 
 ### 模块的形状
 
@@ -107,4 +107,4 @@ interface AgentMemoryRegistry {
 - 对 `resident` 模块发 `rename` → 工具面里就没有这个动词(不是运行时拒),错误文案列出该模块支持的动词。
 - 模块声明 `ops: ["view"]` → `create` 到它的路径被拒。
 - 自带工具的模块:它的工具拿到的对象上没有 `read` / `write` / `list` / `remove`(拿不到 `dir`)。
-- 全仓 grep 不到「分区」这个词(CONTEXT.md 词条、设计文档、代码注释、错误文案都换成「记忆模块」)。
+- 全仓 grep 不到「模块」这个词(CONTEXT.md 词条、设计文档、代码注释、错误文案都换成「记忆模块」)。

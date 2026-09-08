@@ -93,7 +93,7 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "memory.mutation.rejected": { zh: "记忆拒写", en: "memory.mutation.rejected", tone: "caution", hint: "语义拒绝（越界 / 不存在 / 超预算），数据未变" },
   "memory.mutation.failed": { zh: "记忆写失败", en: "memory.mutation.failed", tone: "critical", hint: "主存储 I/O 抛错且数据未变，stage 说在哪一段" },
   "memory.mutation.partial": { zh: "记忆半提交", en: "memory.mutation.partial", tone: "critical", hint: "rename 目标已建、源删失败之类的半提交" },
-  "memory.compose": { zh: "记忆入 prompt", en: "memory.compose", tone: "neutral", hint: "这次进 system 的分区数 / 块数 / 字符数" },
+  "memory.compose": { zh: "记忆入 prompt", en: "memory.compose", tone: "neutral", hint: "这次进 system 的模块数 / 块数 / 字符数" },
   "task.state.committed": { zh: "任务状态", en: "task.state.committed", tone: "neutral", hint: "内存清单已变（不等于已落盘）" },
   "task.store.saved": { zh: "任务已落盘", en: "task.store.saved", tone: "positive", hint: "真实 TaskStore.save() 成功" },
   "task.store.failed": { zh: "任务落盘失败", en: "task.store.failed", tone: "critical", hint: "真实 TaskStore.save() 抛错" },

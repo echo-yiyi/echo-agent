@@ -27,7 +27,7 @@
 
 **待拍板。** 一条：**agent 这个身份有没有跨 session 的持久状态**——同一个 HR 的两段 session 要不要共享一份「我跟这个候选人聊到哪了」。不要 = agent 就是「定义 + 名字」，作用域仍是 session / project / user 三层；要 = 三层之外多一层 agent 作用域，`AgentRef.name` 也从「来历」变成外键。两条后果与判据见 [agent 是身份](../decisions/proposed/2026-09-07-agent-is-an-identity.md) 的「待拍板」。**这条不定，`--resume` 与 `session_create` 的行为一个字都不用改**；定了才动记忆那条线。
 
-其余的：记忆三层怎么切 2026-09-07 拍了：分区（`agent.md` / `user.md` / 笔记索引）与作用域（session / project / user）分开，哪层放什么、注入什么、怎么选层、什么顺序落地，全在 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」一段，2026-09-07 已实现。dream 的计数与锁跟着整理范围下到 session 层，「两段 session 同时整理同一份」于是不再成立。
+其余的：记忆三层怎么切 2026-09-07 拍了：模块（`agent.md` / `user.md` / 笔记索引）与作用域（session / project / user）分开，哪层放什么、注入什么、怎么选层、什么顺序落地，全在 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」一段，2026-09-07 已实现。dream 的计数与锁跟着整理范围下到 session 层，「两段 session 同时整理同一份」于是不再成立。
 
 其余五项决策已拍（2026-09-03，口头；§4 那条 2026-09-07 修正），见决策记录。
 
@@ -54,37 +54,27 @@
 
 | 作用域 | 目录 | 放什么 | 共享面 |
 |---|---|---|---|
-| **session** | `~/.echo/sessions/<id>/` | meta、transcript、inbox、tasks、schedule、dream 状态、**session 级 memory**、lease、status、observability | 只有这段 session 自己写 |
-| **project** | `~/.echo/projects/<hash>/`，`hash = fnv1a64hex(workspace)` 前 12 位 | **project 级 memory**；以后可加项目级 agent 定义 / skill | 同一 workspace 的所有 session |
-| **user** | `~/.echo/` | credentials、settings、extensions、skills、agent 定义、**user 级 memory** | 全部 session |
+| **session** | `~/.echo/sessions/<id>/` | meta、transcript、inbox、tasks、schedule、lease、status、observability | 只有这段 session 自己写 |
+| **project** | `~/.echo/projects/<hash>/`，`hash = fnv1a64hex(workspace)` 前 12 位 | project 级 memory（**缺省**声明，见下）；以后可加项目级 agent 定义 / skill | 同一 workspace 的所有 session |
+| **user** | `~/.echo/` | credentials、settings、extensions、skills、agent 定义（`agents/<角色名>/`，角色记忆也住这里）、user 级 memory | 全部 session |
 
 project 一层**存 home 下、按 workspace 分**，不放进仓库：agent 自动写的东西不该进 git，也不该要求每个仓库改 `.gitignore`。哈希只有 48 位，撞了就是两个项目的记忆混在一起而没人发现，所以 project 目录里放一份 `workspace.json` 记原路径，打开时对一遍，不匹配判红。项目指令文件（AGENTS.md / CLAUDE.md）仍从 workspace 里读（prompt 决策 7），那是人写给 agent 的，方向相反。
 
 三层里唯一的共享写方是 project / user 级 memory：多段 session 同时往同一层记。dream 只整理 session 自己那份，不碰上两层，所以整理不冲突；上两层的并发写归 memory 线（Non-Goals）。
 
-**分区与作用域是两个轴**，不是笛卡尔积。分区是「记的是什么」（`agent.md` / `user.md` / 笔记与它的 `INDEX.md`），作用域是「谁看得见」。哪层有哪些分区、每种分区注入哪几层，是下面两张表（2026-09-07 实现；为什么这么切见 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md)）。
+**记忆的作用域由产品声明，core 不认识任何具体层名**（2026-09-07 拍板，2026-09-08 实现；替代本节原先那套写死的三层，见 [作用域由产品声明](../decisions/implemented/2026-09-07-memory-scopes-by-product.md)）。不同产品要的分层本来就不一样：coding 要 user / role / project，常驻产品要产品级 / role——它根本没有"这台机器的用户"这个概念。core 只定义"作用域"这个位置：一个有序的、各带一个根的命名集合；名字、前缀、有几层由产品在装配期声明，声明是**纯数据**（锚点闭合、`{{}}` 变量闭合、名字开放）。
 
-落盘——哪层有什么：
+**缺省三层**（`DEFAULT_MEMORY_SCOPES`，在装配层而不是 `memory/`）：`user` → `<ECHO_HOME>/memory/`；`project` → `<ECHO_HOME>/projects/{{workspaceHash}}/memory/`（带 `workspace.json` 留痕与撞车校验）；`role` → `<ECHO_HOME>/agents/<角色名>/memory/`——**与角色定义同一棵树**，定义和记忆不分家。`AgentRef.name` 可选，**没有角色名就没有这一层**。
 
-| 作用域 | `agent.md` | `user.md` | 笔记 + `INDEX.md` |
-|---|---|---|---|
-| user | 有 | 有 | 有 |
-| project | 有 | 有 | 有 |
-| session | 无 | 无 | 有（dream 只整理这份） |
+**模块与作用域仍是两个轴**，不是笛卡尔积。模块（原先叫"模块"）是"记的是什么"（`agent.md` / `user.md` / 笔记与它的 `INDEX.md`），作用域是"谁看得见"。模块**不点名 `scopes` = 当前装配的每一层都有**——内建那三个都不点名，core 里因此一个具体层名都不出现；点名了就只在点到的层，点到不存在的层在绑定时 fail-loud。
 
-注入——system prompt 里给模型看什么：
+**选层走路径前缀**（`<层名>/<模块内路径>`），`memory` 工具不加参数；注入的每段带自己的路径，模型改哪份就写哪个路径。system 里那段选层说明**从作用域表生成**：按 `order`（同时是宽度序，小 = 宽）列出每层的 `describe`。
 
-| 分区 | 注入哪几层 |
-|---|---|
-| `agent.md` | user + project |
-| `user.md` | user + project |
-| `INDEX.md` | user + project + session |
+**作用域不在装配期解析**：workspace、角色、产品都是 session 级事实，`--resume` 一段在别的目录、别的角色下建的会话时，权威值要到 `start()` 里 `createOrResume` 返回才知道。所以装配期给的是一个还没绑定的字节面（读写都抛），`start()` 里 session 恢复之后解析一次、绑定一次，之后不变。运行中的 `setWorkspace()` 想跟也跟不了——**结构上没有第二个解析入口**，这条纪律不再建立在调用点自觉上。
 
-三条配套规矩：**选层走路径前缀**（`user/agent.md`、`project/user.md`、`session/memory/x.md`），`memory` 工具不加参数——注入的每段带自己的路径，模型改哪份就写哪个路径；**顺序**先 `agent.md` / `user.md` 后索引，同一分区内多层按 user → project → session，都渲染、不去重、各带路径标题；**project / user 两层的并发写先接受后写覆盖**（文件不会写坏，tmp + rename），dream 只碰 session 层所以整理不冲突。
+实现落点：作用域的声明与路由在 [`memoryScopeDir()`](../../packages/core/src/memory/scope.ts#symbol=memoryScopeDir)，延迟绑定在 [`lateBoundMemoryDir()`](../../packages/core/src/memory/scope.ts#symbol=lateBoundMemoryDir)，`workspace.json` 的校验在 [`assertProjectWorkspace()`](../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace)，缺省声明与锚点解析在 `createAgent` 的 `prepareCapabilities` 里。
 
-实现落点：project 目录的解析在 [`projectPrefix()`](../../packages/core/src/memory/scope.ts#symbol=projectPrefix)，`workspace.json` 的校验在 [`assertProjectWorkspace()`](../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace)，三层的字节面在 `createAgent` 的 `prepareCapabilities` 里接上。
-
-project 层指哪个目录**以 `start()` 从盘上读回的 workspace 为准**（2026-09-07）：装配期先按 `createAgent` 那时已知的 workspace 指着，`start()` 里 `createOrResume` 返回之后 [`projectScopeBinding`](../../packages/core/src/memory/scope.ts#symbol=projectScopeBinding) 的 `pin` 重指一次，撞车检查走的还是 `assertProjectWorkspace`。**只重指这一次**：运行中 `setWorkspace()` 换目录（echo-coding 的 worktree 隔离）故意不跟——同一个仓库换个 worktree 路径就换一套项目记忆，不是想要的行为。
+**共享层的并发写**由记忆自己的文件锁管（进程内串行 + 跨进程乐观校验，见 [记忆的并发](../decisions/implemented/2026-09-07-memory-concurrency.md)），不再是"先接受后写覆盖"。dream 现在**按层各整理各的**，整理哪些模块由模块自己声明。
 
 `ECHO_HOME` 覆盖 `~/.echo`，与今天的 [`resolveStateDir()`](../../packages/core/src/create-agent.ts#symbol=resolveStateDir) 同一个来源；`agents/<agentId>/` 这一层退场，session 的 meta 里记着自己是哪个 agent。
 
@@ -97,7 +87,7 @@ project 层指哪个目录**以 `start()` 从盘上读回的 workspace 为准**�
   inbox/000001.json  入站 record；inbox/acks/ 是 ack marker（今天的形状，不变）
   tasks.json
   schedule/
-  memory/            session 级记忆（`memory/memory/` 是笔记分区，`memory/.dream/` 是整理的计数与锁）
+  memory/            session 级记忆（`memory/memory/` 是笔记模块，`memory/.dream/` 是整理的计数与锁）
   .lock              lease，每段一把
   status.json        运行态快照（§6）
   observability/
@@ -335,7 +325,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 ## 9. 实施顺序（每步独立可验）
 
 1. **布局（已实现，2026-09-03）**：状态根 = session 目录；`SessionService` 扁平化，清单改自由函数 `listSessions()`（扫上一层）；memory / skills 提到 user 层；空会话延迟写 meta；`SessionInfo` 加 `main` / `status`；删旧 `SessionManager` / `InMemorySessionManager` / `AgentOptions.sessions`；`CreateAgentOptions` 加 `sessionsRoot` 与 `sharedStore`；`observe` 的 `--agent-id` 换成 `--session`。lease 每段一把随之成立。
-   **补齐（2026-09-07）**：这一步只把 memory 提到 user 层**一层**；§2 的三层由 memory 线自己那次改动落地——分区表加 `scopes`、路径带作用域前缀、dream 的整理范围与状态一起下到 session 层。
+   **补齐（2026-09-07）**：这一步只把 memory 提到 user 层**一层**；§2 的三层由 memory 线自己那次改动落地——模块表加 `scopes`、路径带作用域前缀、dream 的整理范围与状态一起下到 session 层。
 2. **角色定义**（2026-09-07 改，原「agent 打包」作废，见 §4）：角色文件的加载（产品自带 / user 层 / 项目层三处合并）；`AgentPrompt.section(…, { replace: true })` 与 `AgentTools.restrict()` 两个口；`AgentRef` 进 meta；角色 → `echo:inline-agent`；不越权检查；`session_create` 的 `agent` 参数回来。**排在第 5 步之前做**（2026-09-07 拍板：`/clear` 与 `wait` 都会碰 AgentRef 与「这段挂什么」）。
 3. **通道（已实现，2026-09-03）**：record id 改**写者自己发号**（`createRecordIdSource`，
    `<12 位十六进制毫秒>-<4 位同毫秒计数><12 位十六进制随机>`；同一写者严格递增，跨写者靠随机区分）；

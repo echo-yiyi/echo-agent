@@ -7,6 +7,7 @@ import type { StorageDir } from "../src/storage/types.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
 import {
   createAgentMemories,
+  bindMemoryScopes,
   memoryCreate,
   memoryDelete,
   memoryInsert,
@@ -16,6 +17,7 @@ import {
 } from "../src/memory/harness.ts";
 import { renderMemorySystem } from "../src/memory/compose.ts";
 import { indexedMemory, residentMemory } from "../src/memory/types.ts";
+import { memoryScopeTable } from "../src/memory/scope.ts";
 import { memoryFactDescriptor, type MemoryFact } from "../src/memory/observe.ts";
 import { createTasks, linkTasks, removeTask, saveTasks, unlinkTasks, updateTask, type TaskMap } from "../src/task/harness.ts";
 import { attachTaskObserver, taskFactDescriptor, type TaskFact } from "../src/task/observe.ts";
@@ -56,14 +58,22 @@ function faultyDir(base: StorageDir, fail: { read?: (p: string) => boolean; writ
 describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析字符串", () => {
   function memoriesWith(dir: StorageDir): { ctx: AgentMemories; facts: MemoryFact[] } {
     const sink = collect<MemoryFact>();
-    const ctx = createAgentMemories(dir, {
+    const ctx = createAgentMemories({
       memories: [residentMemory("agent", { budget: 60 }), indexedMemory("memory", { budget: 2_000, fileBudget: 100 })],
     });
+    // 那一层落在 `user/` 前缀下——盘上的路径与从前一致（faultyDir 的判据按全路径写）
+    const scoped: StorageDir = {
+      read: (path) => dir.read("user/" + path),
+      write: (path, content) => dir.write("user/" + path, content),
+      remove: (path) => dir.remove("user/" + path),
+      list: async (p) => (await dir.list("user/" + p)).map((k) => k.slice("user/".length)),
+    };
+    bindMemoryScopes(ctx, memoryScopeTable([{ def: { name: "user", order: 1, describe: "user", anchor: { kind: "home" }, prefix: "" }, dir: scoped }]));
     ctx.observe = sink;
     return { ctx, facts: sink.facts };
   }
 
-  test("committed：create / str_replace / insert / delete / rename 各一条；indexed 分区 indexOutcome=ok；rename 不双发 create", async () => {
+  test("committed：create / str_replace / insert / delete / rename 各一条；indexed 模块 indexOutcome=ok；rename 不双发 create", async () => {
     const { ctx, facts } = memoriesWith(new InMemoryDir());
     expect((await memoryCreate(ctx, "user/memory/a.md", "hello")).isError).toBe(false);
     expect((await memoryStrReplace(ctx, "user/memory/a.md", "hello", "hi")).isError).toBe(false);
@@ -80,7 +90,7 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
     const rename = facts[3];
     expect(rename).toMatchObject({ kind: "mutation", operation: "rename", path: "user/memory/a.md", toPath: "user/memory/b.md", partition: "memory", mode: "indexed", indexOutcome: "ok" });
     expect(facts[0]).toMatchObject({ chars: 5, indexOutcome: "ok" });
-    // resident 分区：indexOutcome not-applicable
+    // resident 模块：indexOutcome not-applicable
     expect((await memoryCreate(ctx, "user/agent.md", "resident")).isError).toBe(false);
     expect(facts[5]).toMatchObject({ operation: "create", outcome: "committed", partition: "agent", mode: "resident", indexOutcome: "not-applicable" });
   });
@@ -99,8 +109,8 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
       [() => memoryDelete(ctx, "user/memory/zzz.md"), "not_found", "does not exist"],
       [() => memoryDelete(ctx, "user/memory/"), "not_a_file", "not a directory"],
       [() => memoryCreate(ctx, "user/memory/INDEX.md", "x"), "index_file_protected", "system-maintained index"],
-      [() => memoryCreate(ctx, "elsewhere/x.md", "x"), "outside_regions", "not inside any memory region"],
-      [() => memoryDelete(ctx, "user/keepsake.md"), "outside_regions", "not inside any memory region"], // delete 同一道闸（2026-09-07）
+      [() => memoryCreate(ctx, "elsewhere/x.md", "x"), "outside_regions", "not inside any memory module"],
+      [() => memoryDelete(ctx, "user/keepsake.md"), "outside_regions", "not inside any memory module"], // delete 同一道闸（2026-09-07）
       [() => memoryCreate(ctx, "user/agent.md", "a".repeat(61)), "budget_exceeded", "would exceed its budget"],
       [() => memoryRename(ctx, "user/memory/a.md", "user/agent.md"), "cross_region", "must stay within one region"],
       [() => memoryRename(ctx, "user/memory/nope.md", "user/memory/c.md"), "not_found", "does not exist"],

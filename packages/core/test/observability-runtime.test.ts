@@ -198,32 +198,25 @@ describe("send → getRun → render（completed）", () => {
       await reader.close();
     }
   });
-
-  test("装了记忆：用户 run 之后自动排的 Dream run 也是一条 accepted run（source dream），同样封口可查", async () => {
+  test("记忆的后台活不再是 admission run：用户那条照常可查，run 列表里只有它", async () => {
+    // **2026-09-08 翻向**：dream（与新加的提取）从 admission 挪进了各自的独立通道——
+    // 走 maintenance 许可的代价是提取会被连续对话整段抢掉。代价是它们不再产生 run 级观测；
+    // 记忆本身的动作仍然可查，那是 `memory.mutation.*` 那族事实（见 memory/observe.ts）。
     const stateDir = join(await tmp(), "state");
     const echo = await echoWith({ stateDir, turns: [textTurn("one")], withMemory: true });
     const user = await echo.send("a");
     expect(user.outcome.kind).toBe("completed");
-    // Dream 在 finishRun 里 enqueue、微任务里拿 permit；门控（间隔 / 写入数）在新 state root 下不满足 → 立即 completed
-    let dream: RunObservation | undefined;
-    for (let i = 0; i < 100 && dream === undefined; i++) {
-      const page = await echo.observations.listRuns({ limit: 5 });
-      const hit = page.items.find((h) => h.source.kind === "dream" && h.status !== "running");
-      if (hit !== undefined) {
-        const lookup = await echo.observations.getRun(hit.runId);
-        if (lookup.kind === "found") dream = lookup.observation;
-      }
-      if (dream === undefined) await new Promise((r) => setTimeout(r, 10));
-    }
-    expect(dream).toBeDefined();
-    expect(dream?.runId).toMatch(/^dream:/);
-    expect(dream?.status).toBe("completed");
-    expect(names(dream!)).toEqual(["event:run.accepted", `snapshot:${RUN_ASSEMBLY_RECORD}`, "event:run.started", "event:run.closed"]);
-    expect(dream?.agentAssembly.slots.map((s) => s.slot)).toContain("memory");
-    // 用户那条照常可查，且 listRuns 两条都在（倒序：dream 在前）
+
+    // 给后台通道一点时间：就算它跑了，也不该出现在 run 列表里
+    await new Promise((r) => setTimeout(r, 50));
+    const page = await echo.observations.listRuns({ limit: 5 });
+    expect(page.items.map((h) => h.source.kind)).toEqual(["user"]);
     expect((await echo.observations.getRun(user.runId)).kind).toBe("found");
-    expect((await echo.observations.listRuns()).items.map((h) => h.source.kind)).toEqual(["dream", "user"]);
+    // 装了记忆这件事仍然在装配快照里看得见
+    const lookup = await echo.observations.getRun(user.runId);
+    expect(lookup.kind === "found" && lookup.observation.agentAssembly.slots.map((s) => s.slot).includes("memory")).toBe(true);
   });
+
 
   test("stop 之后库已关；reader 仍能读；没记录过的 state root 打开 reader 是明确的 missing 错误", async () => {
     const stateDir = join(await tmp(), "state");

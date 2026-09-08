@@ -1,14 +1,14 @@
 // 记忆模块的契约门。
 //
 // 锁的不变量:
-//   ① 三个分区(agent/user resident + memory indexed)× 三层作用域(user/project/session),
-//      分区注册开、路径重叠 fail-loud;哪层有哪个分区按「切法」的落盘表
+//   ① 三个模块(agent/user resident + memory indexed)× 三层作用域(user/project/session),
+//      模块注册开、路径重叠 fail-loud;哪层有哪个模块按「切法」的落盘表
 //   ② 方法是唯一写路径,工具是薄壳;INDEX.md 落盘、由写方法重建、不许直接改、不索引自己
-//   ③ 组装:resident 全文、indexed 只有索引;一个分区每层各一段、各带自己的路径;索引行单行化;
+//   ③ 组装:resident 全文、indexed 只有索引;一个模块每层各一段、各带自己的路径;索引行单行化;
 //      renderMemorySystem 绝不 throw
 //   ④ 写入:统一过 checkWrite(预算拒绝带整理指引);路径 jail(../绝对/点开头全拒);
-//      选层走路径前缀——那一层没有这个分区就判红
-//   ⑤ 工具六动词行为(str_replace 唯一命中、rename 不许跨分区、也不许跨层)
+//      选层走路径前缀——那一层没有这个模块就判红
+//   ⑤ 工具六动词行为(str_replace 唯一命中、rename 不许跨模块、也不许跨层)
 //   ⑥ Dream 门控(写入/轮次/文件数/间隔/锁)与 markDreamed 清计数;INDEX 与内部状态不计数;
 //      **只整理 session 层**——工具够不到上两层
 //   ⑦ Agent 接线:工具普通注册、system 冻结快照、run 内写下个 run 可见、dispose 链
@@ -27,16 +27,65 @@ import { DEFAULT_DREAM_GATES } from "../src/memory/dream.ts";
 import {
   createAgentMemories, addMemory, removeMemoryRegion, listMemories, getMemory, memoryFor,
   memoryView, memoryCreate, memoryStrReplace, memoryInsert, memoryDelete, memoryRename,
-  memoryPromptSections, composeMemoryRegion, memoryTool, memoryObserver,
-  shouldDream, dreamTask, markDreamed, disposeMemory, MEMORY_KIND, type AgentMemories,
+  memoryPromptSections, composeMemoryRegion, memoryTool, memoryObserver, bindMemoryScopes, memoryScopeTableOf, dreamScopes,
+  shouldDream, dreamTask, markDreamed, disposeMemory, MEMORY_KIND, type AgentMemories, type MemoryHarnessOptions,
 } from "../src/memory/harness.ts";
 
 import { InMemoryDir } from "../src/memory/in-memory-dir.ts";
 import { createMemoryTool, normalizeMemoryPath, MEMORY_TOOL_NAME } from "../src/memory/tool.ts";
-import { fnv1a64hex, memoryScopeDir, projectPrefix, projectScopeBinding, withWorkspaceStamp, WORKSPACE_STAMP_FILE } from "../src/memory/scope.ts";
-import { agentMemory, notesMemory, indexedMemory, memoryOwns, memoryPaths, residentMemory } from "../src/memory/types.ts";
+import {
+  assertProjectWorkspace, expandMemoryPrefix, fnv1a64hex, memoryScopeTable, projectDirName, withWorkspaceStamp, WORKSPACE_STAMP_FILE,
+  type MemoryScopeDef, type MemoryScopeEntry, type MemoryScopeTable,
+} from "../src/memory/scope.ts";
+import { agentMemory, notesMemory, userMemory, indexedMemory, memoryOwns, memoryPaths, residentMemory } from "../src/memory/types.ts";
 import type { MemoryDir } from "../src/memory/types.ts";
 import type { ToolExecutionContext } from "../src/tools/types.ts";
+
+
+/* ── 测试脚手架:作用域现在由产品声明、session 加载完才绑定,所以每个 harness 都要先 bind ── */
+
+/** 三层的声明。名字与顺序沿用从前那套(user → project → session),便于逐条对照旧断言。 */
+const TEST_SCOPE_DEFS: readonly MemoryScopeDef[] = [
+  { name: "user", order: 1, describe: "every session of this user", anchor: { kind: "home" }, prefix: "" },
+  { name: "project", order: 2, describe: "every session in this workspace", anchor: { kind: "home" }, prefix: "" },
+  { name: "session", order: 3, describe: "only this session", anchor: { kind: "home" }, prefix: "" },
+];
+
+function sub(base: MemoryDir, prefix: string): MemoryDir {
+  return {
+    read: (path) => base.read(prefix + path),
+    write: (path, content) => base.write(prefix + path, content),
+    remove: (path) => base.remove(prefix + path),
+    list: async (p) => (await base.list(prefix + p)).map((k) => k.slice(prefix.length)),
+    close: async () => {
+      await base.close?.();
+    },
+  };
+}
+
+function tableOf(dirs: { user: MemoryDir; project: MemoryDir; session: MemoryDir }): MemoryScopeTable {
+  const entries: MemoryScopeEntry[] = TEST_SCOPE_DEFS.map((def) => ({ def, dir: dirs[def.name as keyof typeof dirs] }));
+  return memoryScopeTable(entries);
+}
+
+/** 三层都落在同一个平的 dir 上(`user/…`、`project/…`、`session/…`)——与从前的路径完全一致。 */
+function memories(dir: MemoryDir, opts?: MemoryHarnessOptions): AgentMemories {
+  // 内建三个现在由 `echo:memory` 经 registry 注册；不经 mount 的纯 harness 测试要显式带上
+  const h = createAgentMemories({ memories: [agentMemory, userMemory, notesMemory], ...opts });
+  bindMemoryScopes(h, tableOf({ user: sub(dir, "user/"), project: sub(dir, "project/"), session: sub(dir, "session/") }));
+  return h;
+}
+
+/** 三层各自一个真 dir(测层与层之间互不可见时用)。 */
+function layered(dirs: { user: MemoryDir; project: MemoryDir; session: MemoryDir }, opts?: MemoryHarnessOptions): AgentMemories {
+  // 内建三个现在由 `echo:memory` 经 registry 注册；不经 mount 的纯 harness 测试要显式带上
+  const h = createAgentMemories({ memories: [agentMemory, userMemory, notesMemory], ...opts });
+  bindMemoryScopes(h, tableOf(dirs));
+  return h;
+}
+
+/** 只用来算路径 / 判归属的表（纯函数不碰 dir）。 */
+const T: MemoryScopeTable = tableOf({ user: new InMemoryDir(), project: new InMemoryDir(), session: new InMemoryDir() });
 
 function ctx(): ToolExecutionContext {
   return { toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
@@ -47,42 +96,45 @@ async function call(h: AgentMemories, params: Record<string, unknown>) {
   return tool.execute(tool.prepareArguments!(params), ctx());
 }
 
-/* ───────────────────────── ① 数据、分区与作用域 ───────────────────────── */
+/* ───────────────────────── ① 数据、模块与作用域 ───────────────────────── */
 
-describe("Memory 判别联合与分区", () => {
-  test("内建三个分区:agent/user resident,memory indexed", () => {
-    const h = createAgentMemories(new InMemoryDir());
+describe("Memory 判别联合与模块", () => {
+  test("内建三个模块:agent/user resident,memory indexed", () => {
+    const h = memories(new InMemoryDir());
     expect(listMemories(h).map((m) => `${m.name}:${m.mode}`)).toEqual(["agent:resident", "user:resident", "memory:indexed"]);
   });
 
-  test("落盘表:agent / user 两分区在 user + project,笔记三层都有(session 层只有笔记)", () => {
-    const h = createAgentMemories(new InMemoryDir());
-    expect(memoryPaths(getMemory(h, "agent")!).map((p) => p.path)).toEqual(["user/agent.md", "project/agent.md"]);
-    expect(memoryPaths(getMemory(h, "user")!).map((p) => p.path)).toEqual(["user/user.md", "project/user.md"]);
-    expect(memoryPaths(getMemory(h, "memory")!).map((p) => p.path)).toEqual(["user/memory/", "project/memory/", "session/memory/"]);
+  test("不点名 scopes 的模块在每一层都有(内建三个都不点名,core 里因此没有层名字面量)", () => {
+    const h = memories(new InMemoryDir());
+    expect(memoryPaths(T, getMemory(h, "agent")!).map((p) => p.path)).toEqual(["user/agent.md", "project/agent.md", "session/agent.md"]);
+    expect(memoryPaths(T, getMemory(h, "user")!).map((p) => p.path)).toEqual(["user/user.md", "project/user.md", "session/user.md"]);
+    expect(memoryPaths(T, getMemory(h, "memory")!).map((p) => p.path)).toEqual(["user/memory/", "project/memory/", "session/memory/"]);
   });
 
-  test("memoryOwns:收全路径,resident 精确匹配、indexed 前缀匹配;那一层没有这个分区就不归它", () => {
-    expect(memoryOwns(agentMemory, "user/agent.md")).toBe(true);
-    expect(memoryOwns(agentMemory, "project/agent.md")).toBe(true);
-    expect(memoryOwns(agentMemory, "session/agent.md")).toBe(false); // session 层没有这个分区
-    expect(memoryOwns(agentMemory, "agent.md")).toBe(false); // 缺作用域前缀
-    expect(memoryOwns(agentMemory, "user/agent.md.bak")).toBe(false);
-    expect(memoryOwns(notesMemory, "session/memory/a.md")).toBe(true);
-    expect(memoryOwns(notesMemory, "user/memory/")).toBe(false); // 目录本身不是文件
+  test("memoryOwns:收全路径,resident 精确匹配、indexed 前缀匹配;模块点名之外的层不归它", () => {
+    expect(memoryOwns(T, agentMemory, "user/agent.md")).toBe(true);
+    expect(memoryOwns(T, agentMemory, "project/agent.md")).toBe(true);
+    // 点名了层的模块:没点到的那层不归它（不点名 = 每层都有,所以这条要用一个点名的模块来测）
+    const onlyUser = residentMemory("scoped", { scopes: ["user"] });
+    expect(memoryOwns(T, onlyUser, "user/scoped.md")).toBe(true);
+    expect(memoryOwns(T, onlyUser, "session/scoped.md")).toBe(false);
+    expect(memoryOwns(T, agentMemory, "agent.md")).toBe(false); // 缺作用域前缀
+    expect(memoryOwns(T, agentMemory, "user/agent.md.bak")).toBe(false);
+    expect(memoryOwns(T, notesMemory, "session/memory/a.md")).toBe(true);
+    expect(memoryOwns(T, notesMemory, "user/memory/")).toBe(false); // 目录本身不是文件
   });
 
   test("撞名与路径重叠都 fail-loud", () => {
-    const h = createAgentMemories(new InMemoryDir());
+    const h = memories(new InMemoryDir());
     expect(() => addMemory(h, residentMemory("agent"))).toThrow("已存在");
     expect(() => addMemory(h, indexedMemory("nested", { path: "memory/nested/" }))).toThrow("重叠");
     addMemory(h, indexedMemory("scratch")); // 不重叠的可以加
     expect(getMemory(h, "scratch")?.mode).toBe("indexed");
   });
 
-  test("同一分区内路径落在不同层不算重叠(比的是带作用域的全路径)", () => {
-    const h = createAgentMemories(new InMemoryDir(), { memories: [indexedMemory("a", { scopes: ["user"] })] });
-    addMemory(h, indexedMemory("b", { path: "a/", scopes: ["project"] })); // 同一个分区内路径,另一层
+  test("同一模块内路径落在不同层不算重叠(比的是带作用域的全路径)", () => {
+    const h = memories(new InMemoryDir(), { memories: [indexedMemory("a", { scopes: ["user"] })] });
+    addMemory(h, indexedMemory("b", { path: "a/", scopes: ["project"] })); // 同一个模块内路径,另一层
     expect(listMemories(h).map((m) => m.name)).toEqual(["a", "b"]);
     expect(() => addMemory(h, indexedMemory("c", { path: "a/", scopes: ["user"] }))).toThrow("重叠");
   });
@@ -97,7 +149,7 @@ describe("Memory 判别联合与分区", () => {
 describe("INDEX.md(落盘索引)", () => {
   test("写方法成功后重建;description 来自 frontmatter,退化首行;条目带作用域前缀", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
+    const h = memories(dir);
     await call(h, { command: "create", path: "user/memory/a.md", file_text: "---\ndescription: 钩子甲\n---\n\n正文" });
     await call(h, { command: "create", path: "user/memory/b.md", file_text: "首行是钩子乙\n第二行" });
     const index = await dir.read("user/memory/INDEX.md");
@@ -109,7 +161,7 @@ describe("INDEX.md(落盘索引)", () => {
 
   test("索引一层一份:写 project 层不动 user 层那份", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
+    const h = memories(dir);
     await call(h, { command: "create", path: "user/memory/u.md", file_text: "---\ndescription: 用户级\n---\n" });
     await call(h, { command: "create", path: "project/memory/p.md", file_text: "---\ndescription: 项目级\n---\n" });
     expect(await dir.read("user/memory/INDEX.md")).toBe("- user/memory/u.md — 用户级");
@@ -118,7 +170,7 @@ describe("INDEX.md(落盘索引)", () => {
 
   test("索引不索引自己;直接改 INDEX.md 被拒(系统维护)", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
+    const h = memories(dir);
     await call(h, { command: "create", path: "user/memory/a.md", file_text: "x" });
     expect(await dir.read("user/memory/INDEX.md")).not.toContain("INDEX.md");
     const denied = await call(h, { command: "create", path: "user/memory/INDEX.md", file_text: "伪造索引" });
@@ -133,7 +185,7 @@ describe("组装(defaultComposeMemory / renderMemorySystem)", () => {
   test("resident:全文进段,超预算截断留标记", async () => {
     const dir = new InMemoryDir();
     await dir.write("user/agent.md", "x".repeat(3000));
-    const block = await defaultComposeMemory(agentMemory, dir);
+    const block = await defaultComposeMemory(agentMemory, dir, T);
     expect(block).toContain("## agent (user/agent.md)");
     expect(block).toContain("…[truncated]");
     expect(block.length).toBeLessThan(2400);
@@ -141,20 +193,20 @@ describe("组装(defaultComposeMemory / renderMemorySystem)", () => {
 
   test("indexed:读落盘 INDEX.md;没有则现场扫描(人手预置目录的口径)", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
+    const h = memories(dir);
     await call(h, { command: "create", path: "user/memory/a.md", file_text: "---\ndescription: 钩子\n---\n\n这段机密正文绝不该出现" });
-    const block = await defaultComposeMemory(notesMemory, dir);
+    const block = await defaultComposeMemory(notesMemory, dir, T);
     expect(block).toContain("## memory (user/memory/ — index");
     expect(block).toContain("- user/memory/a.md — 钩子");
     expect(block).not.toContain("机密正文"); // 只有索引,正文按需
     // 人手预置(没有 INDEX.md)也能出索引
     const bare = new InMemoryDir();
     await bare.write("user/memory/manual.md", "手放的首行");
-    expect(await defaultComposeMemory(notesMemory, bare)).toContain("- user/memory/manual.md — 手放的首行");
+    expect(await defaultComposeMemory(notesMemory, bare, T)).toContain("- user/memory/manual.md — 手放的首行");
   });
 
   test("注入表:user.md 恰好两段(user、project),索引恰好三段且顺序 user → project → session", async () => {
-    const h = createAgentMemories(new InMemoryDir());
+    const h = memories(new InMemoryDir());
     await memoryCreate(h, "user/user.md", "用户级的我");
     await memoryCreate(h, "project/user.md", "项目级的我");
     await memoryCreate(h, "user/memory/a.md", "---\ndescription: 甲\n---\n");
@@ -167,10 +219,10 @@ describe("组装(defaultComposeMemory / renderMemorySystem)", () => {
     expect(sys).toContain("## user (project/user.md)");
     // 都渲染、不去重、各带路径标题:三段索引,顺序恒定
     expect([...sys.matchAll(/^## memory \((user|project|session)\//gm)].map((m) => m[1])).toEqual(["user", "project", "session"]);
-    // 分区内先常驻后索引
+    // 模块内先常驻后索引
     expect(sys.indexOf("## user (user/user.md)")).toBeLessThan(sys.indexOf("## memory ("));
-    // 使用规则里每个分区把自己各层的路径都摆出来(模型据此选层)
-    expect(sys).toContain("- agent (user/agent.md, project/agent.md):");
+    // 使用规则里每个模块把自己各层的路径都摆出来(模型据此选层)
+    expect(sys).toContain("- agent (user/agent.md, project/agent.md, session/agent.md):");
     expect(sys).toContain("- memory (user/memory/, project/memory/, session/memory/):");
   });
 
@@ -183,7 +235,7 @@ describe("组装(defaultComposeMemory / renderMemorySystem)", () => {
     expect(parseFrontmatter("裸正文").meta).toEqual({});
   });
 
-  test("renderMemorySystem 绝不 throw:某分区读坏 → 该分区隐形,其余照常", async () => {
+  test("renderMemorySystem 绝不 throw:某模块读坏 → 该模块隐形,其余照常", async () => {
     const bad: MemoryDir = {
       read: async (p) => {
         if (p === "user/agent.md") throw new Error("盘坏了");
@@ -193,18 +245,21 @@ describe("组装(defaultComposeMemory / renderMemorySystem)", () => {
       remove: async () => false,
       list: async () => [],
     };
-    const h = createAgentMemories(bad);
+    const h = memories(bad);
     const block = await renderMemorySystem(h);
     expect(block).toContain("用户偏好中文");
     expect(block).not.toContain("盘坏了");
   });
 
   test("空记忆也出使用规则(模型要知道可以写,以及怎么选层)", async () => {
-    const h = createAgentMemories(new InMemoryDir());
+    const h = memories(new InMemoryDir());
     const block = await renderMemorySystem(h);
     expect(block).toContain("# Memory");
     expect(block).toContain("session/memory/");
-    expect(block).toContain("The first path segment picks who will see an entry");
+    // 选层说明**从作用域表生成**（core 不认识任何层名，只按 order 列出每层的 describe）
+    expect(block).toContain("The first path segment of every path picks who will see an entry, widest first:");
+    expect(block).toContain("- user/ — every session of this user");
+    expect(block).toContain("- session/ — only this session");
   });
 });
 
@@ -227,7 +282,7 @@ describe("路径 jail", () => {
 
 describe("写入闸(checkWrite 经方法生效)", () => {
   test("resident 超预算拒,拒因带整理指引", async () => {
-    const h = createAgentMemories(new InMemoryDir());
+    const h = memories(new InMemoryDir());
     const r = await call(h, { command: "create", path: "user/user.md", file_text: "x".repeat(2000) });
     expect(r.isError).toBe(true);
     expect(r.content).toContain("exceed its budget");
@@ -235,31 +290,29 @@ describe("写入闸(checkWrite 经方法生效)", () => {
   });
 
   test("indexed 单文件超限拒", async () => {
-    const h = createAgentMemories(new InMemoryDir());
+    const h = memories(new InMemoryDir());
     const r = await call(h, { command: "create", path: "user/memory/big.md", file_text: "x".repeat(5000) });
     expect(r.isError).toBe(true);
     expect(r.content).toContain("File too large");
   });
 
-  test("分区外路径拒,并告知可用分区(带每一层的路径)", async () => {
-    const h = createAgentMemories(new InMemoryDir());
+  test("模块外路径拒,并告知可用模块(带每一层的路径)", async () => {
+    const h = memories(new InMemoryDir());
     const r = await call(h, { command: "create", path: "elsewhere.md", file_text: "x" });
     expect(r.isError).toBe(true);
-    expect(r.content).toContain("not inside any memory region");
-    expect(r.content).toContain("agent (user/agent.md, project/agent.md)");
+    expect(r.content).toContain("not inside any memory module");
+    expect(r.content).toContain("agent (user/agent.md, project/agent.md, session/agent.md)");
   });
 
-  test("选层判红:session 层没有 agent.md / user.md 这两个分区", async () => {
+  test("选层判红:模块点名之外的层写不进去（点名的才有这条;不点名 = 每层都有）", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
-    for (const path of ["/memories/session/agent.md", "/memories/session/user.md"]) {
-      const r = await call(h, { command: "create", path, file_text: "x" });
-      expect(r.isError).toBe(true);
-      expect(r.content).toContain("not inside any memory region");
-    }
-    expect(await dir.read("session/agent.md")).toBeNull();
-    // 同一分区在有它的那两层照常写
-    expect((await call(h, { command: "create", path: "/memories/project/agent.md", file_text: "x" })).isError).toBe(false);
+    const h = memories(dir, { memories: [residentMemory("scoped", { scopes: ["user", "project"] })] });
+    const r = await call(h, { command: "create", path: "/memories/session/scoped.md", file_text: "x" });
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("not inside any memory module");
+    expect(await dir.read("session/scoped.md")).toBeNull();
+    // 点到的那两层照常写
+    expect((await call(h, { command: "create", path: "/memories/project/scoped.md", file_text: "x" })).isError).toBe(false);
   });
 });
 
@@ -268,7 +321,7 @@ describe("写入闸(checkWrite 经方法生效)", () => {
 describe("memory 工具六动词", () => {
   test("create → view(带行号)→ str_replace(唯一命中)", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
+    const h = memories(dir);
     expect((await call(h, { command: "create", path: "user/agent.md", file_text: "第一行\n第二行" })).isError).toBe(false);
     const viewed = await call(h, { command: "view", path: "user/agent.md" });
     expect(viewed.content).toBe("1\t第一行\n2\t第二行");
@@ -281,7 +334,7 @@ describe("memory 工具六动词", () => {
     const user = new InMemoryDir();
     const project = new InMemoryDir();
     const session = new InMemoryDir();
-    const h = createAgentMemories(memoryScopeDir({ user, project, session }));
+    const h = layered({ user, project, session });
     await call(h, { command: "create", path: "user/agent.md", file_text: "用户级" });
     await call(h, { command: "create", path: "project/agent.md", file_text: "项目级" });
     await call(h, { command: "create", path: "session/memory/x.md", file_text: "会话级" });
@@ -298,8 +351,8 @@ describe("memory 工具六动词", () => {
     const project = new InMemoryDir();
     const s1 = new InMemoryDir();
     const s2 = new InMemoryDir();
-    const h1 = createAgentMemories(memoryScopeDir({ user, project, session: s1 }));
-    const h2 = createAgentMemories(memoryScopeDir({ user, project, session: s2 }));
+    const h1 = layered({ user, project, session: s1 });
+    const h2 = layered({ user, project, session: s2 });
     await Promise.all([
       memoryCreate(h1, "session/memory/a.md", "---\ndescription: 甲\n---\n"),
       memoryCreate(h2, "session/memory/b.md", "---\ndescription: 乙\n---\n"),
@@ -313,16 +366,16 @@ describe("memory 工具六动词", () => {
 
   test("上层复写的正确姿势:自己的工具调我们的方法(计数、索引照常)", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir, { dream: { minWritesSinceLast: 1, minFiles: 1 } });
+    const h = memories(dir, { dream: { minWritesSinceLast: 1, minFiles: 1 } });
     // 模拟上层自定义 remember 工具:内部就是调 h.create
     const remember = async (note: string) => memoryCreate(h, `session/memory/note.md`, note);
     expect((await remember("用户偏好 tab")).isError).toBe(false);
     expect(await dir.read("session/memory/INDEX.md")).toContain("note.md"); // 索引重建没断
-    expect(await shouldDream(h)).toBe(true); // 计数没断
+    expect(await shouldDream(h, "session")).toBe(true); // 计数没断
   });
 
   test("str_replace:零命中与多义都拒", async () => {
-    const h = createAgentMemories(new InMemoryDir());
+    const h = memories(new InMemoryDir());
     await call(h, { command: "create", path: "user/agent.md", file_text: "aa aa" });
     expect((await call(h, { command: "str_replace", path: "user/agent.md", old_str: "没有", new_str: "x" })).content).toContain("old_str not found");
     expect((await call(h, { command: "str_replace", path: "user/agent.md", old_str: "aa", new_str: "x" })).content).toContain("must be unique");
@@ -330,16 +383,16 @@ describe("memory 工具六动词", () => {
 
   test("insert 行号语义与越界", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
+    const h = memories(dir);
     await call(h, { command: "create", path: "user/agent.md", file_text: "a\nb" });
     await call(h, { command: "insert", path: "user/agent.md", insert_line: 1, insert_text: "中间" });
     expect(await dir.read("user/agent.md")).toBe("a\n中间\nb");
     expect((await call(h, { command: "insert", path: "user/agent.md", insert_line: 99, insert_text: "x" })).isError).toBe(true);
   });
 
-  test("delete 与 rename;rename 不许跨分区(换预算域不许静默发生),也不许跨层(换的是谁看得见)", async () => {
+  test("delete 与 rename;rename 不许跨模块(换预算域不许静默发生),也不许跨层(换的是谁看得见)", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
+    const h = memories(dir);
     await call(h, { command: "create", path: "user/memory/a.md", file_text: "内容" });
     const cross = await call(h, { command: "rename", path: "user/memory/a.md", new_path: "user/agent.md" });
     expect(cross.isError).toBe(true);
@@ -355,9 +408,9 @@ describe("memory 工具六动词", () => {
     expect((await call(h, { command: "delete", path: "user/memory/b.md" })).isError).toBe(true); // 已不存在
   });
 
-  test("view 根:每个分区每一层一行;内部状态(.dream)不可见", async () => {
+  test("view 根:每个模块每一层一行;内部状态(.dream)不可见", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir);
+    const h = memories(dir);
     await call(h, { command: "create", path: "user/memory/a.md", file_text: "x" });
     await dir.write("session/.dream/state.json", "{}");
     const r = await call(h, { command: "view", path: "" });
@@ -369,7 +422,7 @@ describe("memory 工具六动词", () => {
   });
 
   test("细粒度复写:handlers 只换一个动词,其余走缺省", async () => {
-    const h = createAgentMemories(new InMemoryDir());
+    const h = memories(new InMemoryDir());
     const tool = createMemoryTool(h, { handlers: { view: async () => ({ content: "自定义视图", isError: false, metadata: null }) } });
     const viewed = await tool.execute(tool.prepareArguments!({ command: "view", path: "" }), ctx());
     expect(viewed.content).toBe("自定义视图");
@@ -382,58 +435,58 @@ describe("memory 工具六动词", () => {
 
 describe("Dream 门控", () => {
   test("写入门与文件数门;INDEX.md 不算一条记忆", async () => {
-    const h = createAgentMemories(new InMemoryDir(), { dream: { minWritesSinceLast: 2, minFiles: 2 } });
-    expect(await shouldDream(h)).toBe(false);
+    const h = memories(new InMemoryDir(), { dream: { minWritesSinceLast: 2, minFiles: 2 } });
+    expect(await shouldDream(h, "session")).toBe(false);
     await call(h, { command: "create", path: "session/memory/a.md", file_text: "a" });
-    expect(await shouldDream(h)).toBe(false); // 写 1 文件 1
+    expect(await shouldDream(h, "session")).toBe(false); // 写 1 文件 1
     await call(h, { command: "create", path: "session/memory/b.md", file_text: "b" });
-    expect(await shouldDream(h)).toBe(true); // 写 2 文件 2
+    expect(await shouldDream(h, "session")).toBe(true); // 写 2 文件 2
 
     // 文件数把 INDEX.md 也算进去的话,minFiles: 3 此刻就会满足——必须不满足
-    const h3 = createAgentMemories(new InMemoryDir(), { dream: { minFiles: 3 } });
+    const h3 = memories(new InMemoryDir(), { dream: { minFiles: 3 } });
     await call(h3, { command: "create", path: "session/memory/a.md", file_text: "a" });
     await call(h3, { command: "create", path: "session/memory/b.md", file_text: "b" });
-    expect(await shouldDream(h3)).toBe(false);
+    expect(await shouldDream(h3, "session")).toBe(false);
   });
 
   test("文件数门只数 session 层:上两层攒再多也不该把整理催起来", async () => {
-    const h = createAgentMemories(new InMemoryDir(), { dream: { minFiles: 2 } });
+    const h = memories(new InMemoryDir(), { dream: { minFiles: 2 } });
     await call(h, { command: "create", path: "user/memory/a.md", file_text: "a" });
     await call(h, { command: "create", path: "project/memory/b.md", file_text: "b" });
-    expect(await shouldDream(h)).toBe(false); // session 层还是 0 个
+    expect(await shouldDream(h, "session")).toBe(false); // session 层还是 0 个
     await call(h, { command: "create", path: "session/memory/c.md", file_text: "c" });
     await call(h, { command: "create", path: "session/memory/d.md", file_text: "d" });
-    expect(await shouldDream(h)).toBe(true);
+    expect(await shouldDream(h, "session")).toBe(true);
   });
 
   test("轮次门经 observer 喂;markDreamed 清计数并记时间", async () => {
-    const h = createAgentMemories(new InMemoryDir(), { dream: { minTurnsSinceLast: 2 } });
-    expect(await shouldDream(h)).toBe(false);
+    const h = memories(new InMemoryDir(), { dream: { minTurnsSinceLast: 2 } });
+    expect(await shouldDream(h, "session")).toBe(false);
     const observe = memoryObserver(h);
     const fake = { seq: 0, at: 0, type: "turn_end", iteration: 0, message: {} as never, toolResults: [] } as never;
     await observe(fake, new AbortController().signal);
     await observe(fake, new AbortController().signal);
-    expect(await shouldDream(h)).toBe(true);
-    await markDreamed(h);
-    expect(await shouldDream(h)).toBe(false); // 计数清零
+    expect(await shouldDream(h, "session")).toBe(true);
+    await markDreamed(h, "session");
+    expect(await shouldDream(h, "session")).toBe(false); // 计数清零
   });
 
   test("dreamTask 上锁:进行中不重复触发;备料只含 memory 工具,prompt 只讲 session 层", async () => {
-    const h = createAgentMemories(new InMemoryDir(), { dream: {} }); // 无门 = 恒可触发
-    expect(await shouldDream(h)).toBe(true);
-    const task = await dreamTask(h);
+    const h = memories(new InMemoryDir(), { dream: {} }); // 无门 = 恒可触发
+    expect(await shouldDream(h, "session")).toBe(true);
+    const task = await dreamTask(h, "session");
     expect(task.tools.map((t) => t.name)).toEqual([MEMORY_TOOL_NAME]);
     expect(task.prompt).toContain("Consolidate the session/ layer");
     expect(task.prompt).toContain("- memory (session/memory/");
     expect(task.prompt).not.toContain("user/memory/"); // 上两层不进整理的视野
-    expect(await shouldDream(h)).toBe(false); // 锁住了
+    expect(await shouldDream(h, "session")).toBe(false); // 锁住了
   });
 
   test("dream 那把工具够不到上两层(不是靠 prompt 里说一句,是门)", async () => {
     const dir = new InMemoryDir();
-    const h = createAgentMemories(dir, { dream: {} });
+    const h = memories(dir, { dream: {} });
     await memoryCreate(h, "user/agent.md", "上层的东西");
-    const tool = (await dreamTask(h)).tools[0]!;
+    const tool = (await dreamTask(h, "session")).tools[0]!;
     const denied = await tool.execute(tool.prepareArguments!({ command: "str_replace", path: "user/agent.md", old_str: "上层的东西", new_str: "被改了" }), ctx());
     expect(denied.isError).toBe(true);
     expect(denied.content).toContain("only reaches the 'session/' layer");
@@ -448,10 +501,10 @@ describe("Dream 门控", () => {
   });
 
   test("内部状态与索引重建不计入写入计数", async () => {
-    const h = createAgentMemories(new InMemoryDir(), { dream: { minWritesSinceLast: 2 } });
-    await markDreamed(h); // 写 .dream/state.json——不计数
+    const h = memories(new InMemoryDir(), { dream: { minWritesSinceLast: 2 } });
+    await markDreamed(h, "session"); // 写 .dream/state.json——不计数
     await call(h, { command: "create", path: "session/memory/a.md", file_text: "a" }); // 一次写(顺带重建 INDEX,不另计)
-    expect(await shouldDream(h)).toBe(false); // 计数是 1 不是 2/3
+    expect(await shouldDream(h, "session")).toBe(false); // 计数是 1 不是 2/3
   });
 
   test("dream 状态住在 session 层:两段 session 各算各的计数与锁", async () => {
@@ -459,82 +512,98 @@ describe("Dream 门控", () => {
     const s1 = new InMemoryDir();
     const s2 = new InMemoryDir();
     const gates = { minWritesSinceLast: 1, minFiles: 1 };
-    const h1 = createAgentMemories(memoryScopeDir({ user: shared, project: shared, session: s1 }), { dream: gates });
-    const h2 = createAgentMemories(memoryScopeDir({ user: shared, project: shared, session: s2 }), { dream: gates });
+    const h1 = layered({ user: shared, project: shared, session: s1 }, { dream: gates });
+    const h2 = layered({ user: shared, project: shared, session: s2 }, { dream: gates });
     await memoryCreate(h1, "session/memory/a.md", "a");
-    expect(await shouldDream(h1)).toBe(true);
-    expect(await shouldDream(h2)).toBe(false); // 计数不共用
-    await dreamTask(h1); // h1 上锁
+    expect(await shouldDream(h1, "session")).toBe(true);
+    expect(await shouldDream(h2, "session")).toBe(false); // 计数不共用
+    await dreamTask(h1, "session"); // h1 上锁
     expect(await s1.read(".dream/state.json")).not.toBeNull();
     expect(await s2.read(".dream/state.json")).toBeNull(); // 锁也不共用
   });
 
-  test("缺省门就是 CC 量级(防手滑改缺省)", () => {
-    expect(DEFAULT_DREAM_GATES).toEqual({ minWritesSinceLast: 5, minFiles: 10, minIntervalMs: 24 * 3600_000 });
+  test("缺省门:四道节流是 CC 量级,外加一道水位(防手滑改缺省)", () => {
+    expect(DEFAULT_DREAM_GATES).toEqual({ minWritesSinceLast: 5, minFiles: 10, minIntervalMs: 24 * 3600_000, budgetRatio: 0.8 });
   });
 });
 
-/* ───────────────────────── ⑦ project 层的目录名 ───────────────────────── */
+/* ───────────────────────── ⑦ 作用域:声明、变量、延迟绑定、留痕 ───────────────────────── */
 
-describe("project 层目录", () => {
-  test("目录名 = workspace 的 fnv1a64 前 12 位;不同 workspace 必然是两个目录", () => {
+describe("作用域声明与延迟绑定", () => {
+  test("哈希目录名 = workspace 的 fnv1a64 前 12 位;不同 workspace 必然是两个目录", () => {
     expect(fnv1a64hex("")).toBe("cbf29ce484222325"); // FNV-1a 64 的空串偏移量,防实现漂
-    expect(projectPrefix("/repo/a")).toMatch(/^projects\/[0-9a-f]{12}\/$/);
-    expect(projectPrefix("/repo/a")).toBe(projectPrefix("/repo/a")); // 稳定
-    expect(projectPrefix("/repo/a")).not.toBe(projectPrefix("/repo/b"));
+    expect(projectDirName("/repo/a")).toMatch(/^[0-9a-f]{12}$/);
+    expect(projectDirName("/repo/a")).toBe(projectDirName("/repo/a")); // 稳定
+    expect(projectDirName("/repo/a")).not.toBe(projectDirName("/repo/b"));
   });
 
-  // 装配层把三件套(前缀 / 留痕 / 分区内的 `memory/`)套在一起的那个 `open`,与 create-agent.ts 同形
-  const openAt = (root: MemoryDir) => (prefix: string, workspace: string): MemoryDir => {
-    const at = (base: MemoryDir, p: string): MemoryDir => ({
-      read: (x) => base.read(p + x),
-      write: (x, c) => base.write(p + x, c),
-      remove: (x) => base.remove(p + x),
-      list: async (s) => (await base.list(p + s)).map((k) => k.slice(p.length)),
-    });
-    return at(withWorkspaceStamp(at(root, prefix), workspace), "memory/");
-  };
-
-  test("重指到盘上权威的 workspace:之后的写落新目录,装配期那个目录一个字节都没有", async () => {
-    const root = new InMemoryDir();
-    const b = projectScopeBinding({ root, workspace: "/elsewhere", open: openAt(root) });
-    await b.pin("/repo/a");
-    await b.dir.write("agent.md", "这个仓库用 bun");
-    expect(await root.list("")).toEqual([
-      `${projectPrefix("/repo/a")}memory/agent.md`,
-      `${projectPrefix("/repo/a")}${WORKSPACE_STAMP_FILE}`,
-    ]);
-    expect(JSON.parse((await root.read(`${projectPrefix("/repo/a")}${WORKSPACE_STAMP_FILE}`))!)).toEqual({ workspace: "/repo/a" });
+  test("前缀变量:闭合集合展开,认不出的变量 fail-loud(静默留 {{typo}} = 所有 session 共用一个目录)", () => {
+    const facts = { workspace: "/repo/a", role: "reviewer", product: "echo-coding", sessionId: "s-1" };
+    expect(expandMemoryPrefix("projects/{{workspaceHash}}/memory/", facts)).toBe(`projects/${projectDirName("/repo/a")}/memory/`);
+    expect(expandMemoryPrefix("products/{{product}}/memory/", facts)).toBe("products/echo-coding/memory/");
+    expect(() => expandMemoryPrefix("x/{{nope}}/", facts)).toThrow(/认不出的变量/);
   });
 
-  test("重指本身不写盘:留痕仍是第一次真写时才落(withWorkspaceStamp 的规矩没变)", async () => {
-    const root = new InMemoryDir();
-    const b = projectScopeBinding({ root, workspace: "/elsewhere", open: openAt(root) });
-    await b.pin("/repo/a");
-    expect(await root.list("")).toEqual([]); // 只读过,没建过目录
-    expect(await b.dir.read("agent.md")).toBeNull(); // 读也不落痕
-    expect(await root.list("")).toEqual([]);
+  test("变量值消毒:含 / 与 .. 的取值不能穿出它那一段", () => {
+    const facts = { workspace: "../../etc", role: "r", product: "p", sessionId: "s" };
+    const out = expandMemoryPrefix("x/{{workspace}}/", facts);
+    const segment = out.slice(2, -1);
+    expect(out.startsWith("x/") && out.endsWith("/")).toBe(true);
+    expect(segment).not.toContain("/"); // 值里的 / 被消掉:穿不出这一段
+    expect(segment).not.toBe(".."); // 也不会整段变成上跳
+    expect(segment.startsWith(".")).toBe(false);
   });
 
-  test("只重指一次:再 pin(setWorkspace 换 worktree)不动它——「一次」是结构性质,不靠调用方", async () => {
-    const root = new InMemoryDir();
-    const b = projectScopeBinding({ root, workspace: "/elsewhere", open: openAt(root) });
-    await b.pin("/repo/a");
-    await b.pin("/repo/a-worktree");
-    await b.dir.write("agent.md", "x");
-    expect(await root.list(projectPrefix("/repo/a"))).toHaveLength(2);
-    expect(await root.list(projectPrefix("/repo/a-worktree"))).toEqual([]);
+  test("绑定前任何读写都抛;只绑一次,重复 bind 是空操作", async () => {
+    const h = createAgentMemories({ memories: [agentMemory] });
+    expect(h.binding.bound()).toBe(false);
+    await expect(h.dir.read("user/agent.md")).rejects.toThrow(/还没绑定/);
+    expect(() => memoryScopeTableOf(h)).toThrow(/还没绑定/);
+
+    const first = new InMemoryDir();
+    const second = new InMemoryDir();
+    bindMemoryScopes(h, tableOf({ user: first, project: first, session: first }));
+    bindMemoryScopes(h, tableOf({ user: second, project: second, session: second })); // 空操作
+    await memoryCreate(h, "user/agent.md", "x");
+    expect(await first.read("agent.md")).toBe("x");
+    expect(await second.read("agent.md")).toBeNull();
   });
 
-  test("新目录留痕对不上 → pin 抛(与装配期同一条 assertProjectWorkspace);抛了就不算指过", async () => {
+  test("模块点了本次装配里没有的层 → 绑定时 fail-loud,并列出可用的层", () => {
+    const h = createAgentMemories({ memories: [indexedMemory("a", { scopes: ["nope"] })] });
+    expect(() => bindMemoryScopes(h, tableOf({ user: new InMemoryDir(), project: new InMemoryDir(), session: new InMemoryDir() }))).toThrow(/nope/);
+  });
+
+  test("不点名 scopes = 每一层都有(内建三个模块靠它,core 里因此没有层名字面量)", () => {
+    const h = memories(new InMemoryDir());
+    expect(memoryPaths(memoryScopeTableOf(h), agentMemory).map((p) => p.path)).toEqual(["user/agent.md", "project/agent.md", "session/agent.md"]);
+  });
+
+  test("作用域撞名 fail-loud:一个名字只能是一层", () => {
+    const d = new InMemoryDir();
+    const dup: MemoryScopeEntry[] = [
+      { def: { name: "user", order: 1, describe: "a", anchor: { kind: "home" }, prefix: "" }, dir: d },
+      { def: { name: "user", order: 2, describe: "b", anchor: { kind: "home" }, prefix: "" }, dir: d },
+    ];
+    expect(() => memoryScopeTable(dup)).toThrow(/重复/);
+  });
+
+  test("留痕:第一次真写才落 workspace.json;对不上的目录判红(48 位哈希撞了)", async () => {
     const root = new InMemoryDir();
-    await root.write(`${projectPrefix("/repo/a")}${WORKSPACE_STAMP_FILE}`, JSON.stringify({ workspace: "/somewhere/else" }));
-    const b = projectScopeBinding({ root, workspace: "/elsewhere", open: openAt(root) });
-    await expect(b.pin("/repo/a")).rejects.toThrow("project 层目录撞了");
-    await b.dir.write("agent.md", "x"); // 仍指着装配期那个
-    expect(await root.list(`${projectPrefix("/elsewhere")}memory/`)).toEqual([`${projectPrefix("/elsewhere")}memory/agent.md`]);
+    const stamped = withWorkspaceStamp(root, "/repo/a");
+    expect(await root.read(WORKSPACE_STAMP_FILE)).toBeNull(); // 只读不写 → 不留痕
+    await stamped.write("agent.md", "x");
+    expect(JSON.parse((await root.read(WORKSPACE_STAMP_FILE))!)).toEqual({ workspace: "/repo/a" });
+
+    await assertProjectWorkspace(root, "", "/repo/a"); // 对得上:不抛
+    await expect(assertProjectWorkspace(root, "", "/repo/b")).rejects.toThrow(/撞了/);
+  });
+
+  test("没有留痕的目录不判红(第一次在这个项目里跑)", async () => {
+    await assertProjectWorkspace(new InMemoryDir(), "", "/anything");
   });
 });
+
 
 /* ───────────────────────── ⑧ Agent 接线 ───────────────────────── */
 
@@ -543,7 +612,7 @@ describe("Agent 接线", () => {
     const agent = new Agent({
       model: FAKE_MODEL,
       streamFunction: scriptedStreamFn([]),
-      memory: createAgentMemories(new InMemoryDir()),
+      memory: memories(new InMemoryDir()),
     });
     await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
     expect(agent.state.tools.map((t) => t.name)).toContain(MEMORY_TOOL_NAME);
@@ -581,7 +650,7 @@ describe("Agent 接线", () => {
     const agent = new Agent({
       model: FAKE_MODEL,
       streamFunction: spy,
-      memory: createAgentMemories(dir),
+      memory: memories(dir),
     });
     await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
 
@@ -611,7 +680,7 @@ describe("Agent 接线", () => {
         closed = true;
       },
     };
-    const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]), memory: createAgentMemories(dir) });
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]), memory: memories(dir) });
     await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
     await agent.dispose();
     expect(closed).toBe(true);

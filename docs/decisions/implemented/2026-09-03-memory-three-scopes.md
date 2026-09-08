@@ -32,7 +32,7 @@ memory 一层,在状态根下(`~/.echo/agents/default/memory/`),所有会话共�
 - **不跟 `setWorkspace()`**:运行中换工作目录(echo-coding 的 worktree 隔离)**故意不重指**——同一个仓库换个 worktree 路径就换一套项目记忆,不是想要的行为。
 
 守住四条:
-1. **重指只发生一次**,在 `start()` 里 session 恢复之后、任何自主活动(skill 发现、闹钟补跑、inbox 重放)与 `sessionStart` 钩子之前。「一次」由 [`projectScopeBinding`](../../../packages/core/src/memory/scope.ts#symbol=projectScopeBinding) 自己保证,不靠调用点只调一次。
+1. **重指只发生一次**,在 `start()` 里 session 恢复之后、任何自主活动(skill 发现、闹钟补跑、inbox 重放)与 `sessionStart` 钩子之前。「一次」由 `projectScopeBinding` 自己保证,不靠调用点只调一次。
 2. **撞车检查不写第二套**:重指走的还是装配期那条 [`assertProjectWorkspace()`](../../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace),新目录里 `workspace.json` 与新 workspace 对不上就抛,于是 `start()` 判红;抛出去时这次重指不算生效。
 3. **装配期那次检查保留**:不给 `sessionId` 时(缺省每次新建一段)workspace 就是装配期这个,早点判红比晚点好。
 4. **写入闸不动**:重指本身一个字节都不写,`workspace.json` 的留痕仍归 `withWorkspaceStamp` 的「第一次真写时才落」——重指时租约刚拿到、`restore-migration` 才开,不该顺手在 home 下建一个没人写过的空目录。

@@ -1,6 +1,6 @@
 # 记忆的作用域由产品声明,core 不认识具体层名;按角色分层,session 层退场
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 替代 [记忆三级作用域](../implemented/2026-09-03-memory-three-scopes.md) 的作用域那一半(分区与作用域两个轴这条保留)
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头) · 实现并合入 2026-09-08 · 替代 [记忆三级作用域](2026-09-03-memory-three-scopes.md) 的作用域那一半(模块与作用域两个轴这条保留)
 
 ## 现状(拍板前)
 
@@ -51,7 +51,7 @@ export type MemoryScopeDef = Readonly<{
 
 ### 解析时机:session 加载完,一次,之后不变
 
-今天是"装配期先按当时已知的 workspace 指着,`start()` 里 [`projectScopeBinding`](../../../packages/core/src/memory/scope.ts#symbol=projectScopeBinding) 重指一次"。改成:**装配期不解析**,给 harness 的是一个还没绑定的字节面(绑定前任何读写直接抛,与写入闸同一条 fail-closed);等 `start()` 里 `createOrResume` 返回、workspace / 角色 / 产品都是盘上权威值,才第一次解析,之后不变。
+今天是"装配期先按当时已知的 workspace 指着,`start()` 里 `projectScopeBinding` 重指一次"。改成:**装配期不解析**,给 harness 的是一个还没绑定的字节面(绑定前任何读写直接抛,与写入闸同一条 fail-closed);等 `start()` 里 `createOrResume` 返回、workspace / 角色 / 产品都是盘上权威值,才第一次解析,之后不变。
 
 这一改消掉三样东西:**「重指」这个概念**(从"先指错再改"变成"先不指,加载完才指");**`setWorkspace()` 故意不跟这条纪律**(运行期不再有解析入口,想跟也跟不了,从纪律变成结构事实);**装配期那次 [`assertProjectWorkspace()`](../../../packages/core/src/memory/scope.ts#symbol=assertProjectWorkspace)**(它存在的理由是"早点判红比晚点好",只有一个解析点时早晚之分不成立)。
 
@@ -77,7 +77,7 @@ core 不认识层名,但拼得出那段说明:按 `order` 升序列出每层的 
 
 ## 连带推翻
 
-- **session 作用域退场**。[记忆三级作用域](../implemented/2026-09-03-memory-three-scopes.md) 里"session 层只放笔记、dream 只整理它"那一段作废,理由见「不拍板的代价」。dream 的计数与锁改为按层各一份,落在各层目录下(见 [dream 改造](2026-09-07-dream-rework.md))。
+- **session 作用域退场**。[记忆三级作用域](2026-09-03-memory-three-scopes.md) 里"session 层只放笔记、dream 只整理它"那一段作废,理由见「不拍板的代价」。dream 的计数与锁改为按层各一份,落在各层目录下(见 [dream 改造](2026-09-07-dream-rework.md))。
 - **「agent 自动写的东西不该进 git」从设计约束降级成默认产品的选择**([会话与 agent 集群](../../design/sessions.md) §2 那句)。作用域由产品声明之后 core 不再有立场:产品想把某层记忆放进仓库,声明 `{anchor:"workspace", prefix:".echo/memory/"}` 即可。`echo-agent` / `echo-coding` 的默认仍然不进 git。
 
 ## 验收

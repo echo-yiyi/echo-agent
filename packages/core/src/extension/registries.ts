@@ -23,6 +23,8 @@ import { addSkills, type ActiveSkillMap, type SkillMap } from "../skill/harness.
 import type { Skill } from "../skill/types.ts";
 import { PROMPT_VARIABLE_NAME, type PromptSection, type PromptVariable } from "../prompt/types.ts";
 import type { CompactionStage } from "../compaction/types.ts";
+import { addMemory, removeMemoryRegion, type AgentMemories } from "../memory/harness.ts";
+import type { AnyMemory } from "../memory/types.ts";
 import { NO_SESSION_FACE, type SessionFace } from "../session/sessions.ts";
 import { defineService, type Disposer, type ServiceKey } from "./abi.ts";
 
@@ -79,6 +81,19 @@ export interface AgentCompactionRegistry {
   stage(stage: CompactionStage): Disposer;
 }
 
+/**
+ * 记忆模块的注册口（2026-09-08）：**记忆模块是数据**。内建的 `echo:memory` 与产品 / 第三方的
+ * 模块走同一个 `module()`、同一份所有权账本；core 只拥有机制（唯一写路径、索引重建、预算校验、
+ * 路径 jail、观测事实、整理与提取），模块只说"记的是什么、在哪几层、多大、归不归整理"。
+ *
+ * 与压缩那条同一个分法。撞名与路径重叠仍 fail-loud；层名合法性要等作用域绑定（session 加载完）
+ * 才谈得上，所以绑定之前注册的攒到绑定时一起校验。
+ */
+export interface AgentMemoryRegistry {
+  /** 同名已存在 → 抛；与已有模块路径重叠 → 抛。返回的 disposer 只卸这个模块。 */
+  module(memory: AnyMemory): Disposer;
+}
+
 export const AgentTools: ServiceKey<AgentToolsRegistry> = defineService<AgentToolsRegistry>({
   id: "echo.agent.tools",
   version: 1,
@@ -116,6 +131,15 @@ export const AgentPrompt: ServiceKey<AgentPromptRegistry> = defineService<AgentP
 /** 压缩阶段的注册口（`AgentCompactionRegistry`）：`kind:"registry"`，阶段的增删在下一次流水线跑时生效（轮边界）。 */
 export const AgentCompaction: ServiceKey<AgentCompactionRegistry> = defineService<AgentCompactionRegistry>({
   id: "echo.agent.compaction",
+  version: 1,
+  kind: "registry",
+  scope: "agent",
+  reload: "turn",
+});
+
+/** 记忆模块的注册口（`AgentMemoryRegistry`）：`kind:"registry"`，模块的增删下个 run 生效（system 每 run 装配一次）。 */
+export const AgentMemory: ServiceKey<AgentMemoryRegistry> = defineService<AgentMemoryRegistry>({
+  id: "echo.agent.memory",
   version: 1,
   kind: "registry",
   scope: "agent",
@@ -198,6 +222,8 @@ export function agentRegistries(input: {
   prompt?: { sections: Map<string, PromptSection>; variables: Map<string, PromptVariable> };
   /** 压缩阶段表（`agent.compactionStages`）。与 `prompt` 同款：Agent 恒有，由 Agent 造的 Host 应当恒传。 */
   compaction?: Map<string, CompactionStage>;
+  /** 记忆的操作面（`agent.memory`）。**没装记忆就不传**——那时这个 Service 缺席，声明 required 的扩展装不上。 */
+  memory?: AgentMemories;
   /**
    * 会话面（2026-09-07）。**只有容器有**——`createEcho()` 传真的那一份；
    * 不传就提供 `NO_SESSION_FACE`，因为这个 Service 恒有（理由见它的定义处）。
@@ -238,10 +264,20 @@ export function agentRegistries(input: {
   out.push([AgentSessionsService, input.sessions ?? NO_SESSION_FACE]);
   if (input.prompt !== undefined) out.push([AgentPrompt, promptRegistry(input.prompt.sections, input.prompt.variables)]);
   if (input.compaction !== undefined) out.push([AgentCompaction, compactionRegistry(input.compaction)]);
+  if (input.memory !== undefined) out.push([AgentMemory, memoryRegistry(input.memory)]);
   return out;
 }
 
 /** 阶段表上的 registry：先查后写、fail-loud；disposer 认对象身份（与 prompt 段同款）。 */
+function memoryRegistry(ctx: AgentMemories): AgentMemoryRegistry {
+  return {
+    module: (memory) => {
+      addMemory(ctx, memory);
+      return () => void removeMemoryRegion(ctx, memory.name);
+    },
+  };
+}
+
 function compactionRegistry(stages: Map<string, CompactionStage>): AgentCompactionRegistry {
   return {
     stage: (stage) => {

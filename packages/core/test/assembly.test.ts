@@ -245,7 +245,7 @@ test("first-party 的五个 adopt factory 零外部副作用：陷阱端口一�
   const trap = trapStorageDir("state-root");
   // 碰一下就抛，所以「没抛」本身就是判据；探针再管住进程级那几类。
   const { violations, covered } = runFactoryProbe(() => ({
-    memory: createAgentMemories(trap),
+    memory: createAgentMemories(),
     schedule: createAgentSchedule(trap),
     inbox: new InboxStore(trap),
     session: new SessionService(trap),
@@ -385,7 +385,7 @@ test("被禁的入口只记账不执行：fetch 没被真调、process 监听器
 test("未 start 的 candidate 被 dispose 只释放纯内存引用：陷阱端口在整个 unwind 期间一次都没被碰", async () => {
   const trap = trapStorageDir("state-root");
   const assembly = new AgentAssembly({ provider: "echo:persistence-local" });
-  assembly.adopt("echo:memory", () => createAgentMemories(trap));
+  assembly.adopt("echo:memory", () => createAgentMemories());
   assembly.adopt("echo:schedule", () => createAgentSchedule(trap));
   assembly.adopt("echo:inbox", () => new InboxStore(trap));
   assembly.adopt("echo:session", () => new SessionService(trap));

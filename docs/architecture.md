@@ -39,7 +39,7 @@
 
 | 能力 | 机制与状态（core） | 缺省内容（`echo:*`） | 让别人扩展的口 |
 |---|---|---|---|
-| memory | `packages/core/src/memory/harness.ts`：分区表与三层作用域、dream 调度与轮次门、恢复 | `echo:memory`：`memory` 工具、记忆段 | 暂无（等第一个仓外消费者） |
+| memory | `packages/core/src/memory/harness.ts`：模块表、唯一写路径、索引重建、预算校验、文件锁；作用域由产品声明（`memory/scope.ts`）；提取与整理各走一条后台通道 | `echo:memory`：`memory` 工具、记忆段、内建三个记忆模块 | `AgentMemory.module()`：第三方注册自己的记忆模块，与内建的同一条 |
 | tasks | `packages/core/src/task/harness.ts`：DAG、落盘尾巴 | `echo:tasks`：四件 Task 工具 | 无 |
 | schedule | `packages/core/src/schedule/harness.ts`：cron、tick、补跑 | `echo:scheduler`：三件工具 | 无 |
 | skills | `packages/core/src/skill/harness.ts`：池与激活 | `echo:skills`：激活 / 创建工具、目录段 | `AgentSkills` registry |
@@ -85,7 +85,12 @@
 | 并行工具（已合入 59beb8c，本表只为指路） | 工具声明 `concurrent`，连续批；结果按 tool_use 顺序；`toolExecution` 选项删 | [记录](decisions/implemented/2026-09-07-parallel-tools.md) |
 | 落单的 `tool_use`（已实现） | 中止后没跑的调用账本里就是没有结果，送模前由投影补一条 error 结果让请求合法 | [记录](decisions/implemented/2026-09-07-orphan-tool-use.md) |
 | 角色定义 | session 的 agent 定义是产品内的角色，不是产品打包；`section(replace)` 与 `restrict()` 两个口 | [记录](decisions/proposed/2026-09-07-role-agent.md) |
-| 记忆三层切法（已实现，本表只为措辞改准） | 分区与作用域两个轴；路径前缀选层，工具不加参数；dream 只整理 session 层 | [记录](decisions/implemented/2026-09-03-memory-three-scopes.md) |
+| 记忆的模块与作用域两个轴 | 路径前缀选层，工具不加参数 | [记录](decisions/implemented/2026-09-03-memory-three-scopes.md) |
+| 作用域由产品声明，core 不认识层名 | 锚点闭合、变量闭合、名字开放；session 加载完才绑定一次 | [记录](decisions/implemented/2026-09-07-memory-scopes-by-product.md) |
+| 记忆模块走 registry，内建与第三方同一条 | 动词集按模块配置；`resident` 没有 rename | [记录](decisions/implemented/2026-09-07-memory-modules.md) |
+| 记忆的产生补上提取，不再只靠前台自觉 | 每条 reply 结束跑一次隔离子 agent，走独立通道不进 admission | [记录](decisions/implemented/2026-09-07-memory-extraction.md) |
+| dream 按层各整理各的，门加一道水位单开 | 整理哪些模块由模块声明；从 admission 挪进独立通道 | [记录](decisions/implemented/2026-09-07-dream-rework.md) |
+| 记忆文件的并发 | 进程内按路径串行 + 跨进程乐观校验；`stop()` 等两条通道收完 | [记录](decisions/implemented/2026-09-07-memory-concurrency.md) |
 | session 的身份 | meta 记 `product`（哪个产品开的）与 `agent`（角色）；`agentId` / `agentName` 退场 | [记录](decisions/proposed/2026-09-07-session-identity.md) |
 | 人优先，后台让位（已合入 e48a366，本表只为措辞改准） | 自称可让位的实例被请走时交还 lease；不可让位的照旧不抢占 | [记录](decisions/implemented/2026-09-07-preemptible-lease.md) |
 | lifecycle 四条小决策 | abort reason 保留、`agent_end` 保留名字、stop hook 三次留硬编码、第二个 prompt 留 fail-fast | [abort](decisions/implemented/2026-09-01-abort-reason.md) · [agent_end](decisions/implemented/2026-09-01-agent-end-barrier.md) · [stop hook](decisions/implemented/2026-09-01-stop-continuation-limit.md) · [second prompt](decisions/proposed/2026-09-01-second-prompt-policy.md) |

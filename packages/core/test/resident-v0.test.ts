@@ -101,18 +101,19 @@ test(
     expect(ra.seen.every((s) => !s.tools.includes("transcript_read"))).toBe(true);
 
     // 落盘是真的：记忆文件、索引、闹钟、会话 entries
-    // 记忆分三层（2026-09-07）：user 层在 `<home>/memory/`（跨 session 共享），session 层
-    // 在这一段自己的目录里；闹钟与 entries 同样在这一段自己的目录里
+    // 缺省作用域 user / project / role（2026-09-08：session 那一层退场，作用域改由产品声明）。
+    // 这一段没点角色，所以真正落盘的是 user 层：`<home>/memory/`，跨 session 共享。
+    // 闹钟与 entries 仍在这一段自己的目录里。
     expect(existsSync(join(dir, "memory", "memory", "项目.md"))).toBe(true);
-    expect(existsSync(join(dir, "sessions", ra.sessionId!, "memory", "memory", "笔记0.md"))).toBe(true);
+    expect(existsSync(join(dir, "memory", "memory", "笔记0.md"))).toBe(true);
     expect(existsSync(join(dir, "sessions", ra.sessionId!, "schedules.json"))).toBe(true);
     expect(readdirSync(join(dir, "sessions", ra.sessionId!, "entries")).length).toBeGreaterThan(0);
 
     // ⑥ **Dream 是 Agent 自己起的**：宿主没调任何整理相关的东西，只是把门喂饱
-    // （session 层 10 个记忆文件 / 11 次写入）。判据是盘上的 `lastAt` 被提交，不是「dream 跑过」。
-    // 文件数那道门只数 session 层——dream 只整理这一层。
+    // （同一层 10 个记忆文件 / 11 次写入）。判据是盘上的 `lastAt` 被提交，不是「dream 跑过」。
+    // 门**按层各算各的**（2026-09-08），喂的是 user 层，提交的也是 user 层那份状态。
     expect(ra.dreamed, "门满足了，Agent 却没自己整理").toBe(true);
-    expect(readdirSync(join(dir, "sessions", ra.sessionId!, "memory", "memory")).length).toBeGreaterThanOrEqual(10);
+    expect(readdirSync(join(dir, "memory", "memory")).length).toBeGreaterThanOrEqual(10);
 
     // ⑪ 干净 stop 之后锁必须还回去
     expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock")), "stop() 之后锁没释放").toBe(false);

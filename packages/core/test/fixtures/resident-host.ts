@@ -24,7 +24,7 @@ import { createProvider } from "../../src/provider/models.ts";
 import { createProviderStreams } from "../../src/provider/dialect.ts";
 import { environmentMessage } from "../../src/messages.ts";
 import { readDreamState } from "../../src/memory/dream.ts";
-import { memoryScopeDir } from "../../src/memory/scope.ts";
+import { memoryScopeDir, memoryScopeTable } from "../../src/memory/scope.ts";
 import type { MemoryDir } from "../../src/memory/types.ts";
 import { InboxStore } from "../../src/inbox/store.ts";
 import { FileDir } from "../../src/storage/file-dir.ts";
@@ -56,12 +56,14 @@ const sessionDir = (id: string): string => join(echoHomeArg, "sessions", id);
  * session 那一层在这一段自己的目录里——dream 的计数与锁跟着 session 层走，
  * 所以读整理状态必须用**同一套路由**，不能拿某一层的根去读。
  */
-const memoryDirs = (id: string): MemoryDir =>
-  memoryScopeDir({
-    user: new FileDir(join(echoHomeArg, "memory")),
-    project: new FileDir(join(echoHomeArg, "memory")), // 这条判据用不到 project 层
-    session: new FileDir(join(sessionDir(id), "memory")),
-  });
+const memoryDirs = (_id: string): MemoryDir =>
+  // 缺省作用域是 user / project / role；这条判据用的是缺省角色（`AgentRef.name` 没有），
+  // 所以 role 那层对它不存在，判据只要读得到 user 层的整理状态。
+  memoryScopeDir(
+    memoryScopeTable([
+      { def: { name: "user", order: 1, describe: "user", anchor: { kind: "home" }, prefix: "" }, dir: new FileDir(join(echoHomeArg, "memory")) },
+    ]),
+  );
 /** 每一段都点名：跨进程共享 tasks / inbox / schedule 的前提是**同一段 session**。 */
 const resumeOpt = resumeSessionId === undefined ? {} : { sessionId: resumeSessionId };
 
@@ -162,14 +164,14 @@ async function main(): Promise<void> {
           path: "user/memory/项目.md",
           file_text: "---\ndescription: 项目笔记\n---\n\n用户在做 Echo",
         }),
-        // 再往 **session 层**写 10 个，把 Dream 的门喂饱：缺省是 minFiles 10 / minWritesSinceLast 5，
-        // 而文件数那道门只数 session 层（dream 只整理这一层）。
+        // 再往同一层写 10 个，把 Dream 的门喂饱：缺省是 minFiles 10 / minWritesSinceLast 5，
+        // 而门**按层各算各的**（2026-09-08：整理是按层各整理各的，计数与锁也跟着层走）。
         // **不需要假时钟**——`minIntervalMs`（24h）只在 `lastAt !== null` 时才判，
         // 新 agent 从没整理过，那道门直接跳过。
         ...Array.from({ length: 10 }, (_, k) =>
           callTool(`m${k}`, "memory", {
             command: "create",
-            path: `session/memory/笔记${k}.md`,
+            path: `user/memory/笔记${k}.md`,
             file_text: `---\ndescription: 第 ${k} 条\n---\n\n内容 ${k}`,
           }),
         ),
@@ -200,7 +202,7 @@ async function main(): Promise<void> {
     await agent.prompt("把「用户在做 Echo」记进记忆、建个任务、启用那个 skill，再建一个每分钟的提醒");
     // ⑥ 等整理**真的提交**再收摊：`stop()` 会中断在飞的 dream（那是它该做的），
     // 睡一觉赌它跑完了是 flaky 的判据，所以这里盯的是盘上的 `lastAt`。
-    const dreamed = await waitFor(async () => (await readDreamState(memoryDirs(agent.state.sessionId!))).lastAt !== null);
+    const dreamed = await waitFor(async () => (await readDreamState(memoryDirs(agent.state.sessionId!), "user")).lastAt !== null);
 
     // **快照要在 stop() 之前取**：`dispose()` 的语义是「资产归零」，
     // 停完再读 `state.tasks` / `state.activeSkills` 一律是空的（第一版就这么读的，
