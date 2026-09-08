@@ -63,10 +63,18 @@ export function renderSkillInjections(skills: SkillMap, active: ActiveSkillMap):
 function renderOneSkill(active: ActiveSkill, content: string): string {
   const head = `# Skill: ${active.name} (instructions begin)`;
   const tail = `# Skill: ${active.name} (instructions end)`;
-  const body = truncateMarked(fenceSafe(content), SKILL_BODY_CAP);
+  // 起止标记自己也要消毒（review 2026-09-07）：`fenceSafe` 护的是围栏，护不住这两行——第三方 SKILL.md 正文里
+  // 写一行字面的 tail 就能提前收尾。正文里与标记同形的行，把行首的 `#` 转成 markdown 字面量 `\#`：
+  // 模型照样读得懂，但它不再是标记。
+  const marker = new RegExp(`^#(?= Skill: ${escapeRegExp(active.name)} \\(instructions (?:begin|end)\\)\\s*$)`, "gm");
+  const body = truncateMarked(fenceSafe(content).replace(marker, "\\#"), SKILL_BODY_CAP);
   const ask =
     active.instructions !== undefined && active.instructions !== ""
       ? `\nFor this task: ${truncateMarked(singleLine(active.instructions), 500)}`
       : "";
   return `${head}\n${body}${ask}\n${tail}`;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

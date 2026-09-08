@@ -10,7 +10,9 @@
 // 安全：它是仓库文件，可能来自第三方 clone——**第三方文本进上下文必须过公共防线**
 // （`fenceSafe` 中和反引号、`truncateMarked` 截断留标记，都从 core 同源消费），并用定界符包起来，
 // 一段精心构造的 AGENTS.md 不能伪装成新的 system 段。「不越过上面的确认规则」那句靠模型自觉，
-// 定界与消毒才是结构隔离。
+// 定界与消毒才是结构隔离——**定界符自己也要消毒**（review 2026-09-07）：`fenceSafe` 护的是围栏，
+// 护不住 XML 标签，此前正文里写一行 `</project-instructions>` 就能提前收尾、后面的字变成「system 段之外的话」。
+// 中和只在这一处做（cli 本地），不往 core 的公共防线加函数。
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -40,9 +42,18 @@ export async function loadInstructions(workspace: string): Promise<{ file: strin
   return null;
 }
 
+/** 定界标签名。正文里出现它的闭合形式（含大小写与内部空白变体）一律中和，闭合标签只能由我们写在最后。 */
+const INSTRUCTIONS_TAG = "project-instructions";
+const CLOSING_TAG_RE = /<\s*\/\s*project-instructions\b[^>]*>?/gi;
+
+/** 正文里冒充闭合标签的字样，把 `<` 换成全角 `＜`：字面还看得出来，但不再是标签。 */
+export function neutralizeClosingTag(body: string): string {
+  return body.replace(CLOSING_TAG_RE, (m) => `＜${m.slice(1)}`);
+}
+
 export function renderInstructions(file: string, content: string): string {
-  const body = truncateMarked(fenceSafe(content.trim()), INSTRUCTIONS_CAP);
-  return `${INSTRUCTIONS_HEADER}\n<project-instructions path="${file}">\n${body}\n</project-instructions>`;
+  const body = truncateMarked(neutralizeClosingTag(fenceSafe(content.trim())), INSTRUCTIONS_CAP);
+  return `${INSTRUCTIONS_HEADER}\n<${INSTRUCTIONS_TAG} path="${file}">\n${body}\n</${INSTRUCTIONS_TAG}>`;
 }
 
 export function instructionsSection(): PromptSection {

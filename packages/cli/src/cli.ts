@@ -35,6 +35,7 @@ import {
   minimaxProvider,
   openaiProvider,
   resolveSessionsRoot,
+  inspectStateLock,
   listSessions,
   zaiCodingProvider,
   type CredentialStore,
@@ -43,7 +44,6 @@ import {
   type SessionRunner,
 } from "@echo-agent/core";
 import type { TUI } from "@earendil-works/pi-tui";
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tuiShell } from "./extension.ts";
 import { instructionsEntry } from "./instructions.ts";
@@ -455,8 +455,9 @@ export const main: Main = mainFor(ECHO_AGENT);
  * 容器怎么让一段会话跑起来（`SessionRunner`，2026-09-07）：**spawn 一个自己的副本**，
  * 让它以 `--serve --resume <id>` 无界面地当那一段的宿主。
  *
- * 契约是「resolve = 那一段已经持有自己的 lease」，所以这里等的是**它的锁文件出现**——
- * 不是等进程起来（进程起来了但装配失败、或者锁被别人占着，都不算跑起来了）。
+ * 契约是「resolve = 那一段已经持有自己的 lease」，所以这里等的是**我起的那个进程持有一把合法的锁**——
+ * 不是等进程起来（进程起来了但装配失败、或者锁被别人占着，都不算跑起来了），也不是「锁文件在」
+ * （review 2026-09-07：盘上残留一把崩在写一半的坏锁时，第一拍就被当成子进程拿到了锁，消息投进一个没人读的目录）。
  *
  * 为什么起独立进程而不是在自己进程里多跑一段：**一段 session 一个宿主**是这条线的原话。
  * 起在自己进程里的话，你关掉这个终端就把别人的会话一起带走了；而独立进程会一直活到
@@ -478,8 +479,10 @@ function sessionRunner(opts: CliOptions): SessionRunner {
     const lock = join(expandHome(opts.stateDir ?? resolveSessionsRoot()), row.id, ".lock");
     const deadline = Date.now() + WAKE_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      if (existsSync(lock)) return; // 它拿到锁了 = 真的跑起来了
+      // 先看进程：它退了就是没跑起来——哪怕盘上留着一把别人的 / 坏的锁
       if (child.exitCode !== null) throw new Error(`会话 ${row.id} 的宿主进程退了（exit ${child.exitCode}），没跑起来`);
+      const cur = await inspectStateLock(lock);
+      if (cur.state === "valid" && cur.record.pid === child.pid) return; // 我起的那个进程持有一把合法的锁 = 真的跑起来了
       await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
     }
     throw new Error(`会话 ${row.id} 的宿主 ${WAKE_TIMEOUT_MS}ms 内没拿到锁`);
@@ -510,19 +513,32 @@ async function runServe(
   const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId);
   const echo = await createEcho({ ...base, preemptible: true });
   try {
-    await echo.agent.start();
-    // 起来这一下就会把盘上攒着的 inbox 吃掉（`start()` 里那句 `consumeInbox()`）。
-    // 之后靠每秒一拍的轮询接着收别人写进来的；连着空闲够久就收摊。
-    let idleSince = Date.now();
-    while (!signal.aborted) {
-      await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
-      if (!echo.agent.acceptsWork) break; // 被请走了（handoff）或已经收摊
-      if (echo.agent.state.status !== "idle") idleSince = Date.now();
-      else if (Date.now() - idleSince >= SERVE_IDLE_MS) break;
+    // 退出只认两件事（review 2026-09-07，#6 拍板：不开新公共面）：**让位 / 丢锁**——Agent 在这两条路上各发一条诊断
+    // （`[lease_handoff]` / `[lease_lost]`，经 lifecycle notification 送出，让位那条发在它自己 stop() 之前），
+    // 以及连着空闲够久。此前拿 `acceptsWork` 当「被请走」读：一有活干它就变 false，宿主一被叫醒就自己收摊、
+    // 把要处理的那条消息当场掐掉——它起来就是为了处理那条消息的。
+    let gone = false;
+    const unsubscribe = echo.agent.subscribeLifecycle((e) => {
+      if (e.type === "notification" && (e.message.startsWith("[lease_handoff]") || e.message.startsWith("[lease_lost]"))) gone = true;
+    });
+    try {
+      await echo.agent.start();
+      // 起来这一下就会把盘上攒着的 inbox 吃掉（`start()` 里那句 `consumeInbox()`）。
+      // 之后靠每秒一拍的轮询接着收别人写进来的；连着空闲够久就收摊。
+      let idleSince = Date.now();
+      while (!signal.aborted && !gone) {
+        await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
+        // 忙 = 跑着，或 admission 还没把这一段放回可接活（inbox 的 ack 裁决窗口里 status 已是 idle 而 acceptsWork 仍 false）
+        const busy = echo.agent.state.status !== "idle" || !echo.agent.acceptsWork;
+        if (busy) idleSince = Date.now();
+        else if (Date.now() - idleSince >= SERVE_IDLE_MS) break;
+      }
+    } finally {
+      unsubscribe();
     }
     return 0;
   } finally {
-    await echo.stop();
+    await echo.stop(); // 让位那条路 Agent 自己已经 stop() 过了：幂等
   }
 }
 

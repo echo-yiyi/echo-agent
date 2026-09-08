@@ -34,6 +34,7 @@
 
 - **ABI 对第三方够不够**:今天没有热重载(同一路径的模块进程内只求值一次),extension 面的 `sessions` / `inbox.watch` 还没做(sessions.md §9 第 3 步的尾巴),观测的发口还没建([观测的公开线](2026-09-07-observation-public-face.md) 第 1 条)。「一个第三方能不能真建出东西来」要有人拿这三样试过才知道。
 - **扩展作者的文档**:今天只有 `examples/extension` 一个样例,没有写扩展的指南。A 之下文档是产品的一部分,这条缺口要补。
+- **「基于 echo-agent 的启动逻辑建产品」这条路今天只在 Bun 下成立**(2026-09-08 review 批 3b 登记):`packages/cli/package.json` 的 `exports` 只有 `bun` 一支,`bin` 是 `.ts`、不构建不发 `dist`——Node 消费不了,普通 tsconfig(不写 `customConditions: ["bun"]`)也拿不到类型。这是 `packages/cli/test/package-isolation.test.ts` 那道门明确定下的「不写空头支票」,不是漏;要让第三方在 Bun 之外用它,得先补 build / 产物门,那是另一件事。README 那句承诺要在写扩展指南时把这个限制写上。
 
 ## 验收
 
