@@ -4,7 +4,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "../src/create-agent.ts";
-import { projectPrefix } from "../src/memory/scope.ts";
+import { projectDirName } from "../src/memory/scope.ts";
+
+/** project 层的家:`projects/<workspace 哈希前 12 位>/`(缺省声明,见 create-agent.ts 的 DEFAULT_MEMORY_SCOPES)。 */
+const projectPrefix = (workspace: string): string => `projects/${projectDirName(workspace)}/`;
 import { SessionService, listSessions } from "../src/session/service.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
 import { createProvider } from "../src/provider/models.ts";
@@ -184,48 +187,72 @@ test("缺省每次启动新建会话，各占一个目录；显式 sessionId 才
   expect(bare.agent).toEqual({ definition: {} });
 });
 
-test("记忆三层各落各的根：user 在 home、project 按 workspace 分、session 才跟着状态根", async () => {
-  // 没有前两层时：状态根成了 session 目录之后记忆也跟着一段一份——每开一段就失忆一次。
-  // 没有第三层时：dream 整理的是所有 session 共写的那一份，两段同时整理就是真冲突。
+test("缺省作用域：user 在 home、project 按 workspace 分；没有角色名就没有 role 层", async () => {
+  // 2026-09-08 起作用域由产品声明，core 的缺省是 user / project / role（session 那一层退场：
+  // 它没有跨层提升、模型没有理由往那儿写，dream 只整理它 = 没有整理对象）。
+  // 这一段没点角色（`AgentRef.name` 可选），所以 role 层对它不存在——没有身份就没有身份记忆。
   const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
   process.env.ECHO_HOME = home;
   const provider = fakeProvider({ id: "t", models: ["only"] });
   const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a" });
   await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
   await agent.start();
-  await agent.prompt("你好"); // 说一句：一句话没说的段收摊时连目录一起撤，session 层记忆跟着它走
+  await agent.prompt("你好");
   const memoryTool = agent.tools.get("memory");
   expect(memoryTool).toBeDefined();
-  const write = async (path: string, text: string): Promise<void> => {
-    const r = await memoryTool!.execute(
+  const exec = async (path: string, text: string) =>
+    memoryTool!.execute(
       { command: "create", path, file_text: text },
       { toolCallId: "c1", workspace: "/repo/a", sessionId: agent.state.sessionId, iteration: 0 },
     );
-    expect([path, r.isError]).toEqual([path, false]);
-  };
-  await write("user/memory/fact.md", "bun test 跑测试");
-  await write("project/agent.md", "这个仓库用 bun");
-  await write("session/memory/scratch.md", "这一段在查的东西");
-  const sessionId = agent.state.sessionId!;
+  expect((await exec("user/memory/fact.md", "bun test 跑测试")).isError).toBe(false);
+  expect((await exec("project/agent.md", "这个仓库用 bun")).isError).toBe(false);
+  // 没有角色名 → role 层不在路由里；session 层已退场
+  expect((await exec("role/agent.md", "x")).isError).toBe(true);
+  expect((await exec("session/memory/scratch.md", "x")).isError).toBe(true);
   await agent.stop();
 
   const projectDir = join(home, projectPrefix("/repo/a"));
   expect(existsSync(join(home, "memory", "memory", "fact.md"))).toBe(true);
   expect(existsSync(join(projectDir, "memory", "agent.md"))).toBe(true);
-  expect(existsSync(join(home, "sessions", sessionId, "memory", "memory", "scratch.md"))).toBe(true);
   // 哈希撞了没人会发现，所以目录里留一份原路径
-  expect(JSON.parse(readFileSync(join(projectDir, "workspace.json"), "utf8"))).toEqual({ workspace: "/repo/a" });
+  expect(JSON.parse(readFileSync(join(projectDir, "memory", "workspace.json"), "utf8"))).toEqual({ workspace: "/repo/a" });
 });
 
-test("project 层的 workspace.json 对不上 = 装配判红（48 位哈希撞了不许静默混记忆）", async () => {
+test("有角色名时 role 层就在，落在 `agents/<角色名>/memory/`（与角色定义同一棵树）", async () => {
+  const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const agent = await createAgent({
+    provider,
+    allowNetwork: false,
+    workspace: "/repo/a",
+    agentDef: { name: "reviewer", definition: { identity: "你是 reviewer" } },
+  });
+  await mountBuiltinTools(agent);
+  await agent.start();
+  await agent.prompt("你好");
+  const r = await agent.tools.get("memory")!.execute(
+    { command: "create", path: "role/agent.md", file_text: "review 时先看 diff" },
+    { toolCallId: "c1", workspace: "/repo/a", sessionId: agent.state.sessionId, iteration: 0 },
+  );
+  expect(r.isError).toBe(false);
+  await agent.stop();
+  expect(existsSync(join(home, "agents", "reviewer", "memory", "agent.md"))).toBe(true);
+});
+
+test("project 层的 workspace.json 对不上 = start() 判红（48 位哈希撞了不许静默混记忆）", async () => {
   const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
   process.env.ECHO_HOME = home;
   const provider = fakeProvider({ id: "t", models: ["only"] });
   // 伪造一次哈希撞车：这个目录说自己是另一个项目的
-  const dir = join(home, projectPrefix("/repo/a"));
+  const dir = join(home, projectPrefix("/repo/a"), "memory");
   await mkdir(dir, { recursive: true });
   writeFileSync(join(dir, "workspace.json"), JSON.stringify({ workspace: "/somewhere/else" }));
-  await expect(createAgent({ provider, allowNetwork: false, workspace: "/repo/a" })).rejects.toThrow("project 层目录撞了");
+  // **判红点从装配期挪到了 start()**（2026-09-08）：作用域只有一个解析点，而装配期知道的
+  // workspace 未必是权威的那个——早的那一次查的可能是错的目录。
+  const bad = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a" });
+  await expect(bad.start()).rejects.toThrow("撞了");
   // 关了记忆的那条路不该被它挡住
   const ok = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", withoutMemory: true });
   await ok.stop();
@@ -302,7 +329,7 @@ test("resume：project 层重指到盘上权威的 workspace；同一段里 setW
   await second.stop();
 });
 
-test("重指到的 project 目录留痕对不上 → start() 判红（与装配期同一条规矩、同一个错误）", async () => {
+test("resume 到的 project 目录留痕对不上 → start() 判红（解析与校验是同一处）", async () => {
   const home = await mkdtemp(join(tmpdir(), "echo-scope-"));
   process.env.ECHO_HOME = home;
   const provider = fakeProvider({ id: "t", models: ["only"] });
@@ -313,13 +340,13 @@ test("重指到的 project 目录留痕对不上 → start() 判红（与装配�
   await first.stop();
 
   // 伪造一次哈希撞车：/repo/a 那个目录说自己是别的项目
-  const dir = join(home, projectPrefix("/repo/a"));
+  const dir = join(home, projectPrefix("/repo/a"), "memory");
   await mkdir(dir, { recursive: true });
   writeFileSync(join(dir, "workspace.json"), JSON.stringify({ workspace: "/somewhere/else" }));
 
-  // 装配期看的是 /elsewhere（没撞），所以红出在 start() 的重指那一步
+  // 进程起在 /elsewhere，但盘上权威的是 /repo/a——解析就在 start() 里那一次，校验跟着它走
   const second = await createAgent({ provider, allowNetwork: false, workspace: "/elsewhere", sessionId: "s" });
-  await expect(second.start()).rejects.toThrow("project 层目录撞了");
+  await expect(second.start()).rejects.toThrow("撞了");
 });
 
 test("start() create-or-resume：stop() 之后换个实例、**显式给同一个 sessionId** 能读回来", async () => {

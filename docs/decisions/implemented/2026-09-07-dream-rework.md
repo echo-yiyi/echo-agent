@@ -1,6 +1,6 @@
 # dream 改造:范围跟模块声明走、按层各整理各的、加一道水位门单开、从 admission 挪进独立通道
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 相关 [作用域由产品声明](2026-09-07-memory-scopes-by-product.md)、[记忆模块](2026-09-07-memory-modules.md)、[记忆的并发](2026-09-07-memory-concurrency.md)
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头) · 实现并合入 2026-09-08 · 相关 [作用域由产品声明](2026-09-07-memory-scopes-by-product.md)、[记忆模块](2026-09-07-memory-modules.md)、[记忆的并发](2026-09-07-memory-concurrency.md)
 
 ## 现状(拍板前)
 

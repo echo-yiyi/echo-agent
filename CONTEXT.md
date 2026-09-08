@@ -39,12 +39,12 @@ _Avoid_：父 session、根 session
 _Avoid_：agent 目录、数据目录
 
 **作用域**：
-记忆等共享内容按谁看得见分的三层：session / project / user。
+记忆按谁看得见分的层。**名字与层数由产品声明**，core 不认识具体层名；缺省是 user / project / role。
 _Avoid_：层级、level
 
-**分区**：
-记忆按记的是什么分的三种：`agent.md`、`user.md`、笔记及其索引。分区与作用域是两个轴。
-_Avoid_：记忆类型、层
+**记忆模块**：
+记忆按记的是什么分的一份声明：名字、位置、`resident` 还是 `indexed`、多大、在哪几层、归不归整理。内建三份是 `agent.md`、`user.md`、笔记及其索引。记忆模块与作用域是两个轴。
+_Avoid_：分区、记忆类型、层
 
 **workspace**：
 一段 session 工作的目录，是 session 的字段，不是状态根的一部分。

@@ -20,9 +20,21 @@ import { InboxStore } from "./inbox/store.ts";
 import { AgentAssembly, type AdoptionLedger } from "./assembly/ledger.ts";
 import { adoptStorageView } from "./state/write-gate.ts";
 import { attachStateHost } from "./state/host-wiring.ts";
-import { createAgentMemories } from "./memory/harness.ts";
+import { bindMemoryScopes, createAgentMemories } from "./memory/harness.ts";
 import { attachMemoryHost } from "./memory/host-wiring.ts";
-import { assertProjectWorkspace, memoryScopeDir, projectPrefix, projectScopeBinding, withWorkspaceStamp } from "./memory/scope.ts";
+import {
+  assertProjectWorkspace,
+  expandMemoryPrefix,
+  memoryScopeTable,
+  safeScopeSegment,
+  withWorkspaceStamp,
+  type MemoryAnchor,
+  type MemoryScopeDef,
+  type MemoryScopeEntry,
+  type MemoryScopeFacts,
+  type MemoryScopeTable,
+} from "./memory/scope.ts";
+import { AGENT_DEF_DIR } from "./agent-def/loader.ts";
 import { createAgentSchedule } from "./schedule/harness.ts";
 import type { Clock } from "./schedule/clock.ts";
 import type { TaskStore } from "./task/types.ts";
@@ -47,6 +59,47 @@ const DEFAULT_PRODUCT = "default";
 const LOCK_FILE = ".lock";
 /** RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
 const RUNTIME_GENERATION = "boot";
+
+const MEMORY_DIR = "memory";
+/** project 那层的家。**是缺省声明的一部分,不是 core 的概念**——产品换了声明它就不出现。 */
+const PROJECTS_DIR = "projects";
+
+/**
+ * **core 的缺省记忆作用域**(2026-09-07 用户拍板):user / project / role 三层。
+ *
+ * 缺省件属于装配层,不属于能力层——`memory/` 里因此一个具体层名都不出现(名字、前缀、有几层
+ * 全是产品的事)。产品给 `memoryScopes` 就整份替换:常驻产品换成「产品级 + role」,
+ * 想把某层记忆放进仓库就声明 `{ anchor: "workspace", prefix: ".echo/memory/" }`。
+ *
+ * `order` 同时是**宽度序**(小 = 宽),模型选层时按它读 `describe`。
+ * role 那层锚在 `<ECHO_HOME>/agents/<角色名>/`——**与角色定义同一棵树**(`AGENT_DEF_DIR`),
+ * 定义和记忆不分家;没有角色名的 session 这一层直接不存在。
+ */
+export const DEFAULT_MEMORY_SCOPES: readonly MemoryScopeDef[] = Object.freeze([
+  Object.freeze({
+    name: "user",
+    order: 1,
+    describe: "every session of this user, in any project",
+    anchor: Object.freeze({ kind: "home" as const }),
+    prefix: `${MEMORY_DIR}/`,
+  }),
+  Object.freeze({
+    name: "project",
+    order: 2,
+    describe: "every session working in this same directory",
+    anchor: Object.freeze({ kind: "home" as const }),
+    prefix: `${PROJECTS_DIR}/{{workspaceHash}}/${MEMORY_DIR}/`,
+    // 目录名是 workspace 的 48 位哈希,撞了就是两个项目的记忆混在一起——留痕 + 打开时对一遍
+    stamp: true,
+  }),
+  Object.freeze({
+    name: "role",
+    order: 3,
+    describe: "every session running this same agent definition",
+    anchor: Object.freeze({ kind: "agent" as const }),
+    prefix: `${MEMORY_DIR}/`,
+  }),
+]);
 /** OR9 的缺省 capture policy：metadata。content 要调用方显式打开（`observation.capture`）。 */
 const DEFAULT_OBSERVATION_CAPTURE: ObservationCapturePolicy = "metadata";
 /**
@@ -61,7 +114,6 @@ const OBSERVATION_BOUNDARY_DEADLINE_MS = 500;
 const OBSERVATION_BUSY_TIMEOUT_MS = 250;
 const TASKS_FILE = "tasks.json";
 const SKILLS_DIR = "skills";
-const MEMORY_DIR = "memory";
 const SESSIONS_DIR = "sessions";
 
 export type CreateAgentOptions = {
@@ -135,6 +187,14 @@ export type CreateAgentOptions = {
    * 「我传了 InMemoryDir」的调用方不该发现记忆仍旧写进了真盘 home。
    */
   sharedStore?: StorageDir;
+  /**
+   * 记忆的作用域声明,**整份替换** `DEFAULT_MEMORY_SCOPES`(2026-09-07)。
+   *
+   * 不同产品要的分层本来就不一样:coding 要 user / role / project,常驻产品要产品级 / role
+   * (它没有"这台机器的用户"这个概念)。core 只定义"作用域"这个位置——一个有序的、各带一个
+   * 根的命名集合——名字、前缀、有几层由产品填。声明是**纯数据**,能写进配置文件。
+   */
+  memoryScopes?: readonly MemoryScopeDef[];
   /**
    * 关掉记忆（C6/D7 的装配面）。缺省 **false** = 装配记忆并让 `start()` 打开 Dream 自调度。
    * 评测与一次性跑给 `true`：那时「跨任务变好」不是目标，整理只会让轨迹不确定。
@@ -427,15 +487,9 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   let agent: Agent;
   let ledger: AdoptionLedger | undefined;
   try {
-    // **打开 project 层时对一遍**(sessions.md §2):目录名是 workspace 的 48 位哈希,
-    // 撞了就是两个项目的记忆混在一起而没人发现。留痕对不上 = 装配当场失败,不是「先跑着再说」。
-    // 读不受写入闸管,所以这一步能在拿到租约之前做;**写**留痕要等第一次真往这层写(见 `withWorkspaceStamp`)。
-    //
-    // **这一次保留**,尽管 `start()` 还会按盘上权威的 workspace 重指并再对一遍:不给 `sessionId`
-    // 时(缺省每次新建一段)workspace 就是这里这个,早点判红比晚点好。
-    if (opts.withoutMemory !== true) {
-      await assertProjectWorkspace(sharedUser, projectPrefix(memoryWorkspace), memoryWorkspace);
-    }
+    // **装配期不再对 project 层做撞车检查**(2026-09-07):作用域现在是 `start()` 里 session
+    // 加载完才解析的,只有那一个解析点,"早点判红比晚点好"这条理由不再成立——早的那一次
+    // 查的是**可能不对**的 workspace。检查跟着解析走,见 `resolveMemoryScopes`。
     const parts = prepareCapabilities({ assembly, shared, sharedUser, clock: opts.clock, withoutMemory: opts.withoutMemory, workspace: memoryWorkspace });
 
     // 形状到此为止。**seal 只冻结形状，不转移所有权**——转移发生在构造成功之后的 `adoptInto()`。
@@ -487,6 +541,14 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       finalDisposables: [
         ...(opts.agent?.finalDisposables ?? []),
         { dispose: () => observation.dispose() },
+        // 记忆的 `workspace` / `path` 两种锚点解析时新建的字节面（`home` / `agent` 落在
+        // `sharedStore` 上，那一份归 `assembly.disposeProcessScope()`）。数组是闭包引用：
+        // 登记这个 disposer 时它还是空的，绑定发生在 `start()` 里，收摊时读到的才是解析出来的那几个。
+        {
+          dispose: async () => {
+            for (const dir of parts.memoryOwnedDirs) await dir.close?.();
+          },
+        },
         { dispose: () => assembly.disposeProcessScope() },
         // **一句话都没说过的那一段，连目录一起清掉**（2026-09-07）。排在最后：观测库先关，
         // 否则删的是一个还开着的 SQLite。
@@ -505,10 +567,15 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     attachStateHost(agent, { gate: ledger.writeGate, adoption: ledger });
     // canonical writer 同样不进公共 `AgentOptions`（observability/host-wiring.ts 头注）
     attachObservationHost(agent, { runtime: observation });
-    // 记忆 project 层的重指口：`start()` 拿到盘上权威的 workspace 之后调一次（memory/host-wiring.ts 头注）。
-    // 关了记忆就不挂——没有这一层可指。
-    if (parts.pinMemoryProjectWorkspace !== undefined) {
-      attachMemoryHost(agent, { pinProjectWorkspace: parts.pinMemoryProjectWorkspace });
+    // 记忆作用域的绑定口：`start()` 从盘上拿到权威的 workspace / 角色 / 产品之后调一次
+    // （memory/host-wiring.ts 头注）。关了记忆就不挂——没有作用域要绑。
+    const resolveScopes = parts.resolveMemoryScopes;
+    const memories = parts.memory;
+    if (resolveScopes !== undefined && memories !== undefined) {
+      const defs = opts.memoryScopes ?? DEFAULT_MEMORY_SCOPES;
+      attachMemoryHost(agent, {
+        bindScopes: async (facts) => bindMemoryScopes(memories, await resolveScopes(defs, facts)),
+      });
     }
   } catch (e) {
     const owner = ledger;
@@ -557,7 +624,10 @@ type AssembledCapabilities = Readonly<{
    * 记忆 project 层的一次性重指口，`start()` 拿到盘上权威的 workspace 之后调。
    * 关了记忆（`withoutMemory`）时是 `undefined`——没有这一层可指。
    */
-  pinMemoryProjectWorkspace: ((workspace: string) => Promise<void>) | undefined;
+  /** 给定 session 加载完之后的权威事实,造出这一段的作用域表。`Agent.start()` 调一次。 */
+  resolveMemoryScopes: ((defs: readonly MemoryScopeDef[], facts: MemoryScopeFacts) => Promise<MemoryScopeTable>) | undefined;
+  /** 锚点解析时新建的字节面,收摊时由本函数关掉。 */
+  memoryOwnedDirs: StorageDir[];
 }>;
 
 /**
@@ -590,28 +660,54 @@ function prepareCapabilities(input: {
   // lane 划分：恢复期的写都走 restore-migration，收摊尾写走 lifecycle-finalization，
   // inbox 的 durable delivery 与 schedule 的 catch-up 各有自己的一条。
   const sessionView = viewFor("echo:session", ["restore-migration", "lifecycle-finalization"]);
-  // 记忆的三层各一个真根,交给 harness 的是一棵**带作用域前缀的树**(memory/scope.ts)：
-  //   user    → `<ECHO_HOME>/memory/`
-  //   project → `<ECHO_HOME>/projects/<hash>/memory/`(`hash` = workspace 的 fnv1a64 前 12 位)
-  //   session → `<状态根>/memory/`(状态根就是 session 目录,所以它天然一段一份)
-  // 三层都过同一个写入闸(闸管的是「什么时候允许写」,与根在哪无关);project / user 两层
-  // **不提供互斥**——多段 session 同时写是设计允许的形态(sessions.md §2)。
-  const memoryUserView = scopedDir(sharedViewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`);
-  // project 那条腿是**可重指一次**的(`projectScopeBinding`):装配期先按已知的 workspace 指着,
-  // `start()` 从盘上拿到权威值之后重指(resume 到别的目录时才真换)。`open` 把这一层的三件套
-  // ——`projects/<hash>/` 前缀、`workspace.json` 留痕、分区内的 `memory/`——一起造出来,
-  // 重指走的是同一个 `open`,所以新旧两个目录的形状按定义一致。
+  // 记忆的作用域**不在装配期解析**(2026-09-07 用户拍板):workspace、角色、产品都是 session
+  // 级事实——`--resume` 一段在别的目录、别的角色下建的会话时,权威值要到 `Agent.start()` 里
+  // `createOrResume` 返回才知道(盘上为准)。这里只造一个「给我 facts 就造出作用域表」的解析器,
+  // `start()` 调它一次、绑定一次,之后不变。
+  //
+  // 这比从前那套「装配期先指着、`start()` 再重指一次」少一个概念:没有"重指",只有"还没指"
+  // 与"指好了";运行期的 `setWorkspace()` 想跟也跟不了——**结构上没有第二个解析入口**,
+  // 这条纪律因此不再建立在调用点自觉上。
+  //
+  // 各层都过同一个写入闸(闸管的是「什么时候允许写」,与根在哪无关);共享层**不提供互斥**——
+  // 多段 session 同时写是设计允许的形态,正确性归记忆自己的文件锁。
   const memorySharedView = sharedViewFor("echo:memory", ["restore-migration"]);
-  const memoryProject = projectScopeBinding({
-    root: memorySharedView,
-    workspace: input.workspace,
-    open: (prefix, workspace) => scopedDir(withWorkspaceStamp(scopedDir(memorySharedView, prefix), workspace), `${MEMORY_DIR}/`),
-  });
-  const memoryView = memoryScopeDir({
-    user: memoryUserView,
-    project: memoryProject.dir,
-    session: scopedDir(viewFor("echo:memory", ["restore-migration"]), `${MEMORY_DIR}/`),
-  });
+  // 锚点解析时**本函数新建**的字节面(`workspace` / `path` 两种锚点)。`home` / `agent` 落在
+  // `sharedStore` 上,那一份归 `finalDisposables` 关一次,不在这里。数组是闭包引用:
+  // 登记 disposer 时它还是空的,收摊时读到的才是解析出来的那几个。
+  const memoryOwnedDirs: StorageDir[] = [];
+  const openMemoryAnchor = (anchor: MemoryAnchor, facts: MemoryScopeFacts): StorageDir | null => {
+    switch (anchor.kind) {
+      case "home":
+        return memorySharedView;
+      case "agent":
+        // **没有角色名 = 没有身份,也就没有身份记忆**(`AgentRef.name` 可选:容器自己开的段、
+        // `--continue` 的老会话、inline 定义都可能没有)。返回 null = 这一层对这段 session 不存在。
+        return facts.role === undefined || facts.role === ""
+          ? null
+          : scopedDir(memorySharedView, `${AGENT_DEF_DIR}/${safeScopeSegment(facts.role)}/`);
+      case "workspace":
+      case "path": {
+        const dir = new FileDir(anchor.kind === "workspace" ? facts.workspace : anchor.path);
+        memoryOwnedDirs.push(dir);
+        return adoptStorageView(dir, gate.authorityFor("echo:memory", { lanes: ["restore-migration"], activeBusiness: true }));
+      }
+    }
+  };
+  const resolveMemoryScopes = async (defs: readonly MemoryScopeDef[], facts: MemoryScopeFacts): Promise<MemoryScopeTable> => {
+    const entries: MemoryScopeEntry[] = [];
+    for (const def of defs) {
+      const root = openMemoryAnchor(def.anchor, facts);
+      if (root === null) continue;
+      const prefix = expandMemoryPrefix(def.prefix, facts);
+      // 撞车检查在**打开这一层的那一刻**做一次:目录名是短哈希时,撞了就是两个项目的记忆
+      // 混在一起而没人发现。留痕仍归 `withWorkspaceStamp` 的「第一次真写时才落」。
+      if (def.stamp === true) await assertProjectWorkspace(root, prefix, facts.workspace);
+      const scoped = scopedDir(root, prefix);
+      entries.push({ def, dir: def.stamp === true ? withWorkspaceStamp(scoped, facts.workspace) : scoped });
+    }
+    return memoryScopeTable(entries);
+  };
   const taskView = viewFor("echo:task", ["restore-migration", "lifecycle-finalization"]);
   const scheduleView = viewFor("echo:schedule", ["restore-migration", "managed-activation", "lifecycle-finalization"]);
   const inboxView = viewFor("echo:inbox", ["restore-migration", "durable-ingress", "lifecycle-finalization"]);
@@ -628,7 +724,7 @@ function prepareCapabilities(input: {
   // **别给它们补登记 disposer**：start 之后的收摊（`disposeMemory` / `disposeSchedule` / session settle）
   // 已经在 `Agent.stop()` 的第 ② 档按类型做过一次，再登记一份就是同一件事收两次。
   const memory =
-    input.withoutMemory === true ? undefined : assembly.adopt("echo:memory", () => createAgentMemories(memoryView));
+    input.withoutMemory === true ? undefined : assembly.adopt("echo:memory", () => createAgentMemories());
 
   // 任务清单与闹钟也落在同一个状态根下。
   // `TaskStore` 是字节面（D3 收窄后），所以这里就是把 `StorageDir` 的两个方法接过去——
@@ -653,7 +749,8 @@ function prepareCapabilities(input: {
     inboxStore,
     sessionService,
     skillStore,
-    pinMemoryProjectWorkspace: input.withoutMemory === true ? undefined : memoryProject.pin,
+    resolveMemoryScopes: input.withoutMemory === true ? undefined : resolveMemoryScopes,
+    memoryOwnedDirs,
   };
 }
 
