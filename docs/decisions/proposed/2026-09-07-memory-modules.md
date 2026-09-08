@@ -92,6 +92,14 @@ interface AgentMemoryRegistry {
 
 内建这一组由 `echo:memory` builtin 经同一条 `module()` 注册,`memory.builtin === false` 就不装,与压缩内建阶梯同款。
 
+## 不做:外部记忆模块(待以后单独讨论设计)
+
+本轮定的模块**存储后端一律在本地**:`MemoryDir` 就是 `StorageDir`,[作用域由产品声明](2026-09-07-memory-scopes-by-product.md) 的四个锚点(`home` / `workspace` / `agent` / `path`)全是本地路径,[记忆的并发](2026-09-07-memory-concurrency.md) 那把锁是本地文件锁。
+
+**外部记忆模块**——存储后端不在本地文件系统上的模块(远程服务、数据库、向量库、团队/组织共享的记忆库这类)——**本轮不设计**。它不是这套机制的自然延伸,至少要重新回答四件事:字节面还是不是 `StorageDir`(远程通常没有"读整个文件再写回"这种便宜操作);并发保护换成什么(本地文件锁跨不到远端);dream 与提取的"读一批改一批写回"在网络延迟下还成不成立;以及失败姿态(本地写失败是异常,远端不可达是常态)。
+
+**记在这里是为了挡住"顺手支持一下"**:registry 开了之后,给 `MemoryModule` 加一个 `dir?: StorageDir` 字段看起来只有一行,但那一行会同时绕过预算校验的时机假设、索引重建的路径假设和文件锁——等于给记忆开第二条落盘路径。要做就单独一轮,从上面四个问题开始。
+
 ## 验收
 
 - 第三方 extension 经 `AgentMemory.module()` 注册一个模块,它出现在 `view ''` 的概览、system 的使用规则、以及写入路由里;disposer 卸载后下一个 run 就没有它。
