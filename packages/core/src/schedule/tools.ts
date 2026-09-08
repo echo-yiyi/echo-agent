@@ -47,7 +47,11 @@ function createTool(ctx: AgentSchedule): ModelTool<{ prompt: string; at?: string
           if (Number.isNaN(at)) return toolError(`Unrecognized timestamp '${params.at}' (use ISO format)`);
           schedule = { ...base, kind: "at", at };
         } else if (params.every_seconds !== undefined) {
-          schedule = { ...base, kind: "every", everyMs: Math.floor(params.every_seconds * 1000) };
+          // 非有限数（`"1h"` 这类字符串 → NaN，`1e400` → Infinity）此前绕过 60 秒下限闸、落盘成 `everyMs: null`，
+          // 重启后每一拍都到期（review 2026-09-07）。在这里判形，闸那边同样按 fail-closed 写。
+          const everyMs = Math.floor(Number(params.every_seconds) * 1000);
+          if (!Number.isFinite(everyMs)) return toolError(`every_seconds must be a finite number of seconds (at least 60), got '${String(params.every_seconds)}'`);
+          schedule = { ...base, kind: "every", everyMs };
         } else {
           schedule = { ...base, kind: "cron", cron: params.cron! };
         }

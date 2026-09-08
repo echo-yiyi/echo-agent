@@ -336,6 +336,18 @@ test("跨代依赖：新代 consumer 绑到旧代仍 ACTIVE 的 provider；卸�
   expect(host.inspect()).toEqual([]);
 });
 
+test("跨代 provide：另一个 entry 在新代 provide 旧代仍 ACTIVE 的 Service → 整代被拒，旧 provider 不受影响（review 2026-09-07）", async () => {
+  // 此前「恰好一个 provider」只在同一代内成立：盘上任一扩展能在下一代静默劫持 AgentRuntimeService，壳绑到假 runtime 上
+  const S = defineService<string>({ id: "xp.s", version: 1, kind: "single", scope: "agent", reload: "agent" });
+  const real = defineExtension({ name: "real", hostAbiVersion: 1, provide: [S], apply: (ctx) => ctx.provide(S, "real") });
+  const impostor = defineExtension({ name: "impostor", hostAbiVersion: 1, provide: [S], apply: (ctx) => ctx.provide(S, "fake") });
+  const host = new ExtensionHost();
+  await host.mount("g1", [entry("real", real)]);
+  await expect(host.mount("g2", [entry("impostor", impostor)])).rejects.toThrow("跨代也只有一个 provider");
+  expect(host.inspect().filter((f) => f.status === "active").map((f) => f.generation)).toEqual(["g1"]);
+  await host.unmount("g1");
+});
+
 /* ─────────────── registry sidecar：exact-reference disposer、同名 fail-loud ─────────────── */
 
 test("registry disposer 只认对象身份：Fiber 注册的 Tool 被显式 replace 成 A2 后，unmount 不误删 A2", async () => {

@@ -165,6 +165,20 @@ test("请求体:system / tool_result→role:tool / assistant tool_calls / tools 
   expect(body.tools[0]!.function.name).toBe("read");
 });
 
+test("thinkingLevel → reasoning_effort：按目录里的 thinkingLevelMap 写；没映射的档、没映射表的模型一个字节都不发（review 2026-09-07）", async () => {
+  // 此前 `StreamOptions.thinkingLevel` 一路传到方言就断了：Shift+Tab / setThinkingLevel / 压缩要的 off，请求体纹丝不动
+  const reply = (): Response => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]));
+  const { fn, calls } = fakeFetch(reply, reply, reply);
+  const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
+  const ctx: Context = { systemPrompt: null, messages: [{ role: "user", content: [{ type: "text", text: "问" }] }], tools: [] };
+  const mapped: Model = { ...MODEL, thinkingLevelMap: { low: "low", high: "high", max: "max" } };
+  await collect(d.request(mapped, ctx, { apiKey: "k", thinkingLevel: "high" }));
+  await collect(d.request(mapped, ctx, { apiKey: "k", thinkingLevel: "off" })); // 这一档没映射：不发（GLM 关不掉，就不假装能关）
+  await collect(d.request(MODEL, ctx, { apiKey: "k", thinkingLevel: "high" })); // 没映射表的模型：不发
+  const bodies = calls.map((c) => c.body as { reasoning_effort?: string });
+  expect(bodies.map((b) => b.reasoning_effort)).toEqual(["high", undefined, undefined]);
+});
+
 test("model.params 最后合并:显式调参赢过缺省", async () => {
   const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: {}, finish_reason: "stop" }] }])));
   const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });

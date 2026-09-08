@@ -171,8 +171,10 @@ export const AgentSessionsService: ServiceKey<SessionFace> = defineService<Sessi
  * 包成 Service。Agent 本身一行不改——它仍直接拥有原始领域对象。
  *
  * 可选项**不给就不提供那条 Service**（不是提供一个空壳）：扩展 `inject` 时
- * `required: true` 会诚实装不上，`required: false` 拿到 `undefined` 自己降级。
- * 这与「能力不在」和「能力在但为空」是两件事那条口径一致。
+ * `required: true` 会诚实装不上；**`required: false` 也不是「拿到 `undefined` 自己降级」**——
+ * ABI 里没有 `tryGet()`，缺 provider 时 `ctx.get()` 同样抛（`fiber.ts`），所以消费这几条的扩展应当声明
+ * `required: true`（本文件上面能力端口那段说的就是这个；review 2026-09-07 此处曾把 optional 写成能降级，
+ * 照它写的扩展整代装不上）。这与「能力不在」和「能力在但为空」是两件事那条口径一致。
  */
 export function agentRegistries(input: {
   tools: ToolMap;

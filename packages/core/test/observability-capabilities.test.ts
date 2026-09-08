@@ -100,6 +100,7 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
       [() => memoryDelete(ctx, "user/memory/"), "not_a_file", "not a directory"],
       [() => memoryCreate(ctx, "user/memory/INDEX.md", "x"), "index_file_protected", "system-maintained index"],
       [() => memoryCreate(ctx, "elsewhere/x.md", "x"), "outside_regions", "not inside any memory region"],
+      [() => memoryDelete(ctx, "user/keepsake.md"), "outside_regions", "not inside any memory region"], // delete 同一道闸（2026-09-07）
       [() => memoryCreate(ctx, "user/agent.md", "a".repeat(61)), "budget_exceeded", "would exceed its budget"],
       [() => memoryRename(ctx, "user/memory/a.md", "user/agent.md"), "cross_region", "must stay within one region"],
       [() => memoryRename(ctx, "user/memory/nope.md", "user/memory/c.md"), "not_found", "does not exist"],

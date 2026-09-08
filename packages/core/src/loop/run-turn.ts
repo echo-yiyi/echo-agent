@@ -445,11 +445,22 @@ async function runOneTool(
     return toolResultMessage(use.id, use.name, message, true);
   }
 
-  /* postToolUse 拦截：可改写结果 */
+  /* postToolUse 拦截：可改写结果，也可 block */
   const post = await hooks.intercept(
     { type: "postToolUse", toolCallId: use.id, toolName: use.name, params, result },
     config.hookContext,
   );
+  // block 与 preToolUse 同一条语义（review 2026-09-07，#3 拍板）：此前 decision / reason 在这里被整个丢掉，工具结果
+  // 照样入账送模，按 ABI 写 block 的 hook 一个字都不生效。patch 在 block 之前已经合并（runtime.ts 先合 patch 再判
+  // block），所以同时返回 patch + block 的 hook 脱敏那半仍生效，但入账的只有 block 的 reason。
+  // 工具已经跑过（tool_execution_start 发过了），所以这里要补 tool_execution_end 把事件配对收口。
+  if (post.decision === "block") {
+    const reason = post.reason ?? "Blocked by a hook";
+    await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "hook", reason });
+    const denied: AgentToolResult = { content: reason, isError: true, metadata: null };
+    await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: denied });
+    return toolResultMessage(use.id, use.name, reason, true);
+  }
   const finalResult = post.event.result;
 
   await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: finalResult });

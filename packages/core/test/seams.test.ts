@@ -161,6 +161,31 @@ test("hook：本轮中途注册的下一轮才生效，中途卸掉的本轮仍�
   expect(earlySeen).toEqual(["c1"]); // 第 1 轮里卸掉的，第 1 轮仍跑；第 2 轮没了
 });
 
+test("postToolUse 返回 block：结果按 reason 入账为 error、发 toolUseDenied、tool_execution_end 照发（review 2026-09-07，#3）", async () => {
+  // 此前 decision / reason 在 run-turn 里被整个丢掉：工具结果照样入账送模，按 ABI 写 block 的 hook 一个字都不生效
+  const hooks = new HookRuntime();
+  const denied: string[] = [];
+  hooks.on("postToolUse", (e) => (e.toolCallId === "c1" ? { decision: "block" as const, reason: "结果里有密钥" } : undefined));
+  hooks.on("toolUseDenied", (e) => void denied.push(`${e.toolCallId}:${e.by}:${e.reason}`));
+  const ends: string[] = [];
+  const t = tool("t", async () => toolOk("sk-secret"));
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: scriptedStreamFn([toolTurn("c1", "t", {}), toolTurn("c2", "t", {}), textTurn("done")]),
+    tools: [t],
+    hooks,
+  });
+  agent.subscribe((e) => {
+    if (e.type === "tool_execution_end") ends.push(`${e.toolCallId}:${String(e.result.isError)}`);
+  });
+  const result = await agent.prompt("go");
+  const rs = toolResults(result.messages);
+  expect([rs[0]!.isError, rs[0]!.content]).toEqual([true, "结果里有密钥"]); // 模型看到的是 reason，不是密钥
+  expect([rs[1]!.isError, rs[1]!.content]).toEqual([false, "sk-secret"]); // 没 block 的照常
+  expect(denied).toEqual(["c1:hook:结果里有密钥"]);
+  expect(ends).toEqual(["c1:true", "c2:false"]); // 工具已经跑过，start / end 仍配对
+});
+
 /* ─────────────── 3. userPromptSubmit 真的可拦截 ─────────────── */
 
 test("userPromptSubmit：patch 改写正文进 transcript；block 拒掉这次 prompt、不起循环", async () => {

@@ -92,6 +92,9 @@ describe("创建闸", () => {
     const { h } = harness();
     await expect(addSchedule(h, sched({ kind: "cron", cron: "bad" } as never))).rejects.toThrow("五段");
     await expect(addSchedule(h, sched({ kind: "every", everyMs: 5000 } as never))).rejects.toThrow("最短");
+    // 非有限数绕闸（review 2026-09-07）：`x < min` 对 NaN 为 false 会放过去；Infinity 过了闸落盘成 null，重启后每一拍都到期
+    await expect(addSchedule(h, sched({ kind: "every", everyMs: Number.NaN } as never, "nan"))).rejects.toThrow("最短");
+    await expect(addSchedule(h, sched({ kind: "every", everyMs: Number.POSITIVE_INFINITY } as never, "inf"))).rejects.toThrow("最短");
     await expect(addSchedule(h, sched({ kind: "at", at: Date.now() - 600_000 } as never))).rejects.toThrow("已经过去");
     await addSchedule(h, sched({ kind: "every", everyMs: 60_000 } as never, "dup"));
     await expect(addSchedule(h, sched({ kind: "every", everyMs: 60_000 } as never, "dup"))).rejects.toThrow("已存在");
@@ -119,6 +122,22 @@ describe("tick", () => {
     expect(m.ref).toBe("j1");
     await tickSchedule(h, T0 + 90_000); // 距上次仅 29s,不到下个周期
     expect(delivered.length).toBe(1);
+  });
+
+  test("投递期间被取消的条目不复活：await 回来后按当前表簿记，不按快照（review 2026-09-07）", async () => {
+    const { h, dir, delivered } = harness();
+    await addSchedule(h, sched({ kind: "every", everyMs: 60_000 } as never));
+    Object.assign(h, {
+      deliver: async (m: AgentMessage) => {
+        delivered.push(m);
+        await cancelSchedule(h, "j1"); // schedule_cancel 在投递还没返回时到达
+      },
+    });
+    await tickSchedule(h, T0 + 61_000);
+    expect(delivered.length).toBe(1); // 投递确实发生了
+    // 此前簿记按 tick 开始时的快照 set 回去：取消的那条复活、还被写回盘上
+    expect((await listSchedules(h)).map((e) => e.schedule.id)).toEqual([]);
+    expect((await dir.read(SCHEDULE_FILE)) ?? "").not.toContain("j1");
   });
 
   test("at:一次性触发即删且落盘;cron:同分钟不重复", async () => {

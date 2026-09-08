@@ -28,7 +28,7 @@ import type {
 } from "../messages.ts";
 import { createProviderStreams, type Dialect } from "./dialect.ts";
 import { createProvider } from "./models.ts";
-import type { Model, Provider, ProviderAuth, StreamOptions } from "./types.ts";
+import type { Model, Provider, ProviderAuth, StreamOptions, ThinkingLevel } from "./types.ts";
 
 export const OPENAI_COMPLETIONS_API = "openai-completions";
 
@@ -96,7 +96,7 @@ export function openAiDialect(opts: OpenAiDialectOptions): Dialect {
             ...(options?.apiKey !== undefined ? { authorization: `Bearer ${options.apiKey}` } : {}),
             ...options?.headers,
           },
-          body: JSON.stringify(buildRequest(model, context, opts.alwaysSendReasoningField === true)),
+          body: JSON.stringify(buildRequest(model, context, opts.alwaysSendReasoningField === true, options?.thinkingLevel)),
           ...(options?.signal !== undefined ? { signal: options.signal } : {}),
         });
       } catch (e) {
@@ -148,7 +148,7 @@ export function openAiDialect(opts: OpenAiDialectOptions): Dialect {
 
 /* ─────────────── 请求体:Context → chat/completions ─────────────── */
 
-function buildRequest(model: Model, context: Context, alwaysSendReasoningField: boolean): Record<string, unknown> {
+function buildRequest(model: Model, context: Context, alwaysSendReasoningField: boolean, thinkingLevel?: ThinkingLevel): Record<string, unknown> {
   const messages: Record<string, unknown>[] = [];
   if (context.systemPrompt !== null && context.systemPrompt !== "") {
     messages.push({ role: "system", content: context.systemPrompt });
@@ -163,6 +163,11 @@ function buildRequest(model: Model, context: Context, alwaysSendReasoningField: 
     }));
   }
   if (model.capabilities?.maxOutputTokens !== undefined) body.max_tokens = model.capabilities.maxOutputTokens;
+  // 思考深度（review 2026-09-07：此前 `StreamOptions.thinkingLevel` 一路传到这里就断了，Shift+Tab / setThinkingLevel /
+  // 压缩显式要的 off，请求体一个字节都不变）。这个方言只认一种写法：`model.thinkingLevelMap[level]` 给出的字符串写进
+  // `reasoning_effort`；`null` 或没映射 = 这一档不发参数（服务端缺省）。哪些模型有哪几档、值是什么，只从目录来（按官方文档填）。
+  const effort = thinkingLevel === undefined ? undefined : model.thinkingLevelMap?.[thinkingLevel];
+  if (typeof effort === "string") body.reasoning_effort = effort;
   return { ...body, ...model.params }; // params 最后:显式调参赢过一切缺省
 }
 
@@ -579,6 +584,13 @@ export function openaiProvider(opts: BuiltinProviderOptions = {}): Provider {
 }
 
 /**
+ * GLM 5.3 系的深度映射（review 2026-09-07 接上 thinkingLevel 之后目录里第一份）：七档折到官方的三档
+ * `reasoning_effort` low / high / max，**没有 `off`**——关不掉就不假装能关，那一档不发参数、服务端按缺省 max 跑。
+ * Kimi / DeepSeek / MiniMax 的目录先不填：仓里没有它们深度参数的官方依据，按「目录静态、过期按官方文档刷表」的规矩不猜。
+ */
+const GLM_THINKING_LEVELS = { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max", max: "max" } as const;
+
+/**
  * 智谱 GLM 的 coding 端点（pi 那边叫 `zai-coding-cn`）。key:`ZAI_CODING_CN_API_KEY`。
  *
  * 目录按 2026-09-01 官方 Coding Plan 文档（docs.bigmodel.cn/cn/coding-plan/overview）：该端点**只真正
@@ -591,6 +603,7 @@ export function openaiProvider(opts: BuiltinProviderOptions = {}): Provider {
  * preserved thinking 要求工具结果回来时原样带回上一轮 `reasoning_content`——方言两侧都做到了
  * （收时记来源字段进 `ThinkingBlock.signature`，发时写回同一个字段）。
  * `maxOutputTokens` 官方口径「128K」，沿用上一版（取自 pi 同一端点的目录）的 131_072。
+ * 深度映射见上面的 `GLM_THINKING_LEVELS`。
  */
 export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
   const baseUrl = opts.baseUrl ?? "https://open.bigmodel.cn/api/coding/paas/v4";
@@ -602,8 +615,8 @@ export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
     // 官方旗舰；flash 是 1/10 价、唯一收图的那个
     defaultModelId: "glm-5.3",
     models: [
-      { id: "glm-5.3", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3", capabilities: { reasoning: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED },
-      { id: "glm-5.3-flash", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3-Flash", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED },
+      { id: "glm-5.3", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3", capabilities: { reasoning: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED, thinkingLevelMap: GLM_THINKING_LEVELS },
+      { id: "glm-5.3-flash", api: OPENAI_COMPLETIONS_API, name: "GLM-5.3-Flash", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000, maxOutputTokens: 131_072 }, params: THINKING_ENABLED, thinkingLevelMap: GLM_THINKING_LEVELS },
     ],
     api: createProviderStreams(openAiDialect({ baseUrl, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) })),
   });

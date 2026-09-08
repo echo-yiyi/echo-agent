@@ -244,6 +244,10 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise
   if (path === "" || path.endsWith("/")) return finishMemoryMutation(ctx, frame, rejected("not_a_file", "delete needs a file path, not a directory"));
   const guard = guardIndexFile(path);
   if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
+  // 与 writeMemory 同一道闸（review 2026-09-07）：此前 delete 不查分区归属，模型能删掉自己建不出来的文件
+  if (frame.owner === undefined) {
+    return finishMemoryMutation(ctx, frame, rejected("outside_regions", `Path '${path}' is not inside any memory region. Regions: ${describeRegions(ctx)}`));
+  }
   let removed: boolean;
   try {
     removed = await ctx.dir.remove(path);

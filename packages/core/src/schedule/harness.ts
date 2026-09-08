@@ -95,7 +95,9 @@ export async function addSchedule(ctx: AgentSchedule, schedule: Schedule, at?: n
   if (ctx.entries.has(schedule.id)) throw new Error(`定时任务 '${schedule.id}' 已存在`);
   if (ctx.entries.size >= max) throw new Error(`定时任务已达上限 ${max} 条,先 schedule_cancel 一些`);
   if (schedule.prompt.trim() === "") throw new Error("prompt 不能为空");
-  if (schedule.kind === "every" && schedule.everyMs < minInterval) {
+  // fail-closed 的写法：`!(x >= min)` 让 NaN / undefined 一并被拒（`x < min` 对 NaN 为 false，会放过去），
+  // `addSchedule` 是公共入口，宿主直接调时形状不经工具那道验（review 2026-09-07）
+  if (schedule.kind === "every" && !(Number.isFinite(schedule.everyMs) && schedule.everyMs >= minInterval)) {
     throw new Error(`周期最短 ${Math.floor(minInterval / 1000)} 秒(防空转)`);
   }
   if (schedule.kind === "at" && schedule.at < now - ONESHOT_GRACE_MS) throw new Error("触发时刻已经过去");
@@ -173,10 +175,14 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
       // deliver 返回 = 投递被接受：这是 delivered 的唯一 emission point
       observe(ctx, { kind: "delivered", id: entry.schedule.id, scheduleKind: entry.schedule.kind, via: "tick" }, now);
       fired.push(entry.schedule);
+      // **await 回来之后重新校验**（review 2026-09-07）：投递期间这条可能已被 schedule_cancel 取消、或同 id 重建
+      //（`createdAt` 不同 = 另一个事实，与 agent.ts 的 incarnation 判据同一条）。按快照簿记会把取消的那条写回盘上复活。
+      const current = ctx.entries.get(entry.schedule.id);
+      if (current === undefined || current.schedule.createdAt !== entry.schedule.createdAt) continue;
       if (entry.schedule.kind === "at") {
         ctx.entries.delete(entry.schedule.id); // 一次性:触发即删
       } else {
-        ctx.entries.set(entry.schedule.id, { ...entry, lastFiredAt: now });
+        ctx.entries.set(entry.schedule.id, { ...current, lastFiredAt: now });
       }
       dirty = true;
     } catch (e) {

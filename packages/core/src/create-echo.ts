@@ -156,11 +156,11 @@ export type Echo = Readonly<{
  */
 async function sessionToolsEntry(
   sessions: EchoSessions,
-  sessionsRoot: string,
+  sessionDirOf: (id: string) => string,
   sessionId: string | null,
   hasRunner: boolean,
 ): Promise<readonly ExtensionEntry[]> {
-  const main = sessionId === null ? true : await isMainSession(sessionsRoot, sessionId);
+  const main = sessionId === null ? true : await isMainSession(sessionDirOf, sessionId);
   const toolOpts = { canCreate: main && hasRunner };
   return [
     {
@@ -175,8 +175,8 @@ async function sessionToolsEntry(
  * 盘上那一段挂的是哪份 agent 定义。**读不到就是 `null`**（还没落 meta = 刚建的这一段），
  * 由调用方决定退到什么。meta 坏了这里不判红——`start()` 马上会撞上同一份并给出更准确的话。
  */
-async function readSessionAgentRef(sessionsRoot: string, sessionId: string): Promise<AgentRef | null> {
-  const raw = await new FileDir(resolveStateDir({ sessionsRoot, sessionId })).read("meta.json");
+async function readSessionAgentRef(sessionDirOf: (id: string) => string, sessionId: string): Promise<AgentRef | null> {
+  const raw = await new FileDir(sessionDirOf(sessionId)).read("meta.json");
   if (raw === null) return null;
   try {
     const ref = (JSON.parse(raw) as { agent?: unknown }).agent;
@@ -187,8 +187,8 @@ async function readSessionAgentRef(sessionsRoot: string, sessionId: string): Pro
   }
 }
 
-async function isMainSession(sessionsRoot: string, sessionId: string): Promise<boolean> {
-  const raw = await new FileDir(resolveStateDir({ sessionsRoot, sessionId })).read("meta.json");
+async function isMainSession(sessionDirOf: (id: string) => string, sessionId: string): Promise<boolean> {
+  const raw = await new FileDir(sessionDirOf(sessionId)).read("meta.json");
   if (raw === null) return true; // 还没落 meta = 刚由容器建的这一段
   try {
     return (JSON.parse(raw) as { main?: unknown }).main !== false;
@@ -321,7 +321,14 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // workspace（session 级事实）的缺省由**这一层**定：进程目录。core 的 Agent 自己不读 process.cwd()。
   const workspace = opts.workspace ?? opts.cwd ?? process.cwd();
   const sessionsRoot = expandHome(opts.sessionsRoot ?? resolveSessionsRoot());
-  const sessionDirOf = (id: string): string => resolveStateDir({ sessionsRoot, sessionId: id });
+  // 「一段 session 的目录在哪」只有一个数法（review 2026-09-07）：**本段点名了 `stateDir` 就是它**，别的段才落
+  // `sessionsRoot/<id>`。此前会话面按 sessionsRoot 另算一遍自己那一段——给了 `stateDir` 的宿主，会话面看不见自己：
+  // `isAlive` 读错锁、`isMainSession` 读不到 meta 于是非 main 的段也拿到 `session_create`。
+  // 本段的 id 在 `createAgent()` 之后才定（不给就随机），所以这里先记调用方给的，创建后再对齐。
+  const selfStateDir = opts.stateDir === undefined ? undefined : expandHome(opts.stateDir);
+  let selfSessionId: string | null = opts.sessionId ?? null;
+  const sessionDirOf = (id: string): string =>
+    selfStateDir !== undefined && id === selfSessionId ? selfStateDir : resolveStateDir({ sessionsRoot, sessionId: id });
   // agent 定义（角色，2026-09-07）：三处来源合并成一张按名查的表，`session_create({ agent: "reviewer" })`
   // 查的就是它。项目层在前——与项目指令文件同一条规矩，放仓库里的最具体、最优先。
   // 加载失败不挡启动（与盘上扩展同一条口径）：坏文件记一条诊断、跳过。
@@ -330,7 +337,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // **这一段挂哪份角色：盘上说了算**。`--resume` 一段 reviewer 会话时角色得跟着回来，
   // 而 meta 要到 `start()` 才读得到——那时 mount 早过去了。所以这里照 `isMainSession` 的先例
   // 直接读一次 meta.json：给了 `sessionId` 且盘上有 meta 就以它为准，否则用调用方给的。
-  const agentRef = (opts.sessionId !== undefined ? await readSessionAgentRef(sessionsRoot, opts.sessionId) : null) ?? opts.agentDef ?? DEFAULT_AGENT_REF;
+  const agentRef = (opts.sessionId !== undefined ? await readSessionAgentRef(sessionDirOf, opts.sessionId) : null) ?? opts.agentDef ?? DEFAULT_AGENT_REF;
   const agent = await createAgent({
     ...opts,
     workspace,
@@ -341,6 +348,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     agentDef: agentRef,
     ...(agentOpts === undefined ? {} : { agent: agentOpts as CreateAgentOptions["agent"] }),
   });
+  selfSessionId = agent.state.sessionId; // 到这里本段的 id 才定；`sessionDirOf` 从此对自己那一段认 `stateDir`
   // canonical writer 是 `createAgent()` 挂上的 Host-internal 接线；这里只把查询面与 `send()` 露出去
   const observation = observationHostOf(agent)?.runtime;
   if (observation === undefined) throw new Error("createAgent() 没有挂观测接线：composition root 装配不完整");
@@ -478,7 +486,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       //     系统却什么都不做，比没有这件工具更坏（工具不能承诺系统不交付的事）。
       ...(opts.sessions === undefined
         ? [] // **开关**：容器不提会话面，这个 agent 就是今天的单会话形态，工具一件不多
-        : await sessionToolsEntry(sessions, sessionsRoot, agent.state.sessionId, opts.sessions.run !== undefined)),
+        : await sessionToolsEntry(sessions, sessionDirOf, agent.state.sessionId, opts.sessions.run !== undefined)),
     ];
     // 顺序与从前一致：inline → 盘上发现的 → extra。差别只在**代的划分**：
     //   · inline / extra 是显式装配 → 各自一代、fail-loud；

@@ -214,11 +214,23 @@ export class Models {
   async checkAuth(providerId: string): Promise<{ source: string } | undefined> {
     const p = this.providers.get(providerId);
     if (p === undefined) return undefined;
-    const credential = await this.credentials.read(providerId);
+    const auth = await this.resolveAuth(p);
+    return auth === undefined ? undefined : { source: auth.source };
+  }
+
+  /**
+   * 「这家配好了没、用哪把 key」**只有这一个数法**（review 2026-09-07）：`checkAuth()` 与 `stream()` 都从这里出。
+   * 此前两处各判各的：`checkAuth` 认「`resolve()` 返回了对象」，`stream` 认「拿到了 apiKey 字符串」——
+   * 文档点名支持的「本地无 key 的服务」（`resolve()` 返回 `{}`）正好踩中：checkAuth 说配好了，stream 当场回 auth 错。
+   * 现在：resolve 返回了对象就是配好了，`apiKey` 可以没有（keyless 服务不发 Authorization；OAuth 走自己的头）。
+   */
+  private async resolveAuth(p: Provider): Promise<{ apiKey?: string; source: string } | undefined> {
+    const credential = await this.credentials.read(p.id);
     if (credential?.type === "oauth") return p.auth.oauth !== undefined ? { source: "OAuth" } : undefined;
     const resolved = await p.auth.apiKey?.resolve({ credential });
-    if (resolved !== undefined) return { source: resolved.env ?? "apiKey" };
-    if (credential?.type === "api_key") return { source: "credentialStore" };
+    if (resolved !== undefined) return { ...(resolved.apiKey === undefined ? {} : { apiKey: resolved.apiKey }), source: resolved.env ?? "apiKey" };
+    const stored = credentialKey(credential);
+    if (stored !== undefined) return { apiKey: stored, source: "credentialStore" };
     return undefined;
   }
 
@@ -245,10 +257,9 @@ export class Models {
       if (provider === undefined) {
         return oneShot({ type: "error", error: agentError("provider", "protocol", `未知端点：${model.provider}`, false) });
       }
-      const credential = await this.credentials.read(provider.id);
-      const resolved = await provider.auth.apiKey?.resolve({ credential });
-      const apiKey = options?.apiKey ?? resolved?.apiKey ?? credentialKey(credential);
-      if (apiKey === undefined && provider.auth.oauth === undefined) {
+      // 与 `checkAuth()` 同一个判据；显式 `options.apiKey` 逐字段赢
+      const auth = options?.apiKey !== undefined ? { apiKey: options.apiKey, source: "options" } : await this.resolveAuth(provider);
+      if (auth === undefined) {
         return oneShot({
           type: "error",
           error: agentError("provider", "auth", `端点未配置凭据：${provider.id}`, false),
@@ -256,7 +267,7 @@ export class Models {
       }
       const merged: StreamOptions = {
         ...options,
-        apiKey,
+        ...(auth.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
         headers: { ...provider.headers, ...options?.headers },
       };
       return provider.stream(model, context, merged);

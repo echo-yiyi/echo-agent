@@ -44,6 +44,13 @@ export function resolveGraph(input: GraphInput): readonly Fiber[] {
             (key.kind === "registry" ? "（registry 也只能有一个 owner；「多」是往里登记条目，不是多个 provider）" : ""),
         );
       }
+      // **跨代同样只有一个 provider**（review 2026-09-07）：此前这条只在同一代内成立，盘上任一扩展在下一代 provide
+      // 同一个 key 就静默成了第二个 provider——`AgentRuntimeService` 被劫持，壳绑到假 runtime 上。
+      // 同一 entryId 的两代 overlap 是 reload 的合法形状（新代顶替旧代），不在此列。
+      const active = activeProviders.get(key);
+      if (active !== undefined && active.entryId !== f.entryId) {
+        throw new ExtensionAbiError(`Service '${key.id}' 已由仍 ACTIVE 的 ${active.label} provide，${f.label} 不能再 provide 它：跨代也只有一个 provider`);
+      }
       providers.set(key, f);
     }
   }

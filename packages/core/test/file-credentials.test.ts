@@ -10,7 +10,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CREDENTIALS_FILE, FileCredentialStore } from "../src/provider/file-credentials.ts";
-import { Models } from "../src/provider/models.ts";
+import { Models, createProvider } from "../src/provider/models.ts";
+import { createProviderStreams } from "../src/provider/dialect.ts";
+import { scriptedDialect, textTurn } from "../src/testing.ts";
 import { kimiProvider } from "../src/provider/openai.ts";
 import { createEcho } from "../src/create-echo.ts";
 
@@ -254,6 +256,27 @@ test("`checkAuth` 与请求路径口径一致：文件里的 key 也算「配好
   // 环境变量也设上 → source 变成那个环境变量的名字（谁赢看得见）
   process.env["MOONSHOT_API_KEY"] = "sk-FROM-ENV";
   expect(await models.checkAuth("kimi")).toEqual({ source: "MOONSHOT_API_KEY" });
+});
+
+test("本地无 key 的服务：`checkAuth` 说配好了，请求路径也真的发得出去——两处同一个数法（review 2026-09-07）", async () => {
+  // 此前两处各判各的：checkAuth 认「resolve() 返回了对象」，stream 认「拿到了 apiKey 字符串」——
+  // 文档点名支持的 keyless 服务正好踩中：checkAuth 配好了，stream 当场回 auth 错
+  const models = new Models(new FileCredentialStore(join(home, CREDENTIALS_FILE)));
+  models.setProvider(
+    createProvider({
+      id: "local",
+      auth: { apiKey: { resolve: async () => ({}) } }, // 有鉴权语义、没有 key
+      defaultModelId: "m",
+      models: [{ id: "m", api: "fake" }],
+      api: createProviderStreams(scriptedDialect([textTurn("ok")])),
+    }),
+  );
+  expect(await models.checkAuth("local")).toEqual({ source: "apiKey" });
+  const reply = await models.complete(
+    { provider: "local", id: "m", api: "fake" },
+    { systemPrompt: null, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], tools: [] },
+  );
+  expect(reply.content.some((b) => b.type === "text" && b.text === "ok")).toBe(true);
 });
 
 /* ──────────── 装配不看凭据：配置是运行态（2026-09-01 用户拍板） ──────────── */
