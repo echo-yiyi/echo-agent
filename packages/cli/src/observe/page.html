@@ -164,20 +164,41 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
  * 事件列限阅读宽度（46ch），剩下的宽度交给条形轨——留白因此参与表达，而不是纯粹的空。
  */
 .timeline { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
+/*
+ * 列宽定义一次，时间刻度用同一份，两者才对得齐。
+ * 右侧让出了事件详情栏之后，事件列不能再用固定的 46ch 上限——那会把用量 / 耗时 / 条形轨一起挤没
+ * （实测 1280px 下刻度数字叠在一起、事件名截成 `attempt_sta…`）。现在让**事件列吃弹性空间**、
+ * 数值列按内容、条形轨给一段固定宽：阅读宽度由这一栏本身限住，不必再靠 ch 上限。
+ */
+.exec { --tl-cols: 18px 52px minmax(0, 1fr) max-content 52px minmax(96px, 132px); }
 .tl {
   position: relative;
-  display: grid; grid-template-columns: 52px minmax(0, 46ch) minmax(0, max-content) 58px minmax(64px, 1fr);
+  display: grid; grid-template-columns: var(--tl-cols);
   align-items: baseline; gap: var(--space-8);
   min-height: var(--ctl-tool-row-height); padding: var(--space-2) var(--space-8);
   font-size: var(--size-ui); color: var(--ink-70); cursor: pointer; border-radius: var(--r-sm);
 }
+/* 悬浮与选中必须一眼分得开：悬浮只换底，选中是浅紫底 + 左侧细线（紫 = 交互，见颜色规则） */
 .tl:hover { background: var(--ui-raised); }
+.tl[aria-selected="true"] { background: var(--accent-wash); box-shadow: inset 2px 0 0 var(--accent); }
+/* 折叠箭头：图标小，命中区整格；没有子事件的行不画箭头，但格子留着，行首才对得齐 */
+.caret { width: 18px; height: 18px; padding: 0; border: 0; background: transparent; color: var(--stone); cursor: pointer; border-radius: var(--r-sm); align-self: center; }
+.caret:hover { background: var(--ui-raised); color: var(--ink); }
+.caret[data-empty="1"] { visibility: hidden; cursor: default; }
+.tl .folded { color: var(--stone); font-size: var(--size-micro); }
 /* 条形轨占最后一列：左端 = 这条 span 在 run 里的起点，长度 = 它占 run 的比例 */
-.tl .track { position: relative; align-self: center; height: 4px; }
-/* 条形轨是数据不是交互，所以用中性墨色——紫留给「可操作 / 已选中」。失败那行的条才染色 */
-.tl-bar { position: absolute; top: 0; height: 4px; border-radius: var(--r-full); background: var(--ink-70); opacity: 0.22; }
-.tl--turn .tl-bar { opacity: 0.4; }
-.tl--bad .tl-bar { background: var(--clay); opacity: 0.45; }
+/*
+ * 条形轨是数据不是交互，所以用中性墨色——紫留给「可操作 / 已选中」。失败那行的条才染色。
+ * **阶段不靠色相区分**：设计系统的分类色板（dataviz.md §2）只在 spec 里，没进我 vendor 的 dist/tokens.css，
+ * 而手抄 hex 是它明令禁止的（本页那道颜色门也会判红）。所以用「粗细 + 浓淡」分层：
+ * 轮（容器）粗而实，模型 / 工具（叶子）细而淡。要真正的色相编码，得先把那张色板 build 进 dist。
+ */
+.tl .track { position: relative; align-self: center; height: 6px; }
+.tl-bar { position: absolute; top: 1px; height: 4px; border-radius: var(--r-full); background: var(--ink-70); opacity: 0.24; }
+.tl--turn .tl-bar { top: 0; height: 6px; opacity: 0.42; }
+.tl--bad .tl-bar { background: var(--clay); opacity: 0.5; }
+/* 起止点：条太短时（10ms / 12s）也要看得出它落在哪儿 */
+.tl-bar::before { content: ""; position: absolute; left: 0; top: -1px; bottom: -1px; width: 1px; background: currentColor; opacity: 0.5; }
 /* 字体分工：数字与技术标识走等宽，人读的词走界面字体——整行 mono 会让页面变成终端输出 */
 .tl .t { font-family: var(--font-mono); color: var(--stone); text-align: right; font-variant-numeric: tabular-nums; font-size: var(--size-caption); }
 .tl .what { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
@@ -231,6 +252,61 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 
 .usageline { max-width: 76ch; margin-top: var(--space-10); display: flex; flex-wrap: wrap; gap: var(--space-12); font-size: var(--size-ui); color: var(--ink-70); }
 .usageline > span:first-child { color: var(--stone); }
+
+/*
+ * ── 排查用的三段版面（2026-09-07 用户评审第 3 条）──
+ * 打开这页的人有三个问题：这次怎么样？为什么这么久？某一步发生了什么？
+ * 对应三段：**顶部固定的运行概览** → **中间完整的时间线** → **右侧按需的事件详情**。
+ * 关键是最后一段：原来点一行会就地展开一大块 JSON，把后面的行整个推下去，
+ * 连着看两条就找不回位置了。现在选中只换右栏，时间线的位置不动。
+ */
+.overview { position: sticky; top: 0; z-index: 1; background: var(--surface); padding-bottom: var(--space-8); }
+.overview .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-8); margin-bottom: var(--space-4); }
+/* 指标行：把「这次怎么样」压成一排可扫的数——状态与总时长在标题行，明细在这里 */
+.metrics { display: flex; flex-wrap: wrap; gap: var(--space-16); margin: var(--space-8) 0; font-size: var(--size-ui); }
+.metric { display: flex; align-items: baseline; gap: var(--space-6); }
+.metric .k { color: var(--stone); font-size: var(--size-caption); }
+.metric .v { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.metric .v.bad { color: var(--clay); }
+/* 采集提示是低强度信息条，不是正文段落 */
+.infobar { display: flex; gap: var(--space-6); padding: var(--space-6) var(--space-8); border-left: 2px solid var(--ui-line-strong); background: var(--ui-inset); font-size: var(--size-caption); color: var(--ink-70); }
+.problembar { margin-bottom: var(--space-12); border-left-color: var(--marigold); }
+/* 状态解释：圆点可点，展开一行人话，而不是只在 title 里藏着 */
+.marks .mark { border: 0; background: transparent; padding: 0; cursor: help; }
+.markwhy { margin: var(--space-6) 0 0; font-size: var(--size-caption); color: var(--ink-70); }
+
+/* 中段：时间线 + 事件详情。窄屏改成上下两块（抽屉留到真需要时再做，不假装有） */
+.exec { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: var(--space-16); align-items: start; }
+@media (max-width: 1180px) { .exec { grid-template-columns: 1fr; } }
+/* 时间刻度：条形轨那一列的坐标系。没有它，几根灰线看着像滚动条 */
+.scale { display: grid; grid-template-columns: var(--tl-cols); gap: var(--space-8); padding: 0 var(--space-8) var(--space-4); font-size: var(--size-micro); color: var(--stone); }
+.scale .scalelabel { grid-column: 3; text-align: right; }
+.scale .ticks { grid-column: 6; position: relative; height: 12px; border-bottom: 1px solid var(--ui-line-soft); }
+.scale .tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--ui-line-soft); padding-left: 2px; white-space: nowrap; }
+.scale .tick--end { border-left: 0; border-right: 1px solid var(--ui-line-soft); padding: 0 2px 0 0; transform: translateX(-100%); }
+
+/* 事件详情：选中一条事件后的右栏。先给人话摘要，再给原始 JSON（默认收起） */
+.evt { position: sticky; top: var(--space-40); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--ui-inset); padding: var(--space-12); }
+.evt .evthead { display: flex; align-items: baseline; gap: var(--space-6); margin-bottom: var(--space-8); }
+.evt .evthead .verb { font-size: var(--size-content); font-weight: 600; color: var(--ink); }
+.evt .evthead .obj { font-family: var(--font-mono); color: var(--ink-70); overflow: hidden; text-overflow: ellipsis; }
+.evt .nav { margin-left: auto; display: flex; gap: var(--space-4); }
+.evt .navbtn { height: 20px; min-width: 22px; padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--ink-70); font-size: var(--size-caption); cursor: pointer; }
+.evt .navbtn:disabled { opacity: 0.4; cursor: default; }
+.evt .navbtn:hover:not(:disabled) { background: var(--ui-raised); }
+.evt .fields { grid-template-columns: 5.5em 1fr; row-gap: var(--space-4); }
+.evt .fields dt, .evt .fields dd { font-size: var(--size-caption); }
+.evt .raw { margin-top: var(--space-10); }
+.evt .raw > summary { cursor: pointer; font-size: var(--size-caption); color: var(--stone); list-style: none; }
+.evt .raw > summary::-webkit-details-marker { display: none; }
+.evt .raw > summary::before { content: "▸ "; }
+.evt .raw[open] > summary::before { content: "▾ "; }
+.evt .rawbox { margin-top: var(--space-6); max-height: var(--ctl-tool-expand-max-height); overflow: auto; background: var(--surface); border: 1px solid var(--ui-line-soft); border-radius: var(--r-sm); padding: var(--space-8); }
+.evt .rawbox pre { margin: 0; font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink-70); white-space: pre-wrap; word-break: break-all; }
+/* 复制按钮：点完给回执，不然用户不知道有没有成 */
+.copy { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--stone); font-size: var(--size-micro); padding: 0 var(--space-4); height: 16px; cursor: pointer; }
+.copy:hover { background: var(--ui-raised); color: var(--ink-70); }
+.copy[data-done="1"] { color: var(--ink-70); border-color: var(--ui-line-strong); }
 /* 记录健康是页脚：比区块更淡一档，不与「工具与用量」争成一个新区块 */
 .health { margin-top: var(--space-24); padding-top: var(--space-12); border-top: 1px solid var(--ui-line-soft); font-size: var(--size-caption); color: var(--stone); display: flex; flex-wrap: wrap; gap: var(--space-12); align-items: center; }
 .muted { color: var(--stone); }
@@ -250,6 +326,8 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
     </div>
   </header>
 
+  <!-- 只在会话清单读不出来时出现：说清「run 照看，只是没名字」，不让人以为面板坏了 -->
+  <div class="infobar problembar" id="problem" hidden></div>
   <div class="split">
     <aside class="pane" aria-label="run 列表">
       <div class="filters" id="filters" role="group" aria-label="按来源筛选"></div>
@@ -266,7 +344,13 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 
 <script>
 const LEX = /*__LEXICON__*/ null;
-const STATE = { runs: [], sessions: {}, filter: "all", product: "all", session: "all", selected: null, follow: true, vm: null, expanded: new Set(), hidden: false, activity: [], root: "", envOpen: false };
+const STATE = {
+  runs: [], sessions: {}, filter: "all", product: "all", session: "all", selected: null, follow: true, vm: null,
+  hidden: false, activity: [], root: "", envOpen: false,
+  // 事件详情（2026-09-07 改版）：选中哪条事件、哪些行收起了、原始 JSON 展开没有、状态解释显示哪一条。
+  // 都存在 STATE 里，因为详情每 2s 重绘一次——不存的话轮询会把用户刚打开的东西合上。
+  selectedEvent: null, collapsed: new Set(), rawOpen: false, markWhy: "",
+};
 /* run 归哪个产品：header 只有 sessionId，产品名与 workspace 在会话 meta 里（/api/runs 顺带给） */
 const sessionOf = (r) => (r.sessionId ? STATE.sessions[r.sessionId] : undefined);
 const productOf = (r) => sessionOf(r)?.agent ?? (r.sessionId ? "未上报" : "无会话");
@@ -320,6 +404,24 @@ function dot(term, key, tone) {
 function statusMark(term, key) {
   const t = termOf(term, key);
   return t.tone === "critical" || t.tone === "caution" ? badge(t, key) : dot(t, key);
+}
+/** 概览里的状态标记：点一下把解释显示在下面一行，而不是只藏在 title 里（评审：「完整」「已落盘」要可查看的解释）。 */
+function markButton(term, key) {
+  const t = termOf(term, key);
+  const why = `${t.zh}（${t.en}）：${t.hint}`;
+  const b = el("button", { class: "mark", "aria-label": `${t.zh}：点开解释` }, statusMark(t, key));
+  b.addEventListener("click", () => { STATE.markWhy = STATE.markWhy === why ? "" : why; renderDetail(); });
+  return b;
+}
+/** 跳到另一条 run（收件消费带着来源 run 时用）。 */
+function openRun(runId) {
+  STATE.selected = runId;
+  STATE.selectedEvent = null;
+  STATE.follow = false;
+  renderFollow();
+  history.replaceState(null, "", `?run=${encodeURIComponent(runId)}`);
+  renderRuns();
+  loadRun();
 }
 
 /* ── 列表 ── */
@@ -396,7 +498,7 @@ function renderRuns() {
     if (showProduct) parts.push(productOf(r));
     if (showSession && r.sessionId) parts.push(sessionLabel(r.sessionId));
     if (parts.length === 0) parts.push(LEX.runSource[r.source.kind]?.zh ?? r.source.kind); // 都不区分时，至少说清这是哪一类
-    const open = () => { STATE.selected = r.runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(r.runId)}`); renderRuns(); loadRun(); };
+    const open = () => openRun(r.runId);
     // **每行恒两行**（2026-09-07 用户定）：第一行名称 + 右对齐耗时，第二行时间 · 状态 · 来源。
     // 整理 run 走同一副骨架，只把整行调暗——此前它是一行、对话是三行，两种读法交替，视线一直在切换。
     const item = el("button", {
@@ -529,6 +631,15 @@ function foldSingleLayers(entries) {
     e.indent = hideReply && e.start.depth >= 2 ? e.start.depth - 1 : e.start.depth;
     out.push(e);
   }
+  // 谁能收起：**只有真正的 span**（轮 / 尝试 / 模型生成 / 工具 / 压缩）。
+  // 只按缩进算父子会把 `run.started` 这种单点事件也变成父节点——它后面恰好跟着更深的行，
+  // 但它不是容器，给它一个箭头是在说谎（实测截图里 `开始执行` 和 `消息入账` 都长出了箭头）。
+  for (let i = 0; i < out.length; i++) {
+    let n = 0;
+    for (let j = i + 1; j < out.length && out[j].indent > out[i].indent; j++) n++;
+    out[i].hasChildren = !out[i].single && out[i].start.kind === "span_start" && n > 0;
+    out[i].hiddenCount = n;
+  }
   return out;
 }
 
@@ -602,21 +713,25 @@ function renderEntry(e, gaps, runMs = 0) {
   const cls = ["tl"];
   if (t.name.startsWith("run.")) cls.push("tl--boundary");
   if (t.name === "turn.execute") cls.push("tl--turn");
-  if (failed) cls.push("tl--bad");
-  else if (warn) cls.push("tl--warn");
+  if (warn && !failed) cls.push("tl--warn");
   if (isOpen) cls.push("tl--open");
-  const id = `${t.seq}`;
-  const expanded = STATE.expanded.has(id) || (failed && !STATE.expanded.has(`-${id}`));
-  const { secs, strip } = contentSections(t, end);
-  const detail = el("div", { class: "tl-detail", hidden: !expanded });
-  for (const s of secs) detail.append(el("div", { class: `tl-sec${s.tone === "bad" ? " tl-sec--bad" : ""}` }, el("span", { class: "tl-sec-label", text: s.label }), el("pre", { class: "tl-text", text: clip(s.text) })));
-  const raw = { name: t.name, seq: t.seq, attributes: attrs, body: strip(t.body, "body"), endBody: strip(end?.body, "end") };
-  if (e.folded) raw.folded = e.folded;
-  detail.append(el("pre", { class: "tl-text", text: JSON.stringify(raw, null, 2) }));
+  if (failed) cls.push("tl--bad");
+  const seq = t.seq;
+  const selected = STATE.selectedEvent === seq;
+  const collapsed = STATE.collapsed.has(seq);
+  // **一行一件事**（2026-09-07 用户评审第 2 条）：箭头收放子事件，行本身选中并把内容送去右栏。
+  // 原来点一行会就地展开一大块 JSON 把后面的行推走，连着看两条就找不回位置。
   const row = el("div", {
-    class: cls.join(" "), role: "button", tabindex: 0, title: term?.hint ?? t.name, "aria-expanded": expanded,
-    onclick: () => { if (expanded) { STATE.expanded.delete(id); STATE.expanded.add(`-${id}`); } else { STATE.expanded.add(id); STATE.expanded.delete(`-${id}`); } renderDetail(); },
+    class: cls.join(" "), role: "option", tabindex: 0, "aria-selected": selected,
+    onclick: () => selectEvent(seq),
+    onkeydown: (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectEvent(seq); } },
   },
+    el("button", {
+      class: "caret", "data-empty": e.hasChildren ? "0" : "1", tabindex: e.hasChildren ? 0 : -1,
+      "aria-label": collapsed ? "展开子事件" : "收起子事件", "aria-expanded": e.hasChildren ? !collapsed : undefined,
+      text: e.hasChildren ? (collapsed ? "▸" : "▾") : "",
+      onclick: (ev) => { ev.stopPropagation(); if (!e.hasChildren) return; if (collapsed) STATE.collapsed.delete(seq); else STATE.collapsed.add(seq); renderDetail(); },
+    }),
     el("span", { class: "t", text: `+${fmtMs(t.relativeMs)}` }),
     el("span", { class: "what", style: `padding-left: calc(var(--space-16) * ${e.indent ?? t.depth})` },
       el("span", { class: "prefix", text: prefix }),
@@ -624,16 +739,110 @@ function renderEntry(e, gaps, runMs = 0) {
       obj ? el("span", { class: "obj", text: obj }) : null,
       arg ? el("span", { class: "arg", text: `"${arg}"` }) : null,
       el("span", { class: "en", text: t.name }),
+      e.folded ? el("span", { class: "folded", text: `+${e.folded}` }) : null,
+      collapsed && e.hiddenCount ? el("span", { class: "folded", text: `⋯${e.hiddenCount}` }) : null,
     ),
     el("span", { class: "usage", text: usage }),
     el("span", { class: "res", text: res }),
-    // 条形轨占最后一列：数字要逐行读，条形一眼就看出「12 秒里 9 秒花在第一轮」
+    // 条形轨占最后一列：数字要逐行读，条形一眼就看出「12 秒里 9 秒花在第一轮」。刻度在时间线顶部
     el("span", { class: "track" },
       runMs > 0 && end?.durationMs !== undefined
         ? el("span", { class: "tl-bar", style: `left: ${(100 * t.relativeMs) / runMs}%; width: max(2px, ${(100 * end.durationMs) / runMs}%)` })
         : null),
   );
-  return [row, detail];
+  return row;
+}
+
+/** 选中一条事件：只换右栏，时间线不动（评审第 2、3 条的核心）。地址栏跟着走，现场可分享、回得来。 */
+function selectEvent(seq) {
+  STATE.selectedEvent = seq;
+  if (STATE.selected !== null) history.replaceState(null, "", `?run=${encodeURIComponent(STATE.selected)}&evt=${seq}`);
+  renderDetail();
+}
+
+/** 收起的行把它的整棵子树藏起来；被藏的行不参与「上一条 / 下一条」。 */
+function visibleEntries(entries) {
+  const out = [];
+  let hideDeeperThan = null;
+  for (const e of entries) {
+    if (hideDeeperThan !== null && e.indent > hideDeeperThan) continue;
+    hideDeeperThan = null;
+    out.push(e);
+    if (e.hasChildren && STATE.collapsed.has(e.start.seq)) hideDeeperThan = e.indent;
+  }
+  return out;
+}
+
+/** 复制并给回执——不然用户不知道点没点成。 */
+function copyButton(label, text) {
+  const b = el("button", { class: "copy", text: label, title: "复制" });
+  b.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    void navigator.clipboard?.writeText(text);
+    b.textContent = "已复制";
+    b.dataset.done = "1";
+    setTimeout(() => { b.textContent = label; delete b.dataset.done; }, 1200);
+  });
+  return b;
+}
+
+/**
+ * 右栏：选中那条事件的详情。**先给人话摘要，再给原始 JSON**（默认收起）——
+ * 评审第 2 条：不要让用户每次都从 name、seq 开始找重点。
+ */
+function renderEventDetail(entries, vm) {
+  const list = visibleEntries(entries);
+  const idx = list.findIndex((e) => e.start.seq === STATE.selectedEvent);
+  const box = el("aside", { class: "evt", "aria-label": "事件详情" });
+  if (idx < 0) {
+    box.append(el("div", { class: "empty", text: "选时间线里的一行，这里显示它的摘要与原始记录。" }));
+    return box;
+  }
+  const e = list[idx];
+  const t = e.start;
+  const end = e.end;
+  const attrs = { ...t.attributes, ...(end?.attributes ?? {}) };
+  const { verb, obj } = verbFor(t.name, attrs, t.body);
+  const go = (delta) => { const n = list[idx + delta]; if (n) selectEvent(n.start.seq); };
+  box.append(el("div", { class: "evthead" },
+    el("span", { class: "verb", text: verb }),
+    obj ? el("span", { class: "obj", text: obj }) : null,
+    el("span", { class: "nav" },
+      el("button", { class: "navbtn", text: "↑", title: "上一条事件", disabled: idx === 0, onclick: () => go(-1) }),
+      el("button", { class: "navbtn", text: "↓", title: "下一条事件", disabled: idx === list.length - 1, onclick: () => go(1) })),
+  ));
+  const term = LEX.records[t.name];
+  if (term?.hint) box.append(el("p", { class: "markwhy", text: term.hint }));
+
+  const dl = el("dl", { class: "fields" });
+  const field = (k, ...v) => { dl.append(el("dt", { text: k }), el("dd", {}, ...v)); };
+  // ViewModel 的时间线只带相对时间（`relativeMs`），绝对时刻由 run 的受理时刻加上去——**不要读 `occurredAt`**，
+  // `RunObservationTimelineItem` 上没有这个字段（读到的是 undefined，`fmtClock` 会给出 Invalid Date）
+  const absAt = (item) => vm.header.acceptedAt + item.relativeMs;
+  field("起", el("span", { class: "mono", text: `${fmtClock(absAt(t))} · +${fmtMs(t.relativeMs)}` }));
+  if (end?.durationMs !== undefined) {
+    field("止", el("span", { class: "mono", text: `${fmtClock(absAt(end))} · +${fmtMs(end.relativeMs)}` }));
+    field("耗时", el("span", { class: "mono", text: fmtMs(end.durationMs) }));
+  }
+  field("记录", el("span", { class: "mono", text: t.name }), copyButton("复制", t.name));
+  // 关联运行：收件消费这类事实带着来源 run，能直接跳过去（多 agent 排查要顺着线索走）
+  const linked = typeof attrs.runId === "string" && attrs.runId !== vm.header.runId ? attrs.runId : null;
+  if (linked) field("关联", el("button", { class: "navbtn", text: "打开那条 run", onclick: () => openRun(linked) }));
+  box.append(dl);
+
+  const { secs, strip } = contentSections(t, end);
+  for (const s of secs) box.append(el("div", { class: `tl-sec${s.tone === "bad" ? " tl-sec--bad" : ""}` }, el("span", { class: "tl-sec-label", text: s.label }), el("pre", { class: "tl-text", text: clip(s.text) })));
+
+  const raw = { name: t.name, seq: t.seq, attributes: attrs, body: strip(t.body, "body"), endBody: strip(end?.body, "end") };
+  if (e.folded) raw.folded = e.folded;
+  const rawText = JSON.stringify(raw, null, 2);
+  const det = el("details", { class: "raw", ...(STATE.rawOpen ? { open: true } : {}) },
+    el("summary", { text: "原始 JSON" }),
+    el("div", { class: "rawbox" }, el("pre", { text: rawText })));
+  det.addEventListener("toggle", () => { STATE.rawOpen = det.open; });
+  det.querySelector("summary").append(" ", copyButton("复制", rawText));
+  box.append(det);
+  return box;
 }
 
 function renderDetail() {
@@ -651,45 +860,68 @@ function renderDetail() {
   }
   const h = vm.header;
   const sk = statusKey(h, vm.outcome);
-  // 没封口的 run 只说事实：最后一条记录是什么时候。「已跑 N 秒」是在替进程说它还活着，离线读者说不了这句话
-  const lastAt = vm.timeline.length > 0 ? vm.timeline[vm.timeline.length - 1].occurredAt : h.acceptedAt;
-  const duration = h.endedAt === null ? `未收尾 · 最后记录 ${fmtClock(lastAt)}` : fmtMs(h.endedAt - h.acceptedAt);
+  // 没封口的 run 只说事实：最后一条记录是什么时候。「已跑 N 秒」是在替进程说它还活着，离线读者说不了这句话。
+  // 绝对时刻 = 受理时刻 + 相对毫秒；ViewModel 的时间线项上没有 `occurredAt`
+  const lastRel = vm.timeline.length > 0 ? vm.timeline[vm.timeline.length - 1].relativeMs : 0;
+  const duration = h.endedAt === null ? `未收尾 · 最后记录 ${fmtClock(h.acceptedAt + lastRel)}` : fmtMs(h.endedAt - h.acceptedAt);
   const sess = h.sessionId ? STATE.sessions[h.sessionId] : undefined;
   // 标题是这段对话（用户扫读的锚点），不是 runId——那串 uuid 原来是全页最大的字，却谁也不读
   const title = sess?.name && sess.name !== h.sessionId ? sess.name : h.sessionId ? shortId(h.sessionId) : "临时对话";
-  // 三枚状态里通常只有「已完成 · 完整 · 已落盘」三个正常值：它们走圆点，出事才升级成色块
-  box.append(el("div", { class: "head" },
+  // ── 第一段：运行概览。滚动时钉在顶上，答「这次到底怎么样」（评审第 3 条）──
+  const ov = el("div", { class: "overview" });
+  ov.append(el("div", { class: "head" },
     el("span", { class: "title", text: title, title: h.sessionId ?? "" }),
     el("span", { class: "muted mono dur", text: duration }),
     el("span", { class: "marks" },
-      statusMark(LEX.runStatus[sk], sk),
-      statusMark(LEX.integrity[h.integrity], h.integrity),
-      statusMark(LEX.persistence[h.persistence], h.persistence)),
+      markButton(LEX.runStatus[sk], sk),
+      markButton(LEX.integrity[h.integrity], h.integrity),
+      markButton(LEX.persistence[h.persistence], h.persistence)),
   ));
-  // 副标题一行讲清「谁、什么时候、在哪、用什么模型」；runId 留在末尾可复制
-  const sub = el("div", { class: "sub" },
-    // 来源是次要属性，普通文本即可——副标题这一行整体就是次要信息，不必再嵌一个带框的小块
+  // 状态的解释不藏在 title 里：点圆点，下面出一行人话（评审：「完整」「已落盘」要可查看的解释）
+  if (STATE.markWhy) ov.append(el("p", { class: "markwhy", text: STATE.markWhy }));
+  ov.append(el("div", { class: "sub" },
     el("span", { text: LEX.runSource[h.source.kind]?.zh ?? h.source.kind, title: LEX.runSource[h.source.kind]?.hint ?? "" }),
     el("span", { class: "mono", text: fmtClock(h.acceptedAt) }),
     sess ? el("span", { text: sess.agent }) : el("span", { class: "muted", text: h.sessionId ? "产品未上报" : "无会话" }),
-    sess ? el("span", { class: "mono", text: shortPath(sess.workspace), title: sess.workspace }) : null,
     el("span", { class: "mono", text: `${vm.modelBinding.providerId}/${vm.modelBinding.modelId}`, title: `目录版本 ${vm.modelBinding.catalogRevision}` }),
-    el("span", { class: "runid", text: h.runId, title: "点一下复制", role: "button", tabindex: 0, onclick: () => navigator.clipboard?.writeText(h.runId) }),
-  );
-  box.append(sub);
-  if (sk === "truncated") box.append(el("p", { class: "muted", text: "跑到上限停了，这次的结果可能不完整" }));
-  if (vm.outcome && vm.outcome.status === "error" && sk !== "truncated") box.append(el("p", { class: "tl--bad", text: `出了点问题：${vm.outcome.error?.code ?? "unknown"}。看时间线里标红的那一行` }));
-  // 采集档只在「看不到正文」时出现在正文流里——那时它是一句可执行的提示；content 档不必占位，进运行环境
+  ));
+  if (sk === "truncated") ov.append(el("p", { class: "markwhy", text: "跑到上限停了，这次的结果可能不完整" }));
+  if (vm.outcome && vm.outcome.status === "error" && sk !== "truncated") ov.append(el("p", { class: "tl--bad markwhy", text: `出了点问题：${vm.outcome.error?.code ?? "unknown"}。看时间线里标红的那一行` }));
+
+  // 指标行：答「为什么花了这么久」的第一层。总时长拆成 模型 / 工具 / 其余，口径写在 title 里
+  const m = vm.summary.model;
+  const toolCalls = vm.summary.tools.reduce((n, t) => n + t.calls, 0);
+  const toolErrors = vm.summary.tools.reduce((n, t) => n + t.errors, 0);
+  const toolMs = vm.summary.tools.reduce((n, t) => n + t.totalDurationMs, 0);
+  const totalMs = h.endedAt === null ? null : h.endedAt - h.acceptedAt;
+  const tokens = m.calls > 0 && m.inputTokens === 0 && m.outputTokens === 0 ? "未上报" : `${m.inputTokens}↑ ${m.outputTokens}↓`;
+  const metrics = el("div", { class: "metrics" });
+  const metric = (k, v, opts = {}) => metrics.append(el("div", { class: "metric", title: opts.hint ?? "" }, el("span", { class: "k", text: k }), el("span", { class: `v${opts.bad ? " bad" : ""}`, text: v })));
+  metric("模型", `${m.calls} 次 · ${fmtMs(m.totalDurationMs)}`, { hint: "落地的模型生成次数与它们的耗时合计" });
+  metric("token", tokens, { hint: "provider 回报的用量；没给就说没给，不写 0" });
+  metric("工具", `${toolCalls} 次 · ${fmtMs(toolMs)}`, { hint: "工具调用次数与耗时合计" });
+  if (toolErrors > 0) metric("工具出错", `${toolErrors}`, { bad: true });
+  if (totalMs !== null) {
+    const rest = Math.max(0, totalMs - m.totalDurationMs - toolMs);
+    metric("其余", fmtMs(rest), { hint: "总时长减去模型与工具：上下文构建、记忆整理、排队与落盘都在这里" });
+  }
+  metric("记录", `${vm.summary.recordCount}`, { hint: "这条 run 落进账本的记录条数" });
+  ov.append(metrics);
+
+  // 采集档只在「看不到正文」时出现，做成低强度信息条——它是一句能照做的提示，不是正文段落
   if (h.capturePolicy !== "content") {
     const note = h.capturePolicy === "off" ? "这条 run 只记了边界：起 agent 时给了 --observe off。" : "只有形状与计数，没有正文。要看模型回复与工具参数 / 结果，起 agent 时加 --observe content。";
-    box.append(el("p", { class: "muted", text: note }));
+    ov.append(el("div", { class: "infobar" }, el("span", { text: "采集档" }), el("span", { text: note })));
   }
+  box.append(ov);
 
   const dl = el("dl", { class: "fields" });
   const field = (label, ...value) => { dl.append(el("dt", { text: label }), el("dd", {}, ...value)); };
   field("agent", el("span", { class: "mono", text: `${h.agentId} · ${h.agentInstanceId}` }));
   field("会话", el("span", { class: "mono", text: h.sessionId ?? "无（临时对话）" }));
   field("工作目录", el("span", { class: "mono", text: sess ? sess.workspace : "—" }));
+  // 完整 runId 收进这里（评审：路径和完整 ID 收进环境详情），要用的时候一键复制
+  field("run", el("span", { class: "mono", text: h.runId }), copyButton("复制", h.runId));
   field("模型", el("span", { class: "mono", text: `${vm.modelBinding.providerId} / ${vm.modelBinding.modelId} · ${vm.modelBinding.catalogRevision}` }));
   const chips = el("div", { class: "chips" });
   if (vm.assembly.slots.length === 0) chips.append(el("span", { class: "muted", text: vm.assembly.digest === "not-captured" ? "未上报" : "无" }));
@@ -702,14 +934,27 @@ function renderDetail() {
   env.addEventListener("toggle", () => { STATE.envOpen = env.open; });
   box.append(env);
 
-  // 三个区块：运行摘要（上面的标题 / 副标题 / 运行环境）→ 执行过程 → 工具与用量。靠间距与小标题分节，不再层层套卡片
+  // ── 第二段：执行过程（时间线）+ 第三段的一半（事件详情）并排 ──
   box.append(el("h3", { text: "执行过程" }));
-  const tl = el("ul", { class: "timeline" });
-  for (const e of buildEntries(vm)) {
-    const [row, detail] = renderEntry(e, vm.health.canonicalGaps, h.endedAt === null ? 0 : h.endedAt - h.acceptedAt);
-    tl.append(el("li", {}, row, detail));
+  const runMs = h.endedAt === null ? 0 : h.endedAt - h.acceptedAt;
+  const entries = buildEntries(vm);
+  const exec = el("div", { class: "exec" });
+  const left = el("div", {});
+  // 时间刻度：给那几根条一个坐标系。没有它，灰线看着像滚动条或分隔线（评审第 1 条）
+  if (runMs > 0) {
+    // 只标起止两点：轨道 100 出头的像素放不下第三个数字（实测中点会和右端叠在一起）
+    const ticks = el("div", { class: "ticks" });
+    ticks.append(el("span", { class: "tick", style: "left: 0", text: "0" }));
+    ticks.append(el("span", { class: "tick tick--end", style: "left: 100%", text: fmtMs(runMs) }));
+    left.append(el("div", { class: "scale" }, el("span", { class: "scalelabel", text: "耗时占比" }), ticks));
   }
-  box.append(tl);
+  const tl = el("ul", { class: "timeline", role: "listbox", "aria-label": "执行过程" });
+  for (const e of visibleEntries(entries)) {
+    tl.append(el("li", {}, renderEntry(e, vm.health.canonicalGaps, runMs)));
+  }
+  left.append(tl);
+  exec.append(left, renderEventDetail(entries, vm));
+  box.append(exec);
 
   box.append(el("h3", { text: "工具与用量" }));
   if (vm.summary.tools.length === 0) {
@@ -725,15 +970,7 @@ function renderDetail() {
     table.append(tb);
     box.append(table);
   }
-  const m = vm.summary.model;
-  // 「未上报」不是 0（agent-behavior §4.3）：provider 没给 usage 就说没给，不显示 0↑ 0↓
-  const tokens = m.calls > 0 && m.inputTokens === 0 && m.outputTokens === 0 ? "token 未上报" : `${m.inputTokens}↑ ${m.outputTokens}↓ tokens`;
-  // 模型用量与工具表同宽同块：它是「工具与用量」的另一半，不是段落末尾的一句旁白
-  box.append(el("div", { class: "usageline" },
-    el("span", { text: "模型" }),
-    el("span", { class: "mono", text: `${m.calls} 次` }),
-    el("span", { class: "mono", text: tokens }),
-    el("span", { class: "mono", text: `合计 ${fmtMs(m.totalDurationMs)}` })));
+  // 模型用量不在这里重复：它已经在顶部的指标行里（评审第 3 条：顶部就能读到调用次数与耗时）
 
   const gaps = vm.health.canonicalGaps;
   box.append(el("div", { class: "health" },
@@ -788,7 +1025,7 @@ function renderActivity() {
     if (runId) {
       row.setAttribute("role", "button");
       row.setAttribute("tabindex", "0");
-      row.addEventListener("click", () => { STATE.selected = runId; STATE.follow = false; renderFollow(); history.replaceState(null, "", `?run=${encodeURIComponent(runId)}`); renderRuns(); loadRun(); });
+      row.addEventListener("click", () => openRun(runId));
     }
     list.append(el("li", {}, row));
   }
@@ -804,9 +1041,12 @@ async function loadRuns() {
       // 不再优先「running」——那只是没封口，可能是早就死了的进程留下的，跟着它会被钉住
       const target = STATE.runs.find((r) => r.source.kind !== "dream") ?? STATE.runs[0] ?? null;
       const next = target ? target.runId : null;
-      if (next !== STATE.selected) { STATE.selected = next; STATE.expanded.clear(); await loadRun(); }
+      // 换了 run 就清掉上一条的事件选择与折叠，否则 seq 会串到另一条 run 的记录上
+      if (next !== STATE.selected) { STATE.selected = next; STATE.selectedEvent = null; STATE.collapsed.clear(); STATE.markWhy = ""; await loadRun(); }
     } else if (STATE.selected !== null && !STATE.runs.some((r) => r.runId === STATE.selected)) {
       STATE.selected = STATE.runs[0]?.runId ?? null;
+      STATE.selectedEvent = null;
+      STATE.collapsed.clear();
       await loadRun();
     }
     renderFilters();
@@ -839,11 +1079,21 @@ document.addEventListener("visibilitychange", () => { STATE.hidden = document.hi
 
 (async () => {
   // `?run=<id>`：直接打开某条（可分享、刷新不丢），这时不跟随
-  const wanted = new URLSearchParams(location.search).get("run");
+  const params = new URLSearchParams(location.search);
+  const wanted = params.get("run");
+  // `?evt=<seq>` 让「某一步发生了什么」这个现场可以直接发给别人，回来也还在原处
+  const wantedEvt = Number(params.get("evt"));
+  if (Number.isInteger(wantedEvt) && wantedEvt > 0) STATE.selectedEvent = wantedEvt;
   if (wanted) { STATE.selected = wanted; STATE.follow = false; renderFollow(); }
   try {
     const h = await getJson("/api/health");
     STATE.root = h.sessionId ? `会话 ${h.sessionId}` : h.sessionsRoot;
+    // 会话清单读不出来（坏 / 旧 meta）：run 照看，但没有产品名与工作目录——把原因摆在页头，别让人以为是面板坏了
+    if (h.sessionsProblem) {
+      const bar = document.getElementById("problem");
+      bar.textContent = `会话清单读不出来，产品名与工作目录暂缺（run 不受影响）：${h.sessionsProblem}`;
+      bar.hidden = false;
+    }
   } catch {}
   await loadRuns();
   await loadActivity();
