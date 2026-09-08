@@ -13,12 +13,9 @@
 
 import type { StorageDir } from "../storage/types.ts";
 
-export type EnforcedWriteLane =
-  | "restore-migration"
-  | "durable-ingress"
-  | "managed-activation"
-  | "lifecycle-finalization"
-  | "canonical-observation";
+// 曾经还有一条 `canonical-observation`，但从没有人申请过它：观测库不经这道闸（它有自己的 SQLite 连接，
+// 封口走 `lease-lifecycle.ts`）。一条没人走的 lane 只会让文档以为观测也在闸内（review 2026-09-07），删了。
+export type EnforcedWriteLane = "restore-migration" | "durable-ingress" | "managed-activation" | "lifecycle-finalization";
 
 export type ActiveBusinessWriteMode = "closed" | "open" | "draining";
 
@@ -65,7 +62,10 @@ export type StateWriteGate = Readonly<{
   readonly cell: LeaseIdentityCell;
   /** acquire 成功后**原子安装**到 cell 与根闸；同一格只能装一次，revoked 之后永远装不回去。 */
   install(input: { agentInstanceId: string; acquisitionId: string }): LeaseIdentity;
-  /** 永久收摊：revoke cell + 关根闸 + 关全部 lane。**这之后任何 state-root I/O 都被拒**。 */
+  /**
+   * 永久收摊：revoke cell + 关根闸 + 关全部 lane。**这之后任何经闸的状态根写入都被拒**
+   * （读与 list 不经闸；观测库不在闸内，由 `lease-lifecycle.ts` 那条 port 封口）。
+   */
   revoke(): void;
   isOpen(): boolean;
   /** 打开一条 lane，返回关它的函数（重复关是 no-op）。 */

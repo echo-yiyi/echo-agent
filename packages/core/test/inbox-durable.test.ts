@@ -1145,6 +1145,61 @@ test("**P0** ack barrier：marker 已 durable、ackBatch 还没返回时，同 k
   expect((await new InboxStore(dir).restore()).map((r) => r.recordId)).toEqual([acceptedIdOf(result)]);
 });
 
+test("ack barrier 在 ackBatch 的同步前缀就立起来：ackCommitId 还在算的那一格，同 key 的 accept 也得等裁决（review 2026-09-07）", async () => {
+  const dir = new InMemoryDir();
+  const s = await ledger(dir);
+  const old = acceptedIdOf(await accept(s, "到点了", "k1"));
+  const batch = s.reserveBatch()!;
+  const acking = s.ackBatch(batch.reservationId); // 不 await：此刻还没走到任何盘 I/O
+  const raced = accept(s, "又到点了", "k1"); // 同一个同步 tick 里进来
+  await acking;
+  const result = await raced;
+  // 此前 barrier 立在 `await ackCommitIdOf()` 之后：这一格里 accept 直接 dedupe 到 old，
+  // old 随后被 marker 清掉，新事实从来没有自己的 record——永久消失
+  expect(result).toMatchObject({ kind: "accepted", deduplicated: false });
+  expect(acceptedIdOf(result)).not.toBe(old);
+  expect((await new InboxStore(dir).restore()).map((r) => r.recordId)).toEqual([acceptedIdOf(result)]);
+});
+
+test("refresh() 不重投已 ack 的 record：cleanup 删不掉时它还在盘上，此前每一拍都当新消息重新入队（review 2026-09-07）", async () => {
+  const inner = new InMemoryDir();
+  let removable = true;
+  const dir: StorageDir = {
+    read: (p) => inner.read(p),
+    write: (p, c) => inner.write(p, c),
+    list: (p) => inner.list(p),
+    remove: async (p) => {
+      if (!removable && /inbox\/[0-9a-f]{12}-[0-9a-f]{16}\.json$/.test(p)) throw new Error("EPERM");
+      return inner.remove(p);
+    },
+  };
+  const s = await ledger(dir);
+  acceptedIdOf(await accept(s, "到点了", "k1"));
+  removable = false;
+  await s.ackBatch(s.reserveBatch()!.reservationId); // marker 落盘、record 删不掉：逻辑上已 ack
+  expect(await recordFiles(dir)).toHaveLength(1); // 确实还在盘上
+  expect(await s.refresh()).toBe(0);
+  expect(s.pendingCount).toBe(0);
+
+  // 重启：restore 按 marker 跳过它、cleanup 又删不掉——之后的 refresh 同样不许再收
+  const next = new InboxStore(dir);
+  expect(await next.restore()).toHaveLength(0);
+  expect(await next.refresh()).toBe(0);
+  expect(next.pendingCount).toBe(0);
+});
+
+test("clear() 丢掉的 pending，本进程的 refresh() 不再捡回来——此前 `/clear` 形同虚设（review 2026-09-07）", async () => {
+  const dir = new InMemoryDir();
+  const s = await ledger(dir);
+  acceptedIdOf(await accept(s, "旧消息", "k1"));
+  s.clear();
+  expect(s.pendingCount).toBe(0);
+  expect(await s.refresh()).toBe(0);
+  expect(s.pendingCount).toBe(0);
+  // 盘上留着：下次 restore（重启）照旧重放——clear 的语义没变
+  expect(await new InboxStore(dir).restore()).toHaveLength(1);
+});
+
 test("ack barrier：pre-commit 裁决 → 同 key 仍 dedupe 到旧事实；indeterminate → store-error", async () => {
   for (const mode of ["pre-commit", "indeterminate"] as const) {
     const inner = new InMemoryDir();

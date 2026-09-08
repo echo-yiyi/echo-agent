@@ -1619,6 +1619,12 @@ export class Agent {
       this.stopInboxPoll();
       if (this.schedule !== undefined) stopSchedule(this.schedule);
       if (acquired !== undefined) {
+        // Host 的观测 writer 先把尾巴写完——**此时 lease 还在手上**，这是它最后一次合法落盘
+        try {
+          await this.leaseLifecycle?.beforeLeaseRelease({ reason: "stop" });
+        } catch {
+          /* 收尾失败不该盖掉真正的启动错误 */
+        }
         // **revoke 排在 release 之前**：只 release 的话，锁已经还回去了而本代 view 还写得进去——
         // 公开的 `addSchedule(agent.schedule, …)` 就能往已经不归自己的状态根里写（实测）。
         this.gate?.revoke();
@@ -1628,6 +1634,14 @@ export class Agent {
           await acquired.release();
         } catch {
           /* 释放失败不该盖掉真正的启动错误 */
+        }
+        // 租约已交还，状态根从这一刻起不归本进程：观测 writer 一并封口（review 2026-09-07）——
+        // 否则宿主随后调 `stop()`，`finalDisposables` 里的观测收摊仍会把 ring 里的尾巴 flush 进
+        // 一个可能已经归别人的目录。写入闸管不到它（它有自己的 SQLite 连接），只能由这条 port 封。
+        try {
+          await this.leaseLifecycle?.onLeaseLost(new Error("start() 在取得租约之后失败，租约已交还"));
+        } catch {
+          /* 同上 */
         }
       }
       // 回到 new：**拿锁之前**失败是可重试的（换个状态根、修好坏档再来），不是终态。
@@ -2971,7 +2985,16 @@ export class Agent {
     // 两道闸都必须过：本段没有任何 entry（`discardIfUnused` 自己判），以及
     // **inbox 里没有待消费的记录**——有人给它留过话就不能撤，撤了那条留言就成了孤儿。
     // 撤在 settle 之后：先把该落的落完，再决定这一段算不算数。
-    if (this.inbox.pendingCount === 0) {
+    //
+    // inbox 这道闸**按盘上判，不按内存计数**（review 2026-09-07）：别的进程可能刚往 `inbox/` 投了一条，
+    // `pendingCount` 看不见它。`refresh()` 只读盘、只加不减，settle 之后调是安全的；读不出盘就不裁决。
+    // refresh 与撤 meta 之间仍有一个微秒级窗口（那一格里投进来的会成孤儿），登记为已知。
+    let inboxReadable = false;
+    await attempt(async () => {
+      await this.inbox.refresh();
+      inboxReadable = true;
+    });
+    if (inboxReadable && this.inbox.pendingCount === 0) {
       const id = this._state.sessionId;
       if (id !== null) await attempt(async () => void (await this.sessionService?.discardIfUnused(id)));
     }

@@ -56,7 +56,7 @@ test("activeBusinessMode：open / draining 放行有资格的能力，closed 拒
   const raw = new InMemoryDir();
   const gate = createStateWriteGate();
   const business = adoptStorageView(raw, gate.authorityFor("echo:business", { activeBusiness: true }));
-  const laneOnly = adoptStorageView(raw, gate.authorityFor("echo:lane-only", { lanes: ["canonical-observation"] }));
+  const laneOnly = adoptStorageView(raw, gate.authorityFor("echo:lane-only", { lanes: ["durable-ingress"] }));
   gate.install({ agentInstanceId: "a@1", acquisitionId: "acq" });
 
   await expect(business.write("b.json", "1")).rejects.toThrow(/没有开放的通道/); // 缺省 closed
@@ -66,7 +66,7 @@ test("activeBusinessMode：open / draining 放行有资格的能力，closed 拒
   await business.write("b.json", "2"); // draining：barrier 前已开始的照样写得完
   // 没资格走 active business 的，open 期间也不放行
   await expect(laneOnly.write("l.json", "1")).rejects.toThrow(/无资格/);
-  gate.openLane("canonical-observation");
+  gate.openLane("durable-ingress");
   await laneOnly.write("l.json", "1");
   gate.setActiveBusinessMode("closed");
   await expect(business.write("b.json", "3")).rejects.toThrow(/没有开放的通道/);
@@ -84,8 +84,9 @@ test("身份不符：view 攥着的 cell 与根闸认的不是同一代 → 拒�
   await expect(view.write("x.json", "1")).rejects.toThrow(/身份与当前租约不符/);
 });
 
-test("五条 enforced lane 逐条验：只有自己那条开着才放行，别人的 lane 全开也借不到道", async () => {
-  const lanes = ["restore-migration", "durable-ingress", "managed-activation", "lifecycle-finalization", "canonical-observation"] as const;
+test("四条 enforced lane 逐条验：只有自己那条开着才放行，别人的 lane 全开也借不到道", async () => {
+  // 曾经还有一条 `canonical-observation`，从没人申请过（观测库不经闸），2026-09-07 删了
+  const lanes = ["restore-migration", "durable-ingress", "managed-activation", "lifecycle-finalization"] as const;
   for (const mine of lanes) {
     const raw = new InMemoryDir();
     const gate = createStateWriteGate();
@@ -242,7 +243,9 @@ test("丢锁之后再 stop()：只做 loss-safe 清理，**不再调 beforeLease
   // loss fence 不补 flush：从丢锁那一刻起 view 一律拒写
   await expect(view.write("after.json", "丢锁之后")).rejects.toBeInstanceOf(StateWriteDenied);
 
-  await agent.stop().catch(() => undefined);
+  // 丢锁之后的 stop() 必须 resolve：loss-safe 清理不该再碰状态根，也就没有会被闸拒掉的写
+  //（此前这里 `.catch(() => undefined)` 把「撤 meta 被闸拒、stop() reject」整个吞掉了，review 2026-09-07）
+  await agent.stop();
   // 上一版无条件调用：丢锁之后又走一次正常释放 fence（那条 fence 的前提是「还持有合法租约」）
   expect(calls).toEqual(["onLeaseLost"]);
   expect(await raw.read("after.json")).toBeNull();

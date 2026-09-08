@@ -494,7 +494,10 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
         // `discardIfUnused()` 只撤了 `meta.json` / `status.json`（它只有字节面，没有 rmdir），
         // 目录与里面的观测库还留着——实测在开发机上攒了 805 个这样的空壳、68 MB。
         // 目录是本函数建的，路径也只有本函数知道，所以这一步归它。
-        { dispose: () => removeIfEmptySession(stateDir, opts.store !== undefined) },
+        //
+        // 持有证明（review 2026-09-07）：写入格 `installed` 才是「这一段此刻归我」。`dispose()` 跑在
+        // `doStop()` 的 revoke 之前，所以正常收摊时格还是 installed；丢锁后格已 revoke，一个字都不删。
+        { dispose: () => removeIfEmptySession(stateDir, opts.store !== undefined, () => assembly.writeGate.cell.state() === "installed") },
       ],
     });
 
@@ -502,7 +505,18 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     //（普通用户注入不了、也覆盖不掉——外部再登记一份「保险 disposer」正是要防的那件事）。
     // adoption 之后 provider 侧就不再是这些值的 dispose owner，`agent.stop()` 是排空账本的唯一触发点。
     ledger = assembly.adoptInto("echo:agent");
-    attachStateHost(agent, { gate: ledger.writeGate, adoption: ledger });
+    attachStateHost(agent, {
+      gate: ledger.writeGate,
+      adoption: ledger,
+      // 观测 writer 的封口（review 2026-09-07）：它有自己的 SQLite 连接、不经写入闸，所以只能由这条 port 管——
+      // 正常交还前把 ring 里的尾巴 flush 掉（此时 lease 还在手上）；丢锁、或失败后交还，则只封不 flush。
+      // 此前 `Agent` 一直在调这两个钩子，装配侧却从没提供过实现：丢锁后 `stop()` 照样往已经归别人的
+      // 状态根里写观测库。
+      leaseLifecycle: {
+        beforeLeaseRelease: () => observation.sequencer.flushPending(),
+        onLeaseLost: async (reason) => observation.sequencer.markLeaseLost(reason),
+      },
+    });
     // canonical writer 同样不进公共 `AgentOptions`（observability/host-wiring.ts 头注）
     attachObservationHost(agent, { runtime: observation });
     // 记忆 project 层的重指口：`start()` 拿到盘上权威的 workspace 之后调一次（memory/host-wiring.ts 头注）。
@@ -670,6 +684,10 @@ const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.jso
  * 判过了「这一段没有任何 entry、inbox 里也没有待消费的留言」，判过才撤 meta。所以
  * **没有 meta = 那两条都成立**——这里再推一遍只会推出一条不一样的规矩来。
  *
+ * 再加两道（review 2026-09-07）：**只有此刻仍持有 lease 的实例才删**——丢锁后目录已经是接班者的，
+ * 连 `.lock` 一起删等于把它的状态根抹掉；从没 `start()` 过的实例也不删，那时目录可能正被别的进程用着。
+ * 以及 **`inbox/` 里还有文件就不删**：`discardIfUnused` 判过之后，别的进程仍可能刚投进来一条。
+ *
  * 不能只看「除了 observability 什么都没有」：收摊会无条件刷一次 `tasks.json`（哪怕一条任务都没有），
  * 于是那条判据永远不满足（实测）。
  *
@@ -678,12 +696,14 @@ const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.jso
  *
  * 失败只当没发生：收摊阶段为了删一个空目录而抛错，代价远大于留下它。
  */
-async function removeIfEmptySession(stateDir: string, customStore: boolean): Promise<void> {
+async function removeIfEmptySession(stateDir: string, customStore: boolean, holdsLease: () => boolean): Promise<void> {
   if (customStore) return;
+  if (!holdsLease()) return;
   try {
     const entries = await readdir(stateDir);
     if (entries.includes("meta.json")) return; // 这一段算数：说过话，或有人给它留了话
     if (entries.some((e) => !SESSION_DIR_OWNED.has(e))) return; // 有不是我们写的东西：不碰
+    if (entries.includes("inbox") && (await readdir(join(stateDir, "inbox"))).length > 0) return; // 有人刚留了话：不碰
     await rm(stateDir, { recursive: true, force: true });
   } catch {
     // 目录不在、没权限、正被别人用——都不值得为它把收摊搅黄

@@ -11,7 +11,7 @@
 // 两种实现（内存锁 / 文件锁）走同一份语义，所以下面每条都对两边成立。
 
 import { test, expect } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +39,20 @@ async function fileLockAt(): Promise<{ lock: StateLock; path: string }> {
   const path = join(dir, ".lock");
   return { lock: fileStateLock(path), path };
 }
+
+test("文件锁：可被请走的持有者 release 之后不再盯 `.handoff`——否则每把租约留下一条每 50ms 读盘、永不回收的轮询链（review 2026-09-07）", async () => {
+  const { lock, path } = await fileLockAt();
+  const held = await lock.acquire({ holder: "后台", preemptible: true });
+  expect(held).not.toBeNull();
+  let asked = false;
+  void held!.handoffRequested?.then(() => (asked = true));
+  await held!.release();
+
+  // release 之后才有人来请：轮询已停，这把已经到头的租约不该再收到信号
+  await writeFile(`${path}.handoff`, JSON.stringify({ by: "人", at: Date.now() }));
+  await new Promise((r) => setTimeout(r, 150)); // 三个轮询周期
+  expect(asked).toBe(false);
+});
 
 /* ───────────── 端口层：两种实现同一份语义 ───────────── */
 

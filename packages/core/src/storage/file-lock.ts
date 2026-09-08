@@ -30,17 +30,41 @@ import type { Lease, StateLock } from "./lock.ts";
 /** 交还请求的轮询间隔。请求是人触发的、一次性的，不值得为它上 fs.watch。 */
 const HANDOFF_POLL_MS = 50;
 
-/** 每 `HANDOFF_POLL_MS` 问一次 `probe`，第一次拿到非 null 就 resolve。**永不 reject**。 */
-function waitFor<T>(probe: () => Promise<T | null>): Promise<T> {
-  return new Promise<T>((resolve) => {
+/**
+ * 每 `HANDOFF_POLL_MS` 问一次 `probe`，第一次拿到非 null 就 resolve。**永不 reject**。
+ *
+ * `stop()` 停掉轮询，之后 promise 永远悬着（与不可让位持有者那条 `new Promise(() => {})` 同形）。
+ * 没有它的话，release 之后这条链照样每 50ms 读一次盘、永不回收——`--serve` 宿主空闲退出时
+ * 进程因此退不出，长驻宿主每 acquire/release 一次就多攒一条（review 2026-09-07）。
+ */
+function waitFor<T>(probe: () => Promise<T | null>): { readonly promise: Promise<T>; stop(): void } {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<T>((resolve) => {
     const tick = (): void => {
+      timer = undefined;
+      if (stopped) return;
       void probe().then(
-        (v) => (v === null ? void setTimeout(tick, HANDOFF_POLL_MS) : resolve(v)),
-        () => void setTimeout(tick, HANDOFF_POLL_MS),
+        (v) => {
+          if (stopped) return;
+          if (v === null) timer = setTimeout(tick, HANDOFF_POLL_MS);
+          else resolve(v);
+        },
+        () => {
+          if (!stopped) timer = setTimeout(tick, HANDOFF_POLL_MS);
+        },
       );
     };
-    setTimeout(tick, HANDOFF_POLL_MS);
+    timer = setTimeout(tick, HANDOFF_POLL_MS);
   });
+  return {
+    promise,
+    stop(): void {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
 }
 
 /** 锁文件里记的东西——报错时要能说清「是谁占着」。**我们写出去的一定四个字段都全**。 */
@@ -165,8 +189,25 @@ export function fileStateLock(path: string): StateLock {
       }
       await fh.close();
 
+      // **只有可被抢占的持有者才盯这个文件**：别人不该被请走，也就不该为此每秒读一次盘。
+      const handoff =
+        opts.preemptible === true
+          ? waitFor(async () => {
+              const raw = await readFile(handoffPath, "utf8").catch(() => null);
+              if (raw === null) return null;
+              try {
+                const by = (JSON.parse(raw) as { by?: unknown }).by;
+                return { by: typeof by === "string" ? by : "（没说是谁）" };
+              } catch {
+                return { by: "（请求文件是坏的）" }; // 坏了也算有人在等：宁可让出去，不要卡住人
+              }
+            })
+          : null;
+
       return {
         release: async () => {
+          // 这把租约到头了：先停 handoff 轮询，再去动锁文件（删不删得掉都不该再盯着 `.handoff`）
+          handoff?.stop();
           // **只删 token 对得上的那把，且删不掉必须说出来。** 三态各有各的归宿：
           //   missing → 没什么可清的，正常返回（release 是终点，重复调不该炸）
           //   corrupt → **不删**（可能是别人正在写它），但**抛**：锁还在盘上，
@@ -188,20 +229,7 @@ export function fileStateLock(path: string): StateLock {
         },
         // 本地文件锁没有租约到期这回事：拿住了就一直拿着，直到 release。
         lost: new Promise<Error>(() => {}),
-        // **只有可被抢占的持有者才盯这个文件**：别人不该被请走，也就不该为此每秒读一次盘。
-        handoffRequested:
-          opts.preemptible === true
-            ? waitFor(async () => {
-                const raw = await readFile(handoffPath, "utf8").catch(() => null);
-                if (raw === null) return null;
-                try {
-                  const by = (JSON.parse(raw) as { by?: unknown }).by;
-                  return { by: typeof by === "string" ? by : "（没说是谁）" };
-                } catch {
-                  return { by: "（请求文件是坏的）" }; // 坏了也算有人在等：宁可让出去，不要卡住人
-                }
-              })
-            : new Promise<{ by: string }>(() => {}),
+        handoffRequested: handoff === null ? new Promise<{ by: string }>(() => {}) : handoff.promise,
       };
     },
 

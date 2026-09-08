@@ -91,6 +91,13 @@ export class InboxStore {
    * 崩溃后 restore 会按 marker 把旧 record 清掉，而新事实从来没有自己的 record——**永久消失**（实测确定性复现）。
    */
   private readonly ackBarriers = new Map<string, Promise<void>>();
+  /**
+   * 本进程**不再收**的 record id：已逻辑 ack 但 cleanup 没删掉的（marker 与 record 都还在盘上），
+   * 以及 `clear()` 丢弃的（盘上留着等下次 restore 重放）。`refresh()` 重扫盘时跳过它们——
+   * 否则每一拍都把它们当「别人新投进来的」重新入队（review 2026-09-07：已 ack 的每秒重投、`/clear` 形同虚设）。
+   * 盘上没有了就从这里摘掉，所以它不会比 `inbox/` 里的文件数更大。
+   */
+  private readonly notForRefresh = new Set<string>();
 
   private onDiagnostic?: (d: Diagnostic) => void;
   /** 观测出口（Inbox 行，observe.ts 头注列了全部发点）：装配方（Agent）接上；没接就不发。 */
@@ -172,6 +179,7 @@ export class InboxStore {
 
     // cleanup：删掉被 marker 覆盖的 record；某个 marker 的 records 全没了才删该 marker
     for (const id of ackedOnDisk) {
+      this.notForRefresh.add(id); // 删不掉也不能再收：它已被 marker 覆盖
       try {
         await store.remove(recordPath(id));
       } catch (e) {
@@ -217,11 +225,15 @@ export class InboxStore {
     for (const r of this.pending) known.add(r.recordId);
     for (const batch of this.reservations.values()) for (const r of batch) known.add(r.recordId);
     for (const ids of this.index.values()) for (const id of ids) known.add(id);
+    for (const id of this.notForRefresh) known.add(id);
 
     const found: InboxRecordV1[] = [];
+    const onDisk = new Set<string>();
     for (const path of [...(await store.list(`${INBOX_DIR}/`))].sort()) {
       const nameId = recordIdFromPath(path);
-      if (nameId === null || known.has(nameId)) continue;
+      if (nameId === null) continue;
+      onDisk.add(nameId);
+      if (known.has(nameId)) continue;
       const full = path.startsWith(`${INBOX_DIR}/`) ? path : `${INBOX_DIR}/${path}`;
       const text = await store.read(full);
       if (text === null) continue; // list 与 read 之间被别人删了——不是坏档
@@ -235,6 +247,8 @@ export class InboxStore {
         this.diagnose("inbox_refresh_skipped", `record ${nameId} 读不出来，本次跳过（重启时按坏档判红）：${errText(e)}`);
       }
     }
+    // 盘上已经没有的就不用再记着（cleanup 或别的进程删掉了）
+    for (const id of this.notForRefresh) if (!onDisk.has(id)) this.notForRefresh.delete(id);
     if (found.length === 0) return 0;
     // 按 recordId 排序 = 按时间排序（id 前缀是定长时间戳），所以别人写进来的这些也按它们的发生顺序入队
     found.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0));
@@ -426,10 +440,9 @@ export class InboxStore {
       return;
     }
 
-    const ackCommitId = await ackCommitIdOf(recordIds);
-    const bytes = serializeAckCommit({ ackCommitId, recordIds, committedAt: Date.now() });
-    const path = ackPath(ackCommitId);
-    // **barrier 必须在 write 之前立起来**：marker 落盘与 write 返回之间，同 key 的 accept 不许自行裁决
+    // **barrier 必须在任何 await 之前立起来**（review 2026-09-07）：keys 在拿到 batch 那一刻就全知道了，
+    // 不用等 ackCommitId。立晚了，`ackCommitIdOf` 那个 await 的窗口里同 key 的 accept 会 dedupe 到
+    // 即将被删的旧 record——新事实从来没有自己的 record，永久消失。marker 落盘与 write 返回之间同理。
     const keys = new Set(batch.map((r) => r.dedupeKey));
     let releaseBarrier = (): void => {};
     const barrier = new Promise<void>((r) => {
@@ -437,6 +450,9 @@ export class InboxStore {
     });
     for (const k of keys) this.ackBarriers.set(k, barrier);
     try {
+      const ackCommitId = await ackCommitIdOf(recordIds);
+      const bytes = serializeAckCommit({ ackCommitId, recordIds, committedAt: Date.now() });
+      const path = ackPath(ackCommitId);
       return await this.commitAck(reservationId, recordIds, ackCommitId, bytes, path, store, acked);
     } finally {
       // 先摘 barrier 再放行：被唤醒的 accept 不能再看到这条已经裁决完的 barrier
@@ -480,6 +496,7 @@ export class InboxStore {
     // committed：同一 critical section 关闭 reservation + 一次性移除整批 index
     this.closeReservation(reservationId, recordIds);
     this.fact(acked);
+    for (const id of recordIds) this.notForRefresh.add(id); // 已逻辑 ack：下面删不掉也不许 refresh 再收
     // 可恢复 cleanup：幂等删 record，**确认整批都不存在了**才删 marker
     let allGone = true;
     for (const id of recordIds) {
@@ -498,9 +515,15 @@ export class InboxStore {
     }
   }
 
-  /** 清空**未 reserve 的** pending（盘上留着，下次 restore 重放）。已 reserve 的批不动。 */
+  /**
+   * 清空**未 reserve 的** pending（盘上留着，下次 restore 重放；本进程的 `refresh()` 不再把它们捡回来）。
+   * 已 reserve 的批不动。
+   */
   clear(): void {
-    for (const r of this.pending) this.indexDrop(r.dedupeKey, r.recordId);
+    for (const r of this.pending) {
+      this.indexDrop(r.dedupeKey, r.recordId);
+      this.notForRefresh.add(r.recordId);
+    }
     this.pending = [];
   }
 

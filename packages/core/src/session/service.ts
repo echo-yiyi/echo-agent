@@ -281,14 +281,18 @@ export class SessionService {
    * 只在**本实例一条 entry 都没写过**时动手，而且只删我们自己写出去的那两个文件
    * （`meta.json` / `status.json`）——目录里别的东西（观测库）不归这里管。
    * 未消费的 inbox 记录是另一道闸，由调用方（`Agent`）判：有人给它留了话就不该撤，
-   * 撤了那条留言就成了没人认领的孤儿。
+   * 撤了那条留言就成了没人认领的孤儿。**那道闸必须按盘上判**（先 `InboxStore.refresh()` 再看
+   * pendingCount）：别的进程可能刚投进来一条，内存计数看不见它。
+   *
+   * 封存之后一个字都不撤（review 2026-09-07）：丢锁时 `seal()` 已把 `append` / `rename` / `setPhase`
+   * 都封了，这里是同一条不变量——状态根已经不归本进程，撤掉的会是接班者的 meta。
    *
    * @returns 撤了没有。
    */
   async discardIfUnused(sessionId: string): Promise<boolean> {
     const cursor = this.cursors.get(sessionId);
     if (cursor === undefined || cursor.nextSeq !== 1 || !cursor.metaWritten) return false;
-    if (this.poisoned.has(sessionId)) return false; // 盘上状态没法裁决时不动它
+    if (this.sealed || this.poisoned.has(sessionId)) return false; // 封存 / 盘上状态没法裁决时不动它
     await this.store.remove(META_FILE);
     await this.store.remove(STATUS_FILE);
     cursor.metaWritten = false;

@@ -68,7 +68,7 @@
 
 三条硬约定怎么守：
 
-- **single-writer**：每段一把 lease（`packages/core/src/storage/file-lock.ts`），core 不猜对面死没死，也不抢占没有自称可让位的持有者（可让位的实例被请走时自己交还，2026-09-07）；门 `packages/core/test/state-lock.test.ts`。lease 之下还有一道 Host-internal 的写入闸（`packages/core/src/state/write-gate.ts`）：拿到 lease 之前、revoke 之后任何状态根 I/O 都被拒，门 `packages/core/test/write-gate.test.ts`。
+- **single-writer**：每段一把 lease（`packages/core/src/storage/file-lock.ts`），core 不猜对面死没死，也不抢占没有自称可让位的持有者（可让位的实例被请走时自己交还，2026-09-07）；门 `packages/core/test/state-lock.test.ts`。lease 之下还有一道 Host-internal 的写入闸（`packages/core/src/state/write-gate.ts`）：拿到 lease 之前、revoke 之后任何**经闸的状态根写入**都被拒（读与 list 不经闸），门 `packages/core/test/write-gate.test.ts`。**观测库是闸外的例外**：它是 `createAgent()` 直接开的 SQLite，装配期（拿到 lease 之前）就建目录建库，写也不经闸；它的封口走 lease lifecycle port（`packages/core/src/state/lease-lifecycle.ts`，装配侧接在 `createAgent()` 里）——正常交还前 flush 尾巴，丢锁或失败后交还则只封不 flush。把建库推迟到拿到 lease 之后是另一件事，见 §7。
 - **一次写失败就封存该会话**：`packages/core/src/session/service.ts`，继续写只会产出 parent 指向不存在 entry 的坏档。
 - **观测不得影响执行**：观测库是 SQLite（`packages/core/src/observability/sqlite-store.ts`），落状态根下；给了自定义 `store` 又没点名 `stateDir` 时落 `:memory:`，所以注入内存端口的装配一个文件都不写。store 写不动时 run 照跑、`observationPersistence` 报 degraded；`echo-agent observe` 只读它，不装配、不取锁（`packages/cli/src/observe.ts`）。
 

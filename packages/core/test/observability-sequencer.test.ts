@@ -66,6 +66,24 @@ function harness(limits: Partial<ObservationSequencerOptions["limits"]> = {}): H
   };
 }
 
+test("markLeaseLost()：进 lost-lease 终态——不 flush、之后 offer 丢弃、flushPending 直接返回、幂等（review 2026-09-07）", async () => {
+  // 下游对 lost-lease 的判断早就写好了，此前只是没有入口：丢锁后 stop() 照样 flush 进已经归别人的状态根
+  const h = harness();
+  h.seq.offer(bounded({ a: 1 }));
+  await h.flush();
+  const committed = h.store.commitCount;
+  h.seq.offer(bounded({ a: 2 })); // ring 里有没写完的
+  h.seq.markLeaseLost(new Error("租约过期"));
+  expect(h.seq.persistenceState.status).toBe("lost-lease");
+  await h.seq.flushPending(); // 状态根已经不归本进程：不 flush
+  h.seq.offer(bounded({ a: 3 })); // 之后的 offer 丢弃
+  await h.flush();
+  expect(h.store.commitCount).toBe(committed);
+  h.seq.markLeaseLost(new Error("再来一次")); // 幂等
+  expect(h.seq.persistenceState.status).toBe("lost-lease");
+  expect(h.diags.filter((d) => d.code === "observation_writer_lost_lease")).toHaveLength(1);
+});
+
 /** 等异步回放（store 读是 Promise，不走 FakeClock）交付到位；最多等 `ticks` 个宏任务。 */
 async function settle(done: () => boolean, ticks = 50): Promise<void> {
   for (let i = 0; i < ticks && !done(); i++) await new Promise((r) => setTimeout(r, 0));

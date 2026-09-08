@@ -1337,6 +1337,20 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   }
 
   private seal(cause: Error): void {
+    this.terminate("sealed", cause);
+  }
+
+  /**
+   * 丢锁 / 交还之后的封口——`StateLeaseLifecycle.onLeaseLost` 接到这里（review 2026-09-07）。
+   * 状态根已经不归本进程：**不 flush**，ring 里没写完的留在内存；之后的 offer / boundary 一律经
+   * `unavailable()` 丢弃。幂等：已经 terminal 就什么都不做。
+   * 下游对 `lost-lease` 的判断（`flushPending` / `unavailable` / health）早就写好了，此前只是没有入口。
+   */
+  markLeaseLost(cause: Error): void {
+    this.terminate("lost-lease", cause);
+  }
+
+  private terminate(status: "sealed" | "lost-lease", cause: Error): void {
     if (this.persistence.status === "sealed" || this.persistence.status === "lost-lease") return;
     // **成因先 redact**：seal 往往由第三方错误触发，`cause.message` 里出现过整条
     // `Authorization: Bearer sk-…`，而它会同时进诊断和 boundary waiter 的 rejection（review 实测）。
@@ -1346,19 +1360,20 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     const prev = this.persistence;
     const now = this.clock.now();
     this.persistence = {
-      status: "sealed",
+      status,
       since: now,
       // 之前经历过 degraded/recovering 就把首次 degradation 的时刻留下；直接从 healthy 掉进来则没有
       ...(prev.status === "degraded" || prev.status === "recovering" ? { degradedSince: prev.since } : {}),
       lastErrorDigest: r.digest, // health 存**完整** digest；对外只露前缀
       reopenAttempts: prev.status === "degraded" || prev.status === "recovering" ? prev.reopenAttempts : 0,
     };
-    this.report({ code: "observation_writer_sealed", message: `canonical writer sealed：${label}` });
+    const message = `canonical writer ${status}：${label}`;
+    this.report({ code: status === "sealed" ? "observation_writer_sealed" : "observation_writer_lost_lease", message });
     for (const w of [...this.waiters.values()]) {
       if (w.settled) continue;
       w.settled = true;
       w.cancelDeadline();
-      w.reject(new ObservationStoreUnavailableError(`canonical writer sealed：${label}`, this.persistence));
+      w.reject(new ObservationStoreUnavailableError(message, this.persistence));
     }
     this.waiters.clear();
     this.cancelDelayedFlush?.();

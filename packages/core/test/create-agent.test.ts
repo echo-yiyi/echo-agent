@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createAgent, resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "../src/create-agent.ts";
 import { projectPrefix } from "../src/memory/scope.ts";
 import { SessionService, listSessions } from "../src/session/service.ts";
+import { InboxStore } from "../src/inbox/store.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
@@ -13,6 +14,7 @@ import { kimiProvider, deepseekProvider } from "../src/provider/openai.ts";
 import { createTasks } from "../src/task/harness.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
+import { observationHostOf } from "../src/observability/host-wiring.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { scriptedDialect, scriptedStreamFn, textTurn } from "../src/testing.ts";
 import { environmentMessage } from "../src/messages.ts";
@@ -359,6 +361,8 @@ test("start() 中途失败必须释放已取得的 lease（否则状态根被死
 
   const a = await createAgent({ provider, store, lock, allowNetwork: false, sessionId: "bad" });
   await expect(a.start()).rejects.toThrow(/meta\.json 解不开/);
+  // 租约已交还：观测 writer 一并封口，之后宿主调 stop() 不会再往可能已归别人的状态根 flush（review 2026-09-07）
+  expect(observationHostOf(a)?.runtime.sequencer.persistenceState.status).toBe("lost-lease");
 
   // lease 被还回去了，所以另一个 agent 还能启动
   const b = await createAgent({ provider, store: new InMemoryDir(), lock, allowNetwork: false });
@@ -382,6 +386,10 @@ test("丢锁 → 停止持久化 + 拒绝新工作（丢锁善后的 ①③）",
   await new Promise((r) => setTimeout(r, 0));
 
   await expect(agent.prompt("还能干活吗")).rejects.toThrow(/已丢失 single-writer 租约/);
+  // Host 的观测 writer 也封了口（装配侧接上了 leaseLifecycle，review 2026-09-07）——它有自己的 SQLite 连接、
+  // 不经写入闸，此前 `Agent` 一直在调 onLeaseLost 而装配侧从没提供实现，丢锁后 stop() 照样往别人的目录里 flush
+  expect(observationHostOf(agent)?.runtime.sequencer.persistenceState.status).toBe("lost-lease");
+  await agent.stop(); // loss-safe 清理，必须 resolve
 });
 
 test("stop() 释放 lease —— 之后同一把锁能再被拿到", async () => {
@@ -777,4 +785,37 @@ test("留过话的空段也不清：目录里还有别的东西就原样留着",
   await agent.ingress.deliverDurable({ message: environmentMessage("有人给你留了话", "session", "s-x:1"), dedupeKey: "s-x:1" });
   await agent.stop();
   expect(existsSync(join(home, "sessions", id)), "有留言的段被清掉了").toBe(true);
+});
+
+test("别的进程刚投进来的留言：本进程内存里没有它，收摊也不撤 meta、不清目录（review 2026-09-07）", async () => {
+  // 此前那道「有留言就不撤」的闸看的是内存计数，别的写者刚写进 inbox/ 的那条看不见——
+  // meta 被撤、目录连 inbox/ 一起 rm -rf，而对方拿到的是 accepted。
+  const home = await mkdtemp(join(tmpdir(), "echo-empty-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo" });
+  await agent.start();
+  agent.autoConsumeInbox = false;
+  const id = agent.state.sessionId!;
+  const dir = join(home, "sessions", id);
+  // 另一个进程：对同一个状态根另起一本 InboxStore 往盘上投一条（session_send 走的就是这条路）
+  const other = new InboxStore(new FileDir(dir));
+  await other.restore();
+  await other.accept({ message: environmentMessage("我是另一个进程", "session", "s-y:1"), dedupeKey: "s-y:1" });
+
+  await agent.stop();
+  expect(existsSync(join(dir, "meta.json")), "有留言的段不该被撤").toBe(true);
+  expect((await new InboxStore(new FileDir(dir)).restore()).length, "那条留言必须还在").toBe(1);
+});
+
+test("没 start() 过就 stop()：目录不动——没持有过 lease 就没资格删，那目录可能正被别的进程用着（review 2026-09-07）", async () => {
+  // 此前 rm -rf 不看自己有没有持有 lease：连 `.lock` 一起算「我们的东西」，删的可能是持锁者的整个状态根。
+  const home = await mkdtemp(join(tmpdir(), "echo-empty-"));
+  process.env.ECHO_HOME = home;
+  const provider = fakeProvider({ id: "t", models: ["only"] });
+  const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo", sessionId: "someone-elses" });
+  const dir = join(home, "sessions", "someone-elses");
+  expect(existsSync(dir), "装配期就建了目录（观测库）").toBe(true);
+  await agent.stop();
+  expect(existsSync(dir), "没持有过 lease 的实例不许删目录").toBe(true);
 });

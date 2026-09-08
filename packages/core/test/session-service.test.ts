@@ -624,3 +624,15 @@ test("收摊兜底：一句话都没说过的段撤掉 meta，从此不进清单
   const again = await new SessionService(scoped(root, "s-silent/")).createOrResume("s-silent", { workspace: "/b", product: "echo-coding" });
   expect([again.info.workspace, again.messages.length]).toEqual(["/b", 0]);
 });
+
+test("seal() 之后 discardIfUnused() 不撤：状态根已不归本进程，撤掉的会是接班者的 meta（review 2026-09-07）", async () => {
+  // 此前它是这个类上唯一不看 sealed 的写路径：丢锁 → Agent seal() → 宿主 stop() → 这里照样 remove meta.json，
+  // 低层手接线的 Agent 就把接班者的 meta 静默删掉，stop() 还报成功。
+  const root = new InMemoryDir();
+  const s = new SessionService(scoped(root, "s-lost/"));
+  await s.createOrResume("s-lost", { workspace: "/a", product: "echo-agent" });
+  s.seal();
+  expect(await s.discardIfUnused("s-lost")).toBe(false);
+  expect(await root.read("s-lost/meta.json")).not.toBeNull();
+  expect((await listSessions(root)).map((i) => i.id)).toEqual(["s-lost"]);
+});

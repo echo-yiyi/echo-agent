@@ -133,7 +133,7 @@ type SessionInfo = {
 
 三条不变量沿用：**每段一个写者**（lease）、**坏档判红不给半截**、**transcript 只增不改**。两条新规矩：
 
-- **活着就找得到，空段收摊时撤掉**（2026-09-04 改）。meta 在 `createOrResume` 那一刻就写，所以一段**正开着**的 session 立刻在清单里、也发得进消息；「不留空段」由 `stop()` 兜底：这一段一条 entry 都没写过、inbox 里也没有待消费的记录，就把 `meta.json` 与 `status.json` 撤掉，它便不再进任何清单，`--resume` 它等于「没有这一段」。
+- **活着就找得到，空段收摊时撤掉**（2026-09-04 改）。meta 在 `createOrResume` 那一刻就写，所以一段**正开着**的 session 立刻在清单里、也发得进消息；「不留空段」由 `stop()` 兜底：这一段一条 entry 都没写过、inbox 里也没有待消费的记录，就把 `meta.json` 与 `status.json` 撤掉，它便不再进任何清单，`--resume` 它等于「没有这一段」。三道闸（2026-09-07 review 补齐）：inbox 那道**按盘上判**——撤之前重扫一次 `inbox/`，内存计数看不见别的进程刚投进来的那条；**仍持有 lease** 才撤——丢锁后 meta 已经是接班者的，`SessionService` 封存后一个字都不撤，连目录一起清的那步也只有写入格仍 installed 时才做；`inbox/` 里还有文件也不清目录。重扫与撤 meta 之间仍有一个微秒级窗口，登记为已知。
 
   **原来的做法（把 meta 推迟到第一次 `append`）是错的**，实测：B 正开着、还没说过话时，A 的 `session_list` 里没有它、`session_send` 给它是 `not-found`——「打开第二个终端、从第一个带句话过去」这一步直接断掉。目标（列表不被空段塞满）没变，换了个不会误伤活人的做法。
 - **名字来自第一句人话的首行**（截 60 字，已实现 2026-09-07）。core 只出 `SessionService.rename()` 与 `Agent.renameSession()`；命名策略是**装配层挂的一个钩子**（`createEcho` 里的 `echo:session-name`），挂在 `userPromptSubmit` 上——那个挂点直接带 `text` 与 `source`，比 `message_end` 少一层「哪条才是人说的」的判断。
@@ -386,7 +386,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 - **不越权**：inline 点名创建者池外的工具，`create` 判红、`~/.echo/sessions/` 下不多目录。
 - **`/clear` 落盘**：`/clear` 后旧段 `status = closed`，新段 id 不同；`--resume` 旧段回来的是清之前的对话，`--continue` 挑到的是新段。
 - **活着就找得到**：一段刚 `start()`、一句话没说的 session，在别的进程的 `session_list` 里在，`session_send` 给它是 `accepted`。
-- **空会话**：启动即退出，那一段不在清单里（meta 被撤）；但 **inbox 里还有没消费的 record 就不撤**（活着时收到、退出前没处理完的）——撤了那条消息就成了没人认领的孤儿。
+- **空会话**：启动即退出，那一段不在清单里（meta 被撤）；但 **inbox 里还有没消费的 record 就不撤**（活着时收到、退出前没处理完的，**含别的进程刚投进来、本进程还没读到内存的**——撤之前重扫盘）——撤了那条消息就成了没人认领的孤儿；**丢锁 / 封存之后一个字都不撤**——那时 meta 与目录已经是接班者的。
 - **旧决策失效**：`~/.echo/agents/` 不再被创建；`docs` 门与 API 快照重录。
 
 ## 11. 判据落在哪一层测试

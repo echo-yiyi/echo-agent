@@ -81,6 +81,22 @@ test("丢锁之后 phase 变 lost，不能再 start()", async () => {
   await expect(agent.start()).rejects.toThrow(/丢失 single-writer 租约/);
 });
 
+test("丢锁之后 stop()：不撤 meta.json——那已经是接班者的；stop() 本身 resolve（review 2026-09-07）", async () => {
+  // 一句话没说的段正是 discardIfUnused 会动手的那种。此前：装配路径这里 reject（写入闸拒掉 remove），
+  // 低层手接线（没有闸）则静默删掉接班者的 meta——单写者与 fail-loud 同时破。
+  const lock = new InMemoryStateLock();
+  const dir = new InMemoryDir();
+  const agent = await createAgent(opts(dir, { lock }));
+  await agent.start();
+  lock.simulateLost("租约过期");
+  await new Promise((r) => setTimeout(r, 0));
+  // 接班者拿到同一个状态根，写下自己的 meta
+  await dir.write("meta.json", JSON.stringify({ owner: "接班的那一段" }));
+
+  await agent.stop();
+  expect(await dir.read("meta.json")).toContain("接班的那一段");
+});
+
 /* ───────────── P1：stop() 失败不泄漏 Lease ───────────── */
 
 test("收摊途中抛错 → 错误照抛，但 Lease 必须还回去", async () => {
