@@ -42,7 +42,12 @@ export type Model = {
   readonly capabilities?: ModelCapabilities;
   readonly cost?: ModelCost;
   readonly params?: Record<string, unknown>;
-  readonly thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
+  /**
+   * thinking 档位 → 要合并进请求体的参数（目录数据，按各家官方文档填；方言只合并、不认字段名）。
+   * `null` / 没映射 = 这一档不发参数（服务端缺省）。`off` 有映射 = 这家能关、发的就是关的参数；没有 = 关不掉。
+   * 七档折三档时几档同值，壳按值去重轮换。见 `docs/decisions/implemented/2026-09-08-thinking-level-off.md`。
+   */
+  readonly thinkingLevelMap?: Partial<Record<ThinkingLevel, Readonly<Record<string, unknown>> | null>>;
 };
 
 /* ───────────────── 鉴权 ───────────────── */

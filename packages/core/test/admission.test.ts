@@ -314,6 +314,12 @@ test("model 快照的精确 schema：class 实例 / capabilities 非法标量 / 
   expect(() => normalizeModelSnapshot({ ...FAKE_MODEL, extra: 1 } as never)).toThrow("未知字段");
   expect(() => normalizeModelSnapshot({ ...FAKE_MODEL, cost: { input: 1 } as never })).toThrow("必填");
   expect(() => normalizeModelSnapshot({ ...FAKE_MODEL, thinkingLevelMap: { weird: "x" } as never })).toThrow("不是 ThinkingLevel");
+  // 2026-09-08：值是参数字典（`reasoning_effort` / `thinking.type` 之类）或 null，不再是字符串
+  expect(() => normalizeModelSnapshot({ ...FAKE_MODEL, thinkingLevelMap: { low: "low" } as never })).toThrow("plain object | null");
+  expect(normalizeModelSnapshot({ ...FAKE_MODEL, thinkingLevelMap: { off: { thinking: { type: "disabled" } }, max: null } }).thinkingLevelMap).toEqual({
+    off: { thinking: { type: "disabled" } },
+    max: null,
+  });
   const hidden: Record<string, unknown> = { a: 1 };
   Object.defineProperty(hidden, "secret", { value: 2, enumerable: false });
   expect(() => normalizeModelSnapshot({ ...FAKE_MODEL, params: hidden })).toThrow("non-enumerable");

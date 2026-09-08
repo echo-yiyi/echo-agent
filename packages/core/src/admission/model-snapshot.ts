@@ -1,7 +1,7 @@
 // `normalizeModelSnapshot(model)`：把 `Model` 变成 JSON-like 的冻结快照。
 //
 // 按**精确 schema** 验形：顶层只认 provider / id / api / name / capabilities / cost / params / thinkingLevelMap，
-// 未知字段拒；capabilities / cost / thinkingLevelMap 的每个键与标量类型逐个验；params 是自由 JSON-like 字典。
+// 未知字段拒；capabilities / cost 的每个键与标量类型逐个验；thinkingLevelMap 的键必须是 ThinkingLevel、值是自由 JSON-like 字典或 null；params 是自由 JSON-like 字典。
 // 值只接受 plain object / array / string / boolean / null / finite number；function、symbol、bigint、`undefined` value、
 // 非 finite number、class 实例、accessor、symbol key、non-enumerable、sparse array、循环引用一律 fail-loud——
 // 不静默删字段、不保留别名。结果递归 clone + freeze；字典用 defineProperty 逐键定义，`__proto__` 这种键也只是自身属性，
@@ -167,8 +167,11 @@ export function normalizeModelSnapshot(model: Model): RunModelSnapshot {
     const mapped: (readonly [string, ModelSnapshotValue])[] = [];
     for (const level of levels) {
       if (!THINKING_LEVELS.has(level)) throw new ModelSnapshotError(`model.thinkingLevelMap.${level}`, "不是 ThinkingLevel");
-      const value = map[level];
-      if (value !== null && typeof value !== "string") throw new ModelSnapshotError(`model.thinkingLevelMap.${level}`, "必须是 string | null");
+      // 值是要合并进请求体的参数字典（与 `params` 同一种自由 JSON-like），`null` = 这一档不发参数
+      const value = map[level] === null ? null : cloneValue(map[level], `model.thinkingLevelMap.${level}`, []);
+      if (value !== null && (typeof value !== "object" || Array.isArray(value))) {
+        throw new ModelSnapshotError(`model.thinkingLevelMap.${level}`, "必须是 plain object | null");
+      }
       mapped.push([level, value]);
     }
     entries.push(["thinkingLevelMap", dict(mapped)]);

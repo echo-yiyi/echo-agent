@@ -41,7 +41,7 @@ export type RunModelSnapshot = Readonly<{
     cacheWrite?: number;
   }>;
   params?: Readonly<Record<string, ModelSnapshotValue>>;
-  thinkingLevelMap?: Readonly<Partial<Record<ThinkingLevel, string | null>>>;
+  thinkingLevelMap?: Readonly<Partial<Record<ThinkingLevel, Readonly<Record<string, ModelSnapshotValue>> | null>>>;
 }>;
 
 /**

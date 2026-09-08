@@ -165,44 +165,59 @@ test("请求体:system / tool_result→role:tool / assistant tool_calls / tools 
   expect(body.tools[0]!.function.name).toBe("read");
 });
 
-test("thinkingLevel → reasoning_effort：按目录里的 thinkingLevelMap 写；没映射的档、没映射表的模型一个字节都不发（review 2026-09-07）", async () => {
+test("thinkingLevel → 请求体参数：按目录里的 thinkingLevelMap 合并；没映射的档、没映射表的模型一个字节都不发；params 赢过档位（review 2026-09-07；2026-09-08 值改成参数对象）", async () => {
   // 此前 `StreamOptions.thinkingLevel` 一路传到方言就断了：Shift+Tab / setThinkingLevel / 压缩要的 off，请求体纹丝不动
   const reply = (): Response => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]));
-  const { fn, calls } = fakeFetch(reply, reply, reply);
+  const { fn, calls } = fakeFetch(reply);
   const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
   const ctx: Context = { systemPrompt: null, messages: [{ role: "user", content: [{ type: "text", text: "问" }] }], tools: [] };
-  const mapped: Model = { ...MODEL, thinkingLevelMap: { low: "low", high: "high", max: "max" } };
+  const mapped: Model = { ...MODEL, thinkingLevelMap: { off: { thinking: { type: "disabled" } }, high: { reasoning_effort: "high" }, max: null } };
   await collect(d.request(mapped, ctx, { apiKey: "k", thinkingLevel: "high" }));
-  await collect(d.request(mapped, ctx, { apiKey: "k", thinkingLevel: "off" })); // 这一档没映射：不发（GLM 关不掉，就不假装能关）
+  await collect(d.request(mapped, ctx, { apiKey: "k", thinkingLevel: "off" })); // off 有映射：发关的参数，字段名方言不认
+  await collect(d.request(mapped, ctx, { apiKey: "k", thinkingLevel: "max" })); // null：不发
+  await collect(d.request(mapped, ctx, { apiKey: "k", thinkingLevel: "low" })); // 没映射的档：不发
   await collect(d.request(MODEL, ctx, { apiKey: "k", thinkingLevel: "high" })); // 没映射表的模型：不发
-  const bodies = calls.map((c) => c.body as { reasoning_effort?: string });
-  expect(bodies.map((b) => b.reasoning_effort)).toEqual(["high", undefined, undefined]);
+  await collect(d.request({ ...mapped, params: { reasoning_effort: "none" } }, ctx, { apiKey: "k", thinkingLevel: "high" })); // params 最后合并
+  const bodies = calls.map((c) => c.body as { reasoning_effort?: string; thinking?: unknown });
+  expect(bodies.map((b) => [b.reasoning_effort, b.thinking])).toEqual([
+    ["high", undefined],
+    [undefined, { type: "disabled" }],
+    [undefined, undefined],
+    [undefined, undefined],
+    [undefined, undefined],
+    ["none", undefined],
+  ]);
 });
 
-test("目录的 thinkingLevelMap 按官方文档：GLM / K3 两两折、DeepSeek 照官方兼容表（xhigh → high）、没档位的不填（2026-09-08 刷表）", async () => {
-  // 走真 provider 目录 + 假 fetch：证明的是「选了这档、请求体里是哪个值」，不是端点真的接受它
+test("目录的 thinkingLevelMap 按官方文档：GLM / K3 两两折且关不掉、DeepSeek 照官方兼容表（xhigh → high）且 off 真关、K2.6 只有开关、没档位的不填（2026-09-08 刷表）", async () => {
+  // 走真 provider 目录 + 假 fetch：证明的是「选了这档、请求体里是哪些参数」，不是端点真的接受它
   const reply = (): Response => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]));
   const { fn, calls } = fakeFetch(reply);
   const opts = { fetchFn: fn };
   type P = ReturnType<typeof kimiProvider>;
   const pick = (p: P, id: string): Model => p.getModels().find((m) => m.id === id)!;
-  const cases: [P, string, ThinkingLevel, string | undefined][] = [
-    [kimiProvider(opts), "kimi-k3", "xhigh", "max"],
-    [kimiProvider(opts), "kimi-k3", "minimal", "low"],
-    [zaiCodingProvider(opts), "glm-5.3-flash", "medium", "high"],
-    [deepseekProvider(opts), "deepseek-v4-pro", "xhigh", "high"], // 官方兼容表：xhigh → high，不是 max
-    [deepseekProvider(opts), "deepseek-v4-flash", "medium", "high"],
-    [deepseekProvider(opts), "deepseek-v4-flash", "off", undefined], // 关思考是另一个参数（thinking.type），这张表不写
-    [deepseekProvider(opts), "deepseek-v4-flash-vision-exp", "max", undefined], // 文档没点名，真 key 实测参数不按文档走
-    [kimiProvider(opts), "kimi-k2.7-code", "max", undefined], // 官方没给深度参数
-    [kimiProvider(opts), "kimi-k2.6", "max", undefined], // 只有 K2.x 的 thinking 开关
-    [minimaxProvider(opts), "MiniMax-M3", "max", undefined], // chat completions 上只有 thinking.type 开关
-    [openaiProvider(opts), "gpt-5.6-sol", "max", "none"], // params 里被迫 none，档位选了也不算数
+  const OFF = { type: "disabled" };
+  const ON = { type: "enabled" };
+  const cases: [P, string, ThinkingLevel, string | undefined, unknown][] = [
+    [kimiProvider(opts), "kimi-k3", "xhigh", "max", undefined],
+    [kimiProvider(opts), "kimi-k3", "minimal", "low", undefined],
+    [kimiProvider(opts), "kimi-k3", "off", undefined, undefined], // 关不掉：不发，服务端缺省 max
+    [zaiCodingProvider(opts), "glm-5.3-flash", "medium", "high", { type: "enabled", clear_thinking: false }], // thinking 来自 params
+    [zaiCodingProvider(opts), "glm-5.3", "off", undefined, { type: "enabled", clear_thinking: false }], // 关不掉
+    [deepseekProvider(opts), "deepseek-v4-pro", "xhigh", "high", undefined], // 官方兼容表：xhigh → high，不是 max
+    [deepseekProvider(opts), "deepseek-v4-flash", "medium", "high", undefined],
+    [deepseekProvider(opts), "deepseek-v4-flash", "off", undefined, OFF], // off 真关
+    [deepseekProvider(opts), "deepseek-v4-flash-vision-exp", "max", undefined, undefined], // 文档没点名，真 key 实测参数不按文档走
+    [kimiProvider(opts), "kimi-k2.7-code", "max", undefined, undefined], // 官方既没给深度也没给开关
+    [kimiProvider(opts), "kimi-k2.6", "off", undefined, OFF], // 只有开关
+    [kimiProvider(opts), "kimi-k2.6", "max", undefined, ON],
+    [minimaxProvider(opts), "MiniMax-M3", "max", undefined, OFF], // params 里关着（2026-08-30 拍板），没有档位表
+    [openaiProvider(opts), "gpt-5.6-sol", "max", "none", undefined], // params 里被迫 none，档位选了也不算数
   ];
-  for (const [p, id, level, want] of cases) {
+  for (const [p, id, level, effort, thinking] of cases) {
     await collect(p.stream(pick(p, id), CTX, { apiKey: "k", thinkingLevel: level }));
-    const body = calls.at(-1)!.body as { reasoning_effort?: string };
-    expect([id, level, body.reasoning_effort]).toEqual([id, level, want]);
+    const body = calls.at(-1)!.body as { reasoning_effort?: string; thinking?: unknown };
+    expect([id, level, body.reasoning_effort, body.thinking]).toEqual([id, level, effort, thinking]);
   }
 });
 

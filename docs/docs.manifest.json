@@ -62,6 +62,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-08-thinking-level-off.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-05-retry-owned-by-loop.md",
       "bilingual": false
     },

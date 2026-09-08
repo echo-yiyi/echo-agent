@@ -5,7 +5,7 @@
 // 真终端只在 `bin/echo-tui.ts` 里出现，测试一行都不碰它。
 
 import { test, expect } from "bun:test";
-import { Agent, deepseekProvider, InMemoryCredentialStore, kimiProvider, NO_SESSION_FACE, type CredentialStore, type ProviderEvent, type SessionFace, type SessionRow } from "@echo-agent/core";
+import { Agent, deepseekProvider, InMemoryCredentialStore, kimiProvider, NO_SESSION_FACE, type CredentialStore, type Model, type ProviderEvent, type SessionFace, type SessionRow } from "@echo-agent/core";
 import { agentRuntimeOf, type AgentRuntime } from "@echo-agent/core/extension";
 import { scriptedStreamFn, textTurn, toolTurn } from "@echo-agent/core/testing";
 import { CURSOR_MARKER, visibleWidth, type TUI } from "@earendil-works/pi-tui";
@@ -33,12 +33,24 @@ function quit(ui: ReturnType<typeof fakeTui>): void {
   ui.feed(String.fromCharCode(4));
 }
 
-function agentWith(turns: ReturnType<typeof textTurn>[]): Agent {
+function agentWith(turns: ReturnType<typeof textTurn>[], model: Partial<Model> = {}): Agent {
   return new Agent({
-    model: { provider: "t", id: "only", api: "scripted" },
+    model: { provider: "t", id: "only", api: "scripted", ...model },
     streamFunction: scriptedStreamFn(turns),
   });
 }
+
+/** GLM / K3 那种目录：七档折成三档、关不掉（表里没 off）。 */
+const FOLD_NO_OFF = {
+  minimal: { reasoning_effort: "low" },
+  low: { reasoning_effort: "low" },
+  medium: { reasoning_effort: "high" },
+  high: { reasoning_effort: "high" },
+  xhigh: { reasoning_effort: "max" },
+  max: { reasoning_effort: "max" },
+} as const;
+/** DeepSeek 那种目录：三档 + off 真关。 */
+const FOLD_WITH_OFF = { off: { thinking: { type: "disabled" } }, ...FOLD_NO_OFF } as const;
 
 /**
  * 壳子只认 `AgentRuntime` 那份**封闭协议**——不认 Agent，也不认 Echo。
@@ -1693,36 +1705,63 @@ test("忙的时候选模型：rejected 原因上屏，装备原样不动", async
   }
 });
 
-test("Shift+Tab：thinking 档位轮换（off → minimal），状态栏出现「思考」；再轮到 off 就从状态栏消失", async () => {
+test("Shift+Tab：只轮映射表里发出去的参数不同的档，状态栏显示真发的值；关不掉的模型圈里没有 off、起手显示「缺省」", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const agent = agentWith([textTurn("好")], { thinkingLevelMap: FOLD_NO_OFF });
   const done = runTui({ agent: runtimeOf(agent), ui });
   await flush();
+  const bar = (): string => ui.screen().split("\n").at(-1)!;
 
-  expect(ui.screen()).not.toContain("思考");
-  ui.feed(SHIFT_TAB);
-  await flush();
-  expect(agent.state.thinkingLevel).toBe("minimal");
-  expect(ui.screen().split("\n").at(-1)!).toContain("思考 minimal");
-
-  for (let i = 0; i < 6; i++) {
+  expect(bar()).toContain("思考 缺省"); // off 没映射：不发参数、服务端按缺省思考——不能显示成「没在思考」
+  const seen: string[] = [];
+  for (let i = 0; i < 4; i++) {
     ui.feed(SHIFT_TAB);
     await flush();
+    seen.push(agent.state.thinkingLevel);
   }
-  expect(agent.state.thinkingLevel).toBe("off"); // 轮满一圈回到 off
-  expect(ui.screen().split("\n").at(-1)!).not.toContain("思考");
+  expect(seen).toEqual(["low", "high", "max", "low"]); // minimal / medium / xhigh 与相邻档同值，跳过；没有 off
+  expect(bar()).toContain("思考 low");
 
   quit(ui);
   await done;
 });
 
+test("Shift+Tab：能关的模型（表里有 off）圈里有 off、显示 disabled；没有映射表的模型只报一句、档位不动", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")], { thinkingLevelMap: FOLD_WITH_OFF });
+  const done = runTui({ agent: runtimeOf(agent), ui });
+  await flush();
+  expect(ui.screen().split("\n").at(-1)!).toContain("思考 disabled"); // 起手 off = 真关
+  const seen: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    ui.feed(SHIFT_TAB);
+    await flush();
+    seen.push(agent.state.thinkingLevel);
+  }
+  expect(seen).toEqual(["low", "high", "max", "off"]);
+  quit(ui);
+  await done;
+
+  const bareUi = fakeTui();
+  const bare = agentWith([textTurn("好")]);
+  const bareDone = runTui({ agent: runtimeOf(bare), ui: bareUi });
+  await flush();
+  expect(bareUi.screen()).not.toContain("思考");
+  bareUi.feed(SHIFT_TAB);
+  await flush();
+  expect(bare.state.thinkingLevel).toBe("off");
+  expect(bareUi.screen()).toContain("[思考] 这个模型没有思考档位");
+  quit(bareUi);
+  await bareDone;
+});
+
 test("/clear：协议 reset() 清会话真相，屏幕投影一起清；装备不动", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("这句会被清掉"), textTurn("新的一句")]);
+  const agent = agentWith([textTurn("这句会被清掉"), textTurn("新的一句")], { thinkingLevelMap: FOLD_NO_OFF });
   const done = runTui({ agent: runtimeOf(agent), ui });
   await flush();
 
-  ui.feed(SHIFT_TAB); // 先把 thinking 拨到 minimal，验证 /clear 不动装备
+  ui.feed(SHIFT_TAB); // 先把 thinking 拨到 low，验证 /clear 不动装备
   ui.feed("说一句");
   ui.feed(ENTER);
   await flush(300);
@@ -1736,7 +1775,7 @@ test("/clear：协议 reset() 清会话真相，屏幕投影一起清；装备�
   expect(ui.screen()).toContain("[清空] 对话已清");
   expect(ui.screen(), "屏幕投影没清").not.toContain("这句会被清掉");
   expect(agent.state.messages, "会话真相没清").toEqual([]);
-  expect(agent.state.thinkingLevel, "/clear 把装备也清了").toBe("minimal");
+  expect(agent.state.thinkingLevel, "/clear 把装备也清了").toBe("low");
 
   // 清完还能正常说话
   ui.feed("再来");

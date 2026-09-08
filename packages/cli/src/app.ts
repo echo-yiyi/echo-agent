@@ -110,8 +110,43 @@ function welcomeLines(product: Pick<Product, "name" | "version">, state: Readonl
   ];
 }
 
-/** Shift+Tab 轮换的顺序。全集来自 `ThinkingLevel`；协议拒绝的档位会原样把原因显示出来。 */
-const THINKING_CYCLE: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * 一档参数的人读形：只取叶子字符串（`{ reasoning_effort: "low" }` → `low`，`{ thinking: { type: "disabled" } }` → `disabled`）。
+ * 状态栏显示的是**真发出去的值**，不是档位名——折表后 minimal 与 low 发的是同一个东西。
+ */
+function describeThinking(params: Readonly<Record<string, unknown>>): string {
+  const leaves: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === "string") leaves.push(v);
+    else if (v !== null && typeof v === "object") for (const x of Object.values(v as Record<string, unknown>)) walk(x);
+  };
+  walk(params);
+  return leaves.length > 0 ? leaves.join("/") : "on";
+}
+
+/**
+ * Shift+Tab 轮换的顺序（2026-09-08）：只轮**这个模型**映射表里有、且发出去的参数彼此不同的档——折表后 minimal 与 low
+ * 同值，轮到它等于没按。同值的几档里优先取名字与参数值同名的（GLM / K3 的 low / high / max），否则取第一个。
+ * `off` 只在这家能关（表里有 off）时才在圈里；没有映射表的模型没有圈，Shift+Tab 只报一句。协议拒绝的档位会原样把原因显示出来。
+ */
+function thinkingCycle(model: AgentState["model"]): ThinkingLevel[] {
+  const map = model.thinkingLevelMap ?? {};
+  const groups = new Map<string, { params: Readonly<Record<string, unknown>>; levels: ThinkingLevel[] }>();
+  for (const level of THINKING_LEVELS) {
+    const params = map[level];
+    if (params === undefined || params === null) continue;
+    const key = JSON.stringify(params);
+    const group = groups.get(key) ?? { params, levels: [] };
+    group.levels.push(level);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map(({ params, levels }) => {
+    const leaves = describeThinking(params).split("/");
+    return levels.find((l) => leaves.includes(l)) ?? levels[0]!;
+  });
+}
 
 const STATUS_LABEL: Record<AgentState["status"], string> = {
   idle: "空闲",
@@ -157,7 +192,11 @@ function footerLine(
   if (state.contextTokens !== null && window !== undefined && window > 0) {
     parts.push(`上下文 ${short(state.contextTokens)}/${short(window)} (${Math.round((state.contextTokens / window) * 100)}%)`);
   }
-  if (state.thinkingLevel !== "off") parts.push(`思考 ${state.thinkingLevel}`);
+  // 思考：显示这一档**真发出去的参数**；表里没这档（GLM / K3 的 off：关不掉）就是不发参数、服务端按缺省思考——
+  // 不能显示成「没在思考」。没有映射表的模型（没有思考通道、或被 params 定死）什么都不显示。
+  const levelParams = state.model.thinkingLevelMap?.[state.thinkingLevel];
+  if (levelParams) parts.push(`思考 ${describeThinking(levelParams)}`);
+  else if (state.model.thinkingLevelMap !== undefined) parts.push("思考 缺省");
   if (state.tasks.total > 0) parts.push(`任务 ${state.tasks.active.length}/${state.tasks.total}`);
   if (state.activeSkills.length > 0) parts.push(`skill ${state.activeSkills.length}`);
   if (state.mcp.length > 0) parts.push(`mcp ${state.mcp.length}`);
@@ -459,8 +498,14 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
 
   /** Shift+Tab：thinking 档位轮换。协议拒了（正在跑）就把原因显示出来，档位原样不动。 */
   const cycleThinking = (): void => {
+    const cycle = thinkingCycle(agent.state.model);
+    if (cycle.length === 0) {
+      transcript.push({ kind: "notice", text: "[思考] 这个模型没有思考档位（目录里没有映射表）" });
+      rerender();
+      return;
+    }
     const now = agent.state.thinkingLevel;
-    const next = THINKING_CYCLE[(THINKING_CYCLE.indexOf(now) + 1) % THINKING_CYCLE.length]!;
+    const next = cycle[(cycle.indexOf(now) + 1) % cycle.length]!; // 当前档不在圈里（关不掉的模型起手是 off）→ 从第一档起
     void agent.setThinkingLevel(next).then((result) => {
       if (result.kind === "rejected") transcript.push({ kind: "notice", text: `[思考] 没换成：${result.reason}` });
       rerender(); // 换成了不用说话——状态栏现读 state，档位直接变

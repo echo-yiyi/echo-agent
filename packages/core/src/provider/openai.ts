@@ -163,12 +163,11 @@ function buildRequest(model: Model, context: Context, alwaysSendReasoningField: 
     }));
   }
   if (model.capabilities?.maxOutputTokens !== undefined) body.max_tokens = model.capabilities.maxOutputTokens;
-  // 思考深度（review 2026-09-07：此前 `StreamOptions.thinkingLevel` 一路传到这里就断了，Shift+Tab / setThinkingLevel /
-  // 压缩显式要的 off，请求体一个字节都不变）。这个方言只认一种写法：`model.thinkingLevelMap[level]` 给出的字符串写进
-  // `reasoning_effort`；`null` 或没映射 = 这一档不发参数（服务端缺省）。哪些模型有哪几档、值是什么，只从目录来（按官方文档填）。
-  const effort = thinkingLevel === undefined ? undefined : model.thinkingLevelMap?.[thinkingLevel];
-  if (typeof effort === "string") body.reasoning_effort = effort;
-  return { ...body, ...model.params }; // params 最后:显式调参赢过一切缺省
+  // 思考档位（review 2026-09-07 接上；2026-09-08 值改成参数对象）：`model.thinkingLevelMap[level]` 是要合并进请求体的参数
+  //（`reasoning_effort` / `thinking.type` 之类，**字段名由目录按各家官方文档定，方言不认**）；`null` 或没映射 = 这一档不发参数
+  //（服务端缺省）。`off` 有映射 = 这家能关、发的就是关的参数；没有 = 关不掉。`params` 仍最后合并：显式调参赢过档位与缺省。
+  const levelParams = thinkingLevel === undefined ? undefined : model.thinkingLevelMap?.[thinkingLevel];
+  return { ...body, ...(levelParams ?? {}), ...model.params };
 }
 
 /**
@@ -516,7 +515,8 @@ function readEnv(name: string): string | undefined {
  * 现役四款；`kimi-k2` 整个系列 2026-05-25 下线（含上一版表里的 `kimi-k2-turbo-preview`，调用回 404）。
  * 四款都收图、思考都走 `reasoning_content`：K3 与 K2.7-code 思考常开，K2.6 缺省开、可关（K2.x 的 `thinking` 参数）。
  * 深度只有 K3 有：请求顶层 `reasoning_effort` low / high / max，缺省 `max`（2026-09-08 官方 use-reasoning-effort 指南），
- * 目录映射 `LOW_HIGH_MAX_FOLD`；K2.7-code / K2.6 官方没给深度参数，不填表。`.cn` 与 `.ai` 两站模型 id 相同，key 不通用。
+ * 目录映射 `LOW_HIGH_MAX_FOLD`；K2.6 只有 `thinking.type` 开关（`KIMI_K2_TOGGLE`）；K2.7-code 官方既没给深度也没给开关，
+ * 不填表。`.cn` 与 `.ai` 两站模型 id 相同，key 不通用。
  *
  * **不填 `maxOutputTokens`**：官方只给缺省输出（K3 131,072、K2.x 32,768），上限没有明确数字，
  * 而且 K3 的 `max_tokens` 已标 deprecated（改 `max_completion_tokens`）。方言只在该字段有值时才发
@@ -536,7 +536,7 @@ export function kimiProvider(opts: BuiltinProviderOptions = {}): Provider {
       { id: "kimi-k3", api: OPENAI_COMPLETIONS_API, name: "Kimi K3", capabilities: { reasoning: true, vision: true, contextWindow: 1_048_576 }, thinkingLevelMap: LOW_HIGH_MAX_FOLD },
       { id: "kimi-k2.7-code", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.7 Code", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
       { id: "kimi-k2.7-code-highspeed", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.7 Code HighSpeed", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
-      { id: "kimi-k2.6", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.6", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 } },
+      { id: "kimi-k2.6", api: OPENAI_COMPLETIONS_API, name: "Kimi K2.6", capabilities: { reasoning: true, vision: true, contextWindow: 262_144 }, thinkingLevelMap: KIMI_K2_TOGGLE },
     ],
     api: createProviderStreams(openAiDialect({ baseUrl, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) })),
   });
@@ -586,17 +586,31 @@ export function openaiProvider(opts: BuiltinProviderOptions = {}): Provider {
 }
 
 /**
- * 七档 `ThinkingLevel` 折到厂商三档 `reasoning_effort` low / high / max（review 2026-09-07 接上 thinkingLevel 后填的表，
- * 2026-09-08 按官方文档刷到 Kimi / DeepSeek）。两张表都是目录数据、各按各家文档：
- * - `LOW_HIGH_MAX_FOLD`：官方只给三档、没给折法的（GLM 5.3 系、Kimi K3），两两一折。
+ * 七档 `ThinkingLevel` → 请求体参数（目录数据，方言不认字段名，见 `buildRequest`；review 2026-09-07 接上，
+ * 2026-09-08 按官方文档刷全、值改成参数对象）。三张表各按各家文档：
+ * - `LOW_HIGH_MAX_FOLD`：官方只给 `reasoning_effort` low / high / max、没给折法的（GLM 5.3 系、Kimi K3），两两一折。
+ *   **没有 `off`**：这两家思考关不掉，不假装能关——那一档不发参数、服务端按缺省跑（壳据此显示「缺省」）。
  * - `DEEPSEEK_THINKING_LEVELS`：DeepSeek 官方自己给了兼容表（thinking_mode 指南：medium / high / **xhigh → high**），照抄；
- *   `minimal` 表里没有，按最低档发 low。服务端也认 medium / xhigh，但请求体只发文档里的三个值。
- * 两张表都**没有 `off`**：GLM 5.3 与 K3 思考关不掉，不假装能关；DeepSeek 能关（`thinking: { type: "disabled" }`），
- * 但那是另一个参数，这张表只写 `reasoning_effort`——`off` 一档不发参数 = 服务端缺省，照样思考（见 `buildRequest`）。
- * 官方没给档位的模型不填表，选了档位请求体也一个字节不变（Shift+Tab 对它们无效）；哪款为什么没有，看各家 provider 的 JSDoc。
+ *   `minimal` 表里没有，按最低档发 low；服务端也认 medium / xhigh，但请求体只发文档里的三个值。
+ *   `off` = `thinking: { type: "disabled" }`（官方能关；2026-09-08 用户拍板 `off` 要真关）。
+ * - `KIMI_K2_TOGGLE`：K2.6 只有开关没有档位（官方 K2.6 quickstart：`thinking.type` enabled / disabled，缺省 enabled）：
+ *   `off` 关，其余六档都显式开。
+ * 官方没给档位也没给开关的模型不填表，选了档位请求体一个字节不变；哪款为什么没有，看各家 provider 的 JSDoc。
  */
-const LOW_HIGH_MAX_FOLD = { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max", max: "max" } as const;
-const DEEPSEEK_THINKING_LEVELS = { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "high", max: "max" } as const;
+const effort = (level: "low" | "high" | "max"): Readonly<Record<string, unknown>> => Object.freeze({ reasoning_effort: level });
+const THINKING_OFF: Readonly<Record<string, unknown>> = Object.freeze({ thinking: Object.freeze({ type: "disabled" }) });
+const THINKING_ON: Readonly<Record<string, unknown>> = Object.freeze({ thinking: Object.freeze({ type: "enabled" }) });
+const LOW_HIGH_MAX_FOLD = Object.freeze({
+  minimal: effort("low"), low: effort("low"), medium: effort("high"), high: effort("high"), xhigh: effort("max"), max: effort("max"),
+});
+const DEEPSEEK_THINKING_LEVELS = Object.freeze({
+  off: THINKING_OFF,
+  minimal: effort("low"), low: effort("low"), medium: effort("high"), high: effort("high"), xhigh: effort("high"), max: effort("max"),
+});
+const KIMI_K2_TOGGLE = Object.freeze({
+  off: THINKING_OFF,
+  minimal: THINKING_ON, low: THINKING_ON, medium: THINKING_ON, high: THINKING_ON, xhigh: THINKING_ON, max: THINKING_ON,
+});
 
 /**
  * 智谱 GLM 的 coding 端点（pi 那边叫 `zai-coding-cn`）。key:`ZAI_CODING_CN_API_KEY`。
@@ -677,7 +691,7 @@ export function minimaxProvider(opts: BuiltinProviderOptions = {}): Provider {
  * 三款都是 1M 上下文、思考缺省**开**（`thinking: { type: "enabled" }`，可传 `disabled` 关掉；深度 `reasoning_effort`
  * low / high / max，缺省 high），思考走 `reasoning_content`；只有 `-vision-exp` 收图，别的模型给图回 400。
  *
- * **深度映射只填 flash / pro**（`DEEPSEEK_THINKING_LEVELS`，官方 thinking_mode 指南点名的就这两款）。`-vision-exp` 不填：
+ * **档位表只填 flash / pro**（`DEEPSEEK_THINKING_LEVELS`：三档深度 + `off` 真关，官方 thinking_mode 指南点名的就这两款）。`-vision-exp` 不填：
  * 文档没点名；2026-09-08 真 key 实测 4 组同题，`low` 的 reasoning_tokens 全部比 `max` 多（均值 321 对 88，flash 对照组
  * 方向正常 10 对 52）——参数在它身上不按文档走，填了就是「选的是 A、跑的是 B」。
  *
