@@ -320,6 +320,52 @@ test("backoff 中 deadline：退避期间 run 超时，以 error{timeout} 收场
   expect(requests).toHaveLength(1);
 });
 
+test("abort 的 reason 一路带到 outcome：宿主传的字符串原样透传；裸 abort() 没有 reason；工具阶段与退避阶段两条路都带", async () => {
+  // 工具阶段 abort
+  let agent!: Agent;
+  const t = tool("t", async () => {
+    agent.abort("用户中断");
+    return toolOk("ok");
+  });
+  agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([toolTurn("c1", "t", {}), textTurn("不该到")]), tools: [t] });
+  const events = collect(agent);
+  const r = await agent.prompt("go");
+  expect(r.outcome).toEqual({ kind: "aborted", reason: "用户中断" });
+  expect(validate(events)).toEqual([]);
+  const end = events.find((e) => e.type === "agent_end");
+  expect(end?.type === "agent_end" && end.outcome).toEqual({ kind: "aborted", reason: "用户中断" });
+  const replyEnd = events.find((e) => e.type === "reply_end");
+  expect(replyEnd?.type === "reply_end" && replyEnd.outcome).toEqual({ kind: "aborted", reason: "用户中断" });
+
+  // 退避阶段 abort
+  const { fn } = capturing([errorTurn("rate_limit", "限流", true), textTurn("不该到")]);
+  const backing = new Agent({ model: FAKE_MODEL, streamFunction: fn, retryPolicy: { maxAttempts: 3, backoffMs: () => 5_000 } });
+  backing.subscribe((e) => {
+    if (e.type === "retry_scheduled") backing.abort("收到停止信号");
+  });
+  expect((await backing.prompt("go")).outcome).toEqual({ kind: "aborted", reason: "收到停止信号" });
+
+  // 没给理由：outcome 不带 reason 字段
+  let bare!: Agent;
+  const t2 = tool("t", async () => {
+    bare.abort();
+    return toolOk("ok");
+  });
+  bare = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([toolTurn("c1", "t", {}), textTurn("不该到")]), tools: [t2] });
+  expect((await bare.prompt("go")).outcome).toEqual({ kind: "aborted" });
+});
+
+test("agent_end 不是 idle barrier：监听器里 status 仍是 generating，prompt() resolve 才是 idle", async () => {
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("hi")]) });
+  const seen = { statusAtEnd: null as string | null }; // 对象字段：闭包里的赋值不会被 TS 的控制流收窄吃掉
+  agent.subscribe((e) => {
+    if (e.type === "agent_end") seen.statusAtEnd = agent.status;
+  });
+  await agent.prompt("go");
+  expect(seen.statusAtEnd).toBe("generating");
+  expect(agent.status).toBe("idle");
+});
+
 test("撞窗应急后成功：同一 turn 的第二个 attempt，compaction_* 夹在两个 attempt 之间，不发 retry_scheduled", async () => {
   const big: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000_000 } };
   const { fn } = capturing([textTurn("first"), errorTurn("context_overflow", "prompt too long", false), textTurn("<summary>RECOVERED</summary>"), textTurn("ok")]);

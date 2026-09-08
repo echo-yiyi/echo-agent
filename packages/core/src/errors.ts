@@ -29,6 +29,35 @@ export type ErrorCode =
   | "max_replies" // 一个 run 的 reply 上限（达上限且仍有待办）
   | "internal";
 
+/* ══════════════════ 中断的理由 ══════════════════ */
+
+/**
+ * `AbortSignal.reason` 里装的中断理由。**必须是 `AbortError` 形状的 `DOMException`**：provider 靠 `name === "AbortError"`
+ * 识别「请求被中止」（`provider/openai.ts`），裸字符串会让 fetch 的 rejection 被当成别的错误、run 以 error 而非 aborted 收场。
+ * 理由是自由字符串：宿主传什么透传什么；core 自己发起的用 `ABORT_REASON` 里的常量。
+ */
+export class AbortReason extends DOMException {
+  constructor(readonly reason: string) {
+    super(reason, "AbortError");
+  }
+}
+
+/** 从 signal 取回中断理由；没给理由的裸 `abort()`（或不是本仓装进去的）返回 undefined。 */
+export function abortReasonOf(signal: AbortSignal): string | undefined {
+  return signal.reason instanceof AbortReason ? signal.reason.reason : undefined;
+}
+
+/**
+ * core 自己发起的中断在 outcome 里用的理由常量（docs/decisions/implemented/2026-09-01-abort-reason.md）。
+ * 不做枚举——枚举会把宿主的中断理由挤成 other。
+ */
+export const ABORT_REASON = Object.freeze({
+  /** 状态锁丢了：这段不再属于本进程。 */
+  leaseLost: "lease-lost",
+  /** Agent 收摊（stop / dispose）。 */
+  dispose: "dispose",
+} as const);
+
 export type AgentError = {
   source: "provider" | "tool" | "internal";
   code: ErrorCode;

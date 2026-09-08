@@ -1,6 +1,6 @@
 # stop hook 最多继续三次是不是产品约束
 
-> 状态:proposed · 提出 2026-09-01 · 拍板 2026-09-07(口头,留硬编码) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-07(留硬编码) · 实现 2026-09-07(文档提一句) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 
@@ -21,4 +21,4 @@
 
 ## 验收
 
-该数字要么出现在公开文档与测试里,要么成为一个有默认值的配置项;两种情况下都不再是散落在 engine 里的裸常量。
+数字出现在 run loop 文档里(docs/design/run-loop-layers.md §2.1),`MAX_STOP_CONTINUATIONS` 仍是 engine 常量,不进配置、不加契约测试。

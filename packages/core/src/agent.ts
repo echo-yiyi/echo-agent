@@ -8,7 +8,7 @@
 //      是公共可替换字段：上层换行为不改内核，评测塞假 streamFn 就能跑。
 
 import { redactedLabel } from "./observability/redact.ts";
-import { errText, type AgentError } from "./errors.ts";
+import { ABORT_REASON, AbortReason, errText, type AgentError } from "./errors.ts";
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
@@ -26,7 +26,7 @@ import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk, QuestionPolicy,
 import { defaultConvertToLlm, userMessage, type AgentMessage, type ContentBlock, type ConvertToLlm, type ImageBlock, type Usage, environmentMessage } from "./messages.ts";
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "./provider/dialect.ts";
 import type { Model, StreamFn, ThinkingLevel } from "./provider/types.ts";
-import { runAgentLoop, runAgentLoopContinue } from "./loop/run-loop.ts";
+import { abortedOutcome, runAgentLoop, runAgentLoopContinue } from "./loop/run-loop.ts";
 import { turnNumberOf } from "./loop/ids.ts";
 import { RunIntakeGate, type FollowUpResult, type IntakeLeftovers, type SteerResult } from "./loop/intake.ts";
 import { StandaloneRunAdmission } from "./admission/standalone.ts";
@@ -1346,7 +1346,8 @@ export class Agent {
 
   abort(reason?: string): void {
     void this.hooks.notify({ type: "abortRequested", reason }, this.hookContext());
-    this.activeRun?.abortController.abort();
+    // reason 装进 signal 一路带到 outcome（`abortedOutcome`）；裹成 AbortError 形状，provider 才认得出是中止
+    this.activeRun?.abortController.abort(reason === undefined ? undefined : new AbortReason(reason));
   }
 
   /** 清 transcript + 运行态 + 队列；**装备与决策点不动**。 */
@@ -1931,7 +1932,7 @@ export class Agent {
     this.leaseLostError = error; // ③ 的开关，先置上免得 abort 触发的收尾又开新活
     this.phase = "lost";
     this.intake.closeForReconfiguration(); // 新的 steer / followUp 不再 accepted
-    this.abort("lease-lost"); // ②
+    this.abort(ABORT_REASON.leaseLost); // ②
     // admission 关门：排队的 rejected(lease-lost)，在跑的（含整理）abort 并**等它真停**——
     // 不等的话，租约已经归别人、旧 dream 还在往 memory 里写。
     // 剩下的善后**整段**排进同一次 actor work：与 stop / transition 不交错，中间也不给别的 transition 插空
@@ -2392,8 +2393,9 @@ export class Agent {
     // run intake 开门（RunIntakeGate）：与 activeRun 落位同一同步段——从这一刻起 followUp() 才 accepted
     this.intake.openRun(runId);
     const abortController = new AbortController();
-    const onScopeAbort = (): void => abortController.abort();
-    if (scope.signal.aborted) abortController.abort();
+    // admission 侧的中止（抢占 / 收摊）连 reason 一起转过来：有理由就带理由，没有就是裸的 AbortError
+    const onScopeAbort = (): void => abortController.abort(scope.signal.reason);
+    if (scope.signal.aborted) abortController.abort(scope.signal.reason);
     else scope.signal.addEventListener("abort", onScopeAbort, { once: true });
     let resolvePromise = (): void => {};
     const promise = new Promise<void>((resolve) => {
@@ -2451,7 +2453,7 @@ export class Agent {
       at: Date.now(),
       ...(aborted ? {} : { error: err }),
     };
-    const outcome: AgentOutcome = aborted ? { kind: "aborted" } : { kind: "error", error: err };
+    const outcome: AgentOutcome = aborted ? abortedOutcome(this.activeRun?.abortController.signal) : { kind: "error", error: err };
     if (input.source.kind === "dream") return { outcome, messages: [failure] };
     try {
       await this.processEvents({ type: "message_start", role: "assistant" });
@@ -2928,7 +2930,7 @@ export class Agent {
     // 关 admission：排队的 rejected(stopping)、在跑的 abort 并等它 close；之后的 enqueue 一律 rejected
     await this.admission.close("stopping");
     if (this.activeRun !== undefined) {
-      this.abort("dispose");
+      this.abort(ABORT_REASON.dispose);
       await this.activeRun.promise;
     }
     // **整理也得收干净，而且要等它真停。** 上一版只在 `abort()` 里发了个信号就往下走，

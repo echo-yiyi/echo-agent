@@ -3,7 +3,7 @@
 > 状态：已实现（2026-09-05，分支 `worktree-loop-layers`）；四条决策均已拍板，见导读<br>
 > 读者：要改 run loop、订阅事件流做 UI / 观测、或对循环写评测的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) §2–§4 的现状描述。本文只写目标形态；与现状的差异集中在 §7。实现合入后，该稿 §3–§4 指向本文<br>
-> 决策记录（四条，本文只指向，论证在记录里）：[外层单位叫 reply](../decisions/implemented/2026-09-05-reply-layer.md) · [重试归 loop](../decisions/implemented/2026-09-05-retry-owned-by-loop.md) · [失败 attempt 留 transcript](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) · [迭代预算按 reply 计](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)。**相邻但不在本文范围**的已有记录：[abort reason](../decisions/proposed/2026-09-01-abort-reason.md) · [`agent_end` 是否 idle barrier](../decisions/proposed/2026-09-01-agent-end-barrier.md) · [stop hook 三次](../decisions/proposed/2026-09-01-stop-continuation-limit.md) · [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)（`toolExecution` 已删，[来源](../decisions/implemented/2026-09-01-tool-execution-parallel.md)）
+> 决策记录（四条，本文只指向，论证在记录里）：[外层单位叫 reply](../decisions/implemented/2026-09-05-reply-layer.md) · [重试归 loop](../decisions/implemented/2026-09-05-retry-owned-by-loop.md) · [失败 attempt 留 transcript](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) · [迭代预算按 reply 计](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)。**相邻但不在本文范围**的已有记录：[abort reason](../decisions/implemented/2026-09-01-abort-reason.md) · [`agent_end` 是否 idle barrier](../decisions/implemented/2026-09-01-agent-end-barrier.md) · [stop hook 三次](../decisions/implemented/2026-09-01-stop-continuation-limit.md) · [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)（`toolExecution` 已删，[来源](../decisions/implemented/2026-09-01-tool-execution-parallel.md)）
 
 ## 导读
 
@@ -65,10 +65,10 @@
 ### 2.1 run
 
 - **开**：admission 通过，[`RunIntakeGate.openRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openRun) 与 `agent_start`。
-- **关**：intake 关门（[`tryCloseRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.tryCloseRun) 或 [`closeRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.closeRun)）→ `agent_end`。**关门三件事（清 deadline timer、`closeRun`、`agent_end`）在 `finally` 里**，任何异常路径都走——现状只有 `break outer` 走得到，§7。
+- **关**：intake 关门（[`tryCloseRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.tryCloseRun) 或 [`closeRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.closeRun)）→ `agent_end`。**`agent_end` 是 run 事件流的封口，不是 idle barrier**：它发出时 admission ticket 还没 settle，监听器里读到的 `status` 仍是 `generating`；要等空闲，等 `prompt()` / `continue()` 的 resolve（那就是 barrier），或订阅 `onChange` 看状态变化。不另设 barrier API（[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。**关门三件事（清 deadline timer、`closeRun`、`agent_end`）在 `finally` 里**，任何异常路径都走——现状只有 `break outer` 走得到，§7。
 - **reply 之间**，按序：
   1. 上一条 reply 是被 `shouldStopAfterTurn` 叫停的 → 直接关门（不 drain、不问 stop hook；现状语义）。
-  2. reply 数 < `maxReplies`：drain followUp 有货 → 新 reply（`follow_up`）；没货 → 问 stop hook，block 且注入次数未到上限（[`MAX_STOP_CONTINUATIONS`](../../packages/core/src/loop/run-loop.ts#symbol=MAX_STOP_CONTINUATIONS)）→ 新 reply（`stop_hook`）。
+  2. reply 数 < `maxReplies`：drain followUp 有货 → 新 reply（`follow_up`）；没货 → 问 stop hook，block 且注入次数未到上限 → 新 reply（`stop_hook`）。**stop hook 最多把 agent 拉回来 3 次**（[`MAX_STOP_CONTINUATIONS`](../../packages/core/src/loop/run-loop.ts#symbol=MAX_STOP_CONTINUATIONS)），第 4 次 block 被忽略、run 照常关门。这是防死循环的保险丝，不是产品契约、不进配置（[决策](../decisions/implemented/2026-09-01-stop-continuation-limit.md)）。
   3. `tryCloseRun`：队列空 → 关门，`completed`；非空且 reply 数 < `maxReplies` → 新 reply（`follow_up`）；非空且已达上限 → `closeRun`，`error{max_replies}`。
 - **未吸收的消息**：drain 出来但没吸收进 transcript 的（turn 交出的 steer、达上限时 drain 出的 followUp）随关门作为 leftovers 经 `queue_dropped` 报出，与现状 `closeRun` 的报法同一条路。
 
@@ -199,7 +199,7 @@ agent_end{completed}
 
 ## 6. 重试与失败
 
-**attempt 是唯一的重试单位。** dialect 只做协议翻译：一次请求、一条流、流断了就以 `error` 收场并标 `retryable`；它自己不重试，`ProviderEvent.retry` 删除。重试由 `runTurn` 按 `retryPolicy` 做：`retryable && attempt < maxAttempts` → `retry_scheduled` → `backoffMs(attempt)` → 下一个 attempt（完整重建，§2.4）。撞窗（`context_overflow`）→ 应急压缩一次 → 下一个 attempt；压不动 → `failed`。hook 侧 `modelCallFailed`（每次 `attempt_end{failed}`）与 `retryScheduled`（每次 `retry_scheduled`）由 `runTurn` 在同一位置 notify，attempt 计数与事件一致——现状这两个通知**没有任何发送点**（§7）。
+**attempt 是唯一的重试单位。** dialect 只做协议翻译：一次请求、一条流、流断了就以 `error` 收场并标 `retryable`；它自己不重试，`ProviderEvent.retry` 删除。压缩摘要器的模型调用（[`modelCallFor`](../../packages/core/src/compaction/pipeline.ts#symbol=modelCallFor)）不是 attempt，但同一份 `retryPolicy`、同一个受 signal 管的退避（[`loop/backoff.ts`](../../packages/core/src/loop/backoff.ts#symbol=sleep)）：retryable 错误重试到 `maxAttempts`，只发 hook 侧的 `modelCallFailed` / `retryScheduled`，不发 loop 事件（它不在任何 turn 里）。重试由 `runTurn` 按 `retryPolicy` 做：`retryable && attempt < maxAttempts` → `retry_scheduled` → `backoffMs(attempt)` → 下一个 attempt（完整重建，§2.4）。撞窗（`context_overflow`）→ 应急压缩一次 → 下一个 attempt；压不动 → `failed`。hook 侧 `modelCallFailed`（每次 `attempt_end{failed}`）与 `retryScheduled`（每次 `retry_scheduled`）由 `runTurn` 在同一位置 notify，attempt 计数与事件一致——现状这两个通知**没有任何发送点**（§7）。
 
 **失败消息的去向。** 失败 attempt 的定稿进 transcript（`stopReason: "error"`，与现状同），`convertToLlm` 投影时丢掉 `stopReason === "error"` 的 assistant 消息——它不是模型说过的话，不该作为上文送回去。现状没有这道过滤（§7）。
 
@@ -212,8 +212,10 @@ agent_end{completed}
 | failed，撞窗且应急成功 | 下一个 attempt | — | — |
 | failed（终） | `failed` | `error` | `error` |
 | blocked | `blocked` | `aborted{reason}` | `aborted{reason}` |
-| aborted（调用方 signal） | `aborted` | `aborted` | `aborted` |
+| aborted（调用方 signal） | `aborted` | `aborted{reason}` | `aborted{reason}` |
 | aborted（deadline signal） | `aborted` | `error{timeout}`（reply 区分两个 signal，现状同） | `error{timeout}` |
+
+**abort 的 reason 一路带到 outcome**（[决策](../decisions/implemented/2026-09-01-abort-reason.md)）：`Agent.abort(reason)` 把 reason 装进 `AbortSignal.reason`（[`AbortReason`](../../packages/core/src/errors.ts#symbol=AbortReason)——必须是 `AbortError` 形状的 `DOMException`，provider 靠 `name` 识别「被中止」，裸字符串会被当成别的错误），reply 在收场时从调用方 signal 取回，落在 `agent_end` 与 `LoopResult` 的 `{ kind: "aborted", reason }` 里。宿主传的 reason 是自由字符串原样透传；core 自己发起的中断用 [`ABORT_REASON`](../../packages/core/src/errors.ts#symbol=ABORT_REASON) 里的常量：`lease-lost`（丢锁）、`dispose`（收摊）。没给理由的裸 `abort()` 与 admission 的抢占 / 收摊仍是不带 reason 的 `{ kind: "aborted" }`；run 超时不是 aborted，是 `error{timeout}`。
 | — | — | 轮首硬闸：`aborted` / `error{max_iterations}` / `error{timeout}` | 同 reply |
 | — | — | — | reply 之间：达 `maxReplies` 且仍有待办 → `error{max_replies}` |
 

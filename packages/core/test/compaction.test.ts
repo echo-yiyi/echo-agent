@@ -288,12 +288,13 @@ test("extractSummary：剥 scratchpad、取 summary 里面的；都没有就整�
 /** 低层路径：`new Agent()` + `mountBuiltinTools()`，与 createEcho 同一张 builtin 表。 */
 async function agentWithBuiltins(
   streamFunction: StreamFn,
-  opts: { model?: Model; session?: { store: InMemoryDir; id: string }; compaction?: Agent["compaction"] } = {},
+  opts: { model?: Model; session?: { store: InMemoryDir; id: string }; compaction?: Agent["compaction"]; retryPolicy?: Agent["retryPolicy"] } = {},
 ): Promise<Agent> {
   const agent = new Agent({
     model: opts.model ?? SMALL,
     streamFunction,
     tools: [echoTool()],
+    ...(opts.retryPolicy !== undefined ? { retryPolicy: opts.retryPolicy } : {}),
     // 一个 store 就是一段 session 的目录（2026-09-03）：同一个 store 换个 Agent 就是「另一个进程续同一段」
     ...(opts.session !== undefined ? { sessionService: new SessionService(opts.session.store), sessionId: opts.session.id } : {}),
     compaction: opts.compaction ?? { reserveTokens: 100, keepRecentTokens: 40 },
@@ -356,6 +357,60 @@ test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐�
   await agentB.prompt("next");
   expect(b.requests[0]!.messages).toEqual(a.requests[2]!.messages);
   expect(b.requests[0]!.messages.length).toBe(3); // 摘要 · one · next
+});
+
+test("摘要器的模型调用带退避重试：摘要请求撞 429 一次，同一份 retryPolicy 再来一次，压缩照常完成（2026-09-07 拍板）", async () => {
+  const big: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000_000 } };
+  const { fn, requests } = capturing([
+    textTurn("first"),
+    errorTurn("context_overflow", "prompt too long", false),
+    errorTurn("rate_limit", "限流", true), // 摘要调用第 1 次：429
+    reply("<summary>RECOVERED</summary>"), // 摘要调用第 2 次：成功
+    textTurn("ok"),
+  ]);
+  const agent = await agentWithBuiltins(fn, { model: big, compaction: { keepRecentTokens: 8_000 }, retryPolicy: { maxAttempts: 3, backoffMs: () => 0 } });
+  const retries: string[] = [];
+  agent.subscribeLifecycle((e) => {
+    if (e.type === "retryScheduled") retries.push(`${e.attempt}:${e.cause}`);
+  });
+  await agent.prompt("x".repeat(12_000));
+  const result = await agent.prompt("second");
+  expect(result.outcome.kind).toBe("completed");
+  // 请求：0 first · 1 撞窗 · 2 摘要 429 · 3 摘要成功 · 4 重跑
+  expect(requests.length).toBe(5);
+  expect(JSON.stringify(requests[4]!.messages)).toContain("RECOVERED");
+  expect(retries).toEqual(["2:rate_limit"]);
+
+  // 预算用尽：摘要连撞 3 次 429 → 恰好 3 次请求、2 次退避，summary 阶段以 compactionFailed 报出；
+  // 阶梯里后面不调模型的阶段仍可能压动、重跑仍可能发生，所以只断言 hook 侧的事实，不断言 run 的收场
+  const exhausted = capturing([
+    textTurn("first"),
+    errorTurn("context_overflow", "too long", false),
+    errorTurn("rate_limit", "限流", true),
+    errorTurn("rate_limit", "限流", true),
+    errorTurn("rate_limit", "限流", true),
+    textTurn("ok"),
+    textTurn("ok"),
+  ]);
+  const agent2 = await agentWithBuiltins(exhausted.fn, { model: big, compaction: { keepRecentTokens: 8_000 }, retryPolicy: { maxAttempts: 3, backoffMs: () => 0 } });
+  const hooks2: string[] = [];
+  agent2.subscribeLifecycle((e) => {
+    if (e.type === "modelCallFailed") hooks2.push(`failed:${e.attempt}:${e.error.code}`);
+    if (e.type === "retryScheduled") hooks2.push(`retry:${e.attempt}:${e.cause}`);
+    if (e.type === "compactionFailed" && e.stage === "summary") hooks2.push("summary-failed");
+  });
+  await agent2.prompt("x".repeat(12_000));
+  await agent2.prompt("second");
+  // 第一条是撞窗那次 attempt 自己报的（turn 层）；之后三条是摘要器的（同一个 hook，靠 code 分开）
+  expect(hooks2).toEqual([
+    "failed:1:context_overflow",
+    "failed:1:rate_limit",
+    "retry:2:rate_limit",
+    "failed:2:rate_limit",
+    "retry:3:rate_limit",
+    "failed:3:rate_limit",
+    "summary-failed",
+  ]);
 });
 
 test("撞窗应急：context_overflow → 同一条流水线以 overflow 跑一次 → 重跑本轮成功；第二次撞窗按 error 收场", async () => {

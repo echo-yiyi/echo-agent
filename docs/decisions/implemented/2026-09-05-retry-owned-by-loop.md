@@ -28,3 +28,7 @@ hook 侧 `modelCallFailed` / `retryScheduled` 现状没有任何发送点;`runTu
 ## 验收
 
 `dialect.ts` 不再读 `maxAttempts`,`ProviderEvent` 没有 `retry` 变体;provider 持续返回 retryable 错误时一个 run 的请求总数 = `maxAttempts`;`retry_scheduled` 只出现在同一 turn 的 `attempt_end{failed}` 之后,其后是下一个 `attempt_start` 或(退避被 abort / deadline 打断时)`turn_end{aborted}`;退避受 run 的 signal 管,打断后在远小于 backoff 的时间内收场;`transformContext` 在有重试的 turn 里被调用的次数 = attempt 数;`modelCallFailed` / `retryScheduled` 有测试证明被发出。
+
+## 补记(2026-09-07):压缩摘要器也重试
+
+dialect 不重试之后,压缩摘要器的模型调用(`packages/core/src/compaction/pipeline.ts` 的 `modelCallFor`)失去了 transport 重试——摘要请求撞一次 429 这次压缩就失败,overflow 应急那条路上等于 run 直接以 `context_overflow` 收场。用户拍板:**加带退避的重试**。形状:同一份 `retryPolicy`、同一个受 signal 管的退避(`packages/core/src/loop/backoff.ts`,与 attempt 共用),retryable 错误重试到 `maxAttempts`;它不是 attempt,只发 hook 侧的 `modelCallFailed` / `retryScheduled`,不发 loop 事件。验收:摘要请求 429 一次后成功,压缩照常完成且 `retryScheduled` 恰好一次;连撞 `maxAttempts` 次后按 error 收场,没有第 N+1 次请求(`packages/core/test/compaction.test.ts`)。

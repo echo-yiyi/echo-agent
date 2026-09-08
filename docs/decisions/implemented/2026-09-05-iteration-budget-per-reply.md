@@ -19,7 +19,7 @@
 
 ## 决定
 
-**C。** `maxReplies` 缺省 10(`DEFAULT_MAX_REPLIES`,保险丝量级:stop hook 最多贡献 3 条,其余留给一次 run 里的 host followUp);它是常量还是配置项,与 [stop hook 三次](../proposed/2026-09-01-stop-continuation-limit.md) 同拍——两者必须同形。
+**C。** `maxReplies` 缺省 10(`DEFAULT_MAX_REPLIES`,保险丝量级:stop hook 最多贡献 3 条,其余留给一次 run 里的 host followUp);它是常量还是配置项,与 [stop hook 三次](2026-09-01-stop-continuation-limit.md) 同拍——两者必须同形。
 
 ## 验收
 

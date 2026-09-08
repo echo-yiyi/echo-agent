@@ -267,7 +267,9 @@ ABORT_OUTCOME={"kind":"aborted"}
 
 run loop 先原子关闭 intake、发出 `agent_end` 并返回；admission ticket settle 之后，Agent 才把公开 status 设回 `idle` 并调度 inbox/dream。顺序见 [`runLoop()`](../../packages/core/src/loop/run-loop.ts#symbol=runLoop) 和 [`Agent.finishRun()`](../../packages/core/src/agent.ts#symbol=Agent.finishRun)。
 
-所以 listener 在处理 `agent_end` 时仍可能看到 `generating`。这在代码里是有意顺序，但事件名容易被理解为“Agent 已经空闲”。需要拍板：
+所以 listener 在处理 `agent_end` 时仍可能看到 `generating`。这在代码里是有意顺序，但事件名容易被理解为“Agent 已经空闲”。
+
+> 已拍板（2026-09-07，[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）并写进正式契约：见 [Run Loop 的四层](run-loop-layers.md) §2.1；下文是审阅时的现状与选项。
 
 实际事件探针的结果是：
 

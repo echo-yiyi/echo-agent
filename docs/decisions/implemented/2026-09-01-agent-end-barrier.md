@@ -1,6 +1,6 @@
 # `agent_end` 是否 idle barrier
 
-> 状态:proposed · 提出 2026-09-01 · 拍板 2026-09-07(口头,保留名字、文档写清) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-07(保留名字、文档写清) · 实现 2026-09-07 · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
 
 ## 现状
 

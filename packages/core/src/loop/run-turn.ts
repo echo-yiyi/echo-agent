@@ -31,6 +31,7 @@ import type { AgentMessage, ToolResultMessage, ToolUseBlock } from "../messages.
 import { toolResultMessage, toolUsesFromMessage } from "../messages.ts";
 import { isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type McpTool, type ModelTool } from "../tools/types.ts";
 import { buildWorkingMessages } from "../compaction/view.ts";
+import { clampDelay, sleep } from "./backoff.ts";
 import { turnIdOf } from "./ids.ts";
 import type { AgentLoopConfig, AttemptResult, Emit, LoopDeps, TurnCause, TurnResult } from "./types.ts";
 
@@ -518,27 +519,6 @@ async function notify(
   event: Parameters<HookWorkset["notify"]>[0],
 ): Promise<void> {
   await hooks.notify(event, config.hookContext);
-}
-
-function clampDelay(ms: number, cap?: number): number {
-  return cap === undefined ? ms : Math.min(ms, cap);
-}
-
-/**
- * 可中止的退避：signal 一到就提前 resolve（不 reject——由循环顶部的判断收场），timer 同时清掉。
- * 裸 `setTimeout` 会把 abort / deadline 拖到整段 backoff 走完（缺省最长 30s），还撑着 event loop。
- */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    signal.addEventListener("abort", done, { once: true });
-  });
 }
 
 export { agentError, toolSchemas };

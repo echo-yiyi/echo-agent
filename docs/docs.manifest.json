@@ -106,11 +106,11 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-abort-reason.md",
+      "path": "docs/decisions/implemented/2026-09-01-abort-reason.md",
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-agent-end-barrier.md",
+      "path": "docs/decisions/implemented/2026-09-01-agent-end-barrier.md",
       "bilingual": false
     },
     {
@@ -130,7 +130,7 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-stop-continuation-limit.md",
+      "path": "docs/decisions/implemented/2026-09-01-stop-continuation-limit.md",
       "bilingual": false
     },
     {

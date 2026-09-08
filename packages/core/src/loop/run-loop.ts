@@ -13,7 +13,7 @@
 //
 // 预算两把：maxIterations 是每条 reply 的 turn 上限，maxReplies 是每个 run 的 reply 上限；timeoutMs 是可选的墙钟，不承担总闸。
 
-import { agentError, errText } from "../errors.ts";
+import { abortReasonOf, agentError, errText } from "../errors.ts";
 import type { AgentOutcome } from "../events.ts";
 import { userMessage, type AgentMessage, type AssistantMessage } from "../messages.ts";
 import { createCompactor } from "../compaction/pipeline.ts";
@@ -22,7 +22,7 @@ import { runTurn, type RunDeps } from "./run-turn.ts";
 import type { AgentContext, AgentLoopConfig, Emit, LoopDeps, LoopResult, ReplySource, TurnCause } from "./types.ts";
 import type { StreamFn } from "../provider/types.ts";
 
-/** stop hook 最多把 agent 拉回来几次（决策记录 docs/decisions/proposed/2026-09-01-stop-continuation-limit.md）。 */
+/** stop hook 最多把 agent 拉回来几次（决策记录 docs/decisions/implemented/2026-09-01-stop-continuation-limit.md）。 */
 const MAX_STOP_CONTINUATIONS = 3;
 
 type ReplyInput = { source: ReplySource; input: readonly AgentMessage[] };
@@ -175,7 +175,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
     for (;;) {
       /* 硬闸：三条都在轮首集中判 */
       if (callerSignal.aborted) {
-        outcome = { kind: "aborted" };
+        outcome = abortedOutcome(callerSignal);
         break;
       }
       if (fired(deadline)) {
@@ -208,7 +208,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
             : turn.result.kind === "blocked"
               ? // hook 在送模前说「别发」：不是用户取消、不是错误，是明确的 aborted（reason 透传给 agent_end 的读者）
                 { kind: "aborted", reason: turn.result.reason ?? "contextBeforeBuild blocked the turn" }
-              : { kind: "aborted" };
+              : abortedOutcome(callerSignal);
         break;
       }
       final = turn.result.message;
@@ -258,6 +258,15 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
     }
     throw e;
   }
+}
+
+/**
+ * 调用方中止的 outcome：signal 里装了理由（`AbortReason`）就带上，没有就是裸的 `{ kind: "aborted" }`。
+ * `signal` 缺省（规范化路径上 activeRun 可能已经没了）也按裸的算。
+ */
+export function abortedOutcome(signal: AbortSignal | undefined): AgentOutcome {
+  const reason = signal === undefined ? undefined : abortReasonOf(signal);
+  return reason === undefined ? { kind: "aborted" } : { kind: "aborted", reason };
 }
 
 /** `signal.aborted` 是会变的 getter；经函数读，避免 TS 在一次 `=== true` 判断后把它收窄成 false。 */

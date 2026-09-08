@@ -13,8 +13,9 @@ import type { CompactionReason, CompactionBudget, CompactionModelCall, Compactio
 import { COMPACTION_SLACK_RATIO, DEFAULT_RESERVE_TOKENS } from "./types.ts";
 import { estimateText, estimateTokens, buildWorkingMessages, measureContext, normalizeCompaction, sameCompaction, type ContextAnchor } from "./view.ts";
 import type { LoopDeps, TurnResult } from "../loop/types.ts";
+import { clampDelay, sleep } from "../loop/backoff.ts";
 import type { AgentMessage } from "../messages.ts";
-import { errText } from "../errors.ts";
+import { agentError, errText } from "../errors.ts";
 
 export type CompactionOutcome = {
   /** 有阶段改了状态。false = 跑了但没有一段有事可做（已发 compactionFailed）。 */
@@ -54,30 +55,44 @@ export function compactionBudget(input: {
   return { window, used, target, goal };
 }
 
-/** 阶段用的模型调用（见 `CompactionModelCall` 的契约）。 */
+/**
+ * 阶段用的模型调用（见 `CompactionModelCall` 的契约）。
+ * 它不是 attempt，但重试与 loop 同一份 `retryPolicy`、同一个受 signal 管的退避（`loop/backoff.ts`）：
+ * retryable 错误重试到 `maxAttempts`；只发 hook 侧的 modelCallFailed / retryScheduled，不发 loop 事件（它不在任何 turn 里）。
+ */
 export function modelCallFor(deps: LoopDeps): CompactionModelCall {
   const { config, streamFn } = deps;
   return async ({ systemPrompt, messages }, signal) => {
     const llm = await config.convertToLlm([...messages]);
-    const apiKey = await config.getApiKey?.(config.model.provider);
-    const stream = await streamFn(
-      config.model,
-      { systemPrompt, messages: llm, tools: [] },
-      { signal, apiKey, thinkingLevel: "off" },
-    );
-    for await (const _item of stream) {
-      /* 只要定稿；流式增量不外发 */
+    const { maxAttempts } = config.retryPolicy;
+    for (let attempt = 1; ; attempt++) {
+      const apiKey = await config.getApiKey?.(config.model.provider);
+      const stream = await streamFn(
+        config.model,
+        { systemPrompt, messages: llm, tools: [] },
+        { signal, apiKey, thinkingLevel: "off" },
+      );
+      for await (const _item of stream) {
+        /* 只要定稿；流式增量不外发 */
+      }
+      const final = await stream.result();
+      if (final.stopReason === "aborted") throw new Error("model call aborted");
+      if (final.stopReason !== "error") {
+        return final.content
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join("");
+      }
+      const err = final.error ?? agentError("provider", "internal", "未标注的失败", false);
+      await config.hooks.notify({ type: "modelCallFailed", error: err, attempt }, config.hookContext);
+      if (!err.retryable || attempt >= maxAttempts || signal.aborted) {
+        throw Object.assign(new Error(err.message), { code: err.code });
+      }
+      const delayMs = clampDelay(config.retryPolicy.backoffMs(attempt), config.maxRetryDelayMs);
+      await config.hooks.notify({ type: "retryScheduled", attempt: attempt + 1, maxAttempts, delayMs, cause: err.code }, config.hookContext);
+      await sleep(delayMs, signal);
+      if (signal.aborted) throw new Error("model call aborted");
     }
-    const final = await stream.result();
-    if (final.stopReason === "error") {
-      const err = final.error;
-      throw Object.assign(new Error(err?.message ?? "model call failed"), { code: err?.code ?? "internal" });
-    }
-    if (final.stopReason === "aborted") throw new Error("model call aborted");
-    return final.content
-      .filter((b): b is { type: "text"; text: string } => b.type === "text")
-      .map((b) => b.text)
-      .join("");
   };
 }
 
