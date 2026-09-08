@@ -216,6 +216,10 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   expect(html).not.toContain('class: "tl-detail"'); // 行内展开已经没有了
   // 噪声收敛（2026-09-08 用户实测那条 79s 的 run）：连着的同名事件折成 ×N；右栏空态给「最耗时的几步」
   for (const marker of ["prev.repeat", "最耗时的几步", "class: \"slowrow\""]) expect(html).toContain(marker);
+  // 层级看得见（2026-09-08 用户：「我要的是交互可见性，看起来有层次感」）：每层一条导轨、轮是分组头、
+  // 行按类别分轻重。导轨用真元素不用背景渐变——渐变调不出来时说不清是没画还是画在看不见的地方（实测走过两轮）
+  for (const marker of ["class: \"rail\"", "tl--tool", "tl--trace", "TRACE_NAMES"]) expect(html).toContain(marker);
+  expect(html).toContain(".tl .rail { flex: 0 0 var(--space-16); border-left: 1px solid var(--ui-line-strong); }");
   // 标签不再中英双写：badge 只出中文，英文进 title
   expect(html).not.toContain('el("span", { class: "en", text: t.en })');
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
