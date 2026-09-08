@@ -54,8 +54,10 @@ function validate(events: readonly AgentEvent[]): string[] {
 
   for (const e of events) {
     if (!LOOP_EVENTS.has(e.type)) continue;
+    // 轮首硬闸（abort / deadline / max_iterations）在输入吸收之后、第一个 turn 之前命中：紧接着就是 reply_end（零 turn 的 reply）
+    if (pendingInput && e.type === "reply_end") pendingInput = false;
     if (pendingInput && e.type !== "turn_start" && e.type !== "compaction_start" && e.type !== "compaction_end") {
-      v.push(`#${e.seq} 输入消息之后来了 ${e.type}（只允许 compaction_* / turn_start）`);
+      v.push(`#${e.seq} 输入消息之后来了 ${e.type}（只允许 compaction_* / turn_start，或轮首硬闸命中时的 reply_end）`);
       pendingInput = false;
     }
     if (afterRetry && e.type !== "attempt_start") {
@@ -109,12 +111,12 @@ function validate(events: readonly AgentEvent[]): string[] {
         break;
       case "turn_end":
         need(e, "turn");
-        if (attemptsInTurn < 1) v.push(`#${e.seq} turn 内没有 attempt`);
+        // 允许零 attempt（§5 规则 1，2026-09-08 放宽）：turn_start 之后、发请求之前被 abort 的 turn 就是空的
         stack.pop();
         break;
       case "reply_end":
         need(e, "reply");
-        if (turnsInReply < 1) v.push(`#${e.seq} reply 内没有 turn`);
+        // 允许零 turn：输入吸收之后轮首硬闸就命中（abort / deadline / max_iterations）
         if (e.turns !== turnsInReply) v.push(`#${e.seq} reply_end.turns=${e.turns}，实际 ${turnsInReply}`);
         stack.pop();
         break;
@@ -238,6 +240,47 @@ test("只有文本：一条 reply、一个 turn、一个 attempt，事件序列�
   expect(turn?.type === "turn_start" && turn.turnId).toBe(`${r.runId}/1#1`);
   const end = events.find((e) => e.type === "reply_end");
   expect(end?.type === "reply_end" && end.final?.stopReason).toBe("end_turn");
+});
+
+test("轮首 abort（turn 里）：turn_start 之后、发请求之前被中止 → 零 attempt 的 turn，配对仍成立（2026-09-08 放宽）", async () => {
+  // 最朴素的生产路径就是用户 Ctrl-C 落在 turn_start 的 emit 期间；此前校验器要求「turn 内至少一个 attempt」，这一幕会被判红
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("hi")]) });
+  const events = collect(agent);
+  agent.subscribe((e) => {
+    if (e.type === "turn_start") agent.abort("轮首中断");
+  });
+  const r = await agent.prompt("go");
+  expect(r.outcome).toEqual({ kind: "aborted", reason: "轮首中断" });
+  expect(validate(events)).toEqual([]);
+  expect(types(events)).toEqual(["agent_start", "reply_start", "message_end", "turn_start", "turn_end", "reply_end", "agent_end"]);
+  const turnEnd = events.find((e) => e.type === "turn_end");
+  expect(turnEnd?.type === "turn_end" && turnEnd.result.kind).toBe("aborted");
+});
+
+test("轮首 abort（reply 里）：输入吸收之后、第一个 turn 之前被中止 → 零 turn 的 reply，配对仍成立（2026-09-08 放宽）", async () => {
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("hi")]) });
+  const events = collect(agent);
+  agent.subscribe((e) => {
+    if (e.type === "reply_start") agent.abort("还没开 turn 就停");
+  });
+  const r = await agent.prompt("go");
+  expect(r.outcome).toEqual({ kind: "aborted", reason: "还没开 turn 就停" });
+  expect(validate(events)).toEqual([]);
+  expect(types(events)).toEqual(["agent_start", "reply_start", "message_end", "reply_end", "agent_end"]);
+  const replyEnd = events.find((e) => e.type === "reply_end");
+  expect(replyEnd?.type === "reply_end" && replyEnd.turns).toBe(0);
+});
+
+test("轮首 deadline：输入吸收期间就超时 → 零 turn 的 reply，outcome error{timeout}，配对仍成立（2026-09-08 放宽）", async () => {
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("不该到")]), timeoutMs: 10 });
+  const events = collect(agent);
+  agent.subscribe(async (e) => {
+    if (e.type === "message_end") await new Promise((r) => setTimeout(r, 40)); // 普通 listener 是被 await 的：拖过 deadline
+  });
+  const r = await agent.prompt("go");
+  expect(r.outcome).toMatchObject({ kind: "error", error: { code: "timeout" } });
+  expect(validate(events)).toEqual([]);
+  expect(types(events)).toEqual(["agent_start", "reply_start", "message_end", "reply_end", "agent_end"]);
 });
 
 test("要工具：第二个 turn 的 cause 是 tool_use，工具事件与 toolResult 落在第一个 turn 里、attempt_end{landed} 之后", async () => {

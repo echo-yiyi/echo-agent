@@ -97,7 +97,7 @@
 |---|---|
 | 公共符号表不漂 | `packages/core/test/api-snapshot.test.ts`（清点脚本 `packages/core/scripts/api-inventory.ts`） |
 | core 零运行时依赖 | `packages/core/test/zero-runtime-deps.test.ts` |
-| 四层事件严格嵌套 | `packages/core/test/loop-layers.test.ts` |
+| 四层事件成对且严格嵌套（允许空层：reply 可零 turn、turn 可零 attempt） | `packages/core/test/loop-layers.test.ts` |
 | 单写者与写入闸 | `packages/core/test/state-lock.test.ts`、`packages/core/test/write-gate.test.ts` |
 | 装配所有权（adopt / borrow、失败 unwind） | `packages/core/test/assembly.test.ts`、`packages/core/test/create-echo.test.ts` |
 | 文档花名册、链接、代码块编译、文件引用 | `scripts/docs-lint.ts`、`test/docs.test.ts`、`test/export-jsdoc.test.ts` |
