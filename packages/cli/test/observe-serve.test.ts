@@ -214,6 +214,8 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
     expect(html).toContain(marker);
   }
   expect(html).not.toContain('class: "tl-detail"'); // 行内展开已经没有了
+  // 噪声收敛（2026-09-08 用户实测那条 79s 的 run）：连着的同名事件折成 ×N；右栏空态给「最耗时的几步」
+  for (const marker of ["prev.repeat", "最耗时的几步", "class: \"slowrow\""]) expect(html).toContain(marker);
   // 标签不再中英双写：badge 只出中文，英文进 title
   expect(html).not.toContain('el("span", { class: "en", text: t.en })');
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);

@@ -166,11 +166,12 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .timeline { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
 /*
  * 列宽定义一次，时间刻度用同一份，两者才对得齐。
- * 右侧让出了事件详情栏之后，事件列不能再用固定的 46ch 上限——那会把用量 / 耗时 / 条形轨一起挤没
- * （实测 1280px 下刻度数字叠在一起、事件名截成 `attempt_sta…`）。现在让**事件列吃弹性空间**、
- * 数值列按内容、条形轨给一段固定宽：阅读宽度由这一栏本身限住，不必再靠 ch 上限。
+ * **事件列封顶、条形轨吃剩余**：两者都封顶（上一版把轨道也限成 132px）会让 1800px 宽屏上
+ * `轮 #1 56s` 与 `模型生成 52s` 两根条几乎重合、看不出先后（实测）；反过来只让事件列吃弹性
+ * 又会在 1280px 下把刻度挤成重叠。`minmax(0, 46ch)` + `minmax(96px, 1fr)` 两头都成立：
+ * 窄屏事件列缩、轨道保底 96px；宽屏事件列停在阅读宽度、剩下的全给轨道。
  */
-.exec { --tl-cols: 18px 52px minmax(0, 1fr) max-content 52px minmax(96px, 132px); }
+.exec { --tl-cols: 18px 52px minmax(0, 46ch) max-content 52px minmax(96px, 1fr); }
 .tl {
   position: relative;
   display: grid; grid-template-columns: var(--tl-cols);
@@ -296,6 +297,13 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 .evt .navbtn:hover:not(:disabled) { background: var(--ui-raised); }
 .evt .fields { grid-template-columns: 5.5em 1fr; row-gap: var(--space-4); }
 .evt .fields dt, .evt .fields dd { font-size: var(--size-caption); }
+/* 「最耗时的几步」：右栏没选中时的入口，行形与时间线一致（动词 对象 …… 耗时） */
+.slow { list-style: none; margin: 0; padding: 0; }
+.slowrow { display: flex; align-items: baseline; gap: var(--space-6); width: 100%; padding: var(--space-4) var(--space-6); border: 0; border-radius: var(--r-sm); background: transparent; text-align: left; cursor: pointer; font-size: var(--size-ui); color: var(--ink-70); }
+.slowrow:hover { background: var(--ui-raised); }
+.slowrow .verb { flex-shrink: 0; color: var(--ink); }
+.slowrow .obj { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slowrow .res { margin-left: auto; flex-shrink: 0; font-family: var(--font-mono); color: var(--stone); font-variant-numeric: tabular-nums; }
 .evt .raw { margin-top: var(--space-10); }
 .evt .raw > summary { cursor: pointer; font-size: var(--size-caption); color: var(--stone); list-style: none; }
 .evt .raw > summary::-webkit-details-marker { display: none; }
@@ -603,6 +611,14 @@ function buildEntries(vm) {
       prev.folded = (prev.folded ?? 0) + 1;
       continue;
     }
+    // **连着的同名事件折成一行**：一批工具结果回来会连记 4 条 `agent.message.appended`，
+    // 逐条列出来只是把同一句话说四遍，还把真正的动作挤出屏幕（实测一条 run 里十几条）。
+    // 折起的那几条不丢：行上写 `×N`，右栏说清是哪一段 seq。
+    if (prev !== undefined && prev.single && prev.start.name === t.name && prev.start.depth === t.depth) {
+      prev.repeat = (prev.repeat ?? 1) + 1;
+      prev.lastSeq = t.seq;
+      continue;
+    }
     entries.push({ start: t, end: null, key: null, single: true });
   }
   return foldSingleLayers(entries);
@@ -740,6 +756,7 @@ function renderEntry(e, gaps, runMs = 0) {
       arg ? el("span", { class: "arg", text: `"${arg}"` }) : null,
       el("span", { class: "en", text: t.name }),
       e.folded ? el("span", { class: "folded", text: `+${e.folded}` }) : null,
+      e.repeat ? el("span", { class: "folded", text: `×${e.repeat}` }) : null,
       collapsed && e.hiddenCount ? el("span", { class: "folded", text: `⋯${e.hiddenCount}` }) : null,
     ),
     el("span", { class: "usage", text: usage }),
@@ -795,7 +812,29 @@ function renderEventDetail(entries, vm) {
   const idx = list.findIndex((e) => e.start.seq === STATE.selectedEvent);
   const box = el("aside", { class: "evt", "aria-label": "事件详情" });
   if (idx < 0) {
-    box.append(el("div", { class: "empty", text: "选时间线里的一行，这里显示它的摘要与原始记录。" }));
+    // 空着不如给个入口：把最耗时的几步摆出来，点一下就跳过去——「为什么花了这么久」的第二层
+    // （第一层是顶部指标行的「其余」）。只算叶子：轮 / 回应本来就是容器，列出来等于把总时长重复一遍。
+    const CONTAINERS = new Set(["reply.execute", "turn.execute", "attempt.execute"]);
+    const slow = list
+      .filter((x) => x.end?.durationMs !== undefined && !CONTAINERS.has(x.start.name))
+      .sort((a, b) => b.end.durationMs - a.end.durationMs)
+      .slice(0, 5);
+    box.append(el("div", { class: "evthead" }, el("span", { class: "verb", text: "最耗时的几步" })));
+    if (slow.length === 0) {
+      box.append(el("p", { class: "markwhy", text: "这条 run 里没有带耗时的步骤。选时间线里的一行看它的记录。" }));
+      return box;
+    }
+    const ul = el("ul", { class: "slow" });
+    for (const x of slow) {
+      const a = { ...x.start.attributes, ...(x.end?.attributes ?? {}) };
+      const { verb, obj } = verbFor(x.start.name, a, x.start.body);
+      ul.append(el("li", {}, el("button", { class: "slowrow", onclick: () => selectEvent(x.start.seq) },
+        el("span", { class: "verb", text: verb }),
+        obj ? el("span", { class: "obj", text: obj }) : null,
+        el("span", { class: "res", text: fmtMs(x.end.durationMs) }))));
+    }
+    box.append(ul);
+    box.append(el("p", { class: "markwhy", text: "点一行跳到时间线里那一步；或直接在左边选任意一行。" }));
     return box;
   }
   const e = list[idx];
@@ -825,6 +864,8 @@ function renderEventDetail(entries, vm) {
     field("耗时", el("span", { class: "mono", text: fmtMs(end.durationMs) }));
   }
   field("记录", el("span", { class: "mono", text: t.name }), copyButton("复制", t.name));
+  // 折起的那几条要交代清楚：行上写了 ×N，这里说是哪一段 seq、下面的正文是其中第一条
+  if (e.repeat) field("连续", el("span", { text: `${e.repeat} 条同名记录（seq ${t.seq}–${e.lastSeq}），下面显示第一条` }));
   // 关联运行：收件消费这类事实带着来源 run，能直接跳过去（多 agent 排查要顺着线索走）
   const linked = typeof attrs.runId === "string" && attrs.runId !== vm.header.runId ? attrs.runId : null;
   if (linked) field("关联", el("button", { class: "navbtn", text: "打开那条 run", onclick: () => openRun(linked) }));
