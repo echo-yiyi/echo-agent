@@ -193,13 +193,14 @@ test("parseArgs:认识的都认得出", () => {
   // 是唯一的子命令，等于噪音，2026-08-31 一并去掉）。
   // D7 起 `provider` 不再有解析期缺省：**不给 = 没说**，缺省与「记住上次」的合成在 main() 里做
   expect(parseArgs([])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, serve: false });
-  expect(parseArgs(["--provider", "deepseek", "--no-memory", "--agent-id", "a1"])).toEqual({
+  expect(parseArgs(["--provider", "deepseek", "--no-memory"])).toEqual({
     provider: "deepseek",
     withoutMemory: true,
-    agentId: "a1",
     extensionDirs: [],
     continueLast: false, serve: false,
   });
+  // `--agent-id` 2026-09-07 退场：那一维现在是 `product`（由产品自己给，不是命令行参数）
+  expect(() => parseArgs(["--agent-id", "a1"])).toThrow();
   expect(parseArgs(["--help"])).toBeNull();
   expect(parseArgs(["-h"])).toBeNull();
 });
@@ -732,7 +733,7 @@ async function seedSession(
   opts: { agent: string; text: string; main?: boolean },
 ): Promise<void> {
   const svc = new SessionService(new FileDir(join(sessionsRoot, id)));
-  await svc.createOrResume(id, { workspace: process.cwd(), agent: opts.agent, main: opts.main ?? true });
+  await svc.createOrResume(id, { workspace: process.cwd(), product: opts.agent, main: opts.main ?? true });
   await svc.append(id, [{ kind: "message", message: oldMessage(opts.text) }]);
   await svc.settle();
 }

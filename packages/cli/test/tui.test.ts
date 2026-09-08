@@ -2079,7 +2079,8 @@ function sessionsWith(rows: readonly SessionRow[], fail?: Error): SessionFace {
 const row = (over: Partial<SessionRow> & { id: string }): SessionRow => ({
   name: over.id,
   workspace: "/repo",
-  agent: "echo-agent",
+  product: "echo-agent",
+  agent: "default",
   main: true,
   status: "active",
   alive: false,

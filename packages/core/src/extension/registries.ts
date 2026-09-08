@@ -15,7 +15,7 @@
 // disposer 只认对象身份（O1a 的 exact-reference 契约）：条目已被别的显式操作替换成 A2 时，旧 Fiber 的 disposer 不动 A2。
 // 同名注册 fail-loud；受控 replace 不在 O2a（等有真实消费者再开）。
 
-import { registerTool, type ToolMap } from "../tools/harness.ts";
+import { registerTool, restrictTools, type ToolMap, type ToolRestrictions } from "../tools/harness.ts";
 import type { AgentTool } from "../tools/types.ts";
 import type { HookRuntime } from "../hooks/runtime.ts";
 import type { AgentBackground } from "../background/types.ts";
@@ -29,6 +29,15 @@ import { defineService, type Disposer, type ServiceKey } from "./abi.ts";
 export interface AgentToolsRegistry {
   /** 同名已存在 → 抛。返回的 disposer 只卸这个对象。 */
   register(tool: AgentTool): Disposer;
+  /**
+   * **收紧工作集**（2026-09-07，角色定义）：工作集 = 池 ∩ `names`，**只能少不能多**。
+   * 池一个字不动，别的 extension 照常 `register()`——只是收紧期间露不出来，
+   * 包括**收紧之后**才注册的（求交是查询时做的，不是一次性打标记）。
+   *
+   * disposer 解除这一条；多条并存就是多重交集。装不上这一条的 Host（没接工作集表的假 Host）
+   * **抛**，不静默吞——「装上了却不生效」正是这套 ABI 要消灭的东西。
+   */
+  restrict(names: ReadonlySet<string>): Disposer;
 }
 
 export interface AgentHooksRegistry {
@@ -47,8 +56,15 @@ export interface AgentSkillsRegistry {
  * 以及工具的**跨调用习惯**——由拥有该工具的 extension 出。
  */
 export interface AgentPromptRegistry {
-  /** 同名已存在 → 抛；order 非有限数 → 抛。返回的 disposer 只卸这个对象。 */
-  section(section: PromptSection): Disposer;
+  /**
+   * 同名已存在 → 抛；order 非有限数 → 抛。返回的 disposer 只卸这个对象。
+   *
+   * **`replace: true` 反过来**（2026-09-07，角色定义）：同名**必须**已存在才成功，
+   * 换掉它，disposer 把原来那段放回去。这是 O1a 注释里等的那个「真实消费者」——
+   * 角色替产品的 identity 段，纪律段与工具习惯段不许碰（那是产品对自己工具的承诺）。
+   * 不给 `replace` 时行为一个字没变，同名照旧 fail-loud。
+   */
+  section(section: PromptSection, opts?: { replace: true }): Disposer;
   /** `{{name}}` 的值。名字不合 `[a-z][a-z0-9_]*` 或同名已存在 → 抛。disposer 只卸这个 provider。 */
   variable(name: string, provider: PromptVariable): Disposer;
 }
@@ -160,6 +176,11 @@ export const AgentSessionsService: ServiceKey<SessionFace> = defineService<Sessi
  */
 export function agentRegistries(input: {
   tools: ToolMap;
+  /**
+   * 收紧工作集的那一叠（`agent.toolRestrictions`）。与 `prompt` 同款：Agent 恒有，
+   * 由 Agent 造的 Host 应当恒传；不传时 `restrict()` **抛**，不静默装上不生效。
+   */
+  toolRestrictions?: ToolRestrictions;
   hooks: HookRuntime;
   skills?: { pool: SkillMap; active: ActiveSkillMap };
   /**
@@ -185,6 +206,12 @@ export function agentRegistries(input: {
     register: (tool) => {
       const off = registerTool(input.tools, tool);
       return () => void off();
+    },
+    restrict: (names) => {
+      const list = input.toolRestrictions;
+      // 真 Host（Agent 造的）恒传这张表。没有它就是**装上了不生效**，那比装不上更坏
+      if (list === undefined) throw new Error("这个 Host 没接工作集收紧表：restrict() 无处生效");
+      return restrictTools(list, names);
     },
   };
   const hooks: AgentHooksRegistry = {
@@ -231,10 +258,22 @@ function compactionRegistry(stages: Map<string, CompactionStage>): AgentCompacti
 /** 两张表上的 registry：先查后写、fail-loud；disposer 认对象身份（O1a exact-reference 契约）。 */
 function promptRegistry(sections: Map<string, PromptSection>, variables: Map<string, PromptVariable>): AgentPromptRegistry {
   return {
-    section: (section) => {
+    section: (section, opts) => {
       if (typeof section.name !== "string" || section.name === "") throw new Error("prompt 段缺 name");
       if (!Number.isFinite(section.order)) throw new Error(`prompt 段 '${section.name}' 的 order 必须是有限数`);
-      if (sections.has(section.name)) throw new Error(`prompt 段 '${section.name}' 已存在`);
+      const existing = sections.get(section.name);
+      if (opts?.replace === true) {
+        // **替代要有被替代的那一段**：同名不存在时抛，而不是退化成 register——
+        // 角色写错段名（比如产品把 identity 段改了名）会静默变成「多出一段」，
+        // 而人看到的是「角色没生效」，查起来毫无线索。
+        if (existing === undefined) throw new Error(`prompt 段 '${section.name}' 不存在：replace 无从替起`);
+        sections.set(section.name, section);
+        return () => {
+          // 认对象身份：中途又被别人替过就什么都不做（与 `registerTool` 的卸载器同一条规矩）
+          if (sections.get(section.name) === section) sections.set(section.name, existing);
+        };
+      }
+      if (existing !== undefined) throw new Error(`prompt 段 '${section.name}' 已存在`);
       sections.set(section.name, section);
       return () => {
         if (sections.get(section.name) === section) sections.delete(section.name);

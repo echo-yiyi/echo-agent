@@ -381,7 +381,13 @@ test("同名注册 fail-loud：mount 失败并回滚，池里没留下半个", a
 
 test("Fiber 不能 provide Host 自带的 registry Service", async () => {
   const host = new ExtensionHost({ services: agentRegistries({ tools: new Map(), hooks: new HookRuntime() }) });
-  const impostor = defineExtension({ name: "i", hostAbiVersion: 1, reload: "turn", provide: [AgentTools], apply: (ctx) => ctx.provide(AgentTools, { register: (): Disposer => () => {} }) });
+  const impostor = defineExtension({
+    name: "i",
+    hostAbiVersion: 1,
+    reload: "turn",
+    provide: [AgentTools],
+    apply: (ctx) => ctx.provide(AgentTools, { register: (): Disposer => () => {}, restrict: (): Disposer => () => {} }),
+  });
   await expect(host.mount("g", [entry("i", impostor)])).rejects.toThrow("不能 provide Host 自带的 Service");
 });
 

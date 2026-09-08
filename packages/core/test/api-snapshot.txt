@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 319（value 110 · type 190 · both 19）
+符号 331（value 118 · type 194 · both 19）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -23,6 +23,24 @@ type   ModelSnapshotValue
 type   RunModelBinding
 type   RunModelSnapshot
 type   RunSource
+
+-- src/agent-def/loader.ts (4) --
+value  AGENT_DEF_DIR
+value  loadAgentDefs
+value  loadAgentDefsFromDir
+type   LoadedAgentDefs
+
+-- src/agent-def/parse.ts (3) --
+value  parseAgentFile
+type   ParsedAgentFile
+value  parseNameList
+
+-- src/agent-def/types.ts (5) --
+type   AgentDefinition
+type   AgentRef
+value  DEFAULT_AGENT_REF
+value  describeAgentRef
+value  isEmptyDefinition
 
 -- src/agent.ts (7) --
 both   Agent
@@ -689,19 +707,22 @@ value  textTurn
 value  toolTurn
 
 == 入口 "./tools" → src/tools/public.ts ==
-符号 15（value 13 · type 2 · both 0）
+符号 18（value 15 · type 3 · both 0）
 
--- src/tools/harness.ts (15) --
+-- src/tools/harness.ts (18) --
 value  activeTools
 value  disableTools
+value  effectiveRestriction
 value  enableTools
 value  getTool
 value  listTools
 value  registerTool
 value  registerTools
 value  resolveTool
+value  restrictTools
 type   ToolMap
 type   ToolResolution
+type   ToolRestrictions
 value  toolSchemasOf
 value  unregisterExact
 value  unregisterTool

@@ -40,9 +40,10 @@ import { attachObservationHost } from "./observability/host-wiring.ts";
 import { ObservationRuntime } from "./observability/runtime.ts";
 import type { ObservationCapturePolicy } from "./observability/types.ts";
 import { MEMORY_PATH, SqliteCanonicalObservationStore, observationDatabasePath } from "./observability/sqlite-store.ts";
+import type { AgentRef } from "./agent-def/types.ts";
 
-/** 默认身份（D5）。 */
-const DEFAULT_AGENT_ID = "default";
+/** 不给产品名时的缺省（2026-09-07，原 `DEFAULT_AGENT_ID`）。 */
+const DEFAULT_PRODUCT = "default";
 const LOCK_FILE = ".lock";
 /** RuntimeGeneration：O3a 只有 boot 一代（reload / 换代是 O5 的事），与 `createEcho` 的 boot 代同名。 */
 const RUNTIME_GENERATION = "boot";
@@ -78,13 +79,20 @@ export type CreateAgentOptions = {
    */
   model?: string;
 
-  /** agent 身份（D5，缺省 `"default"`）。 */
-  agentId?: string;
   /**
-   * 会话归属名（2026-09-01：会话身份 = workspace + agent）。写进新建会话的 `SessionInfo.agent`，
-   * 产品各给各的名字（`echo-agent` / `echo-coding`），同一目录里就各有各的对话。缺省 = `agentId`。
+   * 哪个产品（2026-09-07，替代 `agentId` / `agentName`）。写进新建会话的 `SessionInfo.product`，
+   * 产品各给各的名字（`echo-agent` / `echo-coding`），同一目录里就各有各的对话
+   * （`--continue` 按 workspace + product 挑）。缺省 `"default"`。
    */
-  agentName?: string;
+  product?: string;
+  /**
+   * 这一段挂的 agent 定义（角色，2026-09-07）。写进 `SessionInfo.agent`。
+   *
+   * **叫 `agentDef` 不叫 `agent`**：这一层的 `agent` 已经是「透传给低层 `Agent` 的那包选项」
+   * （见下），两个含义挤一个名字会让调用方每次都要想一下。`AgentOptions` 那边没这个包袱，
+   * 就叫 `agent`，与 `SessionInfo.agent` 对齐。
+   */
+  agentDef?: AgentRef;
   /**
    * 会话身份（D5）。**不给 = `start()` 时新建一段**（2026-09-01 用户拍板：续上次是显式动作）；
    * 给了 = create-or-resume 那一段。产品的 `--continue` / `--resume` 用 `listSessions()` 挑出 id 后给这里。
@@ -294,8 +302,10 @@ export function resolveModel(provider: Provider, available: readonly Model[], wa
  * 改名换来的是一次全仓改词，换不来任何判据。
  */
 export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
-  const agentId = opts.agentId ?? DEFAULT_AGENT_ID;
-  assertSafePathSegment("agentId ", agentId);
+  // **product 不校验路径形状**：它从前叫 `agentId`，是路径段（`agents/<agentId>/`），所以要校验。
+  // 「状态根 = session 目录」之后它不进任何路径了——只是 meta 里的一个字段、holder 标识的一半。
+  // 继续拿路径规则卡它会把中文产品名之类正当的名字挡在门外（实测：'echo-试产品' 起不来）。
+  const product = opts.product ?? DEFAULT_PRODUCT;
   // **会话 id 在装配期就定**（2026-09-03）：状态根就是它的目录，晚一步定就没有目录可建。
   // 不给 = 新起一段（缺省每次启动新建，2026-09-01）；给了 = create-or-resume 那一段。
   const sessionId = opts.sessionId ?? newSessionId();
@@ -455,12 +465,12 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       model,
       ...(parts.memory !== undefined ? { memory: parts.memory } : {}),
       streamFunction: opts.agent?.streamFunction ?? ((m, ctx, o) => models.stream(m, ctx, o)),
-      agentId,
+      product,
+      ...(opts.agentDef !== undefined ? { agent: opts.agentDef } : {}),
       ...(opts.preemptible === true ? { preemptible: true } : {}),
       // Agent 拿 clock 只做一件事：定期重扫 inbox（别的进程写进来的消息靠它才看得见）。
       // 与 schedule 拿到的是**同一个**——测试拨一次 FakeClock，两边一起动。
       clock: opts.clock ?? systemClock,
-      ...(opts.agentName !== undefined ? { agentName: opts.agentName } : {}),
       // 装配期已经定了（状态根就是它的目录），这里必须原样交给 Agent——
       // 让 `start()` 再抽一个新的，会写进一个**不是自己**的目录里。
       sessionId,

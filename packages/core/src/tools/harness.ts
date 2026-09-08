@@ -17,6 +17,39 @@ import { TOOL_SEARCH_NAME } from "./tool-search.ts";
 export type ToolMap = Map<string, AgentTool>;
 
 /**
+ * **收紧工作集**的那一叠（2026-09-07，角色定义）：每条 `restrict()` 往里压一个名字集合，
+ * 工作集 = 池 ∩ 所有集合。池一个字不动——别的 extension 照常 `register()`，只是露不出来。
+ *
+ * 为什么不复用 `disabled`：那个字段是「来源断了」（MCP 掉线），语义是**这件工具坏了**，
+ * 而且是一次性打在对象上的——收紧之后**新注册**的工具不会被打上，于是角色一边限着、
+ * 池里一边冒出没限住的工具。这里是**动态过滤**，查的时候才求交，后来的照样被挡在外面。
+ */
+export type ToolRestrictions = ReadonlySet<string>[];
+
+/**
+ * 压一条收紧。返回的 disposer 只摘自己那一条（认对象身份，与别处的 disposer 同款）。
+ * 多条并存 = 交集，叠加只会更小——**任何一条都不能把工作集放大**。
+ */
+export function restrictTools(list: ToolRestrictions, names: ReadonlySet<string>): () => void {
+  const own = new Set(names);
+  list.push(own);
+  return () => {
+    const i = list.indexOf(own);
+    if (i !== -1) list.splice(i, 1);
+  };
+}
+
+/** 当前有效的收紧集合；一条都没有 = `undefined`（**不是空集**，那会把工作集清成零件）。 */
+export function effectiveRestriction(list: ToolRestrictions): ReadonlySet<string> | undefined {
+  if (list.length === 0) return undefined;
+  const [first, ...rest] = list as [ReadonlySet<string>, ...ReadonlySet<string>[]];
+  if (rest.length === 0) return first;
+  const out = new Set<string>();
+  for (const name of first) if (rest.every((s) => s.has(name))) out.add(name);
+  return out;
+}
+
+/**
  * 装一个工具。撞名 **fail-loud**,要盖掉必须显式 `replace: true`——不许静默影子。
  *
  * 返回的卸载器**只认对象身份**：池里这个名字若已被别人显式 replace 成
@@ -72,11 +105,13 @@ export function listTools(tools: ToolMap): readonly AgentTool[] {
 }
 
 /**
- * **摆给模型的那些**：池里没被禁用的。
+ * **摆给模型的那些**：池里没被禁用的，再交上 `only`（角色收紧的工作集，见 `ToolRestrictions`）。
  * 禁用的工具不从池里删——来源恢复时一行复原，不必重新注册。
+ *
+ * `only` 不给 = 没人收紧；给了就是池 ∩ 它，**只会更小**。
  */
-export function activeTools(tools: ToolMap): readonly AgentTool[] {
-  return [...tools.values()].filter((t) => t.disabled === undefined);
+export function activeTools(tools: ToolMap, only?: ReadonlySet<string>): readonly AgentTool[] {
+  return [...tools.values()].filter((t) => t.disabled === undefined && (only === undefined || only.has(t.name)));
 }
 
 /**
@@ -85,8 +120,8 @@ export function activeTools(tools: ToolMap): readonly AgentTool[] {
  * `tool_search` 自己只在池里**还有没加载的延迟工具**时上菜单——没什么可取时不多占一格。
  * `getTools()` 的实现，循环契约不变。
  */
-export function visibleTools(tools: ToolMap, loaded?: ReadonlySet<string>): readonly AgentTool[] {
-  const active = activeTools(tools);
+export function visibleTools(tools: ToolMap, loaded?: ReadonlySet<string>, only?: ReadonlySet<string>): readonly AgentTool[] {
+  const active = activeTools(tools, only);
   if (loaded === undefined) return active;
   const pending = active.some((t) => t.deferred === true && !loaded.has(t.name));
   return active.filter((t) => {
@@ -130,9 +165,13 @@ export type ToolResolution =
  * 执行时解析一个工具名。**给准确原因**，不是含糊的「未知工具」——
  * 模型点了一个刚断线的 MCP 工具，它该看到「服务器已断开」；点了一个没加载的延迟工具，该看到「先 tool_search」。
  */
-export function resolveTool(tools: ToolMap, name: string, loaded?: ReadonlySet<string>): ToolResolution {
+export function resolveTool(tools: ToolMap, name: string, loaded?: ReadonlySet<string>, only?: ReadonlySet<string>): ToolResolution {
   const tool = tools.get(name);
   if (tool === undefined) return { ok: false, reason: "not_found" };
+  // 被角色收紧挡在工作集外：对这一段 session 来说这个名字**就是不存在**——它从没上过菜单，
+  // 点它只可能是幻觉或从别处抄来的。所以是 `not_found`，不另立一种原因（联合类型是公共面，
+  // 加成员要单独拍；而这里没有第二种处置方式需要区分）。
+  if (only !== undefined && !only.has(name)) return { ok: false, reason: "not_found" };
   if (tool.disabled !== undefined) return { ok: false, reason: "disabled", message: tool.disabled };
   if (loaded !== undefined && tool.deferred === true && !loaded.has(name)) {
     return { ok: false, reason: "deferred", message: `Tool '${name}' is deferred: load it with ${TOOL_SEARCH_NAME} first, then call it` };

@@ -11,6 +11,7 @@ import { createRecordIdSource, recordPath, serializeRecord, type InboxRecordV1 }
 import type { StorageDir } from "../storage/types.ts";
 import { listSessions, setSessionStatus, SessionService, assertSafeSessionId } from "./service.ts";
 import { newSessionId, type SessionInfo } from "./types.ts";
+import { describeAgentRef, DEFAULT_AGENT_REF, type AgentDefinition, type AgentRef } from "../agent-def/types.ts";
 import { readSessionPhase, type SessionPhase } from "./status.ts";
 
 /** 会话间消息的 `source`。收方的 transcript 里就是一条普通 environment 消息。 */
@@ -26,6 +27,12 @@ export type SessionRow = {
   readonly id: string;
   readonly name: string;
   readonly workspace: string;
+  /** 哪个产品开的（2026-09-07 从 `agent` 分出来）。 */
+  readonly product: string;
+  /**
+   * 挂的哪份 agent 定义，**人读的那个名字**（`describeAgentRef`）：具名角色是它的名字，
+   * 现写的是 `inline`，产品原样的是 `default`。行是给人和模型看的，不摊开整份定义。
+   */
   readonly agent: string;
   readonly main: boolean;
   readonly status: SessionInfo["status"];
@@ -38,8 +45,14 @@ export type SessionRow = {
 /** 开一段新会话要交代的事。`agent` / `workspace` 不给就继承建它的那一段。 */
 export type CreateSessionInput = {
   readonly name?: string;
-  /** 归哪个 agent（产品 / 身份名）。不给 = 跟建它的这一段同一个。 */
-  readonly agent?: string;
+  /**
+   * 新段挂哪份 agent 定义（角色，2026-09-07）：**名字**（从三处来源那张表里找，找不到判红），
+   * 或**现写一份**。不给 = 产品原样（`DEFAULT_AGENT_REF`），**不继承创建者的角色**——
+   * 一段 reviewer 派出去的活默认不该也是 reviewer，那是它自己要说的事。
+   *
+   * 现写的定义里 `tools` **必须 ⊆ 创建者此刻的工具集**：越权判红，盘上不建目录。
+   */
+  readonly agent?: string | AgentDefinition;
   readonly workspace?: string;
   /**
    * 第一条消息，投进新段的 inbox。**工具面必填**（见 `echo:sessions`）：
@@ -87,8 +100,18 @@ export type EchoSessionsDeps = {
   storeFor(sessionId: string): StorageDir;
   /** 这一段此刻有没有进程持有 lease。读锁文件是宿主知识，所以注进来。 */
   isAlive(sessionId: string): Promise<boolean>;
-  /** 调用方自己是哪一段（`send` 的落款、`create` 的 agent / workspace 缺省）。 */
-  readonly self: () => { sessionId: string | null; agent: string; workspace: string };
+  /**
+   * 调用方自己是哪一段（`send` 的落款、`create` 的缺省与不越权判据）。
+   *
+   * `tools` 是**此刻**的工作集——不越权检查读它，所以它必须是现查的那一份，
+   * 不能是装配时抄下来的（角色收紧过的段只能派出比自己更小的段）。
+   */
+  readonly self: () => { sessionId: string | null; product: string; workspace: string; tools: readonly string[] };
+  /**
+   * 按名找一份 agent 定义（三处来源合并好的那张表）。
+   * 不给 = 这个容器没有具名角色，`agent: "reviewer"` 一律判红。
+   */
+  readonly agentDefs?: () => ReadonlyMap<string, AgentDefinition>;
   /**
    * 怎么让一段 session 跑起来。**两处用它**：`create()` 之后把新的那段拉起来；`send()` 发现
    * 对方没在跑时先把它叫醒（2026-09-07 拍板的虚拟 actor 模型）。
@@ -102,7 +125,10 @@ export type EchoSessionsDeps = {
 /** 清单的筛选条件。缺省只列 `active` 的——`closed` 的还在盘上，要看得显式要。 */
 export type SessionListFilter = {
   readonly workspace?: string;
+  /** 按**角色的人读名**筛（`describeAgentRef`：具名的用名字，现写的是 `inline`，产品原样是 `default`）。 */
   readonly agent?: string;
+  /** 按**哪个产品开的**筛（2026-09-07）。 */
+  readonly product?: string;
   readonly includeClosed?: boolean;
 };
 
@@ -168,13 +194,17 @@ export class EchoSessions implements SessionFace {
    */
   async create(input: CreateSessionInput): Promise<SessionRow> {
     const self = this.deps.self();
+    // **先解析角色、先验越权，再动盘**：判红时 `~/.echo/sessions/` 下不许多出一个目录
+    const ref = this.resolveAgent(input.agent);
+    this.assertNotEscalating(ref, self.tools);
     const id = newSessionId();
     assertSafeSessionId(id);
     const store = this.deps.storeFor(id);
     const svc = new SessionService(store);
     const data = await svc.createOrResume(id, {
       ...(input.name !== undefined ? { name: input.name } : {}),
-      agent: input.agent ?? self.agent,
+      product: self.product,
+      agent: ref,
       workspace: input.workspace ?? self.workspace,
       main: input.main ?? true,
     });
@@ -195,7 +225,8 @@ export class EchoSessions implements SessionFace {
       id,
       name: data.info.name,
       workspace: data.info.workspace,
-      agent: data.info.agent,
+      product: data.info.product,
+      agent: describeAgentRef(data.info.agent),
       main: data.info.main,
       status: "active",
       alive: false,
@@ -213,6 +244,36 @@ export class EchoSessions implements SessionFace {
     return { ...row, alive: true, phase: "idle" };
   }
 
+  /**
+   * `agent` 参数 → 一份 `AgentRef`。名字从三处来源那张表里找，**找不到判红**——
+   * 静默退回缺省的话，模型以为自己开了个 reviewer，实际开出来的是产品原样。
+   */
+  private resolveAgent(input: string | AgentDefinition | undefined): AgentRef {
+    if (input === undefined) return DEFAULT_AGENT_REF;
+    if (typeof input !== "string") return { definition: input };
+    const defs = this.deps.agentDefs?.();
+    const found = defs?.get(input);
+    if (found === undefined) {
+      const known = defs === undefined || defs.size === 0 ? "这个容器一份具名 agent 定义都没有" : `有的是：${[...defs.keys()].join("、")}`;
+      throw new Error(`没有名叫 '${input}' 的 agent 定义（${known}）`);
+    }
+    return { name: input, definition: found };
+  }
+
+  /**
+   * **不越权**（2026-09-03 拍板，2026-09-07 落到角色上）：新段的 `tools` 必须 ⊆ 创建者此刻的工具集。
+   * 越权判红——否则一段被收紧过的 session 可以派出一段工具更多的，收紧就成了摆设。
+   */
+  private assertNotEscalating(ref: AgentRef, own: readonly string[]): void {
+    const want = ref.definition.tools;
+    if (want === undefined) return;
+    const have = new Set(own);
+    const over = want.filter((n) => !have.has(n));
+    if (over.length > 0) {
+      throw new Error(`agent 定义点了创建者没有的工具：${over.join("、")}——工具集只能收紧，不能越权（自己有的是：${own.join("、")}）`);
+    }
+  }
+
   /** 清单。缺省只列 `active` 的；`closed` 的还在盘上，要看得显式要。 */
   async list(filter?: SessionListFilter): Promise<readonly SessionRow[]> {
     const infos = await listSessions(this.deps.root);
@@ -220,7 +281,8 @@ export class EchoSessions implements SessionFace {
     for (const info of infos) {
       if (filter?.includeClosed !== true && info.status !== "active") continue;
       if (filter?.workspace !== undefined && info.workspace !== filter.workspace) continue;
-      if (filter?.agent !== undefined && info.agent !== filter.agent) continue;
+      if (filter?.agent !== undefined && describeAgentRef(info.agent) !== filter.agent) continue;
+      if (filter?.product !== undefined && info.product !== filter.product) continue;
       out.push(await this.rowOf(info));
     }
     return out;
@@ -280,7 +342,8 @@ export class EchoSessions implements SessionFace {
       id: info.id,
       name: info.name,
       workspace: info.workspace,
-      agent: info.agent,
+      product: info.product,
+      agent: describeAgentRef(info.agent),
       main: info.main,
       status: info.status,
       alive: false,
@@ -333,7 +396,8 @@ export class EchoSessions implements SessionFace {
       id: info.id,
       name: info.name,
       workspace: info.workspace,
-      agent: info.agent,
+      product: info.product,
+      agent: describeAgentRef(info.agent),
       main: info.main,
       status: info.status,
       alive,

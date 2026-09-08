@@ -44,7 +44,11 @@ import type { Agent } from "./agent.ts";
 import { createAgent, resolveSessionsRoot, resolveStateDir, type CreateAgentOptions } from "./create-agent.ts";
 import { EchoSessions, type SessionRunner } from "./session/sessions.ts";
 import { makeSessionTools, sessionToolsSection } from "./session/tools.ts";
-import { FileDir, expandHome } from "./storage/file-dir.ts";
+import { FileDir, echoHome, expandHome } from "./storage/file-dir.ts";
+import { AGENT_DEF_DIR, loadAgentDefs } from "./agent-def/loader.ts";
+import { inlineAgentExtension, INLINE_AGENT_ENTRY } from "./agent-def/extension.ts";
+import { DEFAULT_AGENT_REF, isEmptyDefinition, type AgentRef } from "./agent-def/types.ts";
+import type { ParsedAgentFile } from "./agent-def/parse.ts";
 import { inspectStateLock } from "./storage/file-lock.ts";
 import { errText, type Diagnostic } from "./errors.ts";
 import { defineExtension, type ExtensionDefinition } from "./extension/abi.ts";
@@ -105,6 +109,11 @@ export type CreateEchoOptions = CreateAgentOptions & {
     /** runner 迟迟不 resolve 的上界，缺省 30 秒。超时按失败处理：判红并把那段置 closed。 */
     runTimeoutMs?: number;
   };
+  /**
+   * 产品自带的 agent 定义（角色，2026-09-07）。排在三处来源的**最后**——
+   * 人放在项目里或家目录里的同名角色盖得住产品自带的。
+   */
+  builtinAgentDefs?: readonly ParsedAgentFile[];
 };
 
 /** 装上了什么。`file` 为 `undefined` 表示它来自 `opts.extensions`（不是从盘上发现的）。 */
@@ -160,6 +169,22 @@ async function sessionToolsEntry(
       config: { tools: makeSessionTools(sessions, toolOpts), sections: [sessionToolsSection(toolOpts)] },
     },
   ];
+}
+
+/**
+ * 盘上那一段挂的是哪份 agent 定义。**读不到就是 `null`**（还没落 meta = 刚建的这一段），
+ * 由调用方决定退到什么。meta 坏了这里不判红——`start()` 马上会撞上同一份并给出更准确的话。
+ */
+async function readSessionAgentRef(sessionsRoot: string, sessionId: string): Promise<AgentRef | null> {
+  const raw = await new FileDir(resolveStateDir({ sessionsRoot, sessionId })).read("meta.json");
+  if (raw === null) return null;
+  try {
+    const ref = (JSON.parse(raw) as { agent?: unknown }).agent;
+    if (ref === null || typeof ref !== "object" || typeof (ref as AgentRef).definition !== "object") return null;
+    return ref as AgentRef;
+  } catch {
+    return null;
+  }
 }
 
 async function isMainSession(sessionsRoot: string, sessionId: string): Promise<boolean> {
@@ -295,9 +320,27 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   const agentOpts = opts.agent === undefined ? undefined : { ...opts.agent, tools: undefined };
   // workspace（session 级事实）的缺省由**这一层**定：进程目录。core 的 Agent 自己不读 process.cwd()。
   const workspace = opts.workspace ?? opts.cwd ?? process.cwd();
-  const agent = await createAgent(
-    agentOpts === undefined ? { ...opts, workspace } : ({ ...opts, workspace, agent: agentOpts } as CreateAgentOptions),
-  );
+  const sessionsRoot = expandHome(opts.sessionsRoot ?? resolveSessionsRoot());
+  const sessionDirOf = (id: string): string => resolveStateDir({ sessionsRoot, sessionId: id });
+  // agent 定义（角色，2026-09-07）：三处来源合并成一张按名查的表，`session_create({ agent: "reviewer" })`
+  // 查的就是它。项目层在前——与项目指令文件同一条规矩，放仓库里的最具体、最优先。
+  // 加载失败不挡启动（与盘上扩展同一条口径）：坏文件记一条诊断、跳过。
+  const agentDefsLoaded = await loadAgentDefs([join(workspace, ".echo", AGENT_DEF_DIR), join(echoHome(), AGENT_DEF_DIR)], opts.builtinAgentDefs ?? []);
+  const agentDefs = agentDefsLoaded.defs;
+  // **这一段挂哪份角色：盘上说了算**。`--resume` 一段 reviewer 会话时角色得跟着回来，
+  // 而 meta 要到 `start()` 才读得到——那时 mount 早过去了。所以这里照 `isMainSession` 的先例
+  // 直接读一次 meta.json：给了 `sessionId` 且盘上有 meta 就以它为准，否则用调用方给的。
+  const agentRef = (opts.sessionId !== undefined ? await readSessionAgentRef(sessionsRoot, opts.sessionId) : null) ?? opts.agentDef ?? DEFAULT_AGENT_REF;
+  const agent = await createAgent({
+    ...opts,
+    workspace,
+    // 角色的第三项：模型缺省。**在这一层接**——角色写的是模型 id，而按 id 查目录的能力只有
+    // 装配层有（`echo:inline-agent` 拿不到 provider 目录，见那个文件的头注）。
+    // 显式 `opts.model` 赢：命令行点名的模型比角色的缺省更具体。
+    ...(opts.model ?? agentRef.definition.model) !== undefined ? { model: opts.model ?? agentRef.definition.model } : {},
+    agentDef: agentRef,
+    ...(agentOpts === undefined ? {} : { agent: agentOpts as CreateAgentOptions["agent"] }),
+  });
   // canonical writer 是 `createAgent()` 挂上的 Host-internal 接线；这里只把查询面与 `send()` 露出去
   const observation = observationHostOf(agent)?.runtime;
   if (observation === undefined) throw new Error("createAgent() 没有挂观测接线：composition root 装配不完整");
@@ -315,17 +358,19 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // 别人那一段的目录**不过本 Agent 的写入闸**：闸管的是「本段的 lease 还在不在手上」，
   // 而往别人的 inbox 写一条本来就不在我们的 lease 覆盖范围内——那是它自己的账本，
   // 由它自己的 lease 保护。
-  const sessionsRoot = expandHome(opts.sessionsRoot ?? resolveSessionsRoot());
-  const sessionDirOf = (id: string): string => resolveStateDir({ sessionsRoot, sessionId: id });
   const sessions = new EchoSessions({
     root: new FileDir(sessionsRoot),
     storeFor: (id) => new FileDir(sessionDirOf(id)),
     isAlive: async (id) => (await inspectStateLock(join(sessionDirOf(id), LOCK_FILE))).state === "valid",
     self: () => ({
       sessionId: agent.state.sessionId,
-      agent: opts.agentName ?? opts.agentId ?? "default",
+      product: opts.product ?? "default",
       workspace: agent.state.workspace,
+      // **现查的那一份工作集**：不越权检查读它。装配时抄一份下来的话，
+      // 一段被角色收紧过的 session 仍然能按「产品全套」去派活，收紧就成了摆设。
+      tools: agent.state.tools.map((t) => t.name),
     }),
+    agentDefs: () => agentDefs,
     ...(opts.sessions?.run !== undefined ? { run: opts.sessions.run } : {}),
     ...(opts.sessions?.runTimeoutMs !== undefined ? { runTimeoutMs: opts.sessions.runTimeoutMs } : {}),
   });
@@ -333,6 +378,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   const host = new ExtensionHost({
     services: agentRegistries({
       tools: agent.tools,
+      // 收紧工作集的那一叠（2026-09-07）：角色（`echo:inline-agent`）经它把工具集收到子集
+      toolRestrictions: agent.toolRestrictions,
       hooks: agent.hooks,
       skills: { pool: agent.skills, active: agent.activeSkills },
       // **能力端口**（2026-08-31）：扩展要挂后台任务得拿得到这个。不给的话扩展面就只有
@@ -349,7 +396,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   });
 
   // 从这里起 Agent 已经存在：任何（fail-loud 路径上的）失败都必须把它停掉，否则 store 与文件锁没人收。
-  const diagnostics: Diagnostic[] = [];
+  // 角色文件的加载诊断（坏档、撞名）从这里开始攒——与盘上扩展同一条口径：不挡启动，但看得见。
+  const diagnostics: Diagnostic[] = [...agentDefsLoaded.diagnostics];
   /** 已经 mount 上的**非 builtin** 代，按 mount 顺序。收摊与失败回滚都按它逆序卸。 */
   // **会话的缺省命名**（2026-09-07，sessions.md §3）：拿第一句人话的首行当名字。
   //
@@ -409,6 +457,14 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       ...(inlineTools.length === 0
         ? []
         : [{ entryId: "echo:inline-tools", definition: defineToolPack("echo:inline-tools") as never, config: { tools: inlineTools } }]),
+      // ── `echo:inline-agent`：这一段挂的角色（2026-09-07）──────────────────────────────
+      //
+      // **排在 inline-tools 之后、盘上发现的之前**：identity 要替的那一段、tools 要收紧的那个池，
+      // 都得先由产品与内建装好。角色只做两件——替 identity、收工作集，第三件（model）在装配
+      // 更早的地方接（见上面 `createAgent` 那里）。空定义不挂：挂它等于不挂。
+      ...(isEmptyDefinition(agentRef.definition)
+        ? []
+        : [{ entryId: INLINE_AGENT_ENTRY, definition: inlineAgentExtension() as never, config: agentRef.definition }]),
       // ── `echo:sessions`：会话面的模型可见工具（2026-09-03，sessions.md §7）──────────────
       //
       // **不在 builtin 表里**，因为它要的东西 `Agent` 没有：会话面是**容器**级的

@@ -55,11 +55,11 @@ test("/api/runs 顺带给会话摘要：产品名与 workspace 按 sessionId 反
   // **观测库一段一份**（2026-09-03：状态根 = session 目录），所以一个 reader 只看得到那一段的 run。
   // 这条盯的仍是「反查得到」：会话摘要从 session 目录的**上一层**扫，所以面板里出现的
   // 任何 sessionId 都认得出产品名与 workspace——哪怕那一段不是本库这一段。
-  const coding = await echoAt([textTurn("coding 说")], { agentName: "echo-coding", workspace: "/tmp/ws-coding" });
+  const coding = await echoAt([textTurn("coding 说")], { product: "echo-coding", workspace: "/tmp/ws-coding" });
   const a = await coding.send("x");
   const codingId = coding.agent.state.sessionId!;
   await coding.stop();
-  const general = await echoAt([textTurn("agent 说")], { agentName: "echo-agent", workspace: "/tmp/ws-general" });
+  const general = await echoAt([textTurn("agent 说")], { product: "echo-agent", workspace: "/tmp/ws-general" });
   await general.send("y");
   const generalId = general.agent.state.sessionId!;
 
@@ -68,11 +68,12 @@ test("/api/runs 顺带给会话摘要：产品名与 workspace 按 sessionId 反
   try {
     const page = (await (await fetch(`${server.url}/api/runs?limit=10`)).json()) as {
       items: { runId: string; sessionId: string | null }[];
-      sessions: Record<string, { agent: string; workspace: string; name: string }>;
+      sessions: Record<string, { product: string; agent: string; workspace: string; name: string }>;
     };
     const runA = page.items.find((h) => h.runId === a.runId)!;
     expect(runA.sessionId).toBe(codingId);
-    expect(page.sessions[codingId]).toMatchObject({ agent: "echo-coding", workspace: "/tmp/ws-coding" });
+    // 产品与角色是两维（2026-09-07）：这一段是 echo-coding 开的，没挂角色所以 `agent` 是 default
+    expect(page.sessions[codingId]).toMatchObject({ product: "echo-coding", agent: "default", workspace: "/tmp/ws-coding" });
     // 只带这页用到的会话，不把整层的会话表都吐出去——另一段在盘上，但这页没用到它
     expect(Object.keys(page.sessions)).toEqual([codingId]);
     expect(generalId).not.toBe(codingId);
@@ -128,10 +129,10 @@ async function waitForInboxRun(echo: Echo): Promise<string> {
 }
 
 test("跨 session：/api/runs 合并各段、/api/runs/<id> 不必知道在哪一段、/api/health 每段一块、/api/activity 有收件与 ack 且带 sessionId", async () => {
-  const a = await echoAt([textTurn("A 说")], { agentName: "echo-coding", workspace: "/tmp/ws-a" });
+  const a = await echoAt([textTurn("A 说")], { product: "echo-coding", workspace: "/tmp/ws-a" });
   const ra = await a.send("a");
   const aId = a.agent.state.sessionId!;
-  const b = await echoAt([textTurn("B 说"), textTurn("B 收到")], { agentName: "echo-agent", workspace: "/tmp/ws-b" });
+  const b = await echoAt([textTurn("B 说"), textTurn("B 收到")], { product: "echo-agent", workspace: "/tmp/ws-b" });
   const rb = await b.send("b");
   const bId = b.agent.state.sessionId!;
   // A 给 B 发一句：与 session_send 同一条路（进 B 的 inbox 账本），B 消费成一条 inbox run
@@ -142,12 +143,12 @@ test("跨 session：/api/runs 合并各段、/api/runs/<id> 不必知道在哪�
   const readers = new SessionObservationReaders({ sessionsRoot: dir });
   const server = startObserveServer({ readers, port: 0 });
   try {
-    const runs = (await (await fetch(`${server.url}/api/runs?limit=10`)).json()) as { items: { runId: string; sessionId: string; acceptedAt: number }[]; nextCursor: null; sessions: Record<string, { agent: string }> };
+    const runs = (await (await fetch(`${server.url}/api/runs?limit=10`)).json()) as { items: { runId: string; sessionId: string; acceptedAt: number }[]; nextCursor: null; sessions: Record<string, { product: string }> };
     expect(runs.items.map((h) => h.runId).sort()).toEqual([ra.runId, rb.runId, inboxRun].sort());
     for (let i = 1; i < runs.items.length; i++) expect(runs.items[i - 1]!.acceptedAt).toBeGreaterThanOrEqual(runs.items[i]!.acceptedAt); // 合并后仍按时间倒序
     expect(runs.nextCursor).toBeNull();
-    expect(runs.sessions[aId]!.agent).toBe("echo-coding");
-    expect(runs.sessions[bId]!.agent).toBe("echo-agent");
+    expect(runs.sessions[aId]!.product).toBe("echo-coding");
+    expect(runs.sessions[bId]!.product).toBe("echo-agent");
     for (const id of [ra.runId, rb.runId, inboxRun]) {
       const vm = (await (await fetch(`${server.url}/api/runs/${encodeURIComponent(id)}`)).json()) as { header: { runId: string } };
       expect(vm.header.runId).toBe(id);

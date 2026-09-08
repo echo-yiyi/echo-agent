@@ -138,6 +138,27 @@ describe("AgentPrompt registry", () => {
     expect(r.variables.has("ws")).toBe(false);
   });
 
+  test("replace:同名必须已存在才换得成;disposer 把原来那段放回去,不是删掉", () => {
+    // 角色替产品的 identity 段（2026-09-07）。**替代要有被替代的那一段**——
+    // 段名写错时静默变成「多出一段」，人看到的却是「角色没生效」，查起来毫无线索。
+    const r = registryOf();
+    const original = sec("identity", 0, "产品的身份");
+    void r.svc.section(original);
+    expect(() => r.svc.section(sec("nobody", 0, "x"), { replace: true })).toThrow(/不存在/);
+
+    const role = sec("identity", 0, "reviewer 的身份");
+    const off = r.svc.section(role, { replace: true });
+    expect(r.sections.get("identity")).toBe(role);
+    off();
+    expect(r.sections.get("identity")).toBe(original); // 复原,不是删掉
+  });
+
+  test("replace 不给时行为一个字没变:同名照旧 fail-loud", () => {
+    const r = registryOf();
+    void r.svc.section(sec("identity", 0, "产品的身份"));
+    expect(() => r.svc.section(sec("identity", 0, "偷偷盖掉"))).toThrow(/已存在/);
+  });
+
   test("definePromptPack / defineToolPack 带段:mount 进表,unmount 撤走;撞名整包回滚", async () => {
     const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("好")]) });
     const host = new ExtensionHost({

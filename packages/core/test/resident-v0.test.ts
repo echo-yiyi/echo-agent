@@ -188,7 +188,9 @@ test(
     // 人工清锁的前提是**看得见是谁占着**——这就是 `inspectStateLock` 存在的理由
     const who = await inspectStateLock(join(dir, "sessions", ra.sessionId!, ".lock"));
     expect(who.state).toBe("valid");
-    expect(who.state === "valid" && who.record.holder).toBe("agent:default");
+    // holder = `${产品}:${会话 id}`（2026-09-07，替代 `agent:${agentId}`）：
+    // 锁文件旁边看一眼就知道是谁占着**哪一段**——从前那个 id 几乎恒为 "default"，说不出是哪段
+    expect(who.state === "valid" && who.record.holder).toBe(`default:${ra.sessionId!}`);
     rmSync(join(dir, "sessions", ra.sessionId!, ".lock")); // ← 显式运维步骤
 
     /* ─── ⑩ 清锁之后：那条入站事实被 Agent 自己吃掉 ─── */

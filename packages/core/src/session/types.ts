@@ -7,6 +7,7 @@
 // **一个 session 目录就是一个状态根**（2026-09-03，sessions.md §2–§3）：meta 与 entries 在目录根，
 // 与 inbox / tasks / schedule / lease 平级。清单是另一件事——扫上一层目录，见 `listSessions()`。
 
+import type { AgentRef } from "../agent-def/types.ts";
 import type { StorageDir } from "../storage/types.ts";
 import type { AgentError } from "../errors.ts";
 import type { AgentMessage } from "../messages.ts";
@@ -50,13 +51,21 @@ export type SessionInfo = {
    */
   readonly workspace: string;
   /**
-   * 归哪个 agent（产品）：会话身份的第二维（2026-09-01 用户拍板）。`echo-agent` 与 `echo-coding`
-   * 在同一目录里各有各的对话，靠的就是这个字段——只按 workspace 分的话，谁先起谁定义那段对话，
-   * 后来的产品只能续（实测：coding 续了通用 agent「我没有文件工具」的结论）。
-   * 由宿主给（`AgentOptions.agentName`，缺省与 `agentId` 相同）；resume 时以盘上为准。
+   * 哪个产品开的：会话身份的第二维（2026-09-01 用户拍板，2026-09-07 从 `agent` 改名到这里）。
+   * `echo-agent` 与 `echo-coding` 在同一目录里各有各的对话，靠的就是这个字段——只按 workspace
+   * 分的话，谁先起谁定义那段对话，后来的产品只能续（实测：coding 续了通用 agent「我没有文件
+   * 工具」的结论）。由容器给（`Product.name`），创建时写、之后不改。
    * **必填**：没有它的 meta 是坏档，resume 判红（pre-release，不留可选兼容）。
    */
-  readonly agent: string;
+  readonly product: string;
+  /**
+   * 这一段挂的 agent 定义（角色），**连同它的来历**（2026-09-07）。
+   *
+   * 与 `product` 是两维：产品是容器级的（一个 echo-coding 容器开出来的段全是 coding 方向），
+   * 角色是产品**内部**的 reviewer / 前端 / 缺省。没挂角色的段是 `DEFAULT_AGENT_REF`。
+   * 定义整份存在这里，`--resume` 不回头按名去找文件——那份文件可能已经改了、没了。
+   */
+  readonly agent: AgentRef;
   /**
    * 谁建的这一段（2026-09-03，sessions.md §6）。**判据是谁调的 create**：经容器自己的路径建的
    * （cli 启动、`/clear`、宿主 `echo.sessions.create`）为 `true`；经 extension 面的 `session_create`

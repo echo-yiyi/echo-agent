@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { EchoSessions, NO_SESSION_FACE, type SessionRow } from "../src/session/sessions.ts";
 import { makeSessionTools, sessionToolsSection } from "../src/session/tools.ts";
 import { listSessions, SessionService } from "../src/session/service.ts";
+import type { AgentDefinition, AgentRef } from "../src/agent-def/types.ts";
 import { InboxStore } from "../src/inbox/store.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { writeSessionPhase } from "../src/session/status.ts";
@@ -37,7 +38,17 @@ type Harness = {
   readonly ran: SessionRow[];
 };
 
-function harness(opts: { selfId?: string; run?: (row: SessionRow) => Promise<void>; runTimeoutMs?: number } = {}): Harness {
+function harness(
+  opts: {
+    selfId?: string;
+    run?: (row: SessionRow) => Promise<void>;
+    runTimeoutMs?: number;
+    /** 创建者此刻的工作集——不越权检查读它。 */
+    tools?: readonly string[];
+    /** 容器认得的具名 agent 定义。不给 = 一份都没有，点名一律判红。 */
+    agentDefs?: ReadonlyMap<string, AgentDefinition>;
+  } = {},
+): Harness {
   const root = new InMemoryDir();
   const alive = new Set<string>();
   const ran: SessionRow[] = [];
@@ -45,7 +56,8 @@ function harness(opts: { selfId?: string; run?: (row: SessionRow) => Promise<voi
     root,
     storeFor: (id) => scoped(root, `${id}/`),
     isAlive: async (id) => alive.has(id),
-    self: () => ({ sessionId: opts.selfId ?? "s-self", agent: "echo-agent", workspace: "/repo" }),
+    self: () => ({ sessionId: opts.selfId ?? "s-self", product: "echo-agent", workspace: "/repo", tools: opts.tools ?? [] }),
+    ...(opts.agentDefs !== undefined ? { agentDefs: () => opts.agentDefs! } : {}),
     ...(opts.run !== undefined
       ? {
           run: async (row: SessionRow) => {
@@ -65,9 +77,14 @@ function ctx(): never {
 }
 
 /** 预置一段说过话的会话（一句话没说的段不落 meta，也就不在清单里）。 */
-async function seed(root: InMemoryDir, id: string, opts: { agent?: string; main?: boolean } = {}): Promise<void> {
+async function seed(root: InMemoryDir, id: string, opts: { product?: string; agent?: AgentRef; main?: boolean } = {}): Promise<void> {
   const svc = new SessionService(scoped(root, `${id}/`));
-  await svc.createOrResume(id, { workspace: "/repo", agent: opts.agent ?? "echo-agent", main: opts.main ?? true });
+  await svc.createOrResume(id, {
+    workspace: "/repo",
+    product: opts.product ?? "echo-agent",
+    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+    main: opts.main ?? true,
+  });
   await svc.append(id, [{ kind: "message", message: userMessage("开场") }]);
   await svc.settle();
 }
@@ -79,7 +96,9 @@ test("create：建目录、立刻落 meta、第一条消息进对方 inbox，然
   const row = await h.sessions.create({ name: "查一下 PR 42", message: "先看 PR 42" });
 
   expect(row.main).toBe(true);
-  expect([row.agent, row.workspace]).toEqual(["echo-agent", "/repo"]); // 不给就继承建它的那一段
+  // product 与 workspace 继承建它的那一段；**角色不继承**——一段 reviewer 派出去的活
+  // 默认不该也是 reviewer，那是它自己要说的事（`CreateSessionInput.agent`）
+  expect([row.product, row.workspace, row.agent]).toEqual(["echo-agent", "/repo", "default"]);
   expect((await listSessions(h.root)).map((i) => [i.id, i.name, i.status])).toEqual([[row.id, "查一下 PR 42", "active"]]);
 
   // 第一条消息真的在对方的 inbox 里，而且是**盘上**那份
@@ -119,7 +138,7 @@ test("刚起来、一句话没说的那段也发得到（活着就找得到，20
   // 「打开第二个终端、从第一个带句话过去」这一步直接断掉。
   const h = harness();
   const svc = new SessionService(scoped(h.root, "s-fresh/"));
-  await svc.createOrResume("s-fresh", { workspace: "/repo", agent: "echo-agent" }); // 只 start，不说话
+  await svc.createOrResume("s-fresh", { workspace: "/repo", product: "echo-agent" }); // 只 start，不说话
   h.alive.add("s-fresh");
 
   expect((await h.sessions.list()).map((r) => r.id)).toContain("s-fresh");
@@ -182,15 +201,19 @@ test("list：alive 为假时 phase 恒为 null——崩在 working 的段不许�
   expect((await h.sessions.list()).map((r) => [r.alive, r.phase])).toEqual([[true, "working"]]);
 });
 
-test("list：按 workspace / agent 筛，closed 要显式要", async () => {
+test("list：按 workspace / product / 角色筛，closed 要显式要", async () => {
   const h = harness();
-  await seed(h.root, "s-a", { agent: "echo-agent" });
-  await seed(h.root, "s-b", { agent: "echo-coding" });
-  await seed(h.root, "s-c", { agent: "echo-agent", main: false });
+  await seed(h.root, "s-a", { product: "echo-agent" });
+  await seed(h.root, "s-b", { product: "echo-coding" });
+  await seed(h.root, "s-c", { product: "echo-agent", main: false });
+  await seed(h.root, "s-r", { product: "echo-agent", agent: { name: "reviewer", definition: { identity: "审查" } } });
   await h.sessions.close("s-c");
 
-  expect((await h.sessions.list({ agent: "echo-agent" })).map((r) => r.id)).toEqual(["s-a"]);
-  expect((await h.sessions.list({ agent: "echo-agent", includeClosed: true })).map((r) => r.id).sort()).toEqual(["s-a", "s-c"]);
+  expect((await h.sessions.list({ product: "echo-agent" })).map((r) => r.id).sort()).toEqual(["s-a", "s-r"]);
+  expect((await h.sessions.list({ product: "echo-agent", includeClosed: true })).map((r) => r.id).sort()).toEqual(["s-a", "s-c", "s-r"]);
+  // 角色是另一维：没挂角色的是 `default`,挂了具名角色的是它的名字
+  expect((await h.sessions.list({ agent: "reviewer" })).map((r) => r.id)).toEqual(["s-r"]);
+  expect((await h.sessions.list({ agent: "default" })).map((r) => r.id).sort()).toEqual(["s-a", "s-b"]);
   expect((await h.sessions.list({ workspace: "/elsewhere" }))).toEqual([]);
   expect((await h.sessions.list()).find((r) => r.id === "s-c")).toBeUndefined();
 });
@@ -212,10 +235,10 @@ test("真盘上跑一遍：两段各占一个目录，互发的消息落在对�
       root,
       storeFor: (id) => new FileDir(join(home, id)),
       isAlive: async (id) => alive.has(id),
-      self: () => ({ sessionId: "s-self", agent: "echo-agent", workspace: "/repo" }),
+      self: () => ({ sessionId: "s-self", product: "echo-agent", workspace: "/repo" , tools: [] }),
     });
     const peerSvc = new SessionService(new FileDir(join(home, "s-peer")));
-    await peerSvc.createOrResume("s-peer", { workspace: "/repo", agent: "echo-agent" });
+    await peerSvc.createOrResume("s-peer", { workspace: "/repo", product: "echo-agent" });
     await peerSvc.append("s-peer", [{ kind: "message", message: userMessage("开场") }]);
     await peerSvc.settle();
 
@@ -252,6 +275,55 @@ test("工具面：习惯段只在能派活时讲派活；异步这条两种情�
   for (const text of [withCreate, without]) {
     expect(text).toContain("does not wait for a reply"); // 异步是这组工具最容易被误解的一条
   }
+});
+
+test("工具面：session_create 的 agent 参数——按名点中、现写一份、不点就是产品原样", async () => {
+  // 没有这个参数时（2026-09-07 之前）模型开不出 reviewer 段：角色只有容器给得了，
+  // 而「派一个只读审查去看 PR」正是这组工具最该能干的事。
+  // 创建者手上要有 read_file——**不越权对具名定义一视同仁**：人写在 reviewer.md 里的工具，
+  // 也不能让一个被收紧过的段派出比自己更宽的段。
+  const h = harness({
+    run: async () => {},
+    tools: ["read_file", "shell"],
+    agentDefs: new Map([["reviewer", { identity: "你是代码审查员。", tools: ["read_file"] }]]),
+  });
+  const create = makeSessionTools(h.sessions, { canCreate: true })[0]!;
+
+  const byName = await create.execute({ message: "看 PR 42", agent: "reviewer" }, ctx());
+  expect(byName.isError).toBe(false);
+  expect(JSON.stringify(byName)).toContain("agent reviewer"); // 点中了要说出来，模型才确认得了
+  expect((await listSessions(h.root)).find((i) => i.agent.name === "reviewer")?.agent.definition.identity).toBe("你是代码审查员。");
+
+  const inline = await create.execute({ message: "跑一下", agent: { identity: "你只跑测试。", tools: ["read_file"] } }, ctx());
+  expect(inline.isError).toBe(false);
+  expect(JSON.stringify(inline)).toContain("agent inline");
+
+  const plain = await create.execute({ message: "随便干点啥" }, ctx());
+  expect(JSON.stringify(plain)).toContain("agent default"); // 不点 = 产品原样，**不继承创建者的**
+});
+
+test("工具面：agent 参数验形——名字不存在、越权、形状不对，各说各的且盘上不留半段", async () => {
+  // 三条都必须在**动盘之前**判掉：判红却留下一个目录，清单里就多一段永远不会跑的会话。
+  const h = harness({ run: async () => {}, tools: ["read_file"], agentDefs: new Map() });
+  const create = makeSessionTools(h.sessions, { canCreate: true })[0]!;
+
+  const noSuch = await create.execute({ message: "干活", agent: "nobody" }, ctx());
+  expect(noSuch.isError).toBe(true);
+  expect(JSON.stringify(noSuch)).toContain("nobody");
+
+  // 越权：创建者手上只有 read_file，点了它没有的 shell
+  const escalate = await create.execute({ message: "干活", agent: { tools: ["read_file", "shell"] } }, ctx());
+  expect(escalate.isError).toBe(true);
+  expect(JSON.stringify(escalate)).toContain("shell");
+
+  const badShape = await create.execute({ message: "干活", agent: { identity: "x", persona: "y" } }, ctx());
+  expect(badShape.isError).toBe(true);
+  expect(JSON.stringify(badShape)).toContain("persona"); // 多出来的键不静默丢掉
+
+  const empty = await create.execute({ message: "干活", agent: {} }, ctx());
+  expect(empty.isError).toBe(true);
+
+  expect(await listSessions(h.root)).toEqual([]); // 四次判红，盘上一段都没有
 });
 
 test("工具面：session_create 建出来的一律不是 main（扇出只有一层）", async () => {
@@ -359,7 +431,7 @@ test("工具面：list 把「活着 / 在忙 / 没进程」说清楚；一段都
 test("SessionService.rename：只改自己那一段，空名字与同名忽略；改完落盘", async () => {
   const dir = new InMemoryDir();
   const svc = new SessionService(dir);
-  const data = await svc.createOrResume("s-1", { workspace: "/repo", agent: "echo-agent" });
+  const data = await svc.createOrResume("s-1", { workspace: "/repo", product: "echo-agent" });
   expect(data.info.name).toBe("s-1"); // 缺省名 = 会话 id，对人零信息量
 
   svc.rename("s-1", "  修 PR 42  ");
@@ -381,7 +453,7 @@ test("SessionService.rename：只改自己那一段，空名字与同名忽略�
 test("改过名之后，清单与 list 都按新名字认它", async () => {
   const h = harness();
   const svc = new SessionService(scoped(h.root, "s-1/"));
-  await svc.createOrResume("s-1", { workspace: "/repo", agent: "echo-agent" });
+  await svc.createOrResume("s-1", { workspace: "/repo", product: "echo-agent" });
   await svc.append("s-1", [{ kind: "message", message: userMessage("一") }]);
   svc.rename("s-1", "改接口");
   await svc.settle();

@@ -150,12 +150,12 @@ test("缺省每次启动新建会话，各占一个目录；显式 sessionId 才
   const provider = fakeProvider({ id: "t", models: ["only"] });
   const sessionsRoot = new FileDir(resolveSessionsRoot());
 
-  const a = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", agentName: "echo-coding" });
+  const a = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", product: "echo-coding" });
   await a.start();
   expect(a.state.sessionId).toMatch(/^s-/);
   expect(a.state.workspace).toBe("/repo/a");
 
-  const a2 = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", agentName: "echo-coding" });
+  const a2 = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a", product: "echo-coding" });
   await a2.start(); // **同一台机器、同一个 workspace、同一个产品，两段同时活着**
   expect(a2.state.sessionId).not.toBe(a.state.sessionId); // 同 workspace、同产品 → 仍是新的一段
   // 各占各的目录、各持各的锁。旧布局（状态根 = agents/<agentId>）下这里是同一把，第二个 start() 直接 fail-loud
@@ -175,11 +175,13 @@ test("缺省每次启动新建会话，各占一个目录；显式 sessionId 才
   // 清单扫的是 session 目录的上一层。**a2 一句话没说，收摊时把 meta 撤了**，所以不在清单里；
   // 但它**活着的时候是在的**——下面那条判据盯的就是这一点（活着找不到 = 别人没法给它带话）。
   const listed = await listSessions(sessionsRoot);
-  expect(listed.map((s) => [s.id, s.workspace, s.agent, s.main, s.status])).toEqual([
+  expect(listed.map((s) => [s.id, s.workspace, s.product, s.main, s.status])).toEqual([
     [a.state.sessionId!, "/repo/a", "echo-coding", true, "active"],
   ]);
-  // 没给 agentName 的低层用户：与 agentId 同名
-  expect((await new SessionService(new InMemoryDir()).createOrResume("x", { workspace: "/w" })).info.agent).toBe("default");
+  // 没挂角色的段:`agent` 是 `DEFAULT_AGENT_REF`（产品原样），不是产品名——那一维现在归 `product`
+  const bare = (await new SessionService(new InMemoryDir()).createOrResume("x", { workspace: "/w" })).info;
+  expect(bare.product).toBe("default");
+  expect(bare.agent).toEqual({ definition: {} });
 });
 
 test("记忆三层各落各的根：user 在 home、project 按 workspace 分、session 才跟着状态根", async () => {

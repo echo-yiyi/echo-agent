@@ -151,6 +151,15 @@ export type { AgentBackground, BackgroundLimits } from "./background/types.ts";
 export type { ActiveSkill, Skill, SkillActivation, SkillCreation } from "./skill/types.ts";
 export type { SessionData, SessionEntry, SessionInfo, SessionStatus, SessionStore } from "./session/types.ts";
 export { newSessionId } from "./session/types.ts";
+
+/* agent 定义（角色，2026-09-07）：产品内的一个角色——identity 段、工具子集、模型缺省。
+   设计见 docs/design/sessions.md §4。挂载走 `echo:inline-agent`，那条是装配层的事，不出公共面。 */
+export type { AgentDefinition, AgentRef } from "./agent-def/types.ts";
+export { DEFAULT_AGENT_REF, describeAgentRef, isEmptyDefinition } from "./agent-def/types.ts";
+export { AGENT_DEF_DIR, loadAgentDefs, loadAgentDefsFromDir } from "./agent-def/loader.ts";
+export type { LoadedAgentDefs } from "./agent-def/loader.ts";
+export { parseAgentFile, parseNameList } from "./agent-def/parse.ts";
+export type { ParsedAgentFile } from "./agent-def/parse.ts";
 export type {
   TaskBrief,
   TaskCreateResult,
