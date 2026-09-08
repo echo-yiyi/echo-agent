@@ -1,0 +1,50 @@
+name: Bug report
+description: Something behaves differently from what the docs or the code say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security vulnerabilities here — see [SECURITY.md](../blob/main/SECURITY.md).
+
+        English or Chinese are both fine.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest thing that shows it — a command, a prompt, a short script, or a
+        failing test. A reproduction someone else can run is worth more than a description.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: The commit you are on (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Bun version (`bun --version`) and OS.
+      placeholder: "bun 1.3.14, macOS 15.6"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or diagnostics
+      description: Any error output. Redact API keys before pasting.
+      render: shell
+    validations:
+      required: false

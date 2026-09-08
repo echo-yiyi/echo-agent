@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a capability or a change in behaviour.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is pre-release and the public API still moves. Proposals that
+        change a public API, a persistence format, or a package boundary are worth
+        opening before writing code — see [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).
+
+        English or Chinese are both fine.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: >
+        What the API or behaviour would look like. Concrete beats abstract — a type
+        signature or a snippet of calling code says more than a paragraph.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Workarounds you already have, and why they are not enough.
+    validations:
+      required: false

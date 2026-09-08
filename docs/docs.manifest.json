@@ -22,6 +22,14 @@
       "bilingual": false
     },
     {
+      "path": "CODE_OF_CONDUCT.md",
+      "bilingual": false
+    },
+    {
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "bilingual": false
+    },
+    {
       "path": "packages/core/README.md",
       "bilingual": false
     },
