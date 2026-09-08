@@ -2,7 +2,7 @@
 
 > 状态：审阅中，尚未成为设计契约<br>
 > 基线：2026-09-01 当前源码与测试<br>
-> 范围：消息账本、system prompt、每轮注入、送模投影、上下文变换、压缩与会话恢复<br>
+> 范围：消息账本、system prompt、attempt 动态注入、送模投影、上下文变换、压缩与会话恢复<br>
 > 暂不处理：具体 provider 方言、thinking 字段的厂商兼容、Memory 的提取与写回策略、UI 如何展示消息<br>
 > 退出条件：第 10 节每一项分别形成决策记录，结论吸收到正式设计后删除本稿；历史由 Git 保留
 
@@ -13,7 +13,7 @@
 当前实现已经有一条值得保留的主轴：
 
 - `AgentMessage` 是本地账本形状，`ProviderMessage` 是临时线上形状；两者不混存。
-- system prompt 每个 run 装配一次，每轮动态内容作为 injection 追加，不进入 transcript。
+- system prompt 每个 run 装配一次，动态内容在每个 attempt 作为 injection 追加，不进入 transcript。
 - 工具结果、环境事件与人类输入在账本里角色分明，出门时再投影成 provider 支持的两种角色。
 - 每条真正入账的消息都经 `message_end`，并由同一事件驱动运行时投影和 session append。
 
@@ -23,11 +23,10 @@
 2. **消息没有所有权隔离。** `prompt(message)`、`Agent.messages`、context snapshot 与 `transformContext` 共享嵌套对象；调用方或 transform 能在没有新事件、没有新 session entry 的情况下改写已经入账的历史。
 3. ~~**`contextBeforeBuild` 的 block 是假能力。**~~ 已修（2026-09-01）：block 让 run 以 `aborted` 结束、模型不被调用，见 §6。
 4. **`followUp` 的来源只在 hook event 中如实，账本里仍记成 `human`。** 现有测试标题声称 transcript 来源如实，但没有断言消息的 `source`。
-5. **`PromptSource.toolSchemas()` 是死接口。** 类型和注释声称每轮读取，实际工具菜单来自 `getTools() → toolSchemas()`，这个方法从未被调用。
-6. **上下文扩展点的失败契约与实现相反。** 注释要求 `transformContext`、`convertToLlm` 和 turn injection “绝不抛、失败安全回退”；实际任一抛错都会让整个 run 以 internal error 结束。
-7. **消息只在恢复时严格验形，prompt 入站不验。** 一个 JavaScript 调用方可以让 Agent 自己把坏消息写进 session，本次 run 成功，下一次恢复才判坏档。
+5. **上下文扩展点的失败契约与实现相反。** 注释要求 `transformContext`、`convertToLlm` 和 attempt injection “绝不抛、失败安全回退”；实际任一抛错都会让整个 run 以 internal error 结束。
+6. **消息只在恢复时严格验形，prompt 入站不验。** 一个 JavaScript 调用方可以让 Agent 自己把坏消息写进 session，本次 run 成功，下一次恢复才判坏档。
 
-第二项直接破坏长会话正确性和审计可信度，第四、第五项是公开接口或测试声称的行为并不存在，后两项是失败发生位置与承诺不一致。它们都不是靠改文案可以解决的问题。
+第二项直接破坏长会话正确性和审计可信度，第四项是测试声称的行为并不存在，后两项是失败发生位置与承诺不一致。它们都不是靠改文案可以解决的问题。
 
 ## 术语与分层
 
@@ -38,7 +37,7 @@
 | transcript | 按入账顺序排列的 `AgentMessage[]`，是 Agent 对会话事实的运行时视图 | 是 | 否 |
 | session ledger | 盘上的 message / compaction / error entries | 是 | 否 |
 | system prompt | 一个 run 装配出的固定前缀 | 否，装备与来源数据另行持久化 | 是 |
-| turn injection | 当前 turn 临时追加的 instruction-like 消息 | 否 | 是 |
+| attempt injection | 当前模型调用临时追加的 instruction-like 消息；同一 turn 重试会重算 | 否 | 是 |
 | working context | transcript 快照、injection 和 hook/transform 处理后的 `AgentMessage[]` | 否 | 否 |
 | provider context | `systemPrompt + ProviderMessage[] + ToolSchema[]` | 否 | 是 |
 | projection | `AgentMessage[] → ProviderMessage[]` 的单向转换 | 否 | 产物送模型 |
@@ -58,7 +57,7 @@ flowchart TD
     D --> F["run 开始时浅拷贝 messages 数组"]
     P["PromptSection sources"] --> Q["每 run 组装 system prompt"]
     Q --> R["AgentContext.systemPrompt"]
-    F --> G["每 turn 追加 injections"]
+    F --> G["每 attempt 追加 injections"]
     G --> H["transformContext"]
     H --> I["contextBeforeBuild hook"]
     I --> J["convertToLlm"]
@@ -118,45 +117,14 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { FAKE_MODE
 
 审阅结论：内建消息在所有 durable ingress 进入 transcript 之前必须跑同一份闭合验形；自定义 role 继续只验公共信封。恢复期校验仍要保留，它防的是旧版本、人工修改和外部坏写，不能替代写入前校验。
 
-## 3. System prompt 与每轮 injection
+## 3. Prompt 通过两条通道进入 context
 
-### 3.1 System prompt
+prompt 的内容、所有权、排序、变量、信任、失败与预算只有一份权威说明：[Prompt 设计](prompt.md)。本文只保留它与消息流水线相交的两条事实：
 
-`Agent.assemblePrompt()` 每个 run 从 `AgentPrompt` registry 的两张表（段、变量）取材，再交给 [`assembleSystem()`](../../packages/core/src/prompt/assemble.ts#symbol=assembleSystem)。**段只从 registry 来**（2026-09-01）：内建的 environment / skills / memory 由 `echo:agent` / `echo:skills` / `echo:memory` builtin 注册，产品与壳的段由各自的 extension 注册（`definePromptPack` / `defineToolPack` 的 `sections`）；构造参数上不再有 `systemPrompt` / `promptSections` / `promptSources`。装配规则是：
+- system sections 在主 Agent 的 run 开始前装配成 `AgentContext.systemPrompt`；该快照不进入 transcript。
+- 动态 injection 在每个 attempt 构建 working context 时追加到压缩视图末尾，不发 `message_end`，因此不进入 transcript 或 session；工具门控读取本 turn 冻结的菜单。
 
-1. 按 `order` 升序，同数保注册序。约定带见 [`PROMPT_ORDER`](../../packages/core/src/prompt/types.ts#symbol=PROMPT_ORDER)：identity 0、conduct 10、surface 20、工具习惯 100–199、environment 300、instructions 400、skills 500、memory 900——按**变化频率**排，越稳定越靠前；
-2. 每段单独 `render(ctx)` 和 trim，`ctx` 是本次装配的事实（workspace、admission 冻结的模型、agentId、sessionId）；
-3. `{{name}}` 从本次装配一次性解析出的变量表取值，**严格**：未注册、无值、畸形都不放行；
-4. 空段丢弃；非空段以两个换行连接；全空得到 `null`。
-
-`order` **只表示排序**，core 没有 prompt cache，也不按 order 选择刷新频率。它把更稳定的字节放在前面，给 provider 的 prefix cache 创造命中条件；是否缓存、缓存多久由 provider 决定。字节级判据见 [order 排序与空段语义](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null) 与 [严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名)。
-
-失败语义（2026-09-01 定了两档）：
-
-- `PromptSection.render()` 抛错：省略该段并发诊断，run 继续——段是增强面，运行时数据坏一段不许击穿整个 run；
-- 变量引用错：抛 `PromptVariableError`，本次 run 以 error 结束——段文本是产品 / extension 写的受信文本，写错变量名是作者错误，要响。判据见 [变量错让 run 以 error 收场](../../packages/core/test/prompt.test.ts#test=变量错-run-以-error-收场不静默发一份错的-system)。
-
-仍然没有的：段上的“必需 / 可选”属性。产品身份段的 `render` 抛错依旧静默隐形；今天产品与壳的段都是字面量（`render` 不会抛），唯一读盘的段是 `echo:instructions`，它失败 = 没有项目指令，可接受。真出现「必需段」再加属性。
-
-### 3.2 Turn injection
-
-`PromptSource.turnInjections()` 每 turn 重算，结果追加到 transcript snapshot 的末尾，不发 `message_end`，因此不进入运行时 transcript 和 session。当前 skill 正文与 task snapshot 走这条路，接线见 [`Agent.promptSources()`](../../packages/core/src/agent.ts#symbol=Agent.promptSources) 和 [`Agent.createLoopConfig()`](../../packages/core/src/agent.ts#symbol=Agent.createLoopConfig)。
-
-这个边界适合“当前有效、但不是对话事实”的材料：激活 skill、任务清单、短期运行说明。已有测试验证激活正文下一 turn 可见、system 字节不变且 injection 不入 transcript，见 [skill injection 接线](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)。
-
-injection 里的**工具门控读本轮冻结的菜单**（`runTurn` 把冻结的工具名集传给 `getTurnInjections`），不读活池：`turn_start` 里才注册的工具，这轮菜单上没有，注入也不许提它——菜单与注入永远是同一份 turn 快照。判据见 [冻结菜单门控](../../packages/core/test/prompt.test.ts#test=注入的工具门控读本轮冻结的菜单turnstart-里才注册的-tasklist本轮菜单与清单都没有下一轮一起出现)。
-
-激活 skill 的注入有**总预算**（`SKILL_ACTIVE_TOTAL_CAP`，64 000 字符，各条正文按单条上限计）：闸在 `activateSkill`，超了拒绝并把现状告诉模型；不在渲染末端静默截掉已声明激活的指令。判据见 [激活总预算](../../packages/core/test/skill.test.ts#test=激活总预算合计超过-skillactivetotalcap-就拒回执带现状重复激活不重复计费超长正文按单条上限计)。
-
-但注释中的“契约：绝不抛；没有返回 `[]`”没有调用侧兜底。任一 source 抛错会结束整个 run。这里需要的是明确选择，不是模糊承诺：
-
-- 如果 injection 是完成任务所必需的上下文，失败应使 run fail-loud；
-- 如果它只是增强，失败应记录诊断并按该 source 返回空列表；
-- 不同来源可能需要不同档位，不能由聚合器统一猜测。
-
-### 3.3 `PromptSource` 只剩 `turnInjections()`
-
-2026-09-01 起 [`PromptSource`](../../packages/core/src/prompt/types.ts#symbol=PromptSource) 只有 `turnInjections()` 一个方法，且只在 Agent 内部用（skill 正文、任务清单两条注入）。原先的 `toolSchemas()` 从未被消费（工具菜单一直由 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 从 turn 工作集调 [`toolSchemas()`](../../packages/core/src/tools/types.ts#symbol=toolSchemas) 得到），`promptSections()` 的职责被 `AgentPrompt` registry 接走。工具菜单因此只有 `getTools() → toolSchemas()` 一条真源；system 里也不再列工具目录——单工具语义只在 description，跨工具的习惯由拥有该工具的 extension 出段。
+随后 injection 与 transcript 一起经过 `transformContext → contextBeforeBuild → convertToLlm`。工具 schema 由同一 turn 的工作集单独投影，不从 prompt module 生成。接线见 [`Agent.createContextSnapshot()`](../../packages/core/src/agent.ts#symbol=Agent.createContextSnapshot) 与 [`runAttempt()`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt)。
 
 ## 4. Working context 与对象所有权
 
@@ -229,18 +197,15 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 
 ## 8. 失败语义
 
-源码给上下文接缝写了不同承诺：section render 失败 omit、transform 和 converter 失败安全回退、hook 按 fail-open / fail-closed 折叠。但实际调用链是：
+prompt section、变量与 injection 的失败语义归 [Prompt 设计](prompt.md) §8。这里仅记录 working context 后半段的接缝：源码注释要求 transform 和 converter 失败安全回退，实际调用链却是 fail-loud。
 
 | 失败点 | 当前行为 | 注释或接口暗示 |
 | --- | --- | --- |
-| `PromptSection.render()` 抛错 | 省略该段，诊断后继续 | fail-soft enhancement |
-| 段里 `{{变量}}` 未注册 / 无值 / 畸形 | `PromptVariableError`，run 以 error 结束 | 设计如此：作者错误要响 |
-| `turnInjections()` 抛错 | run 以 internal error 结束 | “绝不抛；没有返回 []” |
 | `transformContext()` 抛错 | run 以 internal error 结束 | “失败原样返回入参” |
 | `convertToLlm()` 抛错 | run 以 internal error 结束 | “绝不抛” |
 | `contextBeforeBuild` 返回 block | run 以 `aborted` 结束、reason 透传，provider 不被调用 | interceptable / block（2026-09-01 起一致） |
 
-三个抛错探针都得到结构化 `outcome.kind === "error"`；Agent 的 terminal normalizer 保住了完整封口，但它不是安全回退。这里要先按“缺失这项上下文后继续调用模型是否安全”分类，再让类型、实现和测试使用同一个答案。
+两个抛错探针都得到结构化 `outcome.kind === "error"`；Agent 的 terminal normalizer 保住了完整封口，但它不是安全回退。这里要先按“缺失这项上下文后继续调用模型是否安全”分类，再让类型、实现和测试使用同一个答案。
 
 ## 9. 哪些由机器守，哪些只是纪律
 
@@ -251,18 +216,17 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 | 缺省 projection 剥掉本地字段 | [账本字段不出门](../../packages/core/test/invariants.test.ts#test=投影剥壳atsourceusagemetadata-不出门) |
 | tool result 在线上合并、账本中逐条保留 | [toolResult 投影与相邻合并](../../packages/core/test/invariants.test.ts#test=投影toolresult-包回-user-角色的-toolresult-块相邻的合并成一条) |
 | 空 assistant 不进入 provider context | [空 assistant 隐形](../../packages/core/test/invariants.test.ts#test=投影空-content-的-assistant-消息整条隐形空消息是协议违规) |
-| system section 排序、空段与 render 失败 | [assembleSystem 行为](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null)、[坏段隐形并留痕](../../packages/core/test/prompt.test.ts#test=render-抛错-该段隐形不击穿onfailure-留痕) |
-| skill / task injection 每轮刷新且不入 transcript | [skill injection](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)、[task injection](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |
+| `contextBeforeBuild` block 不调 provider、run 以 aborted 收场 | [block 判据](../../packages/core/test/prompt.test.ts#test=contextbeforebuild-返回-block不调模型run-以-aborted-收场reason-透传transcript-不多一条) |
 | session 恢复时拒绝坏内建消息 | [坏 message payload 恢复判红](../../packages/core/test/session-service.test.ts#test=坏-message-payload-在恢复时判红只有-role-是不够的)、[content block 闭合验形](../../packages/core/test/session-service.test.ts#test=内容块闭合验形缺字段与不认识的-type-都判红) |
+
+prompt 自身的机器判据与缺口见 [Prompt 设计](prompt.md) §9–§10，不在这里抄第二份。
 
 ### 当前没有门守
 
 - ingress 后调用方不能改写 transcript。
 - transform、converter 和 context hook 不能回写 transcript。
-- `contextBeforeBuild` 的 decision 被调用点正确消费。
 - `followUp` 在 transcript 中保留真实 admission 来源。
-- `PromptSource` 的每个公开方法都有消费者。
-- programmatic prompt source 的失败档位与 section 重要性一致。
+- transform 与 converter 抛错后的实际 fail-loud 行为和公开注释一致。
 
 （compaction 缩短下一次 provider context、恢复前后一致、游标只有一种语义：2026-09-02 起有机器判据，见 §7。）
 
@@ -274,17 +238,15 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 
 1. ~~**实现或移除 compaction。**~~ 已实现（2026-09-02），见 [Compaction](compaction.md) 与六条决策记录。
 2. **建立消息所有权边界。** admission 取得消息所有权，账本只读，working context 与 transcript 断开对象别名。
-3. **修正 `contextBeforeBuild` ABI。** 要么只允许 patch，要么兑现 block；不能保留被忽略的 decision。
-4. **删除 `PromptSource.toolSchemas()`。** 已于 2026-09-01 删除（见 §3.3）；工具 schema 只由 turn workset 投影。
-5. **在 durable ingress 前验消息形状。** 同一份 validator 同时守写入和恢复，不能让 Agent 自己产毒档。
+3. ~~**兑现 `contextBeforeBuild` block。**~~ 已实现（2026-09-01），见 §6。
+4. **在 durable ingress 前验消息形状。** 同一份 validator 同时守写入和恢复，不能让 Agent 自己产毒档。
 
 ### 需要产品语义确认
 
 1. `UserMessage.source` 表示内容作者，还是入账通道；据此决定 follow-up 是否是独立来源。
-2. 哪些 prompt sections 属于关键策略，渲染失败必须阻止模型调用；哪些只是增强，可以省略。
-3. turn injection、transform 与 converter 失败时，是 fail-loud 结束 run，还是使用明确的 fallback；每个扩展点分别决定。
-4. 自定义 AgentMessage 是否默认永远 model-invisible，还是注册自定义 role 时必须同时注册 projection。
-5. ~~compaction summary 在账本中采用独立 role、environment role，还是只作为 session entry 经恢复投影。~~ 已决（2026-09-02）：只作为 session entry，送模时投影成 user/harness 消息带固定框定，见 [决策记录](../decisions/implemented/2026-09-02-compaction-summary-message.md)。
+2. transform 与 converter 失败时，是 fail-loud 结束 run，还是使用明确的 fallback；两者分别决定。Prompt section 与 injection 的对应问题归 [Prompt 设计](prompt.md) §8–§9。
+3. 自定义 AgentMessage 是否默认永远 model-invisible，还是注册自定义 role 时必须同时注册 projection。
+4. ~~compaction summary 在账本中采用独立 role、environment role，还是只作为 session entry 经恢复投影。~~ 已决（2026-09-02）：只作为 session entry，送模时投影成 user/harness 消息带固定框定，见 [决策记录](../decisions/implemented/2026-09-02-compaction-summary-message.md)。
 
 ### 本轮明确延期
 
@@ -307,10 +269,10 @@ bun test packages/core/test/prompt.test.ts \
 
 当前全绿。它说明既有判据仍成立，不说明本稿列出的缺口不存在。
 
-核实死接口和 compaction 消费路径：
+核实 compaction 消费路径：
 
 ```bash
-rg -n 'toolSchemas|PromptSource|compactionStages|buildWorkingMessages' \
+rg -n 'compactionStages|buildWorkingMessages' \
   packages/core/src packages/core/test
 ```
 

@@ -70,6 +70,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/design/prompt.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/proposed/2026-09-03-agent-is-an-extension.md",
       "bilingual": false
     },

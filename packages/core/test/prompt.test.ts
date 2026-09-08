@@ -1,4 +1,4 @@
-// prompt 组装的契约门。对应设计 docs/design/context-and-message-flow.md §3。
+// prompt 组装的契约门。对应设计 docs/design/prompt.md。
 //
 // 锁的不变量:
 //   ① 装配:按 order 升序(同数保注册序);空段丢弃;render 抛错 = 隐形 + 留痕;全空 = null

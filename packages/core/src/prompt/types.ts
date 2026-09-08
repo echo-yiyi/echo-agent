@@ -1,4 +1,4 @@
-// prompt 组装的接口。设计见 docs/design/context-and-message-flow.md §3。
+// prompt 组装的接口。设计见 docs/design/prompt.md。
 //
 // 架构（2026-08-05 拍定，2026-09-01 改为 extension 出段）:
 //   prompt 模块定义 **PromptSection(段)** 与 **PromptVariable(变量)** 两个接口;
