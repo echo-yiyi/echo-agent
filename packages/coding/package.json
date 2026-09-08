@@ -1,10 +1,9 @@
 {
-  "name": "echo-coding",
-  "version": "0.0.1",
-  "private": true,
+  "name": "@echo-agent/coding",
+  "version": "0.1.0",
   "license": "MIT",
   "type": "module",
-  "description": "Echo 的 coding agent 产品：在 echo-agent 之上装 echo:workspace / echo:shell 两条 Extension（文件读写、搜索、shell）。可执行文件 echo-coding 复用 echo-agent 的启动逻辑，装配归 createEcho()。",
+  "description": "Echo's coding agent: file, search, shell and web tools mounted on top of echo-agent. Installs the `echo-coding` command. Requires Bun.",
   "bin": {
     "echo-coding": "./bin/echo-coding.ts"
   },
@@ -26,6 +25,25 @@
   "files": [
     "src",
     "bin",
-    "LICENSE"
-  ]
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "agent",
+    "ai-agent",
+    "llm",
+    "coding-agent",
+    "cli",
+    "bun"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/echo-yiyi/echo-agent.git",
+    "directory": "packages/coding"
+  },
+  "homepage": "https://github.com/echo-yiyi/echo-agent#readme",
+  "bugs": "https://github.com/echo-yiyi/echo-agent/issues",
+  "engines": {
+    "bun": ">=1.3.0"
+  }
 }

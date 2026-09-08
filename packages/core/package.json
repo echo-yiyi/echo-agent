@@ -1,10 +1,9 @@
 {
   "name": "@echo-agent/core",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0",
   "license": "MIT",
   "type": "module",
-  "description": "agent-core v2：一个持续存在的 Agent（状态机 + 命令 + 事件）与它的纯循环。零运行时依赖；Agent 管机制（状态机、恢复、提交顺序），用户换策略与基础设施（Store / Strategy / Source / Clock / Executor / Lock）。",
+  "description": "The Echo agent runtime and SDK: a persistent agent — state machine, commands, events — and its pure loop. Zero runtime dependencies; the Agent owns the mechanism while you supply the ports and the policy.",
   "dependencies": {},
   "devDependencies": {
     "@types/bun": "latest",
@@ -78,5 +77,21 @@
     "src",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "keywords": [
+    "agent",
+    "ai-agent",
+    "llm",
+    "llm-agent",
+    "agent-runtime",
+    "sdk",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/echo-yiyi/echo-agent.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/echo-yiyi/echo-agent#readme",
+  "bugs": "https://github.com/echo-yiyi/echo-agent/issues"
 }

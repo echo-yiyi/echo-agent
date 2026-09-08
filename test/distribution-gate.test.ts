@@ -473,7 +473,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         mkdirSync(consumer, { recursive: true });
         writeFileSync(
           join(consumer, "package.json"),
-          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "echo-coding": `file:${join(out, codingTgz!)}` } }),
+          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "@echo-agent/coding": `file:${join(out, codingTgz!)}` } }),
         );
         const install = sh(["bun", "install"], consumer);
         expect([install.ok, install.out.slice(-400)]).toEqual([true, install.out.slice(-400)]);

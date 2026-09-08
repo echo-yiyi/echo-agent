@@ -97,7 +97,7 @@ try {
 |---|---|
 | `@echo-agent/core` | Runtime、engine、provider adapters、持久化、记忆、任务与 extension API |
 | `echo-agent` | 通用 agent：官方 CLI，支持交互与管道两种形态；不认识任何具体产品 |
-| `echo-coding` | coding agent：依赖 `echo-agent`，加 `echo:workspace`、`echo:shell`、`echo:worktree`、`echo:web` 四条 extension 和 `echo-coding` 命令 |
+| `@echo-agent/coding` | coding agent：依赖 `echo-agent`，加 `echo:workspace`、`echo:shell`、`echo:worktree`、`echo:web` 四条 extension 和 `echo-coding` 命令 |
 
 可运行的消费者在 [`examples/`](examples/) 中：真实 provider 的 hello world、无需凭据的 scripted agent，以及 extension 自动发现示例。分发测试会打包各 workspace，在干净项目中安装 tarball，再用 Bun 和 Node 运行这些公共入口。
 

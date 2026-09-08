@@ -97,7 +97,7 @@ try {
 |---|---|
 | `@echo-agent/core` | Runtime, engine, provider adapters, persistence, memory, tasks, and the extension API |
 | `echo-agent` | General agent: official CLI with interactive and piped modes; knows no specific product |
-| `echo-coding` | Coding agent: depends on `echo-agent`, adds the `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions and the `echo-coding` command |
+| `@echo-agent/coding` | Coding agent: depends on `echo-agent`, adds the `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions and the `echo-coding` command |
 
 Runnable consumers live in [`examples/`](examples/): a real-provider hello world, a credential-free scripted agent, and extension auto-discovery. The distribution test packs the workspaces, installs the tarballs in clean projects, and runs these public entry points with Bun and Node.
 

@@ -6,10 +6,10 @@
     "packages/*"
   ],
   "devDependencies": {
+    "@echo-agent/coding": "workspace:*",
     "@echo-agent/core": "workspace:*",
     "@types/bun": "latest",
     "echo-agent": "workspace:*",
-    "echo-coding": "workspace:*",
     "typescript": "^5.5.0"
   },
   "scripts": {

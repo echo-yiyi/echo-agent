@@ -34,6 +34,14 @@
       "bilingual": false
     },
     {
+      "path": "packages/cli/README.md",
+      "bilingual": false
+    },
+    {
+      "path": "packages/coding/README.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/design/lifecycle-and-run-loop.md",
       "bilingual": false
     },
