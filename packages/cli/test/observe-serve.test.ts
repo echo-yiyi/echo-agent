@@ -10,7 +10,7 @@ import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "@echo-ag
 import { OBSERVE_DEFAULT_PORT, parseObserveArgs, runObserve } from "../src/observe.ts";
 import { observePageHtml, startObserveServer } from "../src/observe/server.ts";
 import { SessionObservationReaders } from "../src/observe/sessions.ts";
-import { lexicon } from "../src/observe/lexicon.ts";
+import { lexicon, recordMark } from "../src/observe/lexicon.ts";
 import type { Sink } from "../src/run.ts";
 
 let dir: string;
@@ -220,9 +220,28 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   // 行按类别分轻重。导轨用真元素不用背景渐变——渐变调不出来时说不清是没画还是画在看不见的地方（实测走过两轮）
   for (const marker of ["class: \"rail\"", "tl--tool", "tl--trace", "TRACE_NAMES"]) expect(html).toContain(marker);
   expect(html).toContain(".tl .rail { flex: 0 0 var(--space-16); border-left: 1px solid var(--ui-line-strong); }");
+  // 类别记号（2026-09-08）：表在术语表里，页面只做最长前缀匹配；工具 / 失败沿用 agent-behavior.md §2.3 的字符
+  expect(html).toContain('"marks"');
+  for (const marker of ["function recordMark", "CAPABILITY_PREFIXES", "tl--cap"]) expect(html).toContain(marker);
   // 标签不再中英双写：badge 只出中文，英文进 title
   expect(html).not.toContain('el("span", { class: "en", text: t.en })');
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
+});
+
+test("类别记号：按最长前缀匹配，容器不给记号，工具 / 失败沿用设计系统规定的字符", () => {
+  expect(recordMark("tool.execute")).toBe("▸");
+  expect(recordMark("model.generate")).toBe("◆");
+  expect(recordMark("memory.compose")).toBe("◇");
+  expect(recordMark("inbox.consumed")).toBe("◇");
+  expect(recordMark("context.compact")).toBe("⤓");
+  expect(recordMark("observation.gap")).toBe("⚠");
+  // 容器左边已经有折叠箭头，不再给点
+  expect(recordMark("turn.execute")).toBe("");
+  expect(recordMark("reply.execute")).toBe("");
+  // 没登记的回落到安静的点
+  expect(recordMark("agent.loop.started")).toBe("·");
+  // 最长前缀赢：`tool.execute.progress` 不会被更短的前缀抢走
+  expect(recordMark("tool.execute.progress")).toBe("▸");
 });
 
 test("页面的内联脚本能解析：语法错会让整页空白，而 HTML 本身照样 200", () => {
