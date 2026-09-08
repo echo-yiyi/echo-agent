@@ -74,6 +74,8 @@ export function startObserveServer(opts: ObserveServerOptions): ObserveServer {
             sessionsRoot: readers.opts.sessionsRoot,
             ...(readers.opts.sessionId === undefined ? {} : { sessionId: readers.opts.sessionId }),
             sessions: await readers.health(),
+            // 会话清单读不出来时 run 照看，但产品名 / 工作目录会缺——原因如实报出，不让页面自己猜
+            ...(readers.sessionsProblem === undefined ? {} : { sessionsProblem: readers.sessionsProblem }),
             now: Date.now(),
           });
         }

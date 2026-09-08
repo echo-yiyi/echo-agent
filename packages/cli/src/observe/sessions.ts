@@ -5,7 +5,7 @@
 // 会话的出现与消失按 2s 缓存重扫：新出现且已有库的开 reader，目录没了的关掉。`sessionId` 给了就只看那一段——
 // 那时不要求它有 meta（点名的是目录），只要求库文件存在。
 
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import {
   describeAgentRef,
   FileDir,
@@ -84,6 +84,8 @@ export type SessionObservationReadersOptions = Readonly<{
 export class SessionObservationReaders {
   private readonly readers = new Map<string, SqliteEchoObservationReader>();
   private briefs: Record<string, SessionBrief> = {};
+  /** 非 undefined = 这轮会话清单没读出来（坏 / 旧 meta）：run 照看，只是没有产品名与工作目录。 */
+  private briefsError: string | undefined;
   private scannedAt = 0;
   /** runId → sessionId（listRuns 见过的），`getRun` 先查它再挨个库找。 */
   private readonly runOwner = new Map<string, string>();
@@ -106,6 +108,11 @@ export class SessionObservationReaders {
   }
 
   /** 会话根下全部会话的摘要（不只是有库的）。 */
+  /** 会话清单为什么没读出来；`undefined` = 读出来了。页面据此说清「为什么没有名字」。 */
+  get sessionsProblem(): string | undefined {
+    return this.briefsError;
+  }
+
   get sessions(): Readonly<Record<string, SessionBrief>> {
     return this.briefs;
   }
@@ -113,12 +120,24 @@ export class SessionObservationReaders {
   /** 重扫会话根。`force` 跳过 2s 缓存（命令行一次性用）。 */
   async refresh(force = false): Promise<void> {
     if (!force && Date.now() - this.scannedAt < SESSION_CACHE_MS) return;
-    const infos = await listSessions(new FileDir(this.opts.sessionsRoot));
+    // **会话清单读不出来不该让只读面板起不来**：`listSessions()` 对任何一段坏 / 旧 meta 都整体抛错
+    // （那对 `--continue` / `--resume` 是对的：续错一段比不续更糟）。但观测是只读旁路，
+    // 一段 2026-09-01 之前建的老 session 缺 `product`，不该连累其余会话的 run 一条都看不了。
+    // 接住它，退成「没有会话摘要」——产品名与工作目录显示未上报，run 照看；原因交给 /api/health 与页面说清。
+    let infos: SessionInfo[] = [];
+    this.briefsError = undefined;
+    try {
+      infos = await listSessions(new FileDir(this.opts.sessionsRoot));
+    } catch (e) {
+      this.briefsError = e instanceof Error ? e.message : String(e);
+    }
     const briefs: Record<string, SessionBrief> = {};
     for (const s of infos) {
       briefs[s.id] = { product: s.product, agent: describeAgentRef(s.agent), name: s.name, workspace: s.workspace, updatedAt: s.updatedAt, status: s.status };
     }
-    const wanted = this.opts.sessionId === undefined ? infos.map((s) => s.id) : [this.opts.sessionId];
+    // 清单读不出来时，直接扫会话根下有观测库的目录——run 仍然全都看得见，只是没有名字
+    const discovered = this.briefsError === undefined ? infos.map((s) => s.id) : this.sessionDirsWithDatabase();
+    const wanted = this.opts.sessionId === undefined ? discovered : [this.opts.sessionId];
     const seen = new Set<string>();
     for (const id of wanted) {
       if (!existsSync(this.databasePath(id))) continue; // 会话有了、agent 还没跑过一条 run：库还没建，不是错
@@ -132,6 +151,17 @@ export class SessionObservationReaders {
     }
     this.briefs = briefs;
     this.scannedAt = Date.now();
+  }
+
+  /** 会话清单读不出来时的兜底：会话根下每个「有观测库」的子目录就是一段能看的会话。 */
+  private sessionDirsWithDatabase(): string[] {
+    let names: string[];
+    try {
+      names = readdirSync(this.opts.sessionsRoot, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+    } catch {
+      return [];
+    }
+    return names.filter((id) => existsSync(this.databasePath(id)));
   }
 
   /** 各段的最近 `limit` 条 run 合起来按 `(acceptedAt, runId)` 倒序，取前 `limit` 条。 */

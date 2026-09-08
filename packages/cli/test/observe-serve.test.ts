@@ -208,9 +208,23 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   expect(lex.records["attempt.execute"]).toBeDefined();
   // 视觉分工（2026-09-07 用户评审）：正常状态走圆点、色块留给要立刻注意的；时间线四列 + 条形轨；筛选恒两行
   for (const marker of ["function statusMark", "function dot(", "class: \"track\"", "class: \"selrow\"", "class: \"chiprow\""]) expect(html).toContain(marker);
+  // 排查版面（2026-09-07 第三轮评审）：顶部概览 + 中间时间线 + 右侧事件详情；折叠归箭头、选中归行；
+  // 原始 JSON 收进右栏而不是就地展开（那会把后面的行推走，连着看两条就找不回位置）
+  for (const marker of ["class: \"overview\"", "class: \"metrics\"", "function renderEventDetail", "function selectEvent", "function visibleEntries", "原始 JSON", "function copyButton"]) {
+    expect(html).toContain(marker);
+  }
+  expect(html).not.toContain('class: "tl-detail"'); // 行内展开已经没有了
   // 标签不再中英双写：badge 只出中文，英文进 title
   expect(html).not.toContain('el("span", { class: "en", text: t.en })');
   expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
+});
+
+test("页面的内联脚本能解析：语法错会让整页空白，而 HTML 本身照样 200", () => {
+  // 实测教训（2026-09-07）：改版时留下一个重复的 `const m`，服务照常返回页面、Chrome 里一片空白，
+  // 直到截图才发现。`new Function` 只编译不执行，正好把语法错挡在渲染之前。
+  const script = observePageHtml().split("<script>")[1]?.split("</script>")[0] ?? "";
+  expect(script.length).toBeGreaterThan(1000);
+  expect(() => new Function(script)).not.toThrow();
 });
 
 test("颜色规则可判（2026-09-07 用户定）：紫只用于交互态、成功色不再出现、强色只给失败与警告", () => {
