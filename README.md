@@ -81,15 +81,15 @@ echo.agent.subscribe((event) => {
   }
 });
 
-await echo.agent.start();
+await echo.start();
 try {
-  await echo.agent.prompt("Introduce yourself in one sentence.");
+  await echo.send("Introduce yourself in one sentence.");
 } finally {
   await echo.stop();
 }
 ```
 
-`createEcho()` is the one place a runtime is put together, so a host starts there. An extension is how you add tools, prompt sections, compaction stages, or hooks to a running agent: it declares what it injects and what it provides, and the host owns its lifetime, so it can be unmounted without leaving anything behind. A shell is an extension too, one that injects the `AgentRuntime` service and renders it. The `Agent` class itself is internal: much of it exists to carry host-only wiring, and everything a third party needs is on the extension API.
+`createEcho()` is the one place a runtime is put together, so a host starts there. An extension is how you add tools, prompt sections, compaction stages, or hooks to a running agent: it declares what it injects and what it provides, and the host owns its lifetime, so it can be unmounted without leaving anything behind. A shell is an extension too, one that injects the `AgentRuntime` service and renders it. The `Agent` class is on its way inside: the decision is made but not yet implemented (`docs/decisions/proposed/2026-09-07-agent-class-internal.md`), so it is still exported today, but it is not a supported entry point — much of it exists to carry host-only wiring, and everything a third party needs is on the extension API.
 
 ## Packages
 
@@ -99,7 +99,7 @@ try {
 | `echo-agent` | General agent: official CLI with interactive and piped modes; knows no specific product |
 | `@echo-agent/coding` | Coding agent: depends on `echo-agent`, adds the `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions and the `echo-coding` command |
 
-Runnable consumers live in [`examples/`](examples/): a real-provider hello world, a credential-free scripted agent, and extension auto-discovery. The distribution test packs the workspaces, installs the tarballs in clean projects, and runs these public entry points with Bun and Node.
+Runnable consumers live in [`examples/`](examples/): a real-provider hello world, a credential-free scripted agent, and extension auto-discovery. The distribution test packs the workspaces, installs the tarballs in clean projects, type-checks all three examples, and runs the two credential-free ones with Bun; Node runs a generated smoke script against the installed package instead (the hello example needs a real key, so it is only type-checked).
 
 ## Repository layout
 

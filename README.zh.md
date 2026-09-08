@@ -81,15 +81,15 @@ echo.agent.subscribe((event) => {
   }
 });
 
-await echo.agent.start();
+await echo.start();
 try {
-  await echo.agent.prompt("Introduce yourself in one sentence.");
+  await echo.send("Introduce yourself in one sentence.");
 } finally {
   await echo.stop();
 }
 ```
 
-`createEcho()` 是装配 runtime 的唯一一处，所以自定义 host 从这里起步。要给运行中的 agent 加工具、prompt 段、压缩阶段或 hook，就写一条 extension：它声明自己注入什么、提供什么，生命周期归 host 管，卸载时不留残骸。壳也是一条 extension，只是它注入的是 `AgentRuntime` 这个 service 并把它渲染出来。`Agent` 类本身是内部的：它有相当一部分是为承载 host 专用接线而存在的，第三方需要的一切都在 extension API 上。
+`createEcho()` 是装配 runtime 的唯一一处，所以自定义 host 从这里起步。要给运行中的 agent 加工具、prompt 段、压缩阶段或 hook，就写一条 extension：它声明自己注入什么、提供什么，生命周期归 host 管，卸载时不留残骸。壳也是一条 extension，只是它注入的是 `AgentRuntime` 这个 service 并把它渲染出来。`Agent` 类正在收进内部：已拍板、尚未实现（`docs/decisions/proposed/2026-09-07-agent-class-internal.md`），所以今天它仍然导出，但不是受支持的入口——它有相当一部分是为承载 host 专用接线而存在的，第三方需要的一切都在 extension API 上。
 
 ## Packages
 
@@ -99,7 +99,7 @@ try {
 | `echo-agent` | 通用 agent：官方 CLI，支持交互与管道两种形态；不认识任何具体产品 |
 | `@echo-agent/coding` | coding agent：依赖 `echo-agent`，加 `echo:workspace`、`echo:shell`、`echo:worktree`、`echo:web` 四条 extension 和 `echo-coding` 命令 |
 
-可运行的消费者在 [`examples/`](examples/) 中：真实 provider 的 hello world、无需凭据的 scripted agent，以及 extension 自动发现示例。分发测试会打包各 workspace，在干净项目中安装 tarball，再用 Bun 和 Node 运行这些公共入口。
+可运行的消费者在 [`examples/`](examples/) 中：真实 provider 的 hello world、无需凭据的 scripted agent，以及 extension 自动发现示例。分发测试会打包各 workspace，在干净项目中安装 tarball，三个样例都做类型检查，用 Bun 跑其中两个无需凭据的；Node 则另跑一段生成的冒烟脚本验证装好的包（hello 要真 key，只做类型检查）。
 
 ## 仓库目录
 
