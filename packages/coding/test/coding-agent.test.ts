@@ -2,7 +2,7 @@
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
@@ -158,6 +158,49 @@ test("路径越界一律拒(../ 逃逸、绝对路径出工作区)", async () =>
     const r = await tool(fs, "write_file").execute({ path, content: "x" }, ctx());
     expect(r.isError).toBe(true);
     expect(r.content).toContain("outside the workspace");
+  }
+});
+
+test("越界守卫覆盖六件工具，且解 symlink：工作区里一条软链指到外面，读、写、改、搜、找、列一律拒；指回工作区内的软链照常（review 2026-09-07）", async () => {
+  // 此前：`resolveSafe` 只比字符串前缀，`link -> /outside` 之后 `link/secret` 字面上完全在工作区内；
+  // 而 glob / grep / list_dir 根本没有边界——凡是把 bash 设成 ask 的策略，grep 就是绕开那道门读整块盘的路。
+  const outside = await mkdtemp(join(tmpdir(), "echo-ca-outside-"));
+  try {
+    await writeFile(join(outside, "secret.txt"), "top secret\n", "utf8");
+    await mkdir(join(root, "sub"), { recursive: true });
+    await writeFile(join(root, "sub/in.txt"), "inside\n", "utf8");
+    await symlink(outside, join(root, "escape")); // 目录软链 → 外面
+    await symlink(join(outside, "secret.txt"), join(root, "escape.txt")); // 文件软链 → 外面
+    await symlink(join(root, "sub"), join(root, "alias")); // 软链 → 工作区内
+
+    const fs = makeFsTools();
+    const s = makeSearchTools();
+    const refused = (r: { isError?: boolean; content: string }): void => {
+      expect(r.isError).toBe(true);
+      expect(r.content).toContain("outside the workspace");
+    };
+    refused(await tool(fs, "read_file").execute({ path: "escape/secret.txt" }, ctx()));
+    refused(await tool(fs, "read_file").execute({ path: "escape.txt" }, ctx()));
+    refused(await tool(fs, "write_file").execute({ path: "escape/new.txt", content: "x" }, ctx()));
+    expect(existsSync(join(outside, "new.txt")), "写到外面去了").toBe(false);
+    refused(await tool(fs, "write_file").execute({ path: "escape/deeper/new.txt", content: "x" }, ctx())); // mkdir 之前就得拒
+    expect(existsSync(join(outside, "deeper")), "递归建目录顺着软链建到外面去了").toBe(false);
+    refused(await tool(fs, "edit_file").execute({ path: "escape.txt", old_string: "top", new_string: "x" }, ctx()));
+    refused(await tool(s, "grep").execute({ pattern: "secret", path: "escape" }, ctx()));
+    refused(await tool(s, "glob").execute({ pattern: "*", path: "escape" }, ctx()));
+    refused(await tool(s, "list_dir").execute({ path: "escape" }, ctx()));
+    // 三件搜索工具对绝对路径与 `../` 同样拒（此前它们根本没有边界）
+    refused(await tool(s, "list_dir").execute({ path: outside }, ctx()));
+    refused(await tool(s, "grep").execute({ pattern: "secret", path: "../" }, ctx()));
+    refused(await tool(s, "glob").execute({ pattern: "*", path: "/" }, ctx()));
+
+    // 指回工作区内的软链不误伤（结果路径仍按字面相对工作区报，不冒出展开后的路径）
+    const ok = await tool(fs, "read_file").execute({ path: "alias/in.txt" }, ctx());
+    expect([ok.isError, ok.content]).toEqual([false, expect.stringContaining("inside")]);
+    expect((await tool(s, "list_dir").execute({ path: "alias" }, ctx())).content).toBe("in.txt");
+    expect((await tool(s, "grep").execute({ pattern: "inside", path: "alias" }, ctx())).content).toBe("alias/in.txt:1:inside");
+  } finally {
+    await rm(outside, { recursive: true, force: true });
   }
 });
 

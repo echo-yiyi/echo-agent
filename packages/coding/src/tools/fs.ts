@@ -3,12 +3,14 @@
 // 这些是**产品层工具**(对外部世界动手),所以住这儿不住 core(判据 2026-08-04 拍定)。
 // 路径纪律:相对路径以 ctx.workspace 解析,**解析结果必须落在 workspace 之内**——
 // 越界一律拒绝(`../../etc/passwd` 这类,不管是模型手滑还是注入)。workspace 是 session 级事实（2026-09-01），
-// 既是起点也是边界,一个字段。
+// 既是起点也是边界,一个字段。这道边界是**六件工作区工具共用的一条**（`resolveSafe`，search.ts 也走它），
+// 解 symlink（review 2026-09-07：此前只比字符串前缀，工作区里一条软链就能读写外面）。bash 不在这道边界内——
+// 它是有意留的出口，像 Claude Code 的 Bash 一样能 cd 到任何地方，看着它的是 permission 策略，不是路径。
 //
 // description 与结果文本是模型逐字读的资产（全英文，2026-09-01）；跨工具的用法（先读后改、glob/grep 优先）
 // 在 `prompt.ts` 的 `tool:workspace` 段，这里只讲单个工具自己的语义。
 
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { toolError, toolOk, type ModelTool, type ToolExecutionContext } from "@echo-agent/core";
 
@@ -50,11 +52,43 @@ async function markSeen(seen: SeenFiles, abs: string): Promise<void> {
   if (st !== null) seen.set(abs, st.mtimeMs);
 }
 
-/** 解析 + 越界守卫。返回 null = 越界。 */
-export function resolveSafe(ctx: ToolExecutionContext, path: string): string | null {
+/**
+ * 解析 + 越界守卫：六件工作区工具（read_file / write_file / edit_file / list_dir / glob / grep）共用的**唯一**边界。
+ * 返回 null = 越界。
+ *
+ * 两道判据（照 core `storage/file-dir.ts#resolveSafe`）：先按字面比前缀（挡 `../` 与绝对路径），
+ * 再把**最近的已存在祖先** realpath 之后比一次——字面判据对 symlink 无话可说，工作区里一条
+ * `link -> /etc` 的软链，`link/passwd` 字面上完全在工作区内。用祖先是因为目标本身可能还不存在
+ * （write_file 正要创建它）；祖先在工作区之内，那么在它下面新建的东西也在。
+ * **write_file 必须先过这一关再 mkdir**：`mkdir(..., {recursive:true})` 会顺着软链在外面把目录建出来。
+ *
+ * 返回的是字面路径（不是 realpath）：后面的读写照常跟着软链走，结果仍在工作区内；结果文案里也不该
+ * 冒出 `/private/var/...` 这种展开后的路径。
+ */
+export async function resolveSafe(ctx: ToolExecutionContext, path: string): Promise<string | null> {
   const abs = isAbsolute(path) ? resolve(path) : resolve(ctx.workspace, path);
   const root = resolve(ctx.workspace);
-  return abs === root || abs.startsWith(root + sep) ? abs : null;
+  if (abs !== root && !abs.startsWith(root + sep)) return null;
+
+  let realRoot: string;
+  try {
+    realRoot = await realpath(root);
+  } catch {
+    return abs; // 工作区目录本身不存在 → 里面不可能有软链；后面的读写会自己报 not found
+  }
+  let cursor = abs;
+  let real: string | null = null;
+  while (real === null) {
+    try {
+      real = await realpath(cursor);
+    } catch (e) {
+      if ((e as { code?: string }).code !== "ENOENT") return null; // 读不出来（权限、循环软链）：按越界拒，不猜
+      const parent = dirname(cursor);
+      if (parent === cursor) return abs; // 一路到文件系统根都不存在
+      cursor = parent;
+    }
+  }
+  return real === realRoot || real.startsWith(realRoot + sep) ? abs : null;
 }
 
 function readFileTool(seen: SeenFiles): ModelTool<{ path: string; offset?: number; limit?: number }> {
@@ -76,7 +110,7 @@ function readFileTool(seen: SeenFiles): ModelTool<{ path: string; offset?: numbe
       required: ["path"],
     },
     async execute({ path, offset, limit }, ctx) {
-      const abs = resolveSafe(ctx, path);
+      const abs = await resolveSafe(ctx, path);
       if (abs === null) return toolError(`Path outside the workspace: '${path}'`);
       let raw: string;
       try {
@@ -114,7 +148,7 @@ function writeFileTool(seen: SeenFiles): ModelTool<{ path: string; content: stri
       required: ["path", "content"],
     },
     async execute({ path, content }, ctx) {
-      const abs = resolveSafe(ctx, path);
+      const abs = await resolveSafe(ctx, path); // 必须在 mkdir 之前：递归建目录会顺着软链把目录建到外面
       if (abs === null) return toolError(`Path outside the workspace: '${path}'`);
       const refused = await assertFreshlyRead(seen, abs, path); // 新建不用先读；覆盖已有的必须
       if (refused !== null) return toolError(refused);
@@ -146,7 +180,7 @@ function editFileTool(seen: SeenFiles): ModelTool<{ path: string; old_string: st
       required: ["path", "old_string", "new_string"],
     },
     async execute({ path, old_string, new_string, replace_all }, ctx) {
-      const abs = resolveSafe(ctx, path);
+      const abs = await resolveSafe(ctx, path);
       if (abs === null) return toolError(`Path outside the workspace: '${path}'`);
       if (old_string === new_string) return toolError("old_string and new_string are identical; nothing to change");
       const refused = await assertFreshlyRead(seen, abs, path);

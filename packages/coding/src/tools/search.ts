@@ -6,11 +6,16 @@
 // glob 拿到文件则明说「要目录」并指回 grep——静默返回 0 个匹配是「写了没生效」。
 //
 // **结果路径一律相对工作区**：read_file / edit_file 收的是工作区相对路径，搜索若按 `path` 相对报
-// （在 `packages/core/src` 里搜到 `agent.ts:260`），模型拿着 `agent.ts` 去读就找不到。工作区之外的报绝对路径。
+// （在 `packages/core/src` 里搜到 `agent.ts:260`），模型拿着 `agent.ts` 去读就找不到。
+//
+// **边界与文件三件套同一条**（review 2026-09-07）：`path` 经 fs.ts 的 `resolveSafe` 解析，越界（含经软链）一律拒。
+// 此前这三件没有任何边界，而 system 段对模型说的是「工作区之外的路径会被拒」——契约与实现两张皮，
+// 且凡是把 bash 设成 ask 的策略，grep 都是绕开那道门读整块盘的路。
 
 import { readdir, readFile, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { toolError, toolOk, type ModelTool, type ToolExecutionContext } from "@echo-agent/core";
+import { resolveSafe } from "./fs.ts";
 
 const GLOB_CAP = 500;
 const GREP_CAP = 200;
@@ -25,22 +30,17 @@ export function makeSearchTools(): ModelTool[] {
   return [globTool(), grepTool(), listDirTool()] as ModelTool[];
 }
 
-function baseDir(ctx: ToolExecutionContext, path?: string): string {
-  if (path === undefined || path === "") return ctx.workspace;
-  return isAbsolute(path) ? path : resolve(ctx.workspace, path);
-}
-
-/** 结果里怎么报这个文件：工作区内相对工作区；工作区外（绝对 `path` 指出去的）报绝对路径。 */
+/** 结果里怎么报这个文件：相对工作区——起点已经过了越界守卫，结果只可能在工作区内。 */
 function display(ctx: ToolExecutionContext, abs: string): string {
-  const rel = relative(ctx.workspace, abs);
-  return rel === "" || rel.startsWith("..") || isAbsolute(rel) ? abs : rel;
+  return relative(ctx.workspace, abs);
 }
 
 type Target = { ok: true; kind: "file" | "dir"; abs: string } | { ok: false; error: string };
 
-/** `path` → 搜索起点。不存在、是文件、是目录三种情况分开说，错误文案要让模型知道下一步怎么办。 */
+/** `path` → 搜索起点。越界、不存在、是文件、是目录分开说，错误文案要让模型知道下一步怎么办。 */
 async function resolveTarget(ctx: ToolExecutionContext, path?: string): Promise<Target> {
-  const abs = baseDir(ctx, path);
+  const abs = path === undefined || path === "" ? resolve(ctx.workspace) : await resolveSafe(ctx, path);
+  if (abs === null) return { ok: false, error: `Path outside the workspace: '${path}'` };
   const st = await stat(abs).catch(() => null);
   if (st === null) return { ok: false, error: `path not found: ${path ?? abs}` };
   return { ok: true, kind: st.isFile() ? "file" : "dir", abs };
