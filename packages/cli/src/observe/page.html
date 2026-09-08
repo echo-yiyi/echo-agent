@@ -171,7 +171,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
  * 又会在 1280px 下把刻度挤成重叠。`minmax(0, 46ch)` + `minmax(96px, 1fr)` 两头都成立：
  * 窄屏事件列缩、轨道保底 96px；宽屏事件列停在阅读宽度、剩下的全给轨道。
  */
-.exec { --tl-cols: 18px 52px minmax(0, 46ch) max-content 52px minmax(96px, 1fr); }
+.exec { --tl-cols: 18px 52px minmax(0, 54ch) max-content 52px minmax(96px, 1fr); }
 .tl {
   position: relative;
   display: grid; grid-template-columns: var(--tl-cols);
@@ -205,11 +205,15 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .tl .what { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
 .tl .what .prefix { width: var(--ctl-tool-prefix-width); flex-shrink: 0; color: var(--stone); }
 .tl .what .verb { flex-shrink: 0; color: var(--ink-70); }
-.tl .what .obj { font-family: var(--font-mono); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tl .what .arg { font-family: var(--font-mono); color: var(--stone); flex: 0 2 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 底层事件名再降一级，但保留可读对比度：它是查证用的锚，不是扫读目标。
-   宽度不够时**它先让**（flex-shrink 大）——被截断的该是 `agent.custom_event`，不是那条事件说的对象 */
-.tl .what .en { font-family: var(--font-mono); color: var(--stone); font-size: var(--size-micro); opacity: 0.85; flex: 0 999 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/*
+ * 一行里谁先让：**参数预览先让，工具名与记录名不让**。
+ * 上一版让 flex-shrink 按基准长度分配，结果是长参数把 `bash` 截成 `ba…`、把 `tool.execute` 截成 `t`
+ * （实测截图）——工具叫什么是这行的身份，参数只是预览，截错了顺序整行就读不懂了。
+ */
+.tl .what .obj { font-family: var(--font-mono); flex: 0 0 auto; white-space: nowrap; }
+.tl .what .arg { font-family: var(--font-mono); color: var(--stone); flex: 0 1 auto; min-width: 0; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 底层事件名再降一级，但保留可读对比度：它是查证用的锚，不是扫读目标。短且定长，不参与收缩 */
+.tl .what .en { font-family: var(--font-mono); color: var(--stone); font-size: var(--size-micro); opacity: 0.85; flex: 0 0 auto; white-space: nowrap; }
 .tl .usage, .tl .res { font-family: var(--font-mono); font-size: var(--size-caption); color: var(--stone); white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 .tl--boundary { color: var(--ink); }
 /* 「轮 #1」要明显重过它旁边的 turn.execute：加重只加在动词上，不整行加粗 */
@@ -575,7 +579,13 @@ const FOLDED_INTO = { "model.generate.delta": "model.generate", "tool.execute.pr
 
 /* 紧跟在某条 span 之后、说的是同一件事的记录：折进那条，不另起一行。
    `model.usage` 就是刚结束那次生成的 token 数——模型生成行的结果位已经写着 `10611↑ 867↓`，再来一行是同一句话说两遍。 */
-const FOLDED_INTO_PREVIOUS = { "model.usage": "model.generate" };
+/*
+ * `model.usage` 是刚结束那次生成的 token 数——模型生成行的结果位已经写着它。
+ * `agent.message.appended` 紧跟在一次工具执行之后时，说的是「这次的工具结果进了 transcript」，
+ * 也就是那一行的后半句：单列一行只是把同一件事说两遍，而一条 run 里能有十几条（实测截图）。
+ * 折进去的记录不丢：行上写 `+N`，展开右栏能看到计数。
+ */
+const FOLDED_INTO_PREVIOUS = { "model.usage": "model.generate", "agent.message.appended": "tool.execute" };
 
 /* span_start / span_end 配对成一行（§2.3：进行中的条目留在列表里，end 只补结果，不另起一行） */
 function buildEntries(vm) {
@@ -591,7 +601,7 @@ function buildEntries(vm) {
     const ownerName = FOLDED_INTO[t.name];
     if (ownerName !== undefined) {
       const owner = findOpen(ownerName, t.attributes.toolCallId);
-      if (owner) { owner.folded = (owner.folded ?? 0) + 1; continue; }
+      if (owner) { owner.folded = (owner.folded ?? 0) + 1; owner.foldedOf = t.name; continue; }
     }
     if (t.kind === "span_start") {
       const e = { start: t, end: null, key: keyOf(t) };
@@ -609,6 +619,7 @@ function buildEntries(vm) {
     const prev = entries[entries.length - 1];
     if (FOLDED_INTO_PREVIOUS[t.name] !== undefined && prev !== undefined && prev.start.name === FOLDED_INTO_PREVIOUS[t.name]) {
       prev.folded = (prev.folded ?? 0) + 1;
+      prev.foldedOf = t.name; // 给 `+N` 一个说得出口的名字，不然那个数字没人知道是什么
       continue;
     }
     // **连着的同名事件折成一行**：一批工具结果回来会连记 4 条 `agent.message.appended`，
@@ -755,8 +766,8 @@ function renderEntry(e, gaps, runMs = 0) {
       obj ? el("span", { class: "obj", text: obj }) : null,
       arg ? el("span", { class: "arg", text: `"${arg}"` }) : null,
       el("span", { class: "en", text: t.name }),
-      e.folded ? el("span", { class: "folded", text: `+${e.folded}` }) : null,
-      e.repeat ? el("span", { class: "folded", text: `×${e.repeat}` }) : null,
+      e.folded ? el("span", { class: "folded", text: `+${e.folded}`, title: `折起 ${e.folded} 条紧随其后的 ${e.foldedOf ?? "同源记录"}` }) : null,
+      e.repeat ? el("span", { class: "folded", text: `×${e.repeat}`, title: `连续 ${e.repeat} 条同名记录（seq ${t.seq}–${e.lastSeq}）` }) : null,
       collapsed && e.hiddenCount ? el("span", { class: "folded", text: `⋯${e.hiddenCount}` }) : null,
     ),
     el("span", { class: "usage", text: usage }),
@@ -866,6 +877,7 @@ function renderEventDetail(entries, vm) {
   field("记录", el("span", { class: "mono", text: t.name }), copyButton("复制", t.name));
   // 折起的那几条要交代清楚：行上写了 ×N，这里说是哪一段 seq、下面的正文是其中第一条
   if (e.repeat) field("连续", el("span", { text: `${e.repeat} 条同名记录（seq ${t.seq}–${e.lastSeq}），下面显示第一条` }));
+  if (e.folded) field("折起", el("span", { text: `${e.folded} 条 ${e.foldedOf ?? "同源记录"}——它说的是这一行的后半句，不另占一行` }));
   // 关联运行：收件消费这类事实带着来源 run，能直接跳过去（多 agent 排查要顺着线索走）
   const linked = typeof attrs.runId === "string" && attrs.runId !== vm.header.runId ? attrs.runId : null;
   if (linked) field("关联", el("button", { class: "navbtn", text: "打开那条 run", onclick: () => openRun(linked) }));
