@@ -75,7 +75,7 @@ test("跑的中途换装备直接 throw（上下文与工具面不能撕裂）",
   expect(agent.thinkingLevel).toBe("high");
 });
 
-/* ═══════════ 不变量 3：状态由事件驱动（apply 是唯一写路径） ═══════════ */
+/* ═══════════ 不变量 3：跑完终值归零（进行中区回到初始，transcript 留下） ═══════════ */
 
 test("跑完回 idle，进行中区归零，transcript 留下", async () => {
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("答")]) });

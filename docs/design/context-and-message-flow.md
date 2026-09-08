@@ -17,7 +17,7 @@
 - 工具结果、环境事件与人类输入在账本里角色分明，出门时再投影成 provider 支持的两种角色。
 - 每条真正入账的消息都经 `message_end`，并由同一事件驱动运行时投影和 session append。
 
-但是“账本是事实、context 是投影”这句话目前还不能成立为公开契约。源码里有七个必须先处理或明确接受的问题：
+但是“账本是事实、context 是投影”这句话目前还不能成立为公开契约。源码里有六个必须先处理或明确接受的问题（划掉的两个已修）：
 
 1. ~~**compaction 只生成并持久化摘要，不替换送模上下文。**~~ 已修（2026-09-02）：压缩成为作用在 transcript 上的视图状态，策略走 extension 阶梯，撞窗有应急，见 [Compaction](compaction.md) 与 §7。
 2. **消息没有所有权隔离。** `prompt(message)`、`Agent.messages`、context snapshot 与 `transformContext` 共享嵌套对象；调用方或 transform 能在没有新事件、没有新 session entry 的情况下改写已经入账的历史。

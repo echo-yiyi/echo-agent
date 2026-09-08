@@ -11,10 +11,21 @@
 //   ② `tui-pty.test.ts`：真 PTY 里把 Kitty / 应用光标键编码送进去，行为与传统编码一致。
 
 import { expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 
 const SRC = join(import.meta.dir, "..", "src");
+
+/** `src/` 下所有 `.ts`，**递归**——上一版只读顶层，`observe/` 那几个文件在门外（review 2026-09-07）。 */
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) out.push(...walk(p));
+    else if (p.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}
 
 /** 允许的形状：注释行，或者 `const ESC = String.fromCharCode(27);` 这种拼 ANSI 输出的常量定义。 */
 const ALLOWED = /^(?:\/\/.*|\*.*|\/\*\*.*|const \w+ = String\.fromCharCode\(27\);)$/;
@@ -29,10 +40,9 @@ function offenders(source: string): string[] {
 
 test("packages/cli/src 里 `fromCharCode` 只用于拼 ANSI 输出，按键判定不比较字节", () => {
   const report: string[] = [];
-  for (const name of readdirSync(SRC)) {
-    if (!name.endsWith(".ts")) continue;
-    const hits = offenders(readFileSync(join(SRC, name), "utf8"));
-    if (hits.length > 0) report.push(`${name}\n  ${hits.join("\n  ")}`);
+  for (const file of walk(SRC)) {
+    const hits = offenders(readFileSync(file, "utf8"));
+    if (hits.length > 0) report.push(`${relative(SRC, file)}\n  ${hits.join("\n  ")}`);
   }
   expect(report, "按键判定要走 matchesKey() / KeybindingsManager.matches()，不许比较字节").toEqual([]);
 });

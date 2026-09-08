@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件适用于整个仓库。echo-agent 有两个使用高度，但只有一个高层 composition root：产品与 CLI 通过 `createEcho()` 装配，定制 host 直接使用 `@echo-agent/core` 的 `Agent` 自行给端口。不要在其他入口复制装配逻辑。
+本文件适用于整个仓库。echo-agent 只有一个 composition root、三条正门：产品与 CLI 通过 `createEcho()` 装配；加工具、prompt 段、压缩阶段或 hook 就写一条 extension；换壳也是一条 extension，注入 `AgentRuntime` 这个 service。围着裸 `Agent` 类自行接端口不是受支持的路——内部化已拍板、尚未实现，见 `docs/decisions/proposed/2026-09-07-agent-class-internal.md`。不要在其他入口复制装配逻辑。
 
 ## Pre-release：先把地基做对
 
@@ -14,7 +14,7 @@
 |---|---|
 | `packages/core/` | Runtime、engine、provider adapters、状态、记忆、任务与 extension API |
 | `packages/cli/` | `echo-agent`：通用 agent 产品，官方 CLI 与交互式 TUI；高层装配的消费者，不认识任何具体产品 |
-| `packages/coding/` | `echo-coding`：coding agent 产品，依赖 `packages/cli`，在自己这层装 `echo:workspace` / `echo:shell` |
+| `packages/coding/` | `echo-coding`：coding agent 产品，依赖 `packages/cli`，在自己这层装 `echo:workspace` / `echo:shell` / `echo:worktree` / `echo:web` 与 prompt pack `echo:coding` |
 | `examples/` | 从 tarball 消费公共 API 的可运行示例 |
 | `test/` | 仓库级分发门与文档门 |
 | `scripts/` | inventory、文档检查与仓库工具 |

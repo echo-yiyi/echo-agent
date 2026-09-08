@@ -13,6 +13,9 @@ import { join } from "node:path";
 //   ① manifest 三字段——`optionalDependencies` 仍在运行时依赖图里，
 //     `peerDependencies` 把依赖推给宿主，只查 `dependencies` 留了两个绕行口；
 //   ② 源码闭包——manifest 干净但源码里 import 了，装的时候不报错、跑的时候才炸。
+//     **这条今天只拦 `@modelcontextprotocol` 一个包名**（`SDK_IMPORT`），不是泛查裸 specifier：
+//     某个子路径 import 了根 node_modules 里恰好有的别的包，typecheck 与本门都绿、装出去才炸——
+//     那一片靠纪律（review 2026-09-07 登记）。要扩成「`src/**` 的裸 specifier 只许 `node:` / `bun:`」是另一次拍板。
 
 const RUNTIME_DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"] as const;
 const PKG_ROOT = join(import.meta.dir, "..");

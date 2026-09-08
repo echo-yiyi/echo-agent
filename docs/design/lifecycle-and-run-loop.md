@@ -299,29 +299,29 @@ STATUS_AFTER_PROMPT=idle
 ### 当前只是纪律或描述
 
 - 「有副作用 / 出网的工具不要标 `concurrent`」是**纪律**：core 不判断工具做什么，标了就并跑。`echo-coding` 那一份名单有机器判据（下表），别的产品自己负责。
-- `dispose()` 不能作为 lifecycle-managed Agent 的公开停止入口，没有类型限制或防误用测试。
-- abort reason 应进入 terminal outcome，没有测试。
-- `agent_end` 与 `idle` 的关系只有实现注释，没有面向订阅者的契约测试。
-- “高层使用必须 start、低层使用可以不 start”只由构造参数隐式决定，没有不同的类型面。
+- `dispose()` 不能作为 lifecycle-managed Agent 的公开停止入口，没有类型限制或防误用测试——2026-09-07 拍板不单独立门：随 `Agent` 类内部化一起消失（[记录](../decisions/rejected/2026-09-01-teardown-entry.md)）。
+- ~~abort reason 应进入 terminal outcome，没有测试。~~ 2026-09-07 已实现并有测试（[记录](../decisions/implemented/2026-09-01-abort-reason.md)）。
+- ~~`agent_end` 与 `idle` 的关系只有实现注释，没有面向订阅者的契约测试。~~ 2026-09-07 已实现（[记录](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。
+- “高层使用必须 start、低层使用可以不 start”只由构造参数隐式决定，没有不同的类型面——2026-09-07 拍板不拆类型面：随 `Agent` 类内部化一起消失（[记录](../decisions/rejected/2026-09-01-start-precondition.md)）。
 
-这几项不能在开源文档中写成“系统保证”。在补上判据前，只能标为当前实现限制。
+仍是纪律的那两项不能在开源文档中写成“系统保证”，只能标为当前实现限制。
 
 ## 9. 审阅需要拍板的事项
 
-### 必须在发布前解决
+### 必须在发布前解决（2026-09-07 三项都已拍板，记录见各条）
 
-1. ~~**移除或实现 `toolExecution: "parallel"`。** 当前接口假绿，使用者会据此做错误的时延和副作用假设。~~ 2026-09-07 已解决（实现，选项删掉，声明制），见 §4.1。
-2. **收窄收摊入口。** lifecycle-managed Agent 直接 `dispose()` 会留下 lease。倾向让 `dispose()` 非公开，或让它与 `stop()` 共享同一个完整 single-flight 终止过程。
-3. **给两种 lifecycle 分开命名。** 至少不能让 `Agent.start()` 与 `agent_start` 各自表示实例和 run 的开始。
+1. ~~**移除或实现 `toolExecution: "parallel"`。** 当前接口假绿，使用者会据此做错误的时延和副作用假设。~~ 2026-09-07 已解决（实现，选项删掉，声明制），见 §4.1 与[记录](../decisions/implemented/2026-09-01-tool-execution-parallel.md)。
+2. ~~**收窄收摊入口。** lifecycle-managed Agent 直接 `dispose()` 会留下 lease。倾向让 `dispose()` 非公开，或让它与 `stop()` 共享同一个完整 single-flight 终止过程。~~ 2026-09-07 否决：不单独改公共面，随 `Agent` 类内部化一起消失（[记录](../decisions/rejected/2026-09-01-teardown-entry.md)）。
+3. ~~**给两种 lifecycle 分开命名。** 至少不能让 `Agent.start()` 与 `agent_start` 各自表示实例和 run 的开始。~~ 2026-09-07 否决，同上（[记录](../decisions/rejected/2026-09-01-lifecycle-naming.md)）。
 
-### 需要产品语义确认
+### 需要产品语义确认（2026-09-07 六项都已拍板，记录见各条）
 
-1. 第二个用户 prompt 是 fail-fast，还是像 inbox 一样排队。
-2. `start()` 是否应成为所有 Agent 的统一前置条件；若保留低层直跑，应不应该拆成独立构造入口。
-3. abort reason 是否是调用者可依赖的终止信息。
-4. `agent_end` 是否应成为 idle barrier。
-5. stop hook 最多继续三次是否是产品约束；如果是，应公开并测试，若不是，不应硬编码在 engine。
-6. acquire 后启动失败是否应成为显式 `fenced` phase，而不是由 `phase === "new"` 加一个隐藏 latch 共同表达。
+1. ~~第二个用户 prompt 是 fail-fast，还是像 inbox 一样排队。~~ 拍板保持 fail-fast（「先留着」；壳按 `acceptsWork` 决定输入框状态），[记录](../decisions/proposed/2026-09-01-second-prompt-policy.md)。
+2. ~~`start()` 是否应成为所有 Agent 的统一前置条件；若保留低层直跑，应不应该拆成独立构造入口。~~ 不拍，问题随 `Agent` 类内部化消失（[记录](../decisions/rejected/2026-09-01-start-precondition.md)）。
+3. ~~abort reason 是否是调用者可依赖的终止信息。~~ 是，一路保留到 terminal outcome，已实现（[记录](../decisions/implemented/2026-09-01-abort-reason.md)）。
+4. ~~`agent_end` 是否应成为 idle barrier。~~ 不是：名字保留、公开契约写清它不是 barrier、不另加 barrier API，已实现（[记录](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。
+5. ~~stop hook 最多继续三次是否是产品约束；如果是，应公开并测试，若不是，不应硬编码在 engine。~~ 是保险丝不是约束：留硬编码、不进配置，文档提一句（[记录](../decisions/implemented/2026-09-01-stop-continuation-limit.md)）。
+6. ~~acquire 后启动失败是否应成为显式 `fenced` phase，而不是由 `phase === "new"` 加一个隐藏 latch 共同表达。~~ 不拍，降为内部实现项随内部化一起修（[记录](../decisions/rejected/2026-09-01-fenced-phase.md)）。
 
 ### 本轮明确延期
 

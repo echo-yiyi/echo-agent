@@ -76,7 +76,7 @@
 
 - **开**：`reply_start{source}`，随后把这条输入吸收进 transcript（每条 `message_end`）。续跑（`resume`）没有新输入，只发 `reply_start`。
 - **每个 turn 之前**：三道硬闸（abort / `maxIterations` / deadline）与 `maybeCompact()`。硬闸命中 → 不开 turn，reply 以该 outcome 结束。
-- **turn 之后**：`shouldStopAfterTurn` → 结束（`completed`）；`prepareNextTurn` 换装；turn 交出的 steer 有货 → 吸收、下一 turn（`steer`）；落地消息 `tool_use` / `max_tokens` → 下一 turn；否则 settle，结束（`completed`）。turn 未落地 → 以 turn 的结果结束。
+- **turn 之后**（顺序即 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply) 里的顺序）：落地消息 `tool_use` / `max_tokens` → 直接下一 turn（**先短路**：工具链的每一轮都不问下面两个钩）；否则 `shouldStopAfterTurn` → 结束（`completed`）；`prepareNextTurn` 换装；turn 交出的 steer 有货 → 吸收、下一 turn（`steer`）；否则 settle，结束（`completed`）。turn 未落地 → 以 turn 的结果结束。
 - **关**：`reply_end{outcome, final, turns}`；`final` 是最后一条落地消息，未落地时为 `null`。
 
 ### 2.3 turn
@@ -153,7 +153,7 @@ run-turn.ts
 | 谁 | 发什么事件 | 开关哪扇门 | 判什么 |
 |---|---|---|---|
 | `runLoop` | `agent_start / agent_end` | `closeRun` / `tryCloseRun` | reply 之间：`maxReplies`、followUp、stop hook |
-| `runReply` | `reply_start / reply_end`、输入与 steer 的 `message_end` | — | 硬闸、`maybeCompact`、`shouldStopAfterTurn`、`prepareNextTurn`、下一 turn 的 cause |
+| `runReply` | `reply_start / reply_end`、输入与 steer 的 `message_end` | — | 硬闸、`maybeCompact`、`tool_use` / `max_tokens` 短路、`shouldStopAfterTurn`、`prepareNextTurn`、下一 turn 的 cause |
 | `runTurn` | `turn_start / turn_end`、`retry_scheduled`、toolResult 的 `message_end`、`tool_execution_*` | `openTurn` / `closeTurn` | 重试预算、撞窗应急 |
 | `runAttempt` | `attempt_start / attempt_end`、assistant 的 `message_*`、`usage` | — | `contextBeforeBuild` 的 block |
 

@@ -11,8 +11,8 @@ import { createEcho, type Provider } from "@echo-agent/core";
 declare const myProvider: Provider;
 
 const echo = await createEcho({ provider: myProvider });
-await echo.agent.start();               // 取单写锁 → 恢复会话
-const result = await echo.agent.prompt("把 README 翻成英文");
+await echo.agent.start();               // 取单写锁 → 恢复会话（今天还得经 echo.agent：Echo 自己没有 start()）
+const result = await echo.send("把 README 翻成英文"); // = agent.prompt() + 观测三元组，第三方走这条
 await echo.stop();                      // 先卸扩展 → 等落盘 settle → 释放锁
 ```
 
@@ -29,14 +29,14 @@ await echo.stop();                      // 先卸扩展 → 等落盘 settle →
 | 给它加工具 / prompt 段 / 压缩阶段 / hook | 写一条 extension（`@echo-agent/core/extension`）：声明注入什么、提供什么，生命周期归 host，卸载不留残骸 |
 | 换一个壳（Web、别的终端） | 同样是一条 extension，注入 `AgentRuntime` 这个 service 并把它渲染出来 |
 
-**`Agent` 类是内部的**（2026-09-07，见 `docs/decisions/`）：它有相当一部分是为承载 host 专用接线（写入闸、所有权账本、观测 writer）而存在的，把它当公共面等于承诺那些。第三方要的深度在 extension ABI 上——那条路带 `hostAbiVersion` 校验、Fiber/Effect 所有权与整代回滚，比裸类安全。
+**`Agent` 类将收进内部**（2026-09-07 拍板、尚未实现，记录在仓库 `docs/decisions/proposed/2026-09-07-agent-class-internal.md`；今天它还在公共面上，api-snapshot 里能看到）：它有相当一部分是为承载 host 专用接线（写入闸、所有权账本、观测 writer）而存在的，把它当公共面等于承诺那些。第三方要的深度在 extension ABI 上——那条路带 `hostAbiVersion` 校验、Fiber/Effect 所有权与整代回滚，比裸类安全。别在新代码里 `new Agent()`。
 
 另有 `@echo-agent/core/testing`（FakeProvider 与脚本化流、in-memory 观测 collector）、
 `@echo-agent/core/extension`（写扩展的 ABI）、`@echo-agent/core/task/fs`、`@echo-agent/core/mcp`。
 
 ## 几条硬约定
 
-- **零运行时依赖。** `dependencies` 恒空，有门守着。
+- **零运行时依赖。** 运行时依赖三字段（`dependencies` / `optionalDependencies` / `peerDependencies`）恒空，有门守着。
 - **fail-loud，绝不静默降级。** 缺凭据、拿不到锁、盘上有坏档——一律抛，不回退到「假装成功」。
 - **single-writer。** 一个状态根同时只允许一个写者。锁被占着就拒绝启动，**core 不猜对面是不是死了**，
   也不抢占没有自称可让位（`preemptible`）的持有者——可让位的实例被请走时自己交还并退出（2026-09-07：人优先，后台让位）；

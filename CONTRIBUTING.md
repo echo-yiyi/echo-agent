@@ -1,7 +1,7 @@
 # Contributing to echo-agent
 
-Thanks for looking. This project is **pre-release**: nothing is published to npm, the workspace
-packages are private, and the public API can still change. Design mistakes get fixed at the root
+Thanks for looking. This project is **pre-release**: nothing is published to npm yet, and the public
+API can still change. Design mistakes get fixed at the root
 rather than papered over with compatibility shims — see the pre-release section of
 [AGENTS.md](AGENTS.md) for what that means in practice.
 
@@ -28,11 +28,10 @@ bun test                         # before opening a pull request
 bun scripts/docs-lint.ts         # after touching docs or doc comments
 ```
 
-**CI blocks on `bun run typecheck` and `bun test`.** `bun scripts/docs-lint.ts` runs too, but is
-informational for now: its `filerefs` check is red with about 60 references to documents that have
-not been written yet. That is a documentation backlog, not a defect in your change, so it reports
-without failing the build. The other four checks — roster, links, code, pairing — are green and
-guarded inside `bun test`.
+**CI blocks on `bun run typecheck` and `bun test`.** All five documentation checks — roster, links,
+code, filerefs, pairing — run inside `bun test` (`test/docs.test.ts`), so a dead link or a wrong file
+path in a doc comment turns the suite red. CI runs `bun scripts/docs-lint.ts` once more only to print
+the per-check summary in the log; any violation exits non-zero there as well.
 
 If the baseline is already red when you start, say so in the pull request and show that your change
 adds no new failures. Do not repair unrelated scope to buy a green run, and do not report red as

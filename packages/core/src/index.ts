@@ -4,9 +4,12 @@
 // 状态机、恢复与提交顺序归 core 自己拥有；用户注入的是 Store / Strategy / Source / Clock / Executor / Lock，
 // 它们只换介质与策略，换不掉语义。
 //
-// **两个使用高度，都在这条入口上**：
-//   - 高：`createEcho()` —— **唯一**的装配现场，端口与内建能力都已备好；
-//   - 低：`new Agent()` —— 自己给端口、自己注册工具。
+// **一个 composition root、三条正门，都在这条入口上**：
+//   - `createEcho()` —— **唯一**的装配现场，端口与内建能力都已备好；
+//   - 写 extension（`./extension`）—— 加工具、prompt 段、压缩阶段、hook；
+//   - 换壳 —— 也是一条 extension，注入 `AgentRuntime` 这个 service 并把它渲染出来。
+// `Agent` 类今天仍导出，但不是受支持的正门：内部化已拍板、尚未实现
+// （`docs/decisions/proposed/2026-09-07-agent-class-internal.md`），新代码别 `new Agent()`。
 //
 // **能力的构造器与操作面下沉子路径**。判据是那句：「普通用户不 import 这些子路径
 // 也已经得到工作的默认能力，**只有替换默认件或开发扩展时才进入子路径**」。
@@ -283,12 +286,11 @@ export { fileStateLock, inspectStateLock } from "./storage/file-lock.ts";
 export type { PeekedLockRecord, StateLockInspection } from "./storage/file-lock.ts";
 
 /**
- * **两个使用高度，一个 composition root**：
- *   - 高 = `createEcho()`，**唯一**的装配现场；
- *   - 低 = `new Agent()`，自己给端口、自己注册工具。
+ * **一个 composition root、三条正门**（`createEcho()` / 写 extension / 换壳），见文件头；
+ * `Agent` 类仍导出但不是正门（内部化已拍板、尚未实现）。
  *
  * `createAgent` **不在公共面上**（2026-08-31 收）：它曾经是第二个 composition root，
- * 与「一个包、两个使用高度、**一个** composition root」直接冲突。
+ * 与「一个包、**一个** composition root」直接冲突。
  * 现在它降为 `create-agent.ts` 里的内部装配函数，只有 `createEcho()` 调它。
  * 模型解析与状态根解析这两个纯函数仍然导出——它们是**判据**不是装配现场，
  * 消费方（Runner / 测试）要先算出 `stateDir` 或校验模型 id 时用得上。
