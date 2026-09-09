@@ -430,13 +430,27 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       return;
     }
     pickerOpening = true;
-    void buildModelPicker(configure, pickerToken);
+    // 不留裸 promise：凭据文件坏了 isConfigured 会抛，unhandled rejection 在 Bun 里是整进程死、锁不还（review 2026-09-07）
+    buildModelPicker(configure, pickerToken).catch((e: unknown) => {
+      pickerOpening = false;
+      transcript.push({ kind: "notice", text: `[模型] 选择器没开成：${errText(e)}` });
+      rerender();
+    });
+  };
+  /** 问一家配没配 key；读不了凭据当没配、并说一声，不让一家的坏文件拖死整个选择器。 */
+  const configuredOrNotice = async (conf: NonNullable<typeof configure>, provider: Provider): Promise<boolean> => {
+    try {
+      return await isConfigured(provider, conf.credentials);
+    } catch (e) {
+      transcript.push({ kind: "notice", text: `[凭据] ${provider.id}：读不了凭据文件：${errText(e)}` });
+      return false;
+    }
   };
   const buildModelPicker = async (conf: NonNullable<typeof configure>, token: number): Promise<void> => {
     // 跨家平铺（P3b-a）：每家问一次配没配 key（`isConfigured`，与请求路径同一判据），未配的标出来
     const entries: { model: Model; configured: boolean }[] = [];
     for (const c of conf.providers) {
-      const configured = await isConfigured(c.provider, conf.credentials);
+      const configured = await configuredOrNotice(conf, c.provider);
       for (const m of c.provider.getModels()) entries.push({ model: m, configured });
     }
     const current = agent.state.model;
@@ -471,7 +485,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     for (const c of configure.providers) {
       const model = c.provider.getModels().find((m) => m.id === id);
       if (model !== undefined) {
-        const configured = await isConfigured(c.provider, configure.credentials);
+        const configured = await configuredOrNotice(configure, c.provider);
         pickModel({ model, configured });
         return;
       }
@@ -482,17 +496,23 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
 
   const pickModel = (e: { model: Model; configured: boolean }): void => {
     modelPicker = null;
-    void agent.setModel(e.model).then((result) => {
-      if (result.kind === "accepted") {
-        transcript.push({ kind: "notice", text: `[模型] 已换到 ${e.model.id}（${e.model.provider}，下一轮生效）` });
-        configure?.onModelChange?.({ provider: e.model.provider, id: e.model.id }); // D7：重启还能用
-        // 换到还没配 key 的家：**主动**把配置段摆出来，不等第一句 prompt 撞 auth
-        if (!e.configured) enterConfigure();
-      } else {
-        transcript.push({ kind: "notice", text: `[模型] 没换成：${result.reason}` });
-      }
-      rerender();
-    });
+    agent
+      .setModel(e.model)
+      .then((result) => {
+        if (result.kind === "accepted") {
+          transcript.push({ kind: "notice", text: `[模型] 已换到 ${e.model.id}（${e.model.provider}，下一轮生效）` });
+          configure?.onModelChange?.({ provider: e.model.provider, id: e.model.id }); // D7：重启还能用
+          // 换到还没配 key 的家：**主动**把配置段摆出来，不等第一句 prompt 撞 auth
+          if (!e.configured) enterConfigure();
+        } else {
+          transcript.push({ kind: "notice", text: `[模型] 没换成：${result.reason}` });
+        }
+        rerender();
+      })
+      .catch((err: unknown) => {
+        transcript.push({ kind: "notice", text: `[模型] 没换成：${errText(err)}` });
+        rerender();
+      });
     rerender();
   };
 
@@ -615,6 +635,8 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     if (hits.length > 1) return say(`[会话] '${rest}' 对上了 ${hits.length} 段，说全一点：\n${hits.map((r) => `  ${r.id}  ${r.name}`).join("\n")}`);
     const target = hits[0]!;
     if (target.id === agent.state.sessionId) return say("[会话] 已经在这一段了");
+    // await 之后复查：list() 挂起期间可能开跑了，切走会掐掉在飞的那一轮（review 2026-09-07）
+    if (busy()) return say("[会话] 还没就绪 / 正在跑，先 Esc 中断或等它空下来再切");
     onResume(target.id); // 装配层收到之后：收摊这一段 → 按新 id 重装 → 界面开回来
     quit();
   };
@@ -635,7 +657,13 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       argumentHint: "[模型id]",
       description: "选模型：不带参数开选择器，带 id 直切",
       getArgumentCompletions: (prefix) => modelIdCompletions(prefix),
-      run: (rest) => (rest === "" ? openModelPicker() : void setModelById(rest)),
+      run: (rest) =>
+        rest === ""
+          ? openModelPicker()
+          : void setModelById(rest).catch((e: unknown) => {
+              transcript.push({ kind: "notice", text: `[模型] 没换成：${errText(e)}` });
+              rerender();
+            }),
     },
     {
       name: "compact",

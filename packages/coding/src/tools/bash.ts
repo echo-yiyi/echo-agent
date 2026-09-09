@@ -85,11 +85,16 @@ export function makeBashTool(
           run: (bg) =>
             new Promise<void>((resolvePromise, rejectPromise) => {
               const child = spawnShell(command, startDir(ctx.workspace).cwd);
-              child.stdout!.on("data", (d: Buffer) => bg.write(d.toString()));
-              child.stderr!.on("data", (d: Buffer) => bg.write(d.toString()));
+              // 每条流一只流式 decoder：跨 chunk 的多字节字符不再被解成替换符（review 2026-09-07）
+              const outDec = new TextDecoder();
+              const errDec = new TextDecoder();
+              child.stdout!.on("data", (d: Buffer) => bg.write(outDec.decode(d, { stream: true })));
+              child.stderr!.on("data", (d: Buffer) => bg.write(errDec.decode(d, { stream: true })));
               bg.signal.addEventListener("abort", () => killTree(child), { once: true });
               child.on("error", rejectPromise);
               child.on("close", (code) => {
+                bg.write(outDec.decode()); // 冲残余
+                bg.write(errDec.decode());
                 if (code === 0 || bg.signal.aborted) resolvePromise();
                 else rejectPromise(new Error(`exit code ${code}`));
               });
@@ -210,8 +215,7 @@ function runForeground(
     let out = "";
     let truncated = false;
     let tail = ""; // 末尾几百字节单独留着：cwd 标记在这里找，输出被截断也丢不了
-    const append = (d: Buffer): void => {
-      const chunk = d.toString();
+    const append = (chunk: string): void => {
       tail = (tail + chunk).slice(-CWD_TAIL_KEEP);
       if (out.length >= OUTPUT_CAP) {
         truncated = true;
@@ -219,8 +223,11 @@ function runForeground(
       }
       out += chunk;
     };
-    child.stdout!.on("data", append);
-    child.stderr!.on("data", append);
+    // 每条流一只流式 decoder：跨 chunk 的多字节字符不再被解成替换符（review 2026-09-07：此前逐块 toString）
+    const outDec = new TextDecoder();
+    const errDec = new TextDecoder();
+    child.stdout!.on("data", (d: Buffer) => append(outDec.decode(d, { stream: true })));
+    child.stderr!.on("data", (d: Buffer) => append(errDec.decode(d, { stream: true })));
 
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -235,6 +242,8 @@ function runForeground(
     const finish = (code: number | null, spawnError?: string): void => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
+      append(outDec.decode()); // 冲残余
+      append(errDec.decode());
       // 先把 cwd 标记摘出来（在 tail 里），再从正文里剥掉——正文没被截断时标记就在正文末尾
       const marked = CWD_MARK_RE.exec(tail);
       const newCwd = marked?.[1];

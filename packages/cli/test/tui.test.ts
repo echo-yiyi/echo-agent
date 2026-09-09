@@ -1847,6 +1847,35 @@ test("Ctrl+L 选 DeepSeek 的模型：换过去、onModelChange 拿到 provider 
   }
 });
 
+test("Ctrl+L：某一家的凭据条目坏了 → 那家当没配并说一声，选择器照开、进程不死（review 2026-09-07：此前是裸 promise，Bun 里 unhandled rejection 直接退出、锁不还）", async () => {
+  const restore = isolateKeys();
+  try {
+    const ui = fakeTui();
+    const agent = kimiAgent([textTurn("好")]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const realRead = credentials.read.bind(credentials);
+    Object.defineProperty(credentials, "read", {
+      value: async (provider: string) => {
+        if (provider === "deepseek") throw new Error("credentials.json 坏了");
+        return realRead(provider);
+      },
+    });
+    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    await flush();
+    ui.feed(CTRL_L);
+    await flush(100);
+    expect(ui.screen()).toContain("读不了凭据文件");
+    expect(ui.screen()).toContain("Kimi K3"); // 选择器照开，别家照列
+    ui.feed(ESC_KEY);
+    await flush();
+    quit(ui);
+    await done;
+  } finally {
+    restore();
+  }
+});
+
 test("Ctrl+L 选已配好那家的模型：换过去就完，不弹配置段", async () => {
   const restore = isolateKeys();
   try {
@@ -2244,6 +2273,33 @@ test("/resume：认 id 的前缀，也认名字的一截——16 位十六进制
   second.ui.feed(ENTER);
   await done2;
   expect(alsoResumed).toEqual(["9988776655443322"]);
+});
+
+test("/resume：list() 挂起期间 core 忙起来了 → await 之后复查、顶回去，不掐在飞的那一轮（review 2026-09-07）", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("好")]);
+  let release: (rows: readonly SessionRow[]) => void = () => {};
+  const sessions: SessionFace = {
+    ...NO_SESSION_FACE,
+    list: () =>
+      new Promise<readonly SessionRow[]>((r) => {
+        release = r;
+      }),
+  };
+  const resumed: string[] = [];
+  const done = runTui({ agent: runtimeOf(agent), ui, sessions, onResume: (id) => resumed.push(id) });
+  await flush();
+  ui.feed("/resume aa11");
+  ui.feed(ENTER);
+  await flush();
+  setCoreAccepts(agent, false); // list() 还挂着，这时 core 开跑了
+  release([row({ id: "aa11", name: "前端" })]);
+  await flush();
+  expect(resumed).toEqual([]);
+  expect(ui.screen()).toContain("正在跑");
+  setCoreAccepts(agent, true);
+  quit(ui);
+  await done;
 });
 
 test("/resume：对上多段就把候选摆出来，**不猜**——切错段是打断别人的活", async () => {

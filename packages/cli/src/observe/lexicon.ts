@@ -17,7 +17,7 @@ export const RUN_STATUS: Readonly<Record<string, Term>> = {
   running: { zh: "未收尾", en: "running", tone: "neutral", hint: "没有终态记录：可能还在跑，也可能进程没了——账本只知道它没封口" },
   completed: { zh: "已完成", en: "completed", tone: "positive", hint: "agent 自行收尾，run.closed 已 COMMIT" },
   truncated: { zh: "已截停", en: "truncated", tone: "caution", hint: "跑到迭代上限被截断、未自行收尾——产出可能不完整（error code = max_iterations）" },
-  aborted: { zh: "已中止", en: "aborted", tone: "neutral", hint: "用户或宿主主动 abort；已产出的部分保留" },
+  aborted: { zh: "已中止", en: "aborted", tone: "neutral", hint: "用户或壳主动 abort；已产出的部分保留" },
   error: { zh: "失败", en: "error", tone: "critical", hint: "provider / 工具 / 内核的不可恢复错误；outcome.error.code 说明是哪一类" },
   interrupted: { zh: "已中断", en: "interrupted", tone: "neutral", hint: "进程崩溃后由下一次持锁启动封口的 run；它自己没有结局" },
 };
@@ -191,6 +191,9 @@ export function recordMark(name: string): string {
   return best;
 }
 
+/** `TOOL_VERBS` 里没登记的工具，时间线上用的动词。也在这里，不在页面里硬编码（review 2026-09-07：页面曾自带一份）。 */
+export const TOOL_VERB_FALLBACK = "调用";
+
 export type Lexicon = Readonly<{
   runStatus: typeof RUN_STATUS;
   runSource: typeof RUN_SOURCE;
@@ -198,11 +201,22 @@ export type Lexicon = Readonly<{
   integrity: typeof INTEGRITY;
   persistence: typeof PERSISTENCE;
   toolVerbs: typeof TOOL_VERBS;
+  toolVerbFallback: string;
   records: typeof RECORD_TERMS;
   /** 类别记号表，页面按最长前缀匹配（见 `recordMark`）。 */
   marks: typeof RECORD_MARKS;
 }>;
 
 export function lexicon(): Lexicon {
-  return { runStatus: RUN_STATUS, runSource: RUN_SOURCE, replySource: REPLY_SOURCE, integrity: INTEGRITY, persistence: PERSISTENCE, toolVerbs: TOOL_VERBS, records: RECORD_TERMS, marks: RECORD_MARKS };
+  return {
+    runStatus: RUN_STATUS,
+    runSource: RUN_SOURCE,
+    replySource: REPLY_SOURCE,
+    integrity: INTEGRITY,
+    persistence: PERSISTENCE,
+    toolVerbs: TOOL_VERBS,
+    toolVerbFallback: TOOL_VERB_FALLBACK,
+    records: RECORD_TERMS,
+    marks: RECORD_MARKS,
+  };
 }

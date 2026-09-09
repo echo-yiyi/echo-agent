@@ -183,6 +183,10 @@ function editFileTool(seen: SeenFiles): ModelTool<{ path: string; old_string: st
       const abs = await resolveSafe(ctx, path);
       if (abs === null) return toolError(`Path outside the workspace: '${path}'`);
       if (old_string === new_string) return toolError("old_string and new_string are identical; nothing to change");
+      // 空 old_string 会在每个字符之间插入（split("") 匹配文件长度次），replace_all 时静默毁掉整个文件（review 2026-09-07）
+      if (old_string === "") {
+        return toolError("old_string must not be empty; to insert text, include the line you are inserting next to as context (or use write_file for a new file)");
+      }
       const refused = await assertFreshlyRead(seen, abs, path);
       if (refused !== null) return toolError(refused);
       let raw: string;

@@ -283,7 +283,7 @@ export function echoOptions(
     // 能互相带个话。**runner 也给**（2026-09-07）：给一段没在跑的会话发消息时，容器 spawn
     // 一个 `--serve` 的进程当它的宿主——「只跟活着的段说话」那条要有人兑现才成立。
     // 那种宿主是可被请走的，所以你 `--resume` 它的时候它会让开。
-    sessions: { run: sessionRunner(opts) },
+    sessions: { run: sessionRunner(opts, choices.find((c) => c.provider === provider)?.name) },
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     ...(opts.observe !== undefined ? { observation: { capture: opts.observe } } : {}),
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
@@ -465,14 +465,27 @@ export const main: Main = mainFor(ECHO_AGENT);
  *
  * 子进程 `unref()`：它不该拖着本进程不退。stdio 全丢——没人看，写出来的东西只会污染终端。
  */
-function sessionRunner(opts: CliOptions): SessionRunner {
+/**
+ * 叫醒一段会话时给副本的 argv（导出只为判据）：与父进程**同一家、同一模型**、同状态根、同扩展目录
+ * （review 2026-09-07：此前只传后两样，副本按设置文件另选一家、缺 key 就根本起不来）。
+ * `--provider` 收的是 CLI 的 provider 名（`kimi` / `zai` …），不是目录里的 provider id。
+ * `--observe` **不继承**：要不要跟父进程同一档还没拍。
+ */
+export function wakeArgs(self: string, opts: CliOptions, providerName: string | undefined, sessionId: string): string[] {
+  const args = [self, "--serve", "--resume", sessionId];
+  if (providerName !== undefined) args.push("--provider", providerName);
+  if (opts.model !== undefined) args.push("--model", opts.model);
+  if (opts.stateDir !== undefined) args.push("--state-dir", opts.stateDir);
+  if (opts.withoutMemory) args.push("--no-memory");
+  for (const dir of opts.extensionDirs) args.push("--extensions", dir);
+  return args;
+}
+
+function sessionRunner(opts: CliOptions, providerName: string | undefined): SessionRunner {
   const self = process.argv[1];
   return async (row) => {
     if (self === undefined) throw new Error("认不出自己的可执行文件路径，起不了会话宿主");
-    const args = [self, "--serve", "--resume", row.id];
-    if (opts.stateDir !== undefined) args.push("--state-dir", opts.stateDir);
-    if (opts.withoutMemory) args.push("--no-memory");
-    for (const dir of opts.extensionDirs) args.push("--extensions", dir);
+    const args = wakeArgs(self, opts, providerName, row.id);
     const child = Bun.spawn([process.execPath, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     child.unref();
 

@@ -110,6 +110,23 @@ test("edit_file:匹配 0 处 / 多处都拒,replace_all 放行", async () => {
   expect(await readFile(join(root, "x.txt"), "utf8")).toBe("b b");
 });
 
+test("edit_file:空 old_string 一律拒、文件一个字节不动（review 2026-09-07：此前 replace_all 时会逐字符插入、静默毁掉整个文件）", async () => {
+  const fs = makeFsTools();
+  await writeFile(join(root, "e.txt"), "abc", "utf8");
+  await tool(fs, "read_file").execute({ path: "e.txt" }, ctx());
+  for (const args of [{ replace_all: true }, {}]) {
+    const r = await tool(fs, "edit_file").execute({ path: "e.txt", old_string: "", new_string: "X", ...args }, ctx());
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("must not be empty");
+    expect(await readFile(join(root, "e.txt"), "utf8")).toBe("abc");
+  }
+  await writeFile(join(root, "empty.txt"), "", "utf8");
+  await tool(fs, "read_file").execute({ path: "empty.txt" }, ctx());
+  const onEmpty = await tool(fs, "edit_file").execute({ path: "empty.txt", old_string: "", new_string: "X" }, ctx());
+  expect(onEmpty.isError).toBe(true);
+  expect(await readFile(join(root, "empty.txt"), "utf8")).toBe("");
+});
+
 test("改前必读、读后未变：没读过拒、盘上被别人改过拒、自己写过的算读过；新建文件不用读", async () => {
   // 2026-09-02 用户拍板（照 Claude Code 的 Edit / Write 门）：此前只是 description 里一句「先读」，
   // 模型没读就改、或按旧内容盖掉用户刚在编辑器里改的文件，都拦不住
@@ -217,6 +234,15 @@ test("bash:stdout+stderr 合并;非零退出是结果不是异常", async () => 
   expect(fail.isError).toBe(true);
   expect(fail.content).toContain("exit code 3");
   expect(fail.content).toContain("boom"); // 模型要看到输出来决定下一步
+});
+
+test("bash 输出跨 chunk 的多字节字符不解成替换符（review 2026-09-07：此前逐块 toString）", async () => {
+  const bash = makeBashTool();
+  // 「中中中」的 UTF-8 拆在两次 printf 之间，中间 sleep 让它分两个 chunk 到
+  const r = await bash.execute({ command: "printf '\\xe4\\xb8\\xad\\xe4'; sleep 0.05; printf '\\xb8\\xad\\xe4\\xb8\\xad'" }, ctx());
+  expect(r.isError).toBe(false);
+  expect(r.content).toContain("中中中");
+  expect(r.content).not.toContain("�");
 });
 
 test("bash 超时:杀掉并说清,不挂死", async () => {
@@ -539,12 +565,35 @@ test("web_fetch：HTML 剥成文本（标题、标题级、链接、列表）；
       }
       if (p === "/json") return Response.json({ a: 1 });
       if (p === "/bin") return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "application/octet-stream" } });
+      if (p === "/big") {
+        // 8 MB 的慢流（每块 64 KB、异步喂）：读端到 4 MB 上限就 cancel 的话，服务端喂不到 8 MB 就停了
+        //（review 2026-09-07：此前 arrayBuffer() 先把整个响应体收进内存再截）。不用无限流——同步的无限 pull 会卡住事件循环
+        const block = new Uint8Array(64 * 1024).fill(0x61);
+        return new Response(
+          new ReadableStream({
+            async pull(controller) {
+              await new Promise((r) => setTimeout(r, 1));
+              if (served >= 8 * 1024 * 1024) {
+                controller.close();
+                return;
+              }
+              served += block.byteLength;
+              controller.enqueue(block);
+            },
+          }),
+          { headers: { "content-type": "text/plain" } },
+        );
+      }
       return new Response("nope", { status: 404 });
     },
   });
+  let served = 0;
   try {
     const [fetchTool] = makeWebTools() as [ModelTool<{ url: string; max_chars?: number }>];
     const base = `http://127.0.0.1:${server.port}`;
+    const big = await fetchTool.execute({ url: `${base}/big`, max_chars: 10 }, ctx());
+    expect([big.isError, big.content]).toEqual([false, expect.stringContaining("over 4000000 bytes, cut")]);
+    expect(served).toBeLessThan(8 * 1024 * 1024); // 到上限就 cancel 了，不是把无限流读到内存里
     const page = await fetchTool.execute({ url: `${base}/page` }, ctx());
     expect([page.isError, page.content]).toEqual([false, "Hi & bye\n\n# Top\nHello [link](https://x.test/a) world\n- one\n- two"]);
     const json = await fetchTool.execute({ url: `${base}/json` }, ctx());

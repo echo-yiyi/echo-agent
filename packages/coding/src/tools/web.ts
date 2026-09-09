@@ -149,24 +149,49 @@ function webFetchTool(): ModelTool<{ url: string; max_chars?: number }> {
       const signal = ctx.signal === undefined ? timeout : AbortSignal.any([ctx.signal, timeout]);
       let res: Response;
       let bytes: Uint8Array;
+      let clipped = false;
       try {
         res = await fetch(target, {
           signal,
           redirect: "follow",
           headers: { "user-agent": "echo-coding", accept: "text/html, text/plain, application/json;q=0.9, */*;q=0.5" },
         });
-        bytes = new Uint8Array(await res.arrayBuffer());
+        // 流式读、到上限就取消：`arrayBuffer()` 会先把整个响应体收进内存再截，MAX_BYTES 那时限不住内存（review 2026-09-07）
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        const reader = res.body?.getReader();
+        if (reader !== undefined) {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value === undefined) continue;
+            if (total + value.byteLength > MAX_BYTES) {
+              chunks.push(value.subarray(0, MAX_BYTES - total));
+              total = MAX_BYTES;
+              clipped = true;
+              await reader.cancel();
+              break;
+            }
+            chunks.push(value);
+            total += value.byteLength;
+          }
+        }
+        bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) {
+          bytes.set(c, offset);
+          offset += c.byteLength;
+        }
       } catch (e) {
         return toolError(`Fetch failed for ${url}: ${e instanceof Error ? e.message : String(e)}`);
       }
-      const clipped = bytes.byteLength > MAX_BYTES;
-      const raw = new TextDecoder().decode(clipped ? bytes.subarray(0, MAX_BYTES) : bytes);
+      const raw = new TextDecoder().decode(bytes);
       const type = (res.headers.get("content-type") ?? "").toLowerCase();
       if (!res.ok) return toolError(`HTTP ${res.status} ${res.statusText} for ${res.url !== "" ? res.url : url}\n${raw.slice(0, 500)}`);
       let text: string;
       if (type.includes("html")) text = htmlToText(raw);
       else if (type === "" || type.startsWith("text/") || type.includes("json") || type.includes("xml")) text = raw;
-      else return toolError(`Unsupported content type '${type}' (${bytes.byteLength} bytes) at ${url}`);
+      else return toolError(`Unsupported content type '${type}' (${clipped ? `over ${MAX_BYTES}` : String(bytes.byteLength)} bytes) at ${url}`);
       const cap = Math.max(1, max_chars ?? DEFAULT_MAX_CHARS);
       const head = res.url !== "" && res.url !== url ? `(redirected to ${res.url})\n` : "";
       const body =

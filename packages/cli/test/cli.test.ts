@@ -33,7 +33,7 @@ import {
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
-import { echoOptions, main, mainFor, parseArgs, usage } from "../src/cli.ts";
+import { echoOptions, main, mainFor, parseArgs, usage, wakeArgs } from "../src/cli.ts";
 import { ECHO_AGENT, type PresetForm } from "../src/product.ts";
 import { isConfigured } from "../src/setup.ts";
 import { fakeTui } from "./fake-tui.ts";
@@ -863,6 +863,19 @@ test("/resume：那一段正被别的写者占着——如实说切不过去，�
     restore();
   }
 }, 20_000);
+
+test("叫醒会话的 argv 带 --provider / --model：宿主与父进程同一家同一模型（review 2026-09-07；--observe 不继承，未拍）", () => {
+  const args = wakeArgs(
+    "/bin/echo-agent.ts",
+    { withoutMemory: true, extensionDirs: ["/ext"], continueLast: false, serve: false, model: "kimi-k2.6", stateDir: "/s", observe: "content" },
+    "kimi",
+    "abc",
+  );
+  expect(args).toEqual(["/bin/echo-agent.ts", "--serve", "--resume", "abc", "--provider", "kimi", "--model", "kimi-k2.6", "--state-dir", "/s", "--no-memory", "--extensions", "/ext"]);
+  expect(args).not.toContain("--observe");
+  // 没选出家（choices 为空）就不传，副本按自己的设置走
+  expect(wakeArgs("/bin/x", { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, undefined, "id")).toEqual(["/bin/x", "--serve", "--resume", "id"]);
+});
 
 test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，也能把没在跑的那段叫起来", async () => {
   // 会话面是**容器的开关**（`CreateEchoOptions.sessions`），core 缺省不挂。这条盯的是 CLI 这个容器

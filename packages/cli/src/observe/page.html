@@ -542,7 +542,7 @@ function renderRuns() {
   const showSession = varies(runs, (r) => r.sessionId ?? undefined);
   const showWorkspace = varies(runs, (r) => sessionOf(r)?.workspace);
   for (const r of runs) {
-    const dur = r.endedAt === null ? "未收尾" : fmtMs(r.endedAt - r.acceptedAt);
+    const dur = r.endedAt === null ? LEX.runStatus.running.zh : fmtMs(r.endedAt - r.acceptedAt);
     const ws = sessionOf(r)?.workspace ?? "";
     const minor = r.source.kind === "dream"; // 记忆整理：系统自理，整行调暗，不与对话争扫读
     const parts = [];
@@ -586,7 +586,7 @@ function argPreview(body) {
   return "";
 }
 function verbFor(name, attrs, body) {
-  if (name === "tool.execute") return { verb: LEX.toolVerbs[attrs.toolName] ?? "调用", obj: attrs.toolName ?? "?", arg: argPreview(body) };
+  if (name === "tool.execute") return { verb: LEX.toolVerbs[attrs.toolName] ?? LEX.toolVerbFallback, obj: attrs.toolName ?? "?", arg: argPreview(body) };
   if (name === "turn.execute") return { verb: "轮", obj: `#${attrs.iteration ?? "?"}` };
   // 四层循环里的另外两层（run-loop-layers.md）。只在有分叉时才出现在时间线上，见 foldSingleLayers
   if (name === "reply.execute") return { verb: "回应", obj: LEX.replySource?.[attrs.source]?.zh ?? attrs.source ?? "" };
@@ -788,7 +788,7 @@ function renderEntry(e, gaps, runMs = 0) {
   // 耗时与用量分两列：它们是两种量，混在一格里就只能靠 `·` 分辨，也没法上下对齐（用户评审第 1 条）
   let res = "";
   if (end && end.durationMs !== undefined) res = fmtMs(end.durationMs);
-  else if (isOpen) res = "未收尾"; // 没有 span_end：账本不知道它是还在跑还是没了，不替进程说话
+  else if (isOpen) res = LEX.runStatus.running.zh; // 没有 span_end：账本不知道它是还在跑还是没了，不替进程说话
   if (isTool && failed) res = res || "出错";
   if (t.name === "observation.gap") res = `丢 ${t.body?.dropped ?? "?"} 条`;
   let usage = "";
@@ -980,7 +980,7 @@ function renderDetail() {
   // 没封口的 run 只说事实：最后一条记录是什么时候。「已跑 N 秒」是在替进程说它还活着，离线读者说不了这句话。
   // 绝对时刻 = 受理时刻 + 相对毫秒；ViewModel 的时间线项上没有 `occurredAt`
   const lastRel = vm.timeline.length > 0 ? vm.timeline[vm.timeline.length - 1].relativeMs : 0;
-  const duration = h.endedAt === null ? `未收尾 · 最后记录 ${fmtClock(h.acceptedAt + lastRel)}` : fmtMs(h.endedAt - h.acceptedAt);
+  const duration = h.endedAt === null ? `${LEX.runStatus.running.zh} · 最后记录 ${fmtClock(h.acceptedAt + lastRel)}` : fmtMs(h.endedAt - h.acceptedAt);
   const sess = h.sessionId ? STATE.sessions[h.sessionId] : undefined;
   // 标题是这段对话（用户扫读的锚点），不是 runId——那串 uuid 原来是全页最大的字，却谁也不读
   const title = sess?.name && sess.name !== h.sessionId ? sess.name : h.sessionId ? shortId(h.sessionId) : "临时对话";
@@ -1002,7 +1002,7 @@ function renderDetail() {
     sess ? el("span", { text: sess.agent }) : el("span", { class: "muted", text: h.sessionId ? "产品未上报" : "无会话" }),
     el("span", { class: "mono", text: `${vm.modelBinding.providerId}/${vm.modelBinding.modelId}`, title: `目录版本 ${vm.modelBinding.catalogRevision}` }),
   ));
-  if (sk === "truncated") ov.append(el("p", { class: "markwhy", text: "跑到上限停了，这次的结果可能不完整" }));
+  if (sk === "truncated") ov.append(el("p", { class: "markwhy", text: LEX.runStatus.truncated.hint }));
   if (vm.outcome && vm.outcome.status === "error" && sk !== "truncated") ov.append(el("p", { class: "tl--bad markwhy", text: `出了点问题：${vm.outcome.error?.code ?? "unknown"}。看时间线里标红的那一行` }));
 
   // 指标行：答「为什么花了这么久」的第一层。总时长拆成 模型 / 工具 / 其余，口径写在 title 里

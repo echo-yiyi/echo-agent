@@ -237,6 +237,13 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   expect(lex.runStatus.running!.zh).toBe("未收尾");
   const html = observePageHtml();
   expect(html).not.toContain("进行中 · 已");
+  // 「界面文案只在术语表这一处翻译」的机器判据（review 2026-09-07）：读**未注入术语表的源文件**的脚本部分，
+  // 不许再硬编码 running 的字面与工具动词兜底（注入后的 LEX JSON 里出现它们是应该的）
+  const rawScript = readFileSync(new URL("../src/observe/page.html", import.meta.url), "utf8").split("</style>")[1] ?? "";
+  expect(rawScript.length).toBeGreaterThan(1000);
+  expect(rawScript).not.toContain('"未收尾"');
+  expect(rawScript).not.toContain('?? "调用"');
+  expect(lex.toolVerbFallback).toBe("调用");
   // 列表的三条收敛（2026-09-07）：整理 run 走一行的次要行、只重复区分得开的维度、筛选片标签截断
   for (const marker of ["run--minor", "const varies", "clipLabel"]) expect(html).toContain(marker);
   // 详情的四条（2026-09-07）：标题是会话不是 runId、运行环境折叠、单支的 reply / attempt 层不占行、耗时条
