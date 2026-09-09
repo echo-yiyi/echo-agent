@@ -52,24 +52,51 @@ export const PERSISTENCE: Readonly<Record<string, Term>> = {
  * 没登记的工具用「调用」+ 原名。`memory` 工具的动作（记住 / 修改 / 删除 / 回忆）在紧随其后的 `memory.mutation.*` 事实里，
  * 工具 span 本身在 metadata 档看不到参数，所以只能是「调用」。
  */
+/*
+ * 工具名 → 人话动词。**每个模型可见的工具都要在这里登记**：没登记的行会念成「调用 web_search」，
+ * 而 `spec/agent-behavior.md` §2.3 明说「不允许只显示『正在使用工具』而不说是哪个工具、对什么对象」，
+ * 动词是那条要求的一半。
+ *
+ * 两档来源，分开列：
+ *   ① 上半段用**跨产品统一动词表**（agent-behavior.md §2.3 的十个：读取 / 搜索 / 写入 / 请求 / 修改 /
+ *      记住 / 回忆 / 运行 / 打开 / 删除）。语义能对上就用它，不另造词。
+ *   ② 下半段是**本产品新增的语义**，统一表里没有对应项（会话集群、工作区隔离、技能、问用户）。
+ *      §5.5 允许产品扩展，条件是登记在自己的术语表里——这里就是那份登记。
+ */
 export const TOOL_VERBS: Readonly<Record<string, string>> = {
+  // ① 统一动词表
   read_file: "读取",
   list_dir: "读取",
   job_output: "读取",
   TaskList: "读取",
   TaskGet: "读取",
   schedule_list: "读取",
+  session_list: "读取",
   glob: "搜索",
   grep: "搜索",
   tool_search: "搜索",
+  web_search: "搜索",
   write_file: "写入",
   TaskCreate: "写入",
   schedule_create: "写入",
+  skill_create: "写入",
   edit_file: "修改",
   TaskUpdate: "修改",
   bash: "运行",
+  web_fetch: "请求",
+  // 写记忆 → 记住；读记忆是自动的那条 `memory.compose`，念「回忆」，两者正好一读一写
+  memory: "记住",
   job_stop: "删除",
   schedule_cancel: "删除",
+
+  // ② 本产品新增（统一表里没有这些语义）
+  session_create: "新建", // 开一段新会话 = 起一个运行实例，不是写数据，所以不归「写入」
+  session_send: "发送",
+  session_close: "关闭", // 只把 meta 置 closed，盘上的东西不删，所以不归「删除」
+  worktree_enter: "切换",
+  worktree_exit: "退出",
+  skill_activate: "启用",
+  ask_user: "询问",
 };
 
 /** canonical record 名 → 时间线一行怎么念。没登记的用原名（设计系统：未知事件用 generic 呈现，不丢）。 */
@@ -85,9 +112,13 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "turn.execute": { zh: "轮", en: "turn.execute", tone: "neutral", hint: "一次模型调用 + 其工具调用；iteration 是第几轮" },
   "attempt.execute": { zh: "尝试", en: "attempt.execute", tone: "neutral", hint: "turn 里的一次模型请求；重试就是同一 turn 的下一个 attempt，只跑了一次时不单独占行" },
   "model.generate": { zh: "模型生成", en: "model.generate", tone: "neutral", hint: "一次 provider 调用；span_end 带 stopReason / usage" },
+  // content 档才有的逐条流式记录。页面把它们折进所属的 span（行尾 `+N`），正常不单独成行；
+  // 登记在这里是因为它们**确实会落盘**，取消折叠或换个消费者就该念得出名字
+  "model.generate.delta": { zh: "流式增量", en: "model.generate.delta", tone: "neutral", hint: "一次生成里的一段增量；content 档才逐条记，metadata 档只做 span 聚合" },
   "model.usage": { zh: "用量", en: "model.usage", tone: "neutral", hint: "provider 回报的 token 数" },
   "model.retry.scheduled": { zh: "重试", en: "model.retry.scheduled", tone: "caution", hint: "provider 出错后内核安排的重试，attempt / cause" },
   "tool.execute": { zh: "工具", en: "tool.execute", tone: "neutral", hint: "一次工具执行；isError 是工具结果的成败，不是 run 的" },
+  "tool.execute.progress": { zh: "工具进展", en: "tool.execute.progress", tone: "neutral", hint: "长工具执行中回报的中间进展；content 档才逐条记" },
   "context.compact": { zh: "上下文压缩", en: "context.compact", tone: "neutral", hint: "上下文被压缩——agent 忘掉了一部分" },
   "memory.mutation.committed": { zh: "记忆已写", en: "memory.mutation.committed", tone: "positive", hint: "create / replace / insert / delete / rename 成功落盘；indexOutcome 说索引重建结果" },
   "memory.mutation.rejected": { zh: "记忆拒写", en: "memory.mutation.rejected", tone: "caution", hint: "语义拒绝（越界 / 不存在 / 超预算），数据未变" },

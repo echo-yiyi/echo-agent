@@ -182,6 +182,44 @@ test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / 
   expect(() => parseObserveArgs(["serve", "--format", "json"], "x")).toThrow("serve 没有");
 });
 
+/**
+ * 2026-09-08 逐个数过的两份清单：core 会落盘的全部记录名，与全部模型可见工具。
+ * **这两份是手抄的快照，不是从源码算出来的**——它证明的是「那次核对的结论没被改回去」，
+ * 不是「以后新增的也一定登记了」。core 加了新记录名 / 产品加了新工具，这里不会自动变红，
+ * 要靠人再核一次（真要立那道门是另一件活，用户还没拍板）。
+ */
+const EMITTED_RECORD_NAMES = [
+  "run.accepted", "run.started", "run.closed", "run.assembly", "observation.gap",
+  "agent.loop.started", "agent.loop.ended", "agent.message.appended", "agent.queue.updated",
+  "agent.resource.changed", "agent.custom_event",
+  "reply.execute", "turn.execute", "attempt.execute", "context.compact",
+  "model.generate", "model.generate.delta", "model.usage", "model.retry.scheduled",
+  "tool.execute", "tool.execute.progress",
+  "memory.compose", "memory.mutation.committed", "memory.mutation.rejected", "memory.mutation.failed", "memory.mutation.partial",
+  "task.state.committed", "task.store.saved", "task.store.failed",
+  "schedule.created", "schedule.cancelled", "schedule.delivered", "schedule.bookkeeping-failed", "schedule.missed",
+  "inbox.accepted", "inbox.rejected", "inbox.restored", "inbox.consumed", "inbox.acked", "inbox.released", "inbox.sealed",
+];
+const MODEL_VISIBLE_TOOLS = [
+  "bash", "edit_file", "glob", "grep", "job_output", "job_stop", "list_dir", "read_file", "write_file",
+  "schedule_cancel", "schedule_create", "schedule_list",
+  "session_close", "session_create", "session_list", "session_send",
+  "skill_activate", "skill_create", "tool_search", "memory", "ask_user",
+  "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
+  "web_fetch", "web_search", "worktree_enter", "worktree_exit",
+];
+
+test("术语表覆盖：每个会落盘的记录名都念得出，每个模型可见工具都有人话动词", () => {
+  const lex = lexicon();
+  const missingRecords = EMITTED_RECORD_NAMES.filter((n) => lex.records[n] === undefined);
+  expect(missingRecords, "core 会发但术语表没登记——时间线会念成原始英文名").toEqual([]);
+  // `agent-behavior.md` §2.3：不允许只显示「正在使用工具」而不说是哪个工具、对什么对象。动词是那条要求的一半
+  const missingVerbs = MODEL_VISIBLE_TOOLS.filter((t) => lex.toolVerbs[t] === undefined);
+  expect(missingVerbs, "工具没登记动词——那一行会念成「调用 xxx」").toEqual([]);
+  // 反向：术语表里不该留 core 已经不发的名字（会变成永远不出现的死条目）
+  expect(Object.keys(lex.records).filter((n) => !EMITTED_RECORD_NAMES.includes(n))).toEqual([]);
+});
+
 test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   const lex = lexicon();
   for (const group of [lex.runStatus, lex.runSource, lex.replySource, lex.integrity, lex.persistence, lex.records]) {
