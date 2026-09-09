@@ -379,13 +379,15 @@ pi 的 `footer.ts` + `FooterDataProvider`。这是**验证 UI 协议够不够用
 
 ## 九、决策记录
 
-| # | 日期 | 决定 | 状态 | 理由 / 去处 |
-|---|---|---|---|---|
-| D1 | 2026-08-31 | 首次运行没有凭据时**起来、进配置流程**，而不是退出；配置流程跑在 `createEcho()` 之前 | 已落地 `59989b1`，**2026-09-01 被 D3 取代**（那一版是启动前一屏向导） | 管道 / CI 保持退出码 1；终端有人坐着就问。原「待拍板 1」 |
-| D2 | 2026-09-01 | **键位照 pi**：编辑器内用 pi-tui 缺省，应用级照 pi 的 `app.*` | **已落地** main `eff6dec`（`keybindings.ts` / `app.ts`；P0 其余交付物同一提交） | 库的缺省就是 pi 的键；自创一套（原稿的 Enter 换行 / Ctrl+D 提交 / 双击 Ctrl+C 退出）和库缺省三处相撞。§二 |
-| D3 | 2026-09-01 | **配置是运行态，不阻塞启动**：常驻 agent 的存活不以任何外围配置为前提（热部署、成熟产品）。装配不看凭据（core `create-agent.ts` 用完整目录解析模型）；key 中途失效在主界面里配，配好不用重启；管道 / CI 仍在启动前报错退出 | **已落地** main `b7c0338`（core `create-agent.ts`；cli `app.ts` / `setup.ts` / `cli.ts`） | pi / Claude Code 都是界面先起来、key 是进去之后的事；上一版把 SDK 的装配纪律直接暴露给了坐在终端前的人。扩展那条同一原则、另拍（待拍板） |
-| D4 | 2026-09-01 | 首次运行走**引导设置**：欢迎 → 选 provider → 贴 key → 选模型（缺省 ✓ 预选中），样子照 Claude Code 的选择器，列表在说明下面；跑在装配前 | **已落地** main `5a6c417`（`first-run.ts`） | 用户拍板「进来是欢迎，然后指导用户去设置 api，可以选择模型」。选哪家 / 哪个模型只能在装配前定（换模型是 P3）；同时修掉「还没有凭据」说两遍的重复。§三 |
-| D8 | 2026-09-01 | 状态栏**只显示 token，不显示 $**；加**缓存命中**一格（`缓存 600 (60%)`）。`Usage` 加可选 `cachedInputTokens`（provider 没报就缺席——0% 是没命中、缺席是没报，两回事）；方言认 OpenAI 系与 DeepSeek 两种上报形状 | **已落地**（core `messages.ts` / `openai.ts` / `agent.ts`；cli `app.ts`；提交见 git log「D8」） | 用户拍板「token 就够，但要看到 cache 缓存情况」。$ 若将来要，走目录里的 `Model.cost`（唯一真源），不建 CLI 价格表。原「待拍板 1」 |
-| D7 | 2026-09-01 | **跨 provider 换模 + 记住选择**：装配全量注册五家（core 加 `CreateAgentOptions.providers`，Models 本来就是 map）；Ctrl+L 跨家平铺（未配 key 标在描述最前），选了没配 key 的家照样切、**主动**弹配置段；`$ECHO_HOME/settings.json` 记 `{model:{provider id, 模型 id}}`，向导与 Ctrl+L 都写入，显式 `--provider`/`--model` 永远赢，记忆坏了/过期了口信 + 回缺省、不挡启动 | **已落地**（core `create-agent.ts`；cli `settings.ts` / `app.ts` / `cli.ts`；提交见 git log「P3b-a + D7」） | 用户拍板「切换了之后重启还要能用」。原「待拍板 2 前半 + 待拍板 3」。§六 |
-| D6 | 2026-09-01 | **坏扩展不阻塞启动**：盘上发现的扩展 load / mount 失败 → 记 `Diagnostic`（`Echo.diagnostics`）、跳过它，agent 照起，TUI 发「[扩展] 没装上」notice、管道模式写 stderr；**显式传入的**（`opts.extensions`、inline 工具）保持 fail-loud——那是代码 bug 不是运行态配置。实现：盘上每个扩展各占一个 generation（Host mount 按代全有或全无，跨代绑定成立），坏 apply 只回滚自己那代 | **已落地**（core `create-echo.ts`；cli `extension.ts` 的 `TuiShell.notify` / `cli.ts`；提交见 git log「D6」） | 用户拍板「没有其他 extension 都不能作为我们不能启动的原因——热部署、成熟产品」。原「待拍板 4」。三个子问题的答案：诊断走 `Echo.diagnostics` + 壳的旁白通道；坏的跳过、其余照装；O4 reload 到来时同一诊断路径复用 |
-| D5 | 2026-09-01 | **P3a 协议开三支**：`setModel` / `setThinkingLevel` / `reset`，协议保持**封闭**；忙时 `rejected` 带原因、**不排队**（steer/followUp 同款显式结果）；绿灯 = 下一轮生效（admission 冻结 binding 保证本轮不撕裂）。UI：Ctrl+L 选择器（当前 ✓）、Shift+Tab 轮档、`/clear`（协议清真相 + 壳清投影）。跨 provider 与 `/sessions` 拆到 P3b | **已落地**（core `runtime.ts` / `builtin.ts`；cli `app.ts`；提交见 git log「P3a」） | 机制早在 Agent 上（装备 setter `agent.ts:787`、`reset()` `:1077`），缺的只是协议口；排队会让「我换了模型」几分钟后突然生效——那是惊吓不是功能。原「待拍板 2」。§六 |
+八条都已各自成条进 `docs/decisions/implemented/`（2026-09-08 转录，论证与验收以记录为准；本表只指路）：
+
+| # | 日期 | 一句话 | 记录 |
+|---|---|---|---|
+| D1 | 2026-08-31 | 首次运行没有凭据时起来、进配置流程，不退出（后被 D3 / D4 细化） | [记录](../decisions/implemented/2026-08-31-tui-first-run-not-exit.md) |
+| D2 | 2026-09-01 | 键位照 pi | [记录](../decisions/implemented/2026-09-01-tui-keybindings-follow-pi.md) |
+| D3 | 2026-09-01 | 配置是运行态，不阻塞启动 | [记录](../decisions/implemented/2026-09-01-config-is-runtime-state.md) |
+| D4 | 2026-09-01 | 首次运行走引导设置 | [记录](../decisions/implemented/2026-09-01-first-run-guided-setup.md) |
+| D5 | 2026-09-01 | P3a 协议开 `setModel` / `setThinkingLevel` / `reset` 三支，忙时拒绝不排队 | [记录](../decisions/implemented/2026-09-01-runtime-protocol-set-model-thinking-reset.md) |
+| D6 | 2026-09-01 | 坏扩展不阻塞启动 | [记录](../decisions/implemented/2026-09-01-bad-extension-does-not-block-startup.md) |
+| D7 | 2026-09-01 | 跨 provider 换模 + 记住选择 | [记录](../decisions/implemented/2026-09-01-cross-provider-model-switch.md) |
+| D8 | 2026-09-01 | 状态栏只显示 token 不显示 $，加缓存命中一格 | [记录](../decisions/implemented/2026-09-01-status-bar-tokens-and-cache.md) |

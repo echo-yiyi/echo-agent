@@ -54,6 +54,38 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-08-31-tui-first-run-not-exit.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-01-tui-keybindings-follow-pi.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-01-config-is-runtime-state.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-01-first-run-guided-setup.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-01-runtime-protocol-set-model-thinking-reset.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-01-bad-extension-does-not-block-startup.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-01-cross-provider-model-switch.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-01-status-bar-tokens-and-cache.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-05-reply-layer.md",
       "bilingual": false
     },
