@@ -1,6 +1,6 @@
 # P3a：`AgentRuntime` 协议开「换」那组——`setModel` / `setThinkingLevel` / `reset`，忙时拒绝不排队
 
-> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01 · 落地 main（core `packages/core/src/extension/runtime.ts` / `builtin.ts`；cli `packages/cli/src/app.ts`；`7d4237c`）· 来源 [产品级 TUI 设计方案](../../design/tui.md) §六、§九 D5（2026-09-08 从那张表转录成条）
+> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01 · 落地 main（core `packages/core/src/extension/runtime.ts` / `builtin.ts`；cli `packages/tui/src/app.ts`；`7d4237c`）· 来源 [产品级 TUI 设计方案](../../design/tui.md) §六、§九 D5（2026-09-08 从那张表转录成条）
 
 ## 决定
 
@@ -16,4 +16,4 @@
 
 ## 验收
 
-`AgentRuntime` 上有且只有这三支新方法（api 快照）；跑着的时候调用得到 `{ kind: "rejected", reason }` 而不是排队；空闲时调用后下一轮用新装备。判据在 `packages/cli/test/tui.test.ts` 的「换装备（P3a）」一节。
+`AgentRuntime` 上有且只有这三支新方法（api 快照）；跑着的时候调用得到 `{ kind: "rejected", reason }` 而不是排队；空闲时调用后下一轮用新装备。判据在 `packages/tui/test/tui.test.ts` 的「换装备（P3a）」一节。

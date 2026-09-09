@@ -18,10 +18,10 @@
 import { AgentPrompt, AgentRuntimeService, AgentSessionsService, defineExtension, type ExtensionDefinition } from "@echo-agent/core/extension";
 import type { TUI } from "@earendil-works/pi-tui";
 import { runTui, type TuiConfigureOptions } from "./app.ts";
-import type { Product } from "./product.ts";
-import { surfaceSection } from "./prompt.ts";
+import type { Product } from "@echo-agent/base";
+import { terminalSurfaceSection } from "./prompt.ts";
 import { runFirstRunSetup } from "./first-run.ts";
-import type { Shell } from "./shell.ts";
+import type { Shell } from "@echo-agent/base";
 
 /**
  * 界面为什么停下来。**退出与换段是两种停法**（2026-09-07）：前者进程收摊，
@@ -101,7 +101,7 @@ export function tuiShell(
       void ctx.effect({
         boundary: "turn",
         start: () => {
-          const off = prompt.section(surfaceSection("terminal"));
+          const off = prompt.section(terminalSurfaceSection());
           return { value: "surface", dispose: () => void off() };
         },
       });

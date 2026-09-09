@@ -10,11 +10,20 @@
 //
 // 记录：`docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`。
 
-import type { CredentialStore } from "@echo-agent/core";
+import type { CredentialStore, Provider } from "@echo-agent/core";
 import type { ExtensionDefinition } from "@echo-agent/core/extension";
-import type { FirstRunChoice, FirstRunOutcome } from "./first-run.ts";
 import type { Product } from "./product.ts";
 import type { VerifyFn } from "./setup.ts";
+
+/** 引导设置里可选的一家：`--provider` 认的短名 + 那家的实例。装配层备好，壳只负责摆出来让人选。 */
+export type FirstRunChoice = Readonly<{ name: string; provider: Provider }>;
+
+/** 引导设置的结果。**它是端口的一部分**：装配层据此决定用哪家、哪个模型去装配。 */
+export type FirstRunOutcome =
+  /** 配好了：用这家、这个模型去装配。key 已验证并写盘。 */
+  | Readonly<{ kind: "configured"; provider: Provider; providerName: string; modelId: string }>
+  /** 用户退出，或进程被中止。 */
+  | Readonly<{ kind: "cancelled" }>;
 
 /** 界面退出时要说的两件事：退出码，和「要换到哪一段会话」（`/resume`；不换就不给）。 */
 export type ShellExit = Readonly<{ code: number; resume?: string }>;

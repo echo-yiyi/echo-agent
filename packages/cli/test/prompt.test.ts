@@ -10,8 +10,11 @@ import { join } from "node:path";
 import { Agent } from "@echo-agent/core";
 import { ExtensionHost, agentRegistries, mountBuiltinTools } from "@echo-agent/core/extension";
 import { FAKE_MODEL, scriptedStreamFn } from "@echo-agent/core/testing";
-import { INSTRUCTIONS_CAP, instructionsEntry, loadInstructions, renderInstructions } from "../src/instructions.ts";
-import { conductText, ECHO_AGENT_IDENTITY, PIPE_SURFACE, TERMINAL_SURFACE, conductEntry, identityEntry, pipeSurfaceEntry } from "../src/prompt.ts";
+import { INSTRUCTIONS_CAP, instructionsEntry, loadInstructions, renderInstructions } from "@echo-agent/base";
+// 2026-09-09 拆包之后这一屏 prompt 由三处凑出来：产品出身份、装配层出纪律与管道交互面、壳出终端交互面
+import { conductText, conductEntry, PIPE_SURFACE, pipeSurfaceEntry } from "@echo-agent/base";
+import { TERMINAL_SURFACE } from "@echo-agent/tui";
+import { ECHO_AGENT_IDENTITY, identityEntry } from "../src/prompt.ts";
 
 async function agentIn(workspace: string): Promise<{ agent: Agent; host: ExtensionHost }> {
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]), workspace });

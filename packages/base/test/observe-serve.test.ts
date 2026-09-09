@@ -11,7 +11,7 @@ import { OBSERVE_DEFAULT_PORT, parseObserveArgs, runObserve } from "../src/obser
 import { observePageHtml, startObserveServer } from "../src/observe/server.ts";
 import { SessionObservationReaders } from "../src/observe/sessions.ts";
 import { lexicon, recordMark } from "../src/observe/lexicon.ts";
-import type { Sink } from "../src/run.ts";
+import type { Sink } from "@echo-agent/base";
 
 let dir: string;
 const running: Echo[] = [];

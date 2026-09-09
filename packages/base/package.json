@@ -1,16 +1,11 @@
 {
-  "name": "echo-agent",
+  "name": "@echo-agent/base",
   "version": "0.1.0",
   "license": "MIT",
   "type": "module",
-  "description": "Echo's general agent: the official CLI and interactive TUI. The same agent runs interactively and through a Unix pipe. Assembly lives in @echo-agent/base, the terminal shell in @echo-agent/tui. Requires Bun.",
-  "bin": {
-    "echo-agent": "./bin/echo-agent.ts"
-  },
+  "description": "Echo's assembly layer: the launcher parts, the product contract, the shell port, host capabilities and the pipe form. No terminal dependency — a web or desktop product depends on this and brings its own shell. Requires Bun.",
   "dependencies": {
-    "@echo-agent/base": "workspace:*",
-    "@echo-agent/core": "workspace:*",
-    "@echo-agent/tui": "workspace:*"
+    "@echo-agent/core": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -18,8 +13,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test test",
-    "start": "bun bin/echo-agent.ts"
+    "test": "bun test test"
   },
   "exports": {
     ".": {
@@ -29,7 +23,7 @@
   },
   "files": [
     "src",
-    "bin",
+    "vendor",
     "LICENSE",
     "README.md"
   ],
@@ -39,13 +33,12 @@
     "llm",
     "llm-agent",
     "cli",
-    "tui",
     "bun"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/echo-yiyi/echo-agent.git",
-    "directory": "packages/cli"
+    "directory": "packages/base"
   },
   "homepage": "https://github.com/echo-yiyi/echo-agent#readme",
   "bugs": "https://github.com/echo-yiyi/echo-agent/issues",

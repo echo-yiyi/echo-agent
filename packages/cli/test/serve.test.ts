@@ -13,7 +13,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileStateLock, SessionService, FileDir } from "@echo-agent/core";
-import { parseArgs } from "../src/cli.ts";
+import { parseArgs } from "@echo-agent/base";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-agent.ts");
 

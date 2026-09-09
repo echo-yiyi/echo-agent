@@ -29,19 +29,19 @@ import {
 } from "@earendil-works/pi-tui";
 import { bannerLines } from "./app.ts";
 import { describeModel, describeProvider } from "./catalog.ts";
-import { ECHO_AGENT, type Product } from "./product.ts";
-import { CredentialSetup, type VerifyFn } from "./setup.ts";
+import type { FirstRunChoice, FirstRunOutcome, Product } from "@echo-agent/base";
+
+/** 同 `app.ts`：壳不认识任何产品，没人给就显示一个中性名字。 */
+const UNNAMED_PRODUCT: Pick<Product, "name" | "version"> = { name: "echo", version: "0.0.0" };
+import { CredentialSetup } from "./setup.ts";
+import type { VerifyFn } from "@echo-agent/base";
 import { wrap } from "./text.ts";
 import { bold, dim, SELECT_LIST_THEME } from "./theme.ts";
 
 /** 一个可选项。`name` 是 `--provider` 认的短名。 */
-export type FirstRunChoice = Readonly<{ name: string; provider: Provider }>;
-
-export type FirstRunOutcome =
-  /** 配好了：用这家、这个模型去装配。key 已验证并写盘。 */
-  | Readonly<{ kind: "configured"; provider: Provider; providerName: string; modelId: string }>
-  /** 用户退出（Ctrl+D），或进程被中止。 */
-  | Readonly<{ kind: "cancelled" }>;
+// 这两个类型是**端口的一部分**（`@echo-agent/base` 的 `shell.ts`）：装配层据此决定用哪家装配。
+// 这里 re-export，写终端引导的人不必两处 import。
+export type { FirstRunChoice, FirstRunOutcome } from "@echo-agent/base";
 
 export type FirstRunOptions = Readonly<{
   /** 欢迎头里的名字与版本。不给 = `echo-agent` 自己。 */
@@ -63,7 +63,7 @@ export async function runFirstRunSetup(opts: FirstRunOptions): Promise<FirstRunO
   const { choices, credentials, signal } = opts;
   if (choices.length === 0) throw new Error("引导设置至少要有一个可选 provider");
   const ui: TUI = opts.ui ?? new TuiMainScreen(new ProcessTerminal(), false, process.cwd());
-  const banner = bannerLines(opts.product ?? ECHO_AGENT, process.cwd());
+  const banner = bannerLines(opts.product ?? UNNAMED_PRODUCT, process.cwd());
 
   let stage: Stage = "provider";
   let chosen: FirstRunChoice = choices.find((c) => c.name === opts.preselect) ?? choices[0]!;

@@ -12,6 +12,17 @@
         "typescript": "^5.5.0",
       },
     },
+    "packages/base": {
+      "name": "@echo-agent/base",
+      "version": "0.1.0",
+      "dependencies": {
+        "@echo-agent/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.7.0",
+      },
+    },
     "packages/cli": {
       "name": "echo-agent",
       "version": "0.1.0",
@@ -19,8 +30,9 @@
         "echo-agent": "./bin/echo-agent.ts",
       },
       "dependencies": {
-        "@earendil-works/pi-tui": "^0.84.3",
+        "@echo-agent/base": "workspace:*",
         "@echo-agent/core": "workspace:*",
+        "@echo-agent/tui": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -34,8 +46,9 @@
         "echo-coding": "./bin/echo-coding.ts",
       },
       "dependencies": {
+        "@echo-agent/base": "workspace:*",
         "@echo-agent/core": "workspace:*",
-        "echo-agent": "workspace:*",
+        "@echo-agent/tui": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -50,13 +63,30 @@
         "typescript": "^5.7.0",
       },
     },
+    "packages/tui": {
+      "name": "@echo-agent/tui",
+      "version": "0.1.0",
+      "dependencies": {
+        "@earendil-works/pi-tui": "^0.84.3",
+        "@echo-agent/base": "workspace:*",
+        "@echo-agent/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.7.0",
+      },
+    },
   },
   "packages": {
     "@earendil-works/pi-tui": ["@earendil-works/pi-tui@0.84.4", "", { "dependencies": { "get-east-asian-width": "1.6.0", "marked": "18.0.5" } }, "sha512-nPUnwDkLtupPXnZQYrCwPFcuTydCDqTY6ZbFqhsL4S4kVq0AT418kPa/6uXwtaCD+MjBNBltb7ScTYX65yeE1w=="],
 
+    "@echo-agent/base": ["@echo-agent/base@workspace:packages/base"],
+
     "@echo-agent/coding": ["@echo-agent/coding@workspace:packages/coding"],
 
     "@echo-agent/core": ["@echo-agent/core@workspace:packages/core"],
+
+    "@echo-agent/tui": ["@echo-agent/tui@workspace:packages/tui"],
 
     "@types/bun": ["@types/bun@1.4.2", "", { "dependencies": { "bun-types": "1.4.2" } }, "sha512-GimotNn7+ZV0uVArItBbriZsR1oNf0+WTzPkdcFrzShI7k2norL0uzEaJT8T33dWr7O/c9ZDuAFQrctKCi72oQ=="],
 

@@ -26,11 +26,18 @@ import { Transcript, clean } from "./transcript.ts";
 import { wrap } from "./text.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { installKeybindings } from "./keybindings.ts";
-import { CredentialSetup, isConfigured, type VerifyFn } from "./setup.ts";
+import { CredentialSetup } from "./setup.ts";
+import { isConfigured, type VerifyFn } from "@echo-agent/base";
 import { SlashCommandProvider, type SlashSpec } from "./slash.ts";
 import { describeModel } from "./catalog.ts";
 import { bold, dim, EDITOR_THEME, SELECT_LIST_THEME } from "./theme.ts";
-import { ECHO_AGENT, type Product } from "./product.ts";
+import type { Product } from "@echo-agent/base";
+
+/**
+ * 欢迎头在没人给产品时的兜底名字。**壳不认识任何产品**（2026-09-09 拆包）——裸用 `runTui()` 的
+ * 低层场合总得显示点什么，这里给一个中性的名字，而不是把某个产品的名字写进壳里。
+ */
+const UNNAMED_PRODUCT: Pick<Product, "name" | "version"> = { name: "echo", version: "0.0.0" };
 
 const ESC = String.fromCharCode(27);
 
@@ -240,7 +247,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   };
 
   const transcript = new Transcript({ spinner: () => spinnerFrame() });
-  const welcome = welcomeLines(options.product ?? ECHO_AGENT, agent.state, agent.state.workspace); // 「在哪」= session 的 workspace
+  const welcome = welcomeLines(options.product ?? UNNAMED_PRODUCT, agent.state, agent.state.workspace); // 「在哪」= session 的 workspace
   /**
    * 能不能收下一条输入，只由 `busy()` 决定——**「起来了没」也在里面**。
    *

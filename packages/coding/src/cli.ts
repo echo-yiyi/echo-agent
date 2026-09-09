@@ -12,7 +12,8 @@
 // 评测或别的宿主可以自己传——本产品不缺省开它。
 
 import { readFileSync } from "node:fs";
-import { conductEntry, mainFor, terminalShell, type Product } from "echo-agent";
+import { conductEntry, mainFor, type Product } from "@echo-agent/base";
+import { terminalShell } from "@echo-agent/tui";
 import { codingPreset } from "./agent.ts";
 
 /** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置。 */

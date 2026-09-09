@@ -86,32 +86,54 @@ function copyTracked(pkgRel: string, dest: string): number {
 }
 
 /**
- * pack `echo-agent`（`packages/cli`）自己：拷 tracked 文件、把它对 core 的 workspace 链接换成
- * core 的真 tarball、`bun pm pack`。返回 tarball 的绝对路径。
+ * pack 一个 workspace 包：拷 tracked 文件、把它对**别的 workspace 包**的链接换成那些包的真 tarball、
+ * `bun pm pack`。返回 tarball 的绝对路径。
  *
- * 两处要它：`echo-agent` 自己的分发门，以及**依赖它的产品**（`echo-coding`）——后者装到别处时，
- * `echo-agent: workspace:*` 同样解析不了，得指向一个真 tarball。
+ * 2026-09-09 拆包之后这是一条**链**：core → base → tui → 产品。`workspace:*` 在没有 workspace 的地方
+ * 解析不了，所以每一层都得先有自己的 tarball，下一层才装得出来。
  */
-function packCli(work: string, coreTgz: string): string {
-  const src = join(work, "tui-src");
-  expect(copyTracked("packages/cli", src)).toBeGreaterThan(5);
+function packWorkspace(work: string, pkgRel: string, tarballs: Readonly<Record<string, string>>, expectBin?: string): string {
+  const name = pkgRel.split("/").at(-1)!;
+  const src = join(work, `${name}-src`);
+  expect(copyTracked(pkgRel, src)).toBeGreaterThan(3);
   const srcPkgPath = join(src, "package.json");
   const srcPkg = JSON.parse(readFileSync(srcPkgPath, "utf8")) as {
-    bin: Record<string, string>;
-    dependencies: Record<string, string>;
+    bin?: Record<string, string>;
+    dependencies?: Record<string, string>;
   };
-  // bin 字段是分发门的前提：它没了，`.bin` 那条断言的失败原因会指向别处
-  expect(Object.keys(srcPkg.bin)).toEqual(["echo-agent"]);
-  srcPkg.dependencies["@echo-agent/core"] = `file:${coreTgz}`;
+  if (expectBin !== undefined) {
+    // bin 字段是分发门的前提：它没了，`.bin` 那条断言的失败原因会指向别处
+    expect(Object.keys(srcPkg.bin ?? {})).toEqual([expectBin]);
+  }
+  const deps = srcPkg.dependencies ?? {};
+  for (const [dep, spec] of Object.entries(deps)) {
+    if (spec !== "workspace:*") continue;
+    const tgz = tarballs[dep];
+    // 链上少一环就是红：这里说清是哪一环，别让失败指向 npm 404
+    expect([pkgRel, dep, tgz !== undefined]).toEqual([pkgRel, dep, true]);
+    deps[dep] = `file:${tgz!}`;
+  }
+  srcPkg.dependencies = deps;
   writeFileSync(srcPkgPath, JSON.stringify(srcPkg, null, 2));
 
-  const out = join(work, "tui-pack");
+  const out = join(work, `${name}-pack`);
   mkdirSync(out, { recursive: true });
   const packed = sh(["bun", "pm", "pack", "--destination", out], src);
   expect([packed.ok, packed.out.slice(-400)]).toEqual([true, packed.out.slice(-400)]);
   const tgz = readdirSync(out).find((f) => f.endsWith(".tgz"));
   expect([out, tgz !== undefined]).toEqual([out, true]);
   return join(out, tgz!);
+}
+
+/**
+ * 装配层与壳的 tarball：产品要装出来就得先有它们（core 的那份由调用方给）。
+ * 顺序即依赖顺序，一层套一层。
+ */
+function packStack(work: string, coreTgz: string): Record<string, string> {
+  const t: Record<string, string> = { "@echo-agent/core": coreTgz };
+  t["@echo-agent/base"] = packWorkspace(work, "packages/base", t);
+  t["@echo-agent/tui"] = packWorkspace(work, "packages/tui", t);
+  return t;
 }
 
 /**
@@ -141,10 +163,16 @@ function isolatedConsumer(pkgRel: string, minFiles: number, extraDeps: readonly 
     const pkgPath = join(dir, "package.json");
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { dependencies: Record<string, string> };
     expect([pkgRel, Object.keys(pkg.dependencies).sort()]).toEqual([pkgRel, ["@echo-agent/core", ...extraDeps].sort()]);
+    // 2026-09-09 拆包：链上每一环都换成真 tarball（core → base → tui → 产品）。
+    // 只换 core 是不够的——base / tui 的 `workspace:*` 在这里同样解析不了。
+    const stack = packStack(work, tarball);
+    for (const [dep, spec] of Object.entries(pkg.dependencies)) {
+      if (spec !== "workspace:*") continue;
+      const tgz = dep === "@echo-agent/core" ? tarball : stack[dep];
+      expect([pkgRel, dep, tgz !== undefined]).toEqual([pkgRel, dep, true]);
+      pkg.dependencies[dep] = `file:${tgz!}`;
+    }
     pkg.dependencies["@echo-agent/core"] = `file:${tarball}`;
-    // 依赖 `echo-agent` 的产品（`echo-coding`）：那条 workspace 链接同样换成真 tarball——
-    // 它对 core 的依赖已经在 `packCli()` 里指向了同一个 core tarball。
-    if (pkg.dependencies["echo-agent"] === "workspace:*") pkg.dependencies["echo-agent"] = `file:${packCli(work, tarball)}`;
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
 
     const install = sh(["bun", "install"], dir);
@@ -371,7 +399,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
     "tui 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
     () => {
       // pi-tui 是它真实的外部依赖（终端差分渲染），显式写出来——判据仍是「恰好等于」
-      isolatedConsumer("packages/cli", 5, ["@earendil-works/pi-tui"]);
+      isolatedConsumer("packages/cli", 3, ["@echo-agent/base", "@echo-agent/tui"]);
     },
     300_000,
   );
@@ -393,7 +421,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
       try {
         // ①② 拷一份 TUI、把它对 core 的 workspace 链接换成 core 的真 tarball、pack 它自己（`packCli`）——
         //    不换链接的话，pack 出来的 tui 装到别处会解析不了 `workspace:*`。
-        const tuiTgz = packCli(work, coreTgz);
+        const tuiTgz = packWorkspace(work, "packages/cli", packStack(work, coreTgz), "echo-agent");
         // tarball 里必须有 bin——`files` 字段写漏时这里当场红，而不是等用户装完发现没这个命令
         const listed = sh(["tar", "-tzf", tuiTgz], work);
         expect(listed.out).toContain("bin/echo-agent.ts");
@@ -429,7 +457,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
     "coding 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
     () => {
       // `echo-agent` 是它真实的依赖（启动逻辑从那儿复用，`packages/coding/src/cli.ts`），显式写出来——判据仍是「恰好等于」
-      isolatedConsumer("packages/coding", 5, ["echo-agent"]);
+      isolatedConsumer("packages/coding", 5, ["@echo-agent/base", "@echo-agent/tui"]);
     },
     300_000,
   );
@@ -442,30 +470,11 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
     () => {
       const { work, tarball: coreTgz, cleanup } = packCore();
       try {
-        const tuiTgz = packCli(work, coreTgz);
-
-        // ① 拷一份 coding，把它的两条 workspace 链接都换成真 tarball
-        const src = join(work, "coding-src");
-        expect(copyTracked("packages/coding", src)).toBeGreaterThan(5);
-        const srcPkgPath = join(src, "package.json");
-        const srcPkg = JSON.parse(readFileSync(srcPkgPath, "utf8")) as {
-          bin: Record<string, string>;
-          dependencies: Record<string, string>;
-        };
-        expect(Object.keys(srcPkg.bin)).toEqual(["echo-coding"]);
-        srcPkg.dependencies["@echo-agent/core"] = `file:${coreTgz}`;
-        srcPkg.dependencies["echo-agent"] = `file:${tuiTgz}`;
-        writeFileSync(srcPkgPath, JSON.stringify(srcPkg, null, 2));
-
-        // ② pack coding 自己
-        const out = join(work, "coding-pack");
-        mkdirSync(out, { recursive: true });
-        const packed = sh(["bun", "pm", "pack", "--destination", out], src);
-        expect([packed.ok, packed.out.slice(-400)]).toEqual([true, packed.out.slice(-400)]);
-        const codingTgz = readdirSync(out).find((f) => f.endsWith(".tgz"));
-        expect([out, codingTgz !== undefined]).toEqual([out, true]);
+        // ① 链上每一环各出一个真 tarball（core → base → tui），再 pack coding 自己。
+        // **coding 不再依赖 `echo-agent`**（2026-09-09 拆包：产品之间平级），所以这里没有它。
+        const codingTgz = packWorkspace(work, "packages/coding", packStack(work, coreTgz), "echo-coding");
         // `files` 漏了 `bin` 就是发出去一个没有命令的包——在 tarball 上当场红
-        const listed = sh(["tar", "-tzf", join(out, codingTgz!)], out);
+        const listed = sh(["tar", "-tzf", codingTgz], work);
         expect(listed.out).toContain("bin/echo-coding.ts");
 
         // ③ 干净项目，只依赖这一个 tarball——**用户拿到的就是这个**
@@ -473,7 +482,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         mkdirSync(consumer, { recursive: true });
         writeFileSync(
           join(consumer, "package.json"),
-          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "@echo-agent/coding": `file:${join(out, codingTgz!)}` } }),
+          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "@echo-agent/coding": `file:${codingTgz}` } }),
         );
         const install = sh(["bun", "install"], consumer);
         expect([install.ok, install.out.slice(-400)]).toEqual([true, install.out.slice(-400)]);

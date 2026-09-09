@@ -13,11 +13,13 @@
     "typescript": "^5.5.0"
   },
   "scripts": {
-    "typecheck": "bun run typecheck:core && bun run typecheck:cli && bun run typecheck:coding && bun run typecheck:repo",
+    "typecheck": "bun run typecheck:core && bun run typecheck:base && bun run typecheck:tui && bun run typecheck:cli && bun run typecheck:coding && bun run typecheck:repo",
     "typecheck:core": "tsc -p packages/core --noEmit",
     "typecheck:cli": "tsc -p packages/cli --noEmit",
     "typecheck:coding": "tsc -p packages/coding --noEmit",
     "typecheck:repo": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck:base": "tsc -p packages/base --noEmit",
+    "typecheck:tui": "tsc -p packages/tui --noEmit"
   }
 }

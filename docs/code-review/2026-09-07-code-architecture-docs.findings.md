@@ -28,7 +28,7 @@
 5. `void this.watchLease(lease)` / `void this.watchHandoff(lease)`（agent.ts:1476-1477 附近）都没有 catch。`watchHandoff` 里的 `await this.stop()` 与 `watchLease` 里 actor work 的 `admission.close()` 一旦 reject 就是 unhandled rejection（在 Node 默认设置下会掀掉整个容器进程，而一个容器可能装着几十段 session）。我没跑出这条——需要一个会在收摊时抛的 Lease/Store 组合，我时间上没构造。
 
 6. 观测那一侧（`tapPending` / `releaseToTap` / `observationPhase()`）与生命周期的交互我只读了调用点，没验证；`processEvents` / `persist()` 的事件顺序也没跑。范围外的 loop、compaction、prompt 装配我一行没看。
-- **arch-boundaries**：1. **`as never` 的删除面我只验了类型，没验运行时。** 我在 /tmp 建了隔离 probe（软链仓库 node_modules），用 tsc 5.9.3 按 `packages/coding/tsconfig.json` 的口径证明「不加 `as never` 也编译得过」，覆盖了 `defineToolPack` / `definePromptPack` / `defineExtension(TConfig=void)` 三种构造，以及从 `echo-coding` 真取来的 `ECHO_WORKSPACE` / `ECHO_SHELL`。**没有覆盖到的**：`packages/cli/src/cli.ts:606` 的 `shell.definition`（要起 TUI 才拿得到实例，我只按 `TuiShell.definition: ExtensionDefinition<void>` 的声明推断），以及 `create-echo.ts` 里那两处在真实调用链上的形态。我也没有实际把 11 处删掉再跑 `bun run typecheck` —— 本次只读。
+- **arch-boundaries**：1. **`as never` 的删除面我只验了类型，没验运行时。** 我在 /tmp 建了隔离 probe（软链仓库 node_modules），用 tsc 5.9.3 按 `packages/coding/tsconfig.json` 的口径证明「不加 `as never` 也编译得过」，覆盖了 `defineToolPack` / `definePromptPack` / `defineExtension(TConfig=void)` 三种构造，以及从 `echo-coding` 真取来的 `ECHO_WORKSPACE` / `ECHO_SHELL`。**没有覆盖到的**：`packages/base/src/cli.ts:606` 的 `shell.definition`（要起 TUI 才拿得到实例，我只按 `TuiShell.definition: ExtensionDefinition<void>` 的声明推断），以及 `create-echo.ts` 里那两处在真实调用链上的形态。我也没有实际把 11 处删掉再跑 `bun run typecheck` —— 本次只读。
 
 2. **零运行时依赖那条的复现我没有真跑。** 我论证的链条是：`packages/core/src/task/fs.ts` 零内部导入者（grep 得到）+ 分发门的冒烟脚本从不 import `./task/fs`（读全文得到）+ `packages/core/scripts/api-inventory.ts` 已经在从根 node_modules 解析 `typescript`（间接证明上溯解析可达）。但我**没有**真往 `src/task/fs.ts` 塞一行 `import ts from "typescript"` 再跑四道门确认全绿——那要改仓库文件。如果 bun 的 isolated linker 对 `packages/core/` 的上溯解析比我想的严（`@earendil-works/pi-tui` 就只落在 `packages/cli/node_modules/`，根上没有），这条的可复现性会打折；但 `typescript` 与 `@types/bun` 确实在根 node_modules，这一半是实测的。
 
@@ -39,7 +39,7 @@
 5. **我按系统上下文里的 CLAUDE.md 副本一度得出「仓库地图指向不存在的 `packages/coding-agent/`」，从磁盘复核后证否、已撤。** 磁盘上的 `CLAUDE.md:17` 写的是 `packages/coding/`，是对的。提醒一句：注入进上下文的那份 CLAUDE.md 是旧快照。
 
 6. **`packages/coding/package.json` 的 `exports` 是裸串 `"./src/index.ts"`（没有条件分支），与 cli 那条「只留 `bun` 一支、不写空头支票」的门（`packages/cli/test/package-isolation.test.ts` 末条）不同形。** Node 侧 `import("echo-coding")` 会去加载一个 `.ts` 文件。我没有把它报成缺陷，因为找不到任何文档承诺 `echo-coding` 可被当库从 Node 消费；但这一条我没有实测，也没有找到对应的决策记录，留在这里备查。
-- **arch-composition-root**：范围本身的结论先说清：**「一个装配现场」这条不变量我核到了，没有第二处**。全仓 grep `new Agent(` / `new ExtensionHost(` / `agentRegistries(` / `mountBuiltinTools` / `builtinEntriesFor`，`packages/*/src` 与 `examples/` 里一处生产代码都没有第二个装配点（只有 test/ 里的低层用法）；`packages/coding/src/agent.ts` 与 `extensions.ts` 只出数据，`packages/coding/src/cli.ts` 只交一个 `Product`，`packages/cli/src/cli.ts` 三个 `createEcho()` 调用共用同一份 `echoOptions()`。装配四步顺序（先扫盘 → `createAgent` → builtin/`boot:inline`/发现的各一代/`boot` → 返回 Echo）与 `stop()` 的 single-flight 逆序卸载都与 docs/architecture.md §2 一致；「装配不启动」也成立（`prompt()` 在 `new` 相位被 `refuseWorkReason()` 拒，agent.ts:2325-2327）。
+- **arch-composition-root**：范围本身的结论先说清：**「一个装配现场」这条不变量我核到了，没有第二处**。全仓 grep `new Agent(` / `new ExtensionHost(` / `agentRegistries(` / `mountBuiltinTools` / `builtinEntriesFor`，`packages/*/src` 与 `examples/` 里一处生产代码都没有第二个装配点（只有 test/ 里的低层用法）；`packages/coding/src/agent.ts` 与 `extensions.ts` 只出数据，`packages/coding/src/cli.ts` 只交一个 `Product`，`packages/base/src/cli.ts` 三个 `createEcho()` 调用共用同一份 `echoOptions()`。装配四步顺序（先扫盘 → `createAgent` → builtin/`boot:inline`/发现的各一代/`boot` → 返回 Echo）与 `stop()` 的 single-flight 逆序卸载都与 docs/architecture.md §2 一致；「装配不启动」也成立（`prompt()` 在 `new` 相位被 `refuseWorkReason()` 拒，agent.ts:2325-2327）。
 
 没能验证的部分：
 
@@ -48,16 +48,16 @@
 3. **preemptible handoff 之后 `runServe` 的 `finally { await echo.stop() }` 会不会抛**。我读了 agent.ts:1846-1852（`revoke` → 清 `this.lease` → `lease.release()`），如果让位时 `this.lease` 没被清掉，`release()` 会撞上「锁文件现在属于别人」而抛（file-lock.ts:180-186），一路冒到 `mainFor` 的 catch 变成 exit 1。这不在本次范围（属于 lease/handoff 那条线），我只是路过看到，没跑复现，也没查它的门。
 4. **`slice(0, SESSION_NAME_MAX)` 按 UTF-16 code unit 截断**（create-echo.ts:372）：第 60 个位置正好落在代理对中间时会切出孤立代理，写进 meta.json 大概率变成替换字符。属于风险清单第 5 条（按字节/码元截断），但我没实测落盘字节，且只影响给人看的会话名，没写成发现。
 5. **真 provider / 真终端一次都没跑**。四个复现脚本（/tmp/echo-review/repro{,2,3,4}.ts）全用 scripted provider，`bun test` / `bun run typecheck` / `docs-lint` 我按你给的基线采信、没有重跑。TUI 壳 mount 之后到 `agent.start()` 之间那个交互窗口，我只从 `refuseWorkReason()` 的代码判断是安全的，没有实跑 TUI 验证。
-6. 范围外没读：`packages/cli/src/app.ts`（壳）、`loop/`、`observability/` 内部、`compaction/`。
+6. 范围外没读：`packages/tui/src/app.ts`（壳）、`loop/`、`observability/` 内部、`compaction/`。
 - **arch-extension-coherence**：1. 跨代覆盖那条：我只在 ExtensionHost 这一层实测复现（/tmp/echo-shadow-probe.ts，输出 `shell bound to provider = HIJACKED`）。「真实 `createEcho()` + 盘上放一个坏扩展 + 起 TUI」的端到端复现我没跑（要真 provider 与终端），挂载顺序是读 packages/core/src/create-echo.ts:406-448 得出的。所以「第三方文件真能劫持 `echo:tui`」这一步是代码推理 + 同机制复现，不是端到端实测。
 
 2. 我没读完 packages/core/src/extension/fiber.ts 与 service-key.ts 全文（只看了 fiber.ts 的 `get`/`provide` 与 host.ts 的调用点）。如果 `ServiceKeyTable.fork()/commit()` 里另有跨代冲突检查，我会漏判——但从 host.ts:116/172 的用法看它只管 canonical 归一，不管 provider 数量。
 
 3. 「任何扩展都能 `answerPermission()` 自批授权」我只验到两件事：`AgentRuntimeService` 可被任意扩展 inject（extensions.ts:34、cli.test.ts:648 是现成例子），以及 agent.ts:894-906 只验参数形状。**没有实跑**一条扩展在 ask 挂起时调 `answerPermission()` 看它是否真的通过；`permission/ledger.ts` 我没读，那里可能另有 `decidedBy` 之类的判定影响结果。
 
-4. 管道形态（packages/cli/src/run.ts:65-92）不经 `AgentRuntime`，只订阅 `agent.subscribe`，一次都没调 `subscribeLifecycle` —— 这正是 runtime.ts:8-11 说的旧病。今天不触发是因为出厂 `permission: false`（packages/coding/src/cli.ts:32），而 `responder:\"host\"` + `askTimeoutMs: null`（coding/src/permission.ts:54）配上管道形态是否真会永久挂住，我没跑。permission.ts:32-33 把这个代价明写成已知取舍，所以我没报，但我不确定这是否等于「已接受」。
+4. 管道形态（packages/base/src/run.ts:65-92）不经 `AgentRuntime`，只订阅 `agent.subscribe`，一次都没调 `subscribeLifecycle` —— 这正是 runtime.ts:8-11 说的旧病。今天不触发是因为出厂 `permission: false`（packages/coding/src/cli.ts:32），而 `responder:\"host\"` + `askTimeoutMs: null`（coding/src/permission.ts:54）配上管道形态是否真会永久挂住，我没跑。permission.ts:32-33 把这个代价明写成已知取舍，所以我没报，但我不确定这是否等于「已接受」。
 
-5. `steer` / `followUp` 在协议里，唯一的壳一次都没调（grep `agent.steer` / `agent.followUp` 在 packages/cli/src/app.ts 零命中，忙时 app.ts:273-280 把文字放回输入行）。runtime.ts:91-94 自己说「TUI 今天就是那样」，我按已知缺功能处理没报——但没去核实是否有别的入口（斜杠命令、键位）间接用到。
+5. `steer` / `followUp` 在协议里，唯一的壳一次都没调（grep `agent.steer` / `agent.followUp` 在 packages/tui/src/app.ts 零命中，忙时 app.ts:273-280 把文字放回输入行）。runtime.ts:91-94 自己说「TUI 今天就是那样」，我按已知缺功能处理没报——但没去核实是否有别的入口（斜杠命令、键位）间接用到。
 
 6. hostAbiVersion：我确认了两道同步检查（abi.ts:124 与 host.ts:123，后者对 `opts.extensions` 传进来的定义也生效）加 create-echo.ts:259「盘上加载后用 host 自己的 `defineExtension` 重验」这条关键路径，所以「mount 时校验」是落地的。但「core 升到 hostAbiVersion 2 之后老扩展会怎样」无法验证——今天只存在版本 1，且类型上是字面量 `1`，没有第二个值可测。host.ts:123 那道检查我也没找到对应的单测（extension-host.test.ts:122 测的是 `defineExtension`）。
 
@@ -78,7 +78,7 @@
 
 7. **`process.env` 的注入面我判成「已文档化的有意设计」，没报。** `echoHome()`（storage/file-dir.ts:24）每次调用现读 `ECHO_HOME`，内建 provider 的 key 走 `envApiKey` 且完全不看注入的 `CredentialStore`（openai.ts:488-503）——但 models.ts:204-211 明确写了「环境变量赢是有意的，CI 与临时覆盖要能不改文件就生效」。多实例想给同一家 provider 两把不同的 key 时这确实做不到，我认为这是已决取舍，不作为发现。
 - **arch-public-face**：1) 我没有自己跑 `bun test` / `bun run typecheck` / `bun scripts/docs-lint.ts`，直接用了你给的基线。我实际执行的只有两条只读探针：`node --input-type=module -e 'import(\"echo-agent\")'`（拿到 ERR_PACKAGE_PATH_NOT_EXPORTED）和在 /tmp 下用不带 customConditions 的 tsconfig 跑 tsc（拿到 TS2307）——后者是把本 worktree 的 node_modules 软链过去做的，与「装 tarball」不完全等价，结论对 exports 表的判定是可靠的，对「补上 types 支之后是否就通了」我没验证过。\n\n2) F2 的修法 (a) 我没试跑：给 packages/cli 补 `types` 支到底该指向 `src/index.ts`（要求消费者开 allowImportingTsExtensions）还是必须像 core 那样加一套 build，我没做实验，只指出了缺口。\n\n3) 各 public.ts 声称的「纯（不碰 node:）」我做了一遍验证：先用正则 BFS 走出口的相对 import 闭包，第一遍把 `import type` 也算进去，得到「./extension 会拖到 observability/sqlite-store.ts 的 node:fs」这个假阳性；排掉 type-only 边之后重跑，`./background` `./extension` `./mcp` `./observability` `./task` `./testing` `./tools` 的值级闭包里都没有 node:/bun: 静态 import，纯度声明成立，所以我没报这条。但这是正则近似，不是 tsc 的真实模块图（动态 import、条件 re-export 可能漏），`bun:sqlite` 在 sqlite-store.ts:207/317 是 `await import(...)` 动态引入，Node 侧只在真正开库时才会炸——这条我没在 Node 上实跑过。\n\n4) 我只评了范围内这一块（公共面 vs 受众决策）。packages/cli 与 packages/coding 的公共面内容本身（30+ 个导出符号是否都该公开、有没有契约说明）我没有逐个核，只核了它们的 package.json#exports 可达性。\n\n5) JSDoc 那条我查了但决定不报：test/jsdoc-baseline.txt 记的 154 个缺口里有 21 个落在决策指定的唯一正门（extension ABI / registries / host），看着刺眼；但抽查 packages/core/src/extension/abi.ts:61 的 `ExtensionDefinition`，声明本身没挂 JSDoc、成员逐个有 JSDoc，而门的 `documented()` 只看顶层声明——所以「154」不等于「154 个符号没有说明」。这个数字被当成文档欠债口径会误导，但门的行为与它自己的注释一致，我按「已有门 + 已登记」处理了，没算发现。\n\n6) README.zh.md 与 README.md 的双语同构、以及 .i18n.yaml 的哈希状态我没核（F1 的修法会同时动两侧，改完需要人确认语义一致后才更新哈希）。
-- **arch-two-truths**：1) 第 1 条的两次实测里，模型请求都没真正发出去（假 key 那次流当场报 auth 错；把 `ECHO_LLM_BASE_URL` 指到一个挂住不返回的本地 stub 那次，stub 压根没收到请求）。所以我实测到的是「宿主在 run 起来后 ~0.6–1.0s 内就释放了锁、消息进 transcript 却没有回复、重启也不重放」，但**没有直接抓到「abort 打断了一个正在跑的模型请求」这一帧**——那一步是从 `SERVE_IDLE_MS=60_000`、523 行是唯一另一个 break、以及 `doDispose()` 里 `this.abort(\"dispose\")`（agent.ts:2897）推出来的。真 key 下 run 会跑几秒，250ms 的 tick 落在 run 中间是必然，但我没有真 key 可验。另外那两次探针里子进程释放锁后 30s 内没退出（`child.exitCode` 一直是 null），我没查清是 Bun 的 `exitCode` 轮询不更新，还是 `--serve` 收摊后真有东西吊住事件循环——顺带说一句，`packages/cli/src/cli.ts:486` 的 runner 也是用 `child.exitCode !== null` 判子进程死没死，如果那个读法不可靠，runner 的失败判定也不可靠，这条我没验。\n\n2) 第 3 条里「`isMainSession()` 会给非 main 段挂上 `session_create`」是从 create-echo.ts:165-167 读出来的，**没有实测**：要造这个场景得让一段 `main:false` 的 session 的状态根落在 `sessionsRoot` 之外，而 `EchoSessions.create()` 总是把新段建在 `sessionsRoot` 下，只有宿主自己搬目录或换 `ECHO_HOME` 才撞得上。已实测的只有 `list()` 为空、`send(自己)` not-found 这两条。\n\n3) 第 4 条（陈尸锁）**完全没有实测**：我没有伪造一份 `.lock` 再走一遍 `send()`。它是从 `peek()` 的实现（file-lock.ts:107-124）、create-echo.ts:315 那段注释的自述、以及 state-lock.test.ts:46 的既有断言拼出来的。要坐实得写一个探针：手工写一份合法 `.lock`（holder/pid/at 齐全、pid 指向一个已退出的进程），然后 `echo.sessions.send()`，看返回是不是 `accepted`。\n\n4) 我按范围只查了「两个真源」这一类，而且只查了任务点名的那几条轴。查过但**没发现问题、也没深挖到底**的：`Agent.lastCalibration`（agent.ts:3084）与 `createCompactor` 内部的 `calibration`（pipeline.ts:198）是同一个公式写了两遍，我核对过两边的输入（system 估值、投影范围）在当前代码下一致，subagent / dream 的事件不走 `apply()`（agent.ts:2620、2571 的 emit 都是独立 sink），所以没找到会分叉的输入——但这是「我没找到」，不是「不会分叉」；`.lock` 这个字面量在 create-agent.ts:46 / create-echo.ts:62 / cli.ts:482 各写了一份，改名会漏，属于 N 级，我没单独报。\n\n5) 我没跑任何门（基线是任务给的），也没跑全仓测试，所以不能声称这四条不会牵动别的测试。所有探针都写在 /tmp 下，仓库一个字节都没改。
+- **arch-two-truths**：1) 第 1 条的两次实测里，模型请求都没真正发出去（假 key 那次流当场报 auth 错；把 `ECHO_LLM_BASE_URL` 指到一个挂住不返回的本地 stub 那次，stub 压根没收到请求）。所以我实测到的是「宿主在 run 起来后 ~0.6–1.0s 内就释放了锁、消息进 transcript 却没有回复、重启也不重放」，但**没有直接抓到「abort 打断了一个正在跑的模型请求」这一帧**——那一步是从 `SERVE_IDLE_MS=60_000`、523 行是唯一另一个 break、以及 `doDispose()` 里 `this.abort(\"dispose\")`（agent.ts:2897）推出来的。真 key 下 run 会跑几秒，250ms 的 tick 落在 run 中间是必然，但我没有真 key 可验。另外那两次探针里子进程释放锁后 30s 内没退出（`child.exitCode` 一直是 null），我没查清是 Bun 的 `exitCode` 轮询不更新，还是 `--serve` 收摊后真有东西吊住事件循环——顺带说一句，`packages/base/src/cli.ts:486` 的 runner 也是用 `child.exitCode !== null` 判子进程死没死，如果那个读法不可靠，runner 的失败判定也不可靠，这条我没验。\n\n2) 第 3 条里「`isMainSession()` 会给非 main 段挂上 `session_create`」是从 create-echo.ts:165-167 读出来的，**没有实测**：要造这个场景得让一段 `main:false` 的 session 的状态根落在 `sessionsRoot` 之外，而 `EchoSessions.create()` 总是把新段建在 `sessionsRoot` 下，只有宿主自己搬目录或换 `ECHO_HOME` 才撞得上。已实测的只有 `list()` 为空、`send(自己)` not-found 这两条。\n\n3) 第 4 条（陈尸锁）**完全没有实测**：我没有伪造一份 `.lock` 再走一遍 `send()`。它是从 `peek()` 的实现（file-lock.ts:107-124）、create-echo.ts:315 那段注释的自述、以及 state-lock.test.ts:46 的既有断言拼出来的。要坐实得写一个探针：手工写一份合法 `.lock`（holder/pid/at 齐全、pid 指向一个已退出的进程），然后 `echo.sessions.send()`，看返回是不是 `accepted`。\n\n4) 我按范围只查了「两个真源」这一类，而且只查了任务点名的那几条轴。查过但**没发现问题、也没深挖到底**的：`Agent.lastCalibration`（agent.ts:3084）与 `createCompactor` 内部的 `calibration`（pipeline.ts:198）是同一个公式写了两遍，我核对过两边的输入（system 估值、投影范围）在当前代码下一致，subagent / dream 的事件不走 `apply()`（agent.ts:2620、2571 的 emit 都是独立 sink），所以没找到会分叉的输入——但这是「我没找到」，不是「不会分叉」；`.lock` 这个字面量在 create-agent.ts:46 / create-echo.ts:62 / cli.ts:482 各写了一份，改名会漏，属于 N 级，我没单独报。\n\n5) 我没跑任何门（基线是任务给的），也没跑全仓测试，所以不能声称这四条不会牵动别的测试。所有探针都写在 /tmp 下，仓库一个字节都没改。
 - **capabilities**：1. 全仓门禁我没重跑，直接采信了任务里给的基线（typecheck 0、bun test 1372/0、docs-lint 0）。我只跑了自己写的一次性探针（/tmp 下四个 .ts，用 bun 直接 import 源码），没有改动仓库里任何文件。
 
 2. 第 2 条（tick 复活已取消的闹钟）我是用 harness + 手工构造的可控异步 deliver 复现的，不是用真 Agent 端到端跑。「窗口足够大」这一步我是读代码得出的：`agent.ts:752` 把 deliver 接到 `deliverForSchedule`，后者 `await this.acceptInboxRecord(...)`（真落盘）。我没有在一个真 Agent 上让 setInterval 的 tick 与模型发出的 schedule_cancel 真正撞上，所以时序窗口的实际宽度只有推断，没有实测。
@@ -104,7 +104,7 @@
 
 4. **一条我读到了但没报，怕是噪音：** `Transcript.push` 对 `tool` 条目只洗了 `name` / `detail`，`params` 原样交给 `ToolExecution`（transcript.ts:52-60 vs messages.ts:129-131），而 transcript.ts:9-12 与 text.ts:4-10 的头注都写「四类条目的动态文本一律在入口过 clean()」。实际展开态渲染走 `JSON.stringify`，C0 会被转义成 `` 字面量，所以我判断没有可利用的后果——但 C1（U+0080–U+009F，`clean()` 会删、`JSON.stringify` 不转义）在某些 8-bit 模式终端上会不会被当 CSI，我没在真终端试过，所以是「我认为无害」而不是「我验过无害」。
 
-5. **范围外没看：** `packages/cli/src/observe.ts`、`observe/` 子目录、`index.ts` 不在你列的清单里，我没读，上面任何结论都不覆盖它们。`packages/coding/` 作为 `mainFor()` 的第二个消费者也没看——第 6 条（参数不转发）对它是否有别的后果我不知道。
+5. **范围外没看：** `packages/base/src/observe.ts`、`observe/` 子目录、`index.ts` 不在你列的清单里，我没读，上面任何结论都不覆盖它们。`packages/coding/` 作为 `mainFor()` 的第二个消费者也没看——第 6 条（参数不转发）对它是否有别的后果我不知道。
 - **coding-tools**：读了但没能实测 / 没把握的部分，如实列出：
 
 1. **`bash -lc` 的登录 shell 副作用没跑通。** packages/coding/src/tools/bash.ts:132 用 `spawn("bash", ["-lc", command], { cwd, … })`，`-l` 会读 `/etc/profile` 与 `~/.bash_profile`（或 `~/.profile`）。若用户的启动文件里有 `cd`，那么第一条命令就不在 workspace 根，而 `withCwdMarker` 打印的 `$PWD`（bash.ts:123-124）会把那个目录写进 `state.cwd`（bash.ts:115）永久保留——与 bash 的 description「it starts at the workspace root」和 prompt.ts:27 那句直接冲突，之后所有相对路径命令都在别处落盘。我想用改 HOME 的方式实测，被本会话的 worktree 隔离检查拒了（它禁止设 HOME 跑命令），所以这条只有代码推理、没有实测，没有作为发现提出。值得作者自己在一台有 `~/.bash_profile` 的机器上验一次。
@@ -166,7 +166,7 @@
 
 5. **两件我读到但**没有**报成发现的事，列出来供你判断，因为找不到决策记录说它是有意的**：
    - `bun packages/cli/bin/echo-agent.ts --help` 的输出**整段是中文**（我实跑过），而 README.md 是英文优先、`2026-09-07-audience-and-versioning.md` 把受众定成第三方；`packages/core/README.md` 也是纯中文，而它是 `files` 收进 tarball、将来 npm 上的那一页。这可能是有意的（CONTRIBUTING.md:8 说 issue/PR 中英皆可），也可能是漏的——我没有依据判定，所以没报。
-   - `packages/cli/vendor/echo-tokens/.upstream.json` 里 `"upstream": "/Users/hainan/Code/echo_design"` 是一个本机绝对路径，而 `packages/cli/package.json` 的 `files` 含 `vendor`，即它会随包发出去；`dist/coding/tokens.css` 没有任何 license/attribution 头。我无法确认 echo_design 是不是你自己的项目（若是，就只剩「泄了个本地路径」这一点），所以没按第三方组件许可问题报。
+   - `packages/base/vendor/echo-tokens/.upstream.json` 里 `"upstream": "/Users/hainan/Code/echo_design"` 是一个本机绝对路径，而 `packages/cli/package.json` 的 `files` 含 `vendor`，即它会随包发出去；`dist/coding/tokens.css` 没有任何 license/attribution 头。我无法确认 echo_design 是不是你自己的项目（若是，就只剩「泄了个本地路径」这一点），所以没按第三方组件许可问题报。
 
 6. **发现 2 里我引用的 `test/distribution-gate.test.ts:285-287` 用 `new Agent()` 做 Node 侧判据**——我把它当作「README 说内部的 API 正被自家分发门当公共入口示范」的旁证。但这属于代码侧，且 `Agent` 类内部化在 `docs/architecture.md` §7 明列为已拍板未实现，所以我没把它单独报成缺陷；如果你希望连同这条测试一起改，那是内部化落地时的事，不是文档修复的一部分。
 - **docs-gate-honesty**：1. 我一行代码都没跑。基线（typecheck 0 / 1372 测试通过 / docs-lint 0 违规）沿用你给的实测结果，本次没有重跑 `bun test`、`bun scripts/docs-lint.ts`，也没有单独跑任何一道门。所有「这道门守住了 / 没守住」的判断都来自通读测试源码，不是靠改坏实现看它变红。
@@ -179,10 +179,10 @@
 
 5. 反向搜（第 ② 项）我做的是有偏的采样，不是穷举：grep 了「有门守着 / 门 / 判据 / 保证 / 不变量」几组词，逐处看的只有命中里最像「声称有保障」的十来处。`grep -rln 判据` 在三个包的 src 里命中 39 个文件，我没有一个个打开。`docs/design/` 下四份设计文档里那些「机器判据」表（context-and-message-flow.md §9、lifecycle-and-run-loop.md:290 等）我只核到「docs-lint 的 links 门会验 `#test=` 锚存在」这一层——**锚存在不等于那个测试真的断言了那一栏声称的语义**，这一片是整块没查的面，值得单独开一轮。
 
-6. 第 5 条（key-discipline 不递归）我只用 grep 确认了 `packages/cli/src/observe/` 当前没有 `fromCharCode` / `handleInput` / `addInputListener` / 裸 ESC 字节，grep 模式是我自己列的，可能漏掉别的按键字节比较写法。
+6. 第 5 条（key-discipline 不递归）我只用 grep 确认了 `packages/base/src/observe/` 当前没有 `fromCharCode` / `handleInput` / `addInputListener` / 裸 ESC 字节，grep 模式是我自己列的，可能漏掉别的按键字节比较写法。
 
 7. docs/review/tui-design.md 我读的是导读、§二（含两道门那段）、§三开头、§九决策表，27KB 里剩下的大半（§一 §四 §五 §七 §八）没读，所以「这份 spec 与当前代码有多不符」我给不出结论，只给了「它在免门目录里、路径已烂」这一条。
-- **docs-glossary**：1. **只读源码，没跑起来。** observe 面板那条（发现 4）我是从 `packages/cli/src/observe/page.html` 的源码读出「未收尾」出现在列表耗时列（:392）和时间线行（:596），没有真的 `echo-agent observe serve` 起页面确认这两处与 LEX badge 会同屏出现。我推断的「同一屏两个说法」是代码推断，不是目视。
+- **docs-glossary**：1. **只读源码，没跑起来。** observe 面板那条（发现 4）我是从 `packages/base/src/observe/page.html` 的源码读出「未收尾」出现在列表耗时列（:392）和时间线行（:596），没有真的 `echo-agent observe serve` 起页面确认这两处与 LEX badge 会同屏出现。我推断的「同一屏两个说法」是代码推断，不是目视。
 
 2. **agentId / agentName 我按规则整体排除了，但排得可能过宽。** `docs/architecture.md` §7 与 `docs/decisions/proposed/2026-09-07-session-identity.md` 把它们的退场列为「已拍板未实现」，所以我没报。但那条记录的验收只点名了三处：`meta.json` 的 `product` 字段、`CreateAgentOptions` / API 快照里没有 `agentId` / `agentName`、`.lock` 的 holder 形如 `echo-coding:<sessionId>`。它**没有**提到观测层那一整套 `agentId` 维度（`packages/core/src/observability/types.ts:87/292/551`、`runtime.ts:72/239/268/294`、`sequencer.ts:291/936`、`identity.ts:117`——`agentId` 是落进 SQLite 的 scope 字段与 header 字段）和 `packages/core/src/prompt/types.ts:26` 的 `agentId`。这两处到底在不在那条决策的射程内，我判断不了；如果不在，它们就是漏网的 Avoid 词残留，而且改起来碰的是落盘格式。**建议单独问一次。**
 
@@ -442,7 +442,7 @@ docs/decisions/proposed/2026-09-07-audience-and-versioning.md 决定第 1 条（
 
 一、别把重心放在「Node 跑不起来」。`echo-agent` 是本质 Bun-only 包：bin 就是 `packages/cli/package.json:8-10` 的 `./bin/echo-agent.ts`（TypeScript 源文件，Node 本来就执行不了），files 无 dist、无 build 脚本。Node 报 ERR_PACKAGE_PATH_NOT_EXPORTED 是「只有 bun 一支」的必然结果，把它单独算作违背 README 承诺偏弱——README 开头也写了 Bun is required。真正过不去的是**类型面**：exports 表连 `types` 支都没有，第三方哪怕老老实实用 Bun 跑，只要 tsconfig 不是仓内那三份的复制品（不写 `customConditions: ["bun"]`），`import { mainFor, ECHO_AGENT }` 就是 TS2307，`Product` / `Main` / `ObserveOptions` 一个类型都拿不到。
 
-二、原发现少说了一层：写了 `customConditions: ["bun"]` 也不算干净。`bun` 支指的是 `.ts` 源码而非 `.d.ts`，第三方的 tsc 会去编译 echo-agent 的源码本身，于是还得补 `@types/bun` 和 `allowImportingTsExtensions`——我实测加上 customConditions 后 TS2307 确实消失，但立刻改报 `packages/cli/src/cli.ts:46-47` 的 `node:fs` / `node:path` 找不到、`src/app.ts:176` 的 `process` 找不到，共几十条。core 走 `types → dist/*.d.ts` 就没有这层传染。也就是说这条路对第三方不是「加一行 tsconfig」，是「把仓内 tsconfig 整份抄过去」。
+二、原发现少说了一层：写了 `customConditions: ["bun"]` 也不算干净。`bun` 支指的是 `.ts` 源码而非 `.d.ts`，第三方的 tsc 会去编译 echo-agent 的源码本身，于是还得补 `@types/bun` 和 `allowImportingTsExtensions`——我实测加上 customConditions 后 TS2307 确实消失，但立刻改报 `packages/base/src/cli.ts:46-47` 的 `node:fs` / `node:path` 找不到、`src/app.ts:176` 的 `process` 找不到，共几十条。core 走 `types → dist/*.d.ts` 就没有这层传染。也就是说这条路对第三方不是「加一行 tsconfig」，是「把仓内 tsconfig 整份抄过去」。
 
 三、恒绿的门要多记一条：除了原发现列的两条 coding 门，`test/distribution-gate.test.ts:374` 的 `isolatedConsumer("packages/cli", 5, ["@earendil-works/pi-tui"])` 同样对这个洞恒绿——它拷的是 `packages/cli/tsconfig.json`（:8 有 customConditions）。
 
@@ -587,7 +587,7 @@ tick 判到期后停在 172 行的 `await deliver`（inbox 落盘，真异步窗
 
 **证据**
 
-packages/cli/src/cli.ts:520-526
+packages/base/src/cli.ts:520-526
 ```ts
 let idleSince = Date.now();
 while (!signal.aborted) {
@@ -626,7 +626,7 @@ docs/design/sessions.md:303「`--serve` …**连着空闲一分钟就退**（它
 
 **证据**
 
-packages/cli/src/cli.ts:479-490
+packages/base/src/cli.ts:479-490
 ```ts
 const child = Bun.spawn([process.execPath, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 child.unref();
@@ -678,7 +678,7 @@ spawn 前先 `existsSync(lock)` 记一次基线，或者把判据从「文件在
 
 **证据**
 
-packages/cli/src/instructions.ts:43-46
+packages/base/src/instructions.ts:43-46
 ```ts
 export function renderInstructions(file: string, content: string): string {
   const body = truncateMarked(fenceSafe(content.trim()), INSTRUCTIONS_CAP);
@@ -1079,7 +1079,7 @@ packages/core/src/provider/types.ts:78-86 `StreamOptions = { signal?, apiKey?, h
 packages/core/src/loop/run-turn.ts:217-221 `const stream = await streamFn(config.model, {...}, { signal, apiKey, thinkingLevel: config.thinkingLevel });`
 packages/core/src/compaction/pipeline.ts:60-66 `const stream = await streamFn(config.model, { systemPrompt, messages: llm, tools: [] }, { signal, apiKey, thinkingLevel: "off" });`
 packages/core/src/provider/openai.ts:89-101 `async *request(model, context, options?)` 里只读了 `options?.apiKey`（96）、`options?.headers`（97）、`options?.signal`（100）；请求体由 `buildRequest(model, context, opts.alwaysSendReasoningField === true)`（99）生成，**buildRequest 连 options 都不收**（openai.ts:151）。全仓 `thinkingLevel` / `thinkingLevelMap` 的读取点：agent.ts、admission、observability、cli 状态栏，没有一处在方言里。
-模型面这一侧的声称：packages/core/src/extension/runtime.ts:132 `setThinkingLevel(level: ThinkingLevel): Promise<EquipResult>`（封闭协议「换」那组）；packages/core/src/agent.ts:108-113 把 `thinkingLevel` 与 `model`、`tools` 并列写在「装备（慢变；仅 idle 可换）」下；packages/cli/src/app.ts:160 `if (state.thinkingLevel !== "off") parts.push(\`思考 ${state.thinkingLevel}\`)`；packages/cli/src/app.ts:461-468 Shift+Tab 轮档。
+模型面这一侧的声称：packages/core/src/extension/runtime.ts:132 `setThinkingLevel(level: ThinkingLevel): Promise<EquipResult>`（封闭协议「换」那组）；packages/core/src/agent.ts:108-113 把 `thinkingLevel` 与 `model`、`tools` 并列写在「装备（慢变；仅 idle 可换）」下；packages/tui/src/app.ts:160 `if (state.thinkingLevel !== "off") parts.push(\`思考 ${state.thinkingLevel}\`)`；packages/tui/src/app.ts:461-468 Shift+Tab 轮档。
 方言自己的注释还点了名该写哪个参数：openai.ts:513 「K3 的深度走 `reasoning_effort`，缺省 `max`」、openai.ts:653 「深度 `reasoning_effort` low / high / max，缺省 high」——但只有 GPT-5.x 用静态 `params: { reasoning_effort: "none" }`（openai.ts:545、588-590）把它写进过请求。
 
 **问题**
@@ -1166,7 +1166,7 @@ packages/core/src/storage/file-lock.ts:34-44
   function waitFor<T>(probe) { return new Promise((resolve) => { const tick = () => { void probe().then((v) => (v === null ? void setTimeout(tick, HANDOFF_POLL_MS) : resolve(v)), () => void setTimeout(tick, HANDOFF_POLL_MS)); }; setTimeout(tick, HANDOFF_POLL_MS); }); }
 file-lock.ts:192-204：`handoffRequested: opts.preemptible === true ? waitFor(...) : new Promise(() => {})`
 file-lock.ts:169-188 `release()` 只删锁文件，没有任何取消轮询的动作
-packages/cli/src/cli.ts:515 `const echo = await createEcho({ ...base, preemptible: true });`
+packages/base/src/cli.ts:515 `const echo = await createEcho({ ...base, preemptible: true });`
 packages/cli/bin/echo-agent.ts:9 `process.exitCode = await main(process.argv.slice(2));`（不调 process.exit）
 
 **问题**
@@ -1175,7 +1175,7 @@ packages/cli/bin/echo-agent.ts:9 `process.exitCode = await main(process.argv.sli
 
 **判据**
 
-packages/cli/src/cli.ts:501-503 对 `--serve` 的三条承诺之一：「**空闲就退**——它是为了处理一条消息才起来的，处理完没理由继续占着锁」；docs/design/sessions.md §5 的虚拟 actor 模型也是按「叫醒 → 处理 → 收摊」讲的。
+packages/base/src/cli.ts:501-503 对 `--serve` 的三条承诺之一：「**空闲就退**——它是为了处理一条消息才起来的，处理完没理由继续占着锁」；docs/design/sessions.md §5 的虚拟 actor 模型也是按「叫醒 → 处理 → 收摊」讲的。
 
 **改法**
 
@@ -1185,7 +1185,7 @@ packages/cli/src/cli.ts:501-503 对 `--serve` 的三条承诺之一：「**空�
 
 - **门覆盖视角**：两处口径要改准，改法也比原文更具体：
 
-(a) 触发条件收窄：不是「交还锁之后仍轮询」，而是**没人来请交还就释放时**才泄漏。真被 handoff 请走那条路 `waitFor` 已 resolve、链自然停（`serve.test.ts:73` 已守住）。泄漏发生在 `--serve` 的另一条出口——空闲 60s 自退（`packages/cli/src/cli.ts:525`），以及任何 acquire/release 未被请走的调用。
+(a) 触发条件收窄：不是「交还锁之后仍轮询」，而是**没人来请交还就释放时**才泄漏。真被 handoff 请走那条路 `waitFor` 已 resolve、链自然停（`serve.test.ts:73` 已守住）。泄漏发生在 `--serve` 的另一条出口——空闲 60s 自退（`packages/base/src/cli.ts:525`），以及任何 acquire/release 未被请走的调用。
 
 (b) 影响面比「进程不退」更大：泄漏是**每个 lease 一条**。长驻宿主反复 acquire/release 会累积多条各自每 50ms 读盘的链，永不回收；「进程不退」只是最显眼的症状。
 
@@ -1818,7 +1818,7 @@ resolveTool: (name) => {
 
 **证据**
 
-packages/cli/src/app.ts:561-574
+packages/tui/src/app.ts:561-574
 ```ts
 // 不空就不切：切 = 收摊这一段，会把在飞的那一轮掐掉。让人自己按 Esc，别替他决定。
 if (busy()) return say("[会话] 还没就绪 / 正在跑，先 Esc 中断或等它空下来再切");
@@ -1827,7 +1827,7 @@ const rows = await sessions.list().catch((e: unknown) => e as Error);
 onResume(target.id); // 装配层收到之后：收摊这一段 → 按新 id 重装 → 界面开回来
 quit();
 ```
-`quit()` → `runTui` 返回 → packages/cli/src/cli.ts:627-631 `finally { await echo.stop(); }` → packages/core/src/agent.ts:2898-2899 `this.abort("dispose")`。
+`quit()` → `runTui` 返回 → packages/base/src/cli.ts:627-631 `finally { await echo.stop(); }` → packages/core/src/agent.ts:2898-2899 `this.abort("dispose")`。
 
 **问题**
 
@@ -1843,7 +1843,7 @@ quit();
 
 **复核修正**
 
-- **门覆盖视角**：发现本身准确，改法可以更收敛一点：不需要新机制，只需把 packages/cli/src/app.ts:573-574 的 `onResume(target.id); quit();` 之前补一次 `if (busy()) return say(...)`，让「重读 → onResume → quit」落在同一个同步段里——这正是 app.ts:224-227 注释里给 `onSubmit` 定的那条规矩，照搬即可。
+- **门覆盖视角**：发现本身准确，改法可以更收敛一点：不需要新机制，只需把 packages/tui/src/app.ts:573-574 的 `onResume(target.id); quit();` 之前补一次 `if (busy()) return say(...)`，让「重读 → onResume → quit」落在同一个同步段里——这正是 app.ts:224-227 注释里给 `onSubmit` 定的那条规矩，照搬即可。
 
 两点补充：
 - 别只在 await 之后立刻重读就完事，中间 566-572 行的匹配逻辑是纯同步的，所以重读放在 563 之后任意位置都行，但**必须与 `onResume`/`quit()` 之间无 await**，否则只是把窗口挪小。
@@ -1859,7 +1859,7 @@ quit();
 
 **证据**
 
-packages/cli/src/cli.ts:474-478
+packages/base/src/cli.ts:474-478
 ```ts
 const args = [self, "--serve", "--resume", row.id];
 if (opts.stateDir !== undefined) args.push("--state-dir", opts.stateDir);
@@ -2102,7 +2102,7 @@ const raw = new TextDecoder().decode(clipped ? bytes.subarray(0, MAX_BYTES) : by
 151  await config.hooks.notify({ type: "compactionFailed", reason, stage: stage.name, message: errText(e) }, config.hookContext);
 163  else await config.hooks.notify({ type: "compactionFailed", reason, message: "no compaction stage changed the context" }, config.hookContext);
 ```
-仓内唯一的 `subscribeLifecycle` 订阅者是 TUI，packages/cli/src/app.ts:699-738，switch 只列了 sessionStart / permissionRequest / permissionCancelled / question / questionCancelled / toolUseDenied / notification，第 736 行 `default: return;` 把 `compactionFailed` 吞掉。
+仓内唯一的 `subscribeLifecycle` 订阅者是 TUI，packages/tui/src/app.ts:699-738，switch 只列了 sessionStart / permissionRequest / permissionCancelled / question / questionCancelled / toolUseDenied / notification，第 736 行 `default: return;` 把 `compactionFailed` 吞掉。
 对照：`Agent.reportDiagnostic()` 发的是 `{ type: "notification", kind: "error" }`，app.ts:732-734 有分支会渲染成一条 notice——真正的「诊断」走的是那条路。
 `grep -rn LifecycleEvent packages/core/src/observability/` 零命中：lifecycle 事件不进观测库，`echo-agent observe` 也看不到。全仓 grep `compactionFailed` 除 core 自身与 compaction.test.ts 外无消费者。
 
@@ -2116,7 +2116,7 @@ packages/core/src/compaction/types.ts:82「抛错 = 记 `compactionFailed` **诊
 
 **改法**
 
-最小改法在壳侧：packages/cli/src/app.ts 的 lifecycle switch 里加一支 `case "compactionFailed": transcript.push({ kind: "notice", text: \`[压缩] ${event.stage ?? "没有阶段改动上下文"}：${event.message}\` }); rerender(); return;`。若决定不在壳上显示，则把 types.ts:82 与 compaction.md:102 的「诊断」改成「lifecycle 事件（默认无人消费，宿主要自己订阅）」——两者选一，不要两处都留现状。
+最小改法在壳侧：packages/tui/src/app.ts 的 lifecycle switch 里加一支 `case "compactionFailed": transcript.push({ kind: "notice", text: \`[压缩] ${event.stage ?? "没有阶段改动上下文"}：${event.message}\` }); rerender(); return;`。若决定不在壳上显示，则把 types.ts:82 与 compaction.md:102 的「诊断」改成「lifecycle 事件（默认无人消费，宿主要自己订阅）」——两者选一，不要两处都留现状。
 
 **复核修正**
 
@@ -2129,7 +2129,7 @@ packages/core/src/compaction/types.ts:82「抛错 = 记 `compactionFailed` **诊
 顺带一个同区域的小缺陷（提交者没提）：手动 `/compact` 时若每个阶段都抛错，`CompactResult` 只带 `stages: []`（agent.ts:1372-1373），app.ts:489 会打出「[压缩] 没有可压的内容」——不是静默而是**报错为无事**，比 auto 那条更容易误导。修 (b) 之后这条会被那行 notice 覆盖掉，可不单独改。
 - **证伪视角**：两处要收窄，否则报告会被现场代码打脸：
 
-① 「观测层也不收 / echo-agent observe 也看不到」——过头了。lifecycle 事件确实不进观测库（`grep -rn LifecycleEvent packages/core/src/observability/` 零命中，属实），但 `compaction_start` / `compaction_end` 是 AgentEvent，走 `emit → Agent.processEvents → 观测 tap`：packages/core/src/observability/agent-events.ts:395-406 把它们映射成 `context.compact` span，span_end 的 `attributes` 明写 `changed: event.stages.length > 0`，body 带 `stages`；packages/cli/src/observe/page.html:566、592 与 observe/lexicon.ts:91 都会渲染这条 span。所以运维在 `observe show <run-id>` 里能看到「压过一次、changed:false、stages 为空」——看不到的是**为什么失败、哪一段失败**；以及「A 段失败但 B 段压成了」这种部分失败（changed:true）在观测里完全消失。
+① 「观测层也不收 / echo-agent observe 也看不到」——过头了。lifecycle 事件确实不进观测库（`grep -rn LifecycleEvent packages/core/src/observability/` 零命中，属实），但 `compaction_start` / `compaction_end` 是 AgentEvent，走 `emit → Agent.processEvents → 观测 tap`：packages/core/src/observability/agent-events.ts:395-406 把它们映射成 `context.compact` span，span_end 的 `attributes` 明写 `changed: event.stages.length > 0`，body 带 `stages`；packages/base/src/observe/page.html:566、592 与 observe/lexicon.ts:91 都会渲染这条 span。所以运维在 `observe show <run-id>` 里能看到「压过一次、changed:false、stages 为空」——看不到的是**为什么失败、哪一段失败**；以及「A 段失败但 B 段压成了」这种部分失败（changed:true）在观测里完全消失。
 
 ② 「官方产品里完全不可见」——手动路径不成立。TUI 有 `/compact`（app.ts:483-494、596-599），全阶段失败时 `result.stages.length === 0`，第 489 行会打「[压缩] 没有可压的内容」。这条文案是**错的**（把「模型调用失败」说成「没东西可压」），但不是静默。另外 core 在 compaction_start/end 上切 status（agent.ts:3067-3074），状态栏会闪一下「压缩中」（app.ts:119）。
 
@@ -2432,7 +2432,7 @@ sqlite-store.ts:181 的注释明确承诺「任何列被改过都在这里判红
 
 **证据**
 
-packages/cli/src/observe/server.ts:22-24 —— `/** 缺省只绑 127.0.0.1：这是本机面板，不做鉴权，不能暴露到局域网。 */`；server.ts:62-99 的 `fetch(req)` 只判 `req.method !== "GET"`，之后 `/`、`/api/health`、`/api/runs`、`/api/activity`、`/api/runs/<id>` 一律照给，全程不看 `Host` 也不看 `Origin`，响应也不带任何同源相关的头（只有 content-type 与 cache-control，49-51、70、92）。
+packages/base/src/observe/server.ts:22-24 —— `/** 缺省只绑 127.0.0.1：这是本机面板，不做鉴权，不能暴露到局域网。 */`；server.ts:62-99 的 `fetch(req)` 只判 `req.method !== "GET"`，之后 `/`、`/api/health`、`/api/runs`、`/api/activity`、`/api/runs/<id>` 一律照给，全程不看 `Host` 也不看 `Origin`，响应也不带任何同源相关的头（只有 content-type 与 cache-control，49-51、70、92）。
 
 **问题**
 
@@ -2465,8 +2465,8 @@ packages/cli/src/observe/server.ts:22-24 —— `/** 缺省只绑 127.0.0.1：�
 
 **证据**
 
-packages/cli/src/observe/sessions.ts:111-115 —— `for (const id of wanted) { if (!existsSync(this.databasePath(id))) continue; seen.add(id); if (!this.readers.has(id)) this.readers.set(id, await openObservationReader({ stateRoot: this.stateRoot(id) })); }`：开不了库就整个 refresh 抛。
-packages/cli/src/observe.ts:198-203 —— `try { await readers.refresh(true); } catch (e) { io.err.write(`打不开观测库：…`); return 1; }`：这条出口没有 `await readers.close()`，而 runObserve 其余每条出口都有（206-211、218-220）。
+packages/base/src/observe/sessions.ts:111-115 —— `for (const id of wanted) { if (!existsSync(this.databasePath(id))) continue; seen.add(id); if (!this.readers.has(id)) this.readers.set(id, await openObservationReader({ stateRoot: this.stateRoot(id) })); }`：开不了库就整个 refresh 抛。
+packages/base/src/observe.ts:198-203 —— `try { await readers.refresh(true); } catch (e) { io.err.write(`打不开观测库：…`); return 1; }`：这条出口没有 `await readers.close()`，而 runObserve 其余每条出口都有（206-211、218-220）。
 packages/cli/src/observability 侧的错误文案来自 sqlite-store.ts:501-509 `assertSchema`。
 
 **问题**
@@ -2485,11 +2485,11 @@ observe.ts:12-15 的文件头声称「不点名就把会话根下**全部**有�
 
 - **门覆盖视角**：修法应比「catch 住继续跑」更准，两点：
 
-(1) 隔离放在 packages/cli/src/observe/sessions.ts:104 的 refresh 里，不是在 observe.ts 的 catch 里吞：单段 `openObservationReader()` 失败时把该 sessionId + `databasePath(id)` + 错误记进一份 `failed` 列表（与 :112 的「还没建库」区分开，那不是错），其余段照常开。**不能静默跳过**——docs/architecture.md:104 把 fail-loud 列为纪律：`observe health` / `/api/health` 要为坏的那段单出一块（sessionId、路径、原因），查询类命令在 stderr 明确打一行「N 段中有 1 段打不开：<sessionId> <path> <原因>」，退出码按「好段有没有读到东西」定，别让坏段静默消失。
+(1) 隔离放在 packages/base/src/observe/sessions.ts:104 的 refresh 里，不是在 observe.ts 的 catch 里吞：单段 `openObservationReader()` 失败时把该 sessionId + `databasePath(id)` + 错误记进一份 `failed` 列表（与 :112 的「还没建库」区分开，那不是错），其余段照常开。**不能静默跳过**——docs/architecture.md:104 把 fail-loud 列为纪律：`observe health` / `/api/health` 要为坏的那段单出一块（sessionId、路径、原因），查询类命令在 stderr 明确打一行「N 段中有 1 段打不开：<sessionId> <path> <原因>」，退出码按「好段有没有读到东西」定，别让坏段静默消失。
 
 (2) `--session` 点名那一段时保持今天的行为（整条命令失败、退出码 1），因为此时没有「其余段」可降级。
 
-(3) fd 泄漏单独修：packages/cli/src/observe.ts:198-203 的 catch 补 `await readers.close()`；更省事的是把 `refresh(true)` 挪进 :212 起的 try，让 :218-220 那个 finally 统一兜住，出错文案仍走同一条 catch。
+(3) fd 泄漏单独修：packages/base/src/observe.ts:198-203 的 catch 补 `await readers.close()`；更省事的是把 `refresh(true)` 挪进 :212 起的 try，让 :218-220 那个 finally 统一兜住，出错文案仍走同一条 catch。
 
 顺带：坏段的错误文案要在 CLI 层补上 sessionId 与库路径（core 的 ObservationCorruptionError 不带路径，sqlite-store.ts:503），别只透传 message。
 - **证伪视角**：三处细化（方向不改）：
@@ -2846,7 +2846,7 @@ docs/decisions/proposed/2026-09-03-main-and-status.md：「持久状态 active /
 
 （a）「status 是 meta 里唯一一个别人写、自己从不读的字段」不准确——拥有者在 `service.ts:152-167` 打开会话时是读过一次 status 的（所以 `--resume` 一段 closed 的会照样写回 closed）。准确说法是：**打开之后就再也不重读，内存那份成了唯一权威**，所以关的动作只在「对方还没打开」或「对方打开后不再入账」时才留得住。
 
-（b）触发条件比「关一个还在跑的段」再窄一格：必须是**关掉之后它又入了至少一条 entry**。若被关时它活着但已空闲、随后 `--serve` 空闲 60 秒退出（`packages/cli/src/cli.ts:104` `SERVE_IDLE_MS`、:520-527 循环），收摊路径只走 `settle()` / `discardIfUnused()`（`service.ts:285-293`，零 entry 时才删 meta），不写 meta，close 就留得住。
+（b）触发条件比「关一个还在跑的段」再窄一格：必须是**关掉之后它又入了至少一条 entry**。若被关时它活着但已空闲、随后 `--serve` 空闲 60 秒退出（`packages/base/src/cli.ts:104` `SERVE_IDLE_MS`、:520-527 循环），收摊路径只走 `settle()` / `discardIfUnused()`（`service.ts:285-293`，零 entry 时才删 meta），不写 meta，close 就留得住。
 
 另外补一条同源的口子：`service.ts:250-269` `rename()` 同样整份写 `cursor.info`，所以被关之后的一次改名也会把 closed 冲掉——不只是 append 这一条路。判据里引的「`/clear` 写 closed」目前未实现（`agent.ts:1330` `reset()` 只清内存、不碰 meta），今天写 closed 的只有 `session_close` 与 `create()` 失败兜底（`sessions.ts:188`、:210），不影响本条结论。
 
@@ -2930,7 +2930,7 @@ CLAUDE.md「每个事实有且只有一个权威出处」「有门守着和是�
 
 (a) 「两份文件头互相打架」更准确的说法是：矛盾在 sqlite-store.ts **内部**也已存在——它自己的类注释 sqlite-store.ts:193「只读面：writer 与 reader 共用。reader connection 是 `readonly`」说的是对的（读代码共用、只有 `openReadOnly` 那条连接是 readonly），只有文件头 sqlite-store.ts:5 的括号「（observe CLI / 同进程查询）」把「同进程查询」错划进了 reader 阵营。最小修法是从 sqlite-store.ts:5 划掉「同进程查询」，只留 observe CLI（跨进程）与「宿主自行 `openObservationReader()`」这两类；不需要改 runtime.ts:115。
 
-(b) 「同进程查询用独立连接」这句话并非完全无指代：`openObservationReader()` 是公共导出（packages/core/src/index.ts:255），宿主完全可以在 writer 同进程里开它（packages/cli/test/observe-serve.test.ts 就是 writer 与 reader 同进程）。所以这句是**歧义 + 对主查询面失真**，不是纯粹凭空捏造；定性上属于「说了没做的隔离承诺」而非「事实完全相反」。
+(b) 「同进程查询用独立连接」这句话并非完全无指代：`openObservationReader()` 是公共导出（packages/core/src/index.ts:255），宿主完全可以在 writer 同进程里开它（packages/base/test/observe-serve.test.ts 就是 writer 与 reader 同进程）。所以这句是**歧义 + 对主查询面失真**，不是纯粹凭空捏造；定性上属于「说了没做的隔离承诺」而非「事实完全相反」。
 
 
 ---
@@ -2977,7 +2977,7 @@ packages/core/test/api-snapshot.txt:548「-- src/observability/draft.ts (7) --�
 
 **证据**
 
-packages/cli/src/app.ts:394 `void buildModelPicker(configure, pickerToken);`（无 `.catch`），396-401
+packages/tui/src/app.ts:394 `void buildModelPicker(configure, pickerToken);`（无 `.catch`），396-401
 ```ts
 for (const c of conf.providers) {
   const configured = await isConfigured(c.provider, conf.credentials);
@@ -3006,7 +3006,7 @@ app.ts:1010-1012 头注「**读不了凭据文件也不挡着**（文件坏了�
 
 - **门覆盖视角**：缺陷成立，但复现场景要改准，否则按提交者写的那条路走不出来。
 
-提交者说「credentials.json 整体坏掉后起 echo-agent 照常进界面、再按 Ctrl+L 才死」——官方 CLI 不是这样。packages/cli/src/cli.ts:404 `await isConfigured(provider, credentials)` 落在 cli.ts:375 起的大 try 里，坏文件在这一步就抛、被 cli.ts:443 接住并 exit 1，根本进不了 TUI。实测：ECHO_HOME 指向一份非法 JSON 跑管道形态 → 「凭据文件不是合法 JSON：…修好它，或者删掉重新配一次。」exit=1。app.ts:1016 那个 catch 只在旁路才够得着。
+提交者说「credentials.json 整体坏掉后起 echo-agent 照常进界面、再按 Ctrl+L 才死」——官方 CLI 不是这样。packages/base/src/cli.ts:404 `await isConfigured(provider, credentials)` 落在 cli.ts:375 起的大 try 里，坏文件在这一步就抛、被 cli.ts:443 接住并 exit 1，根本进不了 TUI。实测：ECHO_HOME 指向一份非法 JSON 跑管道形态 → 「凭据文件不是合法 JSON：…修好它，或者删掉重新配一次。」exit=1。app.ts:1016 那个 catch 只在旁路才够得着。
 
 真正够得着崩溃的三条路：
 (a) 最省事的一条——文件整体合法，但**别家**那条记录坏了（如 `{"kimi":{"apiKey":"sk-ok"},"deepseek":{}}`）。启动只问当前家（app.ts:1016 单个 provider）所以放行；Ctrl+L 的 buildModelPicker 在 app.ts:399-401 逐家遍历，读到 deepseek 时 packages/core/src/provider/file-credentials.ts:181 抛「那条认不出来」→ 进程死。我的 scratch 复现走的就是这条，不需要中途改文件。
@@ -3014,7 +3014,7 @@ app.ts:1010-1012 头注「**读不了凭据文件也不挡着**（文件坏了�
 (c) 用公共面 `runTui`（packages/cli/src/index.ts:18）自装配的宿主——那正是 app.ts:1010-1019 头注声明「读不了也不挡着」的场景。
 
 改法比「包一层 try/catch」要更具体：单家读不动不该让整个选择器消失。在 app.ts:400 逐家那一处就地接——`await isConfigured(...).catch(...)`，出错的那家按「读不了凭据」标出来继续列并推一条 notice；app.ts:435 的 `/model <id>` 同样处理（只读命中 id 的那一家，范围更窄但同一类）。app.ts:394 的 `void buildModelPicker(...)` 再挂 `.catch` 兜底，与 app.ts:518 `sessions.list().catch(...)` 同形。顺带 app.ts:446 `void agent.setModel(...).then(...)` 也没有 `.catch`（协议约定返回 rejected 而非抛，风险低，可一并补）。补完加一条测试：坏记录属于别家时 Ctrl+L 仍开得出选择器、屏幕说清哪家读不动——正是 tui.test.ts 现在缺的那格。
-- **证伪视角**：准确说法：packages/cli/src/app.ts:394 的 `void buildModelPicker(...)` 与 :593 的 `void setModelById(rest)` 确实没接 isConfigured 的 rejection（抛源 packages/core/src/provider/file-credentials.ts:116/:124，经 models.ts:217 上抛，setup.ts:50-54 不接），但触发条件与后果都比原结论小两级：(1) 触发条件不是「启动时文件就坏」——那种情况 cli.ts:402 会先抛、被 cli.ts:442 接住并 exit 1，压根进不了界面；只有「会话跑起来之后凭据文件才被改坏 / 变得读不了」（FileCredentialStore 不缓存，每次现读）或第三方壳直接用公共导出的 runTui 才会走到。(2) 后果不是进程猝死：Bun 对事件循环期的 unhandled rejection 是打印堆栈 + 把退出码顶成 1，进程继续跑，echo.stop()/ui.stop() 照常，锁会还、终端会恢复。实际可见症状是：界面被糊上一段原始堆栈、选择器不打开，且 app.ts:378-394 的 `pickerOpening` 在 reject 后停在 true 没人复位，导致下一次 Ctrl+L 被当成「收起」、要按两下才重试一次，另外正常退出时进程码也变成 1。值得加 .catch，但不是「按一下整进程死、锁不还」。
+- **证伪视角**：准确说法：packages/tui/src/app.ts:394 的 `void buildModelPicker(...)` 与 :593 的 `void setModelById(rest)` 确实没接 isConfigured 的 rejection（抛源 packages/core/src/provider/file-credentials.ts:116/:124，经 models.ts:217 上抛，setup.ts:50-54 不接），但触发条件与后果都比原结论小两级：(1) 触发条件不是「启动时文件就坏」——那种情况 cli.ts:402 会先抛、被 cli.ts:442 接住并 exit 1，压根进不了界面；只有「会话跑起来之后凭据文件才被改坏 / 变得读不了」（FileCredentialStore 不缓存，每次现读）或第三方壳直接用公共导出的 runTui 才会走到。(2) 后果不是进程猝死：Bun 对事件循环期的 unhandled rejection 是打印堆栈 + 把退出码顶成 1，进程继续跑，echo.stop()/ui.stop() 照常，锁会还、终端会恢复。实际可见症状是：界面被糊上一段原始堆栈、选择器不打开，且 app.ts:378-394 的 `pickerOpening` 在 reject 后停在 true 没人复位，导致下一次 Ctrl+L 被当成「收起」、要按两下才重试一次，另外正常退出时进程码也变成 1。值得加 .catch，但不是「按一下整进程死、锁不还」。
 
 ### 62. [P2] 架构总览与 registries.ts 头注都写「五个 registry 同名 fail-loud」，`AgentHooks` 不是：同 id 的两条 hook 并存、都跑
 
@@ -3213,7 +3213,7 @@ docs/architecture.md §6 把写入闸列为 single-writer 的落实手段，措�
 
 **证据**
 
-packages/cli/src/cli.ts:521-526
+packages/base/src/cli.ts:521-526
 ```ts
 while (!signal.aborted) {
   await new Promise((r) => setTimeout(r, SERVE_TICK_MS));   // 250ms
@@ -3223,7 +3223,7 @@ while (!signal.aborted) {
 }
 } finally { await echo.stop(); }
 ```
-core 那边这个位的定义是「接不接**新**工作」，run 在跑就为假：packages/core/src/agent.ts:878-880 `get acceptsWork() { return this.refuseWorkReason() === null; }`；packages/core/src/agent.ts:2289-2292 `if (this.activeRun !== undefined || this.userRunPending) return "Agent 正在处理上一个 prompt…"`；inbox 那一批从 reserve 到 ack 裁决之间同样为假（agent.ts:2294-2296）。同一个包里另一个读者读的是正确含义：packages/cli/src/app.ts:230 `const busy = (): boolean => pendingLocal || !agent.acceptsWork;`。stop 会 abort 在飞的 run：packages/core/src/agent.ts:2897-2900 `if (this.activeRun !== undefined) { this.abort("dispose"); await this.activeRun.promise; }`。
+core 那边这个位的定义是「接不接**新**工作」，run 在跑就为假：packages/core/src/agent.ts:878-880 `get acceptsWork() { return this.refuseWorkReason() === null; }`；packages/core/src/agent.ts:2289-2292 `if (this.activeRun !== undefined || this.userRunPending) return "Agent 正在处理上一个 prompt…"`；inbox 那一批从 reserve 到 ack 裁决之间同样为假（agent.ts:2294-2296）。同一个包里另一个读者读的是正确含义：packages/tui/src/app.ts:230 `const busy = (): boolean => pendingLocal || !agent.acceptsWork;`。stop 会 abort 在飞的 run：packages/core/src/agent.ts:2897-2900 `if (this.activeRun !== undefined) { this.abort("dispose"); await this.activeRun.promise; }`。
 实测（真进程，`bun <cli>/bin/echo-agent.ts --serve --resume <id> --state-dir <tmp>`，往它的 `inbox/` 写一条 record）：消息落盘后 **622ms / 1021ms**（两次）宿主就释放了 `.lock`；`SERVE_IDLE_MS` 是 60_000，所以只可能是 523 行那个 break。事后盘上：`entries/` 只多了那条 environment 消息、没有任何回复，`inbox/` 只剩空的 `acks/`；再起一次 `--serve`，4 秒后 `entries` 仍是 2 —— 不会重放。
 
 **问题**
@@ -3493,7 +3493,7 @@ AGENTS.md「只有精确机器判据才能称为『有门守着』；注释、�
 **证据**
 
 core 自己两处：packages/core/src/create-echo.ts:159 `definition: defineToolPack("echo:sessions") as never`、:411 `definition: defineToolPack("echo:inline-tools") as never`。
-cli 四处：packages/cli/src/prompt.ts:54 / :59 / :64、packages/cli/src/instructions.ts:63、packages/cli/src/cli.ts:606 `definition: shell.definition as never`。
+cli 四处：packages/cli/src/prompt.ts:54 / :59 / :64、packages/base/src/instructions.ts:63、packages/base/src/cli.ts:606 `definition: shell.definition as never`。
 coding 五处：packages/coding/src/agent.ts:161 / :166 / :171 / :173 / :175。
 类型侧：packages/core/src/extension/host.ts:18-23 `ExtensionEntry = Readonly<{ entryId; definition: ExtensionDefinition<unknown>; config?: unknown }>`；packages/core/src/extension/abi.ts:61-72 里 `apply` 是**方法简写**（`apply(ctx, config: TConfig)`），TS 对方法参数做双变，`ExtensionDefinition<T>` 本来就可以赋给 `ExtensionDefinition<unknown>`。
 实测（tsc 5.9.3，与 packages/coding/tsconfig.json 同口径：`strict` + `verbatimModuleSyntax` + `customConditions:["bun"]`，工作区 node_modules）：把 `defineToolPack` / `definePromptPack` / `defineExtension`（`TConfig=void`）三种，以及从 `echo-coding` 真取来的 `ECHO_WORKSPACE` / `ECHO_SHELL`，**不加 `as never`** 直接组成 `readonly ExtensionEntry[]`，退出码 0、零报错。
@@ -3684,7 +3684,7 @@ B) stateDir 点在别处: [session_close, session_create, session_list, session_
 ```
 派出去的那段于是能再派——「扇出只有一层」当场破，而且是静默的。同一处还让 `EchoSessions` 的 `storeFor(self)` / `isAlive(self)` 指向一个不存在的目录，`echo.sessions.list()` 里看不见自己。
 
-CLI 不受影响：它把 `--state-dir` 映射成 `sessionsRoot`（packages/cli/src/cli.ts:284）。踩到的是任何直接用公共 `stateDir` + `sessions` 的宿主。
+CLI 不受影响：它把 `--state-dir` 映射成 `sessionsRoot`（packages/base/src/cli.ts:284）。踩到的是任何直接用公共 `stateDir` + `sessions` 的宿主。
 
 **判据**
 
@@ -4105,7 +4105,7 @@ README.md:102 与 README.zh.md:102 改成分档说明：分发门把各 workspac
 
 `docs/review/tui-design.md` 恰恰是被排除的那一类：:3-5「**给谁看**：要实现这份方案的人」；:22 `### Non-Goals（明确不做）`；:41 `### 待拍板`；:46/:190/:240/:307 四处 `验收判据` / `P0 验收` / `P1 验收` / `P2 验收`；:378-389 一张「## 九、决策记录」表，D1–D8 每条带日期、状态（多条写「**已落地** main `5a6c417`」「main `eff6dec`」）与理由——即 `docs/decisions/` 之外的第二个决策记录归属地。
 
-前提已腐烂：:8-9 写「现在的 TUI（`packages/cli/src/app.ts`，373 行）是个能跑的最小壳…… 键位一条没绑」；实测 `wc -l packages/cli/src/app.ts` = **1110**，且 `packages/cli/src/keybindings.ts`、`first-run.ts`、`settings.ts`、`slash.ts`、`theme.ts` 都已存在（对应 D2/D4/D7 自称的「已落地」）。文中还有 `agent.ts:787` 这种带行号的源码引用，正是 AGENTS.md:47 禁的写法。
+前提已腐烂：:8-9 写「现在的 TUI（`packages/tui/src/app.ts`，373 行）是个能跑的最小壳…… 键位一条没绑」；实测 `wc -l packages/tui/src/app.ts` = **1110**，且 `packages/tui/src/keybindings.ts`、`first-run.ts`、`settings.ts`、`slash.ts`、`theme.ts` 都已存在（对应 D2/D4/D7 自称的「已落地」）。文中还有 `agent.ts:787` 这种带行号的源码引用，正是 AGENTS.md:47 禁的写法。
 
 **问题**
 
@@ -4153,7 +4153,7 @@ README.md:37/:110 与 README.zh.md:37/:110 的「two extensions / 两条 extensi
 
 docs/docs.manifest.json:2（$comment）—— 「docs/review 只放 prompt 与未纳入维护的 scratch,整个目录不受文档门约束;**有明确读者与退出条件的审阅稿必须移出并登记**」「决策记录:状态即目录…**每条都要登记——登记的动作本身是一次人审**」；:190 `orphanExclude: ["docs/review"]`。
 docs/review/tui-design.md:3-14 有完整导读（「给谁看：要实现这份方案的人」）、:24 Non-Goals、:190「### P0 验收」、:317「## 六、交互能力（P3a **已落地**…；P3b 待拍）」、:378「## 九、决策记录」下 D1–D8 八条带拍板日期与合入 commit（:382-389），:43 还有未拍板的「P3b-b：`/sessions`」。
-仓内引用它当权威的地方：packages/cli/src/app.ts:101、:240，packages/cli/src/keybindings.ts:1，packages/cli/src/messages.ts:1，packages/cli/test/key-discipline.test.ts:1（「按键处理的纪律，做成门（`docs/review/tui-design.md` §二…）」），packages/cli/test/tui-pty.test.ts:1，packages/cli/test/tui.test.ts:1400、:1467。
+仓内引用它当权威的地方：packages/tui/src/app.ts:101、:240，packages/tui/src/keybindings.ts:1，packages/tui/src/messages.ts:1，packages/tui/test/key-discipline.test.ts:1（「按键处理的纪律，做成门（`docs/review/tui-design.md` §二…）」），packages/cli/test/tui-pty.test.ts:1，packages/tui/test/tui.test.ts:1400、:1467。
 腐烂已发生：tui-design.md:179 与 :181 把自己那两道门写成 `test/key-discipline.test.ts` / `test/tui-pty.test.ts`（还有 `test/pty-driver.py`），三个文件实际都在 `packages/cli/test/` 下；用 docs-lint 的 `fileRefCandidates` 手工跑一遍这份文档，12 条路径引用里 7 条在仓库根解析不到。
 
 **问题**
@@ -4168,15 +4168,15 @@ docs/docs.manifest.json:2 自己立的两条规矩：「有明确读者与退出
 
 两步，都不改内容：① 把 tui-design.md 移出 docs/review（`docs/design/tui.md`）并登记进 manifest，让五道门作用到它身上，顺手修 :179/:181 的三条路径为 `packages/cli/test/...`；② §九 D1–D8 里已拍板已落地的按目录约定转成 `docs/decisions/implemented/` 下的条目并登记，文档正文改为指向记录（manifest 说的「移动目录即变更状态」），待拍的 P3b 留在 proposed/。仓内那八处引用随之改指新路径。
 
-### 107. [P2] key-discipline 门的标题和注释都说守「packages/cli/src/ 里」，实现只扫顶层 .ts，不递归——`packages/cli/src/observe/` 三个文件在门外
+### 107. [P2] key-discipline 门的标题和注释都说守「packages/cli/src/ 里」，实现只扫顶层 .ts，不递归——`packages/base/src/observe/` 三个文件在门外
 
 车道 `docs-gate-honesty` · 层：代码 · 复核：未跑（额度耗尽）
 
 **证据**
 
-packages/cli/test/key-discipline.test.ts:32 —— `for (const name of readdirSync(SRC)) {`（`SRC = join(import.meta.dir, "..", "src")`，:18），只按文件名过滤 `.ts`，遇到目录直接跳过。
+packages/tui/test/key-discipline.test.ts:32 —— `for (const name of readdirSync(SRC)) {`（`SRC = join(import.meta.dir, "..", "src")`，:18），只按文件名过滤 `.ts`，遇到目录直接跳过。
 同文件 :33 的测试标题：「packages/cli/src 里 `fromCharCode` 只用于拼 ANSI 输出，按键判定不比较字节」；:9-11 的注释：「① 本文件：`packages/cli/src/` 里 `fromCharCode` 只许出现在…」。
-实际存在的子目录：`packages/cli/src/observe/lexicon.ts`、`observe/server.ts`、`observe/sessions.ts`（`find packages/cli/src -type d` 只有 `src` 与 `src/observe`）。
+实际存在的子目录：`packages/base/src/observe/lexicon.ts`、`observe/server.ts`、`observe/sessions.ts`（`find packages/cli/src -type d` 只有 `src` 与 `src/observe`）。
 同文件 :41 还专门有一条「上一条门的判据真能分辨」自检，证明作者在意这道门不恒绿——但自检只喂单行字符串，覆盖不到扫描面这一层。
 
 **问题**
@@ -4243,8 +4243,8 @@ docs/architecture.md:71 把「任何状态根 I/O 都被拒」改成「任何状
 
 **证据**
 
-packages/cli/src/observe/lexicon.ts:1-4：「observe 面板的术语表：**后端枚举 → 界面文案只在这一处翻译**。……页面通过 `lexiconJson()` 拿到整份，**渲染层不再自己猜字面**。」
-实际 packages/cli/src/observe/page.html 里渲染层照样写字面：
+packages/base/src/observe/lexicon.ts:1-4：「observe 面板的术语表：**后端枚举 → 界面文案只在这一处翻译**。……页面通过 `lexiconJson()` 拿到整份，**渲染层不再自己猜字面**。」
+实际 packages/base/src/observe/page.html 里渲染层照样写字面：
 - :392 `const dur = r.endedAt === null ? "未收尾" : fmtMs(...)` —— 与 lexicon.ts:18 `running: { zh: "未收尾" }` 是第二份；
 - :596 `else if (isOpen) res = "未收尾";` —— 第三份；
 - :680 `if (sk === "truncated") … text: "跑到上限停了，这次的结果可能不完整"` —— 与 lexicon.ts:19 `truncated: { zh: "已截停", hint: "跑到迭代上限被截断…" }` 各说各的；
@@ -4276,7 +4276,7 @@ CONTEXT.md:19-21 只有「**容器**：一个 OS 进程，装一个或多个 ses
 - 装配方 / 「宿主知识」：create-echo.ts:309「这里注进去的两件都是**宿主知识**」、agent.ts:191、:193、create-agent.ts:95。
 - 泛指资源持有者：memory/harness.ts:1「与 SkillHarness / ToolHarness 平级的**资源宿主**」、assembly/ledger.ts:301「多代宿主（Runtime）」、observability/runtime.ts:1「canonical writer 的宿主」。
 规范词与被避词并列在同一行：packages/core/src/create-agent.ts:106「这是**容器**（cli / **宿主程序**）该给的那一个」。
-用户可见文案用被避词：packages/cli/src/cli.ts:486「`会话 ${row.id} 的宿主进程退了（exit ${child.exitCode}），没跑起来`」、cli.ts:489「`会话 ${row.id} 的宿主 ${WAKE_TIMEOUT_MS}ms 内没拿到锁`」；observe 面板 packages/cli/src/observe/lexicon.ts:23 aborted 的 hint「用户或宿主主动 abort」。
+用户可见文案用被避词：packages/base/src/cli.ts:486「`会话 ${row.id} 的宿主进程退了（exit ${child.exitCode}），没跑起来`」、cli.ts:489「`会话 ${row.id} 的宿主 ${WAKE_TIMEOUT_MS}ms 内没拿到锁`」；observe 面板 packages/base/src/observe/lexicon.ts:23 aborted 的 hint「用户或宿主主动 abort」。
 文档侧同样：docs/design/sessions.md:305「一段 session 一个宿主」；AGENTS.md 与 CLAUDE.md 首段「定制 host 直接使用 `@echo-agent/core` 的 `Agent` 自行给端口」。
 
 **问题**
@@ -4289,7 +4289,7 @@ CONTEXT.md:21「容器 _Avoid_：宿主进程、runner 进程」；CONTEXT.md:3�
 
 **改法**
 
-两步，都不碰行为：① CONTEXT.md 加一条「宿主 / host」，裁决四种所指各归谁——进程一律叫「容器」、答 permission / question 的那一方叫「壳」、`ExtensionHost` 保留英文 Host 不译、泛指持有者的场合改叫「持有者」。② 先改公共面与用户可见的三处：packages/cli/src/cli.ts:486、:489 的错误文案改成「容器」，packages/core/src/create-agent.ts:106 去掉括号里的「宿主程序」。其余 60 余处内部注释按同一裁决分批收敛，不必一次做完。
+两步，都不碰行为：① CONTEXT.md 加一条「宿主 / host」，裁决四种所指各归谁——进程一律叫「容器」、答 permission / question 的那一方叫「壳」、`ExtensionHost` 保留英文 Host 不译、泛指持有者的场合改叫「持有者」。② 先改公共面与用户可见的三处：packages/base/src/cli.ts:486、:489 的错误文案改成「容器」，packages/core/src/create-agent.ts:106 去掉括号里的「宿主程序」。其余 60 余处内部注释按同一裁决分批收敛，不必一次做完。
 
 ### 112. [P2] 同一件事三个中文词：词表规范词「可让位」在代码里一次都没出现，公共端口契约用的是被明令 Avoid 的「抢占」，且与 admission 里真实存在的「抢占」撞车
 
@@ -4301,7 +4301,7 @@ CONTEXT.md:57-59 定「**可让位**……代码里叫 `preemptible`。_Avoid_�
 公共导出类型（packages/core/src/index.ts:126 `export type { Lease, StateLock }`；packages/core/test/api-snapshot.txt:399-400）的契约 JSDoc：
 - packages/core/src/storage/lock.ts:19-24：「只有**自称可被抢占**的持有者才会收到它……没人等、或本持有者不可被抢占时……**这不是抢占**：锁不会被从持有者手里夺走」——同一段里先用「可被抢占」当本方属性，四行后又说「这不是抢占」。
 - packages/core/src/storage/lock.ts:65「不可被抢占的持有者一律立刻返回 `false`」；file-lock.ts:53、191、211-212；agent.ts:1471、1475 同。
-第三个词在别处：docs/design/sessions.md:206「持有者可以自称**可被请走**」、:303；packages/cli/src/cli.ts:289、501（`runServe` 的 JSDoc「**可被请走**（`preemptible`）」）；packages/core/test/lease-handoff.test.ts:111 测试标题也是「可被请走」。
+第三个词在别处：docs/design/sessions.md:206「持有者可以自称**可被请走**」、:303；packages/base/src/cli.ts:289、501（`runServe` 的 JSDoc「**可被请走**（`preemptible`）」）；packages/core/test/lease-handoff.test.ts:111 测试标题也是「可被请走」。
 撞车的另一义：packages/core/src/agent.ts:585「正在跑的整理……**它可被前台抢占**」、admission/testing.ts:204「在跑的 Dream 可被抢占」、admission/standalone.ts:118「前台抢占 / 收摊共用」——这是 admission 真做的事。
 全仓 grep「可让位」：只在 CONTEXT.md:54/57/58、docs/architecture.md:71/90、packages/core/README.md:42、docs/decisions/implemented/2026-09-07-preemptible-lease.md 出现；`packages/*/src` 与 `docs/design/` 里 0 次。
 
@@ -4315,7 +4315,7 @@ CONTEXT.md:57-59「可让位」条的 _Avoid_ 明确点名「抢占」，理由�
 
 **改法**
 
-把 `packages/core/src/storage/lock.ts`、`file-lock.ts`、`agent.ts:1471/1475` 里描述持有者属性的「可被抢占 / 不可被抢占」逐处改成「可让位 / 不可让位」（`preemptible` 字段名不动），并把 docs/design/sessions.md:206/303 与 packages/cli/src/cli.ts:289/501 的「可被请走」统一成「可让位」。admission 那几处的「抢占」保留不动——它本来就是对面的动作。改词是纯注释/文案编辑，不碰行为，不需要重跑行为门。
+把 `packages/core/src/storage/lock.ts`、`file-lock.ts`、`agent.ts:1471/1475` 里描述持有者属性的「可被抢占 / 不可被抢占」逐处改成「可让位 / 不可让位」（`preemptible` 字段名不动），并把 docs/design/sessions.md:206/303 与 packages/base/src/cli.ts:289/501 的「可被请走」统一成「可让位」。admission 那几处的「抢占」保留不动——它本来就是对面的动作。改词是纯注释/文案编辑，不碰行为，不需要重跑行为门。
 
 ### 113. [P2] 词表规范词「消息来源」全仓零使用，而代码里 `source` 在公共面上有六种含义、四个公共 `*Source` 类型，词表既不给代码名也不裁决它们
 
@@ -4330,7 +4330,7 @@ CONTEXT.md:65-67「**消息来源**：一条入账消息是谁给的：人、ste
 - `PromptSource`（packages/core/src/prompt/types.ts:79）= 每轮注入的供货接口，根本不是枚举；
 - `RuntimeSource`（packages/core/src/extension/builtin.ts:468）= `Pick<AgentRuntime, …>`，是「源材料」不是「来源」。
 叫 `source` 的公共字段又是另外几义：packages/core/src/messages.ts:74 `UserMessage.source: "human" | "steer" | "harness"`（这个才是词表说的「消息来源」）、messages.ts:118 `EnvironmentMessage.source: string`、packages/core/src/errors.ts:33 `AgentError.source: "provider" | "tool" | "internal"`、packages/core/src/events.ts:101/146 `resource_changed.source` / `equipmentChanged.source`（= 哪条 extension）、packages/core/src/tools/types.ts:100/108 注册来源 `mcp:<server>`。
-面板已经被迫自己再定义一遍：packages/cli/src/observe/lexicon.ts:28 `RUN_SOURCE`、:35 `REPLY_SOURCE`。
+面板已经被迫自己再定义一遍：packages/base/src/observe/lexicon.ts:28 `RUN_SOURCE`、:35 `REPLY_SOURCE`。
 
 **问题**
 

@@ -34,6 +34,14 @@
       "bilingual": false
     },
     {
+      "path": "packages/base/README.md",
+      "bilingual": false
+    },
+    {
+      "path": "packages/tui/README.md",
+      "bilingual": false
+    },
+    {
       "path": "packages/cli/README.md",
       "bilingual": false
     },

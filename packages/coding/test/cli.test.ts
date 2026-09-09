@@ -6,7 +6,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { usage } from "echo-agent";
+import { usage } from "@echo-agent/base";
 import { InMemoryCredentialStore } from "@echo-agent/core";
 import { ECHO_CODING } from "../src/cli.ts";
 

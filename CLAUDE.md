@@ -13,7 +13,9 @@ This is not a license to widen the change: before altering a public API, a persi
 | Path | Responsibility |
 |---|---|
 | `packages/core/` | Runtime, engine, provider adapters, state, memory, tasks, and the extension API |
-| `packages/cli/` | `echo-agent`: the general agent product, official CLI and interactive TUI; a consumer of the high-level assembly that knows no specific product |
+| `packages/base/` | `@echo-agent/base`: the assembly layer. Launcher parts, the product contract, the shell port, host capabilities (credentials, settings, project instructions, the observe panel) and the pipe form. No terminal dependency |
+| `packages/tui/` | `@echo-agent/tui`: the terminal shell — the interactive TUI and the first-run setup, packaged as the terminal implementation of the shell port |
+| `packages/cli/` | `echo-agent`: the general agent product. Its identity section, its `Product`, its executable. It picks the terminal shell like any other product would |
 | `packages/coding/` | `echo-coding`: the coding agent product; depends on `packages/cli` and mounts its own `echo:workspace` / `echo:shell` / `echo:worktree` / `echo:web` plus the `echo:coding` prompt pack |
 | `examples/` | Runnable samples that consume the public API from tarballs |
 | `test/` | Repository-level distribution and documentation gates |

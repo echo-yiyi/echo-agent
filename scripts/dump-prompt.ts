@@ -4,7 +4,7 @@
 import { createEcho, kimiProvider } from "@echo-agent/core";
 import { definePromptPack } from "@echo-agent/core/extension";
 import { conductEntry, surfaceSection } from "../packages/cli/src/prompt.ts";
-import { instructionsEntry } from "../packages/cli/src/instructions.ts";
+import { instructionsEntry } from "../packages/base/src/instructions.ts";
 import { codingPreset } from "../packages/coding/src/agent.ts";
 
 const ECHO_SURFACE = definePromptPack("echo:surface-dump");

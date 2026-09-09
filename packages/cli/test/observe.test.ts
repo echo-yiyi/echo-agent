@@ -7,11 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEcho, createProvider, createProviderStreams, observationDatabasePath, type Echo, type Provider } from "@echo-agent/core";
 import { scriptedDialect, textTurn, type ScriptedTurn } from "@echo-agent/core/testing";
-import { parseObserveArgs, runObserve, type ObserveIo } from "../src/observe.ts";
-import { mainFor } from "../src/cli.ts";
-import { terminalShell } from "../src/extension.ts";
+import { parseObserveArgs, runObserve, type ObserveIo } from "@echo-agent/base";
+import { mainFor } from "@echo-agent/base";
+import { terminalShell } from "@echo-agent/tui";
 import { ECHO_AGENT } from "../src/product.ts";
-import { run, type Sink } from "../src/run.ts";
+import { run, type Sink } from "@echo-agent/base";
 
 // **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
 // 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。

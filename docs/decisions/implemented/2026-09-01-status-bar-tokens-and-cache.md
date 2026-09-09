@@ -1,6 +1,6 @@
 # 状态栏只显示 token 不显示 $，加缓存命中一格
 
-> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01（用户：「token 就够，但要看到 cache 缓存情况」）· 落地 main（core `packages/core/src/messages.ts` / `provider/openai.ts` / `agent.ts`；cli `packages/cli/src/app.ts`；`843d260`）· 来源 [产品级 TUI 设计方案](../../design/tui.md) §四、§九 D8（2026-09-08 从那张表转录成条）
+> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01（用户：「token 就够，但要看到 cache 缓存情况」）· 落地 main（core `packages/core/src/messages.ts` / `provider/openai.ts` / `agent.ts`；cli `packages/tui/src/app.ts`；`843d260`）· 来源 [产品级 TUI 设计方案](../../design/tui.md) §四、§九 D8（2026-09-08 从那张表转录成条）
 
 ## 决定
 

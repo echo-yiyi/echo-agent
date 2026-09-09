@@ -44,24 +44,49 @@ function copyPackage(from: string, to: string): void {
   () => {
     const stage = mkdtempSync(join(tmpdir(), "echo-tui-isolation-"));
     try {
+      // 2026-09-09 拆包之后 `echo-agent` 是**产品**，它上面还有两层：装配层与终端壳。
+      // 三个都要拷出去，并把彼此的 workspace 链接换成 `file:`——这一条正是拆包之后最容易漏的接线。
       const coreDir = join(stage, "core");
-      const tuiDir = join(stage, "tui");
+      const baseDir = join(stage, "base");
+      const tuiPkgDir = join(stage, "tui");
+      const productDir = join(stage, "product");
       copyPackage(join(REPO_ROOT, "packages/core"), coreDir);
-      copyPackage(PKG_ROOT, tuiDir);
+      copyPackage(join(REPO_ROOT, "packages/base"), baseDir);
+      copyPackage(join(REPO_ROOT, "packages/tui"), tuiPkgDir);
+      copyPackage(PKG_ROOT, productDir);
 
-      const pkgPath = join(tuiDir, "package.json");
+      const link = (dir: string, deps: Record<string, string>): void => {
+        const path = join(dir, "package.json");
+        const pkg = JSON.parse(readFileSync(path, "utf8")) as { dependencies?: Record<string, string> };
+        pkg.dependencies = { ...(pkg.dependencies ?? {}), ...deps };
+        writeFileSync(path, JSON.stringify(pkg, null, 2));
+      };
+      link(baseDir, { "@echo-agent/core": `file:${coreDir}` });
+      link(tuiPkgDir, { "@echo-agent/core": `file:${coreDir}`, "@echo-agent/base": `file:${baseDir}` });
+
+      const pkgPath = join(productDir, "package.json");
       const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { dependencies: Record<string, string> };
-      // **先断言依赖声明齐全**——漏了 `@echo-agent/core` 下面就装不出来，但报错会指向 npm 404，
-      // 那时不容易一眼看出根因，所以这里先说清楚。
-      expect(Object.keys(pkg.dependencies).sort()).toEqual(["@earendil-works/pi-tui", "@echo-agent/core"]);
-      pkg.dependencies["@echo-agent/core"] = `file:${coreDir}`;
-      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+      // **先断言依赖声明齐全**——漏一条下面就装不出来，但报错会指向 npm 404，
+      // 那时不容易一眼看出根因，所以这里先说清楚。产品**不该**再直接依赖终端库：那是壳的事。
+      expect(Object.keys(pkg.dependencies).sort()).toEqual(["@echo-agent/base", "@echo-agent/core", "@echo-agent/tui"]);
+      link(productDir, {
+        "@echo-agent/core": `file:${coreDir}`,
+        "@echo-agent/base": `file:${baseDir}`,
+        "@echo-agent/tui": `file:${tuiPkgDir}`,
+      });
 
-      const install = sh(["bun", "install"], tuiDir);
+      // **每个 file: 链进来的包各自装一次**：链接指向 stage 外的兄弟目录，模块解析从那个真实路径往上走，
+      // 走不到产品的 node_modules——所以传递依赖得在各自那一层就位。真发布（tarball / npm）没有这个问题，
+      // 那条路由分发门守着。
+      for (const dir of [baseDir, tuiPkgDir]) {
+        const r = sh(["bun", "install"], dir);
+        expect([dir, r.ok, r.out.slice(-300)]).toEqual([dir, true, r.out.slice(-300)]);
+      }
+      const install = sh(["bun", "install"], productDir);
       expect([install.ok, install.out.slice(-500)]).toEqual([true, install.out.slice(-500)]);
 
-      const help = sh(["bun", "bin/echo-agent.ts", "--help"], tuiDir);
-      expect([help.ok, help.out.slice(0, 500)]).toEqual([true, help.out.slice(0, 500)]);
+      const help = sh(["bun", "bin/echo-agent.ts", "--help"], productDir);
+      expect([help.ok, help.out.slice(0, 900)]).toEqual([true, help.out.slice(0, 900)]);
       expect(help.out).toContain("用法：echo-agent");
       expect(help.out).toContain("--provider");
     } finally {

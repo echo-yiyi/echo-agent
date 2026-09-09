@@ -235,7 +235,7 @@
 104. [P2] `docs-external` · `docs/review/` 被整目录豁免门禁，里面却住着一份带 8 条决策记录的在用 spec——违反 manifest 自己写的规矩，且前提已经腐烂
 105. [P2] `docs-external` · `echo-coding` 到底装几条 extension，README 自己前后矛盾（两条 vs 四条），AGENTS.md 的仓库地图停在两条
 106. [P2] `docs-gate-honesty` · docs/review/tui-design.md 是一份在维护的实现 spec + 八条决策记录，却住在 manifest 自己声明「只放 prompt 与未纳入维护的 scratch」的免门目录里，仓内八处源码把它当设计权威引用
-107. [P2] `docs-gate-honesty` · key-discipline 门的标题和注释都说守「packages/cli/src/ 里」，实现只扫顶层 .ts，不递归——`packages/cli/src/observe/` 三个文件在门外
+107. [P2] `docs-gate-honesty` · key-discipline 门的标题和注释都说守「packages/cli/src/ 里」，实现只扫顶层 .ts，不递归——`packages/base/src/observe/` 三个文件在门外
 108. [P2] `docs-gate-honesty` · 「可让位的实例被请走时自己交还」这条硬约定挂在 state-lock.test.ts 名下，而那个文件里一处 preemptible 都没有；真门 lease-handoff.test.ts 在 §8 门表里根本没登场
 109. [P2] `docs-gate-honesty` · 架构文档说写入闸「任何状态根 I/O 都被拒」，实际只拦写和删，读与 list 直通——它引的那道门自己就反着断言
 110. [P2] `docs-glossary` · observe 面板的用词有第二真源：lexicon.ts 头注释声称「界面文案只在这一处翻译」「渲染层不再自己猜字面」，page.html 里仍硬编码同一批词，且没有门

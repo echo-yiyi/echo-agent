@@ -7,7 +7,7 @@
 **给谁看**：要实现这份方案的人。假设你已经知道 `AgentRuntime` 是什么、`packages/cli/` 现在长什么样，
 所以下面不解释这两件事。
 
-**解决什么问题**：现在的 TUI（`packages/cli/src/app.ts`，373 行）是个能跑的最小壳——
+**解决什么问题**：现在的 TUI（`packages/tui/src/app.ts`，373 行）是个能跑的最小壳——
 用了 pi-tui 里最弱的 `Input` 组件（注释里写的理由是「零配置」），键位一条没绑，
 `AgentState` 里已有的 model / usage / tasks / activeSkills 一样都没显示。
 目标是把它做成产品级：**能正常打字、能看见自己在用什么、输出可读**。
@@ -115,7 +115,7 @@ pi-tui 里还有这些现成的，属于 `Editor` 内部行为，接上就有：
 
 `Editor` 的构造函数是 `new Editor(tui, theme: EditorTheme, options?)`（`dist/components/editor.d.ts:72`）——
 **主题不是可选项**。「不做主题系统」的意思是不做切换、不做加载，不是不给主题：
-P0 交付物里要有一份写死的 `EditorTheme` 常量（放 `packages/cli/src/theme.ts`，P2 的 `MarkdownTheme` 也进去）。
+P0 交付物里要有一份写死的 `EditorTheme` 常量（放 `packages/tui/src/theme.ts`，P2 的 `MarkdownTheme` 也进去）。
 
 ### 键位：照 pi
 
@@ -123,7 +123,7 @@ P0 交付物里要有一份写死的 `EditorTheme` 常量（放 `packages/cli/sr
 **应用级**的键照 pi 的 `app.*`（pi 仓 `packages/coding-agent/src/core/keybindings.ts:92-130`）。
 表里的行号都是这两个文件的。
 
-落点：`packages/cli/src/keybindings.ts`——`APP_KEYBINDINGS` 登记应用级键，`installKeybindings()` 把它与
+落点：`packages/tui/src/keybindings.ts`——`APP_KEYBINDINGS` 登记应用级键，`installKeybindings()` 把它与
 `TUI_KEYBINDINGS` 合成一个 `KeybindingsManager` 并 `setKeybindings()` 装成全局（`Editor` 内部走
 `getKeybindings()` 取键，不装就是两份真源）。`app.ts` 里所有判定都是 `keys.matches(data, "app.…")`。
 
@@ -178,7 +178,7 @@ P0 交付物里要有一份写死的 `EditorTheme` 常量（放 `packages/cli/sr
 为什么是门不是纪律：**假 TUI 测不出这类 bug**——`fake-tui.ts` 的 `feed()` 直接把字符串交给
 `handleInput`，绕过了终端编码这一层。所以：
 
-- `packages/cli/test/key-discipline.test.ts`：`packages/cli/src/` 里（递归）`fromCharCode` 只许出现在拼 ANSI **输出**常量的
+- `packages/tui/test/key-discipline.test.ts`：`packages/cli/src/` 里（递归）`fromCharCode` 只许出现在拼 ANSI **输出**常量的
   那种行上（`const ESC = String.fromCharCode(27);`）与注释里，其余一律红；门自带正反例自检。
 - `packages/cli/test/tui-pty.test.ts`（驱动在 `packages/cli/test/pty-driver.py`，python3 标准库的 `pty`——Bun 1.3 没有 pty）：
   真 PTY 里把 `ESC[100;5u`（Kitty 的 Ctrl+D）、`ESC[99;5u`（Kitty 的 Ctrl+C）、`ESC O B`（应用光标键 ↓）
@@ -195,7 +195,7 @@ P0 交付物里要有一份写死的 `EditorTheme` 常量（放 `packages/cli/sr
 - 单行草稿下 ↑ 能翻出上一条输入
 - Enter 提交、Shift+Enter 换行、Esc 中断、Ctrl+C 清空、**Ctrl+D 空时退出**——五条各一个假 TUI 测试
 - 权限询问的 `y` / `n` 从 `handleInput` 里的字符比较移进 `setKeybindings()`
-- `packages/cli/src/theme.ts` 里有 `EditorTheme` 常量
+- `packages/tui/src/theme.ts` 里有 `EditorTheme` 常量
 - 按键纪律那两条门（grep + 真 PTY）绿
 - **`api-snapshot.txt` 逐字未变**
 

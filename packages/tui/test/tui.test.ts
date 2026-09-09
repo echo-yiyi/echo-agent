@@ -10,7 +10,7 @@ import { agentRuntimeOf, type AgentRuntime } from "@echo-agent/core/extension";
 import { scriptedStreamFn, textTurn, toolTurn } from "@echo-agent/core/testing";
 import { CURSOR_MARKER, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { runTui, type TuiConfigureOptions } from "../src/app.ts";
-import { fakeTui } from "./fake-tui.ts";
+import { fakeTui } from "../src/testing.ts";
 import { Transcript } from "../src/transcript.ts";
 
 /**
@@ -1418,7 +1418,8 @@ test("欢迎头：版本、cwd、模型、键位提示，在文档流最上面",
     streamFunction: scriptedStreamFn([textTurn("好")]),
     workspace: "/tmp/echo-welcome-workspace",
   });
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  // 产品由调用方给：**壳不认识任何产品**（2026-09-09 拆包），不给就显示一个中性名字
+  const done = runTui({ agent: runtimeOf(agent), ui, product: { name: "echo-agent", version: "9.9.9" } });
   await flush();
 
   const screen = ui.screen();

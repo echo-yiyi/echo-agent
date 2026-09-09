@@ -46,16 +46,15 @@ import {
 import { join } from "node:path";
 import { instructionsEntry } from "./instructions.ts";
 import { pipeSurfaceEntry } from "./prompt.ts";
-import { terminalShell } from "./extension.ts";
 import type { Shell } from "./shell.ts";
 import { run } from "./run.ts";
 import { runObserve } from "./observe.ts";
-import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
+import type { FirstRunChoice } from "./shell.ts";
 // （FirstRunChoice 同时是装配与选择器的「一家」形状：name = --provider 短名，provider = 实例）
 import { readSettings, writeSettings } from "./settings.ts";
 import { isConfigured, type VerifyFn } from "./setup.ts";
 import { linesOf } from "./stdin.ts";
-import { ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
+import type { PresetForm, Product } from "./product.ts";
 
 export type ProviderName = "kimi" | "deepseek" | "openai" | "zai" | "minimax";
 
@@ -164,7 +163,7 @@ export function usage(name: string): string {
  *
  * @param name 可执行文件名，只进「不认识的选项」那条错误里附带的用法文本。
  */
-export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.name): CliOptions | null {
+export function parseArgs(argv: readonly string[], name: string): CliOptions | null {
   if (argv[0] === "-h" || argv[0] === "--help") return null;
 
   const opts: CliOptions = { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false };
@@ -393,7 +392,7 @@ export function mainFor(product: Product, shell: Shell): Main {
       let provider = chosen.provider;
       let model = opts.model;
       if (model === undefined && remembered !== undefined && remembered.provider === provider.id) {
-        if (provider.getModels().some((m) => m.id === remembered.id)) model = remembered.id;
+        if (provider.getModels().some((m: { id: string }) => m.id === remembered.id)) model = remembered.id;
         else notices.push(`[设置] 记住的模型 '${remembered.id}' 已不在 ${provider.id} 的目录里，用缺省`);
       }
 
@@ -452,8 +451,6 @@ export function mainFor(product: Product, shell: Shell): Main {
   };
 }
 
-/** `echo-agent` 自己的入口：`bin/echo-agent.ts` 调的就是它。 */
-export const main: Main = mainFor(ECHO_AGENT, terminalShell);
 
 /** 管道形态：`run()` 自己会 `echo.stop()`（它的 `finally`），所以这里不重复收摊。 */
 /**

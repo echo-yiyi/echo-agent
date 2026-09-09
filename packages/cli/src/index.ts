@@ -1,66 +1,14 @@
-// `echo-agent` 公共面：**Echo 的官方 CLI 与默认壳**。
+// `echo-agent` 公共面：**通用 agent 这个产品**（2026-09-09 拆包之后它只剩产品，记录见
+// `docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`）。
 //
-// 壳是一条官方 Extension，不是 core 外面套的一层（2026-08-31：壳也是 extension）。
-// `echo:tui` inject core 那份封闭的 `AgentRuntime`（`@echo-agent/core/extension`），
-// 于是壳与工具扩展长在同一套机制上——同一个 ExtensionHost、同一份所有权账本、同一条依赖图。
-// 换一个壳（Web）只是换一条 inject 同一个 Service 的 Extension。
+// 拆之前本包同时是四样东西：产品、产品框架、两个壳、宿主能力。于是产品依赖另一个产品
+// （`@echo-agent/coding` 的 dependencies 里写着 `echo-agent`），做 web 界面的第三方也被迫装终端库。
+// 现在装配层是 `@echo-agent/base`、终端壳是 `@echo-agent/tui`，本包与 `@echo-agent/coding` 平级。
 //
-// 协议里没有 `start` / `stop`：**进程级启停归装配层**（`createEcho()` / `echo.stop()`），
-// 壳子碰不到也不该碰。
-//
-// **`echo-agent` 这个可执行文件也住在本包**：落点不选 `@echo-agent/core`，是因为 core 的
-// 运行时依赖恒空是硬门，而交互式终端要 `pi-tui`。core 保持纯库不出 bin。
+// 本包留下的只有：`echo-agent` 的身份段、它的 `Product`、可执行文件。
 
-/** 官方壳的 Extension 形态：交给 `createEcho({ extensions })` 去 mount。 */
-export { tuiShell, terminalShell, type TuiShell } from "./extension.ts";
+/** 通用 agent 的身份段——只属于本产品，`echo-coding` 有它自己的。 */
+export { ECHO_AGENT_IDENTITY, identityEntry, identitySection } from "./prompt.ts";
 
-/**
- * 壳端口（2026-09-09）：装配层只认它，谁实现它、用什么画界面都行。终端那份实现是 `terminalShell`；
- * 做 web / 桌面界面的产品自己实现一份交给 `mainFor()`。
- */
-export type { Shell, ShellConfigure, ShellExit, ShellFirstRunOptions, ShellHandle, ShellOpenOptions } from "./shell.ts";
-
-/**
- * 共用的工作纪律段。**产品自己挂**（2026-09-09 拍板，记录见
- * `docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`）：装配层不再恒挂，
- * 所以产品能换掉它、也能不要它。文本按形态分两版——没有人的那一头不写「先确认」。
- */
-export { conductEntry, conductSection, conductText } from "./prompt.ts";
-
-/** 渲染循环本体。自己写壳、或要换一套终端实现时用得上。 */
-export { runTui, type TuiAppOptions, type TuiConfigureOptions } from "./app.ts";
-
-/** 会话投影（含终端控制序列清洗与字素折行）。 */
-export { Transcript, clean, type TranscriptEntry } from "./transcript.ts";
-
-/** CLI：`echo-agent` 的解析与入口。两种形态的分叉在 `main()` 里。 */
-export { main, mainFor, parseArgs, usage, type CliOptions, type Main, type MainDeps } from "./cli.ts";
-
-/** `echo-agent observe`：只读已落盘的 run 观测记录（不装配、不取锁）。`mainFor()` 已经分发它；单独暴露是给产品复用帮助与解析。 */
-export { runObserve, parseObserveArgs, observeUsage, type ObserveCommand, type ObserveOptions, type ObserveIo } from "./observe.ts";
-
-/**
- * 「产品」：依赖本包做完整产品（`echo-coding`）时交给 `mainFor()` 的东西——名字、版本、装配片段。
- * 本包不认识任何具体产品；`ECHO_AGENT` 是缺省那个。
- */
-export { ECHO_AGENT, type PresetForm, type Product } from "./product.ts";
-
-/** 首次运行的引导设置（D4）：欢迎 → 选 provider → 贴 key → 选模型。跑在装配前，`main()` 在缺凭据时调它。 */
-export { runFirstRunSetup, type FirstRunChoice, type FirstRunOptions, type FirstRunOutcome } from "./first-run.ts";
-
-/**
- * 凭据配置段：key 中途失效时主界面里摆出来的那一段，以及「配好了没」的判据（与请求路径同一个）。
- * 自己写壳时用得上。**它不是启动前置**——装配不看凭据（2026-09-01）。
- */
-export {
-  CredentialSetup,
-  isConfigured,
-  verifyApiKey,
-  type CredentialSetupOptions,
-  type VerifyFn,
-  type VerifyOutcome,
-} from "./setup.ts";
-
-/** 管道形态的实质：给 Agent 一个进程与一个输入源。自己写别的输入源时用得上。 */
-export { run, type RunOptions, type Sink } from "./run.ts";
-export { linesOf } from "./stdin.ts";
+/** 本产品的定义与入口。`bin/echo-agent.ts` 调的就是 `main`。 */
+export { ECHO_AGENT, main } from "./product.ts";

@@ -1,6 +1,6 @@
 # 跨 provider 换模 + 记住选择
 
-> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01（用户：「切换了之后重启还要能用」）· 落地 main（core `packages/core/src/create-agent.ts`；cli `packages/cli/src/settings.ts` / `app.ts` / `cli.ts`；`75f5aab`）· 来源 [产品级 TUI 设计方案](../../design/tui.md) §六、§九 D7（2026-09-08 从那张表转录成条）
+> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01（用户：「切换了之后重启还要能用」）· 落地 main（core `packages/core/src/create-agent.ts`；cli `packages/base/src/settings.ts` / `app.ts` / `cli.ts`；`75f5aab`）· 来源 [产品级 TUI 设计方案](../../design/tui.md) §六、§九 D7（2026-09-08 从那张表转录成条）
 
 ## 决定
 

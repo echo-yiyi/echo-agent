@@ -6,13 +6,14 @@
 > Non-Goals：不复述各子系统的契约（在 [docs/design/](design/)）；不写规划（在 [docs/decisions/proposed/](decisions/proposed/)）；不重述源码树<br>
 > 验收：本文引用的每个路径存在（`scripts/docs-lint.ts` 的 filerefs 门）；§7 列的每条决策都有记录且状态行带拍板日期
 
-## 1. 三个包，一个方向
+## 1. 五个包，一个方向
 
-依赖只有一个方向：`@echo-agent/core` ← `echo-agent`（`packages/cli/`）← `echo-coding`（`packages/coding/`）。各包的职责见 [CLAUDE.md](../CLAUDE.md) 的仓库地图，这里只说边界：
+依赖只有一个方向：`@echo-agent/core` ← `@echo-agent/base` ← `@echo-agent/tui` ← 各产品（`echo-agent` 与 `echo-coding`，两者平级、互不依赖）。2026-09-09 拆的包，记录见 [装配层独立成包](decisions/proposed/2026-09-09-assembly-layer-packages.md)。各包的职责见 [CLAUDE.md](../CLAUDE.md) 的仓库地图，这里只说边界：
 
 - **core 是纯库**：零运行时依赖（门：`packages/core/test/zero-runtime-deps.test.ts`），不出可执行文件。
-- **echo-agent 是通用产品也是壳**：唯一的可执行文件、TUI、管道形态、`observe` 子命令都在这里。它不认识任何具体产品。
-- **echo-coding 是产品**：只交一份数据给 echo-agent 的启动逻辑。`Product = { name, version, preset }`（`packages/cli/src/product.ts`），`preset` 返回 `createEcho()` 的 `agent` 与 `extensions` 两个字段（`packages/coding/src/agent.ts` 的 `codingPreset`）；可执行文件是 `mainFor(ECHO_CODING)`（`packages/coding/src/cli.ts`），参数解析、凭据、形态分叉、装配、收摊一行不复制。
+- **base 是装配层**：启动器部件、产品契约、壳端口、宿主能力（凭据、设置、项目指令、`observe` 面板）、管道形态。**它不认识任何界面技术**——交互形态由产品挑一个 `Shell` 实现交进来，所以做 web 界面的产品依赖它而不必装终端库。
+- **tui 是终端壳**：界面本体与引导设置，打成 `terminalShell` 一件东西。它是壳端口的终端实现，换壳就是换这个包。
+- **两个产品都很薄**：各出自己的身份段、纪律段的挂载与可执行文件。`Product = { name, version, preset }`（`packages/base/src/product.ts`），`preset` 返回 `createEcho()` 的 `agent` 与 `extensions` 两个字段（`packages/coding/src/agent.ts` 的 `codingPreset`）；可执行文件是 `mainFor(产品, 壳)`，参数解析、凭据、形态分叉、装配、收摊一行不复制。
 
 ## 2. 一个装配现场
 
@@ -60,7 +61,7 @@
 - **registry**，extension 往 agent 里注册：`AgentTools`、`AgentHooks`、`AgentSkills`、`AgentPrompt`、`AgentCompaction`。四个具名的同名 fail-loud；`AgentHooks` 的条目无名，同 id 可并存、disposer 认对象身份（门 `packages/core/test/seams.test.ts`）。
 - **能力端口**，extension 用 agent 已有的：`AgentBackgroundService`（后台队列）、`AgentSessionsService`（会话面）、`AgentRuntimeService`（壳协议；由 `echo:agent` provide 而不是 Host 自带，所以「只有壳拿得到」没有门——`echo:worktree` 就注入了它）。
 
-**壳也是 extension**：`echo:agent` provide 封闭协议 `AgentRuntime`（`packages/core/src/extension/runtime.ts`：看、说、答、换、停五组，没有 `start` / `stop` / `deliver`），`echo:tui`（`packages/cli/src/extension.ts`）inject 它。换壳只是换一条 inject 同一个 Service 的 extension。
+**壳也是 extension**：`echo:agent` provide 封闭协议 `AgentRuntime`（`packages/core/src/extension/runtime.ts`：看、说、答、换、停五组，没有 `start` / `stop` / `deliver`），`echo:tui`（`packages/tui/src/extension.ts`）inject 它。换壳只是换一条 inject 同一个 Service 的 extension。
 
 仓内的消费者：cli 的 `echo:tui` / `echo:identity` / `echo:conduct` / `echo:pipe` / `echo:instructions`；coding 的 `echo:coding` / `echo:workspace` / `echo:shell` / `echo:worktree` / `echo:web`（`packages/coding/src/extensions.ts`）；`examples/extension` 是第一个仓外样例。
 
@@ -72,7 +73,7 @@
 
 - **single-writer**：每段一把 lease（`packages/core/src/storage/file-lock.ts`），core 不猜对面死没死，也不抢占没有自称可让位的持有者（可让位的实例被请走时自己交还，2026-09-07）；门 `packages/core/test/state-lock.test.ts`（互斥与坏锁）、`packages/core/test/lease-handoff.test.ts`（可让位交还）。lease 之下还有一道 Host-internal 的写入闸（`packages/core/src/state/write-gate.ts`）：拿到 lease 之前、revoke 之后任何**经闸的状态根写入**都被拒（读与 list 不经闸），门 `packages/core/test/write-gate.test.ts`。**观测库是闸外的例外**：它是 `createAgent()` 直接开的 SQLite，装配期（拿到 lease 之前）就建目录建库，写也不经闸；它的封口走 lease lifecycle port（`packages/core/src/state/lease-lifecycle.ts`，装配侧接在 `createAgent()` 里）——正常交还前 flush 尾巴，丢锁或失败后交还则只封不 flush。把建库推迟到拿到 lease 之后是另一件事，见 §7。
 - **一次写失败就封存该会话**：`packages/core/src/session/service.ts`，继续写只会产出 parent 指向不存在 entry 的坏档。
-- **观测不得影响执行**：观测库是 SQLite（`packages/core/src/observability/sqlite-store.ts`），落状态根下；给了自定义 `store` 又没点名 `stateDir` 时落 `:memory:`，所以注入内存端口的装配一个文件都不写。store 写不动时 run 照跑、`observationPersistence` 报 degraded；`echo-agent observe` 只读它，不装配、不取锁（`packages/cli/src/observe.ts`）。
+- **观测不得影响执行**：观测库是 SQLite（`packages/core/src/observability/sqlite-store.ts`），落状态根下；给了自定义 `store` 又没点名 `stateDir` 时落 `:memory:`，所以注入内存端口的装配一个文件都不写。store 写不动时 run 照跑、`observationPersistence` 报 degraded；`echo-agent observe` 只读它，不装配、不取锁（`packages/base/src/observe.ts`）。
 
 会话之间只有一种通道：往对方 `inbox/` 写一条 record（`packages/core/src/session/sessions.ts` 的 `EchoSessions`），同进程与跨进程一条路；持 lease 的进程每秒重扫一次自己的 inbox。core 不起进程，谁把一段跑起来是容器的事。
 

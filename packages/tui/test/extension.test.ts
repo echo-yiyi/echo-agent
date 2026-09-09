@@ -10,7 +10,7 @@ import { scriptedStreamFn, textTurn, FAKE_MODEL } from "@echo-agent/core/testing
 import { ExtensionHost, agentRegistries, agentRuntimeOf, AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { HookRuntime } from "@echo-agent/core";
 import { tuiShell } from "../src/extension.ts";
-import { fakeTui } from "./fake-tui.ts";
+import { fakeTui } from "../src/testing.ts";
 
 function hostWith(agent: Agent): ExtensionHost {
   const host = new ExtensionHost({

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { deepseekProvider, FileCredentialStore, InMemoryCredentialStore, kimiProvider } from "@echo-agent/core";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { runFirstRunSetup, type FirstRunChoice, type FirstRunOutcome } from "../src/first-run.ts";
-import { fakeTui } from "./fake-tui.ts";
+import { fakeTui } from "../src/testing.ts";
 
 const ESC = String.fromCharCode(27);
 const ENTER = "\r";

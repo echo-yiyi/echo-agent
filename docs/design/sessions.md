@@ -142,7 +142,7 @@ type SessionInfo = {
 
 > 2026-09-07 修正。此前本节写的是「agent 定义 = extension bundle，echo-agent / echo-coding 各打成一个」，那是把产品当成了 agent 定义。决策记录：[角色定义](../decisions/proposed/2026-09-07-role-agent.md)；被修正的那条：[agent 是 extension](../decisions/proposed/2026-09-03-agent-is-an-extension.md)。
 
-**产品是容器级的事**：一个 echo-coding 容器开出来的段全是 coding 方向。一段 session 挂的 agent 定义是**产品内的一个角色**——reviewer、前端、缺省——对应 Claude Code 的 subagent 定义。角色是数据，不是代码：一个 markdown 文件，frontmatter 带 `name` / `description` / `tools` / `model`，正文就是 identity。[`Product`](../../packages/cli/src/product.ts#symbol=Product) 与 `preset` 不动，ABI 不加字段。
+**产品是容器级的事**：一个 echo-coding 容器开出来的段全是 coding 方向。一段 session 挂的 agent 定义是**产品内的一个角色**——reviewer、前端、缺省——对应 Claude Code 的 subagent 定义。角色是数据，不是代码：一个 markdown 文件，frontmatter 带 `name` / `description` / `tools` / `model`，正文就是 identity。[`Product`](../../packages/base/src/product.ts#symbol=Product) 与 `preset` 不动，ABI 不加字段。
 
 ```md
 ---

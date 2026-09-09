@@ -1,6 +1,6 @@
 # TUI 键位照 pi：编辑器内用 pi-tui 缺省，应用级照 pi 的 `app.*`
 
-> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01 · 落地 main `eff6dec`（`packages/cli/src/keybindings.ts` / `app.ts`，P0 其余交付物同一提交）· 来源 [产品级 TUI 设计方案](../../design/tui.md) §二、§九 D2（2026-09-08 从那张表转录成条）
+> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01 · 落地 main `eff6dec`（`packages/tui/src/keybindings.ts` / `app.ts`，P0 其余交付物同一提交）· 来源 [产品级 TUI 设计方案](../../design/tui.md) §二、§九 D2（2026-09-08 从那张表转录成条）
 
 ## 决定
 
@@ -12,7 +12,7 @@
 
 ## 落地
 
-`eff6dec`：`APP_KEYBINDINGS` 登记应用级键，`installKeybindings()` 把它与库缺省合起来。按键判定只走 `matchesKey()` 一族、不比较字节——门在 `packages/cli/test/key-discipline.test.ts`（递归扫 `packages/cli/src/`）与 `packages/cli/test/tui-pty.test.ts`（真 PTY 送 Kitty / 应用光标键编码）。
+`eff6dec`：`APP_KEYBINDINGS` 登记应用级键，`installKeybindings()` 把它与库缺省合起来。按键判定只走 `matchesKey()` 一族、不比较字节——门在 `packages/tui/test/key-discipline.test.ts`（递归扫 `packages/cli/src/`）与 `packages/cli/test/tui-pty.test.ts`（真 PTY 送 Kitty / 应用光标键编码）。
 
 ## 验收
 

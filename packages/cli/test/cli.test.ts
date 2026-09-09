@@ -33,13 +33,13 @@ import {
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
-import { echoOptions, main, mainFor, parseArgs, usage, wakeArgs } from "../src/cli.ts";
-import { ECHO_AGENT, type PresetForm } from "../src/product.ts";
-import { isConfigured } from "../src/setup.ts";
-import { terminalShell } from "../src/extension.ts";
-import { fakeTui } from "./fake-tui.ts";
-import { linesOf } from "../src/stdin.ts";
-import { run, type Sink } from "../src/run.ts";
+import { echoOptions, mainFor, parseArgs, usage, wakeArgs, type PresetForm } from "@echo-agent/base";
+import { ECHO_AGENT, main } from "../src/product.ts";
+import { isConfigured } from "@echo-agent/base";
+import { terminalShell } from "@echo-agent/tui";
+import { fakeTui } from "@echo-agent/tui/testing";
+import { linesOf } from "@echo-agent/base";
+import { run, type Sink } from "@echo-agent/base";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-agent.ts");
 
@@ -193,39 +193,39 @@ test("parseArgs:认识的都认得出", () => {
   // 就是「按缺省起来」——交互形态下那才是用户要的（原 `echo-agent start` 的 start
   // 是唯一的子命令，等于噪音，2026-08-31 一并去掉）。
   // D7 起 `provider` 不再有解析期缺省：**不给 = 没说**，缺省与「记住上次」的合成在 main() 里做
-  expect(parseArgs([])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, serve: false });
-  expect(parseArgs(["--provider", "deepseek", "--no-memory"])).toEqual({
+  expect(parseArgs([], "echo-agent")).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, serve: false });
+  expect(parseArgs(["--provider", "deepseek", "--no-memory"], "echo-agent")).toEqual({
     provider: "deepseek",
     withoutMemory: true,
     extensionDirs: [],
     continueLast: false, serve: false,
   });
   // `--agent-id` 2026-09-07 退场：那一维现在是 `product`（由产品自己给，不是命令行参数）
-  expect(() => parseArgs(["--agent-id", "a1"])).toThrow();
-  expect(parseArgs(["--help"])).toBeNull();
-  expect(parseArgs(["-h"])).toBeNull();
+  expect(() => parseArgs(["--agent-id", "a1"], "echo-agent")).toThrow();
+  expect(parseArgs(["--help"], "echo-agent")).toBeNull();
+  expect(parseArgs(["-h"], "echo-agent")).toBeNull();
 });
 
 test("parseArgs:`--observe <档>` 只认 off / metadata / content，不给就不出现在结果里（core 缺省 metadata）", () => {
-  expect(parseArgs(["--observe", "content"])).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, serve: false, observe: "content" });
-  expect(parseArgs(["--observe", "off"])?.observe).toBe("off");
-  expect(parseArgs([])).not.toHaveProperty("observe");
-  expect(() => parseArgs(["--observe", "full"])).toThrow("--observe 只能是 off / metadata / content");
-  expect(() => parseArgs(["--observe"])).toThrow("缺一个值");
+  expect(parseArgs(["--observe", "content"], "echo-agent")).toEqual({ withoutMemory: false, extensionDirs: [], continueLast: false, serve: false, observe: "content" });
+  expect(parseArgs(["--observe", "off"], "echo-agent")?.observe).toBe("off");
+  expect(parseArgs([], "echo-agent")).not.toHaveProperty("observe");
+  expect(() => parseArgs(["--observe", "full"], "echo-agent")).toThrow("--observe 只能是 off / metadata / content");
+  expect(() => parseArgs(["--observe"], "echo-agent")).toThrow("缺一个值");
 });
 
 test("parseArgs:`--continue` / `--resume <id>` 各自认得，两个一起给就报错", () => {
   // 2026-09-01 用户拍板：缺省每次启动新建会话，续上次是显式动作
-  expect(parseArgs(["--continue"])).toMatchObject({ continueLast: true });
-  expect(parseArgs(["--resume", "s-abc"])).toMatchObject({ resume: "s-abc", continueLast: false, serve: false });
-  expect(() => parseArgs(["--resume"])).toThrow("缺一个值");
-  expect(() => parseArgs(["--continue", "--resume", "s-abc"])).toThrow("只能给一个");
+  expect(parseArgs(["--continue"], "echo-agent")).toMatchObject({ continueLast: true });
+  expect(parseArgs(["--resume", "s-abc"], "echo-agent")).toMatchObject({ resume: "s-abc", continueLast: false, serve: false });
+  expect(() => parseArgs(["--resume"], "echo-agent")).toThrow("缺一个值");
+  expect(() => parseArgs(["--continue", "--resume", "s-abc"], "echo-agent")).toThrow("只能给一个");
 });
 
 test("parseArgs:`--extensions` 可重复,给了就只用给的", () => {
   // 空数组与「没传」是两回事：前者走约定目录 `<cwd>/extensions`，后者才是显式指定。
   // 合并前这条只有交互形态有，管道形态压根没有 `--extensions`——**并成一个 CLI 之后两边都有了**。
-  expect(parseArgs(["--extensions", "a", "--extensions", "b"])).toMatchObject({ extensionDirs: ["a", "b"] });
+  expect(parseArgs(["--extensions", "a", "--extensions", "b"], "echo-agent")).toMatchObject({ extensionDirs: ["a", "b"] });
 });
 
 test("parseArgs:CLI 内置五家都认得（开源验收第 2 条）", () => {
@@ -235,21 +235,21 @@ test("parseArgs:CLI 内置五家都认得（开源验收第 2 条）", () => {
   // **这条正是「两个 CLI 会分家」的实证**：合并前交互形态那个只认 kimi / deepseek 两家，
   // 加 provider 时漏改了它——同一个产品，两处参数解析，永远只有一处被想起来。
   for (const name of ["kimi", "deepseek", "openai", "zai", "minimax"]) {
-    expect(parseArgs(["--provider", name])).toMatchObject({ provider: name });
+    expect(parseArgs(["--provider", name], "echo-agent")).toMatchObject({ provider: name });
   }
 });
 
 test("parseArgs:不认识的一律 throw,不静默按缺省跑", () => {
-  expect(() => parseArgs(["serve"])).toThrow("不认识的选项");
-  expect(() => parseArgs(["--stat-dir", "/x"])).toThrow("不认识的选项");
+  expect(() => parseArgs(["serve"], "echo-agent")).toThrow("不认识的选项");
+  expect(() => parseArgs(["--stat-dir", "/x"], "echo-agent")).toThrow("不认识的选项");
   // 用一个**确实不存在**的名字：`openai` 2026-08-28 起是内置的一家了
-  expect(() => parseArgs(["--provider", "没这家"])).toThrow("不认识的 provider");
+  expect(() => parseArgs(["--provider", "没这家"], "echo-agent")).toThrow("不认识的 provider");
   // 文档里不许出现 CLI 不认的选项（review P2：注释曾写 `--base-url`，实际会以「不认识的选项」退出）
-  expect(() => parseArgs(["--base-url", "https://x"])).toThrow("不认识的选项");
+  expect(() => parseArgs(["--base-url", "https://x"], "echo-agent")).toThrow("不认识的选项");
   // 缺值不许把下一个 flag 当值吞掉
-  expect(() => parseArgs(["--model", "--no-memory"])).toThrow("缺一个值");
-  expect(() => parseArgs(["--state-dir"])).toThrow("缺一个值");
-  expect(() => parseArgs(["--extensions"])).toThrow("缺一个值");
+  expect(() => parseArgs(["--model", "--no-memory"], "echo-agent")).toThrow("缺一个值");
+  expect(() => parseArgs(["--state-dir"], "echo-agent")).toThrow("缺一个值");
+  expect(() => parseArgs(["--extensions"], "echo-agent")).toThrow("缺一个值");
 });
 
 /* ─────────────────────────── 可执行文件本身 ─────────────────────────── */

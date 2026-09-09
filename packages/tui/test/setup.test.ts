@@ -9,7 +9,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileCredentialStore, InMemoryCredentialStore, kimiProvider, type CredentialStore } from "@echo-agent/core";
-import { CredentialSetup, isConfigured, verifyApiKey, type CredentialSetupOptions, type VerifyFn } from "../src/setup.ts";
+import { CredentialSetup, type CredentialSetupOptions } from "../src/setup.ts";
+// 判据与验证在装配层（不碰界面），组件在这里——2026-09-09 拆包时分的家
+import { isConfigured, verifyApiKey, type VerifyFn } from "@echo-agent/base";
 
 const ESC = String.fromCharCode(27);
 const ENTER = "\r";

@@ -1,6 +1,6 @@
 # 坏扩展不阻塞启动：盘上发现的扩展坏了就跳过并记诊断，显式传入的仍 fail-loud
 
-> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01（用户：「没有其他 extension 都不能作为我们不能启动的原因——热部署、成熟产品」）· 落地 main（core `packages/core/src/create-echo.ts`；cli `packages/cli/src/extension.ts` 的 `TuiShell.notify` / `cli.ts`；`dc185fe`）· 同一原则的上位记录 [配置是运行态](2026-09-01-config-is-runtime-state.md) · 来源 [产品级 TUI 设计方案](../../design/tui.md) §九 D6（2026-09-08 从那张表转录成条）
+> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-01（用户：「没有其他 extension 都不能作为我们不能启动的原因——热部署、成熟产品」）· 落地 main（core `packages/core/src/create-echo.ts`；cli `packages/tui/src/extension.ts` 的 `TuiShell.notify` / `cli.ts`；`dc185fe`）· 同一原则的上位记录 [配置是运行态](2026-09-01-config-is-runtime-state.md) · 来源 [产品级 TUI 设计方案](../../design/tui.md) §九 D6（2026-09-08 从那张表转录成条）
 
 ## 决定
 
