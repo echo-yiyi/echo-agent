@@ -109,7 +109,7 @@ test("非法 verdict 一律 fail-closed：{kind:\"bogus\"} 与缺 reason 的 ask
     await agent.prompt("go");
     expect(ran).toBe(0);
     expect(ofType(seen, "permissionRequest")).toHaveLength(0);
-    expect(ofType(seen, "permissionDenied")[0]?.reason).toContain("非法裁决");
+    expect(ofType(seen, "permissionDenied")[0]?.reason).toContain("invalid verdict");
   }
 });
 
@@ -141,7 +141,9 @@ test("交给 hook 的 params 是冻结快照：原地改在严格模式下抛，
   expect(ran).toBe(0);
   const denied = ofType(seen, "toolUseDenied")[0]!;
   expect(denied.by).toBe("hook");
-  expect(denied.reason).toMatch(/read.?only|not extensible|fail-closed|拦/i);
+  expect(denied.reason).toMatch(/fail-closed/i);
+  // 模型可见的理由不带 entry id 与异常原文（review 2026-09-07）：细节只走 onHookFailure
+  expect(denied.reason).not.toMatch(/preToolUse#|read.?only|not extensible/i);
 });
 
 test("prepareArguments 不承诺幂等：没有 hook patch 时只调用一次；hook 返回新对象时才对那份重跑", async () => {

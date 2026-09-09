@@ -127,6 +127,55 @@ test("输出超上限：从头驱逐，读的时候带 dropped 标记（不静�
   expect(out).toContain("ccccc");
 });
 
+test("输出超上限：驱逐按字符切，最近 max 个字符永远留着——一个大 chunk 不会把整段丢光（review 2026-09-07）", async () => {
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]) });
+  agent.background.limits = { ...LIMITS, maxOutputChars: 10 };
+  const r = startBackground(agent.background, {
+    kind: "p",
+    label: "big",
+    run: async (ctx) => {
+      ctx.write("x".repeat(15)); // 此前：整块 shift，留 0 个字符，readNew 只剩 dropped 标记
+    },
+  });
+  await tick();
+  if (!r.ok) return;
+  expect(r.task.buffer.tail(10)).toBe("x".repeat(10));
+  const out = r.task.buffer.readNew();
+  expect(out).toContain("dropped 5 chars");
+  expect(out.endsWith("x".repeat(10))).toBe(true);
+});
+
+test("onEnd 抛错：任务终态照记、不成 unhandled rejection、走诊断上报（review 2026-09-07）", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown): void => {
+    unhandled.push(e);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]) });
+    const codes: string[] = [];
+    agent.background.report = (d) => {
+      codes.push(d.code);
+    };
+    const r = startBackground(agent.background, {
+      kind: "p",
+      label: "boom",
+      run: async () => {},
+      onEnd: () => {
+        throw new Error("onEnd boom");
+      },
+    });
+    await tick();
+    await tick();
+    if (!r.ok) throw new Error("没起来");
+    expect(r.task.status).toBe("completed");
+    expect(codes).toContain("background_announce_failed");
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("总量上限：终态任务被淘汰，running 的不动", async () => {
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]) });
   agent.background.limits = { ...LIMITS, maxTasks: 3 };

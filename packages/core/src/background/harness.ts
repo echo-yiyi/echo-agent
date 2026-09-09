@@ -71,7 +71,12 @@ export function startBackground(ctx: AgentBackground, spec: BackgroundSpec): Bac
       // 被 kill 之后 run 抛错是正常的（它响应了 abort）——终态吸收保证不会被记成 failed。
       transition(task, task.controller.signal.aborted ? "killed" : "failed", errText(e));
     } finally {
-      announce(task, spec, ctx);
+      // 产品给的 onEnd 抛错不能逃成 unhandledRejection（review 2026-09-07）：终态已记，通知失败走诊断
+      try {
+        announce(task, spec, ctx);
+      } catch (e) {
+        ctx.report?.({ code: "background_announce_failed", message: `后台任务 ${task.id} 的结束通知没发出去：${errText(e)}` });
+      }
     }
   })();
 
@@ -95,10 +100,14 @@ export async function killBackground(tasks: BackgroundMap, id: string, opts: Kil
   if (task === undefined || task.status !== "running") return false;
   task.controller.abort();
   const grace = opts.graceMs ?? DEFAULT_KILL_GRACE_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = await Promise.race([
     task.settled?.then(() => false) ?? Promise.resolve(false),
-    new Promise<boolean>((r) => setTimeout(() => r(true), grace)),
+    new Promise<boolean>((r) => {
+      timer = setTimeout(() => r(true), grace);
+    }),
   ]);
+  clearTimeout(timer); // 停得及时也要清：不然进程要等满宽限期才退（与 run-loop 的 deadline timer 同一习惯）
   if (timedOut) {
     transition(task, "killed", `kill 后 ${grace}ms 仍未停止（run 可能没理会 abort signal）`);
     opts.report?.({ code: "background_kill_timeout", message: `后台任务 ${id} 未在宽限期内停止` });

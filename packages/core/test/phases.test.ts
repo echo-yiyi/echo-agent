@@ -16,6 +16,7 @@ import { environmentMessage } from "../src/messages.ts";
 import { InboxStore } from "../src/inbox/store.ts";
 import { addSchedule, listSchedules } from "../src/schedule/harness.ts";
 import { startBackground } from "../src/background/harness.ts";
+import { readSessionPhase } from "../src/session/status.ts";
 import { Agent } from "../src/agent.ts";
 import { FAKE_MODEL, scriptedDialect, scriptedStreamFn, textTurn } from "../src/testing.ts";
 import type { Provider } from "../src/provider/types.ts";
@@ -267,6 +268,30 @@ test("**P0**：activate() 卡在 catch-up 时 stop() 进来——两者排同一
   // 上一版：stop() 从 activate 旁边插进去先 release Lease，activation 接着起 timer 并把 phase 写回 running
   await expect(agent.prompt("还想干活")).rejects.toThrow(/已经 stop\(\) 过了|不接受新工作/);
   await expect(agent.activate()).rejects.toThrow(/收摊或已停|已经 stop/);
+});
+
+test("start() 起来之后 status.json 真的写了 idle（review 2026-09-07：此前 publishPhase 排在 phase 变 running 之前、被守卫吞掉）", async () => {
+  const store = new InMemoryDir();
+  const agent = await createAgent(opts(store));
+  await agent.start();
+  const deadline = Date.now() + 2000;
+  while ((await readSessionPhase(store))?.phase !== "idle") {
+    if (Date.now() > deadline) throw new Error("status.json 没写 idle");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await agent.stop();
+});
+
+test("丢锁进 lost 之后：inbox 轮询与 schedule 的 timer 都停了（review 2026-09-07：此前善后链没停自己动的东西）", async () => {
+  const clock = new FakeClock(0);
+  const lock = new InMemoryStateLock();
+  const agent = await createAgent(opts(new InMemoryDir(), { clock, lock }));
+  await agent.start();
+  expect(clock.pending).toBeGreaterThan(0); // 轮询挂着
+  lock.simulateLost("租约过期");
+  await new Promise((r) => setTimeout(r, 20));
+  expect(clock.pending).toBe(0);
+  await agent.stop();
 });
 
 test("**P0**：activate() 中途丢锁 → activate() 明确失败，不覆盖 lost 吸收态", async () => {

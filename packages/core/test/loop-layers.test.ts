@@ -299,6 +299,32 @@ test("要工具：第二个 turn 的 cause 是 tool_use，工具事件与 toolRe
   expect(end?.type === "reply_end" && end.turns).toBe(2);
 });
 
+test("tool_execution_update 的订阅者抛错：不成 unhandled rejection，turn 按 emit 违约关成失败、run 报 error（review 2026-09-07）", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown): void => {
+    unhandled.push(e);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const t = tool("t", async (_params, ctx) => {
+      ctx.onUpdate?.("half");
+      return toolOk("ok");
+    });
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([toolTurn("c1", "t", {}), textTurn("不该到")]), tools: [t] });
+    agent.subscribe((e) => {
+      if (e.type === "tool_execution_update") throw new Error("订阅者违约");
+    });
+    const events = collect(agent);
+    const r = await agent.prompt("go");
+    await new Promise((res) => setTimeout(res, 0));
+    expect(r.outcome.kind).toBe("error");
+    expect(validate(events)).toEqual([]); // 关门仍成对
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("transport 错误后成功：同一 turn 两个 attempt，中间恰好一个 retry_scheduled；失败 attempt 的半截正文留在 transcript、不送回模型", async () => {
   const { fn, requests } = capturing([partialThenError("半截", "rate_limit"), textTurn("ok")]);
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, retryPolicy: FAST_RETRY });

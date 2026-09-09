@@ -241,7 +241,9 @@ export class EchoSessions implements SessionFace {
       await this.markClosed(id);
       throw new Error(`新会话 ${id} 没跑起来（${e instanceof Error ? e.message : String(e)}）：已置 closed`);
     }
-    return { ...row, alive: true, phase: "idle" };
+    // runner resolve = 对方持有 lease（活着）；phase 读盘，与 list() 同一条路——它还没写 status.json 时如实是 null，
+    // 不硬编码 idle（review 2026-09-07）
+    return { ...(await this.rowOf(data.info)), alive: true };
   }
 
   /**

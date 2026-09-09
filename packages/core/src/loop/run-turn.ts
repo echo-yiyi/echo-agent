@@ -422,6 +422,10 @@ async function runOneTool(
 
   /* 执行。铁律说 execute 绝不 reject，但工具由调用方提供——仍兜一层，违约不该击穿这一轮 */
   let result: AgentToolResult;
+  // update 事件的订阅者违约不能变成 unhandled rejection（review 2026-09-07）：记下第一个，工具返回后按 emit 违约的老路补抛，
+  // 由外层 catch 把 turn 关成 failed——与 tool_execution_start 的行为对齐
+  let updateFailure: unknown = null;
+  const updates: Promise<void>[] = [];
   try {
     result = await tool.execute(params, {
       toolCallId: use.id,
@@ -430,7 +434,11 @@ async function runOneTool(
       iteration,
       signal,
       onUpdate: (partial) => {
-        void emit({ type: "tool_execution_update", toolCallId: use.id, partial });
+        updates.push(
+          emit({ type: "tool_execution_update", toolCallId: use.id, partial }).catch((e: unknown) => {
+            updateFailure ??= e;
+          }),
+        );
       },
     });
   } catch (e) {
@@ -444,6 +452,8 @@ async function runOneTool(
     });
     return toolResultMessage(use.id, use.name, message, true);
   }
+  await Promise.all(updates); // 都已挂 catch，这里只是等它们 settle、让 updateFailure 定下来（工具返回时 emit 可能还在飞）
+  if (updateFailure !== null) throw updateFailure;
 
   /* postToolUse 拦截：可改写结果，也可 block */
   const post = await hooks.intercept(

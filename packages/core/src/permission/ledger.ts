@@ -181,13 +181,8 @@ export function normalizeVerdict(v: unknown): PermissionVerdict {
       return { kind, reason };
     }
   }
-  let shown: string;
-  try {
-    shown = JSON.stringify(v) ?? String(v);
-  } catch {
-    shown = String(v);
-  }
-  return { kind: "deny", reason: `authorization 返回非法裁决（fail-closed 拦下）：${shown}` };
+  // 理由是模型可见文本：英文、不带策略返回的原值（review 2026-09-07）
+  return { kind: "deny", reason: "authorization returned an invalid verdict (denied, fail-closed)" };
 }
 
 /** 参数里出现了冻不住的值：不能原样放行，只能拒（fail-closed）。 */

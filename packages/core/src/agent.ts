@@ -1842,10 +1842,12 @@ export class Agent {
     if (this.memory !== undefined) this.autoDream = true;
     this.autoConsumeInbox = true;
     this.startInboxPoll();
-    this.publishPhase("idle"); // 起来了、还没活干：别人现在问它，它能马上答
 
     this.phase = "running";
     this.restoredReason = null;
+    // 起来了、还没活干：别人现在问它，它能马上答。**必须在 phase 变 running 之后**——
+    // publishPhase 的守卫只在 running 时写盘，此前这句排在前面等于没写（review 2026-09-07）
+    this.publishPhase("idle");
 
     // **恢复出来的那批要真的被吃掉。** 只把开关拨到 true 是不够的：它只在「下一次有事投进来」时才生效，
     // 没有后续事件的话，恢复的事实会永远躺在队列里（实测；此前的测试是手动调 `consumeInbox()` 才绿的）。
@@ -1997,6 +1999,13 @@ export class Agent {
     // 不等的话，租约已经归别人、旧 dream 还在往 memory 里写。
     // 剩下的善后**整段**排进同一次 actor work：与 stop / transition 不交错，中间也不给别的 transition 插空
     await this.runLifecycle(async () => {
+      // 自己动的东西先停：轮询与闹钟不能在失权之后继续读盘、写 schedules.json（review 2026-09-07：此前善后链没停它们；
+      // 与 dispose 的写法同形——stopSchedule 只挡后续，还要等在飞的那一拍）
+      this.stopInboxPoll();
+      if (this.schedule !== undefined) {
+        stopSchedule(this.schedule);
+        await settleTick(this.schedule);
+      }
       await this.admission.close("lease-lost");
       await this.settleDream();
       // Host 自己的 writer 也要封口（幂等，每份 Lease 至多一次）；它同样不 flush 已失权的状态根

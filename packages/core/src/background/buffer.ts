@@ -2,9 +2,10 @@
 // 别的模块一个都没用过（2026-08-05 从原 store.ts 搬出来）。
 
 /**
- * 有界输出缓冲：绝对码点游标 + 驱逐标记。
+ * 有界输出缓冲：绝对游标（UTF-16 code unit 计）+ 驱逐标记。
  * 「绝对」是关键——驱逐之后旧游标仍然可比，读的人拿到 `…[dropped N chars]…` + 真正的新内容，
- * 而不是静默少一段。
+ * 而不是静默少一段。驱逐按字符切、不按整块：**最近 `max` 个字符永远留着**（review 2026-09-07：
+ * 此前整块 shift，一个大 chunk 进来会把整段输出丢光、留 0 个字符）。
  */
 export class OutputBuffer {
   private chunks: string[] = [];
@@ -17,10 +18,19 @@ export class OutputBuffer {
   write(chunk: string): void {
     this.chunks.push(chunk);
     this.total += chunk.length;
-    while (this.total - this.dropped > this.max) {
-      const head = this.chunks.shift();
+    let excess = this.total - this.dropped - this.max;
+    while (excess > 0) {
+      const head = this.chunks[0];
       if (head === undefined) break;
-      this.dropped += head.length;
+      if (head.length <= excess) {
+        this.chunks.shift();
+        this.dropped += head.length;
+        excess -= head.length;
+      } else {
+        this.chunks[0] = head.slice(excess); // 只切队头块的前半，后半留着
+        this.dropped += excess;
+        excess = 0;
+      }
     }
   }
 

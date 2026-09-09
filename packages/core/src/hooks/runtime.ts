@@ -387,9 +387,10 @@ async function runIntercept<E extends InterceptableType>(
         failClosed,
       });
       if (failClosed) {
+        // 模型可见的理由是固定短句：entry id、脚本路径、异常原文只走上面的 onHookFailure（review 2026-09-07）
         return {
           decision: "block",
-          reason: `hook '${entry.id}' 失败（fail-closed 拦下）：${errText(e)}`,
+          reason: "Blocked: a fail-closed hook failed to run",
           event: current,
         };
       }
