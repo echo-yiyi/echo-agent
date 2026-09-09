@@ -28,15 +28,17 @@ function toolResult(agent: Agent): { content: string; isError: boolean } {
   return { content: m.content, isError: m.isError };
 }
 
-test("缺省没人答（responder none）：ask_user 当场回「没人能答」，不等人、不发 question 事件；模型接着跑", async () => {
+test("缺省没人答（responder none）：ask_user **根本不装**——模型看不见一件必然失败的工具（2026-09-09）", async () => {
   const agent = await agentWith();
   const events: LifecycleEvent["type"][] = [];
   agent.subscribeLifecycle((e) => {
     events.push(e.type);
   });
+  expect(agent.tools.has("ask_user")).toBe(false); // 池里都没有，更谈不上上菜单
   const r = await agent.prompt("go");
   expect(r.outcome.kind).toBe("completed");
-  expect(toolResult(agent)).toEqual({ isError: true, content: expect.stringContaining("Nobody can answer") });
+  // 模型仍照剧本点了它的名：拿到的是「没有这件工具」，不是一轮白等
+  expect(toolResult(agent).isError).toBe(true);
   expect(events).not.toContain("question");
   expect(agent.pendingQuestions).toEqual([]);
 });

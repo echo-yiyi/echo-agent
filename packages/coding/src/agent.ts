@@ -87,12 +87,14 @@ const ECHO_CODING_PROMPT = definePromptPack("echo:coding");
  * **这里手写的名字由 `test/identity.test.ts` 的「与真 agent 工具集完全相等」断言守着**——
  * core 增删任何一件 builtin 工具,该测试立刻红,不会静默漂移。
  */
+// **`ask_user` 不在这里**（2026-09-09）：它只在「有人能答」时才装，而 `codingPreset()` 不设 `questions`
+// ——评测就是没人能答的那一头，digest 记的正是被测的那份工具集。交互形态由 `mainFor()` 给 host，
+// 那时真 agent 会多出这一件，与本清单的差异由使用方自己知道（identity 测的是 preset 这一份）。
 const AGENT_BUILTIN_TOOLS = [
   "TaskCreate",
   "TaskGet",
   "TaskList",
   "TaskUpdate",
-  "ask_user", // 2026-09-05 提问工具，core 恒装；管道形态没人答时它如实回话
   "subagent", // 2026-09-06 委派工具，core 恒装；子 agent 的样子由模型在调用时决定
   "schedule_cancel",
   "schedule_create",

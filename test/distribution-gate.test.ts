@@ -552,7 +552,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
           "echo:memory",
           "echo:scheduler",
           "echo:tool-search",
-          "echo:ask",
+          // 没有 `echo:ask`：样例没给 `questions` 策略 = 没人能答，那件工具不装（2026-09-09）
           "echo:subagent",
           "echo:compaction",
           // 没有 `echo:sessions`：挂不挂会话面是**容器的开关**（`CreateEchoOptions.sessions`），

@@ -41,7 +41,9 @@ const FIXTURES = join(HERE, "fixtures/extensions");
 /** 生命周期 owner 里本批搬进来的四条，顺序即 `builtinEntries()` 的顺序。 */
 // `echo:sessions`（2026-09-03）**不在缺省清单里**：挂不挂它是容器的开关（`CreateEchoOptions.sessions`），
 // 不给就是今天的单会话形态。给了的话它与 `echo:inline-tools` 同代（INLINE），排在 builtin 之后。
-const BUILTIN_NAMES = ["echo:agent", "echo:tasks", "echo:skills", "echo:memory", "echo:scheduler", "echo:tool-search", "echo:ask", "echo:subagent", "echo:compaction"] as const;
+// `echo:ask` **不在缺省清单里**（2026-09-09）：没给 `questions` 就是没人能答，那件工具装了必然失败。
+// 与「能力不在就不出条目」同一口径。给了 `questions: { responder: "host" }` 才会多出它，下面单独有一条。
+const BUILTIN_NAMES = ["echo:agent", "echo:tasks", "echo:skills", "echo:memory", "echo:scheduler", "echo:tool-search", "echo:subagent", "echo:compaction"] as const;
 const SESSIONS_NAME = "echo:sessions";
 
 const temps: string[] = [];
@@ -616,7 +618,7 @@ test("能力不在就不出条目：`withoutMemory` 的 agent 清单里**没有*
   running.push(without);
   expect(without.extensions.map((e) => e.name)).not.toContain("echo:memory");
   // 别的能力照在——判据要能区分「这一条没了」和「整张表塌了」
-  expect(without.extensions.map((e) => e.name)).toEqual(["echo:agent", "echo:tasks", "echo:skills", "echo:scheduler", "echo:tool-search", "echo:ask", "echo:subagent", "echo:compaction"]);
+  expect(without.extensions.map((e) => e.name)).toEqual(["echo:agent", "echo:tasks", "echo:skills", "echo:scheduler", "echo:tool-search", "echo:subagent", "echo:compaction"]);
 });
 
 test("构造失败：**已 mount 的 builtin 那一代也要卸**（review 三轮：上一版是假判据）", async () => {

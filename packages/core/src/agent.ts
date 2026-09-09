@@ -818,6 +818,17 @@ export class Agent {
       order: PROMPT_ORDER.skills,
       render: () => (this.tools.has("skill_activate") ? renderSkillCatalog(this.skills) : ""),
     };
+    // 三项的初值在这里定形（验形与从前同一套函数），之后由 `AgentPolicies` 声明覆盖
+    const initialPolicies: AgentPolicyValues = {
+      permission: validatePermissionPolicy(opts.permission),
+      maxIterations: opts.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+      questions: validateQuestionPolicy(opts.questions),
+    };
+    this.policySlots = new AgentPolicySlots(initialPolicies, {
+      permission: (p) => validatePermissionPolicy(p),
+      questions: (q) => validateQuestionPolicy(q),
+    });
+
     this.builtinTools = {
       tasks: { tools: taskTools },
       skills: { tools: skillTools, sections: [skillsSection] },
@@ -835,8 +846,17 @@ export class Agent {
       // 渐进式披露的入口，恒装：延迟工具是标记、随时可能被 extension / MCP 注册进来；
       // 池里没有待取的延迟工具时它自己不上菜单（`visibleTools`），不多占一格
       toolSearch: { tools: [makeToolSearchTool({ tools: this.tools, loaded: this.loadedTools })] },
-      // 提问 `ask_user`（2026-09-05）：常驻；有没有人答由 `questions` 策略定，没人时工具当场如实回话
-      askUser: { tools: [makeAskUserTool({ ask: (input, signal) => this.askQuestion(input, signal) })] },
+      // 提问 `ask_user`（2026-09-05）。**没有人能答就不装**（2026-09-09 用户拍板）：
+      // 与「能力不在就不出条目」同一口径（memory / scheduler 早就这么做）。此前它无条件上菜单，
+      // 于是 Docker 里跑评测的模型看得见一件必然失败的工具，白花一轮去问一个不存在的人。
+      // 判据只看策略声明的 `responder`：装配期还没有任何 `subscribeLifecycle()` 订阅者，
+      // 「声明了 host 却没人订阅」那一档由调用时的 `askQuestion()` 兜住，如实回话。
+      // **已知边界**：extension 在 mount 期把 `questions` 声明成 host，不会把这件工具补回来——
+      // 那样的 extension 自己就是壳，自己注册一件提问工具即可。
+      askUser:
+        initialPolicies.questions.responder === "host"
+          ? { tools: [makeAskUserTool({ ask: (input, signal) => this.askQuestion(input, signal) })] }
+          : undefined,
       // 委派 `subagent`（2026-09-06）：常驻；子 agent 的 prompt / system / 工具集由模型在调用时决定，
       // 机制是 `runSubagent`（与 Dream 同一段隔离循环）
       subagent: {
@@ -862,16 +882,6 @@ export class Agent {
     this.transformContext = opts.transformContext;
     this.streamFunction = opts.streamFunction;
     this.hooks = opts.hooks ?? new HookRuntime();
-    // 三项的初值在这里定形（验形与从前同一套函数），之后由 `AgentPolicies` 声明覆盖
-    const initialPolicies: AgentPolicyValues = {
-      permission: validatePermissionPolicy(opts.permission),
-      maxIterations: opts.maxIterations ?? DEFAULT_MAX_ITERATIONS,
-      questions: validateQuestionPolicy(opts.questions),
-    };
-    this.policySlots = new AgentPolicySlots(initialPolicies, {
-      permission: (p) => validatePermissionPolicy(p),
-      questions: (q) => validateQuestionPolicy(q),
-    });
     this.getApiKey = opts.getApiKey;
     // **放在最后**：attach 可能触发 report → hookContext() → this.hooks，
     // 而 hooks 是上面几行才赋的值（实测踩到：放在前面直接 TypeError）。
