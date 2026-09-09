@@ -104,7 +104,6 @@ src/provider/openai.ts#BuiltinProviderOptions
 src/provider/openai.ts#OPENAI_COMPLETIONS_API
 src/provider/openai.ts#OpenAiDialectOptions
 src/provider/openai.ts#openAiDialect
-src/provider/types.ts#Credential
 src/provider/types.ts#Model
 src/provider/types.ts#ModelCapabilities
 src/provider/types.ts#ModelCost

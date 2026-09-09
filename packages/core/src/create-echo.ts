@@ -64,6 +64,16 @@ import type { EchoObservations, EchoRunResult } from "./observability/types.ts";
 export const EXTENSIONS_DIR = "extensions";
 /** 与 `create-agent.ts` 同一个名字：会话面判「那一段活着吗」读的就是它。 */
 const LOCK_FILE = ".lock";
+
+/** 进程还在不在：signal 0 只探不杀。ESRCH = 没了；EPERM = 在（别人的进程，杀不了但存在）；其余按在算，不误判死。 */
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as { code?: string }).code !== "ESRCH";
+  }
+}
 /** 缺省会话名的长度上限：一行标题，长了在列表里挤掉别的列。 */
 const SESSION_NAME_MAX = 60;
 
@@ -103,6 +113,9 @@ export type CreateEchoOptions = CreateAgentOptions & {
    *
    * `run` 是「容器怎么让新建的一段跑起来」。不给时 `echo.sessions.create()` 照样建（宿主自己知道
    * 怎么跑它），但模型面的 `session_create` 不挂——工具不能承诺系统不交付的事。
+   *
+   * 与 `stateDir` 同给时，`stateDir` 必须就是 `sessionsRoot/<sessionId>`（且要给 `sessionId`），否则 `createEcho()` 抛：
+   * 会话面按 `sessionsRoot` 认人，放在别处的段别人看不见。
    */
   sessions?: {
     run?: SessionRunner;
@@ -332,6 +345,18 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // `isAlive` 读错锁、`isMainSession` 读不到 meta 于是非 main 的段也拿到 `session_create`。
   // 本段的 id 在 `createAgent()` 之后才定（不给就随机），所以这里先记调用方给的，创建后再对齐。
   const selfStateDir = opts.stateDir === undefined ? undefined : expandHome(opts.stateDir);
+  // 会话面靠 `listSessions(sessionsRoot)` 认人：本段的目录不在 `sessionsRoot/<id>` 这个位置，别的段就永远看不见它、
+  // 发给它一律 not-found。开了会话面还点名 `stateDir`，只许点到那个位置（2026-09-09 拍板 fail-loud，review 2026-09-07 #89）
+  if (opts.sessions !== undefined && selfStateDir !== undefined) {
+    const expected = opts.sessionId === undefined ? undefined : resolveStateDir({ sessionsRoot, sessionId: opts.sessionId });
+    if (expected === undefined || resolve(selfStateDir) !== resolve(expected)) {
+      throw new Error(
+        `开了会话面（sessions）就不能用 stateDir 把这一段放到 sessionsRoot 之外：别的段按 sessionsRoot 认人，会看不见它。` +
+          `要么不给 stateDir（本段落在 ${sessionsRoot}/<sessionId>），要么 stateDir 指到 sessionsRoot/<sessionId> 并同时给 sessionId` +
+          `（现在 stateDir=${selfStateDir}${expected === undefined ? "，没给 sessionId" : `，应为 ${expected}`}）`,
+      );
+    }
+  }
   let selfSessionId: string | null = opts.sessionId ?? null;
   const sessionDirOf = (id: string): string =>
     selfStateDir !== undefined && id === selfSessionId ? selfStateDir : resolveStateDir({ sessionsRoot, sessionId: id });
@@ -375,7 +400,12 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   const sessions = new EchoSessions({
     root: new FileDir(sessionsRoot),
     storeFor: (id) => new FileDir(sessionDirOf(id)),
-    isAlive: async (id) => (await inspectStateLock(join(sessionDirOf(id), LOCK_FILE))).state === "valid",
+    // 「活着」= 锁合法 **且** 持有者进程还在（2026-09-09 拍板加 pid 探针，review 2026-09-07 #90）。core 不接管锁（不删、不抢），
+    // 但会话面拿这个判「直投还是叫醒」：崩溃留下的锁若算活着，发给它的消息就躺在没人读的 inbox 里，工具还回「它会读」。
+    isAlive: async (id) => {
+      const cur = await inspectStateLock(join(sessionDirOf(id), LOCK_FILE));
+      return cur.state === "valid" && processExists(cur.record.pid);
+    },
     self: () => ({
       sessionId: agent.state.sessionId,
       product: opts.product ?? "default",

@@ -52,9 +52,13 @@ export type Model = {
 
 /* ───────────────── 鉴权 ───────────────── */
 
-export type Credential =
-  | { type: "api_key"; key: string; env?: string }
-  | { type: "oauth"; access: string; refresh: string; expires: number };
+/**
+ * 凭据只有 api key 一种（2026-09-09 拍板摘掉 OAuth：此前类型里有 `oauth` 变体、盘上能存、`resolveAuth` 认，
+ * 但没有一家 provider 实现过 refresh / login，请求路径也从不用它——半接线，见
+ * `docs/decisions/implemented/2026-09-09-oauth-removed.md`）。`type` 留着做判别，将来真接第二种时不改调用方。
+ * `env` 是来源标签（从哪个环境变量解析出来的），只在进程内有意义、不落盘。
+ */
+export type Credential = { type: "api_key"; key: string; env?: string };
 
 export type ProviderAuth = {
   /**
@@ -63,10 +67,6 @@ export type ProviderAuth = {
    */
   apiKey?: {
     resolve(ctx: { credential?: Credential }): Promise<{ apiKey?: string; env?: string } | undefined>;
-    login?(interaction: unknown): Promise<Credential>;
-  };
-  oauth?: {
-    refresh(current: Credential, signal?: AbortSignal): Promise<Credential | undefined>;
     login?(interaction: unknown): Promise<Credential>;
   };
 };
@@ -82,7 +82,7 @@ export interface CredentialStore {
 
 export type StreamOptions = {
   signal?: AbortSignal;
-  /** 每轮重解析的易变物——短命 OAuth token 会在长工具阶段中途过期，所以不进装备。 */
+  /** 每轮重解析：key 由 `Models.stream()` 按「环境变量 → 凭据文件」现取，不进装备——换 key 不用重装。 */
   apiKey?: string;
   headers?: Record<string, string>;
   thinkingLevel?: ThinkingLevel;

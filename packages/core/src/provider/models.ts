@@ -202,7 +202,7 @@ export class Models {
   }
 
   /**
-   * 鉴权是否配全（不刷新 OAuth）。`undefined` = 未配置。
+   * 鉴权是否配全。`undefined` = 未配置。
    *
    * **解析顺序与 `stream()` 逐字相同**：provider 自己的 `resolve()`（内建那几家读环境变量）
    * 优先，`CredentialStore` 里的 api key 兜底。环境变量赢是有意的——CI 与临时覆盖要能
@@ -225,11 +225,10 @@ export class Models {
    * 「这家配好了没、用哪把 key」**只有这一个数法**（review 2026-09-07）：`checkAuth()` 与 `stream()` 都从这里出。
    * 此前两处各判各的：`checkAuth` 认「`resolve()` 返回了对象」，`stream` 认「拿到了 apiKey 字符串」——
    * 文档点名支持的「本地无 key 的服务」（`resolve()` 返回 `{}`）正好踩中：checkAuth 说配好了，stream 当场回 auth 错。
-   * 现在：resolve 返回了对象就是配好了，`apiKey` 可以没有（keyless 服务不发 Authorization；OAuth 走自己的头）。
+   * 现在：resolve 返回了对象就是配好了，`apiKey` 可以没有（keyless 服务不发 Authorization）。
    */
   private async resolveAuth(p: Provider): Promise<{ apiKey?: string; source: string } | undefined> {
     const credential = await this.credentials.read(p.id);
-    if (credential?.type === "oauth") return p.auth.oauth !== undefined ? { source: "OAuth" } : undefined;
     const resolved = await p.auth.apiKey?.resolve({ credential });
     if (resolved !== undefined) return { ...(resolved.apiKey === undefined ? {} : { apiKey: resolved.apiKey }), source: resolved.env ?? "apiKey" };
     const stored = credentialKey(credential);

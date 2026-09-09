@@ -233,6 +233,13 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
   // user:tool_result 块 → role:"tool" 消息(OpenAI 的格式);其余合成一条 user
   const out: Record<string, unknown>[] = [];
   const parts: Record<string, unknown>[] = [];
+  // 目录说这款不收图就本地 fail-loud，不把 image_url 发出去等服务端 400（review 2026-09-07：`vision` 此前无人读）
+  const imagePart = (img: { mimeType: string; data: string }): Record<string, unknown> => {
+    if (model.capabilities?.vision !== true) {
+      throw new Error(`Model '${model.provider}/${model.id}' does not accept image input (capabilities.vision is not true)`);
+    }
+    return { type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.data}` } };
+  };
   for (const b of m.content) {
     if (b.type === "tool_result") {
       out.push({
@@ -241,14 +248,16 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
         // 模型面全英文（review 2026-09-07：此前是中文「[工具执行失败]」，而这是唯一方言的必经之路）
         content: b.is_error ? `[tool execution failed]\n${b.content}` : b.content,
       });
+      // 工具带回的图（`ProviderToolResultBlock.images`）：OpenAI 的 role:"tool" 只收文本，图走紧随其后的那条 user 消息，
+      // 与用户贴图同一条路（vision 判定、data URL），并标一句它来自哪次调用（2026-09-09 拍板接上；此前静默丢弃）
+      if (b.images !== undefined && b.images.length > 0) {
+        parts.push({ type: "text", text: `[${b.images.length} image${b.images.length === 1 ? "" : "s"} returned by tool call ${b.tool_use_id}]` });
+        for (const img of b.images) parts.push(imagePart(img));
+      }
     } else if (b.type === "text") {
       parts.push({ type: "text", text: b.text });
     } else if (b.type === "image") {
-      // 目录说这款不收图就本地 fail-loud，不把 image_url 发出去等服务端 400（review 2026-09-07：`vision` 此前无人读）
-      if (model.capabilities?.vision !== true) {
-        throw new Error(`Model '${model.provider}/${model.id}' does not accept image input (capabilities.vision is not true)`);
-      }
-      parts.push({ type: "image_url", image_url: { url: `data:${b.mimeType};base64,${b.data}` } });
+      parts.push(imagePart(b));
     }
   }
   if (parts.length > 0) {

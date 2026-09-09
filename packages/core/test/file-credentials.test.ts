@@ -85,10 +85,13 @@ test("写→读→删 一轮；删掉的那条读回 undefined，别的条不受
   expect(await store.read("deepseek")).toEqual({ type: "api_key", key: "sk-b" });
 });
 
-test("oauth 凭据也能一轮回来（值是对象这件事在这里才有回报）", async () => {
-  const store = new FileCredentialStore(join(home, CREDENTIALS_FILE));
-  await store.write("x", { type: "oauth", access: "a", refresh: "r", expires: 123 });
-  expect(await store.read("x")).toEqual({ type: "oauth", access: "a", refresh: "r", expires: 123 });
+test("老文件里的 oauth 那种记录（access / refresh / expires）认不出：判红，不静默当成没配（2026-09-09 摘掉 OAuth 半接线）", async () => {
+  const file = join(home, CREDENTIALS_FILE);
+  writeFileSync(file, JSON.stringify({ x: { access: "a", refresh: "r", expires: 123 }, kimi: { apiKey: "sk-a" } }), "utf8");
+  const store = new FileCredentialStore(file);
+  await expect(store.read("x")).rejects.toThrow("认不出来");
+  await expect(store.read("x")).rejects.not.toThrow("refresh"); // 报错里不出现记录内容
+  expect(await store.read("kimi")).toEqual({ type: "api_key", key: "sk-a" }); // 别的条不受影响
 });
 
 test("api_key 的 `env` 是来源标签，**不落盘**——落了下次读回来就是假的", async () => {

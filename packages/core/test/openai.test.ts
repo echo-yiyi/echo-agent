@@ -181,6 +181,30 @@ test("tool_result 的失败前缀全英文；目录没标 vision 的模型带图
   expect(sent.messages[0]!.content[0]!.type).toBe("image_url");
 });
 
+test("工具带回的图：role:tool 后面跟一条 user 消息发 image_url，并标明来自哪次调用；目录没标 vision 一样本地抛（2026-09-09 拍板接上，此前静默丢）", async () => {
+  const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
+  const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
+  const ctx: Context = {
+    systemPrompt: null,
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "shot", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "captured", is_error: false, images: [{ type: "image", mimeType: "image/png", data: "AAAA" }] }] },
+    ],
+    tools: [],
+  };
+  const refused = await collect(d.request(MODEL, ctx, { apiKey: "k" }));
+  expect(JSON.stringify(refused)).toContain("does not accept image input");
+  expect(calls.length).toBe(0);
+  await collect(d.request({ ...MODEL, capabilities: { vision: true } }, ctx, { apiKey: "k" }));
+  const body = calls[0]!.body as { messages: { role: string; tool_call_id?: string; content: unknown }[] };
+  expect(body.messages.map((m) => m.role)).toEqual(["assistant", "tool", "user"]);
+  expect(body.messages[1]).toEqual({ role: "tool", tool_call_id: "c1", content: "captured" });
+  expect(body.messages[2]!.content).toEqual([
+    { type: "text", text: "[1 image returned by tool call c1]" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+  ]);
+});
+
 test("thinkingLevel → 请求体参数：按目录里的 thinkingLevelMap 合并；没映射的档、没映射表的模型一个字节都不发；params 赢过档位（review 2026-09-07；2026-09-08 值改成参数对象）", async () => {
   // 此前 `StreamOptions.thinkingLevel` 一路传到方言就断了：Shift+Tab / setThinkingLevel / 压缩要的 off，请求体纹丝不动
   const reply = (): Response => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]));

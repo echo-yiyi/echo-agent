@@ -512,6 +512,36 @@ test("失败的 mount 不污染 ServiceKey 表：v1 candidate 失败后，同 id
   await expect(host.mount("g3", [entry("c1", c1)])).rejects.toThrow("声明冲突");
 });
 
+test("ACTIVE 之后登记的 Effect start 失败：只有 await 它的人看得见；Fiber 仍 ACTIVE、unmount 照常、不成 unhandled rejection（2026-09-09 登记为契约）", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown): void => {
+    unhandled.push(e);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    let ctxRef!: ExtensionContext;
+    const ext = defineExtension({
+      name: "later",
+      hostAbiVersion: 1,
+      apply(ctx) {
+        ctxRef = ctx;
+      },
+    });
+    const host = new ExtensionHost();
+    await host.mount("g", [entry("later", ext)]);
+    // await 的那条：调用方看到 reject
+    await expect(ctxRef.effect({ start: async () => { throw new Error("late boom"); } })).rejects.toThrow("late boom");
+    // void 掉的那条：没人看到，Fiber 也不因此变化
+    void ctxRef.effect({ start: async () => { throw new Error("silent boom"); } });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(host.inspect().map((f) => f.status)).toEqual(["active"]);
+    await host.unmount("g"); // 不抛
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("未 await 的 Effect start 在 apply 返回后才 reject：Fiber 不得标 ACTIVE——按 mount failure 回滚，且不成 unhandled rejection", async () => {
   const unhandled: unknown[] = [];
   const onUnhandled = (e: unknown): void => {
