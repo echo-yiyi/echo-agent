@@ -832,7 +832,8 @@ export class Agent {
       subagent: {
         tools: [
           makeSubagentTool({
-            availableTools: () => [...this.tools.keys()].filter((n) => n !== SUBAGENT_NAME),
+            // 可委派的 = 父此刻的工作集：没被禁用、且过了角色收紧（review 2026-09-07：此前是整个池，被禁的也能派）
+            availableTools: () => activeTools(this.tools, this.restriction()).map((t) => t.name).filter((n) => n !== SUBAGENT_NAME),
             runForeground: (spec, ctx) => this.spawnSubagentForeground(spec, ctx),
             runBackground: (spec, label) => this.spawnSubagentBackground(spec, label),
           }),
@@ -2773,9 +2774,11 @@ export class Agent {
     const out: AgentTool[] = [];
     const missing: string[] = [];
     for (const n of names) {
-      const tool = n === SUBAGENT_NAME ? undefined : this.tools.get(n);
-      if (tool === undefined) missing.push(n);
-      else out.push(tool);
+      // 与父自己执行时同一份判据（禁用、角色收紧）；延迟工具**不查** `loadedTools`——父没 tool_search 过的延迟工具
+      // 能不能委派是另一件事，review 2026-09-07 登记、未拍
+      const r = n === SUBAGENT_NAME ? undefined : resolveTool(this.tools, n, undefined, this.restriction());
+      if (r === undefined || !r.ok) missing.push(r !== undefined && !r.ok && r.reason === "disabled" ? `${n} (${r.message})` : n);
+      else out.push(r.tool);
     }
     return missing.length > 0 ? `Unknown tools: ${missing.join(", ")}` : out;
   }

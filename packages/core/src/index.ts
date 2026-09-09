@@ -16,7 +16,8 @@
 // 现在真的存在的是：`./tools` · `./task` · `./task/fs` · `./background` · `./extension` · `./mcp`
 // （以 `package.json#exports` 为准，那才是外部开发者能 import 的东西）。
 // `memory` / `schedule` / `storage` / `session` / `inbox` 五类**目前不在公共面**——
-// 子路径建了又撤，因为「exports 表无死条目」判红：它们眼下没有任何消费者。
+// 子路径建了又撤：「exports 表不留没有消费者的死条目」是**纪律**（没有门守它；api 快照只锁已导出的），
+// 它们眼下没有任何消费者。
 // 别在这里写成「已经下沉」——那是**承诺一个不存在的扩展面**，外部开发者照着文档 import
 // 会直接失败（2026-08-24 review 点出）。
 //

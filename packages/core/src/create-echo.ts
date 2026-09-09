@@ -171,7 +171,7 @@ async function sessionToolsEntry(
   return [
     {
       entryId: "echo:sessions",
-      definition: defineToolPack("echo:sessions") as never,
+      definition: defineToolPack("echo:sessions"),
       config: { tools: makeSessionTools(sessions, toolOpts), sections: [sessionToolsSection(toolOpts)] },
     },
   ];
@@ -473,7 +473,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     const inline: ExtensionEntry[] = [
       ...(inlineTools.length === 0
         ? []
-        : [{ entryId: "echo:inline-tools", definition: defineToolPack("echo:inline-tools") as never, config: { tools: inlineTools } }]),
+        : [{ entryId: "echo:inline-tools", definition: defineToolPack("echo:inline-tools"), config: { tools: inlineTools } }]),
       // ── `echo:inline-agent`：这一段挂的角色（2026-09-07）──────────────────────────────
       //
       // **排在 inline-tools 之后、盘上发现的之前**：identity 要替的那一段、tools 要收紧的那个池，
@@ -481,7 +481,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       // 更早的地方接（见上面 `createAgent` 那里）。空定义不挂：挂它等于不挂。
       ...(isEmptyDefinition(agentRef.definition)
         ? []
-        : [{ entryId: INLINE_AGENT_ENTRY, definition: inlineAgentExtension() as never, config: agentRef.definition }]),
+        : [{ entryId: INLINE_AGENT_ENTRY, definition: inlineAgentExtension(), config: agentRef.definition }]),
       // ── `echo:sessions`：会话面的模型可见工具（2026-09-03，sessions.md §7）──────────────
       //
       // **不在 builtin 表里**，因为它要的东西 `Agent` 没有：会话面是**容器**级的

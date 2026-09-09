@@ -73,6 +73,14 @@ describe("cron 子集", () => {
     expect(cronMatches("0 9 1 * 3", at("2026-08-01T09:00:00"))).toBe(true);
     expect(cronMatches("0 9 1 * 3", at("2026-08-05T09:00:00"))).toBe(true); // 周三(5 号)也触发
     expect(cronMatches("0 9 1 * 3", at("2026-08-04T09:00:00"))).toBe(false); // 4 号周二,都不占
+    // `*/N` 的起点是字段下界(标准 cron):日、月从 1 起,不是 0(review 2026-09-07)
+    expect(cronMatches("0 0 */2 * *", at("2026-08-01T00:00:00"))).toBe(true);
+    expect(cronMatches("0 0 */2 * *", at("2026-08-02T00:00:00"))).toBe(false);
+    expect(cronMatches("0 0 */2 * *", at("2026-08-03T00:00:00"))).toBe(true);
+    expect(cronMatches("0 0 1 */3 *", at("2026-01-01T00:00:00"))).toBe(true);
+    expect(cronMatches("0 0 1 */3 *", at("2026-03-01T00:00:00"))).toBe(false);
+    expect(cronMatches("0 0 1 */3 *", at("2026-04-01T00:00:00"))).toBe(true);
+    expect(cronMatches("0 0 1/2 * *", at("2026-08-31T00:00:00"))).toBe(true); // 裸 N/S 的上界是字段上界
   });
 
   test("校验:坏表达式给人话拒因", () => {
@@ -224,6 +232,25 @@ describe("重启接续(同一 dir 建新 harness)", () => {
     await startSchedule(b.h, Date.parse("2026-08-05T10:20:00"));
     stopSchedule(b.h);
     expect(b.delivered.length).toBe(1);
+  });
+
+  test("cron 补跑看 createdAt:刚建的 cron 不补投它诞生之前的那一次(review 2026-09-07)", async () => {
+    // 09:30 建的「每天 09:00」,09:40 重启:诞生前的 09:00 不是欠账
+    const dir = new InMemoryDir();
+    const a = harness(dir);
+    await addSchedule(a.h, sched({ kind: "cron", cron: "0 9 * * *", createdAt: Date.parse("2026-08-05T09:30:00") } as never, "daily"));
+    const b = harness(dir);
+    await startSchedule(b.h, Date.parse("2026-08-05T09:40:00"));
+    stopSchedule(b.h);
+    expect(b.delivered.length).toBe(0);
+    // 对照:08:30 建的就欠 09:00 那一次
+    const dir2 = new InMemoryDir();
+    const c = harness(dir2);
+    await addSchedule(c.h, sched({ kind: "cron", cron: "0 9 * * *", createdAt: Date.parse("2026-08-05T08:30:00") } as never, "daily"));
+    const d = harness(dir2);
+    await startSchedule(d.h, Date.parse("2026-08-05T09:40:00"));
+    stopSchedule(d.h);
+    expect(d.delivered.length).toBe(1);
   });
 
   test("坏档逐条丢弃,不拖垮启动", async () => {

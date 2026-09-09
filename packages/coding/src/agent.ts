@@ -158,21 +158,21 @@ export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
     },
     extensions: [
       // 产品的身份与编码纪律
-      { entryId: "echo:coding", definition: ECHO_CODING_PROMPT as never, config: { sections: [codingIdentitySection(), codingConductSection()] } },
+      { entryId: "echo:coding", definition: ECHO_CODING_PROMPT, config: { sections: [codingIdentitySection(), codingConductSection()] } },
       // fs / search 的工具是纯函数造出来的，可以在装配前就备好 → 走 `defineToolPack` 的 config；
       // 它们的跨调用习惯段跟工具同一个 config 进来：工具卸了段也走
       {
         entryId: "echo:workspace",
-        definition: ECHO_WORKSPACE as never,
+        definition: ECHO_WORKSPACE,
         config: { tools: [...makeFsTools(), ...makeSearchTools()], sections: [workspaceToolsSection()] },
       },
       // bash 不行：它要 `agent.background`。所以 `echo:shell` 自己 inject 那条能力端口并在 apply 里
       // 注册工具与段，这里只列 definition、不给 config（见 `extensions.ts` 的注释）。
-      { entryId: "echo:shell", definition: ECHO_SHELL as never },
+      { entryId: "echo:shell", definition: ECHO_SHELL },
       // worktree 隔离要 `AgentRuntime.setWorkspace`，同 shell 一样自己 inject（2026-09-03）
-      { entryId: "echo:worktree", definition: ECHO_WORKTREE as never },
+      { entryId: "echo:worktree", definition: ECHO_WORKTREE },
       // 取网页 / 搜索：纯函数工具，config 进来；延迟工具，经 tool_search 取过才上菜单
-      { entryId: "echo:web", definition: ECHO_WEB as never, config: { tools: makeWebTools({ credentials: opts.credentials }) } },
+      { entryId: "echo:web", definition: ECHO_WEB, config: { tools: makeWebTools({ credentials: opts.credentials }) } },
     ],
   };
 }

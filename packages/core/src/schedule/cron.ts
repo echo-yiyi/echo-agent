@@ -30,14 +30,14 @@ export function cronMatches(expr: string, d: Date): boolean {
   if (fields.length !== 5) return false;
   const [minute, hour, dom, month, dow] = fields as [string, string, string, string, string];
 
-  const m = fieldMatches(minute, d.getMinutes());
-  const h = fieldMatches(hour, d.getHours());
-  const monthOk = fieldMatches(month, d.getMonth() + 1);
+  const m = fieldMatches(minute, d.getMinutes(), 0);
+  const h = fieldMatches(hour, d.getHours(), 1);
+  const monthOk = fieldMatches(month, d.getMonth() + 1, 3);
   if (!(m && h && monthOk)) return false;
 
-  const domOk = fieldMatches(dom, d.getDate());
+  const domOk = fieldMatches(dom, d.getDate(), 2);
   const dowVal = d.getDay(); // 0 = 周日
-  const dowOk = fieldMatches(dow, dowVal) || (dowVal === 0 && fieldMatches(dow, 7));
+  const dowOk = fieldMatches(dow, dowVal, 4) || (dowVal === 0 && fieldMatches(dow, 7, 4));
 
   // 日与星期:都不约束 → 过;只约束一边 → 看那边;都约束 → OR(标准语义,两家一致)
   if (dom === "*" && dow === "*") return true;
@@ -58,11 +58,13 @@ export function latestMatchBefore(expr: string, now: number, scanMinutes = 120):
 
 /* ───────────── 单字段 ───────────── */
 
-function fieldMatches(field: string, value: number): boolean {
-  return field.split(",").some((part) => partMatches(part, value));
+/** `index` 是 FIELD_RANGES 的下标:`*` 与裸 `N/S` 的边界取自字段自己的范围(标准 cron:`*\/N` ≡ `<min>-<max>/N`)。 */
+function fieldMatches(field: string, value: number, index: number): boolean {
+  const [fieldLo, fieldHi] = FIELD_RANGES[index]!;
+  return field.split(",").some((part) => partMatches(part, value, fieldLo, fieldHi));
 }
 
-function partMatches(part: string, value: number): boolean {
+function partMatches(part: string, value: number, fieldLo: number, fieldHi: number): boolean {
   let range = part;
   let step = 1;
   const slash = part.indexOf("/");
@@ -73,8 +75,9 @@ function partMatches(part: string, value: number): boolean {
   let lo: number;
   let hi: number;
   if (range === "*") {
-    lo = 0;
-    hi = 59; // * 的边界不重要:value 本身必在字段范围内
+    // 起点是字段下界:日、月从 1 起——写成 0 时 `*/2` 在日段会命中 2、4、6…而不是标准的 1、3、5…(review 2026-09-07)
+    lo = fieldLo;
+    hi = fieldHi;
   } else if (range.includes("-")) {
     const [a, b] = range.split("-");
     lo = Number(a);
@@ -82,7 +85,7 @@ function partMatches(part: string, value: number): boolean {
   } else {
     if (slash === -1) return Number(range) === value;
     lo = Number(range);
-    hi = 59;
+    hi = fieldHi;
   }
   return value >= lo && value <= hi && (value - lo) % step === 0;
 }

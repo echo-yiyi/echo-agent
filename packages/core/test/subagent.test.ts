@@ -8,6 +8,7 @@ import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import { listBackground } from "../src/background/harness.ts";
 import { scriptedStreamFn, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
+import { disableTools, restrictTools } from "../src/tools/harness.ts";
 import type { StreamFn } from "../src/provider/types.ts";
 
 const ping: ModelTool = {
@@ -99,6 +100,28 @@ test("验形：不认识的工具整组判红并列出可用的；子 agent 拿�
   expect(rs[1]!.content).toContain("cannot spawn subagents");
   expect(rs[2]!.content).toContain("prompt");
   expect(childSeen).toEqual([]);
+});
+
+test("委派不绕过工具面：被禁用的、被角色收紧挡在外面的工具，子 agent 一样拿不到（review 2026-09-07）", async () => {
+  const dead: ModelTool = { ...ping, name: "dead", label: "dead" };
+  const other: ModelTool = { ...ping, name: "other", label: "other" };
+  const { fn, childSeen } = routed(
+    [toolTurn("c1", "subagent", { prompt: "x", tools: ["dead"] }), toolTurn("c2", "subagent", { prompt: "x", tools: ["other"] }), textTurn("done")],
+    [],
+    "never",
+  );
+  const agent = new Agent({ model: { provider: "t", id: "only", api: "scripted" }, streamFunction: fn, tools: [ping, dead, other] });
+  await mountBuiltinTools(agent);
+  await agent.start();
+  disableTools(agent.tools, ["dead"], "MCP server 's' disconnected");
+  restrictTools(agent.toolRestrictions, new Set(["ping", "dead", "subagent"])); // other 被角色收紧挡在工作集外
+  await agent.prompt("go");
+  const rs = toolResults(agent);
+  expect(rs.map((r) => r.isError)).toEqual([true, true]);
+  expect(rs[0]!.content).toContain("dead"); // 禁用的：不在可委派清单里
+  expect(rs[1]!.content).toContain("Unknown tools: other"); // 收紧掉的：对这一段来说就是不存在
+  expect(childSeen).toEqual([]); // 两次都没起子循环
+  await agent.dispose();
 });
 
 test("后台委派：kind subagent 的后台任务，子的文字进缓冲；结束时回复投 inbox，父下一轮就看到", async () => {

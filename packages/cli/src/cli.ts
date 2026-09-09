@@ -615,7 +615,7 @@ async function runInteractive(
       ...base,
       // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的
       // `AgentRuntime` 由 builtin 那一代提供（`create-echo.ts`），与同代里谁先谁后无关。
-      extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: shell.definition as never }],
+      extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: shell.definition }],
     });
     // 启动口信与装配诊断（D6）进界面：壳 mount 在先、这里在后，notify 直通或先攒着
     for (const n of pending) shell.notify(n);

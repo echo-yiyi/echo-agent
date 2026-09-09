@@ -51,15 +51,15 @@ const ECHO_PIPE = definePromptPack("echo:pipe");
 
 /** `echo-agent` 产品的身份段——挂在 `ECHO_AGENT.preset` 里，echo-coding 不用它。 */
 export function identityEntry(): ExtensionEntry {
-  return { entryId: "echo:identity", definition: ECHO_IDENTITY as never, config: { sections: [identitySection()] } };
+  return { entryId: "echo:identity", definition: ECHO_IDENTITY, config: { sections: [identitySection()] } };
 }
 
 /** 两个产品共用的纪律段——`mainFor()` 恒挂。 */
 export function conductEntry(): ExtensionEntry {
-  return { entryId: "echo:conduct", definition: ECHO_CONDUCT as never, config: { sections: [conductSection()] } };
+  return { entryId: "echo:conduct", definition: ECHO_CONDUCT, config: { sections: [conductSection()] } };
 }
 
 /** 管道形态的交互面——`runPiped()` 挂；交互形态由 `echo:tui` 自己注册同名段。 */
 export function pipeSurfaceEntry(): ExtensionEntry {
-  return { entryId: "echo:pipe", definition: ECHO_PIPE as never, config: { sections: [surfaceSection("pipe")] } };
+  return { entryId: "echo:pipe", definition: ECHO_PIPE, config: { sections: [surfaceSection("pipe")] } };
 }

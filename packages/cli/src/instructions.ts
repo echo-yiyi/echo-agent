@@ -71,5 +71,5 @@ export function instructionsSection(): PromptSection {
 const ECHO_INSTRUCTIONS = definePromptPack("echo:instructions");
 
 export function instructionsEntry(): ExtensionEntry {
-  return { entryId: "echo:instructions", definition: ECHO_INSTRUCTIONS as never, config: { sections: [instructionsSection()] } };
+  return { entryId: "echo:instructions", definition: ECHO_INSTRUCTIONS, config: { sections: [instructionsSection()] } };
 }

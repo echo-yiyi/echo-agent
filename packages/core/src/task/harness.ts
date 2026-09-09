@@ -91,6 +91,17 @@ function nextId(tasks: TaskMap): number {
 }
 
 /** **批量原子**：同批内可用 `ref` 互相引用；任一条成环 → 整批不落地。 */
+/**
+ * 约束②的判据，建与改共用：in_progress 而前置未完 → 报错点名是谁卡着（模型据此能立刻做对的事，
+ * 「非法状态」它只能瞎试）；否则 null。
+ */
+function blockedByUnfinished(draft: ReadonlyMap<string, TaskItem>, id: string): string | null {
+  const blockers = derive(draft).get(id)?.blockedBy ?? [];
+  if (blockers.length === 0) return null;
+  const named = blockers.map((b) => `#${b}「${draft.get(b)?.title ?? "?"}」`).join("、");
+  return `Task #${id} is blocked by unfinished prerequisites: ${named}`;
+}
+
 export function createTasks(tasks: TaskMap, specs: readonly TaskSpec[]): TaskCreateResult {
   if (specs.length === 0) return { ok: true, tasks: [] };
 
@@ -143,6 +154,12 @@ export function createTasks(tasks: TaskMap, specs: readonly TaskSpec[]): TaskCre
 
   const cycle = findCycle(draft);
   if (cycle !== undefined) return { ok: false, error: `this would create a cycle: ${cycle.join(" → ")}` };
+  // 约束②在建的时候也执行：同批就 in_progress 而前置未完 → 整批拒（review 2026-09-07：此前只在 updateTask 里查）
+  for (const c of created) {
+    if (c.status !== "in_progress") continue;
+    const blocked = blockedByUnfinished(draft, c.id);
+    if (blocked !== null) return { ok: false, error: blocked };
+  }
 
   commit(tasks, draft, { operation: "create", ids: created.map((c) => c.id) });
   return { ok: true, tasks: created.map((c) => draft.get(c.id) as TaskItem) };
@@ -182,14 +199,11 @@ export function updateTask(tasks: TaskMap, id: string, patch: TaskPatch): TaskWr
   const cycle = findCycle(draft);
   if (cycle !== undefined) return { ok: false, error: `this would create a cycle: ${cycle.join(" → ")}` };
 
-  // 拓扑约束**在这里真被执行**：前置没完，就不许开工。
-  // 报错点名是谁卡着——模型据此能立刻做对的事，「非法状态」它只能瞎试。
-  if (patch.status === "in_progress") {
-    const blockers = derive(draft).get(id)?.blockedBy ?? [];
-    if (blockers.length > 0) {
-      const named = blockers.map((b) => `#${b}「${draft.get(b)?.title ?? "?"}」`).join("、");
-      return { ok: false, error: `Task #${id} is blocked by unfinished prerequisites: ${named}` };
-    }
+  // 拓扑约束**在这里真被执行**：前置没完，就不许开工——看的是改完之后的状态，
+  // 所以「已经在做的任务加上一条未完的前置」同样拒（不然绕一下就能带着未完前置开工）。
+  if (next.status === "in_progress") {
+    const blocked = blockedByUnfinished(draft, id);
+    if (blocked !== null) return { ok: false, error: blocked };
   }
 
   commit(tasks, draft, { operation: "update", ids: [id], before: (tasks.get(id) as TaskItem).status, after: next.status });

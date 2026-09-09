@@ -272,7 +272,8 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
       }
       // cron:往回找最近匹配分钟;错过且在 2h 扫描窗内 → 补一次
       const missed = latestMatchBefore(s.cron, now);
-      if (missed !== null && (entry.lastFiredAt === null || entry.lastFiredAt < missed) && now - missed >= 60_000) {
+      // 从没触发过的看 createdAt：诞生之前的那一次不是欠账（review 2026-09-07：此前 09:30 建的「每天 09:00」重启就补投一次）
+      if (missed !== null && (entry.lastFiredAt ?? s.createdAt) < missed && now - missed >= 60_000) {
         // 补跑同样：接受成功才记 fired，否则下次启动还会补
         await ctx.deliver?.(environmentMessage(renderFire(s), SCHEDULE_KIND, s.id));
         observe(ctx, { kind: "delivered", id: s.id, scheduleKind: s.kind, via: "catch-up" }, now);

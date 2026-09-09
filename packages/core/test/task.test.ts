@@ -103,6 +103,31 @@ test("前置没完就开工 → 拒，且**点名是谁卡着**", () => {
   expect(getTask(h, t!.id)?.derived.ready).toBe(false); // 在做的不算「可做」
 });
 
+test("同批建就 in_progress 而前置未完 → 整批拒（建与改同一份判据，review 2026-09-07）", () => {
+  const h = harness();
+  const r = createTasks(h, [
+    { ref: "a", title: "前置活" },
+    { title: "后置活", blockedBy: ["a"], status: "in_progress" },
+  ]);
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.error).toContain("前置活");
+  expect(h.size).toBe(0); // 整批不落地
+});
+
+test("已在做的任务加上未完的前置 → 拒（不许绕过前置约束）", () => {
+  const h = harness();
+  const r = createTasks(h, [
+    { ref: "a", title: "前置活" },
+    { title: "在做的活", status: "in_progress" },
+  ]);
+  if (!r.ok) throw new Error("建失败");
+  const [a, b] = r.tasks;
+  const bad = updateTask(h, b!.id, { addBlockedBy: [a!.id] });
+  expect(bad.ok).toBe(false);
+  if (!bad.ok) expect(bad.error).toContain("前置活");
+  expect(getTask(h, b!.id)?.derived.blockedBy ?? []).toEqual([]); // 没落地
+});
+
 test("前置取消：不级联改状态，只标 unreachable，且不挡开工", () => {
   const h = harness();
   const r = createTasks(h, [
