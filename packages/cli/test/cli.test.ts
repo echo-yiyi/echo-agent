@@ -864,15 +864,14 @@ test("/resume：那一段正被别的写者占着——如实说切不过去，�
   }
 }, 20_000);
 
-test("叫醒会话的 argv 带 --provider / --model：宿主与父进程同一家同一模型（review 2026-09-07；--observe 不继承，未拍）", () => {
+test("叫醒会话的 argv 带 --provider / --model / --observe：宿主与父进程同一家、同一模型、同一观测档（review 2026-09-07；--observe 2026-09-09 拍板继承）", () => {
   const args = wakeArgs(
     "/bin/echo-agent.ts",
     { withoutMemory: true, extensionDirs: ["/ext"], continueLast: false, serve: false, model: "kimi-k2.6", stateDir: "/s", observe: "content" },
     "kimi",
     "abc",
   );
-  expect(args).toEqual(["/bin/echo-agent.ts", "--serve", "--resume", "abc", "--provider", "kimi", "--model", "kimi-k2.6", "--state-dir", "/s", "--no-memory", "--extensions", "/ext"]);
-  expect(args).not.toContain("--observe");
+  expect(args).toEqual(["/bin/echo-agent.ts", "--serve", "--resume", "abc", "--provider", "kimi", "--model", "kimi-k2.6", "--state-dir", "/s", "--observe", "content", "--no-memory", "--extensions", "/ext"]);
   // 没选出家（choices 为空）就不传，副本按自己的设置走
   expect(wakeArgs("/bin/x", { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, undefined, "id")).toEqual(["/bin/x", "--serve", "--resume", "id"]);
 });

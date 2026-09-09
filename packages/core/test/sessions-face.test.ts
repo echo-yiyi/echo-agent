@@ -402,6 +402,25 @@ test("send：runner 抛错也算够不着，同样不留消息", async () => {
   expect((await new InboxStore(scoped(h.root, "s-away/")).restore()).length).toBe(0);
 });
 
+test("send：对方活着、地址也对，但 inbox 落盘失败 → store-error，不冒充 invalid（review 2026-09-07 #44，2026-09-09 拍板）", async () => {
+  const root = new InMemoryDir();
+  let broken = false;
+  const sessions = new EchoSessions({
+    root,
+    storeFor: (id) => {
+      if (broken && id === "s-full") throw new Error("ENOSPC: no space left on device");
+      return scoped(root, `${id}/`);
+    },
+    isAlive: async () => true,
+    self: () => ({ sessionId: "s-self", product: "echo-agent", workspace: "/repo", tools: [] }),
+  });
+  await seed(root, "s-full");
+  broken = true;
+  const out = await sessions.send("s-full", "在吗");
+  expect(out).toMatchObject({ kind: "rejected", reason: "store-error" });
+  expect(String((out as { detail: string }).detail)).toContain("ENOSPC");
+});
+
 test("canWake：容器给没给 runner，会话面如实说", () => {
   expect(harness().sessions.canWake).toBe(false);
   expect(harness({ run: async () => {} }).sessions.canWake).toBe(true);

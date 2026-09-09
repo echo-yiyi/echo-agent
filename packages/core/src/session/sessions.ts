@@ -73,8 +73,11 @@ export type SendResult =
   | { readonly kind: "accepted"; readonly alive: true; readonly recordId: string }
   | {
       readonly kind: "rejected";
-      /** `unreachable` = 它没在跑，而这个容器叫不起来它（没给 `run`，或 runner 失败）。 */
-      readonly reason: "not-found" | "closed" | "invalid" | "unreachable";
+      /**
+       * `unreachable` = 它没在跑，而这个容器叫不起来它（没给 `run`，或 runner 失败）。
+       * `store-error` = 对方活着、地址也对，但往它的 inbox 落盘失败（磁盘 / 权限 / 损坏）——不是发送方的错，重试可能成功。
+       */
+      readonly reason: "not-found" | "closed" | "invalid" | "unreachable" | "store-error";
       readonly detail: string;
     };
 
@@ -323,7 +326,7 @@ export class EchoSessions implements SessionFace {
     try {
       recordId = await this.deliver(this.deps.storeFor(to), to, this.envelope(self.sessionId, message, ref), `${SESSION_SOURCE}:${ref}`);
     } catch (e) {
-      return { kind: "rejected", reason: "invalid", detail: `写不进对方的 inbox：${e instanceof Error ? e.message : String(e)}` };
+      return { kind: "rejected", reason: "store-error", detail: `写不进对方的 inbox：${e instanceof Error ? e.message : String(e)}` };
     }
     return { kind: "accepted", alive: true, recordId };
   }

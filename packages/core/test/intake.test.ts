@@ -301,7 +301,7 @@ test("退出路径 shouldStopAfterTurn（loop 级决策点，Agent 不暴露）�
     knownToolNames: () => [],
     resolveTool: () => ({ ok: false, reason: "not_found" }),
     hooks: new HookRuntime(),
-    hookContext: { origin: "model", depth: 0, hookId: "test" },
+    hookContext: { origin: "model", hookId: "test" },
     permission: {
       authorize: () => ({ kind: "allow" }),
       ask: () => {

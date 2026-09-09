@@ -124,6 +124,35 @@ test("委派不绕过工具面：被禁用的、被角色收紧挡在外面的�
   await agent.dispose();
 });
 
+test("委派也不绕过渐进披露：父没 tool_search 过的延迟工具不在可委派清单里；取过 schema 之后才能给子 agent（2026-09-09 拍板）", async () => {
+  const lazy: ModelTool = { ...ping, name: "lazy", label: "lazy", deferred: true };
+  const { fn, childSeen } = routed(
+    [
+      toolTurn("c1", "subagent", { prompt: "x", tools: ["lazy"] }), // 没取过：拒，清单里也没有它
+      toolTurn("c2", "tool_search", { names: ["lazy"] }), // 父自己取 schema
+      toolTurn("c3", "subagent", { prompt: "use lazy", system: "You are lazy.", tools: ["lazy"] }), // 取过：能委派
+      textTurn("done"),
+    ],
+    [textTurn("child ok")],
+    "You are lazy.",
+  );
+  const agent = new Agent({ model: { provider: "t", id: "only", api: "scripted" }, streamFunction: fn, tools: [ping, lazy] });
+  await mountBuiltinTools(agent);
+  await agent.start();
+  await agent.prompt("go");
+  const rs = toolResults(agent);
+  expect(rs.map((r) => [r.name, r.isError])).toEqual([
+    ["subagent", true],
+    ["tool_search", false],
+    ["subagent", false],
+  ]);
+  expect(rs[0]!.content).toContain("Unknown tools: lazy");
+  expect(rs[0]!.content).toContain("tool_search"); // 清单上有取 schema 的入口，没有还没取的 lazy
+  expect(rs[0]!.content).not.toMatch(/Available:.*\blazy\b/);
+  expect(childSeen.map((s) => s.tools)).toEqual([["lazy"]]);
+  await agent.dispose();
+});
+
 test("后台委派：kind subagent 的后台任务，子的文字进缓冲；结束时回复投 inbox，父下一轮就看到", async () => {
   const { fn, parentSeen } = routed(
     [

@@ -34,6 +34,7 @@ README 说「两个使用高度」:高 = `createEcho()`,低 = `new Agent()`。�
 2. **评测与 core 自己的测试走 `createEcho()`**,不走 `new Agent()`。它要的零盘路径**已经有了**:给了自定义 `store` 又没点名 `stateDir` 时观测库开 `:memory:`(71150f0),配上 `InMemoryDir` 与 `InMemoryStateLock` 就是一次不碰盘的完整装配。想换掉观测 store 本身是另一件事,见 [观测的公开线](2026-09-07-observation-public-face.md)。
 3. **四条 2026-09-01 记录移入 `rejected/`**,状态行指向本条。它们讲的公共契约不存在了;剩下两个内部实现项(`dispose()` 不还锁、fenced 是隐藏 latch)随内部化一起修,不再是决策。
 4. **`Echo.start()` 先开出来**(2026-09-08 用户拍板,review 批 5 发现):内部化之前第三方就得有一条不经 `agent` 的启动入口,否则 README 的 quickstart 只能教 `echo.agent.start()`。`Echo` 加 `start()`,就是 `agent.start()` 的转发;README / examples / cli 改走它,`echo.agent` 字段随内部化退场。
+5. **`RuntimeSource` 随内部化改名**(2026-09-09 用户拍板,review 批 6 #113 登记):它是 `agentRuntimeOf()` 收的那份 `Pick<AgentRuntime, …>`——「做 runtime 用的源材料」,不是「runtime 的来源」,名字会被读成后者。它现在是公共符号(`extension/public.ts` 导出),单独改名要重录 API 快照一次;`Agent` 内部化落地时这条边界本来就要重画(收进来的就是它),届时一起改、只重录一次。
 
 ## 验收
 

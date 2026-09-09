@@ -37,10 +37,11 @@ export type PermissionPolicy = {
 
 /**
  * 缺省策略：读随便；**bash / write_file / edit_file 先问**，其余放行——与 Claude Code 的缺省一个精神。
- * 「其余」里有些也会动东西，说清为什么不问（review 2026-09-07，此前这句只写「动手的先问」，与表不符）：
- * worktree_enter 开的是新分支与新目录，可逆；worktree_exit 的删除由 git 自己挡（有未提交改动就拒，分支保留）；
- * web_fetch / web_search 出网不问（2026-09-03 拍板）；core 内建的记忆 / 任务 / 技能 / 闹钟写的是 agent 自己的状态，
- * 不是用户的世界。要更严的产品自己给 `rules`。bash 不受工作区边界约束，它靠的正是这一条 ask。
+ * 这是一张黑名单而不是白名单（2026-09-09 拍板，`docs/decisions/implemented/2026-09-09-default-permission-blacklist.md`）：
+ * 「其余」里也有动东西的，各有各的不问的理由——worktree_enter 开的是新分支与新目录，可逆；worktree_exit 的删除
+ * 由 git 自己挡（有未提交改动就拒，分支保留）；web_fetch / web_search 出网不问（2026-09-03 拍板）；core 内建的
+ * 记忆 / 任务 / 技能 / 闹钟写的是 agent 自己的状态，不是用户的世界。要更严的产品自己给 `rules`。
+ * bash 不受工作区边界约束，它靠的正是这一条 ask。
  */
 export const DEFAULT_PERMISSION: PermissionPolicy = {
   rules: { bash: "ask", write_file: "ask", edit_file: "ask" },

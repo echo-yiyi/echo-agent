@@ -469,13 +469,14 @@ export const main: Main = mainFor(ECHO_AGENT);
  * 叫醒一段会话时给副本的 argv（导出只为判据）：与父进程**同一家、同一模型**、同状态根、同扩展目录
  * （review 2026-09-07：此前只传后两样，副本按设置文件另选一家、缺 key 就根本起不来）。
  * `--provider` 收的是 CLI 的 provider 名（`kimi` / `zai` …），不是目录里的 provider id。
- * `--observe` **不继承**：要不要跟父进程同一档还没拍。
+ * `--observe` 也继承（2026-09-09 拍板）：父在看的档，被叫醒的那段也按同一档记，否则 `observe show` 只有半张图。
  */
 export function wakeArgs(self: string, opts: CliOptions, providerName: string | undefined, sessionId: string): string[] {
   const args = [self, "--serve", "--resume", sessionId];
   if (providerName !== undefined) args.push("--provider", providerName);
   if (opts.model !== undefined) args.push("--model", opts.model);
   if (opts.stateDir !== undefined) args.push("--state-dir", opts.stateDir);
+  if (opts.observe !== undefined) args.push("--observe", opts.observe);
   if (opts.withoutMemory) args.push("--no-memory");
   for (const dir of opts.extensionDirs) args.push("--extensions", dir);
   return args;
