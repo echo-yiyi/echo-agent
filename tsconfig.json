@@ -16,5 +16,6 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["test"]
+  // `scripts/` 也纳入（2026-09-09）：拆包时 `dump-prompt.ts` 引的段搬了家却没红，正是因为它不在范围里
+  "include": ["test", "scripts"]
 }

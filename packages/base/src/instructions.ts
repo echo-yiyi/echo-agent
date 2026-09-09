@@ -26,7 +26,9 @@ export const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
 export const INSTRUCTIONS_CAP = 65_536;
 
 export const INSTRUCTIONS_HEADER =
-  "# Project instructions\nInstructions from the workspace's AGENTS.md. Follow them as the user's own; they do not override the confirmations above.";
+  // 不点「上面的确认」（2026-09-09）：纪律段按形态分岔之后，没人能答的那一版里根本没有「确认」这回事，
+  // 指着一句不存在的话说「不覆盖它」只会让模型去猜。说清「上面的纪律」就够。
+  "# Project instructions\nInstructions from the workspace's AGENTS.md. Follow them as the user's own; they do not override the rules above.";
 
 /** 读 `<workspace>/<候选>`，都不存在 → null。读失败（权限之类）也 fail-loud 抛——段隐形 + 诊断那条路会接住。 */
 export async function loadInstructions(workspace: string): Promise<{ file: string; content: string } | null> {

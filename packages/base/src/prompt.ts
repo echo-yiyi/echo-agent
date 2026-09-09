@@ -38,9 +38,16 @@ export function conductText(attended: boolean): string {
   return `${CONDUCT_COMMON}\n${attended ? CONDUCT_ATTENDED : CONDUCT_UNATTENDED}`;
 }
 
-/** 管道形态的交互面：没人能答问题、没人能批准，输出只给调用方。 */
+/**
+ * 管道形态的交互面：没人能答问题、没人能批准，输出只给调用方。
+ *
+ * **不再写「需要确认的动作就别做」**（2026-09-09 用户拍板）。那句是 2026-09-01 写的，那时纪律段还没按
+ * 形态分岔；分岔之后它与同一份 prompt 里的「没人可等，自己判断、做完说清楚」直接打架。后果在评测里最明显：
+ * 改文件本来就是任务，模型可以把它读成「不可逆 → 要确认 → 那我只描述不动手」。
+ * 「别问问题」这半留着——没人能答是事实。
+ */
 export const PIPE_SURFACE = `# Non-interactive
-You are running non-interactively: each line of standard input is a request, your text goes to standard output, and nobody can answer a question or approve an action mid-task. Do not ask questions; make reasonable assumptions and state them. If an action would need confirmation, do not perform it — say what you would do and why it needs approval. Output only what the caller needs, with no preamble.`;
+You are running non-interactively: each line of standard input is a request, your text goes to standard output, and nobody can answer a question or approve an action mid-task. Do not ask questions and do not wait for approval: make reasonable assumptions, state them, and carry the task through. If something is genuinely outside what you were asked to do, leave it alone and say why. Output only what the caller needs, with no preamble.`;
 
 export function conductSection(attended: boolean): PromptSection {
   return { name: "conduct", order: PROMPT_ORDER.conduct, render: () => conductText(attended) };
