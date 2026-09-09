@@ -96,6 +96,7 @@
 | session 的身份 | meta 记 `product`（哪个产品开的）与 `agent`（角色）；`agentId` / `agentName` 退场 | [记录](decisions/proposed/2026-09-07-session-identity.md) |
 | 人优先，后台让位（已合入 e48a366，本表只为措辞改准） | 自称可让位的实例被请走时交还 lease；不可让位的照旧不抢占 | [记录](decisions/implemented/2026-09-07-preemptible-lease.md) |
 | lifecycle 四条小决策（已落地；第二个 prompt 那条就是现状） | abort reason 保留、`agent_end` 保留名字、stop hook 三次留硬编码、第二个 prompt 留 fail-fast | [abort](decisions/implemented/2026-09-01-abort-reason.md) · [agent_end](decisions/implemented/2026-09-01-agent-end-barrier.md) · [stop hook](decisions/implemented/2026-09-01-stop-continuation-limit.md) · [second prompt](decisions/proposed/2026-09-01-second-prompt-policy.md) |
+| 装配层独立成包（2026-09-09 拍板） | `@echo-agent/base` 装启动器部件与宿主能力，`@echo-agent/tui` 装终端壳；产品只剩身份与自带扩展，`Product` 收成身份牌 | [记录](decisions/proposed/2026-09-09-assembly-layer-packages.md) |
 | session 线剩余 | 角色定义先做，再 `/clear`（换 Agent 实例）与 `wait` | [会话与 agent 集群](design/sessions.md) §9 |
 
 ## 8. 门

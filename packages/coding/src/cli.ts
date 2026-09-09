@@ -12,7 +12,7 @@
 // 评测或别的宿主可以自己传——本产品不缺省开它。
 
 import { readFileSync } from "node:fs";
-import { mainFor, type Product } from "echo-agent";
+import { conductEntry, mainFor, type Product } from "echo-agent";
 import { codingPreset } from "./agent.ts";
 
 /** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置。 */
@@ -29,7 +29,12 @@ export const ECHO_CODING: Product = Object.freeze({
   // grep / read 几下就撞顶（实测 `[错误] 迭代上限 20`），每 20 步要人说一次「继续」。
   // 评测的 identity 仍按 `codingPreset()` 缺省（20）算——产品与评测的预算不同，是否让 identity 跟产品走另议。
   // 凭据 store 从形态里来（`web_search` 读 `brave`）：与启动逻辑同一个文件，不另开
-  preset: (form) => codingPreset({ permission: false, maxIterations: 200, credentials: form.credentials }),
+  // 共用的纪律段由**产品**挂（2026-09-09 拍板）：装配层不再恒挂，形态决定「有没有人能答」那一条。
+  // `codingPreset()` 自己只依赖 core，所以这一条加在这里，不加进它。
+  preset: (form) => {
+    const preset = codingPreset({ permission: false, maxIterations: 200, credentials: form.credentials });
+    return { ...preset, extensions: [conductEntry(form), ...preset.extensions] };
+  },
 });
 
 /** 进程入口的实质：`echo-agent` 的 `main` 绑上本产品。签名与它完全相同，退出码语义也相同。 */

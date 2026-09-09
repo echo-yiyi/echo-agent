@@ -15,7 +15,7 @@
 
 import { readFileSync } from "node:fs";
 import type { CreateEchoOptions, CredentialStore } from "@echo-agent/core";
-import { identityEntry } from "./prompt.ts";
+import { conductEntry, identityEntry } from "./prompt.ts";
 
 /** 装配前已经定了的形态。产品层据此决定「谁答权限询问」之类；工作目录不在这里（见文件头）。 */
 export type PresetForm = Readonly<{
@@ -50,9 +50,9 @@ export type Product = Readonly<{
 const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
   .version;
 
-/** `echo-agent` 自己：通用 agent。preset 只交一样——它的身份段。 */
+/** `echo-agent` 自己：通用 agent。身份段与纪律段都由它自己挂（2026-09-09：纪律归产品）。 */
 export const ECHO_AGENT: Product = Object.freeze({
   name: "echo-agent",
   version: VERSION,
-  preset: () => ({ extensions: [identityEntry()] }),
+  preset: (form) => ({ extensions: [identityEntry(), conductEntry(form)] }),
 });

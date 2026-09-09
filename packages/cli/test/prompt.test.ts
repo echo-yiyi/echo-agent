@@ -11,7 +11,7 @@ import { Agent } from "@echo-agent/core";
 import { ExtensionHost, agentRegistries, mountBuiltinTools } from "@echo-agent/core/extension";
 import { FAKE_MODEL, scriptedStreamFn } from "@echo-agent/core/testing";
 import { INSTRUCTIONS_CAP, instructionsEntry, loadInstructions, renderInstructions } from "../src/instructions.ts";
-import { CONDUCT, ECHO_AGENT_IDENTITY, PIPE_SURFACE, TERMINAL_SURFACE, conductEntry, identityEntry, pipeSurfaceEntry } from "../src/prompt.ts";
+import { conductText, ECHO_AGENT_IDENTITY, PIPE_SURFACE, TERMINAL_SURFACE, conductEntry, identityEntry, pipeSurfaceEntry } from "../src/prompt.ts";
 
 async function agentIn(workspace: string): Promise<{ agent: Agent; host: ExtensionHost }> {
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]), workspace });
@@ -56,18 +56,18 @@ test("instructions：第三方文本过防线——反引号中和、超 64 KB �
 
 test("surface：管道形态的 echo:pipe 与终端形态同名互斥；identity / conduct 段进 system 且不点工具名", async () => {
   const { agent, host } = await agentIn("/w");
-  await host.mount("product", [identityEntry(), conductEntry(), pipeSurfaceEntry()]);
+  await host.mount("product", [identityEntry(), conductEntry({ interactive: false }), pipeSurfaceEntry()]);
   const sys = (await agent.assemblePrompt()) ?? "";
   expect(sys.startsWith(ECHO_AGENT_IDENTITY)).toBe(true);
-  expect(sys).toContain(CONDUCT);
+  expect(sys).toContain(conductText(false));
   expect(sys).toContain(PIPE_SURFACE);
   expect(sys).not.toContain(TERMINAL_SURFACE);
   // 顺序：identity(0) → conduct(10) → surface(20) → environment(300)
-  expect(sys.indexOf(CONDUCT)).toBeLessThan(sys.indexOf(PIPE_SURFACE));
+  expect(sys.indexOf(conductText(false))).toBeLessThan(sys.indexOf(PIPE_SURFACE));
   expect(sys.indexOf(PIPE_SURFACE)).toBeLessThan(sys.indexOf("# Environment"));
   // 工具不进 system：身份与纪律里没有任何工具名
   for (const name of ["TaskCreate", "memory", "skill_activate", "schedule_create", "bash", "read_file"]) {
-    expect(ECHO_AGENT_IDENTITY + CONDUCT).not.toContain(name);
+    expect(ECHO_AGENT_IDENTITY + conductText(true) + conductText(false)).not.toContain(name);
   }
   // 同名 surface 再挂一份 → 撞名 fail-loud（两种形态互斥靠这个守）
   await expect(host.mount("dup", [pipeSurfaceEntry()])).rejects.toThrow(/已存在/);

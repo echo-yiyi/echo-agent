@@ -16,7 +16,7 @@ const echo = await createEcho({
   workspace: process.cwd(),
   agentName: "echo-coding",
   extensions: [
-    conductEntry(),
+    conductEntry({ interactive: true }),
     instructionsEntry(),
     ...codingPreset().extensions,
     // echo:tui 对 prompt 的贡献就是 surface(terminal) 一段；不真挂壳，壳会把 UI 跑起来

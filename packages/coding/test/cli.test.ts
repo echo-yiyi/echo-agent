@@ -15,8 +15,21 @@ const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；两种形态都不装权限策略（缺省全放行）", () => {
   for (const interactive of [true, false]) {
     const preset = ECHO_CODING.preset!({ interactive, credentials: new InMemoryCredentialStore() });
-    // 身份与纪律段、文件读写与搜索、shell 只属于 coding（不在 echo-agent 里）——它们以三条 Extension 的形态跟着产品走
-    expect(preset.extensions?.map((e) => e.entryId)).toEqual(["echo:coding", "echo:workspace", "echo:shell", "echo:worktree", "echo:web"]);
+    // 身份与纪律段、文件读写与搜索、shell 只属于 coding（不在 echo-agent 里）——它们以 Extension 的形态跟着产品走。
+    // **共用纪律段也在里面**（2026-09-09 拍板：纪律归产品，装配层不再恒挂）。
+    expect(preset.extensions?.map((e) => e.entryId)).toEqual([
+      "echo:conduct",
+      "echo:coding",
+      "echo:workspace",
+      "echo:shell",
+      "echo:worktree",
+      "echo:web",
+    ]);
+    // 「动手前先确认」只在有人能答的那一头出现：非交互跑（Docker 里的评测）照它执行就是去问一个不存在的人
+    const conduct = preset.extensions!.find((e) => e.entryId === "echo:conduct")!;
+    const text = (conduct.config as { sections: { render: (c: never) => string }[] }).sections[0]!.render(undefined as never);
+    expect(text.includes("confirm with the user")).toBe(interactive);
+    expect(text).toContain("Look at a target before you delete or overwrite it"); // 两版都留
     // workspace 是 session 级事实，由 `mainFor()` 直接交给 `createEcho()`，preset 不出这一项（2026-09-01）。
     // 执行预算 200（2026-09-02 用户拍板）：core 缺省 20 是通用 agent / 评测的预算，coding 几步就撞顶
     expect(preset.agent).toEqual({ maxIterations: 200 });

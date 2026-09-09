@@ -254,6 +254,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/proposed/2026-09-09-assembly-layer-packages.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-memory-scopes-by-product.md",
       "bilingual": false
     },

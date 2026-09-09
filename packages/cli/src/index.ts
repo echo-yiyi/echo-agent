@@ -14,6 +14,13 @@
 /** 官方壳的 Extension 形态：交给 `createEcho({ extensions })` 去 mount。 */
 export { tuiShell, type TuiShell } from "./extension.ts";
 
+/**
+ * 共用的工作纪律段。**产品自己挂**（2026-09-09 拍板，记录见
+ * `docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`）：装配层不再恒挂，
+ * 所以产品能换掉它、也能不要它。文本按形态分两版——没有人的那一头不写「先确认」。
+ */
+export { conductEntry, conductSection, conductText } from "./prompt.ts";
+
 /** 渲染循环本体。自己写壳、或要换一套终端实现时用得上。 */
 export { runTui, type TuiAppOptions, type TuiConfigureOptions } from "./app.ts";
 

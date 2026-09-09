@@ -47,7 +47,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { tuiShell } from "./extension.ts";
 import { instructionsEntry } from "./instructions.ts";
-import { conductEntry, pipeSurfaceEntry } from "./prompt.ts";
+import { pipeSurfaceEntry } from "./prompt.ts";
 import { run } from "./run.ts";
 import { runObserve } from "./observe.ts";
 import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
@@ -295,7 +295,9 @@ export function echoOptions(
     agent: { ...(preset.agent ?? {}), questions: preset.agent?.questions ?? { responder: form.interactive ? "host" : "none", askTimeoutMs: null } },
     // `echo-agent` 恒挂的两段（纪律、项目指令）在前，产品自带的在后。顺序只影响 `echo.extensions`
     // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。
-    extensions: [conductEntry(), instructionsEntry(), ...(preset.extensions ?? [])],
+    // 纪律段**不在这里**（2026-09-09）：它归产品，产品自己挂。项目指令留在装配层——
+    // 读 workspace 的文件是宿主能力，core 是纯 JS 够不着（`docs/design/prompt.md` 的所有权表）。
+    extensions: [instructionsEntry(), ...(preset.extensions ?? [])],
   };
 }
 
