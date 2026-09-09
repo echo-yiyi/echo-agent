@@ -32,8 +32,8 @@ export const ECHO_CODING: Product = Object.freeze({
   // 凭据 store 从形态里来（`web_search` 读 `brave`）：与启动逻辑同一个文件，不另开
   // 共用的纪律段由**产品**挂（2026-09-09 拍板）：装配层不再恒挂，形态决定「有没有人能答」那一条。
   // `codingPreset()` 自己只依赖 core，所以这一条加在这里，不加进它。
-  preset: (form) => {
-    const preset = codingPreset({ permission: false, maxIterations: 200, credentials: form.credentials });
+  preset: (form, host) => {
+    const preset = codingPreset({ permission: false, maxIterations: 200, credentials: host.credentials });
     return { ...preset, extensions: [conductEntry(form), ...preset.extensions] };
   },
 });

@@ -19,10 +19,20 @@ import type { CreateEchoOptions, CredentialStore } from "@echo-agent/core";
 export type PresetForm = Readonly<{
   /** `true` = 交互形态（有人坐在终端前）；`false` = 管道 / CI。判据只有 `main()` 那一个。 */
   interactive: boolean;
+}>;
+
+/**
+ * 装配层借给产品的**宿主能力**（2026-09-09 从 `PresetForm` 里分出来）。
+ *
+ * 分开是因为它们是两件事：形态说的是「这次是哪种跑法」，这里说的是「你能用到的东西」。
+ * 混在一起的时候，产品要拿凭据只能从「形态」里夹带一个资源句柄——那是没有正规通道的症状。
+ * 这一格将来还会长（设置、路径之类），形态不会。
+ */
+export type ProductHost = Readonly<{
   /**
    * 凭据来源——**与启动逻辑同一个 store**（缺省 `$ECHO_HOME/credentials.json`，测试可注入）。
    * 产品自带的、要 key 的工具（如 `echo-coding` 的 `web_search` 读 `brave`）从这里拿，不各开各的文件：
-   * 解析顺序与模型 key 一样是「环境变量 → 这个 store → 没有」（2026-09-04）。
+   * 解析顺序与模型 key 一样是「环境变量 → 这个 store → 没有」。
    */
   credentials: CredentialStore;
 }>;
@@ -41,5 +51,5 @@ export type Product = Readonly<{
    * `extensions` 是显式传入的。两者在 `createEcho()` 里同一代 mount，顺序是发现的在前、
    * 显式的在后（`create-echo.ts`）；工具撞名整组失败，不静默覆盖。
    */
-  preset?: (form: PresetForm) => Pick<CreateEchoOptions, "agent" | "extensions">;
+  preset?: (form: PresetForm, host: ProductHost) => Pick<CreateEchoOptions, "agent" | "extensions">;
 }>;

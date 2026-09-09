@@ -14,7 +14,7 @@ const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
 test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；两种形态都不装权限策略（缺省全放行）", () => {
   for (const interactive of [true, false]) {
-    const preset = ECHO_CODING.preset!({ interactive, credentials: new InMemoryCredentialStore() });
+    const preset = ECHO_CODING.preset!({ interactive }, { credentials: new InMemoryCredentialStore() });
     // 身份与纪律段、文件读写与搜索、shell 只属于 coding（不在 echo-agent 里）——它们以 Extension 的形态跟着产品走。
     // **共用纪律段也在里面**（2026-09-09 拍板：纪律归产品，装配层不再恒挂）。
     expect(preset.extensions?.map((e) => e.entryId)).toEqual([

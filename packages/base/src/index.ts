@@ -23,7 +23,7 @@ export {
 } from "./cli.ts";
 
 /** 产品契约：一个产品交给启动逻辑的名字、版本与装配片段。 */
-export { type PresetForm, type Product } from "./product.ts";
+export { type PresetForm, type Product, type ProductHost } from "./product.ts";
 
 /**
  * 壳端口：装配层只认它，谁实现它、用什么画界面都行。终端那份实现在 `@echo-agent/tui`。

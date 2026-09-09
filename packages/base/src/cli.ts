@@ -265,7 +265,7 @@ export function echoOptions(
   // **产品层的装配片段**（`product.ts`）：`agent`（权限策略等）与 `extensions`（产品自带的，含它的 prompt 段）。
   // 能来自产品的只有这两个字段——`Product.preset` 的返回类型就这么窄——所以它盖不掉下面任何一项，
   // 尤其盖不掉 `extensionDirs`：去哪发现扩展归 `--extensions`、归用户。
-  const preset = product.preset?.(form) ?? {};
+  const preset = product.preset?.(form, { credentials }) ?? {};
   return {
     provider,
     // 五家全注册（P3b-a）：Ctrl+L 跨家换模的派发靠它；初始模型仍从 `provider` 解析
@@ -434,7 +434,7 @@ export function mainFor(product: Product, shell: Shell): Main {
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
-      const form: PresetForm = { interactive, credentials };
+      const form: PresetForm = { interactive };
       // 无界面形态排在最前：它既不是交互也不是管道——不装壳、不读 stdin，跑完就退。
       if (effective.serve) return await runServe(product, form, effective, provider, choices, credentials, sessionId, controller.signal);
       return interactive

@@ -670,7 +670,8 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
     expect(ui.screen()).toContain("echo-试产品");
     expect(ui.screen()).toContain("v9.9.9");
     // 形态到了 preset 手里，而且只调一次（workspace 不经 preset，`mainFor()` 直接交给 createEcho）
-    expect(forms).toEqual([{ interactive: true, credentials }]); // 凭据 store 原样交给产品（web_search 读 brave）
+    // 形态里**只有形态**（2026-09-09）：凭据这类宿主能力走 preset 的第二个参数，不再夹带在形态里
+    expect(forms).toEqual([{ interactive: true }]);
     expect(applied, "preset 交出的 Extension 没被 mount").toBe(1);
     // 渐进式披露的缺省名单（`DEFAULT_DEFERRED_TOOLS`）进了装配：名单非空 → `tool_search` 在池里；
     // 延迟的工具本身也在池里（只是不上菜单，那半边的判据在 core 的 tool-search.test）
@@ -886,7 +887,7 @@ test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，�
   const credentials = new FileCredentialStore(join(dir, "credentials.json"));
   const built = echoOptions(
     ECHO_AGENT,
-    { interactive: true, credentials },
+    { interactive: true },
     { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false },
     kimiProvider(),
     [],
@@ -898,7 +899,7 @@ test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，�
   expect(built.agent?.questions).toEqual({ responder: "host", askTimeoutMs: null });
   const piped = echoOptions(
     ECHO_AGENT,
-    { interactive: false, credentials },
+    { interactive: false },
     { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false },
     kimiProvider(),
     [],
@@ -909,7 +910,7 @@ test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，�
   // 产品 preset 自己定了 questions 就不被形态盖掉（类型允许它定，静默盖掉就是「接受配置又忽略」）
   const custom = echoOptions(
     { name: "p", version: "0", preset: () => ({ agent: { questions: { responder: "host", askTimeoutMs: 5000 } } }) },
-    { interactive: false, credentials },
+    { interactive: false },
     { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false },
     kimiProvider(),
     [],
