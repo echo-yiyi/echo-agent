@@ -106,6 +106,22 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-09-default-permission-blacklist.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-09-oauth-removed.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-09-tool-result-images.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-09-09-session-alive-pid-probe.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-05-retry-owned-by-loop.md",
       "bilingual": false
     },

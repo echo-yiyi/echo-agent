@@ -201,7 +201,9 @@ export class ExtensionHost {
     if (f.status === "disposed") return;
     f.beginUnload();
     try {
-      await f.effects.settlePendingStarts(); // 卸载时 start 自己的失败不算 Host 的错：它须自行清理
+      // 卸载时 start 自己的失败不算 Host 的错：它须自行清理。ACTIVE 之后 `void ctx.effect()` 的失败也在这里被丢掉——
+      // 那是契约（见 `ExtensionContext.effect` 的注释），不是遗漏
+      await f.effects.settlePendingStarts();
       await f.effects.unwind();
     } catch (e) {
       if (e instanceof AggregateError) errors.push(...e.errors);

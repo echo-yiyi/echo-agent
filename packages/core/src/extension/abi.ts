@@ -51,6 +51,10 @@ export interface ExtensionContext {
    * 状态 / 声明类错误（Fiber 已 UNLOADING → `ExtensionDisposedError`；boundary 非法或强于声明）**同步抛**；
    * `start` 自己的失败以 rejection 返回——`void ctx.effect()` 是合法用法，Host 会在 apply 返回后 settle 这些 start，
    * 任一失败按 mount failure 回滚，且不会变成 unhandled rejection。
+   *
+   * **ACTIVE 之后再登记的 Effect**（hook 回调里、定时器里）是另一条契约（2026-09-09 拍板登记）：它的 start 失败
+   * **只有 await 它的调用方看得见**——Fiber 不回滚、不进诊断，`void` 掉的失败留到卸载时被丢弃。mount 期的
+   * 「全有或全无」到 ACTIVE 为止；之后登记什么、失败了怎么办，由登记它的人自己负责。
    */
   effect<T>(spec: {
     boundary?: ReloadBoundary;

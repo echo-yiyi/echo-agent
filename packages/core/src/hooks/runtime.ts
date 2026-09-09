@@ -90,8 +90,9 @@ export type HookOrigin = "model" | "hook" | "runtime" | "user";
  * `session.appendMessage`（破 entries 单写者）、`ui.confirm`（问人是 permission pipeline 的职责）。
  */
 export type HookContext = {
+  /** 这条事件是谁引起的：`user` = 用户输入进入循环（`userPromptSubmit`），其余事件由 Agent 按发生处标。 */
   readonly origin: HookOrigin;
-  readonly depth: number;
+  /** 正在被调用的这条 hook 的注册 id（`on()` 的 `opts.id` 或自动编号）——由 HookRuntime 逐条填，调用方给的值会被覆盖。 */
   readonly hookId: string;
   readonly signal?: AbortSignal;
 };
@@ -347,7 +348,7 @@ async function runNotify(
   if (list === undefined || list.length === 0) return;
   for (const entry of list) {
     try {
-      await withTimeout(entry.run(event, ctx), opts);
+      await withTimeout(entry.run(event, { ...ctx, hookId: entry.id }), opts);
     } catch (e) {
       opts.onHookFailure?.({
         hookId: entry.id,
@@ -377,7 +378,7 @@ async function runIntercept<E extends InterceptableType>(
   for (const entry of list) {
     let result: HookResult | void;
     try {
-      result = await withTimeout(entry.run(current as LifecycleEvent, ctx), opts);
+      result = await withTimeout(entry.run(current as LifecycleEvent, { ...ctx, hookId: entry.id }), opts);
     } catch (e) {
       const failClosed = FAIL_CLOSED.has(eventType);
       opts.onHookFailure?.({

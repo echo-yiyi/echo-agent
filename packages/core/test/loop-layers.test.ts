@@ -556,7 +556,7 @@ test("shouldStopAfterTurn：reply 以 completed 收场、run 直接关门，不�
     knownToolNames: () => [],
     resolveTool: () => ({ ok: false, reason: "not_found" }),
     hooks: new HookRuntime(),
-    hookContext: { origin: "model", depth: 0, hookId: "test" },
+    hookContext: { origin: "model", hookId: "test" },
     permission: {
       authorize: () => ({ kind: "allow" }),
       ask: () => {
@@ -608,7 +608,7 @@ test("工具轮不问 shouldStopAfterTurn / prepareNextTurn：tool_use / max_tok
     knownToolNames: () => ["t"],
     resolveTool: (name) => (name === "t" ? { ok: true, tool: t } : { ok: false, reason: "not_found" }),
     hooks: new HookRuntime(),
-    hookContext: { origin: "model", depth: 0, hookId: "test" },
+    hookContext: { origin: "model", hookId: "test" },
     permission: {
       authorize: () => ({ kind: "allow" }),
       ask: () => {

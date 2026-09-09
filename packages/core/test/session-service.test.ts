@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { SessionService, listSessions } from "../src/session/service.ts";
+import { SessionService, listSessions, setSessionStatus } from "../src/session/service.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
 import { mkdtemp } from "node:fs/promises";
@@ -119,6 +119,25 @@ test("不变量③ 坏档抛错 —— meta 解不开", async () => {
   await dir.write("meta.json", "半截");
 
   await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/meta\.json 解不开/);
+});
+
+test("别处把这一段置 closed 之后，自己的入账不把它盖回 active：保住 closed、报一次诊断（review 2026-09-07 #57，2026-09-09 拍板止血版）", async () => {
+  const { s, dir } = svc();
+  const codes: string[] = [];
+  s.attachDiagnostics((d) => codes.push(d.code));
+  await s.createOrResume("s1", { workspace: "/w" });
+  await s.append("s1", [{ kind: "message", message: userMessage("一") }]);
+  await s.settle();
+  await setSessionStatus(dir, "s1", "closed"); // 会话列表 / session_close 走的就是它：不经这个 Service 实例
+  await s.append("s1", [{ kind: "message", message: userMessage("二") }]);
+  await s.settle();
+  const meta = JSON.parse((await dir.read("meta.json"))!) as { status: string; messageCount: number };
+  expect([meta.status, meta.messageCount]).toEqual(["closed", 2]); // 计数照常刷，状态不倒退
+  expect(codes).toEqual(["session_closed_underneath"]);
+  await s.append("s1", [{ kind: "message", message: userMessage("三") }]);
+  await s.settle();
+  expect(codes).toEqual(["session_closed_underneath"]); // 游标已经跟着 closed 走：不再重复报
+  expect((JSON.parse((await dir.read("meta.json"))!) as { status: string }).status).toBe("closed");
 });
 
 test("不变量④ 封存后不再入账（丢锁的第一步）", async () => {

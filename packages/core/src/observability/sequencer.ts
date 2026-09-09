@@ -211,9 +211,23 @@ type HoleSlot = {
   readonly kind: "hole";
   readonly seq: number;
   readonly reason: ObservationGapReason;
-  /** 精确覆盖本 hole 的 gap 的 seq（总是 > seq）。 */
-  readonly coveredBy: number;
+  /**
+   * 覆盖本 hole 的 gap 的 seq（总是 > seq）。`undefined` = 还没预留：这是一段**尚未收口的连续 buffer_overflow 区间**里的
+   * hole，整段共用一条 gap，等区间收口（下一次别的预留，或 flush 走到这里）时才定下来（2026-09-09）。
+   */
+  readonly coveredBy: number | undefined;
 };
+
+/**
+ * 连续 buffer_overflow 的合并区间（2026-09-09 拍板改不变量，review 2026-09-07 #45）：此前每条溢出各自 hole + gap，
+ * 一次 1 000 条的突发就是 2 000 个 seq、1 000 条 canonical gap、1 000 次 digest 滚动——ring 越满，账本越长，正好反过来。
+ * 现在同一 run（或同为 runtime-scoped）的连续溢出只占各自的 hole seq，共用**一条** gap，放在区间末尾；
+ * 任何别的预留（成功的 offer、boundary、别的 gap）先把它收口，gap 因此永远紧跟区间最后一个 hole。
+ */
+type OverflowRun = { firstSeq: number; lastSeq: number; readonly runId: string | undefined };
+
+/** 封口后还留在内存里的 run 数（RunIndex 查询缓存 + 重复 `run.accepted` 的同步判据）。更老的只在 store 里。 */
+const CLOSED_RUN_RETENTION = 256;
 
 type Slot = CandidateSlot | HoleSlot;
 
@@ -313,8 +327,16 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   private readonly slots = new Map<number, Slot>();
   private pendingBounded = 0;
   private readonly waiters = new Map<number, Waiter>();
+  /**
+   * **只有开着的 run**（2026-09-09，review 2026-09-07 #46）：封口落库那一刻删。此前两张表只进不出，常驻 agent 每跑一个 run
+   * 各涨一条。封口后的 run 挪进 `closedRuns`（有界，最老的先出）：它同时是 `committedRunIndex()` 的查询缓存与
+   * 「同一 runId 第二次 run.accepted」的同步判据；出了缓存的老 run 若再被 accepted，由 store 的 RunIndex CAS
+   * （期望不存在、实际存在）判红——那是 writer 的 bug，不是运行态。
+   */
   private readonly runBoundaries = new Map<string, { accepted?: number; started?: number; closed?: number }>();
   private readonly runIndexCache = new Map<string, RunIndexEntryV1>();
+  private readonly closedRuns = new Map<string, RunIndexEntryV1>();
+  private overflow: OverflowRun | undefined;
   /**
    * 每个 run 的 canonical gap 账本，**常量空间**：每生成一条 exact canonical gap，就用它的 canonical bytes
    * 滚一次 digest。存数组再在封口时重编是错的——700 个 gap 就能让 `run.closed` 因 nodes_exceeded 永远封不了口，
@@ -371,7 +393,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   }
 
   committedRunIndex(runId: string): RunIndexEntryV1 | undefined {
-    return this.runIndexCache.get(runId);
+    return this.runIndexCache.get(runId) ?? this.closedRuns.get(runId);
   }
 
   /**
@@ -454,6 +476,12 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     let seq: number | undefined;
     try {
       if (this.unavailable("bounded record")) return;
+      // ring 满：不编码、不物化，并进当前的溢出区间（一段连续溢出共用一条 gap，见 `OverflowRun`）。
+      // 判在预留之前：这条 seq 只会是 hole，而且不该让它把上一段区间收口
+      if (this.pendingBounded >= this.limits.ringCapacity) {
+        this.overflowHole(safeRunIdOf(draft.scope));
+        return;
+      }
       seq = this.reserve();
       let candidate: CandidateSlot;
       try {
@@ -476,10 +504,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       if (candidate.runId !== undefined && !this.isRunOpen(candidate.runId)) {
         this.report({ code: "observation_boundary_rejected", message: `record 引用了未建立或已封口的 run，已裁决为 gap` });
         this.markHole(seq, undefined, "encoding_error", undefined, undefined);
-        return;
-      }
-      if (this.pendingBounded >= this.limits.ringCapacity) {
-        this.markHole(seq, candidate.runId, "buffer_overflow", undefined, undefined);
         return;
       }
       this.slots.set(seq, candidate);
@@ -659,9 +683,83 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
 
   /* ───────── identity / encode ───────── */
 
+  /** 预留下一个 seq。开着的溢出区间先收口——它的 gap 必须紧跟区间最后一个 hole，不能被这次预留插在中间。 */
   private reserve(): number {
+    this.closeOverflow();
+    return this.reserveRaw();
+  }
+
+  private reserveRaw(): number {
     this.lastReserved += 1;
     return this.lastReserved;
+  }
+
+  /** ring 满时的裁决：占一个 hole seq，并进当前区间；不同 run 的溢出分开记（gap 的归属要对）。 */
+  private overflowHole(rawRunId: string | undefined): void {
+    const runId = this.gapRunIdFor(rawRunId);
+    if (this.overflow !== undefined && this.overflow.runId !== runId) this.closeOverflow();
+    const seq = this.reserveRaw();
+    this.slots.set(seq, { kind: "hole", seq, reason: "buffer_overflow", coveredBy: undefined });
+    if (this.overflow === undefined) this.overflow = { firstSeq: seq, lastSeq: seq, runId };
+    else this.overflow.lastSeq = seq;
+    this.scheduleFlush("delayed");
+  }
+
+  /**
+   * 给开着的溢出区间预留并编码它那**一条** gap：`afterSeq = 首 hole − 1`，`beforeSeq = gap 自己的 seq`（紧跟末 hole），
+   * `dropped` = 区间长度——`dropped === beforeSeq − afterSeq − 1` 这条不变量与单 hole 的 gap 相同。
+   * 没有开着的区间就什么都不做。
+   */
+  private closeOverflow(): void {
+    const open = this.overflow;
+    if (open === undefined) return;
+    this.overflow = undefined;
+    const gapSeq = this.reserveRaw();
+    const dropped = open.lastSeq - open.firstSeq + 1;
+    const gap = this.encodeGap(gapSeq, open.runId, "buffer_overflow", { afterSeq: open.firstSeq - 1, beforeSeq: gapSeq, dropped, reason: "buffer_overflow" }, { coveredSeq: open.firstSeq, coveredThrough: open.lastSeq }, undefined);
+    if (gap === undefined) return; // 已 seal：区间里的 hole 永远不会 commit，也不再需要覆盖
+    for (let seq = open.firstSeq; seq <= open.lastSeq; seq++) {
+      this.slots.set(seq, { kind: "hole", seq, reason: "buffer_overflow", coveredBy: gapSeq });
+    }
+    this.slots.set(gapSeq, gap);
+    this.canonicalGapCount += 1;
+    if (open.runId !== undefined) this.rollGap(open.runId, gap.bytes);
+    this.report({ code: "observation_hole", message: `seq ${open.firstSeq}..${open.lastSeq} → hole(buffer_overflow) ×${dropped}，gap @ ${gapSeq}` });
+    this.scheduleFlush("delayed");
+  }
+
+  /**
+   * 编码一条 canonical gap 的 candidate。gap 的 body 是内建常量，编不出来 = Sequencer 自己坏了：seal 并返回 `undefined`
+   * （调用方不能留一个未裁决的 hole，但 seal 之后也没有第二条通道）。
+   */
+  private encodeGap(
+    gapSeq: number,
+    runId: string | undefined,
+    reason: ObservationGapReason,
+    body: ObservationGap,
+    attributes: Readonly<Record<string, string | number | boolean>>,
+    subject: Readonly<{ kind: string; id: string }> | undefined,
+  ): CandidateSlot | undefined {
+    const gapDraft: BoundaryObservationDraft<ObservationGap> = {
+      lane: "boundary",
+      occurredAt: this.clock.now(),
+      kind: "health",
+      name: "observation.gap",
+      scope: runId === undefined ? { runtimeId: this.runtimeId } : { runtimeId: this.runtimeId, runId },
+      correlation: {},
+      generation: { runtime: this.runtimeGeneration },
+      owner: { status: "not-applicable" },
+      instrumentation: SEQUENCER_INSTRUMENTATION,
+      attributes: { reason, ...attributes },
+      body,
+      ...(subject === undefined ? {} : { subject }),
+    };
+    try {
+      return this.encodeCandidate(gapDraft, gapSeq, boundaryEncodingLimits(), runId === undefined ? undefined : { kind: "gap" });
+    } catch (e) {
+      this.seal(new Error(`canonical gap 编码失败：${redactedLabel(e)}`));
+      return undefined;
+    }
   }
 
   /**
@@ -806,31 +904,10 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     cause: unknown,
   ): number {
     const runId = this.gapRunIdFor(rawRunId);
-    const gapSeq = this.reserve();
-    const body: ObservationGap = { afterSeq: seq - 1, beforeSeq: seq + 1, dropped: 1, reason };
-    const now = this.clock.now();
-    const gapDraft: BoundaryObservationDraft<ObservationGap> = {
-      lane: "boundary",
-      occurredAt: now,
-      kind: "health",
-      name: "observation.gap",
-      scope: runId === undefined ? { runtimeId: this.runtimeId } : { runtimeId: this.runtimeId, runId },
-      correlation: {},
-      generation: { runtime: this.runtimeGeneration },
-      owner: { status: "not-applicable" },
-      instrumentation: SEQUENCER_INSTRUMENTATION,
-      attributes: { reason, coveredSeq: seq },
-      body,
-      ...(subject === undefined ? {} : { subject }),
-    };
-    let gap: CandidateSlot;
-    try {
-      gap = this.encodeCandidate(gapDraft, gapSeq, boundaryEncodingLimits(), runId === undefined ? undefined : { kind: "gap" });
-    } catch (e) {
-      // gap 的 body 是内建常量，编不出来 = Sequencer 自己坏了；不能留一个未裁决的 hole
-      this.seal(new Error(`canonical gap 编码失败：${redactedLabel(e)}`));
-      return gapSeq;
-    }
+    // 这里的 seq 是调用方刚 `reserve()` 的，溢出区间已在那次预留时收口；这条 gap 紧跟它
+    const gapSeq = this.reserveRaw();
+    const gap = this.encodeGap(gapSeq, runId, reason, { afterSeq: seq - 1, beforeSeq: seq + 1, dropped: 1, reason }, { coveredSeq: seq }, subject);
+    if (gap === undefined) return gapSeq;
     this.slots.set(seq, { kind: "hole", seq, reason, coveredBy: gapSeq });
     this.slots.set(gapSeq, gap);
     this.canonicalGapCount += 1;
@@ -858,14 +935,14 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     const st = this.runBoundaries.get(runId);
     switch (name) {
       case "run.accepted":
-        return st !== undefined ? "run.accepted 已发过（唯一 emission owner）" : undefined;
+        return st !== undefined || this.closedRuns.has(runId) ? "run.accepted 已发过（唯一 emission owner）" : undefined;
       case "run.started":
-        if (st?.accepted === undefined) return "run.accepted 尚未发";
+        if (st?.accepted === undefined) return this.closedRuns.has(runId) ? "run 已封口" : "run.accepted 尚未发";
         if (st.started !== undefined) return "run.started 已发过";
         if (st.closed !== undefined) return "run 已封口";
         return undefined;
       case "run.closed":
-        if (st?.accepted === undefined) return "run.accepted 尚未发";
+        if (st?.accepted === undefined) return this.closedRuns.has(runId) ? "run.closed 已发过" : "run.accepted 尚未发";
         if (st.closed !== undefined) return "run.closed 已发过";
         return undefined;
       default:
@@ -1097,11 +1174,18 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       const slot = this.slots.get(seq);
       if (slot === undefined) break;
       if (slot.kind === "hole") {
+        if (slot.coveredBy === undefined) {
+          // 走到了还没收口的溢出区间：前面的都已进窗（或已 commit），此刻收口——gap 落在区间末尾，同一轮就能收进来。
+          // 收口失败（已 seal）时 hole 仍无覆盖：停在它前面，别死循环
+          this.closeOverflow();
+          if (this.slots.get(seq)?.kind === "hole" && (this.slots.get(seq) as HoleSlot).coveredBy === undefined) break;
+          continue;
+        }
         const gap = this.slots.get(slot.coveredBy);
         const gapBytes = gap !== undefined && gap.kind === "candidate" ? gap.bytes.byteLength : 0;
         const wouldExceed = records + 1 > this.limits.maxBatchRecords || bytes + gapBytes > this.limits.maxBatchBytes;
         if (wouldExceed && records > 0) break;
-        seq += 1; // gap 紧跟在 hole 之后（markHole 同步预留），下一轮就把它收进来
+        seq += 1; // 覆盖它的 gap 在后面（单 hole 紧跟其后；溢出区间在区间末尾），跨过去的 hole 与 gap 必须同窗
         continue;
       }
       const overLimit = records >= this.limits.maxBatchRecords || bytes + slot.bytes.byteLength > this.limits.maxBatchBytes;
@@ -1306,10 +1390,19 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     for (const m of input.runIndexMutations) this.runIndexCache.set(m.runId, m.nextRunIndex);
     for (const slot of window.slots) this.recentCommitted.push(slot.envelope);
     while (this.recentCommitted.length > this.limits.replayWindowRecords) this.recentCommitted.shift();
-    // 封口落库后释放这个 run 的 per-run 状态：gap accumulator 与边界登记都不再有用。
-    // （runIndexCache 留着——它是 materialized header 的查询缓存，O3a 由 SQLite 接手。）
+    // 封口落库后释放这个 run 的 per-run 状态：gap accumulator、边界登记、index 缓存一起出；index 挪进有界的 `closedRuns`
+    // （`send()` 在 run 结束后立刻读一次它，会话列表也读最近的），最老的先出，更老的只在 store 里。
     for (const slot of window.slots) {
-      if (slot.indexEffect?.kind === "closed" && slot.runId !== undefined) this.runGaps.delete(slot.runId);
+      if (slot.indexEffect?.kind !== "closed" || slot.runId === undefined) continue;
+      this.runGaps.delete(slot.runId);
+      this.runBoundaries.delete(slot.runId);
+      const index = this.runIndexCache.get(slot.runId);
+      this.runIndexCache.delete(slot.runId);
+      if (index !== undefined) {
+        this.closedRuns.delete(slot.runId); // 重新插入 = 挪到最新
+        this.closedRuns.set(slot.runId, index);
+        while (this.closedRuns.size > CLOSED_RUN_RETENTION) this.closedRuns.delete(this.closedRuns.keys().next().value!);
+      }
     }
     // 先 resolve barrier，再 live 扇出：两者都在 COMMIT 之后，顺序按 seq
     for (const w of [...this.waiters.values()]) {

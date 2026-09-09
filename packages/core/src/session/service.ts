@@ -392,8 +392,33 @@ export class SessionService {
     this.pending.add(wrapped);
   }
 
-  private async writeMeta(info: SessionInfo): Promise<void> {
-    await this.store.write(META_FILE, JSON.stringify(info));
+  /**
+   * 整份覆写 meta；返回真正写下去的那份。
+   *
+   * **`status` 是别人也会改的字段**：`setSessionStatus()` 从外面把这一段置 `closed`（`session_close` / 会话列表），
+   * 而这里按内存里的 `info` 整份覆写——不看盘就会把 closed 盖回 active，关掉的段被自己的一次入账悄悄复活。
+   * 止血版（2026-09-09 拍板，review 2026-09-07 #57）：写之前看一眼盘上的 status，closed 就保住、报一条诊断；
+   * 根治（status 独立成文件）是盘格式变更，另拍。盘上读不出来（没有 / 坏档）时不拦——那是别的路径的事。
+   */
+  private async writeMeta(info: SessionInfo): Promise<SessionInfo> {
+    let next = info;
+    if (info.status !== "closed" && (await this.peekStatus()) === "closed") {
+      next = { ...info, status: "closed" };
+      this.onDiagnostic?.({ code: "session_closed_underneath", message: `会话 ${info.id} 已被别处置 closed；本段的入账不再把它改回 active` });
+    }
+    await this.store.write(META_FILE, JSON.stringify(next));
+    return next;
+  }
+
+  private async peekStatus(): Promise<SessionInfo["status"] | undefined> {
+    try {
+      const raw = await this.store.read(META_FILE);
+      if (raw === null) return undefined;
+      const status = (JSON.parse(raw) as { status?: unknown }).status;
+      return status === "active" || status === "closed" ? status : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -415,7 +440,7 @@ export class SessionService {
       updatedAt: Date.now(),
       messageCount: cursor.info.messageCount + added.filter((e) => e.kind === "message").length,
     };
-    await this.writeMeta(cursor.info);
+    cursor.info = await this.writeMeta(cursor.info); // 盘上已 closed 时写下去的是 closed 那份：游标跟着走，下次不再报
     cursor.metaWritten = true;
   }
 

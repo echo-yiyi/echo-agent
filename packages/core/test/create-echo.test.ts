@@ -820,6 +820,7 @@ test("给了 stateDir 的非 main 段：createEcho 按 stateDir 读自己的 met
   const echo = await createEcho({
     provider: scripted([textTurn("ok")]),
     allowNetwork: false,
+    sessionsRoot: root,
     stateDir: join(root, child.id),
     sessionId: child.id,
     extensionDirs: [],
@@ -828,6 +829,36 @@ test("给了 stateDir 的非 main 段：createEcho 按 stateDir 读自己的 met
   running.push(echo);
   expect([...echo.agent.tools.keys()]).not.toContain("session_create");
   expect([...echo.agent.tools.keys()]).toContain("session_send");
+});
+
+test("开了会话面就不能用 stateDir 把这一段放到 sessionsRoot 之外：createEcho 当场抛（review 2026-09-07 #89，2026-09-09 拍板 fail-loud）", async () => {
+  const root = await tmp();
+  const base = { provider: scripted([textTurn("ok")]), allowNetwork: false, sessionsRoot: root, extensionDirs: [], sessions: {} };
+  // 没给 sessionId：目录永远对不上
+  await expect(createEcho({ ...base, stateDir: join(root, "s1") })).rejects.toThrow("不能用 stateDir");
+  // 给了 sessionId 但目录在别处
+  await expect(createEcho({ ...base, stateDir: join(await tmp(), "s1"), sessionId: "s1" })).rejects.toThrow("不能用 stateDir");
+  // 指到 sessionsRoot/<sessionId>：放行
+  const ok = await createEcho({ ...base, stateDir: join(root, "s1"), sessionId: "s1" });
+  running.push(ok);
+  expect(ok.agent.state.sessionId).toBe("s1");
+  // 不开会话面：stateDir 随便放（单会话形态没有「别人」）
+  const alone = await createEcho({ provider: scripted([textTurn("ok")]), allowNetwork: false, stateDir: join(await tmp(), "anywhere"), extensionDirs: [] });
+  running.push(alone);
+});
+
+test("会话面判「活着」看的是锁 + 持有者进程：崩溃留下的锁（pid 没了）算没在跑，发过去走叫醒（review 2026-09-07 #90，2026-09-09 拍板加 pid 探针）", async () => {
+  const root = await tmp();
+  const main = await createEcho({ provider: scripted([textTurn("ok")]), allowNetwork: false, sessionsRoot: root, extensionDirs: [], sessions: {} }); // 没给 runner
+  running.push(main);
+  await main.start();
+  const peer = await main.sessions.create({ message: "干活", main: false });
+  const lock = join(root, peer.id, ".lock");
+  await writeFile(lock, JSON.stringify({ holder: "死掉的", pid: 2 ** 22, at: Date.now() }));
+  // 锁文件合法但进程没了：不算活着 → 要叫醒 → 这个容器没 runner → unreachable（此前会判「活着」直接投递，消息躺在没人读的 inbox 里）
+  expect(await main.sessions.send(peer.id, "在吗")).toMatchObject({ kind: "rejected", reason: "unreachable" });
+  await writeFile(lock, JSON.stringify({ holder: "活着的", pid: process.pid, at: Date.now() }));
+  expect(await main.sessions.send(peer.id, "在吗")).toMatchObject({ kind: "accepted", alive: true });
 });
 
 test("会话的缺省命名：第一句人话的首行当名字，之后不再改（2026-09-07）", async () => {

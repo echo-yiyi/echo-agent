@@ -47,9 +47,6 @@ const DIR_MODE = 0o700;
  */
 type CredentialRecord = {
   apiKey?: unknown;
-  access?: unknown;
-  refresh?: unknown;
-  expires?: unknown;
 };
 
 /** 临时文件名的进程内序号。理由同 `FileDir.write()`：只靠 pid + 毫秒会在并发写时碰撞。 */
@@ -175,12 +172,9 @@ function toCredential(record: unknown, providerId: string, path: string): Creden
   }
   const r = record as CredentialRecord;
   if (typeof r.apiKey === "string" && r.apiKey !== "") return { type: "api_key", key: r.apiKey };
-  if (typeof r.access === "string" && typeof r.refresh === "string" && typeof r.expires === "number") {
-    return { type: "oauth", access: r.access, refresh: r.refresh, expires: r.expires };
-  }
-  throw new Error(
-    `凭据文件里 '${providerId}' 那条认不出来（既没有非空的 apiKey，也不是一份完整的 oauth 凭据）：${path}`,
-  );
+  // 2026-09-09 之前这里还认 `{ access, refresh, expires }`（OAuth 半接线，已摘）：老文件里若有那样一条，照样判「认不出」——
+  // 它从来没被任何请求路径用过，静默跳过等于把「配了但没用上」变成「没配」
+  throw new Error(`凭据文件里 '${providerId}' 那条认不出来（没有非空的 apiKey）：${path}`);
 }
 
 /**
@@ -190,9 +184,7 @@ function toCredential(record: unknown, providerId: string, path: string): Creden
  * 对一份存在文件里的凭据没有意义，写进去只会让下次读出来的 `env` 说谎。
  */
 function toRecord(credential: Credential): CredentialRecord {
-  return credential.type === "api_key"
-    ? { apiKey: credential.key }
-    : { access: credential.access, refresh: credential.refresh, expires: credential.expires };
+  return { apiKey: credential.key };
 }
 
 function isNotFound(e: unknown): boolean {

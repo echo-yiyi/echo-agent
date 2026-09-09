@@ -59,7 +59,7 @@ function lastUserText(messages: readonly AgentMessage[]): string | undefined {
 }
 
 function ctx(): HookContext {
-  return { origin: "user", depth: 0, hookId: "" };
+  return { origin: "user", hookId: "" };
 }
 
 /* ─────────────── 1. 工具只认本轮快照 ─────────────── */

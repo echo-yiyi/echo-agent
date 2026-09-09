@@ -253,6 +253,47 @@ describe("hole 与 CanonicalObservationGap", () => {
     expect(h.seq.committedSeq).toBe(4);
   });
 
+  test("连续溢出合并成一条 gap：ring 2 条、offer 1 000 条 → 998 个 hole 共用一条 gap，dropped=998，gap 紧跟末 hole（2026-09-09 改不变量）", async () => {
+    const h = harness({ ringCapacity: 2 });
+    for (let i = 1; i <= 1000; i++) h.seq.offer(bounded({ i }));
+    expect(h.seq.reservedSeq).toBe(1000); // 溢出只占自己的 hole seq，gap 还没预留
+    await h.flush();
+    const recs = h.seq.committedRecords();
+    const gaps = recs.filter((r) => r.name === "observation.gap");
+    expect(gaps).toHaveLength(1);
+    const body = gaps[0]!.body as ObservationGap;
+    expect(body).toEqual({ afterSeq: 2, beforeSeq: 1001, dropped: 998, reason: "buffer_overflow" });
+    expect(body.dropped).toBe(body.beforeSeq - body.afterSeq - 1);
+    expect(gaps[0]!.seq).toBe(1001);
+    expect(gaps[0]!.attributes).toMatchObject({ reason: "buffer_overflow", coveredSeq: 3, coveredThrough: 1000 });
+    expect(recs.map((r) => r.seq)).toEqual([1, 2, 1001]);
+    expect(h.seq.committedSeq).toBe(1001);
+    expect(h.seq.health().capture.canonicalGapCount).toBe(1);
+    expect(h.diags.filter((d) => d.code === "observation_hole")).toHaveLength(1); // 一段区间一条诊断
+  });
+
+  test("溢出区间由下一次别的预留收口：gap 落在区间末尾、在那条记录之前；不同 run 的溢出分开记，run-scoped 的把 index 置 partial", async () => {
+    const h = harness({ ringCapacity: 1 });
+    const run = "run-ov";
+    await acceptRun(h, run); // seq 1，已 commit
+    h.seq.offer(bounded({ keep: 1 }, { scope: { runtimeId: RT, runId: run } })); // seq 2：占满 ring
+    h.seq.offer(bounded({ drop: 1 }, { scope: { runtimeId: RT, runId: run } })); // seq 3：run-scoped 溢出
+    h.seq.offer(bounded({ drop: 2 }, { scope: { runtimeId: RT, runId: run } })); // seq 4：同一区间
+    h.seq.offer(bounded({ drop: 3 })); // seq 5：runtime-scoped → 上一段收口？不：不同归属先收口再开新段 → 收口 gap 占 5，这条 hole 是 6
+    const closed = await h.seq.appendBoundary(boundary("run.closed", closedBody(), run)); // 收口第二段：gap 7，run.closed 8
+    const recs = h.seq.committedRecords();
+    const gaps = recs.filter((r) => r.name === "observation.gap").map((r) => ({ seq: r.seq, runId: r.scope.runId, body: r.body as ObservationGap }));
+    expect(gaps).toEqual([
+      { seq: 5, runId: run, body: { afterSeq: 2, beforeSeq: 5, dropped: 2, reason: "buffer_overflow" } },
+      { seq: 7, runId: undefined, body: { afterSeq: 5, beforeSeq: 7, dropped: 1, reason: "buffer_overflow" } },
+    ]);
+    expect(closed.seq).toBe(8);
+    expect(recs.map((r) => r.seq)).toEqual([1, 2, 5, 7, 8]);
+    const idx = h.seq.committedRunIndex(run)!;
+    expect(idx.header.integrity).toBe("partial");
+    expect((idx.terminalRecordId !== undefined && (recs.find((r) => r.seq === 8)!.body as { captureGapCountBeforeClose?: number }).captureGapCountBeforeClose)).toBe(1);
+  });
+
   test("run-scoped gap 把 RunIndex integrity 置 partial，且同事务", async () => {
     const h = harness();
     const run = "run-1";
@@ -327,6 +368,28 @@ describe("run 边界：唯一 emission 与 RunIndex 物化", () => {
     await expect(h.seq.appendBoundary(boundary("run.closed", closedBody(), run))).resolves.toBeDefined();
     await expect(h.seq.appendBoundary(boundary("run.closed", closedBody(), run))).rejects.toThrow(/已发过/);
     expect(h.diags.filter((d) => d.code === "observation_boundary_rejected")).toHaveLength(3);
+  });
+
+  test("封口后 per-run 状态有界：最近 256 段的 index 还在缓存里、更老的只在 store；老 run 重发 accepted 由 store 的 CAS 判红（2026-09-09，#46）", async () => {
+    const h = harness();
+    for (let i = 1; i <= 300; i++) {
+      const run = `run-${i}`;
+      await acceptRun(h, run);
+      await h.seq.appendBoundary(boundary("run.closed", closedBody(), run));
+    }
+    expect(h.seq.committedRunIndex("run-300")?.header.status).toBe("completed");
+    expect(h.seq.committedRunIndex("run-45")?.header.status).toBe("completed"); // 300-256+1 = 45 是最老还在缓存里的
+    expect(h.seq.committedRunIndex("run-44")).toBeUndefined();
+    expect((await h.store.readRunIndex("run-44"))?.header.status).toBe("completed"); // store 里还在
+    // 还在缓存里的：同步拒，不消耗 seq
+    const before = h.seq.reservedSeq;
+    await expect(acceptRun(h, "run-300")).rejects.toThrow(/已发过/);
+    expect(h.seq.reservedSeq).toBe(before);
+    // 出了缓存的：生命周期判据放它过，commit 时 RunIndex CAS（期望不存在、实际存在）判红——writer 封口，这是 bug 不是运行态
+    await expect(acceptRun(h, "run-44")).rejects.toThrow();
+    expect(h.seq.persistenceState.status).toBe("sealed");
+    // 封口后的 record 一律 gap（边界登记已删，与从前一样）
+    expect(h.diags.some((d) => d.code === "observation_writer_sealed" || /sealed|封/.test(d.message))).toBe(true);
   });
 
   test("run.accepted 的 body.header.runId 必须与 scope 一致", async () => {

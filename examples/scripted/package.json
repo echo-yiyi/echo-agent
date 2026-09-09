@@ -2,12 +2,11 @@
   "name": "echo-example-scripted",
   "private": true,
   "type": "module",
-  "description": "自带工具与假 provider 的样例:零凭据可跑。",
+  "description": "自带工具与假 provider 的样例:零凭据可跑。也是「不装 @types/bun 也能用」的判据:只依赖 @echo-agent/core 与 typescript。",
   "dependencies": {
     "@echo-agent/core": "*"
   },
   "devDependencies": {
-    "@types/bun": "latest",
     "typescript": "^5.7.0"
   },
   "scripts": {
