@@ -43,11 +43,11 @@ import {
   type Provider,
   type SessionRunner,
 } from "@echo-agent/core";
-import type { TUI } from "@earendil-works/pi-tui";
 import { join } from "node:path";
-import { tuiShell } from "./extension.ts";
 import { instructionsEntry } from "./instructions.ts";
 import { pipeSurfaceEntry } from "./prompt.ts";
+import { terminalShell } from "./extension.ts";
+import type { Shell } from "./shell.ts";
 import { run } from "./run.ts";
 import { runObserve } from "./observe.ts";
 import { runFirstRunSetup, type FirstRunChoice } from "./first-run.ts";
@@ -231,8 +231,11 @@ export function parseArgs(argv: readonly string[], name: string = ECHO_AGENT.nam
 export type MainDeps = Readonly<{
   /** 凭据来源。缺省 `FileCredentialStore()` —— `$ECHO_HOME/credentials.json`。 */
   credentials?: CredentialStore;
-  /** 测试注入：假终端。 */
-  ui?: TUI;
+  /**
+   * 测试注入：假界面。**类型是 `unknown`**——装配层不认识任何界面技术（2026-09-09 的壳端口），
+   * 认识了就等于把某一种终端库写回启动逻辑里。壳的实现方自己收窄（`terminalShell` 收成 pi-tui 的 `TUI`）。
+   */
+  ui?: unknown;
   /** 测试注入：验 key 的方式。缺省真打一次 `GET {baseUrl}/models`。 */
   verify?: VerifyFn;
 }>;
@@ -346,7 +349,7 @@ export type Main = (argv: readonly string[], interactive?: boolean, deps?: MainD
  *   **形态判据只有这一个**——不再引入第二处「有没有人坐在终端前」的判断。
  * 第三个参数 `deps` 是注入点。生产一个都不给：真凭据文件、真终端、真 HTTP 验证。
  */
-export function mainFor(product: Product): Main {
+export function mainFor(product: Product, shell: Shell): Main {
   return async (
     argv: readonly string[],
     interactive: boolean = process.stdin.isTTY === true,
@@ -407,7 +410,7 @@ export function mainFor(product: Product): Main {
           );
           return 1;
         }
-        const outcome = await runFirstRunSetup({
+        const outcome = await shell.firstRun({
           product,
           choices,
           credentials,
@@ -436,7 +439,7 @@ export function mainFor(product: Product): Main {
       // 无界面形态排在最前：它既不是交互也不是管道——不装壳、不读 stdin，跑完就退。
       if (effective.serve) return await runServe(product, form, effective, provider, choices, credentials, sessionId, controller.signal);
       return interactive
-        ? await runInteractive(product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, sessionId, notices, controller.signal, deps)
+        ? await runInteractive(shell, product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, sessionId, notices, controller.signal, deps)
         : await runPiped(product, form, effective, provider, choices, credentials, sessionId, notices, controller.signal);
     } catch (e) {
       // 装配失败（锁被别的进程占着、状态根不可写、目录为空）一律**明说**并非零退出。
@@ -450,7 +453,7 @@ export function mainFor(product: Product): Main {
 }
 
 /** `echo-agent` 自己的入口：`bin/echo-agent.ts` 调的就是它。 */
-export const main: Main = mainFor(ECHO_AGENT);
+export const main: Main = mainFor(ECHO_AGENT, terminalShell);
 
 /** 管道形态：`run()` 自己会 `echo.stop()`（它的 `finally`），所以这里不重复收摊。 */
 /**
@@ -591,6 +594,7 @@ async function runPiped(
  * 占着且不肯让），这时退回刚才那一段——只退一次，退不回去就照旧 fail-loud。
  */
 async function runInteractive(
+  shell: Shell,
   product: Product,
   form: PresetForm,
   opts: CliOptions,
@@ -609,7 +613,7 @@ async function runInteractive(
   /** 上一段的 id。只在「刚换过段」时有值——换不成就退回它，退一次。 */
   let fallback: string | undefined;
   for (;;) {
-    const shell = tuiShell({
+    const ui = shell.open({
       product,
       signal,
       ...(deps.ui !== undefined ? { ui: deps.ui } : {}),
@@ -617,9 +621,9 @@ async function runInteractive(
       configure: {
         providers: choices,
         credentials,
-        onModelChange: (m): void => {
+        onModelChange: (m: { provider: string; id: string }): void => {
           void writeSettings({ model: m }).then((w) => {
-            if (w.problem !== undefined) shell.notify(`[设置] ${w.problem}`);
+            if (w.problem !== undefined) ui.notify(`[设置] ${w.problem}`);
           });
         },
         ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
@@ -630,11 +634,11 @@ async function runInteractive(
       ...base,
       // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的
       // `AgentRuntime` 由 builtin 那一代提供（`create-echo.ts`），与同代里谁先谁后无关。
-      extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: shell.definition }],
+      extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: ui.definition }],
     });
     // 启动口信与装配诊断（D6）进界面：壳 mount 在先、这里在后，notify 直通或先攒着
-    for (const n of pending) shell.notify(n);
-    for (const d of echo.diagnostics) shell.notify(`[扩展] 没装上：${d.message}${d.path !== undefined ? `（${d.path}）` : ""}`);
+    for (const n of pending) ui.notify(n);
+    for (const d of echo.diagnostics) ui.notify(`[扩展] 没装上：${d.message}${d.path !== undefined ? `（${d.path}）` : ""}`);
     pending = [];
     try {
       // **启停归这一层**，不归壳：协议里没有 `start`/`stop`，壳子想碰也碰不到。
@@ -652,7 +656,7 @@ async function runInteractive(
     const openedId = echo.agent.state.sessionId ?? undefined;
     let exit;
     try {
-      exit = await shell.exited;
+      exit = await ui.exited;
     } finally {
       await echo.stop(); // 先卸 Extension（含壳自己）再停 Agent
     }

@@ -12,7 +12,7 @@
 // 评测或别的宿主可以自己传——本产品不缺省开它。
 
 import { readFileSync } from "node:fs";
-import { conductEntry, mainFor, type Product } from "echo-agent";
+import { conductEntry, mainFor, terminalShell, type Product } from "echo-agent";
 import { codingPreset } from "./agent.ts";
 
 /** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置。 */
@@ -38,4 +38,5 @@ export const ECHO_CODING: Product = Object.freeze({
 });
 
 /** 进程入口的实质：`echo-agent` 的 `main` 绑上本产品。签名与它完全相同，退出码语义也相同。 */
-export const main = mainFor(ECHO_CODING);
+// 壳由**产品**选（2026-09-09）：装配层只认端口，这里挑终端那份实现。做 web / 桌面界面的产品换掉这一个参数即可。
+export const main = mainFor(ECHO_CODING, terminalShell);

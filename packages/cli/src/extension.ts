@@ -20,6 +20,8 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { runTui, type TuiConfigureOptions } from "./app.ts";
 import type { Product } from "./product.ts";
 import { surfaceSection } from "./prompt.ts";
+import { runFirstRunSetup } from "./first-run.ts";
+import type { Shell } from "./shell.ts";
 
 /**
  * 界面为什么停下来。**退出与换段是两种停法**（2026-09-07）：前者进程收摊，
@@ -174,3 +176,20 @@ export function tuiShell(
 
   return { definition, exited, notify };
 }
+
+/**
+ * 终端那份 `Shell` 实现（2026-09-09）：装配层只认端口，这里把界面本体与引导设置打成一件东西。
+ *
+ * `ui` 在端口上是 `unknown`（端口不认识任何界面技术），到这里收窄回 pi-tui 的 `TUI`——
+ * 注入假界面是测试的事，谁实现壳谁认识自己的假件。
+ */
+export const terminalShell: Shell = {
+  open: (opts) =>
+    tuiShell({
+      ...(opts.product !== undefined ? { product: opts.product } : {}),
+      ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+      ...(opts.ui !== undefined ? { ui: opts.ui as TUI } : {}),
+      ...(opts.configure !== undefined ? { configure: opts.configure } : {}),
+    }),
+  firstRun: ({ ui, ...rest }) => runFirstRunSetup({ ...rest, ...(ui !== undefined ? { ui: ui as TUI } : {}) }),
+};

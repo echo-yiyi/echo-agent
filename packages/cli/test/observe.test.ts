@@ -9,6 +9,7 @@ import { createEcho, createProvider, createProviderStreams, observationDatabaseP
 import { scriptedDialect, textTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { parseObserveArgs, runObserve, type ObserveIo } from "../src/observe.ts";
 import { mainFor } from "../src/cli.ts";
+import { terminalShell } from "../src/extension.ts";
 import { ECHO_AGENT } from "../src/product.ts";
 import { run, type Sink } from "../src/run.ts";
 
@@ -192,10 +193,10 @@ test("main：`observe` 在一切启动逻辑之前分走——不装配、不取
   const r = await echo.send("x");
   await echo.stop();
   // 主命令的形态判断、凭据检查都不该被触发：这里没有 provider 凭据，非交互形态本该以 1 退出并抱怨凭据
-  const code = await mainFor(ECHO_AGENT)(["observe", "show", r.runId, "--state-dir", dir], false);
+  const code = await mainFor(ECHO_AGENT, terminalShell)(["observe", "show", r.runId, "--state-dir", dir], false);
   expect(code).toBe(0);
   expect(existsSync(join(dir, echo.agent.state.sessionId!, ".lock")), "observe 不许取锁").toBe(false);
-  expect(await mainFor(ECHO_AGENT)(["observe", "bogus"], false)).toBe(2);
+  expect(await mainFor(ECHO_AGENT, terminalShell)(["observe", "bogus"], false)).toBe(2);
 });
 
 test("管道形态：每轮结束在 err 打 `[run] <run-id> …`，正文不受影响", async () => {

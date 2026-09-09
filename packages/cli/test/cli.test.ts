@@ -36,6 +36,7 @@ import { PassThrough } from "node:stream";
 import { echoOptions, main, mainFor, parseArgs, usage, wakeArgs } from "../src/cli.ts";
 import { ECHO_AGENT, type PresetForm } from "../src/product.ts";
 import { isConfigured } from "../src/setup.ts";
+import { terminalShell } from "../src/extension.ts";
 import { fakeTui } from "./fake-tui.ts";
 import { linesOf } from "../src/stdin.ts";
 import { run, type Sink } from "../src/run.ts";
@@ -659,7 +660,7 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
         forms.push(form);
         return { extensions: [{ entryId: "test:probe", definition: probe as never }] };
       },
-    });
+    }, terminalShell);
     const running = productMain(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
       ui,
       credentials,
@@ -700,7 +701,7 @@ test("mainFor：preset 的 Extension 装不上 → 整个启动失败、退出�
       name: "echo-试产品",
       version: "9.9.9",
       preset: () => ({ extensions: [{ entryId: "test:broken", definition: broken as never }] }),
-    });
+    }, terminalShell);
     const code = await productMain(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
       ui,
       credentials,

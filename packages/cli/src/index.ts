@@ -12,7 +12,13 @@
 // 运行时依赖恒空是硬门，而交互式终端要 `pi-tui`。core 保持纯库不出 bin。
 
 /** 官方壳的 Extension 形态：交给 `createEcho({ extensions })` 去 mount。 */
-export { tuiShell, type TuiShell } from "./extension.ts";
+export { tuiShell, terminalShell, type TuiShell } from "./extension.ts";
+
+/**
+ * 壳端口（2026-09-09）：装配层只认它，谁实现它、用什么画界面都行。终端那份实现是 `terminalShell`；
+ * 做 web / 桌面界面的产品自己实现一份交给 `mainFor()`。
+ */
+export type { Shell, ShellConfigure, ShellExit, ShellFirstRunOptions, ShellHandle, ShellOpenOptions } from "./shell.ts";
 
 /**
  * 共用的工作纪律段。**产品自己挂**（2026-09-09 拍板，记录见
