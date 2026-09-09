@@ -107,6 +107,12 @@ export class SessionObservationReaders {
     return this.readers.size;
   }
 
+  private unreadableSessions: Readonly<Record<string, string>> = {};
+  /** 有库但打不开的会话 → 原因。`/api/health` 与 `observe health` 报它，其余会话照看。 */
+  get unreadable(): Readonly<Record<string, string>> {
+    return this.unreadableSessions;
+  }
+
   /** 会话根下全部会话的摘要（不只是有库的）。 */
   /** 会话清单为什么没读出来；`undefined` = 读出来了。页面据此说清「为什么没有名字」。 */
   get sessionsProblem(): string | undefined {
@@ -139,11 +145,22 @@ export class SessionObservationReaders {
     const discovered = this.briefsError === undefined ? infos.map((s) => s.id) : this.sessionDirsWithDatabase();
     const wanted = this.opts.sessionId === undefined ? discovered : [this.opts.sessionId];
     const seen = new Set<string>();
+    const unreadable: Record<string, string> = {};
     for (const id of wanted) {
       if (!existsSync(this.databasePath(id))) continue; // 会话有了、agent 还没跑过一条 run：库还没建，不是错
       seen.add(id);
-      if (!this.readers.has(id)) this.readers.set(id, await openObservationReader({ stateRoot: this.stateRoot(id) }));
+      if (this.readers.has(id)) continue;
+      try {
+        this.readers.set(id, await openObservationReader({ stateRoot: this.stateRoot(id) }));
+      } catch (e) {
+        // 一段的库打不开（写坏 / 半建）不该让整个只读面板对全部会话失败（review 2026-09-07）：
+        // 记下原因、跳过它；点名 `--session` 看的就是这一段时照旧抛，让命令行如实报错
+        if (this.opts.sessionId !== undefined) throw e;
+        unreadable[id] = e instanceof Error ? e.message : String(e);
+        seen.delete(id);
+      }
     }
+    this.unreadableSessions = unreadable;
     for (const [id, reader] of this.readers) {
       if (seen.has(id)) continue;
       this.readers.delete(id);

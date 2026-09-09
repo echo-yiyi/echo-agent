@@ -2,7 +2,7 @@
 // 判据：真 createEcho 跑一轮落盘 → 进程内调 `runObserve()` 读回来；活 writer 旁边也能读；没库时诚实报错。
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEcho, createProvider, createProviderStreams, observationDatabasePath, type Echo, type Provider } from "@echo-agent/core";
@@ -94,6 +94,28 @@ test("点名一段不存在的会话：退出码 1，说清库在哪、为什么
   expect(o.err.text).toContain("还没有任何 run");
   expect(o.err.text).toContain(observationDatabasePath(join(dir, "s-nope")));
   expect(existsSync(observationDatabasePath(join(dir, "s-nope")))).toBe(false);
+});
+
+test("一段的观测库打不开：health 跳过它并报原因，其余会话照看、退出 0（review 2026-09-07：此前整个 observe 对全部会话失败，已开的 reader 也没人关）", async () => {
+  const echo = await echoAt([textTurn("你好")]);
+  await echo.send("hi");
+  const good = echo.agent.state.sessionId!;
+  await echo.stop();
+  // 一段登记在案（meta 照抄好的那段、只换 id）、但观测库是一坨坏字节的会话
+  const badRoot = join(dir, "bad-session");
+  mkdirSync(join(badRoot, "observability"), { recursive: true });
+  const meta = JSON.parse(readFileSync(join(dir, good, "meta.json"), "utf8")) as Record<string, unknown>;
+  writeFileSync(join(badRoot, "meta.json"), JSON.stringify({ ...meta, id: "bad-session" }));
+  writeFileSync(observationDatabasePath(badRoot), "not a database");
+  const h = io();
+  expect(await runObserve(["health", "--state-dir", dir], "echo-agent", h)).toBe(0);
+  expect(h.out.text).toContain(good);
+  expect(h.err.text).toContain("bad-session");
+  expect(h.err.text).toContain("跳过");
+  // 点名那一段看的时候照旧如实报错
+  const only = io();
+  expect(await runObserve(["health", "--state-dir", dir, "--session", "bad-session"], "echo-agent", only)).toBe(1);
+  expect(only.err.text).toContain("打不开观测库");
 });
 
 test("last / show / export / health：跑一轮落盘后都读得到；stop 之后也读得到", async () => {

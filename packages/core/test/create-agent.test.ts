@@ -447,6 +447,21 @@ test("不传 store / lock 时用 first-party 默认件（真落盘）", async ()
   expect(existsSync(join(dir, "meta.json"))).toBe(true); // stateDir 就是这一段的目录
 });
 
+test("自定义 store + stateDir：观测库落真盘，一句话没说的段收摊时目录照样清掉（review 2026-09-07：此前按 store 有无跳过清理，留下只有观测库的空壳）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "echo-agent-"));
+  const agent = await createAgent({
+    provider: fakeProvider({ id: "t", models: ["only"] }),
+    store: new InMemoryDir(),
+    lock: new InMemoryStateLock(),
+    stateDir: dir,
+    allowNetwork: false,
+  });
+  await agent.start();
+  expect(existsSync(join(dir, "observability"))).toBe(true); // 观测库在这里
+  await agent.stop();
+  expect(existsSync(dir)).toBe(false);
+});
+
 test("本函数装配的件不许从 `agent` 透传口再塞一次——**判据是 tsc**", () => {
   // 「接受配置后又静默覆盖」是最坏的一种参数：写了没生效。
   // 判据落在类型上，所以这里用 `@ts-expect-error`——**omit 少一个，那条指令就变成

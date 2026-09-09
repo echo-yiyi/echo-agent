@@ -13,6 +13,7 @@ import { createProviderStreams } from "../src/provider/dialect.ts";
 import { scriptedDialect, textTurn, type ScriptedTurn } from "../src/testing.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { RunObservationHeader } from "../src/observability/types.ts";
+import { encodeCanonical, syncEncodingLimits } from "../src/observability/normalize.ts";
 
 // Inbox 行的观测（2026-09-05）：账本是唯一发点。
 //   单测：内存账本 + 假 sink，accept / 去重 / reserve → consumed / ack / release 各出一条什么；
@@ -83,6 +84,18 @@ test("descriptor：metadata 档只留结构（id / source / ref / 计数），�
   const batch = inboxFactDescriptor.project({ kind: "acked", records: [{ role: "user" }, { role: "user" }], reservationId: "rsv:x", runId: "run:7", occurredAt: 2 }, "metadata")!;
   expect(batch.attributes).toEqual({ count: 2, runId: "run:7" });
   expect(batch.scope).toEqual({ activityId: "inbox:rsv:x" });
+});
+
+test("content 档整条 fact 的正文共享预算：20 × 4000 CJK 的一批投影后仍编得进同步上限，超预算的只留结构并计入 textOmitted（review 2026-09-07）", () => {
+  const records = Array.from({ length: 20 }, (_, i) => ({ role: "user" as const, recordId: `r${i}`, text: "中".repeat(4000) }));
+  const fact: InboxFact = { kind: "consumed", records, reservationId: "rsv:1", runId: "run:1", occurredAt: 1 };
+  const full = inboxFactDescriptor.project(fact, "content")!;
+  expect(() => encodeCanonical(full.body, syncEncodingLimits())).not.toThrow(); // 此前 6 条就把整条 fact 顶成 gap
+  const body = full.body as { records: { text?: string }[]; textOmitted?: number };
+  expect(body.records.length).toBe(20);
+  expect(body.records[0]!.text).toBe("中".repeat(4000)); // 排前面的完整
+  expect(body.textOmitted).toBeGreaterThan(0);
+  expect(body.records.filter((r) => r.text === undefined).length).toBe(body.textOmitted!);
 });
 
 test("FileDir 账本：别的进程（另一段会话的 session_send）写进目录的 record，refresh 发现 → accepted via=refresh，带发送方 ref", async () => {

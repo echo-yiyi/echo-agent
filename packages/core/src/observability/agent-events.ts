@@ -94,7 +94,7 @@ const LO_MAX = 0xdfff;
  * 扫描长度按 `room` 封顶——每个 code unit 至少 1 字节，扫过 `room` 个必然已经停了；
  * 否则一条 5 MB 的 text block 会让「按预算截断」自己变成 O(输入) 的无界工作。
  */
-function takePrefix(s: string, room: number): Readonly<{ text: string; used: number; truncated: boolean }> {
+export function takePrefix(s: string, room: number): Readonly<{ text: string; used: number; truncated: boolean }> {
   const cap = s.length < room ? s.length : room;
   let cost = 0;
   let i = 0;

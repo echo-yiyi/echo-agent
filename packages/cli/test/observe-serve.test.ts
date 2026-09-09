@@ -335,6 +335,20 @@ test("页面自足：token CSS 与术语表内联，不引外部资源", () => {
   expect(own.split("<style>")[1]?.split("</style>")[0] ?? "").not.toMatch(/#[0-9a-fA-F]{3,6}\b|oklch\(/);
 });
 
+test("serve：Host / Origin 不是自己绑的地址 → 403（DNS rebinding 防线，review 2026-09-07）；本机请求与同源 Origin 照旧 200", async () => {
+  const reader = new SessionObservationReaders({ sessionsRoot: dir });
+  const server = startObserveServer({ readers: reader, port: 0 });
+  try {
+    expect((await fetch(`${server.url}/api/health`)).status).toBe(200);
+    expect((await fetch(`${server.url}/api/health`, { headers: { host: "evil.example:4321" } })).status).toBe(403);
+    expect((await fetch(`${server.url}/api/health`, { headers: { origin: "http://evil.example" } })).status).toBe(403);
+    expect((await fetch(`${server.url}/api/health`, { headers: { origin: server.url } })).status).toBe(200);
+  } finally {
+    await server.stop();
+    await reader.close();
+  }
+});
+
 test("serve：/ 出页面，/api/runs、/api/runs/<id>、/api/health 出 reader 的真数据；未知 run 404；能停", async () => {
   const echo = await echoAt([textTurn("你好")]);
   const r = await echo.send("hi");

@@ -20,7 +20,11 @@ import type { SessionObservationReaders } from "./sessions.ts";
 
 export type ObserveServerOptions = Readonly<{
   readers: SessionObservationReaders;
-  /** 缺省只绑 127.0.0.1：这是本机面板，不做鉴权，不能暴露到局域网。 */
+  /**
+   * 缺省只绑 127.0.0.1：这是本机面板，不做鉴权，不能暴露到局域网。
+   * 只绑回环挡不住浏览器里的页面：DNS rebinding 能让别的站点的脚本打到 127.0.0.1——所以请求还要过 Host / Origin 白名单
+   * （review 2026-09-07），只认自己绑的那个地址与端口。
+   */
   hostname?: string;
   /** 0 = 随机端口（测试用）。 */
   port?: number;
@@ -59,12 +63,35 @@ function clampLimit(raw: string | null, fallback: number): number {
 export function startObserveServer(opts: ObserveServerOptions): ObserveServer {
   const readers = opts.readers;
   const hostname = opts.hostname ?? "127.0.0.1";
+  /** 允许的 `Host` / `Origin` 主机部分：绑回环时三种写法都认；绑到别的地址就只认那一个。端口要等 serve 起来才知道，按需算。 */
+  let allowedHosts: ReadonlySet<string> | null = null;
+  const hostAllowed = (host: string | null): boolean => {
+    if (host === null) return false;
+    if (allowedHosts === null) {
+      const port = server.port;
+      const loopback = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+      allowedHosts = new Set(loopback ? [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`] : [`${hostname}:${port}`]);
+    }
+    return allowedHosts.has(host);
+  };
   const server = Bun.serve({
     hostname,
     port: opts.port ?? 4321,
     async fetch(req) {
       const url = new URL(req.url);
       if (req.method !== "GET") return json({ error: "method not allowed" }, 405);
+      // DNS rebinding 防线：Host 必须是自己绑的地址；带 Origin 的（浏览器跨站 fetch）Origin 也得是
+      if (!hostAllowed(req.headers.get("host"))) return json({ error: "forbidden host" }, 403);
+      const origin = req.headers.get("origin");
+      if (origin !== null) {
+        let originHost: string | null = null;
+        try {
+          originHost = new URL(origin).host;
+        } catch {
+          originHost = null;
+        }
+        if (!hostAllowed(originHost)) return json({ error: "forbidden origin" }, 403);
+      }
       try {
         if (url.pathname === "/") {
           return new Response(observePageHtml(), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
@@ -76,6 +103,8 @@ export function startObserveServer(opts: ObserveServerOptions): ObserveServer {
             sessions: await readers.health(),
             // 会话清单读不出来时 run 照看，但产品名 / 工作目录会缺——原因如实报出，不让页面自己猜
             ...(readers.sessionsProblem === undefined ? {} : { sessionsProblem: readers.sessionsProblem }),
+            // 有库但打不开的会话：跳过了它们，原因在这里
+            ...(Object.keys(readers.unreadable).length === 0 ? {} : { unreadable: readers.unreadable }),
             now: Date.now(),
           });
         }

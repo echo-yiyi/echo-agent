@@ -13,6 +13,8 @@
 import type { AgentMessage } from "../messages.ts";
 import type { CapabilityFactDescriptor, ObservationFactProjection } from "../observability/fact-sink.ts";
 import { sha256Hex } from "../observability/hash.ts";
+import { takePrefix } from "../observability/agent-events.ts";
+import { projectionEncodingLimits } from "../observability/normalize.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
 
 export type InboxFactKind = "accepted" | "rejected" | "restored" | "consumed" | "acked" | "released" | "sealed";
@@ -49,8 +51,30 @@ export type InboxFact = Readonly<{
 
 export const INBOX_INSTRUMENTATION = { name: "echo.inbox", version: "1" } as const;
 
-/** 每条正文摘要的上限：一批几十条长消息不能把整条 fact 顶过 64 KiB 变 gap。 */
+/** 每条正文摘要的**预切**上限（store 侧，不知道采集档）。整条 fact 不变 gap 的保障不在这里——在 `budgetTexts`。 */
 const TEXT_LIMIT = 4_000;
+/** content 档整条 fact 的正文字节预算：投影上限减一点余量给结构字段。 */
+const FACT_TEXT_BUDGET_RESERVE = 8 * 1024;
+
+/**
+ * content 档：一批记录的正文共享一个字节预算，按顺序取前缀，预算用完的只留结构、计入 `textOmitted`——
+ * 单条 4000 字符的预切挡不住一批几十条把整条 fact 顶过 64 KiB 变 gap（review 2026-09-07 实测：6 × 4000 个 CJK 就超）。
+ */
+function budgetTexts(records: readonly InboxRecordBrief[]): { records: InboxRecordBrief[]; omitted: number } {
+  let room = projectionEncodingLimits().maxBytes - FACT_TEXT_BUDGET_RESERVE;
+  let omitted = 0;
+  const out = records.map((r) => {
+    if (r.text === undefined) return r;
+    if (room <= 0) {
+      omitted += 1;
+      return withoutText(r);
+    }
+    const prefix = takePrefix(r.text, room);
+    room -= prefix.used;
+    return prefix.truncated ? { ...r, text: prefix.text, textTruncated: true } : r;
+  });
+  return { records: out, omitted };
+}
 
 /** 从 record 的消息取摘要。正文总是取（store 不知道采集档），descriptor 投影时按档去留。 */
 export function inboxRecordBrief(message: AgentMessage, recordId?: string): InboxRecordBrief {
@@ -104,6 +128,7 @@ export const inboxFactDescriptor: CapabilityFactDescriptor<InboxFact> = {
     if (fact.reason !== undefined) attributes.reason = fact.reason;
     if (fact.runId !== undefined) attributes.runId = fact.runId;
     const activityId = fact.reservationId !== undefined ? `inbox:${fact.reservationId}` : first?.recordId !== undefined ? `inbox:${first.recordId}` : "inbox";
+    const budgeted = content ? budgetTexts(fact.records) : { records: fact.records.map(withoutText), omitted: 0 };
     return {
       occurredAt: fact.occurredAt,
       kind: "event",
@@ -111,7 +136,8 @@ export const inboxFactDescriptor: CapabilityFactDescriptor<InboxFact> = {
       scope: { activityId },
       attributes,
       body: {
-        records: fact.records.map((r) => (content ? r : withoutText(r))),
+        records: budgeted.records,
+        ...(budgeted.omitted === 0 ? {} : { textOmitted: budgeted.omitted }),
         ...(fact.deduplicated === undefined ? {} : { deduplicated: fact.deduplicated }),
         ...(fact.via === undefined ? {} : { via: fact.via }),
         ...(fact.reason === undefined ? {} : { reason: fact.reason }),

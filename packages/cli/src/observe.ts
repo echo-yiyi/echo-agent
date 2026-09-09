@@ -195,26 +195,29 @@ export async function runObserve(argv: readonly string[], name: string, io: Obse
   }
   const sessionsRoot = expandHome(opts.stateDir ?? resolveSessionsRoot());
   const readers = new SessionObservationReaders({ sessionsRoot, ...(opts.sessionId === undefined ? {} : { sessionId: opts.sessionId }) });
+  // refresh 也在 try 里：扫到一半某段库打不开而抛时，已开的 reader 要有人关（review 2026-09-07：此前这条路直接 return，reader 泄漏）
   try {
-    await readers.refresh(true);
-  } catch (e) {
-    io.err.write(`打不开观测库：${e instanceof Error ? e.message : String(e)}\n`);
-    return 1;
-  }
-  // 一个库都没有：面板照样起（agent 稍后起来就有了），查询类命令诚实说没有——分清「没有会话」与「会话有了、还没跑过 run」，
-  // 那两句话指的不是同一件事。
-  if (readers.size === 0 && opts.command.kind !== "serve") {
-    if (opts.sessionId !== undefined) io.err.write(`会话 ${opts.sessionId} 还没有任何 run 的观测记录（${readers.databasePath(opts.sessionId)} 不存在）\n`);
-    else if (Object.keys(readers.sessions).length === 0) io.err.write(`${sessionsRoot} 下还没有任何会话\n`);
-    else io.err.write(`${sessionsRoot} 下的 ${Object.keys(readers.sessions).length} 段会话都还没有 run 的观测记录\n`);
-    await readers.close();
-    return 1;
-  }
-  try {
-    return await execute(opts.command, readers, io);
-  } catch (e) {
-    io.err.write(`${e instanceof Error ? e.message : String(e)}\n`);
-    return 1;
+    try {
+      await readers.refresh(true);
+    } catch (e) {
+      io.err.write(`打不开观测库：${e instanceof Error ? e.message : String(e)}\n`);
+      return 1;
+    }
+    for (const [id, why] of Object.entries(readers.unreadable)) io.err.write(`会话 ${id} 的观测库打不开，跳过：${why}\n`);
+    // 一个库都没有：面板照样起（agent 稍后起来就有了），查询类命令诚实说没有——分清「没有会话」与「会话有了、还没跑过 run」，
+    // 那两句话指的不是同一件事。
+    if (readers.size === 0 && opts.command.kind !== "serve") {
+      if (opts.sessionId !== undefined) io.err.write(`会话 ${opts.sessionId} 还没有任何 run 的观测记录（${readers.databasePath(opts.sessionId)} 不存在）\n`);
+      else if (Object.keys(readers.sessions).length === 0) io.err.write(`${sessionsRoot} 下还没有任何会话\n`);
+      else io.err.write(`${sessionsRoot} 下的 ${Object.keys(readers.sessions).length} 段会话都还没有 run 的观测记录\n`);
+      return 1;
+    }
+    try {
+      return await execute(opts.command, readers, io);
+    } catch (e) {
+      io.err.write(`${e instanceof Error ? e.message : String(e)}\n`);
+      return 1;
+    }
   } finally {
     await readers.close();
   }

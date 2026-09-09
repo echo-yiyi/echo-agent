@@ -26,7 +26,8 @@ const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 
 /**
  * 本文件用到的 `bun:sqlite` `Database` 子集。**不 import 它的类型**：.d.ts 里一出现 `bun:sqlite`，
- * 没装 `@types/bun` 的 Node 消费者连根入口都编译不过（分发门的 examples 走的正是普通 tsconfig）。
+ * 没装 `@types/bun` 的 Node 消费者连根入口都编译不过。这条是**纪律**：分发门的三个 examples 都装了 `@types/bun`
+ * 并写死 `types: ["bun"]`，没有一个「不装 @types/bun 的消费者」在门里（review 2026-09-07；要立门得改 examples 与分发门，另拍）。
  */
 type SqliteStatement<R, P extends unknown[]> = Readonly<{
   get(...params: P): R | null;
@@ -178,10 +179,15 @@ function rowToEntry(row: RunIndexRow): RunIndexEntryV1 {
     bodyState,
     ...(row.pruned_at === null ? {} : { prunedAt: row.pruned_at }),
   };
-  // 列 + header bytes 重组出来的 entry 必须与写入时的 digest 逐字一致：任何列被改过都在这里判红，reader 不「修复」。
+  // 列 + header bytes 重组出来的 entry 必须与写入时的 digest 逐字一致：进 entry 的列被改过都在这里判红，reader 不「修复」。
   const digest = runIndexDigest(entry);
   if (digest !== row.index_digest) {
     throw new ObservationCorruptionError(`RunIndex(${row.run_id}) digest 漂移：行存 ${row.index_digest}，重组得 ${digest}`);
+  }
+  // `accepted_at` 是 header.acceptedAt 的派生索引列（排序与游标用），不进 entry、digest 盖不到它——靠等值判断守：
+  // 改了它 digest 照样对，但 listRunIndex 的顺序与分页会静默漏掉一条（review 2026-09-07 实测）。
+  if (row.accepted_at !== header.acceptedAt) {
+    throw new ObservationCorruptionError(`RunIndex(${row.run_id}) accepted_at 列（${row.accepted_at}）与 header.acceptedAt（${header.acceptedAt}）不符`);
   }
   return entry;
 }

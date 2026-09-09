@@ -1,6 +1,7 @@
-// Host-internal producer 输入。**不从 observability 公共子路径导出**：
-// producer 只提交自己领域内的 typed draft，identity（recordId / seq / observedAt）与最终 JSON normalize
-// 都归 Sequencer；把 draft 露到公共面等于允许外部伪造 canonical identity。
+// Host-internal producer 输入。producer 只提交自己领域内的 typed draft，identity（recordId / seq / observedAt）
+// 与最终 JSON normalize 都归 Sequencer；把 draft 露到公共面等于允许外部伪造 canonical identity。
+// **今天 `public.ts` 仍导出这里的 7 个符号**（`RUN_ASSEMBLY_RECORD` 等）：收回 `./observability` 子路径已拍板未实现
+//（`docs/decisions/proposed/2026-09-07-observation-public-face.md` 第 2 条），做之前这句「不导出」不是现状。
 
 import type { AgentAssemblyObservationSnapshot, ObservationEnvelope, RunModelBindingObservationSnapshot, RunObservationHeader } from "./types.ts";
 

@@ -559,7 +559,8 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
         //
         // 持有证明（review 2026-09-07）：写入格 `installed` 才是「这一段此刻归我」。`dispose()` 跑在
         // `doStop()` 的 revoke 之前，所以正常收摊时格还是 installed；丢锁后格已 revoke，一个字都不删。
-        { dispose: () => removeIfEmptySession(stateDir, opts.store !== undefined, () => assembly.writeGate.cell.state() === "installed") },
+        // 「观测库在内存里」才跳过清理——`store` + `stateDir` 同时给时观测库落真盘（review 2026-09-07：此前按 store 有无判，那种装配留下空壳目录）
+        { dispose: () => removeIfEmptySession(stateDir, observationPath === MEMORY_PATH, () => assembly.writeGate.cell.state() === "installed") },
       ],
     });
 
@@ -788,13 +789,13 @@ const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.jso
  * 不能只看「除了 observability 什么都没有」：收摊会无条件刷一次 `tasks.json`（哪怕一条任务都没有），
  * 于是那条判据永远不满足（实测）。
  *
- * 注入了自定义 store 时**不动**：那时这个路径下本来就没有我们写的东西（观测库也在内存里），
- * 而路径本身可能是调用方另有用处的目录。
+ * 观测库开在内存里时（注入了自定义 store 又没点名 `stateDir`）**不动**：那时这个路径下本来就没有我们写的东西，
+ * 而路径本身可能是调用方另有用处的目录。给了 `stateDir` 的照常清——观测库就在那下面。
  *
  * 失败只当没发生：收摊阶段为了删一个空目录而抛错，代价远大于留下它。
  */
-async function removeIfEmptySession(stateDir: string, customStore: boolean, holdsLease: () => boolean): Promise<void> {
-  if (customStore) return;
+async function removeIfEmptySession(stateDir: string, observationInMemory: boolean, holdsLease: () => boolean): Promise<void> {
+  if (observationInMemory) return;
   if (!holdsLease()) return;
   try {
     const entries = await readdir(stateDir);

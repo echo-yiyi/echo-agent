@@ -271,6 +271,19 @@ describe("reader", () => {
     const reopened = await openAt(root);
     await expect(reopened.readRunIndex("r1")).rejects.toBeInstanceOf(ObservationCorruptionError);
   });
+
+  test("accepted_at 是 digest 盖不到的派生列：被改过 → 靠等值判断判 corruption（review 2026-09-07：此前改了它排序与分页会静默漏条）", async () => {
+    const root = await tmp();
+    const store = await openAt(root);
+    await store.commitBatchIfAbsent(batch([1], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: index("r1", 1) }] }, "r1"));
+    store.close();
+    const { Database } = await import("bun:sqlite");
+    const raw = new Database(observationDatabasePath(root));
+    raw.run("UPDATE observation_run_index SET accepted_at = accepted_at + 250 WHERE run_id = 'r1'");
+    raw.close();
+    const reopened = await openAt(root);
+    await expect(reopened.readRunIndex("r1")).rejects.toBeInstanceOf(ObservationCorruptionError);
+  });
 });
 
 describe("Sequencer 之下", () => {
