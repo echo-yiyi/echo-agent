@@ -470,7 +470,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 59（value 28 · type 27 · both 4）
+符号 63（value 29 · type 30 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -523,12 +523,14 @@ both   ExtensionHost
 both   ExtensionMountError
 type   FiberInfo
 
--- src/extension/registries.ts (13) --
+-- src/extension/registries.ts (15) --
 value  AgentBackgroundService
 value  AgentCompaction
 type   AgentCompactionRegistry
 value  AgentHooks
 type   AgentHooksRegistry
+value  AgentPolicies
+type   AgentPoliciesRegistry
 value  AgentPrompt
 type   AgentPromptRegistry
 value  agentRegistries
@@ -544,6 +546,10 @@ value  AgentRuntimeService
 type   CompactResult
 type   EquipResult
 type   RuntimeTurnResult
+
+-- src/policies.ts (2) --
+type   AgentPolicyValues
+type   DeclaredPolicies
 
 == 入口 "./mcp" → src/mcp/port.ts ==
 符号 5（value 1 · type 4 · both 0）

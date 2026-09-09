@@ -32,6 +32,7 @@ import { ExtensionHost, type ExtensionEntry } from "./host.ts";
 import { AgentCompaction, AgentMemory, AgentPrompt, AgentTools, agentRegistries } from "./registries.ts";
 import type { PromptSection, PromptVariable } from "../prompt/types.ts";
 import { builtinVariables, environmentSection } from "../prompt/sections.ts";
+import type { AgentPolicySlots } from "../policies.ts";
 import { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult } from "./runtime.ts";
 import type { CompactionStage } from "../compaction/types.ts";
 import type { AgentMemories } from "../memory/harness.ts";
@@ -361,6 +362,8 @@ export function builtinEntries(
 export type BuiltinMountable = RuntimeSource & {
   readonly builtinTools: BuiltinToolGroups;
   readonly tools: ToolMap;
+  /** agent 级选项的持有者。与 `toolRestrictions` 同理：Agent 恒有，默认 Host 要接上，否则 `AgentPolicies.declare()` 无处生效。 */
+  readonly policySlots: AgentPolicySlots;
   /** 收紧工作集的那一叠。同理：Agent 恒有，默认 Host 要接上，否则 `AgentTools.restrict()` 无处生效。 */
   readonly toolRestrictions: ToolRestrictions;
   readonly hooks: HookRuntime;
@@ -401,6 +404,8 @@ export async function mountBuiltinTools(
     services: agentRegistries({
       tools: agent.tools,
       toolRestrictions: agent.toolRestrictions,
+      // agent 级选项（2026-09-09）：扩展经 `AgentPolicies` 声明权限 / 预算 / 提问策略
+      policies: agent.policySlots,
       hooks: agent.hooks,
       skills: { pool: agent.skills, active: agent.activeSkills },
       // **能力端口也要给**：少了它，`inject` 后台队列的扩展在这条低层路径上装不上

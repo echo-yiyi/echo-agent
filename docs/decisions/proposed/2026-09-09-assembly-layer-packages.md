@@ -68,9 +68,20 @@ echo-agent           产品:身份段、纪律段、bin
 
 base **导出**缺省纪律段,产品**显式挂**。共享文本仍是一份,但没有人能塞给产品。非交互形态要换掉「先确认」那条,是产品自己的事,不必给装配层加开关。
 
+### 扩展能声明 agent 级选项(2026-09-09 追加拍板,已实现)
+
+`permission` / `maxIterations` / `questions` 这三项此前只有产品的 preset 能给,扩展的 registry 里没有对应的格。不开这个口,上表的第二档与第三档**不等效**:本地扩展能加工具、能换身份段(`section(replace)` 已实现),却改不了执行预算,在仓库里 grep、read 几下就撞上 core 缺省的 20。
+
+用户 2026-09-09 拍板「我需要开,这个选项也要开」。形态:
+
+- 新 Service `AgentPolicies`(`packages/core/src/extension/registries.ts`),一个方法 `declare(policies): Disposer`。
+- 值的家是 `AgentPolicySlots`(`packages/core/src/policies.ts`):产品经 `AgentOptions` 给**初值**,扩展声明覆盖,卸载回到初值。**Agent 用时现读**,不在构造期冻死(`maxIterations` 改成 getter,`permissionPolicy` / `questionPolicy` 两个私有字段撤掉)。
+- **一项只能有一个声明者**,撞了 fail-loud;一次 `declare()` 里多项**整组原子**,中途撞了已生效的回滚。与工具撞名整组失败、prompt 段同名判红同一姿态——静默让后来者赢,等于让「装了两个扩展之后预算是多少」变成 mount 顺序的函数。
+- 验形沿用构造期那两个函数,不另立判据。
+- **不做「只能收紧」**:扩展本来就能注册任意工具,在这里立一道只挡君子的门没有意义。
+
 ## 待拍板(本条未议)
 
-- **扩展能不能声明 agent 级选项**(`permission` / `maxIterations` / `questions`)。今天只有产品的 preset 能给,扩展的 registry 里没有对应的口(`packages/core/src/extension/registries.ts` 有 tools / hooks / skills / prompt / compaction / memory,没有 options)。不开这个口,上表的第二档与第三档不等效——本地扩展能加工具、改 prompt,但改不了权限与预算。
 - **`observe` 是否独立成包**。本次决定留在 base:它现在拆没有收益。
 
 ## 验收

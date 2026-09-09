@@ -32,6 +32,8 @@ export {
   AgentCompaction,
   AgentHooks,
   AgentPrompt,
+  AgentPolicies,
+  type AgentPoliciesRegistry,
   AgentSessionsService,
   AgentSkills,
   AgentTools,
@@ -64,3 +66,6 @@ export {
 export { unmountGenerations, type UnmountTarget } from "./cleanup.ts";
 export { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult, type RuntimeTurnResult } from "./runtime.ts";
 export { ECHO_AGENT, agentRuntimeOf, type RuntimeSource } from "./builtin.ts";
+
+/** `AgentPolicies.declare()` 收的形状与三项的全集：扩展作者写 config 时要念得出它们。 */
+export type { AgentPolicyValues, DeclaredPolicies } from "../policies.ts";

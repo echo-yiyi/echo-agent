@@ -28,6 +28,7 @@ import { addMemory, removeMemoryRegion, type AgentMemories } from "../memory/har
 import type { AnyMemory } from "../memory/types.ts";
 import { NO_SESSION_FACE, type SessionFace } from "../session/sessions.ts";
 import { defineService, type Disposer, type ServiceKey } from "./abi.ts";
+import type { AgentPolicySlots, DeclaredPolicies } from "../policies.ts";
 
 export interface AgentToolsRegistry {
   /** 同名已存在 → 抛。返回的 disposer 只卸这个对象。 */
@@ -174,6 +175,23 @@ export const AgentBackgroundService: ServiceKey<AgentBackground> = defineService
 });
 
 /**
+ * agent 级选项的声明口（2026-09-09 用户拍板）：权限策略、迭代预算、提问策略。
+ *
+ * 在它之前这三样只有**产品**能给，于是「本地扩展把 echo-agent 长成另一个 agent」这条路差一截——
+ * 能加工具、能换段，却改不了预算与权限（`policies.ts` 文件头有完整理由）。
+ *
+ * **恒有**：每个 Agent 都有这三项，所以由 Agent 造的 Host 恒提供这个 Service；
+ * 假 Host 没接上时 `declare()` 抛（同 `AgentTools.restrict()` 的姿态，不静默装上不生效）。
+ */
+export const AgentPolicies: ServiceKey<AgentPoliciesRegistry> = defineService<AgentPoliciesRegistry>({
+  id: "echo.agent.policies",
+  version: 1,
+  kind: "single",
+  scope: "agent",
+  reload: "agent",
+});
+
+/**
  * 会话面（2026-09-07，sessions.md §7）：开一段、列一遍、发一句、关一段。
  *
  * `kind: "single"`、`scope: "agent"`，与 `AgentBackgroundService` 同款——不收注册，
@@ -185,6 +203,7 @@ export const AgentBackgroundService: ServiceKey<AgentBackground> = defineService
  * ABI 里没有读 optional 的方法，声明成 optional 只会在缺它时**装不上却说成可选**
  * （与 `AgentBackgroundService` 那段注释同一条理由）。
  */
+
 export const AgentSessionsService: ServiceKey<SessionFace> = defineService<SessionFace>({
   id: "echo.agent.sessions",
   version: 1,
@@ -192,6 +211,15 @@ export const AgentSessionsService: ServiceKey<SessionFace> = defineService<Sessi
   scope: "agent",
   reload: "agent",
 });
+
+/** `AgentPolicies` 的那一格：声明 agent 级选项（权限策略、迭代预算、提问策略）。 */
+export type AgentPoliciesRegistry = {
+  /**
+   * 声明一项或几项。**一项只能有一个声明者**，撞了 fail-loud；整组原子，中途撞了已生效的回滚。
+   * 卸载时回到产品给的初值。生效点是**下一次用到它的地方**（下一轮的 loop config、下一次授权、下一次提问）。
+   */
+  declare(policies: DeclaredPolicies): Disposer;
+};
 
 /**
  * 给 `new ExtensionHost({ services })` 用：把一个 Agent 已公开的 Map / HookRuntime / 能力端口
@@ -203,6 +231,7 @@ export const AgentSessionsService: ServiceKey<SessionFace> = defineService<Sessi
  * `required: true`（本文件上面能力端口那段说的就是这个；review 2026-09-07 此处曾把 optional 写成能降级，
  * 照它写的扩展整代装不上）。这与「能力不在」和「能力在但为空」是两件事那条口径一致。
  */
+
 export function agentRegistries(input: {
   tools: ToolMap;
   /**
@@ -227,6 +256,11 @@ export function agentRegistries(input: {
   compaction?: Map<string, CompactionStage>;
   /** 记忆的操作面（`agent.memory`）。**没装记忆就不传**——那时这个 Service 缺席，声明 required 的扩展装不上。 */
   memory?: AgentMemories;
+  /**
+   * agent 级选项的持有者（`agent.policySlots`）。与 `toolRestrictions` 同款：Agent 恒有，
+   * 由 Agent 造的 Host 应当恒传；不传时 `declare()` **抛**，不静默装上不生效。
+   */
+  policies?: AgentPolicySlots;
   /**
    * 会话面（2026-09-07）。**只有容器有**——`createEcho()` 传真的那一份；
    * 不传就提供 `NO_SESSION_FACE`，因为这个 Service 恒有（理由见它的定义处）。
@@ -265,6 +299,17 @@ export function agentRegistries(input: {
   if (input.background !== undefined) out.push([AgentBackgroundService, input.background]);
   // **恒有**：没有容器就是 `NO_SESSION_FACE`，不是「这个 Service 缺席」——消费方声明 required 才装得上
   out.push([AgentSessionsService, input.sessions ?? NO_SESSION_FACE]);
+  // 恒提供：三项是 Agent 恒有的。没接上真持有者时 `declare()` 抛——同 `restrict()`，不静默装上不生效
+  const slots = input.policies;
+  out.push([
+    AgentPolicies,
+    {
+      declare: (policies) => {
+        if (slots === undefined) throw new Error("这个 Host 没接上 agent 选项的持有者（agentRegistries 的 policies）：declare 无处生效");
+        return slots.declare(policies);
+      },
+    } satisfies AgentPoliciesRegistry,
+  ]);
   if (input.prompt !== undefined) out.push([AgentPrompt, promptRegistry(input.prompt.sections, input.prompt.variables)]);
   if (input.compaction !== undefined) out.push([AgentCompaction, compactionRegistry(input.compaction)]);
   if (input.memory !== undefined) out.push([AgentMemory, memoryRegistry(input.memory)]);

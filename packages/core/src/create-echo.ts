@@ -394,6 +394,9 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       tools: agent.tools,
       // 收紧工作集的那一叠（2026-09-07）：角色（`echo:inline-agent`）经它把工具集收到子集
       toolRestrictions: agent.toolRestrictions,
+      // agent 级选项（2026-09-09）：扩展经 `AgentPolicies` 声明权限 / 预算 / 提问策略，
+      // 于是「本地扩展把 echo-agent 长成另一个 agent」这条路不再差预算与权限那一截
+      policies: agent.policySlots,
       hooks: agent.hooks,
       skills: { pool: agent.skills, active: agent.activeSkills },
       // **能力端口**（2026-08-31）：扩展要挂后台任务得拿得到这个。不给的话扩展面就只有

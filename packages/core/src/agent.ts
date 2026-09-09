@@ -28,6 +28,7 @@ import type { EchoObservableState, RuntimePhase } from "./observability/types.ts
 import { HookRuntime, type HookContext, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
+import { AgentPolicySlots, type AgentPolicyValues } from "./policies.ts";
 import { QuestionLedger } from "./question/ledger.ts";
 import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk, QuestionPolicy, QuestionSettlement } from "./question/types.ts";
 import { defaultConvertToLlm, userMessage, type AgentMessage, type ContentBlock, type ConvertToLlm, type ImageBlock, type Usage, environmentMessage } from "./messages.ts";
@@ -613,7 +614,13 @@ export class Agent {
   private activeRun?: ActiveRun;
 
   /* 闸与策略 */
-  public maxIterations: number;
+  /**
+   * 一次 reply 的迭代预算。**读的是 `policySlots` 的当前值**（2026-09-09）：产品给初值，
+   * 扩展经 `AgentPolicies` registry 覆盖，卸载回到初值。
+   */
+  get maxIterations(): number {
+    return this.policySlots.values.maxIterations;
+  }
   public maxReplies: number;
   public timeoutMs?: number;
   public retryPolicy: RetryPolicy;
@@ -638,10 +645,13 @@ export class Agent {
   public hooks: HookRuntime;
   /** permission ask 账本：只有 `answerPermission()` 与 loop 的 ask 路径碰它。 */
   private readonly permissions = new PermissionLedger();
-  private readonly permissionPolicy: PermissionPolicy;
+  /**
+   * 扩展可声明的那三项（权限策略、迭代预算、提问策略）的持有者。**Agent 用时现读**，
+   * 不在构造期冻死——`AgentPolicies` registry 就是它的一层皮（`policies.ts`）。
+   */
+  readonly policySlots: AgentPolicySlots;
   /** 提问账本：只有 `answerQuestion()` 与 `ask_user` 工具碰它。 */
   private readonly questions = new QuestionLedger();
-  private readonly questionPolicy: QuestionPolicy;
   /** 正在跑的那次 run 的 scope（模型绑定、runId）：工具里派子 agent 要复用父的绑定，从这里拿。run 之外为空。 */
   private activeScope?: AgentAdmissionExecuteScope;
   /**
@@ -843,7 +853,6 @@ export class Agent {
       // 流水线与 registry 仍在，等别的扩展注册阶段。`transcript_read` 读的是活的 transcript。
       compaction: opts.compaction?.builtin === false ? undefined : defaultCompactionPack(opts.compaction ?? {}, () => this._state.messages),
     };
-    this.maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     this.maxReplies = opts.maxReplies ?? DEFAULT_MAX_REPLIES;
     this.timeoutMs = opts.timeoutMs;
     this.retryPolicy = opts.retryPolicy ?? DEFAULT_RETRY_POLICY;
@@ -853,8 +862,16 @@ export class Agent {
     this.transformContext = opts.transformContext;
     this.streamFunction = opts.streamFunction;
     this.hooks = opts.hooks ?? new HookRuntime();
-    this.permissionPolicy = validatePermissionPolicy(opts.permission);
-    this.questionPolicy = validateQuestionPolicy(opts.questions);
+    // 三项的初值在这里定形（验形与从前同一套函数），之后由 `AgentPolicies` 声明覆盖
+    const initialPolicies: AgentPolicyValues = {
+      permission: validatePermissionPolicy(opts.permission),
+      maxIterations: opts.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+      questions: validateQuestionPolicy(opts.questions),
+    };
+    this.policySlots = new AgentPolicySlots(initialPolicies, {
+      permission: (p) => validatePermissionPolicy(p),
+      questions: (q) => validateQuestionPolicy(q),
+    });
     this.getApiKey = opts.getApiKey;
     // **放在最后**：attach 可能触发 report → hookContext() → this.hooks，
     // 而 hooks 是上面几行才赋的值（实测踩到：放在前面直接 TypeError）。
@@ -1006,7 +1023,7 @@ export class Agent {
    * 没等到（超时 / 中止 / 收摊）再发 `questionCancelled`，壳子据此撤掉屏幕上的问题。
    */
   private async askQuestion(input: Omit<QuestionAsk, "questionId">, signal: AbortSignal | undefined): Promise<QuestionSettlement> {
-    const policy = this.questionPolicy;
+    const policy = this.policySlots.values.questions;
     // 与权限那边同一口径：等人不超时（null）却没人订阅 → 不开 ask；有超时的可以开着等到点
     if (policy.responder === "none" || (policy.askTimeoutMs === null && !this.hooks.hasSubscribers())) {
       return { kind: "unanswered", reason: "no-responder" };
@@ -2422,7 +2439,8 @@ export class Agent {
       return `Agent 当前状态是 ${this.phaseLabel}，不接受新工作（只有 running 才接）`;
     }
     // 声明了「宿主会回答 ask」却没人订阅——在 run 入口就 fail-loud，不能等到 Tool 已经暂停才发现无人回答。
-    if (this.permissionPolicy.responder === "host" && this.permissionPolicy.askTimeoutMs === null && !this.hooks.hasSubscribers()) {
+    const permission = this.policySlots.values.permission;
+    if (permission.responder === "host" && permission.askTimeoutMs === null && !this.hooks.hasSubscribers()) {
       return 'permission 策略声明了 responder:"host" 且 ask 不超时，但没有任何 subscribeLifecycle() 订阅者——无人回答，拒绝开始 run';
     }
     return null;
@@ -3123,7 +3141,8 @@ export class Agent {
    * `responder:"none"` 的策略若返回 ask，这里把它折成 policy deny——诚实缺席，不生成 ask、不等人。
    */
   private permissionStage(): PermissionStage {
-    const policy = this.permissionPolicy;
+    // 每次建 stage 时现读：扩展在 mount 期换掉策略之后，下一次 run 就该用新的那份
+    const policy = this.policySlots.values.permission;
     return {
       authorize: async (input) => {
         // 先验形再看 kind：策略返回 null/"bogus" 时，这里要给出「非法裁决」而不是 TypeError
