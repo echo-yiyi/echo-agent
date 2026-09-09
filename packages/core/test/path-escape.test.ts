@@ -44,9 +44,15 @@ test("③ 符号链接逃不出去——词法 containment 看不出这条", asy
   await symlink(outside, join(root, "entries"));
 
   const svc = new SessionService(new FileDir(root));
-  await svc.createOrResume("main");
-  await svc.append("main", [{ kind: "message", message: userMessage("会被写到外面去吗") }]);
-  await expect(svc.settle()).rejects.toThrow(/符号链接/);
+  // 恢复 → 入账 → 落盘这条链上任一步判红都算：`list("entries/")` 2026-09-08 起也过 resolveSafe（起点是逃出 root 的符号链接
+  // 就在恢复时抛），比等到落盘更早；无论在哪一步抛，外面都不能多出文件
+  await expect(
+    (async () => {
+      await svc.createOrResume("main");
+      await svc.append("main", [{ kind: "message", message: userMessage("会被写到外面去吗") }]);
+      await svc.settle();
+    })(),
+  ).rejects.toThrow(/符号链接/);
   expect(existsSync(join(outside, "000001.json"))).toBe(false);
 });
 

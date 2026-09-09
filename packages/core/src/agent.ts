@@ -944,14 +944,14 @@ export class Agent {
 
   /**
    * 订阅 LifecycleEvent 实时通道：与 hook 走同一个 emission point、同一顺序，但只观察、不参与折叠。
-   * 可信宿主用它收 `permissionRequest`，再单独调 `answerPermission()`。
+   * 壳用它收 `permissionRequest`，再单独调 `answerPermission()`。
    */
   subscribeLifecycle(listener: LifecycleEventListener): () => void {
     return this.hooks.subscribe(listener);
   }
 
   /**
-   * 可信宿主回答一次 ask。accepted / stale / closed 都是正常结果、都 fulfill；
+   * 壳回答一次 ask。accepted / stale / closed 都是正常结果、都 fulfill；
    * 只有 JS 边界的坏 shape 才以 TypeError reject。Extension/Tool 拿不到这个入口。
    */
   async answerPermission(input: PermissionAnswer): Promise<PermissionAnswerResult> {
@@ -974,7 +974,7 @@ export class Agent {
   }
 
   /**
-   * 可信宿主回答一次提问（模型调了 `ask_user`）。accepted / stale / closed 都是正常结果、都 fulfill；
+   * 壳回答一次提问（模型调了 `ask_user`）。accepted / stale / closed 都是正常结果、都 fulfill；
    * 只有 JS 边界的坏 shape 才以 TypeError reject。**至少给一样**：选项或文字——空回答不是回答。
    */
   async answerQuestion(input: QuestionAnswer): Promise<QuestionAnswerResult> {
@@ -1534,11 +1534,11 @@ export class Agent {
         let lease = await this.stateLock.acquire({ holder, preemptible: this.preemptible });
         if (lease === null && !this.preemptible) {
           // **人优先，后台让位**（2026-09-07 用户拍板）：拿不到时先问一句「能让吗」。
-          // 只有自称可被抢占的持有者会让——那种「为了处理一条消息被叫醒」的临时宿主。
+          // 只有自称可让位的持有者会让——那种「为了处理一条消息被叫醒」的临时容器。
           // 人开的会话不会被顶掉，锁也不会被从谁手里夺走：让不让是持有者自己决定的，
           // 所以「core 不抢占」那条一个字没变。
           //
-          // **只有不可被抢占的启动方才问**：两个后台宿主互相请来请去没有意义。
+          // **只有不可让位的启动方才问**：两个后台宿主互相请来请去没有意义。
           if ((await this.stateLock.requestHandoff?.({ by: holder, timeoutMs: HANDOFF_TIMEOUT_MS })) === true) {
             lease = await this.stateLock.acquire({ holder, preemptible: this.preemptible });
           }

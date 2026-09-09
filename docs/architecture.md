@@ -57,8 +57,8 @@
 
 **Service 两种**（`packages/core/src/extension/registries.ts`）：
 
-- **registry**，extension 往 agent 里注册：`AgentTools`、`AgentHooks`、`AgentSkills`、`AgentPrompt`、`AgentCompaction`。同名 fail-loud。
-- **能力端口**，extension 用 agent 已有的：`AgentBackgroundService`（后台队列）、`AgentSessionsService`（会话面）。
+- **registry**，extension 往 agent 里注册：`AgentTools`、`AgentHooks`、`AgentSkills`、`AgentPrompt`、`AgentCompaction`。四个具名的同名 fail-loud；`AgentHooks` 的条目无名，同 id 可并存、disposer 认对象身份（门 `packages/core/test/seams.test.ts`）。
+- **能力端口**，extension 用 agent 已有的：`AgentBackgroundService`（后台队列）、`AgentSessionsService`（会话面）、`AgentRuntimeService`（壳协议；由 `echo:agent` provide 而不是 Host 自带，所以「只有壳拿得到」没有门——`echo:worktree` 就注入了它）。
 
 **壳也是 extension**：`echo:agent` provide 封闭协议 `AgentRuntime`（`packages/core/src/extension/runtime.ts`：看、说、答、换、停五组，没有 `start` / `stop` / `deliver`），`echo:tui`（`packages/cli/src/extension.ts`）inject 它。换壳只是换一条 inject 同一个 Service 的 extension。
 

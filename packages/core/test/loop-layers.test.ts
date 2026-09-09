@@ -592,6 +592,67 @@ test("shouldStopAfterTurn：reply 以 completed 收场、run 直接关门，不�
   expect(gate.activeRunId).toBeNull();
 });
 
+test("工具轮不问 shouldStopAfterTurn / prepareNextTurn：tool_use / max_tokens 先短路，只有 end_turn 之后才问一次（review 2026-09-07，run-loop-layers.md §2.2）", async () => {
+  const gate = new RunIntakeGate("a@1");
+  gate.openRun("run:t");
+  const events: AgentEvent[] = [];
+  let seq = 0;
+  const asked: number[] = [];
+  const prepared: number[] = [];
+  const t = tool("t", async () => toolOk("ok"));
+  const config: AgentLoopConfig = {
+    model: FAKE_MODEL,
+    runId: "run:t",
+    convertToLlm: defaultConvertToLlm,
+    getTools: () => [t],
+    knownToolNames: () => ["t"],
+    resolveTool: (name) => (name === "t" ? { ok: true, tool: t } : { ok: false, reason: "not_found" }),
+    hooks: new HookRuntime(),
+    hookContext: { origin: "model", depth: 0, hookId: "test" },
+    permission: {
+      authorize: () => ({ kind: "allow" }),
+      ask: () => {
+        throw new Error("不该 ask");
+      },
+    },
+    maxIterations: 5,
+    maxReplies: 10,
+    retryPolicy: DEFAULT_RETRY_POLICY,
+    compaction: { getStages: () => [] },
+    workspace: process.cwd(),
+    shouldStopAfterTurn: (ctx) => {
+      asked.push(ctx.iteration);
+      return true;
+    },
+    prepareNextTurn: (ctx) => {
+      prepared.push(ctx.iteration);
+      return undefined;
+    },
+    intake: {
+      openTurn: (id) => gate.openTurn(id),
+      closeTurn: async () => gate.closeTurn(),
+      drainFollowUps: async () => gate.drainFollowUps(),
+      tryCloseRun: async () => gate.tryCloseRun(),
+      closeRun: () => void gate.closeRun(),
+    },
+  };
+  const result = await runAgentLoop(
+    [userMessage("go", "human")],
+    { systemPrompt: null, messages: [], compaction: EMPTY_COMPACTION },
+    config,
+    async (e) => {
+      events.push({ ...e, seq: seq++, at: 0 } as AgentEvent);
+    },
+    new AbortController().signal,
+    scriptedStreamFn([toolTurn("c1", "t", {}), toolTurn("c2", "t", {}), textTurn("done")]),
+  );
+  expect(result.outcome.kind).toBe("completed");
+  expect(validate(events)).toEqual([]);
+  expect(events.filter((e) => e.type === "turn_start").length).toBe(3);
+  expect(asked).toEqual([3]); // 两个工具轮都没问；第三轮落地 end_turn 才问
+  expect(prepared).toEqual([]); // 叫停了就不换装
+});
+
 test("从 transcript 续跑：reply source=resume，没有输入的 message_end，直接 turn_start{input}", async () => {
   let agent!: Agent;
   const t = tool("t", async () => {

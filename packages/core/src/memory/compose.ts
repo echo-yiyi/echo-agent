@@ -184,7 +184,7 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
       }
       // 预算按层各算一份:同一模块在 user / project / session 各有各的索引
       const at = splitScopePath(path);
-      if (at === null) throw new Error(`记忆路径缺作用域前缀:'${path}'`);
+      if (at === null) throw new Error(`Memory path is missing its scope prefix: '${path}'`);
       const entries = await indexEntries(im, dir, at.scope, { path, content: next });
       const size = renderIndex(entries).length;
       if (size > im.budget) {

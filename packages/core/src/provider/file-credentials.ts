@@ -6,8 +6,8 @@
 //
 // ## 为什么在 `ECHO_HOME` 根下，而不是状态根里
 //
-// 状态根是 `$ECHO_HOME/agents/<agentId>/`——**一个 agent 一份**。凭据不是：换个 `--agent-id`
-// 不该要求用户重配一次 key。所以它住在根上，**不进 `agents/`**。
+// 状态根是 `$ECHO_HOME/sessions/<session id>/`——**一段会话一份**。凭据不是：换一段会话
+// 不该要求用户重配一次 key。所以它住在根上，**不进 `sessions/`**，也不进 `agents/<角色名>/`（那是角色定义与 role 层记忆的家）。
 //
 // ## 明文存储（已拍板）
 //
@@ -31,7 +31,7 @@ import { errText } from "../errors.ts";
 import { echoHome, expandHome } from "../storage/file-dir.ts";
 import type { Credential, CredentialStore } from "./types.ts";
 
-/** 凭据文件名。它在 `ECHO_HOME` 根下，与 `agents/` 平级。 */
+/** 凭据文件名。它在 `ECHO_HOME` 根下，与 `sessions/` / `agents/` 平级。 */
 export const CREDENTIALS_FILE = "credentials.json";
 
 const FILE_MODE = 0o600;

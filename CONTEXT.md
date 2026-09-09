@@ -73,11 +73,11 @@ _Avoid_：消息队列、IPC
 ## 循环
 
 **run**：
-一次 admission 到 `agent_end`，可含多条 reply。
+一次 admission 到 `agent_end`，可含多条 reply。来源在代码里是 `RunSource`（user / inbox / dream / extension）。
 _Avoid_：一次调用、一次对话
 
 **reply**：
-agent 对一条输入（prompt / followUp / stop hook 注入 / 续跑）的完整回应。steer 不开新 reply。
+agent 对一条输入（prompt / followUp / stop hook 注入 / 续跑）的完整回应。steer 不开新 reply。来源在代码里是 `ReplySource`（prompt / follow_up / stop_hook / resume）。
 _Avoid_：task、answer、exchange
 
 **turn**：
@@ -149,7 +149,7 @@ extension 往 agent 里注册东西的口：工具、prompt 段、压缩阶段�
 _Avoid_：注册表（可用作译名，代码用 registry）
 
 **能力端口**：
-extension 用 agent 已有东西的口：后台队列（`AgentBackgroundService`）、会话面（`AgentSessionsService`）。观测发口已拍板、尚未实现（[观测的公开线](docs/decisions/proposed/2026-09-07-observation-public-face.md)）。
+extension 用 agent 已有东西的口：后台队列（`AgentBackgroundService`）、会话面（`AgentSessionsService`）、壳协议（`AgentRuntimeService`，由 `echo:agent` 这条 extension provide，不是 Host 自带的 Service——任何注入它的 extension 都拿到整份协议，不只壳）。观测发口已拍板、尚未实现（[观测的公开线](docs/decisions/proposed/2026-09-07-observation-public-face.md)）。
 _Avoid_：service（那是 ABI 里的泛称）
 
 **代**：

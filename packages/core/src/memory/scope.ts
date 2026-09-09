@@ -153,11 +153,12 @@ export function splitScopePath(path: string): { scope: string; rest: string } | 
  * `list("")` 把各层按 `order` 并起来,`view ''` 的概览靠它。
  */
 export function memoryScopeDir(table: MemoryScopeTable): StorageDir {
-  const known = (): string => table.entries.map((e) => e.def.name).join(" / ") || "(本次装配没有任何记忆作用域)";
+  // 报错是模型可见文本（经 memory 工具的 toolError 原样回去）：全英文（review 2026-09-07）
+  const known = (): string => table.entries.map((e) => e.def.name).join(" / ") || "(no memory scopes in this assembly)";
   const route = (path: string): MemoryScopeEntry & { rest: string } => {
     const at = splitScopePath(path);
     const hit = at === null ? undefined : table.byName.get(at.scope);
-    if (at === null || hit === undefined) throw new Error(`记忆路径必须以作用域开头(${known()}):'${path}'`);
+    if (at === null || hit === undefined) throw new Error(`Memory paths must start with a scope (${known()}): '${path}'`);
     return { ...hit, rest: at.rest };
   };
   return {
@@ -182,7 +183,7 @@ export function memoryScopeDir(table: MemoryScopeTable): StorageDir {
       const i = prefix.indexOf("/");
       const head = i < 0 ? prefix : prefix.slice(0, i);
       const hit = table.byName.get(head);
-      if (hit === undefined) throw new Error(`记忆路径必须以作用域开头(${known()}):'${prefix}'`);
+      if (hit === undefined) throw new Error(`Memory paths must start with a scope (${known()}): '${prefix}'`);
       const rest = i < 0 ? "" : prefix.slice(i + 1);
       return (await hit.dir.list(rest)).map((p) => `${head}/${p}`);
     },

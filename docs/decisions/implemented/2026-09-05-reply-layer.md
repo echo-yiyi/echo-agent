@@ -24,3 +24,7 @@ run loop 里有名字的只有 run 和 turn。「agent 对一条输入(prompt / 
 ## 验收
 
 `events.ts` 有 `reply_start` / `reply_end` 变体;每个 run 的事件流里 `agent_start … agent_end` 之间至少一对 reply,turn 事件带 `replyId`;`docs/design/run-loop-layers.md` §1 与 §1.1 的术语表按上述写。
+
+## 登记(2026-09-08)
+
+reply 内轮末的判决顺序是**工具轮先短路**:落地消息 `stopReason` 为 `tool_use` / `max_tokens` 时直接下一 turn,不问 `shouldStopAfterTurn` / `prepareNextTurn`;只有 `end_turn` 之后才问。四层重构前的 `decideAfterTurn` 就是这个顺序,2026-09-05 的设计稿 §2.2 写反了,review 2026-09-07 按实现改回来——这是有意的(工具链中途不给叫停口,叫停要等模型把这一串工具用完),不是漏。门:`packages/core/test/loop-layers.test.ts`「工具轮不问 shouldStopAfterTurn」。

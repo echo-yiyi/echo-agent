@@ -16,8 +16,8 @@ export type Lease = {
   /**
    * **有人在等这把锁**（2026-09-07 用户拍板：人优先，后台让位）。
    *
-   * 只有**自称可被抢占**的持有者才会收到它——收到就该把手上的活 drain 完、`release()`、退出。
-   * 没人等、或本持有者不可被抢占时，这个 Promise **永不 settle**（与 `lost` 同一条理由：
+   * 只有**自称可让位**的持有者才会收到它——收到就该把手上的活 drain 完、`release()`、退出。
+   * 没人等、或本持有者不可让位时，这个 Promise **永不 settle**（与 `lost` 同一条理由：
    * 长期挂着的 rejected 会变噪音，而「有人在等」是正常事件不是异常）。
    *
    * **这不是抢占**：锁不会被从持有者手里夺走，是持有者自己让出来的。所以
@@ -62,7 +62,7 @@ export interface StateLock {
 
   /**
    * 请当前持有者交还（2026-09-07）。**只有它自称 `preemptible` 时才会真的让**——
-   * 不可被抢占的持有者一律立刻返回 `false`，调用方按老规矩 fail-loud。
+   * 不可让位的持有者一律立刻返回 `false`，调用方按老规矩 fail-loud。
    *
    * 返回 `true` = 这一刻锁空出来了（调用方随后仍要正常 `acquire()`，中间可能被第三方抢先，
    * 那时照旧拿不到——**没有任何路径能让两个写者同时在**）。
@@ -102,13 +102,13 @@ export class InMemoryStateLock implements StateLock {
         if (this.current === holder) this.current = null;
       },
       lost,
-      // 不可被抢占的持有者拿到一个**永不 settle** 的 Promise：它不该收到这个信号
+      // 不可让位的持有者拿到一个**永不 settle** 的 Promise：它不该收到这个信号
       handoffRequested: holder.preemptible ? handoffRequested : new Promise<{ by: string }>(() => {}),
     };
   }
 
   /**
-   * 请持有者交还。可被抢占的：发信号并等它 `release()`；否则立刻 `false`。
+   * 请持有者交还。可让位的：发信号并等它 `release()`；否则立刻 `false`。
    * 与文件锁同一份语义，所以两种实现下的判据是同一条。
    */
   async requestHandoff(opts: { by: string; timeoutMs: number }): Promise<boolean> {

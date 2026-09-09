@@ -89,16 +89,19 @@ export function createProvider(input: CreateProviderOptions): Provider {
   if (input.fetchModels !== undefined) {
     const fetchModels = input.fetchModels;
     provider.refreshModels = (ctx) => {
+      // 早退不占闩：离线 / 已 abort 直接 resolve（review 2026-09-07：此前早退在 `??=` 赋值之前就把 finally 跑完了，
+      // 闩被赋成一个已 resolve 的 promise 再也清不掉——之后 fetchModels 永远不会再被调用）
+      if (!ctx.allowNetwork || ctx.signal?.aborted === true) return Promise.resolve();
       // 并发去重：多个调用共享同一次在途刷新。
-      inflight ??= (async () => {
+      if (inflight !== undefined) return inflight;
+      inflight = (async () => {
         try {
-          if (!ctx.allowNetwork) return;
-          if (ctx.signal !== undefined && ctx.signal.aborted) return;
-          const fresh = await fetchModels(ctx);
+          // 经 then 起步：fetchModels 同步抛也变成异步 reject，finally 一定跑在下面那句赋值之后
+          const fresh = await Promise.resolve().then(() => fetchModels(ctx));
           if (ctx.signal !== undefined && ctx.signal.aborted) return;
           dynamic = fresh.map((m) => ({ ...m, provider: input.id }));
         } finally {
-          inflight = undefined;
+          inflight = undefined; // 在途期间没人能换掉它（新调用只会拿到同一个），清掉即可
         }
       })();
       return inflight;

@@ -74,7 +74,7 @@ type LockRecord = {
   readonly at: number;
   /**
    * 这个持有者可不可以被请走（2026-09-07）。**写进锁文件**是因为要请它走的人在另一个进程里，
-   * 只能从盘上看出来——看不出来就只能盲等，而不可被抢占的持有者是永远不会让的。
+   * 只能从盘上看出来——看不出来就只能盲等，而不可让位的持有者是永远不会让的。
    */
   readonly preemptible?: boolean;
   /**
@@ -159,8 +159,6 @@ export function fileStateLock(path: string): StateLock {
   return {
     async acquire(opts: { holder: string; preemptible?: boolean }): Promise<Lease | null> {
       await mkdir(dirname(path), { recursive: true });
-      // 上一轮别人留下的请求不该算在这一把头上：拿到锁的第一件事是把旧请求擦掉
-      await rm(handoffPath, { force: true }).catch(() => undefined);
       const record: LockRecord = {
         holder: opts.holder,
         pid: process.pid,
@@ -188,8 +186,11 @@ export function fileStateLock(path: string): StateLock {
         throw e;
       }
       await fh.close();
+      // 上一轮别人留下的请求不该算在这一把头上：**拿到锁之后**才把旧请求擦掉。放在 `open("wx")` 之前的话，
+      // 任何一次拿不到锁的 acquire 都会先删掉别人正在等的 `.handoff`——人的让位请求被第三方的失败尝试抹掉（review 2026-09-07）
+      await rm(handoffPath, { force: true }).catch(() => undefined);
 
-      // **只有可被抢占的持有者才盯这个文件**：别人不该被请走，也就不该为此每秒读一次盘。
+      // **只有可让位的持有者才盯这个文件**：别人不该被请走，也就不该为此每秒读一次盘。
       const handoff =
         opts.preemptible === true
           ? waitFor(async () => {
@@ -236,7 +237,7 @@ export function fileStateLock(path: string): StateLock {
     /**
      * 请当前持有者交还（2026-09-07：人优先，后台让位）。
      *
-     * **只对自称 `preemptible` 的持有者生效**——不可被抢占的立刻返回 `false`，调用方按老规矩
+     * **只对自称 `preemptible` 的持有者生效**——不可让位的立刻返回 `false`，调用方按老规矩
      * fail-loud。这样人开的那种会话不会被后台顶掉，而后台为处理一条消息叫醒的那种临时宿主会让开。
      *
      * 请求写在锁文件旁边的 `<lock>.handoff` 里。持有者自己在轮询它（见 `acquire`），

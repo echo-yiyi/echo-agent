@@ -7,7 +7,8 @@
 // 这里能看到的全部：`createEcho` 一次装配好状态根、单写者锁、会话、记忆、任务、
 // 定时器与 Inbox——**普通用户不需要 import 任何子路径**。想换其中某一件才进子路径。
 //
-// 状态落在 `$PWD/.echo/agents/default/`。再跑一次，它记得上次说过什么。
+// 状态落在 `$ECHO_HOME/sessions/<session-id>/`（缺省 `~/.echo/sessions/`）。**每次启动新建一段会话**；
+// 要续上次那段，给 `createEcho({ sessionId })`。记忆与技能在 `$ECHO_HOME` 下跨段共享。
 
 import { createEcho, kimiProvider } from "@echo-agent/core";
 

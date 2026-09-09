@@ -4,8 +4,8 @@
 // 后台把某段叫醒之后，**人**在另一个终端 `--resume` 同一段会被挡在门外。
 // 锁本来就保证不会两个写者同时在，问题只在**谁输**：人的显式动作输给一次隐式唤醒不能接受。
 //
-// 定的规矩：持有者可以自称「可被请走」；拿不到锁的人先问一句「能让吗」，
-// 只有自称可被请走的才让。**锁绝不从谁手里夺走**——让不让是持有者自己决定的，
+// 定的规矩：持有者可以自称「可让位」；拿不到锁的人先问一句「能让吗」，
+// 只有自称可让位的才让。**锁绝不从谁手里夺走**——让不让是持有者自己决定的，
 // 所以 `StateLock` 那句「core 不抢占、不猜对面死没死」一个字没变。
 //
 // 两种实现（内存锁 / 文件锁）走同一份语义，所以下面每条都对两边成立。
@@ -40,7 +40,7 @@ async function fileLockAt(): Promise<{ lock: StateLock; path: string }> {
   return { lock: fileStateLock(path), path };
 }
 
-test("文件锁：可被请走的持有者 release 之后不再盯 `.handoff`——否则每把租约留下一条每 50ms 读盘、永不回收的轮询链（review 2026-09-07）", async () => {
+test("文件锁：可让位的持有者 release 之后不再盯 `.handoff`——否则每把租约留下一条每 50ms 读盘、永不回收的轮询链（review 2026-09-07）", async () => {
   const { lock, path } = await fileLockAt();
   const held = await lock.acquire({ holder: "后台", preemptible: true });
   expect(held).not.toBeNull();
@@ -54,22 +54,33 @@ test("文件锁：可被请走的持有者 release 之后不再盯 `.handoff`—
   expect(asked).toBe(false);
 });
 
+test("文件锁：拿不到锁的 acquire 不许删别人的 `.handoff`——人的让位请求不能被第三方的失败尝试抹掉（review 2026-09-07）", async () => {
+  const { lock, path } = await fileLockAt();
+  const held = await lock.acquire({ holder: "后台", preemptible: true });
+  expect(held).not.toBeNull();
+  await writeFile(`${path}.handoff`, JSON.stringify({ by: "人", at: Date.now() }));
+  const third = await lock.acquire({ holder: "第三方" });
+  expect(third).toBeNull();
+  expect(existsSync(`${path}.handoff`)).toBe(true); // 此前：acquire 一进门就 rm，请求被静默抹掉
+  await held!.release();
+});
+
 /* ───────────── 端口层：两种实现同一份语义 ───────────── */
 
 for (const [name, make] of [
   ["内存锁", async (): Promise<StateLock> => new InMemoryStateLock()],
   ["文件锁", async (): Promise<StateLock> => (await fileLockAt()).lock],
 ] as const) {
-  test(`${name}：不可被请走的持有者一律不让——人开的会话不会被后台顶掉`, async () => {
+  test(`${name}：不可让位的持有者一律不让——人开的会话不会被后台顶掉`, async () => {
     const lock = await make();
-    const held = await lock.acquire({ holder: "人" }); // 缺省就是不可被请走
+    const held = await lock.acquire({ holder: "人" }); // 缺省就是不可让位
     expect(held).not.toBeNull();
     expect(await lock.requestHandoff?.({ by: "后台", timeoutMs: 200 })).toBe(false);
     expect(await lock.acquire({ holder: "后台" })).toBeNull(); // 还占着，谁也拿不走
     await held!.release();
   });
 
-  test(`${name}：可被请走的持有者收到信号、自己 release，请的人随后拿得到`, async () => {
+  test(`${name}：可让位的持有者收到信号、自己 release，请的人随后拿得到`, async () => {
     const lock = await make();
     const held = await lock.acquire({ holder: "后台", preemptible: true });
     expect(held).not.toBeNull();
@@ -122,7 +133,7 @@ test("文件锁：请求写在锁旁边，让完就清掉——不许留给下�
   await next!.release();
 });
 
-test("文件锁：可被请走这件事写进锁文件——请它走的人在另一个进程里，只能从盘上看出来", async () => {
+test("文件锁：可让位这件事写进锁文件——请它走的人在另一个进程里，只能从盘上看出来", async () => {
   const { lock, path } = await fileLockAt();
   const held = await lock.acquire({ holder: "后台", preemptible: true });
   expect(JSON.parse(await Bun.file(path).text()).preemptible).toBe(true);
@@ -155,7 +166,7 @@ test("人 start() 时后台那段让开：它自己 stop（drain 完、落完盘
   await background.start();
   await background.prompt("后台先干点活"); // 有内容，才验得到「落完盘才让」
 
-  const human = await createAgent(common); // 缺省不可被请走
+  const human = await createAgent(common); // 缺省不可让位
   await human.start(); // 人来了：后台应当自己让开
   expect(human.messages.length).toBeGreaterThan(0); // 续上了后台落下的那段对话
 

@@ -48,6 +48,18 @@ test("并发写不同路径：每一份都在", async () => {
   expect(listed).toHaveLength(30);
 });
 
+test("list(prefix) 只走 prefix 所在的子树（review 2026-09-07：此前全树遍历再过滤，inbox 每秒一拍的代价随 transcript 长度线性涨）", async () => {
+  const dir = await tmp();
+  await dir.write("a/1.json", "1");
+  await dir.write("b/2.json", "2");
+  await dir.write("b/deep/3.json", "3");
+  expect(await dir.list("a/")).toEqual(["a/1.json"]);
+  expect(await dir.list("b/")).toEqual(["b/2.json", "b/deep/3.json"]);
+  expect(await dir.list("b/de")).toEqual(["b/deep/3.json"]); // 文件名前缀：起点是 b/，再按整串过滤
+  expect(await dir.list("nope/")).toEqual([]); // 起点不存在 = 空，不抛
+  expect(await dir.list("")).toEqual(["a/1.json", "b/2.json", "b/deep/3.json"]);
+});
+
 test("read 不存在的路径返回 null，不抛（StorageDir 契约）", async () => {
   const dir = await tmp();
   expect(await dir.read("nope.json")).toBeNull();

@@ -163,7 +163,7 @@ export type CreateAgentOptions = {
   /**
    * 全部 session 目录的上一层。不给就是 `<ECHO_HOME>/sessions`。
    *
-   * 这是容器（cli / 宿主程序）该给的那一个：它管的是「我的会话都放哪儿」，
+   * 这是容器（cli / 常驻程序）该给的那一个：它管的是「我的会话都放哪儿」，
    * 具体某一段的目录由 `sessionsRoot + sessionId` 得出，容器不必先知道 id。
    */
   sessionsRoot?: string;

@@ -127,7 +127,12 @@ export class FileDir implements StorageDir {
 
   async list(prefix: string): Promise<string[]> {
     const out: string[] = [];
-    await this.walk(this.root, out);
+    // 只走 prefix 所在的那棵子树（review 2026-09-07：此前一律全树遍历再过滤，每秒一拍的 inbox 轮询代价随 transcript 长度线性涨）。
+    // 起点经 resolveSafe：prefix 目录是逃出 root 的符号链接时照样抛；起点不存在时 walk 自己返回空。
+    const cut = prefix.lastIndexOf("/") + 1;
+    const dirPart = prefix.slice(0, cut);
+    const start = dirPart === "" ? this.root : await this.resolveSafe(dirPart);
+    await this.walk(start, out);
     return out.filter((p) => p.startsWith(prefix)).sort();
   }
 

@@ -90,7 +90,6 @@ function nextId(tasks: TaskMap): number {
   return max + 1;
 }
 
-/** **批量原子**：同批内可用 `ref` 互相引用；任一条成环 → 整批不落地。 */
 /**
  * 约束②的判据，建与改共用：in_progress 而前置未完 → 报错点名是谁卡着（模型据此能立刻做对的事，
  * 「非法状态」它只能瞎试）；否则 null。
@@ -102,6 +101,7 @@ function blockedByUnfinished(draft: ReadonlyMap<string, TaskItem>, id: string): 
   return `Task #${id} is blocked by unfinished prerequisites: ${named}`;
 }
 
+/** **批量原子**：同批内可用 `ref` 互相引用；任一条成环、或同批就 in_progress 而前置未完 → 整批不落地。 */
 export function createTasks(tasks: TaskMap, specs: readonly TaskSpec[]): TaskCreateResult {
   if (specs.length === 0) return { ok: true, tasks: [] };
 

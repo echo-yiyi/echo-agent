@@ -811,6 +811,25 @@ test("会话面是**容器的开关**：不给 `sessions` 就一件工具都不�
   await withRunner.stop();
 });
 
+test("给了 stateDir 的非 main 段：createEcho 按 stateDir 读自己的 meta，不挂 session_create（review 2026-09-07 的回归）", async () => {
+  const root = await tmp();
+  const main = await createEcho({ provider: scripted([textTurn("ok")]), allowNetwork: false, sessionsRoot: root, extensionDirs: [], sessions: { run: async () => {} } });
+  await main.start();
+  const child = await main.sessions.create({ message: "干活", main: false }); // 经 extension 面开的段不是 main
+  await main.stop();
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(root, child.id),
+    sessionId: child.id,
+    extensionDirs: [],
+    sessions: { run: async () => {} },
+  });
+  running.push(echo);
+  expect([...echo.agent.tools.keys()]).not.toContain("session_create");
+  expect([...echo.agent.tools.keys()]).toContain("session_send");
+});
+
 test("会话的缺省命名：第一句人话的首行当名字，之后不再改（2026-09-07）", async () => {
   // 没有这条时：每段会话的名字就是它的 id（`s-mtmoe01i-qmeb`），`session_list` 与会话列表里
   // 一眼认不出哪段在干什么——手工用集群时这是最先撞上的墙。

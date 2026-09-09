@@ -138,7 +138,9 @@ export interface AgentLoopConfig {
    */
   resolveTool: (name: string) => ToolResolution;
 
-  /* ── 轮末三个决策钩（turn_end 之后、下一次模型调用之前），契约均为绝不抛。`iteration` 是该 turn 在它的 reply 里的序号 ── */
+  /* ── 轮末的决策钩（turn_end 之后、下一次模型调用之前），契约均为绝不抛。`iteration` 是该 turn 在它的 reply 里的序号。
+     **stopReason 是 tool_use / max_tokens 的 turn 不问它们**：工具链的每一轮先短路、直接下一 turn（run-loop-layers.md §2.2），
+     `shouldStopAfterTurn` 只在落地消息是 end_turn 之后才有发言权 ── */
   shouldStopAfterTurn?: (ctx: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
   prepareNextTurn?: (
     ctx: PrepareNextTurnContext,

@@ -314,6 +314,14 @@ describe("写入闸(checkWrite 经方法生效)", () => {
     // 点到的那两层照常写
     expect((await call(h, { command: "create", path: "/memories/project/scoped.md", file_text: "x" })).isError).toBe(false);
   });
+
+  test("路径没有作用域前缀：报错是英文的模型面文本（review 2026-09-07：此前中文原文直回模型）", async () => {
+    const h = memories(new InMemoryDir());
+    const r = await call(h, { command: "view", path: "/memories/nope/agent.md" });
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/^Memory paths must start with a scope \(/);
+    expect(r.content).not.toMatch(/[一-鿿]/);
+  });
 });
 
 /* ───────────────────────── ⑤ 六动词(薄壳调方法) ───────────────────────── */

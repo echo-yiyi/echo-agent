@@ -238,11 +238,16 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
       out.push({
         role: "tool",
         tool_call_id: b.tool_use_id,
-        content: b.is_error ? `[工具执行失败]\n${b.content}` : b.content,
+        // 模型面全英文（review 2026-09-07：此前是中文「[工具执行失败]」，而这是唯一方言的必经之路）
+        content: b.is_error ? `[tool execution failed]\n${b.content}` : b.content,
       });
     } else if (b.type === "text") {
       parts.push({ type: "text", text: b.text });
     } else if (b.type === "image") {
+      // 目录说这款不收图就本地 fail-loud，不把 image_url 发出去等服务端 400（review 2026-09-07：`vision` 此前无人读）
+      if (model.capabilities?.vision !== true) {
+        throw new Error(`Model '${model.provider}/${model.id}' does not accept image input (capabilities.vision is not true)`);
+      }
       parts.push({ type: "image_url", image_url: { url: `data:${b.mimeType};base64,${b.data}` } });
     }
   }

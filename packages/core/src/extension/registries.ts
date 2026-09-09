@@ -13,7 +13,8 @@
 //
 // 归属靠 disposer：Fiber 把 `register()` 返回的 disposer 交给 `ctx.effect()` 持有，unload 时 LIFO 卸。
 // disposer 只认对象身份（O1a 的 exact-reference 契约）：条目已被别的显式操作替换成 A2 时，旧 Fiber 的 disposer 不动 A2。
-// 同名注册 fail-loud；受控 replace 不在 O2a（等有真实消费者再开）。
+// 同名注册 fail-loud 的是 Tools / Skills / Prompt / Compaction 四个具名 registry；`AgentHooks` 的条目无名、
+// `opts.id` 只是标签，同 id 可并存（session-name 钩子就靠同事件多条），disposer 认对象身份。受控 replace 不在 O2a（等有真实消费者再开）。
 
 import { registerTool, restrictTools, type ToolMap, type ToolRestrictions } from "../tools/harness.ts";
 import type { AgentTool } from "../tools/types.ts";
@@ -150,7 +151,9 @@ export const AgentMemory: ServiceKey<AgentMemoryRegistry> = defineService<AgentM
  * **能力端口**：Agent 的后台队列（闸 / 缓冲 / 收摊都在 core，扩展只填「跑什么」）。
  *
  * `kind` 是 `"single"` 不是 `"registry"`——它不收注册，是把 agent 已有的**那一个**东西交出去
- * （`AgentRuntimeService` 同理）。**没有为它新造一个 `ServiceKind`**：枚举加值是公共面的开闭决定，
+ * （`AgentRuntimeService` 同理，也是能力端口——只是它由 `echo:agent` 这条 Fiber provide，不是 Host 自带的 Service，
+ * 所以 graph.ts 那条「Extension 不能 provide Host 自带的 Service」够不着它；谁 inject 谁就拿到整份协议）。
+ * **没有为它新造一个 `ServiceKind`**：枚举加值是公共面的开闭决定，
  * 现有两值够表达，就不该顺手加第三个。
  * `reload: "agent"`：后台队列与 Agent 同寿，换一份就等于把在跑的任务扔了。
  *

@@ -517,6 +517,10 @@ test("阶段抛错：记 compactionFailed（带 stage）、跳到下一段；全
   const failed = lifecycle.filter((e): e is Extract<LifecycleEvent, { type: "compactionFailed" }> => e.type === "compactionFailed");
   expect(failed.map((e) => e.stage)).toEqual(["bad", undefined]);
   expect(failed[0]!.message).toContain("boom");
+  // 同时有通用错误通知：壳与 serve 端只认这条，压缩失败不能在产品里隐形（review 2026-09-07）
+  const notices = lifecycle.filter((e) => e.type === "notification" && e.kind === "error").map((e) => (e.type === "notification" ? e.message : ""));
+  expect(notices.filter((m) => m.startsWith("[compaction_stage_failed]")).length).toBe(2);
+  expect(notices[0]).toContain("bad: boom");
   // start / end 仍成对（观测 span 要闭合），end 的 stages 为空
   const end = events.find((e) => e.type === "compaction_end");
   expect(end !== undefined && end.type === "compaction_end" && end.stages).toEqual([]);

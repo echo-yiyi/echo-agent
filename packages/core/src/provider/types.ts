@@ -25,7 +25,7 @@ export type ModelCost = {
 export type ModelCapabilities = {
   /** 有无思考通道——消费端据此判断 thinking 块缺席是正常还是异常。 */
   reasoning?: boolean;
-  /** 收不收 image 块——投影层据此裁剪或拒绝。 */
+  /** 收不收 image 块。目录信息；方言据此本地拒绝（openai 方言：不是 true 就不发 image_url，直接抛）。 */
   vision?: boolean;
   /** **承重字段**：压缩预算的根。 */
   contextWindow?: number;

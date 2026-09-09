@@ -164,6 +164,9 @@ export async function runCompaction(
       next = normalizeCompaction(context.messages, next);
     } catch (e) {
       await config.hooks.notify({ type: "compactionFailed", reason, stage: stage.name, message: errText(e) }, config.hookContext);
+      // 官方产品里 compactionFailed 没人收（TUI 的 default 分支丢掉、观测层不记），压缩失败等于不可见——
+      // 再发一条通用错误通知，壳与 serve 端都认它（review 2026-09-07）
+      await config.hooks.notify({ type: "notification", kind: "error", message: `[compaction_stage_failed] ${stage.name}: ${errText(e)}` }, config.hookContext);
       continue;
     }
     if (sameCompaction(next, state)) continue;
@@ -175,7 +178,10 @@ export async function runCompaction(
 
   const changed = applied.length > 0;
   if (changed) context.compaction = state;
-  else await config.hooks.notify({ type: "compactionFailed", reason, message: "no compaction stage changed the context" }, config.hookContext);
+  else {
+    await config.hooks.notify({ type: "compactionFailed", reason, message: "no compaction stage changed the context" }, config.hookContext);
+    await config.hooks.notify({ type: "notification", kind: "error", message: "[compaction_stage_failed] no compaction stage changed the context" }, config.hookContext);
+  }
   await emit({ type: "compaction_end", reason, compaction: state, stages: applied, contextTokens: used });
   if (changed) await config.hooks.notify({ type: "postCompact", reason, compaction: state, stages: applied }, config.hookContext);
   return { changed, state, stages: applied, contextTokens: used };

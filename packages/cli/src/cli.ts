@@ -282,7 +282,7 @@ export function echoOptions(
     // 会话面开着（2026-09-03）：同一台机器上多开几个终端就是多段 session，让它们看得见彼此、
     // 能互相带个话。**runner 也给**（2026-09-07）：给一段没在跑的会话发消息时，容器 spawn
     // 一个 `--serve` 的进程当它的宿主——「只跟活着的段说话」那条要有人兑现才成立。
-    // 那种宿主是可被请走的，所以你 `--resume` 它的时候它会让开。
+    // 那种容器是可让位的，所以你 `--resume` 它的时候它会让开。
     sessions: { run: sessionRunner(opts, choices.find((c) => c.provider === provider)?.name) },
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     ...(opts.observe !== undefined ? { observation: { capture: opts.observe } } : {}),
@@ -493,12 +493,12 @@ function sessionRunner(opts: CliOptions, providerName: string | undefined): Sess
     const deadline = Date.now() + WAKE_TIMEOUT_MS;
     while (Date.now() < deadline) {
       // 先看进程：它退了就是没跑起来——哪怕盘上留着一把别人的 / 坏的锁
-      if (child.exitCode !== null) throw new Error(`会话 ${row.id} 的宿主进程退了（exit ${child.exitCode}），没跑起来`);
+      if (child.exitCode !== null) throw new Error(`会话 ${row.id} 的容器进程退了（exit ${child.exitCode}），没跑起来`);
       const cur = await inspectStateLock(lock);
       if (cur.state === "valid" && cur.record.pid === child.pid) return; // 我起的那个进程持有一把合法的锁 = 真的跑起来了
       await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
     }
-    throw new Error(`会话 ${row.id} 的宿主 ${WAKE_TIMEOUT_MS}ms 内没拿到锁`);
+    throw new Error(`会话 ${row.id} 的容器 ${WAKE_TIMEOUT_MS}ms 内没拿到锁`);
   };
 }
 
@@ -510,7 +510,7 @@ function sessionRunner(opts: CliOptions, providerName: string | undefined): Sess
  *
  * 三条与人开的会话不同：
  *   · **不装壳、不读 stdin**——没人坐在它前面；
- *   · **可被请走**（`preemptible`）——你哪天 `--resume` 这一段，它把手上的活做完就让开；
+ *   · **可让位**（`preemptible`）——你哪天 `--resume` 这一段，它把手上的活做完就让开；
  *   · **空闲就退**——它是为了处理一条消息才起来的，处理完没理由继续占着锁。
  */
 async function runServe(

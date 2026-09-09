@@ -98,7 +98,7 @@ export interface AgentRuntime {
 
   /* ── 答 ───────────────────────────────────────────────────────────── */
 
-  /** 回答一次 `permissionRequest`。这是**唯一**入口——hook 只能观察，回答只能来自可信宿主。 */
+  /** 回答一次 `permissionRequest`。这是**唯一**入口——hook 只能观察，回答只能来自壳、或显式注入本协议的 extension（没有门守「只有壳」这条，见 registries.ts 能力端口那段）。 */
   answerPermission(answer: PermissionAnswer): Promise<PermissionAnswerResult>;
   /** 还欠着几个答复。壳子重启 / 重绘时靠它把待答的重新摆出来。 */
   readonly pendingPermissions: readonly PermissionAsk[];

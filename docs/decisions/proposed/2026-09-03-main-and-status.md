@@ -20,6 +20,8 @@
 
 **A**(2026-09-03 用户拍板:「给 session 一个 main 的标识,只有 main 有创建 session 的能力,同时每个 session 都有对应的状态」)。附带:一台机器可以有多个 main;宿主程序的 `echo.sessions.create` 不受 main 限制;`/clear` = 关当前段(closed)+ 新建 + attach,协议上的 `reset()` 删;`closed` 的段缺省不列、`send` 返回 rejected。
 
+留痕(2026-09-08):`reset()` 反向先**加**进了封闭协议(P3a `7d4237c`,[记录](../implemented/2026-09-01-runtime-protocol-set-model-thinking-reset.md),当时 `/clear` 只清真相不换段);删它推迟到 sessions.md §9 第 5 步随 `/clear` 换段一起做,两条不是打架、是先后。
+
 ## 验收
 
 非 main 的 session 工具表里没有 `session_create`,没给 `SessionRunner` 的容器里 main 也没有,宿主 API 的 `create` 不受限;`/clear` 后旧段 `status = closed`、新段 id 不同且 `main = true`,`--resume` 旧段回来的是清之前的对话,`--continue` 挑到新段;一段在 `working` 时 `status.json` 的 `phase` 为 working,回 idle 后为 idle;进程在 working 时被杀,`session_list` 里它 `alive = false`、`phase = null`;runner 抛错或超时,`create` 判红、那段 `status = closed`、缺省不列。
