@@ -4,7 +4,7 @@
 // 工具、prompt 段、hooks、skills、压缩阶段、记忆模块都能注册，唯独这三样不行。于是「把工具与角色文件放进
 // `<cwd>/extensions/`，echo-agent 就长成另一个 agent」这条路永远差一截——本地扩展能加工具、能换身份段，
 // 却改不了执行预算与权限，在仓库里 grep、read 几下就撞上 core 缺省的 20。
-// 记录：`docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`。
+// 记录：`docs/decisions/implemented/2026-09-09-assembly-layer-packages.md`。
 //
 // **值不在构造期冻死**：Agent 每次用时现读这里的当前值。产品经 `AgentOptions` 给初值，扩展经
 // `AgentPolicies` registry 覆盖，卸载时回到初值——与别的 registry 一样，注册返回 disposer、由 Fiber 持有。

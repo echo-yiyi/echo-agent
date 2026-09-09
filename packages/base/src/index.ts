@@ -1,5 +1,5 @@
 // `@echo-agent/base` 公共面：**装配层**（2026-09-09 拆包，记录见
-// `docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`）。
+// `docs/decisions/implemented/2026-09-09-assembly-layer-packages.md`）。
 //
 // 它不是产品，也不是壳。它是「把一个产品跑起来」这件事本身：参数解析、凭据、引导设置的**时机**、
 // 会话解析、装配、收摊、管道形态、观测面板。三个包的依赖是 core ← base ← {壳, 各产品}。

@@ -59,7 +59,7 @@ const ECHO_PIPE = definePromptPack("echo:pipe");
 
 /**
  * 共用的纪律段。**由产品挂，不再由 `mainFor()` 恒挂**（2026-09-09 拍板，记录见
- * `docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`）。文本仍只有这一份，产品按自己的形态取。
+ * `docs/decisions/implemented/2026-09-09-assembly-layer-packages.md`）。文本仍只有这一份，产品按自己的形态取。
  */
 export function conductEntry(form: Pick<PresetForm, "interactive">): ExtensionEntry {
   return { entryId: "echo:conduct", definition: ECHO_CONDUCT, config: { sections: [conductSection(form.interactive)] } };

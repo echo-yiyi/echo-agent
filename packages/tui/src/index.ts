@@ -1,5 +1,5 @@
 // `@echo-agent/tui` 公共面：**终端壳**（2026-09-09 拆包，记录见
-// `docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`）。
+// `docs/decisions/implemented/2026-09-09-assembly-layer-packages.md`）。
 //
 // 壳是一条官方 Extension，不是 core 外面套的一层（2026-08-31：壳也是 extension）。
 // `echo:tui` inject core 那份封闭的 `AgentRuntime`，于是壳与工具扩展长在同一套机制上——

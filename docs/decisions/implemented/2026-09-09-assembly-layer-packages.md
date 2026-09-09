@@ -1,6 +1,6 @@
 # 装配层独立成 `@echo-agent/base` 与 `@echo-agent/tui`；产品只剩身份与自带扩展；启动器从模板方法改成部件
 
-> 状态:proposed · 提出 2026-09-09 · 拍板 2026-09-09(口头,实现后移入 implemented) · 来源 2026-09-09 设计对话 · 上位记录:[受众与版本](2026-09-07-audience-and-versioning.md) · 相关:[`Agent` 类内部化](2026-09-07-agent-class-internal.md)、[角色定义](2026-09-07-role-agent.md)
+> 状态:implemented · 提出 2026-09-09 · 拍板 2026-09-09(口头) · 实现 2026-09-09(五批) · 来源 2026-09-09 设计对话 · 上位记录:[受众与版本](../proposed/2026-09-07-audience-and-versioning.md) · 相关:[`Agent` 类内部化](../proposed/2026-09-07-agent-class-internal.md)、[角色定义](../proposed/2026-09-07-role-agent.md)
 
 ## 现状(拍板前)
 
@@ -25,7 +25,7 @@
 
 ## 不拍板的代价
 
-每加一个产品,都要在「复制一份启动器」和「继承 echo-agent 的 prompt 与依赖」之间二选一。前者踩 `cli.ts` 头注记着的那个坑(两套参数解析会分家,实测过加 provider 只改了一边);后者就是今天评测里那个问题。而 [受众与版本](2026-09-07-audience-and-versioning.md) 已经把受众定成「第三方可装的内核」,这两条都不该是第三方要面对的选择。
+每加一个产品,都要在「复制一份启动器」和「继承 echo-agent 的 prompt 与依赖」之间二选一。前者踩 `cli.ts` 头注记着的那个坑(两套参数解析会分家,实测过加 provider 只改了一边);后者就是今天评测里那个问题。而 [受众与版本](../proposed/2026-09-07-audience-and-versioning.md) 已经把受众定成「第三方可装的内核」,这两条都不该是第三方要面对的选择。
 
 ## 选项
 

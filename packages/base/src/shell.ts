@@ -8,7 +8,7 @@
 // 本文件把方向倒过来：装配层只认下面这个端口，谁实现它、用什么画界面都行；
 // 终端那份实现是 `terminalShell`（`extension.ts` 的 `tuiShell` + `first-run.ts` 的引导设置）。
 //
-// 记录：`docs/decisions/proposed/2026-09-09-assembly-layer-packages.md`。
+// 记录：`docs/decisions/implemented/2026-09-09-assembly-layer-packages.md`。
 
 import type { CredentialStore, Provider } from "@echo-agent/core";
 import type { ExtensionDefinition } from "@echo-agent/core/extension";
