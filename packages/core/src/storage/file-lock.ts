@@ -121,7 +121,8 @@ function isPeekedRecord(v: unknown): v is PeekedLockRecord {
     typeof r === "object" &&
     r !== null &&
     typeof r["holder"] === "string" &&
-    typeof r["pid"] === "number" &&
+    Number.isInteger(r["pid"]) &&
+    (r["pid"] as number) > 0 && // 0 / 负数 / 小数不是进程号：`process.kill(0, 0)` 会成功，会被探活判成活着（review 2026-09-09）
     typeof r["at"] === "number" &&
     Number.isFinite(r["at"]) &&
     (r["token"] === undefined || typeof r["token"] === "string")

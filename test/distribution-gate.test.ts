@@ -207,12 +207,13 @@ function isolatedExample(name: string, runnable?: (stdout: string) => void): voi
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { dependencies: Record<string, string>; devDependencies?: Record<string, string> };
     // 样例只许依赖这一个包——多一条就说明「装一个包就能用」这句话是假的
     expect([name, Object.keys(pkg.dependencies)]).toEqual([name, ["@echo-agent/core"]]);
-    // scripted 连 `@types/bun` 都不装、tsconfig 不点 `types`（2026-09-09 拍板，review 2026-09-07 #80）：它是「包的类型面不靠 bun
-    // 的全局类型也能编译」的判据。hello / extension 用到 `process` / `import.meta`，不做这条
+    // scripted 连 `@types/bun` 都不装、tsconfig 不点 `types`、**也不 skipLibCheck**（2026-09-09 拍板，review 2026-09-07 #80）：
+    // 它是「包的类型面不靠 bun 的全局类型也能编译」的判据——skipLibCheck 会把 tarball 里 .d.ts 的错全压掉，判据就没牙了。
+    // hello / extension 用到 `process` / `import.meta`，不做这条
     if (name === "scripted") {
       expect(Object.keys(pkg.devDependencies ?? {})).toEqual(["typescript"]);
-      const tsconfig = JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")) as { compilerOptions?: { types?: unknown } };
-      expect(tsconfig.compilerOptions?.types).toBeUndefined();
+      const tsconfig = JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")) as { compilerOptions?: { types?: unknown; skipLibCheck?: unknown } };
+      expect([tsconfig.compilerOptions?.types, tsconfig.compilerOptions?.skipLibCheck]).toEqual([undefined, false]);
     }
     pkg.dependencies["@echo-agent/core"] = `file:${tarball}`;
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));

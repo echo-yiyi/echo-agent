@@ -1,6 +1,6 @@
 # 装配层独立成 `@echo-agent/base` 与 `@echo-agent/tui`；产品只剩身份与自带扩展；启动器从模板方法改成部件
 
-> 状态:implemented · 提出 2026-09-09 · 拍板 2026-09-09(口头) · 实现 2026-09-09(五批) · 来源 2026-09-09 设计对话 · 上位记录:[受众与版本](../proposed/2026-09-07-audience-and-versioning.md) · 相关:[`Agent` 类内部化](../proposed/2026-09-07-agent-class-internal.md)、[角色定义](../proposed/2026-09-07-role-agent.md)
+> 状态:implemented · 提出 2026-09-09 · 拍板 2026-09-09(口头) · 实现 2026-09-09(五批) · 来源 2026-09-09 设计对话 · 上位记录:[受众与版本](../proposed/2026-09-07-audience-and-versioning.md) · 相关:[`Agent` 类内部化](../proposed/2026-09-07-agent-class-internal.md)、[角色定义](2026-09-07-role-agent.md)
 
 ## 现状(拍板前)
 

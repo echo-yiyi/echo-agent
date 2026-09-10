@@ -1,6 +1,6 @@
 # agent 定义是一个 extension(可打包别的),session 按名或 inline 引用;inline 不越权
 
-> 状态:proposed · 提出 2026-09-03 · 拍板 2026-09-03(口头,实现后移入 implemented) · **修正 2026-09-07**:产品打包成 bundle 那一半撤回,agent 定义是产品内的角色,见 [角色定义](2026-09-07-role-agent.md) · 来源 [会话与 agent 集群](../../design/sessions.md) §4
+> 状态:implemented · 提出 2026-09-03 · 拍板 2026-09-03(口头,实现后移入 implemented) · **修正 2026-09-07**:产品打包成 bundle 那一半撤回,agent 定义是产品内的角色,见 [角色定义](2026-09-07-role-agent.md) · 来源 [会话与 agent 集群](../../design/sessions.md) §4 · 挪入 implemented 2026-09-09（对照代码核过验收）
 
 ## 现状(拍板前)
 

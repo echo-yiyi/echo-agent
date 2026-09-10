@@ -294,6 +294,22 @@ describe("hole 与 CanonicalObservationGap", () => {
     expect((idx.terminalRecordId !== undefined && (recs.find((r) => r.seq === 8)!.body as { captureGapCountBeforeClose?: number }).captureGapCountBeforeClose)).toBe(1);
   });
 
+  test("run.closed 先给开着的 run-scoped 溢出区间收口：封口 body 的 captureGapCountBeforeClose 算上它、带 digest（review 2026-09-09 回归）", async () => {
+    const h = harness({ ringCapacity: 1 });
+    const run = "run-close-ov";
+    await acceptRun(h, run); // 1
+    h.seq.offer(bounded({ keep: 1 }, { scope: { runtimeId: RT, runId: run } })); // 2：占满
+    h.seq.offer(bounded({ drop: 1 }, { scope: { runtimeId: RT, runId: run } })); // 3：溢出
+    h.seq.offer(bounded({ drop: 2 }, { scope: { runtimeId: RT, runId: run } })); // 4：同一区间
+    const closed = await h.seq.appendBoundary(boundary("run.closed", closedBody(), run)); // 收口 gap 5，run.closed 6
+    expect(closed.seq).toBe(6);
+    const body = closed.body as { captureGapCountBeforeClose?: number; captureGapDigest?: string };
+    expect(body.captureGapCountBeforeClose).toBe(1); // 此前 sealCaptureState 在 reserve() 之前算，区间还没滚进 runGaps → 0
+    expect(typeof body.captureGapDigest).toBe("string");
+    expect(h.seq.committedRunIndex(run)!.header.integrity).toBe("partial");
+    expect(h.seq.committedRecords().map((r) => r.seq)).toEqual([1, 2, 5, 6]);
+  });
+
   test("run-scoped gap 把 RunIndex integrity 置 partial，且同事务", async () => {
     const h = harness();
     const run = "run-1";

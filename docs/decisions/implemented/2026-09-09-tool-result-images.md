@@ -12,7 +12,7 @@
 
 ## 选项
 
-- **A. 接上**：OpenAI 的 `role:"tool"` 只收文本，图放进紧随其后的那条 user 消息（`image_url` 部件），并标一句「这几张来自哪次工具调用」；`capabilities.vision` 的判定与用户贴图同一条路（不收图的模型本地抛，不发出去等 400）。
+- **A. 接上**：OpenAI 的 `role:"tool"` 只收文本，图放进紧随其后的那条 user 消息（`image_url` 部件），并标一句「这几张来自哪次工具调用」；编码与用户贴图同一条路。不收图的模型**不抛**：图省掉、把那句标签改成「omitted: model does not accept image input」——抛会被归成可重试的 provider 错误，而带图的 tool_result 已经入账，之后每次请求都同样炸（review 2026-09-09 复现）；用户贴图那条仍本地抛，因为它还没入账、改一下就能重发。
 - **B. 删净**：`AgentToolResult` / `ToolResultEntry` / `ProviderToolResultBlock` 三处去掉 `images`，压缩估算随之改。账本格式变更。
 
 ## 决定

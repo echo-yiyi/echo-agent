@@ -1,6 +1,6 @@
 # agent 是身份，session 是它的一次运行实例：一个 agent 可以有多个 session
 
-> 状态：proposed · 提出 2026-09-07 · 拍板 2026-09-07（口头，文档改完即移入 implemented）· 修正 [session 的身份三件](2026-09-07-session-identity.md) 词表那一段与 [会话与 agent 集群](../../design/sessions.md) §1 的等号
+> 状态：implemented · 提出 2026-09-07 · 拍板 2026-09-07（口头，文档改完即移入 implemented）· 修正 [session 的身份三件](../proposed/2026-09-07-session-identity.md) 词表那一段与 [会话与 agent 集群](../../design/sessions.md) §1 的等号 · 挪入 implemented 2026-09-09（对照代码核过验收）
 
 ## 现状（拍板前）
 

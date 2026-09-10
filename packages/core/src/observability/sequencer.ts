@@ -223,6 +223,10 @@ type HoleSlot = {
  * 一次 1 000 条的突发就是 2 000 个 seq、1 000 条 canonical gap、1 000 次 digest 滚动——ring 越满，账本越长，正好反过来。
  * 现在同一 run（或同为 runtime-scoped）的连续溢出只占各自的 hole seq，共用**一条** gap，放在区间末尾；
  * 任何别的预留（成功的 offer、boundary、别的 gap）先把它收口，gap 因此永远紧跟区间最后一个 hole。
+ *
+ * 登记（review 2026-09-09，未做）：区间内每条丢弃仍各占一个 `HoleSlot`，内存与 commit 时的遍历是 n 不是常量
+ * （实测 100 万条丢弃 119 MB）。下一步是用一个 range slot `{ firstSeq, lastSeq, coveredBy }` 代替逐条 hole，
+ * `collectWindow` / `applyCommitted` / `pendingBytesExceedLimits` 直接跳到 `lastSeq + 1`。
  */
 type OverflowRun = { firstSeq: number; lastSeq: number; readonly runId: string | undefined };
 
@@ -556,6 +560,9 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
         return Promise.reject(new Error(`${name} 被拒：${problem}`));
       }
       if (name === "run.closed" && runId !== undefined) {
+        // 先把开着的溢出区间收口：封口 body 里的 capture 计数 / digest 从 `runGaps` 读，而区间要到收口才滚进去；
+        // 靠下面 `reserve()` 顺带收口就晚了——body 已经冻结（review 2026-09-09 复现：count 0、index 却 partial）
+        this.closeOverflow();
         // 在预留 run.closed 的 seq **之前** preflight。可选 projection 超限只留 capture_limit
         // gap 再以安全 body 封口，不降级、不关 admission；只有 required safe body 仍非法才走 required failure。
         try {
@@ -1323,10 +1330,17 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     };
   }
 
+  /** writer 已进终态（sealed / lost-lease）。单独一个方法：同一函数里两次读 `this.persistence.status`，TS 会把第二次窄成不可能。 */
+  private terminal(): boolean {
+    const s = this.persistence.status;
+    return s === "sealed" || s === "lost-lease";
+  }
+
   private async flushOnce(): Promise<void> {
-    if (this.persistence.status === "sealed" || this.persistence.status === "lost-lease") return;
+    if (this.terminal()) return;
     const window = this.collectWindow();
-    if (window === undefined) return;
+    // collectWindow 会给溢出区间收口，收口失败会 seal：terminal 之后这个窗口不能再提交（waiter 已被告知 not durable）
+    if (window === undefined || this.terminal()) return;
     const input = this.buildCommitInput(window);
     for (let attempt = 1; ; attempt++) {
       try {
@@ -1462,6 +1476,12 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     };
     const message = `canonical writer ${status}：${label}`;
     this.report({ code: status === "sealed" ? "observation_writer_sealed" : "observation_writer_lost_lease", message });
+    // 开着的溢出区间不会再有人收口（offer / boundary / flush 都在 terminal 上短路）：那几条丢弃至少要留一句诊断
+    const open = this.overflow;
+    if (open !== undefined) {
+      this.overflow = undefined;
+      this.report({ code: "observation_hole", message: `seq ${open.firstSeq}..${open.lastSeq} → hole(buffer_overflow) ×${open.lastSeq - open.firstSeq + 1}，writer 已 ${status}，没有 gap 落盘` });
+    }
     for (const w of [...this.waiters.values()]) {
       if (w.settled) continue;
       w.settled = true;

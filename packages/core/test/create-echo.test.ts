@@ -813,7 +813,7 @@ test("会话面是**容器的开关**：不给 `sessions` 就一件工具都不�
   await withRunner.stop();
 });
 
-test("给了 stateDir 的非 main 段：createEcho 按 stateDir 读自己的 meta，不挂 session_create（review 2026-09-07 的回归）", async () => {
+test("续一段非 main 的段（sessionsRoot + sessionId）：createEcho 按盘上的 meta 认出它不是 main，不挂 session_create（review 2026-09-07 的回归）", async () => {
   const root = await tmp();
   const main = await createEcho({ provider: scripted([textTurn("ok")]), allowNetwork: false, sessionsRoot: root, extensionDirs: [], sessions: { run: async () => {} } });
   await main.start();
@@ -823,7 +823,6 @@ test("给了 stateDir 的非 main 段：createEcho 按 stateDir 读自己的 met
     provider: scripted([textTurn("ok")]),
     allowNetwork: false,
     sessionsRoot: root,
-    stateDir: join(root, child.id),
     sessionId: child.id,
     extensionDirs: [],
     sessions: { run: async () => {} },
@@ -833,15 +832,13 @@ test("给了 stateDir 的非 main 段：createEcho 按 stateDir 读自己的 met
   expect([...echo.agent.tools.keys()]).toContain("session_send");
 });
 
-test("开了会话面就不能用 stateDir 把这一段放到 sessionsRoot 之外：createEcho 当场抛（review 2026-09-07 #89，2026-09-09 拍板 fail-loud）", async () => {
+test("开了会话面就不收 stateDir：createEcho 当场抛（review 2026-09-07 #89，2026-09-09 拍板 fail-loud）", async () => {
   const root = await tmp();
   const base = { provider: scripted([textTurn("ok")]), allowNetwork: false, sessionsRoot: root, extensionDirs: [], sessions: {} };
-  // 没给 sessionId：目录永远对不上
-  await expect(createEcho({ ...base, stateDir: join(root, "s1") })).rejects.toThrow("不能用 stateDir");
-  // 给了 sessionId 但目录在别处
-  await expect(createEcho({ ...base, stateDir: join(await tmp(), "s1"), sessionId: "s1" })).rejects.toThrow("不能用 stateDir");
-  // 指到 sessionsRoot/<sessionId>：放行
-  const ok = await createEcho({ ...base, stateDir: join(root, "s1"), sessionId: "s1" });
+  await expect(createEcho({ ...base, stateDir: join(root, "s1") })).rejects.toThrow("不能给 stateDir");
+  await expect(createEcho({ ...base, stateDir: join(root, "s1"), sessionId: "s1" })).rejects.toThrow("不能给 stateDir"); // 哪怕正好指到 sessionsRoot/<id>
+  // 续某一段：sessionsRoot + sessionId
+  const ok = await createEcho({ ...base, sessionId: "s1" });
   running.push(ok);
   expect(ok.agent.state.sessionId).toBe("s1");
   // 不开会话面：stateDir 随便放（单会话形态没有「别人」）

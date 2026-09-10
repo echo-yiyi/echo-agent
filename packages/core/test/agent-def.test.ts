@@ -1,5 +1,5 @@
 // agent 定义（角色）：文件形状、三处来源的优先级、挂上来之后是什么样。
-// 决策见 docs/decisions/proposed/2026-09-07-role-agent.md，设计见 docs/design/sessions.md §4。
+// 决策见 docs/decisions/implemented/2026-09-07-role-agent.md，设计见 docs/design/sessions.md §4。
 
 import { expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";

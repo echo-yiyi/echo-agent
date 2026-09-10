@@ -1,5 +1,5 @@
 // agent 定义的文件形状：一个 markdown、frontmatter 带字段、正文就是 identity。
-// 照 skill 的样子（`docs/decisions/proposed/2026-09-07-role-agent.md`）：
+// 照 skill 的样子（`docs/decisions/implemented/2026-09-07-role-agent.md`）：
 //
 //   ---
 //   name: reviewer

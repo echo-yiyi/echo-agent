@@ -1,6 +1,6 @@
 // agent 定义的加载：扫盘 → 一张按名查的表。
 //
-// **三处来源，按优先级合并**（`docs/decisions/proposed/2026-09-07-role-agent.md`）：
+// **三处来源，按优先级合并**（`docs/decisions/implemented/2026-09-07-role-agent.md`）：
 // 项目层 `<workspace>/.echo/agents/`（放仓库里、随 git 走）> user 层 `<ECHO_HOME>/agents/` >
 // 产品自带。顺序与 skill 加载器同一条规矩——**目录顺序就是优先级，撞名先到先得 + 诊断**，
 // 因为加载是批量吞外部世界，一个重名不该炸掉整批。

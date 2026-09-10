@@ -114,8 +114,8 @@ export type CreateEchoOptions = CreateAgentOptions & {
    * `run` 是「容器怎么让新建的一段跑起来」。不给时 `echo.sessions.create()` 照样建（宿主自己知道
    * 怎么跑它），但模型面的 `session_create` 不挂——工具不能承诺系统不交付的事。
    *
-   * 与 `stateDir` 同给时，`stateDir` 必须就是 `sessionsRoot/<sessionId>`（且要给 `sessionId`），否则 `createEcho()` 抛：
-   * 会话面按 `sessionsRoot` 认人，放在别处的段别人看不见。
+   * 与 `stateDir` 互斥：会话面按 `sessionsRoot` 认人，放在别处的段别人看不见，所以两者同给时 `createEcho()` 抛。
+   * 要续某一段就给 `sessionsRoot` + `sessionId`。
    */
   sessions?: {
     run?: SessionRunner;
@@ -346,16 +346,13 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // 本段的 id 在 `createAgent()` 之后才定（不给就随机），所以这里先记调用方给的，创建后再对齐。
   const selfStateDir = opts.stateDir === undefined ? undefined : expandHome(opts.stateDir);
   // 会话面靠 `listSessions(sessionsRoot)` 认人：本段的目录不在 `sessionsRoot/<id>` 这个位置，别的段就永远看不见它、
-  // 发给它一律 not-found。开了会话面还点名 `stateDir`，只许点到那个位置（2026-09-09 拍板 fail-loud，review 2026-09-07 #89）
+  // 发给它一律 not-found。所以开了会话面就**不收** `stateDir`（2026-09-09 拍板 fail-loud，review 2026-09-07 #89）：
+  // 「只许点到 sessionsRoot/<sessionId>」这条例外没有生产调用方，词法比较又会把 /tmp 与 /private/tmp 判成两处，索性不留
   if (opts.sessions !== undefined && selfStateDir !== undefined) {
-    const expected = opts.sessionId === undefined ? undefined : resolveStateDir({ sessionsRoot, sessionId: opts.sessionId });
-    if (expected === undefined || resolve(selfStateDir) !== resolve(expected)) {
-      throw new Error(
-        `开了会话面（sessions）就不能用 stateDir 把这一段放到 sessionsRoot 之外：别的段按 sessionsRoot 认人，会看不见它。` +
-          `要么不给 stateDir（本段落在 ${sessionsRoot}/<sessionId>），要么 stateDir 指到 sessionsRoot/<sessionId> 并同时给 sessionId` +
-          `（现在 stateDir=${selfStateDir}${expected === undefined ? "，没给 sessionId" : `，应为 ${expected}`}）`,
-      );
-    }
+    throw new Error(
+      `开了会话面（sessions）就不能给 stateDir：别的段按 sessionsRoot 认人，放在别处的段它们看不见。` +
+        `本段的目录只能是 sessionsRoot/<sessionId>——用 sessionsRoot（要续某一段就再给 sessionId）来指定它`,
+    );
   }
   let selfSessionId: string | null = opts.sessionId ?? null;
   const sessionDirOf = (id: string): string =>

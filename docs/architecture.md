@@ -83,11 +83,11 @@
 |---|---|---|
 | 受众与版本（根决策） | 受众 = 第三方可装的内核；公共面按「第三方需要不需要」划；0.x，`hostAbiVersion` 独立成线，tag 由人定 | [记录](decisions/proposed/2026-09-07-audience-and-versioning.md) |
 | `Agent` 类内部化 | 仓外只剩 `createEcho()` / `AgentRuntime` / `./testing`；正门是 extension ABI，不是裸 `Agent` | [记录](decisions/proposed/2026-09-07-agent-class-internal.md) |
-| 内建五件留 core | 不搬出 `Agent`；按压缩分法；memory 的 registry 等第一个消费者 | [记录](decisions/proposed/2026-09-07-builtin-capabilities-stay-core.md) |
+| 内建五件留 core | 不搬出 `Agent`；按压缩分法；memory 的 registry 等第一个消费者 | [记录](decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md) |
 | 观测的公开线 | 读面 + extension 发口公开，写面内部；观测 store 从写死的路径分支变成可注入的端口 | [记录](decisions/proposed/2026-09-07-observation-public-face.md) |
 | 并行工具（已合入 59beb8c，本表只为指路） | 工具声明 `concurrent`，连续批；结果按 tool_use 顺序；`toolExecution` 选项删 | [记录](decisions/implemented/2026-09-07-parallel-tools.md) |
 | 落单的 `tool_use`（已实现） | 中止后没跑的调用账本里就是没有结果，送模前由投影补一条 error 结果让请求合法 | [记录](decisions/implemented/2026-09-07-orphan-tool-use.md) |
-| 角色定义 | session 的 agent 定义是产品内的角色，不是产品打包；`section(replace)` 与 `restrict()` 两个口 | [记录](decisions/proposed/2026-09-07-role-agent.md) |
+| 角色定义 | session 的 agent 定义是产品内的角色，不是产品打包；`section(replace)` 与 `restrict()` 两个口 | [记录](decisions/implemented/2026-09-07-role-agent.md) |
 | 记忆的模块与作用域两个轴（已实现） | 路径前缀选层，工具不加参数 | [记录](decisions/implemented/2026-09-03-memory-three-scopes.md) |
 | 作用域由产品声明，core 不认识层名（已实现） | 锚点闭合、变量闭合、名字开放；session 加载完才绑定一次 | [记录](decisions/implemented/2026-09-07-memory-scopes-by-product.md) |
 | 记忆模块走 registry，内建与第三方同一条（已实现） | 动词集按模块配置；`resident` 没有 rename | [记录](decisions/implemented/2026-09-07-memory-modules.md) |
@@ -96,7 +96,7 @@
 | 记忆文件的并发（已实现） | 进程内按路径串行 + 跨进程乐观校验；`stop()` 等两条通道收完 | [记录](decisions/implemented/2026-09-07-memory-concurrency.md) |
 | session 的身份 | meta 记 `product`（哪个产品开的）与 `agent`（角色）；`agentId` / `agentName` 退场 | [记录](decisions/proposed/2026-09-07-session-identity.md) |
 | 人优先，后台让位（已合入 e48a366，本表只为措辞改准） | 自称可让位的实例被请走时交还 lease；不可让位的照旧不抢占 | [记录](decisions/implemented/2026-09-07-preemptible-lease.md) |
-| lifecycle 四条小决策（已落地；第二个 prompt 那条就是现状） | abort reason 保留、`agent_end` 保留名字、stop hook 三次留硬编码、第二个 prompt 留 fail-fast | [abort](decisions/implemented/2026-09-01-abort-reason.md) · [agent_end](decisions/implemented/2026-09-01-agent-end-barrier.md) · [stop hook](decisions/implemented/2026-09-01-stop-continuation-limit.md) · [second prompt](decisions/proposed/2026-09-01-second-prompt-policy.md) |
+| lifecycle 四条小决策（已落地；第二个 prompt 那条就是现状） | abort reason 保留、`agent_end` 保留名字、stop hook 三次留硬编码、第二个 prompt 留 fail-fast | [abort](decisions/implemented/2026-09-01-abort-reason.md) · [agent_end](decisions/implemented/2026-09-01-agent-end-barrier.md) · [stop hook](decisions/implemented/2026-09-01-stop-continuation-limit.md) · [second prompt](decisions/implemented/2026-09-01-second-prompt-policy.md) |
 | 装配层独立成包（2026-09-09 拍板） | `@echo-agent/base` 装启动器部件与宿主能力，`@echo-agent/tui` 装终端壳；产品只剩身份与自带扩展，`Product` 收成身份牌 | [记录](decisions/implemented/2026-09-09-assembly-layer-packages.md) |
 | session 线剩余 | 角色定义先做，再 `/clear`（换 Agent 实例）与 `wait` | [会话与 agent 集群](design/sessions.md) §9 |
 

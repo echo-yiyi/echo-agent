@@ -1,6 +1,6 @@
 # session 的 agent 定义是产品内的一个角色，走 extension 挂载，可选择性替代 identity / 工具子集 / 模型
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 来源 [会话与 agent 集群](../../design/sessions.md) §4 · 修正 [agent 是 extension](2026-09-03-agent-is-an-extension.md)(产品打包成 bundle 那一半撤回)
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 来源 [会话与 agent 集群](../../design/sessions.md) §4 · 修正 [agent 是 extension](2026-09-03-agent-is-an-extension.md)(产品打包成 bundle 那一半撤回) · 挪入 implemented 2026-09-09（对照代码核过验收）
 
 ## 现状(拍板前)
 

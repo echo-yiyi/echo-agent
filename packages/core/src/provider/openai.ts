@@ -249,10 +249,17 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
         content: b.is_error ? `[tool execution failed]\n${b.content}` : b.content,
       });
       // 工具带回的图（`ProviderToolResultBlock.images`）：OpenAI 的 role:"tool" 只收文本，图走紧随其后的那条 user 消息，
-      // 与用户贴图同一条路（vision 判定、data URL），并标一句它来自哪次调用（2026-09-09 拍板接上；此前静默丢弃）
+      // 编码与用户贴图同一条路，并标一句它来自哪次调用（2026-09-09 拍板接上；此前静默丢弃）。
+      // 目录说这款不收图时**不抛、只省略并告诉模型**：这里抛会被归成可重试的 provider 错误，而带图的 tool_result 已经入账，
+      // 之后每次请求都同样炸、直到压缩把图清掉（review 2026-09-09 复现）。用户贴图仍然本地抛——那条没入账，改一下就能重发。
       if (b.images !== undefined && b.images.length > 0) {
-        parts.push({ type: "text", text: `[${b.images.length} image${b.images.length === 1 ? "" : "s"} returned by tool call ${b.tool_use_id}]` });
-        for (const img of b.images) parts.push(imagePart(img));
+        const noun = `${b.images.length} image${b.images.length === 1 ? "" : "s"} returned by tool call ${b.tool_use_id}`;
+        if (model.capabilities?.vision !== true) {
+          parts.push({ type: "text", text: `[${noun} omitted: model does not accept image input]` });
+        } else {
+          parts.push({ type: "text", text: `[${noun}]` });
+          for (const img of b.images) parts.push(imagePart(img));
+        }
       }
     } else if (b.type === "text") {
       parts.push({ type: "text", text: b.text });

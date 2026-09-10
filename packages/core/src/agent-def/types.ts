@@ -1,5 +1,5 @@
 // agent 定义（角色）：**产品内的一个角色**——identity 段、工具子集、模型缺省。
-// 设计见 docs/design/sessions.md §4，决策见 docs/decisions/proposed/2026-09-07-role-agent.md。
+// 设计见 docs/design/sessions.md §4，决策见 docs/decisions/implemented/2026-09-07-role-agent.md。
 //
 // **产品不是 agent 定义**（2026-09-07 用户纠正）：一个 echo-coding 容器开出来的段全是 coding
 // 方向，那是容器级的事；agent 定义是这个产品内部的 reviewer / 前端 / 缺省。

@@ -181,7 +181,7 @@ test("tool_result 的失败前缀全英文；目录没标 vision 的模型带图
   expect(sent.messages[0]!.content[0]!.type).toBe("image_url");
 });
 
-test("工具带回的图：role:tool 后面跟一条 user 消息发 image_url，并标明来自哪次调用；目录没标 vision 一样本地抛（2026-09-09 拍板接上，此前静默丢）", async () => {
+test("工具带回的图：role:tool 后面跟一条 user 消息发 image_url，并标明来自哪次调用；目录没标 vision 时省略并告诉模型，不抛（2026-09-09 拍板接上，此前静默丢）", async () => {
   const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
   const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
   const ctx: Context = {
@@ -192,11 +192,15 @@ test("工具带回的图：role:tool 后面跟一条 user 消息发 image_url，
     ],
     tools: [],
   };
-  const refused = await collect(d.request(MODEL, ctx, { apiKey: "k" }));
-  expect(JSON.stringify(refused)).toContain("does not accept image input");
-  expect(calls.length).toBe(0);
+  // 不收图的模型：请求照发，图省掉、留一句——抛的话会被当成可重试的 provider 错误，而带图的 tool_result 已入账，会话就卡死
+  const plain = await collect(d.request(MODEL, ctx, { apiKey: "k" }));
+  expect(JSON.stringify(plain)).not.toContain("does not accept image input");
+  expect(calls.length).toBe(1);
+  const omitted = calls[0]!.body as { messages: { role: string; content: unknown }[] };
+  expect(omitted.messages.map((m) => m.role)).toEqual(["assistant", "tool", "user"]);
+  expect(omitted.messages[2]!.content).toBe("[1 image returned by tool call c1 omitted: model does not accept image input]");
   await collect(d.request({ ...MODEL, capabilities: { vision: true } }, ctx, { apiKey: "k" }));
-  const body = calls[0]!.body as { messages: { role: string; tool_call_id?: string; content: unknown }[] };
+  const body = calls[1]!.body as { messages: { role: string; tool_call_id?: string; content: unknown }[] };
   expect(body.messages.map((m) => m.role)).toEqual(["assistant", "tool", "user"]);
   expect(body.messages[1]).toEqual({ role: "tool", tool_call_id: "c1", content: "captured" });
   expect(body.messages[2]!.content).toEqual([

@@ -1,6 +1,6 @@
 # 第二个用户 prompt:fail-fast 还是排队
 
-> 状态:proposed · 提出 2026-09-01 · 拍板 2026-09-07(口头,选 A,先留着) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9
+> 状态:implemented · 提出 2026-09-01 · 拍板 2026-09-07(口头,选 A,先留着) · 来源 [Lifecycle 与 Run Loop](../../design/lifecycle-and-run-loop.md) §9 · 挪入 implemented 2026-09-09（对照代码核过验收）
 
 ## 现状
 
