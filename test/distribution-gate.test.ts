@@ -98,6 +98,7 @@ function packWorkspace(work: string, pkgRel: string, tarballs: Readonly<Record<s
   expect(copyTracked(pkgRel, src)).toBeGreaterThan(3);
   const srcPkgPath = join(src, "package.json");
   const srcPkg = JSON.parse(readFileSync(srcPkgPath, "utf8")) as {
+    version: string;
     bin?: Record<string, string>;
     dependencies?: Record<string, string>;
   };
@@ -108,10 +109,9 @@ function packWorkspace(work: string, pkgRel: string, tarballs: Readonly<Record<s
   const deps = srcPkg.dependencies ?? {};
   for (const [dep, spec] of Object.entries(deps)) {
     if (spec !== "workspace:*") continue;
-    const tgz = tarballs[dep];
     // 链上少一环就是红：这里说清是哪一环，别让失败指向 npm 404
-    expect([pkgRel, dep, tgz !== undefined]).toEqual([pkgRel, dep, true]);
-    deps[dep] = `file:${tgz!}`;
+    expect([pkgRel, dep, tarballs[dep] !== undefined]).toEqual([pkgRel, dep, true]);
+    deps[dep] = workspaceVersion(dep);
   }
   srcPkg.dependencies = deps;
   writeFileSync(srcPkgPath, JSON.stringify(srcPkg, null, 2));
@@ -122,13 +122,49 @@ function packWorkspace(work: string, pkgRel: string, tarballs: Readonly<Record<s
   expect([packed.ok, packed.out.slice(-400)]).toEqual([true, packed.out.slice(-400)]);
   const tgz = readdirSync(out).find((f) => f.endsWith(".tgz"));
   expect([out, tgz !== undefined]).toEqual([out, true]);
-  return join(out, tgz!);
+  const abs = join(out, tgz!);
+  expectNoNestedFileDeps(abs, work);
+  return abs;
 }
 
 /**
  * 装配层与壳的 tarball：产品要装出来就得先有它们（core 的那份由调用方给）。
  * 顺序即依赖顺序，一层套一层。
  */
+/** 各 workspace 包的发布版本。它们锁步发版，`bun pm pack` 写进 tarball 的就是这个数。 */
+function workspaceVersion(name: string): string {
+  const dir = readdirSync(join(ROOT, "packages")).find((d) => {
+    const m = join(ROOT, "packages", d, "package.json");
+    return existsSync(m) && (JSON.parse(readFileSync(m, "utf8")) as { name: string }).name === name;
+  });
+  expect([name, dir !== undefined]).toEqual([name, true]);
+  return (JSON.parse(readFileSync(join(ROOT, "packages", dir!, "package.json"), "utf8")) as { version: string }).version;
+}
+
+/**
+ * consumer 那一层的 `overrides`：把每个 workspace 包的版本号解析到它的真 tarball。
+ *
+ * **为什么 tarball 里烤版本号而不是 `file:` 路径**（2026-09-10）：烤路径时，一个 tarball 的
+ * package.json 里会嵌着指向另一个 tarball 的绝对 `file:`。bun 对「**自己带 `file:` 依赖、又被
+ * 两个依赖方够到**」的 tarball 解析是坏的——CI 的 macOS runner 上实测反复红，报
+ * `@echo-agent/base@file:... failed to resolve`，而 `@echo-agent/core`(被三方引用但自己没依赖)
+ * 与 `@echo-agent/tui`(自己带依赖但只被一方引用)从不出错。只有 base 两条同时成立。
+ *
+ * 烤版本号之后**全链一个嵌套 `file:` 都没有**，那个构造由构造消失；`file:` 只出现在 consumer
+ * 这一层。附带好处是保真度更高：tarball 的依赖形状与真发布物**逐字一致**，不再是被改过的变体。
+ */
+function pinAll(tarballs: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(tarballs).map(([name, tgz]) => [name, `file:${tgz}`]));
+}
+
+/** tarball 里不许再出现 `file:` 依赖——上面那个坏构造的机器判据，写回去就当场红。 */
+function expectNoNestedFileDeps(tgz: string, work: string): void {
+  const shown = sh(["tar", "-xzOf", tgz, "package/package.json"], work);
+  expect([tgz, shown.ok]).toEqual([tgz, true]);
+  const deps = (JSON.parse(shown.out) as { dependencies?: Record<string, string> }).dependencies ?? {};
+  expect([tgz, Object.entries(deps).filter(([, v]) => v.startsWith("file:"))]).toEqual([tgz, []]);
+}
+
 function packStack(work: string, coreTgz: string): Record<string, string> {
   const t: Record<string, string> = { "@echo-agent/core": coreTgz };
   t["@echo-agent/base"] = packWorkspace(work, "packages/base", t);
@@ -173,6 +209,8 @@ function isolatedConsumer(pkgRel: string, minFiles: number, extraDeps: readonly 
       pkg.dependencies[dep] = `file:${tgz!}`;
     }
     pkg.dependencies["@echo-agent/core"] = `file:${tarball}`;
+    // tarball 里的传递依赖是版本号（真发布物的样子），这里把它们落到本地 tarball，理由见 `pinAll`
+    (pkg as { overrides?: Record<string, string> }).overrides = pinAll(stack);
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
 
     const install = sh(["bun", "install"], dir);
@@ -429,7 +467,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
       try {
         // ①② 拷一份 TUI、把它对 core 的 workspace 链接换成 core 的真 tarball、pack 它自己（`packCli`）——
         //    不换链接的话，pack 出来的 tui 装到别处会解析不了 `workspace:*`。
-        const tuiTgz = packWorkspace(work, "packages/cli", packStack(work, coreTgz), "echo-agent");
+        const stack = packStack(work, coreTgz);
+        const tuiTgz = packWorkspace(work, "packages/cli", stack, "echo-agent");
         // tarball 里必须有 bin——`files` 字段写漏时这里当场红，而不是等用户装完发现没这个命令
         const listed = sh(["tar", "-tzf", tuiTgz], work);
         expect(listed.out).toContain("bin/echo-agent.ts");
@@ -439,7 +478,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         mkdirSync(consumer, { recursive: true });
         writeFileSync(
           join(consumer, "package.json"),
-          JSON.stringify({ name: "echo-cli-consumer", private: true, dependencies: { "echo-agent": `file:${tuiTgz}` } }),
+          JSON.stringify({ name: "echo-cli-consumer", private: true, dependencies: { "echo-agent": `file:${tuiTgz}` }, overrides: pinAll(stack) }),
         );
         const install = sh(["bun", "install"], consumer);
         expect([install.ok, install.out.slice(-400)]).toEqual([true, install.out.slice(-400)]);
@@ -480,7 +519,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
       try {
         // ① 链上每一环各出一个真 tarball（core → base → tui），再 pack coding 自己。
         // **coding 不再依赖 `echo-agent`**（2026-09-09 拆包：产品之间平级），所以这里没有它。
-        const codingTgz = packWorkspace(work, "packages/coding", packStack(work, coreTgz), "echo-coding");
+        const stack = packStack(work, coreTgz);
+        const codingTgz = packWorkspace(work, "packages/coding", stack, "echo-coding");
         // `files` 漏了 `bin` 就是发出去一个没有命令的包——在 tarball 上当场红
         const listed = sh(["tar", "-tzf", codingTgz], work);
         expect(listed.out).toContain("bin/echo-coding.ts");
@@ -490,7 +530,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         mkdirSync(consumer, { recursive: true });
         writeFileSync(
           join(consumer, "package.json"),
-          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "@echo-agent/coding": `file:${codingTgz}` } }),
+          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "@echo-agent/coding": `file:${codingTgz}` }, overrides: pinAll(stack) }),
         );
         const install = sh(["bun", "install"], consumer);
         expect([install.ok, install.out.slice(-400)]).toEqual([true, install.out.slice(-400)]);
