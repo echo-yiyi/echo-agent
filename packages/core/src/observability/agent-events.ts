@@ -68,6 +68,24 @@ const MAX_CONTENT_BLOCK_SCAN = 1_024;
 const PROJECTED_BODY_RESERVE = 8 * 1024;
 export const MAX_PROJECTED_TEXT_BYTES = projectionEncodingLimits().maxBytes - PROJECTED_BODY_RESERVE;
 
+/**
+ * 正文预算里划给**思考**的那一份。**是划分，不是再加一份。**
+ *
+ * 为什么不另开一份等量预算：上面那份是从整条 fact 的 64 KiB 里扣出来的，body 有机会翻倍就会
+ * 回到 `MAX_PROJECTED_TEXT_BYTES` 注释里记的那个坑——整条记录穿不过 Sequencer 被丢掉，
+ * 于是**一个事实都不剩**。为省一半正文而丢掉全部事实，方向反了。
+ *
+ * 怎么分：**思考封顶在这一份，回答拿池子里剩下的**，两边合计不超总预算。thinking 块在消息里
+ * 排在回答前面，封顶就是为了不让一段长思考把回答挤成空串；反过来没有思考的消息，回答仍拿整份
+ * ——不为不存在的块预留额度。这样只需**一遍扫描**，不必先数一遍有没有思考（那会让下标读翻倍，
+ * 踩到「content 档只扫一遍」那道既有的门）。
+ *
+ * 代价说清楚：一条既有长思考又有长回答的消息，两边都会被截，各自带 `thinkingTruncated` /
+ * `textTruncated`。content 档下完整正文本来就逐条记在 `model.generate.delta` 里，
+ * 这里是摘要不是唯一副本；metadata 档没有 delta，但那一档本来就只记计数。
+ */
+export const MAX_PROJECTED_THINKING_BYTES = Math.floor(MAX_PROJECTED_TEXT_BYTES / 2);
+
 /** 非代理区 code unit 在 canonical JSON 里的字节数**上界**（宁可高估，绝不低估——低估就等于又放行一条编不出来的记录）。 */
 function jsonByteCost(c: number): number {
   if (c === 0x22 || c === 0x5c) return 2; // " 与 \ 转义成两字节
@@ -122,15 +140,36 @@ type ContentSummary = {
   textChars: number;
   /** 已扫描块内的 tool_use 条数；同上。 */
   toolUses: number;
+  /** 已扫描块内的 thinking 条数；同上。 */
+  thinkingBlocks: number;
+  /** 已扫描块内的思考字符数。被抹掉的块贡献 0——它本来就没有正文。 */
+  thinkingChars: number;
+  /** 其中被安全过滤器抹掉的块数。它没有正文却仍要原样回传，只看 `thinkingChars` 看不出它存在过。 */
+  thinkingRedacted: number;
   scanned: number;
   blocksTruncated: boolean;
   text: string;
   textTruncated: boolean;
+  thinking: string;
+  thinkingTruncated: boolean;
   toolUseBlocks: { id: string; name: string; input: unknown }[];
 };
 
 function emptySummary(): ContentSummary {
-  return { textChars: 0, toolUses: 0, scanned: 0, blocksTruncated: false, text: "", textTruncated: false, toolUseBlocks: [] };
+  return {
+    textChars: 0,
+    toolUses: 0,
+    thinkingBlocks: 0,
+    thinkingChars: 0,
+    thinkingRedacted: 0,
+    scanned: 0,
+    blocksTruncated: false,
+    text: "",
+    textTruncated: false,
+    thinking: "",
+    thinkingTruncated: false,
+    toolUseBlocks: [],
+  };
 }
 
 function summarizeString(text: string, collect: boolean): ContentSummary {
@@ -153,13 +192,15 @@ function summarizeContent(blocks: readonly ContentBlock[] | undefined, collect: 
   out.scanned = scan;
   out.blocksTruncated = scan < total;
   const parts: string[] = [];
+  const thinkingParts: string[] = [];
   let taken = 0;
+  let thinkingTaken = 0;
   for (let i = 0; i < scan; i++) {
     const b = blocks[i]!;
     if (b.type === "text") {
       out.textChars += b.text.length;
       if (!collect) continue;
-      const room = MAX_PROJECTED_TEXT_BYTES - taken; // taken 记的是 canonical 字节，不是 code unit
+      const room = MAX_PROJECTED_TEXT_BYTES - taken - thinkingTaken; // taken 记的是 canonical 字节，不是 code unit
       if (room <= 0) {
         out.textTruncated = true;
         continue;
@@ -168,12 +209,36 @@ function summarizeContent(blocks: readonly ContentBlock[] | undefined, collect: 
       if (r.text.length > 0) parts.push(r.text);
       taken += r.used;
       if (r.truncated) out.textTruncated = true;
+    } else if (b.type === "thinking") {
+      // **计数无条件记，两档都记。** metadata 档没有 delta 记录，这条摘要是「模型这一轮想过、
+      // 想了多少、其中几块被抹」的唯一痕迹；上一版连扫描都没进，于是 contentBlocks 算着它、
+      // 别的字段一个都不提它——读者看不出少了什么，也看不出少的是思考。
+      out.thinkingBlocks += 1;
+      if (b.redacted === true) out.thinkingRedacted += 1;
+      out.thinkingChars += b.thinking.length;
+      if (!collect) continue;
+      // 两个上限取小的：① 思考自己封顶在半份——它排在回答前面，不封顶就把回答挤成空串；
+      // ② 池子里真正剩下的——两边合起来不许超总预算，否则整条记录穿不过 Sequencer，一个事实都不剩。
+      const cap = MAX_PROJECTED_THINKING_BYTES - thinkingTaken;
+      const left = MAX_PROJECTED_TEXT_BYTES - taken - thinkingTaken;
+      const room = cap < left ? cap : left;
+      if (room <= 0) {
+        out.thinkingTruncated = true;
+        continue;
+      }
+      const r = takePrefix(b.thinking, room);
+      if (r.text.length > 0) thinkingParts.push(r.text);
+      thinkingTaken += r.used;
+      if (r.truncated) out.thinkingTruncated = true;
     } else if (b.type === "tool_use") {
       out.toolUses += 1;
       if (collect) out.toolUseBlocks.push({ id: b.id, name: b.name, input: b.input });
     }
   }
-  if (collect) out.text = parts.join("");
+  if (collect) {
+    out.text = parts.join("");
+    out.thinking = thinkingParts.join("");
+  }
   return out;
 }
 
@@ -218,12 +283,21 @@ function messageBody(message: AgentMessage, policy: ObservationCapturePolicy): R
       : summarizeContent(Array.isArray(m.content) ? (m.content as ContentBlock[]) : undefined, collect);
   const body: Record<string, unknown> = { role: m.role, chars: s.textChars };
   noteTruncation(body, s);
+  // 这里的消息可能是 user / toolResult，思考只在 assistant 上出现——有才写，别给没有思考的角色
+  // 挂三个恒零字段。`message_end` 那头不一样：那是 assistant 生成的摘要，「想没想」是一等问题。
+  if (s.thinkingBlocks > 0) {
+    body.thinkingBlocks = s.thinkingBlocks;
+    body.thinkingChars = s.thinkingChars;
+    if (s.thinkingRedacted > 0) body.thinkingRedacted = s.thinkingRedacted;
+  }
   if (typeof m.source === "string") body.source = m.source;
   if (typeof m.toolName === "string") body.toolName = m.toolName;
   if (typeof m.isError === "boolean") body.isError = m.isError;
   if (collect) {
     body.text = s.text;
     if (s.textTruncated) body.textTruncated = true;
+    if (s.thinking.length > 0) body.thinking = s.thinking;
+    if (s.thinkingTruncated) body.thinkingTruncated = true;
   }
   return body;
 }
@@ -308,10 +382,15 @@ export function projectAgentEvent(event: AgentEvent, policy: ObservationCaptureP
       return { ...base, kind: "span_start", name: SPAN_MODEL_GENERATE, scope: {}, attributes: { role: event.role }, body: {} };
     case "message_update": {
       if (!content) return null; // metadata：token 级 delta 只做 span 聚合，不逐条成记录
-      const d = event.delta as { type: string; text?: string; argsText?: string };
+      const d = event.delta as { type: string; text?: string; argsText?: string; signature?: string; redacted?: boolean };
       const body: Record<string, unknown> = { deltaType: d.type };
       if (typeof d.text === "string") body.text = d.text;
       if (typeof d.argsText === "string") body.argsText = d.argsText;
+      // `thinking_end` 带的两个回放判据：signature 是「这段思考来自哪个字段」
+      // （`reasoning_content` / `reasoning` / `reasoning_text`），redacted 是「正文被抹了但仍要原样回传」。
+      // 上一版只抄 text / argsText，把它们丢在这一步——而这是它们唯一出现的地方。
+      if (typeof d.signature === "string") body.signature = d.signature;
+      if (d.redacted === true) body.redacted = true;
       return { ...base, kind: "event", name: "model.generate.delta", scope: {}, attributes: { deltaType: d.type }, body };
     }
     case "message_end": {
@@ -324,15 +403,22 @@ export function projectAgentEvent(event: AgentEvent, policy: ObservationCaptureP
           stopReason: m.stopReason,
           contentBlocks: m.content.length,
           textChars: s.textChars,
+          // 与 textChars / toolUses 同一性质的事实，恒写：读者要能从一条记录里回答
+          // 「这一轮模型想了没有、想了多少」，而不是从 contentBlocks 减出来猜。
+          thinkingBlocks: s.thinkingBlocks,
+          thinkingChars: s.thinkingChars,
           toolUses: s.toolUses,
           usage: m.usage,
         };
+        if (s.thinkingRedacted > 0) body.thinkingRedacted = s.thinkingRedacted;
         noteTruncation(body, s);
         if (m.model !== undefined) body.model = { provider: m.model.provider, id: m.model.id };
         if (m.error !== undefined) body.errorCode = m.error.code;
         if (content) {
           body.text = s.text;
           if (s.textTruncated) body.textTruncated = true;
+          if (s.thinking.length > 0) body.thinking = s.thinking;
+          if (s.thinkingTruncated) body.thinkingTruncated = true;
           body.toolUseBlocks = s.toolUseBlocks;
           if (m.error !== undefined) body.errorMessage = m.error.message;
         }

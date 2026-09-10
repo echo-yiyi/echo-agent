@@ -111,9 +111,11 @@ test("content 档：/api/runs/<id> 的时间线带工具 params 与结果正文�
     await server.stop();
     await reader.close();
   }
-  // 页面侧：正文分段、delta 折叠、参数预览三件都在（渲染逻辑在浏览器里跑，这里只验它们没被删）
+  // 页面侧：正文分段、delta 折叠、参数预览三件都在（渲染逻辑在浏览器里跑，这里只验它们没被删）。
+  // `thinkingText` 一并钉住：投影已经把思考记进 body，面板是按 record 名的字段白名单渲染的——
+  // 白名单里没有它，事实就只剩折叠的原始 JSON，等于记了读不到。
   const html = observePageHtml();
-  for (const marker of ["contentSections", "FOLDED_INTO", "argPreview", "--observe content"]) expect(html).toContain(marker);
+  for (const marker of ["contentSections", "FOLDED_INTO", "argPreview", "--observe content", "thinkingText"]) expect(html).toContain(marker);
 });
 
 /** 等 inbox 触发的那条 run 封口（listRuns 只见已 COMMIT 的 header）。 */

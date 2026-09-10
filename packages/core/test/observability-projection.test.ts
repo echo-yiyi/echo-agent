@@ -1,7 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import type { AgentEvent } from "../src/events.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
-import { MAX_PROJECTED_TEXT_BYTES, agentEventDescriptor, estimatePayloadBytes, projectAgentEvent } from "../src/observability/agent-events.ts";
+import { MAX_PROJECTED_TEXT_BYTES, MAX_PROJECTED_THINKING_BYTES, agentEventDescriptor, estimatePayloadBytes, projectAgentEvent } from "../src/observability/agent-events.ts";
 import { factSinkToIngest, noopFactSink, type CapabilityFactDescriptor } from "../src/observability/fact-sink.ts";
 import { InMemoryCanonicalObservationStore } from "../src/observability/store.ts";
 import { ObservationIdentityError } from "../src/observability/identity.ts";
@@ -679,5 +679,97 @@ describe("async reporter 不许击穿主流程（2026-08-27 review P0）", () =>
     process.off("unhandledRejection", on);
     expect(unhandled).toBe(0);
     expect(seq.health().capture.canonicalGapCount).toBe(2);
+  });
+});
+
+// 思考是**事实**，不是产品功能：模型这一轮想没想、想了多少、其中几块被抹、能不能回放，
+// 都是已经发生的事。上一版 `summarizeContent` 只认 text / tool_use，thinking 块连扫描都没进——
+// contentBlocks 算着它、别的字段一个都不提它，读者看不出少了什么，更看不出少的是思考。
+describe("thinking 块进摘要（事实不因预算而丢）", () => {
+  const assistant = (content: unknown): AgentEvent =>
+    ev(1, { type: "message_end", message: { role: "assistant", content, stopReason: "end_turn", usage: null, at: 1 } });
+  const bodyOf = (e: AgentEvent, policy: "metadata" | "content"): Record<string, unknown> =>
+    projectAgentEvent(e, policy)!.body as Record<string, unknown>;
+
+  test("metadata 档：计数出得来，正文一个字都不出", () => {
+    const body = bodyOf(assistant([{ type: "thinking", thinking: "secret-thought", signature: "reasoning_content" }, { type: "text", text: "hi" }]), "metadata");
+    expect(body.thinkingBlocks).toBe(1);
+    expect(body.thinkingChars).toBe("secret-thought".length);
+    expect(body.textChars).toBe(2);
+    expect(JSON.stringify(body)).not.toContain("secret-thought");
+    expect(body.thinking).toBeUndefined();
+  });
+
+  test("没有思考的消息照样写出这两个字段：读者不必拿 contentBlocks 去减", () => {
+    const body = bodyOf(assistant([{ type: "text", text: "hi" }]), "metadata");
+    expect(body.thinkingBlocks).toBe(0);
+    expect(body.thinkingChars).toBe(0);
+    expect(body.thinkingRedacted).toBeUndefined(); // 罕见项按需出现，不给每条记录挂恒零
+  });
+
+  test("被抹掉的块：没有正文，但存在本身是事实——thinkingChars 看不出它，thinkingRedacted 能", () => {
+    const body = bodyOf(assistant([{ type: "thinking", thinking: "", redacted: true, signature: "reasoning_content" }]), "metadata");
+    expect(body.thinkingBlocks).toBe(1);
+    expect(body.thinkingChars).toBe(0);
+    expect(body.thinkingRedacted).toBe(1);
+  });
+
+  test("content 档：思考正文单独成字段，不和回答混在一起", () => {
+    const body = bodyOf(assistant([{ type: "thinking", thinking: "想了想" }, { type: "text", text: "答案" }]), "content");
+    expect(body.thinking).toBe("想了想");
+    expect(body.text).toBe("答案");
+  });
+
+  test("长思考挤不掉回答：思考封顶半份、回答拿剩下的，两边各自标 truncated 且合计不超总预算", () => {
+    const body = bodyOf(
+      assistant([
+        { type: "thinking", thinking: "T".repeat(MAX_PROJECTED_TEXT_BYTES * 2) },
+        { type: "text", text: "A".repeat(MAX_PROJECTED_TEXT_BYTES * 2) },
+      ]),
+      "content",
+    );
+    const thinking = body.thinking as string;
+    const text = body.text as string;
+    expect(thinking.length).toBe(MAX_PROJECTED_THINKING_BYTES);
+    expect(text.length).toBe(MAX_PROJECTED_TEXT_BYTES - MAX_PROJECTED_THINKING_BYTES);
+    expect(body.thinkingTruncated).toBe(true);
+    expect(body.textTruncated).toBe(true);
+    // 合计必须落在总预算内：超了整条记录穿不过 Sequencer，那才是把事实全丢光
+    expect(thinking.length + text.length).toBeLessThanOrEqual(MAX_PROJECTED_TEXT_BYTES);
+  });
+
+  test("没有思考时回答仍拿整份预算：不为不存在的块预留额度", () => {
+    const body = bodyOf(assistant([{ type: "text", text: "A".repeat(MAX_PROJECTED_TEXT_BYTES * 2) }]), "content");
+    expect((body.text as string).length).toBe(MAX_PROJECTED_TEXT_BYTES);
+  });
+
+  test("agent.message.appended：user 消息不挂这两个恒零字段", () => {
+    const body = bodyOf(ev(1, { type: "message_end", message: { role: "user", content: [{ type: "text", text: "q" }], at: 1 } }), "metadata");
+    expect(body.thinkingBlocks).toBeUndefined();
+    expect(body.thinkingChars).toBeUndefined();
+  });
+
+  test("thinking_end 的回放判据不再丢：signature 与 redacted 进 body（只此一处能看到）", () => {
+    const end = ev(2, {
+      type: "message_update",
+      delta: { type: "thinking_end", signature: "reasoning_text", redacted: true },
+      message: { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 },
+    });
+    const body = bodyOf(end, "content");
+    expect(body.deltaType).toBe("thinking_end");
+    expect(body.signature).toBe("reasoning_text");
+    expect(body.redacted).toBe(true);
+  });
+
+  test("thinking_delta 的正文照旧逐条落库：摘要被截断也还有第二处可查", () => {
+    const d = ev(3, {
+      type: "message_update",
+      delta: { type: "thinking_delta", text: "一段思考" },
+      message: { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 },
+    });
+    const body = bodyOf(d, "content");
+    expect(body.deltaType).toBe("thinking_delta");
+    expect(body.text).toBe("一段思考");
+    expect(body.signature).toBeUndefined();
   });
 });

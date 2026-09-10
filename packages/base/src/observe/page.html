@@ -734,7 +734,12 @@ const TEXT_LIMIT = 8000;
 function clip(s) {
   return s.length > TEXT_LIMIT ? `${s.slice(0, TEXT_LIMIT)}\n…还有 ${s.length - TEXT_LIMIT} 字符（完整正文：observe show <run-id> --body）` : s;
 }
-/* content 档的正文字段拆成段落（参数 / 结果 / 报错 / 回复），并从原始 JSON 里拿掉，免得同一段正文出现两遍 */
+/* 摘要里的思考正文。被预算截断时明说去哪找全的——摘要不是唯一副本，content 档下逐条 delta 里有 */
+function thinkingText(b) {
+  if (typeof b.thinking !== "string" || b.thinking === "") return undefined;
+  return b.thinkingTruncated ? `${b.thinking}\n…（摘要已按预算截断；完整思考在 model.generate.delta 的逐条记录里）` : b.thinking;
+}
+/* content 档的正文字段拆成段落（参数 / 结果 / 报错 / 思考 / 回复），并从原始 JSON 里拿掉，免得同一段正文出现两遍 */
 function contentSections(t, end) {
   const secs = [];
   const omit = new Set();
@@ -749,10 +754,12 @@ function contentSections(t, end) {
     add("参数", start.params, "body", "params");
     add(fin.isError ? "报错" : "结果", fin.content, "end", "content", fin.isError ? "bad" : undefined);
   } else if (t.name === "model.generate") {
+    add("思考", thinkingText(fin), "end", "thinking"); // 排在回复前面：消息里它就在前面，TUI 也是这个顺序
     add("回复", fin.text, "end", "text");
     if (Array.isArray(fin.toolUseBlocks) && fin.toolUseBlocks.length > 0) add("工具调用", fin.toolUseBlocks, "end", "toolUseBlocks");
     add("报错", fin.errorMessage, "end", "errorMessage", "bad");
   } else if (t.name === "agent.message.appended") {
+    add("思考", thinkingText(start), "body", "thinking");
     add(start.role === "user" ? "用户" : start.role === "toolResult" ? "工具结果" : "正文", start.text, "body", "text");
   } else if (t.name === "agent.loop.ended") {
     add("报错", start.errorMessage, "body", "errorMessage", "bad");

@@ -69,7 +69,13 @@ function pingTool(execute: ModelTool["execute"] = async () => toolOk("pong")): M
  * 缺省 `withoutMemory: true`：装了记忆的 Agent 在每个用户 run 之后会自动排一次 Dream run，它同样是 accepted run、
  * 同样进 journal（见下面「Dream run」那条），会让 lastRun / listRuns 的断言变成时序题。要它的测试显式打开。
  */
-async function echoWith(opts: { stateDir: string; turns: ScriptedTurn[]; tool?: ModelTool; withMemory?: boolean }): Promise<Echo> {
+async function echoWith(opts: {
+  stateDir: string;
+  turns: ScriptedTurn[];
+  tool?: ModelTool;
+  withMemory?: boolean;
+  capture?: "off" | "metadata" | "content";
+}): Promise<Echo> {
   const echo = await createEcho({
     provider: scripted(opts.turns),
     allowNetwork: false,
@@ -77,6 +83,7 @@ async function echoWith(opts: { stateDir: string; turns: ScriptedTurn[]; tool?: 
     extensionDirs: [],
     withoutMemory: opts.withMemory !== true,
     agent: { tools: [opts.tool ?? pingTool()] },
+    ...(opts.capture !== undefined ? { observation: { capture: opts.capture } } : {}),
   });
   running.push(echo);
   await echo.agent.start();
@@ -383,5 +390,59 @@ describe("观测层坏了不影响 agent 主线（2026-09-03 拍板：放弃 fai
     expect(b.observationPersistence).toBe("degraded");
     expect(echo.agent.messages.filter((m) => m.role === "assistant").length).toBe(2);
     await echo.stop();
+  });
+});
+
+// 投影的单测证明不了「读得回来」：思考还要穿过 canonical 编码、SQLite、reader 与视图模型。
+// 这条走的正是面板读的那条路（buildRunObservationViewModel）。
+describe("思考穿过整条链路：canonical → SQLite → reader → 视图模型", () => {
+  /** 一轮「先想、再答」：thinking 与 text 两块都进 done 的 message——preserved thinking 就是这个形状。 */
+  const thinkTurn: ScriptedTurn = [
+    { type: "start" },
+    { type: "thinking_start" },
+    { type: "thinking_delta", text: "先想一下" },
+    { type: "thinking_end", signature: "reasoning_content" },
+    { type: "text_start" },
+    { type: "text_delta", text: "答案" },
+    { type: "text_end" },
+    {
+      type: "done",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先想一下", signature: "reasoning_content" },
+          { type: "text", text: "答案" },
+        ],
+        stopReason: "end_turn",
+        usage: null,
+      },
+    },
+  ];
+
+  async function generateBody(capture: "metadata" | "content"): Promise<Record<string, unknown>> {
+    const stateDir = join(await tmp(), "state");
+    const echo = await echoWith({ stateDir, turns: [thinkTurn], capture });
+    const result = await echo.send("想想看");
+    expect(result.outcome.kind).toBe("completed");
+    const lookup = await echo.observations.getRun(result.runId);
+    if (lookup.kind !== "found") throw new Error("run 没读回来");
+    const vm = buildRunObservationViewModel(lookup.observation);
+    const end = vm.timeline.find((t) => t.kind === "span_end" && t.name === "model.generate");
+    if (end === undefined) throw new Error("时间线里没有 model.generate 的 span_end");
+    return (end.body ?? {}) as Record<string, unknown>;
+  }
+
+  test("metadata 档：计数落库读得回来，思考正文一个字都没进库", async () => {
+    const body = await generateBody("metadata");
+    expect(body.thinkingBlocks).toBe(1);
+    expect(body.thinkingChars).toBe(4);
+    expect(body.textChars).toBe(2);
+    expect(JSON.stringify(body)).not.toContain("先想一下");
+  });
+
+  test("content 档：思考与回答分成两个字段读得回来", async () => {
+    const body = await generateBody("content");
+    expect(body.thinking).toBe("先想一下");
+    expect(body.text).toBe("答案");
   });
 });
