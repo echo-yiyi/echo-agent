@@ -32,4 +32,4 @@
 
 ## 验收
 
-`<workspace>/.echo/agents/reviewer.md` 存在时,`session_create({ agent: "reviewer", … })` 建出的段 meta 里存着整份定义,其 provider 请求的 system prompt 以该文件正文为 identity、其余段与产品相同,工具菜单恰好是 `tools` 列出的那几件;`tools` 列了池外的名字则判红、盘上不建目录;卸载 `echo:inline-agent` 后产品的 identity 段与工具工作集复原;`AgentPrompt.section()` 不带 `replace` 时同名仍 fail-loud;`Product` 类型与 `ExtensionDefinition` 类型不变。
+`<workspace>/.echo/agents/reviewer.md` 存在时,`session_create({ agent: "reviewer", … })` 建出的段 meta 里存着整份定义,其 provider 请求的 system prompt 以该文件正文为 identity、其余段与产品相同,工具菜单恰好是 `tools` 列出的那几件;`tools` 列了创建者当前工具集之外的名字则判红、盘上不建目录;卸载 `echo:inline-agent` 后产品的 identity 段与工具工作集复原;`AgentPrompt.section()` 不带 `replace` 时同名仍 fail-loud;`Product` 类型与 `ExtensionDefinition` 类型不变。

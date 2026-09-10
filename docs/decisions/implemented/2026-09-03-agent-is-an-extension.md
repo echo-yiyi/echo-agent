@@ -26,4 +26,4 @@ agent 要自己开一段「特殊的」session(比如 reviewer),没有任何东�
 
 ## 验收(2026-09-07 前的原文,已由角色定义那条取代)
 
-`extensions` 字段打包的 extension 按拓扑先装、逆序卸,任一失败整代回滚(沿用 `ExtensionHost` 的全有或全无);`--resume` 一段 inline 定义的 session,工具表与 identity 段和创建时逐字相同;inline 点名创建者池外的工具,`create` 判红、`~/.echo/sessions/` 下不多目录。
+`extensions` 字段打包的 extension 按拓扑先装、逆序卸,任一失败整代回滚(沿用 `ExtensionHost` 的全有或全无);`--resume` 一段 inline 定义的 session,工具表与 identity 段和创建时逐字相同;inline 点名创建者当前工具集之外的工具,`create` 判红、`~/.echo/sessions/` 下不多目录。

@@ -31,7 +31,7 @@
 
 其余五项决策已拍（2026-09-03，口头；§4 那条 2026-09-07 修正），见决策记录。
 
-**验收判据（机器可判）。** 见 §10。核心四条：同一台机器两段 session 各自的进程同时 `start()` 都成功；A 进程 `session_send` 之后 B 进程不重启就在下一轮看到那条 environment 消息；非 main 的 session 工具表里没有 `session_create`；inline 定义点名了创建者池外的工具，`create` 判红、盘上不建目录。
+**验收判据（机器可判）。** 见 §10。核心四条：同一台机器两段 session 各自的进程同时 `start()` 都成功；A 进程 `session_send` 之后 B 进程不重启就在下一轮看到那条 environment 消息；非 main 的 session 工具表里没有 `session_create`；inline 定义点名了创建者当前工具集之外的工具，`create` 判红、盘上不建目录。
 
 ## 1. 术语（只定义一次，全文同一个词）
 
@@ -178,7 +178,7 @@ interface AgentToolsRegistry {
 
 **`restrict` 与延迟工具叠在一起**：先收紧、再按 `deferred` 过滤，两道都作用在工作集上。所以角色白名单外的工具，模型用 `tool_search` 既查不到也取不出——`tool_search` 看的是工作集，不是池。
 
-**不越权**（core 的 `sessions.create` 里验，不靠工具自觉）：角色的 `tools` 必须是创建者当前工具集的子集，权限策略继承创建者的、不能放宽。违反判红，盘上不建目录。
+**不越权**（core 的 `sessions.create` 里验，不靠工具自觉）：角色的 `tools` 必须是创建者当前工具集的子集，权限策略继承创建者的、不能放宽。违反判红，盘上不建目录。「当前工具集」是 [`AgentState.tools`](../../packages/core/src/agent.ts#symbol=AgentState.tools)：池里没被禁用、且过了角色收紧的那些，**不是池**——比池的话，被收紧过的段能派出比自己更宽的段，收紧就成了摆设。延迟工具取没取过都算在内：创建者随时能经 `tool_search` 取来。
 
 **快照权威、只能收紧。** 检查在创建那一刻做一次，通过的定义整份存进 meta，之后它就是这段 session 的权威定义，不再回头看创建者（创建者可能已经 closed）。`--resume` 时工具集取「快照 ∩ 容器此刻能提供的」，只会更小；快照里有、容器没有的工具不挂、不报错。任何路径都不能让它比快照更宽。
 
@@ -380,7 +380,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 - **只跟活着的段说话**（2026-09-07 替代原「留言」判据）：send 到没进程的段，容器给了 runner 就先叫醒再投递、返回 `accepted` 且对方此刻活着；叫不醒（没给 runner 或 runner 失败）返回 `rejected: unreachable`，盘上 `inbox/` 里不多任何 record。
 - **wait**：A `wait: true` 发给 B，B 回信带 `replyTo`，A 的工具调用在回信落盘后返回；超时返回 `timedOut`。
 - **main**：非 main 的 session 工具表里没有 `session_create`；宿主 API 的 `create` 不受限。
-- **不越权**：inline 点名创建者池外的工具，`create` 判红、`~/.echo/sessions/` 下不多目录。
+- **不越权**：inline 点名创建者当前工具集（§4）之外的工具，`create` 判红、`~/.echo/sessions/` 下不多目录；池里有、但被角色收紧挡掉或已禁用的，同样判红。判据见 [不越权比的是工具集而不是池](../../packages/core/test/create-echo.test.ts#test=不越权比的是创建者此刻的工具集而不是池被角色收紧挡掉的被禁用的判红没取过的延迟工具放行)。
 - **`/clear` 落盘**：`/clear` 后旧段 `status = closed`，新段 id 不同；`--resume` 旧段回来的是清之前的对话，`--continue` 挑到的是新段。
 - **活着就找得到**：一段刚 `start()`、一句话没说的 session，在别的进程的 `session_list` 里在，`session_send` 给它是 `accepted`。
 - **空会话**：启动即退出，那一段不在清单里（meta 被撤）；但 **inbox 里还有没消费的 record 就不撤**（活着时收到、退出前没处理完的，**含别的进程刚投进来、本进程还没读到内存的**——撤之前重扫盘）——撤了那条消息就成了没人认领的孤儿；**丢锁 / 封存之后一个字都不撤**——那时 meta 与目录已经是接班者的。

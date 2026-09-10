@@ -21,6 +21,7 @@ import { definePromptPack } from "../src/extension/builtin.ts";
 // 记忆模块经**公开入口**取（2026-09-10 进公共面）：判据要证明包外的扩展作者 import 得到
 import { AgentMemory as PublicAgentMemory, defineExtension as publicDefineExtension, notesMemory, type AnyMemory } from "../src/extension/public.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
+import { disableTools } from "../src/tools/harness.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
 import type { StorageDir } from "../src/storage/types.ts";
@@ -833,6 +834,38 @@ test("续一段非 main 的段（sessionsRoot + sessionId）：createEcho 按盘
   running.push(echo);
   expect([...echo.agent.tools.keys()]).not.toContain("session_create");
   expect([...echo.agent.tools.keys()]).toContain("session_send");
+});
+
+test("不越权比的是创建者此刻的工具集而不是池：被角色收紧挡掉的、被禁用的判红，没取过的延迟工具放行", async () => {
+  // 走真接线：`sessions-face` 的单测给 `self().tools` 喂手写列表，分不出池与工具集。
+  // 这里 `self().tools` 读的是 `agent.state.tools`——池里没被禁用、且过了角色收紧的，延迟工具取没取过都算。
+  const tool = (name: string, deferred = false): ModelTool => ({
+    kind: "model",
+    name,
+    label: name,
+    description: name,
+    parameters: { type: "object", properties: {} },
+    execute: async () => toolOk(name),
+    ...(deferred ? { deferred: true } : {}),
+  });
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    withoutMemory: true,
+    extensionDirs: [],
+    sessionsRoot: await tmp(),
+    sessions: {},
+    agent: { tools: [tool("read_a"), tool("write_b"), tool("cold_c", true)] },
+    agentDef: { name: "narrow", definition: { tools: ["read_a", "cold_c"] } },
+  });
+  running.push(echo);
+  await echo.start();
+  const create = (tools: string[]) => echo.sessions.create({ message: "干活", main: false, agent: { tools } });
+
+  await expect(create(["write_b"])).rejects.toThrow(/write_b/); // 在池里、被角色收紧挡掉——比池的话会放行
+  expect((await create(["cold_c"])).id).toMatch(/^s-/); // 延迟、没取过、不在菜单上：创建者随时取得来，算它有
+  disableTools(echo.agent.tools, ["read_a"], "test");
+  await expect(create(["read_a"])).rejects.toThrow(/read_a/); // 在池里、已禁用
 });
 
 test("开了会话面就不收 stateDir：createEcho 当场抛（review 2026-09-07 #89，2026-09-09 拍板 fail-loud）", async () => {
