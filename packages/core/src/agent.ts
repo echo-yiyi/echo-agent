@@ -83,7 +83,7 @@ import { newSessionId } from "./session/types.ts";
 import { DEFAULT_AGENT_REF, type AgentRef } from "./agent-def/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
 import { activeTools, effectiveRestriction, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap, type ToolRestrictions } from "./tools/harness.ts";
-import { makeToolSearchTool } from "./tools/tool-search.ts";
+import { makeToolSearchTool, TOOL_SEARCH_NAME } from "./tools/tool-search.ts";
 import { makeAskUserTool } from "./question/tool.ts";
 import { makeSubagentTool, SUBAGENT_NAME, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
 import type { Diagnostic } from "./errors.ts";
@@ -863,7 +863,9 @@ export class Agent {
         tools: [
           makeSubagentTool({
             // 可委派的 = 父此刻的工作集：没被禁用、且过了角色收紧（review 2026-09-07：此前是整个池，被禁的也能派）
-            availableTools: () => visibleTools(this.tools, this.loadedTools, this.restriction()).map((t) => t.name).filter((n) => n !== SUBAGENT_NAME), // 可委派的 = 父此刻菜单上的
+            // 可委派的 = 父此刻菜单上的，去掉两件不能交出去的：subagent（只扇一层）与 tool_search（它闭包着父的 loadedTools，
+            // 子调它等于替父取 schema——正是「没取过的延迟工具不许委派」要挡的事；review 2026-09-09）
+            availableTools: () => visibleTools(this.tools, this.loadedTools, this.restriction()).map((t) => t.name).filter((n) => n !== SUBAGENT_NAME && n !== TOOL_SEARCH_NAME),
             runForeground: (spec, ctx) => this.spawnSubagentForeground(spec, ctx),
             runBackground: (spec, label) => this.spawnSubagentBackground(spec, label),
           }),
@@ -2813,7 +2815,7 @@ export class Agent {
     for (const n of names) {
       // 与父自己执行时同一份判据（禁用、角色收紧、延迟未取）：父没 `tool_search` 过的延迟工具也不能委派——
       // 父自己都不知道它的 schema，子拿到的就是一件父没见过的工具（2026-09-09 拍板）
-      const r = n === SUBAGENT_NAME ? undefined : resolveTool(this.tools, n, this.loadedTools, this.restriction());
+      const r = n === SUBAGENT_NAME || n === TOOL_SEARCH_NAME ? undefined : resolveTool(this.tools, n, this.loadedTools, this.restriction());
       if (r === undefined || !r.ok) missing.push(r !== undefined && !r.ok && r.reason !== "not_found" ? `${n} (${r.message})` : n);
       else out.push(r.tool);
     }

@@ -1,6 +1,6 @@
 # 内建五件的机制留在 core：按压缩那个分法，`echo:*` 只出缺省内容
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 来源 2026-09-07 架构 review
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 来源 2026-09-07 架构 review · 挪入 implemented 2026-09-09（对照代码核过验收）
 
 ## 现状(拍板前)
 
@@ -22,7 +22,7 @@ memory / tasks / schedule / skills / inbox 五件内建能力,「注册走 exten
 
 为什么按压缩那个分法:能力的**机制**(什么时候压、什么时候整理记忆、任务的拓扑约束)决定的是 agent 会不会做错事,它必须有唯一一份、由 core 拥有;而**缺省内容**(装哪几件工具、出哪几段 prompt)是可以换的,所以它走 extension、和第三方同一条注册路。搬出去(选项 B)会把机制也变成可替换的——那意味着换一条 extension 就能改掉 dream 什么时候跑、压缩什么时候触发,而这些是 core 对「agent 不失控」的承诺,不该是配置。
 
-附带:为了搬能力而提的 `AgentLifecycle` 端口**撤回**;架构 review 里「把能力搬出 Agent」那条**撤回**;tasks / schedule / skills / inbox 同此,不逐件另拍。memory 的分区 registry **暂不开**——今天零消费者,第一个仓外扩展出现时再开(受众定成第三方之后这条要重看,见 [受众与版本](2026-09-07-audience-and-versioning.md))。
+附带:为了搬能力而提的 `AgentLifecycle` 端口**撤回**;架构 review 里「把能力搬出 Agent」那条**撤回**;tasks / schedule / skills / inbox 同此,不逐件另拍。memory 的分区 registry **暂不开**——今天零消费者,第一个仓外扩展出现时再开(受众定成第三方之后这条要重看,见 [受众与版本](../proposed/2026-09-07-audience-and-versioning.md))。
 
 ## 验收
 

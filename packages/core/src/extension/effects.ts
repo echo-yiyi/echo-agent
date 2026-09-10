@@ -12,8 +12,13 @@ type EffectEntry = Readonly<{ boundary: ReloadBoundary; dispose: Disposer; label
 export class EffectStack {
   private readonly entries: EffectEntry[] = [];
   private readonly pendingStarts = new Set<Promise<unknown>>();
-  /** 已失败的 start 的原因，直到 settlePendingStarts() drain 为止一直留着。 */
+  /**
+   * mount 期已失败的 start 的原因，直到第一次 settlePendingStarts() drain 为止一直留着。
+   * 第一次 drain 之后（Fiber 已 ACTIVE）**不再缓冲**：那些失败只有 await 它的登记者能看到（`ExtensionContext.effect` 的契约），
+   * 缓冲到卸载只会随 turn 数一直涨、又没人读（review 2026-09-09）。
+   */
   private readonly startFailures: unknown[] = [];
+  private bufferFailures = true;
   private gate = true;
   private unwound = false;
 
@@ -41,7 +46,7 @@ export class EffectStack {
       },
       (e: unknown) => {
         this.pendingStarts.delete(started);
-        this.startFailures.push(e);
+        if (this.bufferFailures) this.startFailures.push(e);
       },
     );
     return started;
@@ -67,7 +72,8 @@ export class EffectStack {
       await Promise.allSettled([...this.pendingStarts]);
     }
     // pending 清空后**原子 drain**：失败无论发生在多久之前，都在这里被看到（track 的 rejection handler
-    // 比 allSettled 的 continuation 先跑，所以退出循环时 startFailures 已经齐了）
+    // 比 allSettled 的 continuation 先跑，所以退出循环时 startFailures 已经齐了）。这之后的失败不再进缓冲。
+    this.bufferFailures = false;
     return this.startFailures.splice(0);
   }
 

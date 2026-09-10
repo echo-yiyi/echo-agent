@@ -82,7 +82,12 @@ export type Interception<E extends LifecycleEventType> = {
 
 /* ───────────────── HookContext ───────────────── */
 
-export type HookOrigin = "model" | "hook" | "runtime" | "user";
+/**
+ * 这条事件是谁引起的。只有两个值会被产出（review 2026-09-09 收窄：此前还列着 `hook` / `runtime`，从没人标过）：
+ * `user` = 用户输入进入循环（`userPromptSubmit`）；其余一律 `model`——模型回合里发生的事，包括运行时在回合里触发的
+ * （abort、超时、重试、压缩前）。要再细分，先有读它的人。
+ */
+export type HookOrigin = "model" | "user";
 
 /**
  * hook 能碰到的现场——**只有现场，没有命令面**。
@@ -90,7 +95,7 @@ export type HookOrigin = "model" | "hook" | "runtime" | "user";
  * `session.appendMessage`（破 entries 单写者）、`ui.confirm`（问人是 permission pipeline 的职责）。
  */
 export type HookContext = {
-  /** 这条事件是谁引起的：`user` = 用户输入进入循环（`userPromptSubmit`），其余事件由 Agent 按发生处标。 */
+  /** 见 `HookOrigin`：`user` 只标 `userPromptSubmit`，其余都是 `model`。 */
   readonly origin: HookOrigin;
   /** 正在被调用的这条 hook 的注册 id（`on()` 的 `opts.id` 或自动编号）——由 HookRuntime 逐条填，调用方给的值会被覆盖。 */
   readonly hookId: string;

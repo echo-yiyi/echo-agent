@@ -261,7 +261,8 @@ export class SessionService {
     const next = prev
       .then(async () => {
         if (this.poisoned.has(sessionId)) return;
-        await this.writeMeta(info);
+        const written = await this.writeMeta(info);
+        if (written !== info && cursor.info.status !== written.status) cursor.info = { ...cursor.info, status: written.status }; // 同 bumpMeta：只补 status
       })
       .catch((e: unknown) => {
         this.onDiagnostic?.({ code: "session_rename_failed", message: `改名失败：${e instanceof Error ? e.message : String(e)}` });
@@ -410,15 +411,18 @@ export class SessionService {
     return next;
   }
 
+  /** 盘上 meta 的 status。没有 / 解不开 → `undefined`；**读失败往上抛**（EMFILE 之类不是「没有」，吞掉就等于跳过上面那道保护）。 */
   private async peekStatus(): Promise<SessionInfo["status"] | undefined> {
+    const raw = await this.store.read(META_FILE);
+    if (raw === null) return undefined;
+    let parsed: unknown;
     try {
-      const raw = await this.store.read(META_FILE);
-      if (raw === null) return undefined;
-      const status = (JSON.parse(raw) as { status?: unknown }).status;
-      return status === "active" || status === "closed" ? status : undefined;
+      parsed = JSON.parse(raw);
     } catch {
-      return undefined;
+      return undefined; // 坏档由 createOrResume / setSessionStatus 那些路径判红，这里不重复
     }
+    const status = typeof parsed === "object" && parsed !== null ? (parsed as { status?: unknown }).status : undefined;
+    return status === "active" || status === "closed" ? status : undefined;
   }
 
   /**
@@ -440,7 +444,11 @@ export class SessionService {
       updatedAt: Date.now(),
       messageCount: cursor.info.messageCount + added.filter((e) => e.kind === "message").length,
     };
-    cursor.info = await this.writeMeta(cursor.info); // 盘上已 closed 时写下去的是 closed 那份：游标跟着走，下次不再报
+    const info = cursor.info;
+    const written = await this.writeMeta(info);
+    // 盘上已 closed 时写下去的是 closed 那份：游标跟着走，下次不再报。**只补 status、不整份赋回**——await 期间
+    // `rename()` 可能已经换上带新名字的对象，整份赋回会把名字丢掉（review 2026-09-09 复现）
+    if (written !== info) cursor.info = { ...cursor.info, status: written.status };
     cursor.metaWritten = true;
   }
 

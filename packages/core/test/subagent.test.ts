@@ -128,6 +128,7 @@ test("委派也不绕过渐进披露：父没 tool_search 过的延迟工具不�
   const lazy: ModelTool = { ...ping, name: "lazy", label: "lazy", deferred: true };
   const { fn, childSeen } = routed(
     [
+      toolTurn("c0", "subagent", { prompt: "x", tools: ["tool_search"] }), // tool_search 本身也不能交出去：它替父取 schema
       toolTurn("c1", "subagent", { prompt: "x", tools: ["lazy"] }), // 没取过：拒，清单里也没有它
       toolTurn("c2", "tool_search", { names: ["lazy"] }), // 父自己取 schema
       toolTurn("c3", "subagent", { prompt: "use lazy", system: "You are lazy.", tools: ["lazy"] }), // 取过：能委派
@@ -143,12 +144,14 @@ test("委派也不绕过渐进披露：父没 tool_search 过的延迟工具不�
   const rs = toolResults(agent);
   expect(rs.map((r) => [r.name, r.isError])).toEqual([
     ["subagent", true],
+    ["subagent", true],
     ["tool_search", false],
     ["subagent", false],
   ]);
-  expect(rs[0]!.content).toContain("Unknown tools: lazy");
-  expect(rs[0]!.content).toContain("tool_search"); // 清单上有取 schema 的入口，没有还没取的 lazy
-  expect(rs[0]!.content).not.toMatch(/Available:.*\blazy\b/);
+  expect(rs[0]!.content).toContain("Unknown tools: tool_search");
+  expect(rs[1]!.content).toContain("Unknown tools: lazy");
+  expect(rs[1]!.content).not.toMatch(/Available:.*\blazy\b/); // 还没取的 lazy 不在可委派清单里
+  expect(rs[1]!.content).not.toMatch(/Available:.*tool_search/); // tool_search 也不在（review 2026-09-09：子调它会往父的 loadedTools 里写）
   expect(childSeen.map((s) => s.tools)).toEqual([["lazy"]]);
   await agent.dispose();
 });

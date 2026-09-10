@@ -140,6 +140,73 @@ test("别处把这一段置 closed 之后，自己的入账不把它盖回 activ
   expect((JSON.parse((await dir.read("meta.json"))!) as { status: string }).status).toBe("closed");
 });
 
+test("入账在飞时改名不丢：bumpMeta 醒来只补 status、不把 await 前的旧对象整份赋回（review 2026-09-09 回归）", async () => {
+  const base = new InMemoryDir();
+  let hold = false;
+  let release: (() => void) | undefined;
+  const dir: StorageDir = {
+    read: (p) => base.read(p),
+    remove: (p) => base.remove(p),
+    list: (p) => base.list(p),
+    write: async (p, c) => {
+      if (hold && p === "meta.json") await new Promise<void>((r) => void (release = r)); // 把这次 meta 写卡住，改名插在中间
+      return base.write(p, c);
+    },
+  };
+  const s = new SessionService(dir);
+  await s.createOrResume("s1", { workspace: "/w" });
+  hold = true;
+  await s.append("s1", [{ kind: "message", message: userMessage("一") }]);
+  for (let i = 0; i < 50 && release === undefined; i++) await new Promise((r) => setTimeout(r, 0));
+  expect(release).toBeDefined();
+  s.rename("s1", "foo"); // 此刻 cursor.info 换成了带名字的新对象
+  hold = false;
+  release!();
+  await s.settle();
+  expect(s.nameOf("s1")).toBe("foo"); // 此前 bumpMeta 醒来把旧对象赋回去，名字在内存里就没了
+  await s.append("s1", [{ kind: "message", message: userMessage("二") }]);
+  await s.settle();
+  expect((JSON.parse((await base.read("meta.json"))!) as { name: string }).name).toBe("foo"); // 下一次入账也不会盖回 id
+});
+
+test("别处置 closed 之后改名：rename 也接 writeMeta 的返回，closed 只报一次（review 2026-09-09）", async () => {
+  const { s, dir } = svc();
+  const codes: string[] = [];
+  s.attachDiagnostics((d) => codes.push(d.code));
+  await s.createOrResume("s1", { workspace: "/w" });
+  await s.append("s1", [{ kind: "message", message: userMessage("一") }]);
+  await s.settle();
+  await setSessionStatus(dir, "s1", "closed");
+  s.rename("s1", "x");
+  await s.settle();
+  await s.append("s1", [{ kind: "message", message: userMessage("二") }]);
+  await s.settle();
+  expect(codes).toEqual(["session_closed_underneath"]);
+  const meta = JSON.parse((await dir.read("meta.json"))!) as { status: string; name: string };
+  expect([meta.status, meta.name]).toEqual(["closed", "x"]);
+});
+
+test("写 meta 前看盘上 status：读失败不是「没有」——这次入账封存，不静默盖写（review 2026-09-09）", async () => {
+  const base = new InMemoryDir();
+  let fail = false;
+  const dir: StorageDir = {
+    read: (p) => (fail && p === "meta.json" ? Promise.reject(new Error("EMFILE: too many open files")) : base.read(p)),
+    write: (p, c) => base.write(p, c),
+    remove: (p) => base.remove(p),
+    list: (p) => base.list(p),
+  };
+  const s = new SessionService(dir);
+  await s.createOrResume("s1", { workspace: "/w" });
+  await s.append("s1", [{ kind: "message", message: userMessage("一") }]);
+  await s.settle();
+  await setSessionStatus(base, "s1", "closed");
+  fail = true;
+  await s.append("s1", [{ kind: "message", message: userMessage("二") }]);
+  await expect(s.settle()).rejects.toThrow(/EMFILE/); // 读失败走持久化失败那条路：settle 把成因抛出来，与写失败同一条口径
+  expect((JSON.parse((await base.read("meta.json"))!) as { status: string }).status).toBe("closed"); // 没被盖回 active
+  await expect(s.append("s1", [{ kind: "message", message: userMessage("三") }])).rejects.toThrow(/封存/);
+});
+
 test("不变量④ 封存后不再入账（丢锁的第一步）", async () => {
   const { s } = svc();
   await s.createOrResume("main");

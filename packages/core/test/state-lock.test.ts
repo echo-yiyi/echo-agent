@@ -58,6 +58,17 @@ test("文件锁：**不做 stale takeover**——哪怕持有者 pid 早就没�
   expect(who.state === "valid" && who.record.holder).toBe("死掉的");
 });
 
+test("锁记录的 pid 必须是正整数：0 / 小数判成坏档（`process.kill(0, 0)` 会成功，探活会把它当活着；review 2026-09-09）", async () => {
+  const dir = await tmp();
+  const path = join(dir, ".lock");
+  await writeFile(path, JSON.stringify({ holder: "x", pid: 0, at: Date.now() }));
+  expect((await inspectStateLock(path)).state).toBe("corrupt");
+  await writeFile(path, JSON.stringify({ holder: "x", pid: 1.5, at: Date.now() }));
+  expect((await inspectStateLock(path)).state).toBe("corrupt");
+  await writeFile(path, JSON.stringify({ holder: "x", pid: process.pid, at: Date.now() }));
+  expect((await inspectStateLock(path)).state).toBe("valid");
+});
+
 test("文件锁：持有者进程还活着 → 不接管", async () => {
   const dir = await tmp();
   const path = join(dir, ".lock");

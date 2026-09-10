@@ -162,7 +162,7 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-03-agent-is-an-extension.md",
+      "path": "docs/decisions/implemented/2026-09-03-agent-is-an-extension.md",
       "bilingual": false
     },
     {
@@ -214,7 +214,7 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-01-second-prompt-policy.md",
+      "path": "docs/decisions/implemented/2026-09-01-second-prompt-policy.md",
       "bilingual": false
     },
     {
@@ -250,7 +250,7 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-builtin-capabilities-stay-core.md",
+      "path": "docs/decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md",
       "bilingual": false
     },
     {
@@ -266,11 +266,11 @@
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-agent-is-an-identity.md",
+      "path": "docs/decisions/implemented/2026-09-07-agent-is-an-identity.md",
       "bilingual": false
     },
     {
-      "path": "docs/decisions/proposed/2026-09-07-role-agent.md",
+      "path": "docs/decisions/implemented/2026-09-07-role-agent.md",
       "bilingual": false
     },
     {

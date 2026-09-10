@@ -316,7 +316,7 @@ STATUS_AFTER_PROMPT=idle
 
 ### 需要产品语义确认（2026-09-07 六项都已拍板，记录见各条）
 
-1. ~~第二个用户 prompt 是 fail-fast，还是像 inbox 一样排队。~~ 拍板保持 fail-fast（「先留着」；壳按 `acceptsWork` 决定输入框状态），[记录](../decisions/proposed/2026-09-01-second-prompt-policy.md)。
+1. ~~第二个用户 prompt 是 fail-fast，还是像 inbox 一样排队。~~ 拍板保持 fail-fast（「先留着」；壳按 `acceptsWork` 决定输入框状态），[记录](../decisions/implemented/2026-09-01-second-prompt-policy.md)。
 2. ~~`start()` 是否应成为所有 Agent 的统一前置条件；若保留低层直跑，应不应该拆成独立构造入口。~~ 不拍，问题随 `Agent` 类内部化消失（[记录](../decisions/rejected/2026-09-01-start-precondition.md)）。
 3. ~~abort reason 是否是调用者可依赖的终止信息。~~ 是，一路保留到 terminal outcome，已实现（[记录](../decisions/implemented/2026-09-01-abort-reason.md)）。
 4. ~~`agent_end` 是否应成为 idle barrier。~~ 不是：名字保留、公开契约写清它不是 barrier、不另加 barrier API，已实现（[记录](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。
