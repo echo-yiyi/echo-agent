@@ -137,6 +137,22 @@ function packStack(work: string, coreTgz: string): Record<string, string> {
 }
 
 /**
+ * 让每个工作区包在整棵依赖树里**只解析一次**。
+ *
+ * 本门为了模拟「用户拿到的 tarball」，把链上每一环的 `workspace:*` 重写成绝对路径的 `file:`。
+ * 于是同一个 tarball 会被两个依赖方引用(`coding → base` 与 `coding → tui → base`)，而 bun 对
+ * 这种「自身还带 `file:` 依赖、又被多方引用」的 tarball 解析是**非确定的**:CI 的 macOS runner 上
+ * 实测两次运行各挂各的一条，报 `@echo-agent/base@file:... failed to resolve`(2026-09-10)。
+ *
+ * 这是模拟器的毛病，不是被测物的:真 tarball 里的依赖是普通版本号(`"@echo-agent/base": "0.1.0"`)，
+ * 从 registry 装时这就是个再普通不过的菱形。`overrides` 把它压成一次解析，**判据一条没减**——
+ * 仍是真 tarball、真 install、真执行。
+ */
+function pinAll(tarballs: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(tarballs).map(([name, tgz]) => [name, `file:${tgz}`]));
+}
+
+/**
  * **点名的消费者，逐个验一遍**。
  *
  * 它们平时靠 workspace 软链吃到 `@echo-agent/core` 的**源码**，于是「只用公开面」「产物够它用」
@@ -173,6 +189,8 @@ function isolatedConsumer(pkgRel: string, minFiles: number, extraDeps: readonly 
       pkg.dependencies[dep] = `file:${tgz!}`;
     }
     pkg.dependencies["@echo-agent/core"] = `file:${tarball}`;
+    // 菱形压平，理由见 `pinAll`
+    (pkg as { overrides?: Record<string, string> }).overrides = pinAll(stack);
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
 
     const install = sh(["bun", "install"], dir);
@@ -428,7 +446,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
       try {
         // ①② 拷一份 TUI、把它对 core 的 workspace 链接换成 core 的真 tarball、pack 它自己（`packCli`）——
         //    不换链接的话，pack 出来的 tui 装到别处会解析不了 `workspace:*`。
-        const tuiTgz = packWorkspace(work, "packages/cli", packStack(work, coreTgz), "echo-agent");
+        const stack = packStack(work, coreTgz);
+        const tuiTgz = packWorkspace(work, "packages/cli", stack, "echo-agent");
         // tarball 里必须有 bin——`files` 字段写漏时这里当场红，而不是等用户装完发现没这个命令
         const listed = sh(["tar", "-tzf", tuiTgz], work);
         expect(listed.out).toContain("bin/echo-agent.ts");
@@ -438,7 +457,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         mkdirSync(consumer, { recursive: true });
         writeFileSync(
           join(consumer, "package.json"),
-          JSON.stringify({ name: "echo-cli-consumer", private: true, dependencies: { "echo-agent": `file:${tuiTgz}` } }),
+          JSON.stringify({ name: "echo-cli-consumer", private: true, dependencies: { "echo-agent": `file:${tuiTgz}` }, overrides: pinAll(stack) }),
         );
         const install = sh(["bun", "install"], consumer);
         expect([install.ok, install.out.slice(-400)]).toEqual([true, install.out.slice(-400)]);
@@ -469,8 +488,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
     300_000,
   );
 
-  // **`echo-coding` 的分发门**（2026-09-01）：与 `echo-agent` 那条同形，多一层——它依赖 `echo-agent`，
-  // 于是装出来的包要经过**两级** `file:` 依赖（coding → echo-agent → core）才谈得上「用户拿到的能用」。
+  // **`echo-coding` 的分发门**：与 `echo-agent` 那条同形，多一层——它依赖装配层与壳，
+  // 于是装出来的包要经过**三级** `file:` 依赖（coding → tui → base → core）才谈得上「用户拿到的能用」。
   // 拷目录跑源文件对这一条同样恒绿（workspace 软链会把两级依赖全抹平），所以照样走真路。
   test(
     "echo-coding 分发：pack `echo-coding` → 干净项目安装 → 从 `node_modules/.bin` 真执行",
@@ -479,7 +498,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
       try {
         // ① 链上每一环各出一个真 tarball（core → base → tui），再 pack coding 自己。
         // **coding 不再依赖 `echo-agent`**（2026-09-09 拆包：产品之间平级），所以这里没有它。
-        const codingTgz = packWorkspace(work, "packages/coding", packStack(work, coreTgz), "echo-coding");
+        const stack = packStack(work, coreTgz);
+        const codingTgz = packWorkspace(work, "packages/coding", stack, "echo-coding");
         // `files` 漏了 `bin` 就是发出去一个没有命令的包——在 tarball 上当场红
         const listed = sh(["tar", "-tzf", codingTgz], work);
         expect(listed.out).toContain("bin/echo-coding.ts");
@@ -489,7 +509,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         mkdirSync(consumer, { recursive: true });
         writeFileSync(
           join(consumer, "package.json"),
-          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "@echo-agent/coding": `file:${codingTgz}` } }),
+          JSON.stringify({ name: "echo-coding-consumer", private: true, dependencies: { "@echo-agent/coding": `file:${codingTgz}` }, overrides: pinAll(stack) }),
         );
         const install = sh(["bun", "install"], consumer);
         expect([install.ok, install.out.slice(-400)]).toEqual([true, install.out.slice(-400)]);
