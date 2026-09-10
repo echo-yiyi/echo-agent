@@ -27,7 +27,7 @@
 
 受支持入口是 [`createEcho()`](../../packages/core/src/create-echo.ts#symbol=createEcho)。默认装配记忆；一次性评测或不希望保留跨任务状态时传 `withoutMemory: true`，记忆工具、记忆 section 及这两条后台工作随能力一起缺席。不要围着裸 Agent 复制装配。
 
-**开关归用户，形状归产品。** `withoutMemory` 对应用户的 `--no-memory`，产品碰不到；装哪些模块、分哪几层由产品经 `Product.preset` 返回的 `memory` 决定。`memory.builtin: false` 不装内建的三个模块（agent / user / notes），模块全部来自扩展经 `AgentMemory.module()` 的注册——扩展注册在缺省情况下只是**追加**，要替换就得先关掉内建这组。想保留其中某几个，就把 `@echo-agent/core/extension` 导出的定义再注册一遍。
+**开关归用户，形状归产品。** `withoutMemory` 对应用户的 `--no-memory`，产品碰不到；装哪些模块、分哪几层由产品经 `Product.preset` 返回的 `memory` 决定。`memory.builtin: false` 不装内建的三个模块（agent / user / notes），模块全部来自扩展经 `AgentMemory.module()` 的注册——扩展注册在缺省情况下只是**追加**，要替换就得先关掉内建这组。想保留其中某几个，就把 `@echo-agent/core/extension` 导出的定义再注册一遍。**什么值得记的判据写在各模块自己的 instructions 里**：记忆段、提取、整理三处 prompt 只讲机制（先看再写、合并不新增近似条、超预算先整理、绝不存凭据、可以什么都不写），所以 `builtin: false` 会连同内建模块的判据一起拿掉，产品模块用自己的 instructions 带自己的判据。
 
 **作用域回答“谁共享”，记忆模块回答“记什么”。** 路径由两者组合：`<作用域>/<模块路径>`。例如 `project/agent.md` 是这个项目里共同使用的行为记忆，不是某个 agent 实例的私有文件。相同内容出现在不同作用域时，不自动覆盖、去重或跨层提升。
 
@@ -136,10 +136,11 @@
 
 当前只能确认以下边界：
 
-- [`withMemoryFileLock()`](../../packages/core/src/memory/lock.ts#symbol=withMemoryFileLock) 按 harness 对象和路径串行化，不是 OS 文件锁。不同 harness 即使在同一进程、指向同一根，也不共用这条队列。
-- [`assertFresh()`](../../packages/core/src/memory/lock.ts#symbol=assertFresh) 在部分读改写操作落盘前重读旧内容；它与后面的 write 不是原子操作，不能推出跨进程无丢更新。create 整体覆盖不做这项比对。
+- **提交锁**：同一层、同一个记忆模块的一次提交（读、改、预算校验、落盘、重建索引）整段独占，锁挂在那一层的**字节面**上，名字 `.locks/<模块>`（[`withMemoryRegionLock()`](../../packages/core/src/memory/lock.ts#symbol=withMemoryRegionLock)）。字节面有 `lock` 原语时——`FileDir` 的 `open(…, "wx")` 锁文件、`InMemoryDir` 的实例内互斥，经前缀视图与写入闸视图一路转发——跨实例、跨进程都互斥；没有时按字节面对象在进程内互斥。等不到（缺省 10 秒）返回 `busy`，一个字节都不写。
+- **不自动接管陈旧锁**（与 lease 同一条，见 `storage/name-lock.ts` 头注）：持有者恰好崩在持锁窗口里，锁文件会留着，这个模块在那一层的写入一直返回 `busy`，报错里带锁文件的位置与持有者，要人手删。
+- [`assertFresh()`](../../packages/core/src/memory/lock.ts#symbol=assertFresh) 仍在落盘前重读旧内容，挡的是**不守提交锁**的写者（人手改文件）；create 整体覆盖不做这项比对。
 - Dream 的 startedAt 是状态文件里的标记；shouldDream 的检查和 dreamTask 的设置分开，不能推出多个 session 只有一个整理者。
-- 索引与计数各有后续写入；正文、索引、Dream 状态不组成一个原子事务。按单文件串行也不能推出多个笔记并发写入时索引总预算仍受保护。
+- 正文、预算、索引在同一把提交锁里；Dream 状态（计数、startedAt）另写，不在这把锁里——多个 session 的 Dream 计数仍可能丢增量。
 
 [`Agent.settleDream()`](../../packages/core/src/agent.ts#symbol=Agent.settleDream) 虽沿用旧名字，实际会同时 abort 并等待提取、Dream 两条通道，接入 stop / 丢锁路径。停发新工作与等待在飞工作结束是两件事；不能以“后台不阻塞前台”推导“退出不必等后台”。
 
@@ -162,16 +163,6 @@ bun -e 'import {MemoryChannel} from "./packages/core/src/memory/channel.ts"; let
 ```
 
 当前输出 old、old。修复判据必须覆盖忙时的新材料最终被消费，不能只断言“又运行了一次”。重叠保护还应以真实提交写入区分 view 与 mutation，输入快照与模型选择则须对照提取决策分别收口。
-
-### 新鲜度检查不能代替跨进程互斥
-
-以下在两个 harness 的最终 write 前设置 barrier，让两边都先通过新鲜度检查，模拟共享根的两个写者：
-
-```bash
-bun -e 'import {createAgentMemories,bindMemoryScopes,memoryStrReplace} from "./packages/core/src/memory/harness.ts"; import {residentMemory} from "./packages/core/src/memory/types.ts"; import {memoryScopeTable} from "./packages/core/src/memory/scope.ts"; import {InMemoryDir} from "./packages/core/src/memory/in-memory-dir.ts"; const raw=new InMemoryDir(); await raw.write("note.md","A B"); let n=0,release; const barrier=new Promise(r=>release=r); const dir={read:p=>raw.read(p),list:p=>raw.list(p),remove:p=>raw.remove(p),write:async(p,v)=>{if(p==="note.md"){if(++n===2)release();await barrier;}await raw.write(p,v);}}; const make=()=>{const h=createAgentMemories({memories:[residentMemory("note")]});bindMemoryScopes(h,memoryScopeTable([{def:{name:"team",order:1,describe:"shared",anchor:{kind:"home"},prefix:""},dir}]));return h;}; const r=await Promise.all([memoryStrReplace(make(),"team/note.md","A","AA"),memoryStrReplace(make(),"team/note.md","B","BB")]);console.log({errors:r.map(x=>x.isError),final:await raw.read("note.md")});'
-```
-
-当前两次都报成功，最终却是 A BB，第一份修改丢失。这足以否定“已实现跨进程读改写锁”的承诺；真正的跨进程、崩溃恢复及双 Dream 排他仍需独立验证，不能拿本探针冒充这些测试。
 
 ## 9. 验证范围与人工责任
 

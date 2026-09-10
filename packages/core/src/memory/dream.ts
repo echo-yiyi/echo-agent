@@ -95,7 +95,8 @@ export async function writeDreamState(dir: MemoryDir, scope: string, state: Drea
 }
 
 /**
- * 整理任务的缺省 prompt。上层要换语气 / 换策略,整段替换即可(它只是文本)。
+ * 整理的 prompt。**没有替换口子**：它只讲机制（合并、归位、冲突、预算、不发明）；什么算过时、该归到哪，
+ * 由各模块的 instructions 定——判据跟着模块走（2026-09-10）。
  * **只讲 `scope` 那一层、且只讲声明了 `dream` 的模块**——别的不在这次整理的范围里,
  * 列出来只会诱它去写。
  */
@@ -112,9 +113,9 @@ export function defaultDreamPrompt(memories: readonly AnyMemory[], table: Memory
     `Consolidate the ${scope}/ layer of your persistent memory (use only the memory tool; view everything before changing anything).\n` +
     `Stay inside ${scope}/: the other layers are not part of this pass.\n` +
     "1. Merge duplicates: the same fact recorded in several places becomes one denser entry; keep the version that carries the evidence.\n" +
-    "2. Put entries back where they belong: a fact filed in a behaviour module, a habit buried in a note file — rebuild it in the right module " +
-    "and remove it from the old one. Modules have separate budgets, so this is two steps, not a rename.\n" +
-    "3. Prune: delete what later facts have overtaken, what was true only once, and what has gone stale.\n" +
+    "2. Put entries back where they belong: an entry filed in a module whose description says it belongs in another — rebuild it in the right " +
+    "module and remove it from the old one. Modules have separate budgets, so this is two steps, not a rename.\n" +
+    "3. Prune: delete what later facts have overtaken, and what a module's description says is not worth keeping.\n" +
     "4. Conflicts: when two entries disagree, keep the one with evidence; if you cannot tell, keep both and say plainly that they conflict.\n" +
     "5. Budget: bring every module within its limit. When merging is not enough and something must go, drop the oldest entry that nothing " +
     "later refers back to.\n" +

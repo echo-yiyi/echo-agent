@@ -18,7 +18,8 @@ import type { MemoryScopeTable } from "./scope.ts";
 export const DEFAULT_EXTRACT_MAX_TURNS = 5;
 
 /**
- * 提取的缺省 prompt。上层要换语气 / 换判据,整段替换即可(它只是文本)。
+ * 提取的 prompt。**没有替换口子，也不需要**：什么值得记由各模块的 instructions 定——判据跟着模块走，
+ * `memory.builtin: false` 换掉模块时判据一起换掉（2026-09-10）。这里只有机制：先看、写对地方、可以什么都不写。
  *
  * **层与模块的清单必须由 prompt 自带**:`runSubagent` 是独立 context,子 agent 拿不到
  * system prompt——dream 那边同理,它的 prompt 也自己列 regions。
@@ -39,25 +40,14 @@ export function defaultExtractPrompt(memories: readonly AnyMemory[], table: Memo
     "A reply just finished. Read the conversation below and decide whether anything in it is worth keeping after this session ends.",
     "Work in this order:\n" +
       "1. View what is already stored before writing anything — most of what feels new is already there in some form.\n" +
-      "2. Pick out only what a future session would be worse off without.\n" +
+      "2. Pick out only what the module descriptions below say is worth keeping.\n" +
       "3. Write it where it belongs, then stop.",
-    "Usually worth keeping:\n" +
-      "- The user corrected you, or told you how they want you to work.\n" +
-      "- Something that would trip you again — an environment quirk, a tool that behaves differently than its docs say.\n" +
-      "- A decision that got settled, together with the reasoning behind it.\n" +
-      "- A fact about this project or this person that you had to discover rather than read.",
-    "Leave out:\n" +
-      "- Progress on the current task. The transcript is for that.\n" +
-      "- Anything the repository already states — layout, code structure, git history, its own instruction files. If it is one command away, it is not memory.\n" +
-      "- Anything true only inside this conversation.\n" +
-      "- Credentials, tokens, keys — in any module, ever.",
-    "For each candidate ask: still true, and still useful, in a different session next month? If not, drop it.",
+    "What is worth keeping — and what to leave out — is set by each module's description below. That is the only standard; follow it.",
     "Writing:\n" +
-      "- One fact per entry. If you are joining two with \"and\", they are two entries.\n" +
-      "- Every entry gets a one-line description. That line is all a future session sees when deciding whether to open it — write it to be found by what it is about.\n" +
-      "- Say why it matters, not just what happened.\n" +
+      "- Every file in an indexed module gets a one-line description. That line is all a future session sees when deciding whether to open it — write it to be found by what it is about.\n" +
       "- Merge into an existing entry instead of adding a near-duplicate.\n" +
-      "- Absolute dates, never \"yesterday\".",
+      "- Absolute dates, never \"yesterday\".\n" +
+      "- Credentials, tokens, keys — never, in any module.",
     `Layers — the first path segment picks who will see an entry, widest first:\n${layers}\nPick the widest layer the fact is actually true for.`,
     `Modules:\n${modules}`,
     "Writing nothing is a normal outcome. Most replies produce no memory. Do not invent something to record.",

@@ -1,46 +1,45 @@
-// 记忆文件的并发保护。三件事各管各的,别混:
+// 记忆的原子提交（2026-09-10 重做）。
 //
-//   tmp + rename(`FileDir` 已有)  文件不会是半截内容
-//   **本文件**                     「读—改—写」这一段不被插队,谁的修改都不会被静默盖掉
-//   整理锁(按层,`dream.ts`)        两个 dream 不把同一层各重排一遍——省功,不是正确性
+// 上一版把锁挂在 **harness 对象**上（`WeakMap<AgentMemories, …>`）：同一个 Agent 里的写者互斥了，
+// 可两个 harness 实例——两段 session、同进程或跨进程——写同一个共享层时谁也不等谁；再加上
+// `assertFresh` 的「先读后比、再写」不是原子的，两边都能读到旧内容、都判新鲜、都写回，后写的吃掉
+// 先写的，**双方都报告成功**（find_job 的并发探针实测：A B → A BB）。
 //
-// 为什么正确性这一件要单独做:提取每条 reply 都跑、dream 现在整理共享层,而 dream 是
-// 「读一批、改一批、写回」——中间别人写进来的那条会被它盖掉,**一点痕迹都没有**:
-// 没有报错、没有诊断、没有观测事实,事后查不出来。用户只会发现「我记的那条不见了」。
+// 现在锁挂在**那一层的字节面**上，名字是模块：`<层>/.locks/<模块>`。同一层、同一个模块的一次提交
+// （读 → 改 → 预算校验 → 落盘 → 重建索引）整段独占——正文、预算、索引三件一起被罩住。
+//   · 字节面有 `lock` 原语（`FileDir` 的锁文件、`InMemoryDir` 的实例内互斥，经视图一路转发）→ 用它，
+//     跨实例、跨进程都互斥；
+//   · 没有（测试替身、别人包的一层）→ 按**字节面对象**在进程内互斥：共用同一个对象的写者照样排队。
+// 等不到锁抛 `StorageLockBusy`，调用方把它报成明确的冲突——**不自动接管陈旧锁**（`storage/name-lock.ts`）。
 //
-// **落法是两半**,因为 `StorageDir` 上没有原子的 create-if-absent,建不了真正的跨进程互斥:
-//   · 进程内:按 (记忆上下文, 路径) 串行——同一个 Agent 里的前台、提取、整理三个写者真互斥;
-//   · 跨进程:乐观校验——基于旧内容的写在落盘前再读一次,变了就拒,让调用方重看再试。
-// 合起来就是「读改写不被插队」:同进程被队列挡住,跨进程被校验挡住。
+// `assertFresh` 留着：它挡的是**不守这套协议**的写者（人手改文件、旧版本的进程），落盘前内容变了就拒。
 
 import type { StorageDir } from "../storage/types.ts";
+import { NameMutex } from "../storage/name-lock.ts";
 
-/** 每个记忆上下文一张「路径 → 上一次操作」的表。放 WeakMap:它是实现细节,不进公共类型。 */
-const chains = new WeakMap<object, Map<string, Promise<unknown>>>();
+/** 没有 lock 原语的字节面：按对象身份在进程内互斥。放 WeakMap——字节面没了，它的锁跟着没。 */
+const fallback = new WeakMap<object, NameMutex>();
 
 /**
- * 同一个 owner 上,同一个路径的操作**彼此串行**。不同路径互不影响(它们是不同的文件)。
- *
- * 与 dream 状态那条链同一个模式,同一个理由:「单写者」防的是跨进程,防不了同一个 Agent
- * 里的并发——两个写并发时会双双读到旧内容、双双写回,后一个把前一个盖掉。
+ * 在 `dir` 上独占 `name` 跑完 `run`。拿不到锁时抛 `StorageLockBusy`（由调用方报成冲突）。
+ * 释放在 finally 里——`run` 抛错也不会把锁留在盘上。
  */
-export async function withMemoryFileLock<T>(owner: object, path: string, run: () => Promise<T>): Promise<T> {
-  let table = chains.get(owner);
-  if (table === undefined) {
-    table = new Map();
-    chains.set(owner, table);
+export async function withMemoryRegionLock<T>(dir: StorageDir, name: string, run: () => Promise<T>, timeoutMs?: number): Promise<T> {
+  let release: () => Promise<void>;
+  if (dir.lock !== undefined) {
+    release = await dir.lock(name, timeoutMs === undefined ? undefined : { timeoutMs });
+  } else {
+    let mutex = fallback.get(dir);
+    if (mutex === undefined) {
+      mutex = new NameMutex();
+      fallback.set(dir, mutex);
+    }
+    release = await mutex.acquire(name, timeoutMs);
   }
-  const prev = table.get(path) ?? Promise.resolve();
-  // 前一次失败不该堵死后面的操作,所以两个分支都接上 work
-  const next = prev.then(run, run);
-  // 链上留一份吞掉错误的,免得别人 await 到一个 rejected 的前驱
-  const guarded = next.catch(() => undefined);
-  table.set(path, guarded);
   try {
-    return await next;
+    return await run();
   } finally {
-    // 我这一格还在队尾(没人接在我后面)才清掉,免得长会话攒下一张只增不减的表
-    if (table.get(path) === guarded) table.delete(path);
+    await release();
   }
 }
 

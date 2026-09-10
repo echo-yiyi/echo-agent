@@ -254,6 +254,7 @@ export function withWorkspaceStamp(root: StorageDir, workspace: string): Storage
       return root.write(path, content);
     },
     remove: (path) => root.remove(path),
+    ...(root.lock === undefined ? {} : { lock: (name: string, opts?: { timeoutMs?: number }) => root.lock!(name, opts) }),
   };
 }
 

@@ -145,18 +145,12 @@ export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
       : "The first path segment of every path picks who will see an entry, widest first:\n" +
         layers.map((l) => `- ${l}`).join("\n") +
         "\nPick the widest layer the fact is actually true for, and write the whole path — there is no layer argument.",
-    "When to write. Four things are usually worth keeping: the user corrected you, or told you how they want you to work; " +
-      "you hit something that would trip you again — an environment quirk, a tool that behaves differently than its docs say; " +
-      "a decision got settled, together with the reasoning behind it; " +
-      "a fact about this project or this person that you had to discover rather than read. " +
-      "Before writing any of them, ask whether it will still be true, and still useful, in a different session next month. If not, drop it.",
-    "What not to keep. Progress on the current task — the transcript is for that. " +
-      "Anything the repository already states: its layout, code structure, git history, its own instruction files; if it is one command away, it is not memory. " +
-      "Anything true only inside this conversation. Credentials, tokens and keys — in any region, ever.",
-    "How to write. One fact per entry; if you are joining two with \"and\", they are two entries. " +
-      "Give every entry a one-line description — it is the only thing a future session sees when deciding whether to open it, so write it to be found by what it is about. " +
-      "Use absolute dates, never \"yesterday\". Merge into an existing entry instead of adding a near-duplicate, and delete an entry you find out is wrong. " +
-      "When a module is over budget, consolidate before adding.",
+    // **判据不在这里**（2026-09-10）：什么值得记、什么不记，由各模块自己的 instructions 说（上面那几行）。
+    // 这段只讲机制——判据若写在这里，`memory.builtin: false` 换掉了模块，coding 味的判据却还留着。
+    "How to write. What belongs in each module, and when something is worth writing at all, is in that module's line above — that is the standard; there is no other. " +
+      "View before you write: merge into an existing entry instead of adding a near-duplicate, and delete an entry you find out is wrong. " +
+      "In an indexed module give every file a one-line description — it is all a future session sees when deciding whether to open it, so write it to be found by what it is about. " +
+      "Use absolute dates, never \"yesterday\". When a module is over budget, consolidate before adding. Never store credentials, tokens or keys, in any module.",
     ...blocks,
   ].join("\n\n");
 }

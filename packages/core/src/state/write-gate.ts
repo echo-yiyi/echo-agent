@@ -184,5 +184,14 @@ export function adoptStorageView(raw: StorageDir, authority: CapabilityWriteAuth
       authority.assertWriteAllowed();
       return raw.remove(path);
     },
+    // 锁也要在盘上建锁文件，所以与写同一道闸；底下没有 lock 就不出这个方法（不伪装有互斥）
+    ...(raw.lock === undefined
+      ? {}
+      : {
+          lock: async (name: string, opts?: { timeoutMs?: number }) => {
+            authority.assertWriteAllowed();
+            return raw.lock!(name, opts);
+          },
+        }),
   };
 }

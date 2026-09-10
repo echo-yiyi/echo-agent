@@ -463,6 +463,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       write: (p, c) => store.write(p, c),
       remove: (p) => store.remove(p),
       list: (p) => store.list(p),
+      ...(store.lock === undefined ? {} : { lock: (n: string, o?: { timeoutMs?: number }) => store.lock!(n, o) }),
     },
     { dispose: async () => void (await (store as StorageDir).close?.()) },
   );
@@ -483,6 +484,8 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
             write: (p, c) => sharedStore.write(p, c),
             remove: (p) => sharedStore.remove(p),
             list: (p) => sharedStore.list(p),
+            // 共享层是多段 session 共写的地方——记忆的原子提交靠这一层的锁原语，包装时不能把它丢了
+            ...(sharedStore.lock === undefined ? {} : { lock: (n: string, o?: { timeoutMs?: number }) => sharedStore.lock!(n, o) }),
           },
           { dispose: async () => void (await (sharedStore as StorageDir).close?.()) },
         );
@@ -856,5 +859,7 @@ function scopedDir(base: StorageDir, prefix: string): StorageDir {
     write: (path, content) => base.write(prefix + path, content),
     remove: (path) => base.remove(prefix + path),
     list: async (sub) => (await base.list(prefix + sub)).map((k) => k.slice(prefix.length)),
+    // 互斥按**底下那个位置**算：前缀要一起带下去，不然两个视图锁的是两个名字
+    ...(base.lock === undefined ? {} : { lock: (name: string, opts?: { timeoutMs?: number }) => base.lock!(prefix + name, opts) }),
   };
 }

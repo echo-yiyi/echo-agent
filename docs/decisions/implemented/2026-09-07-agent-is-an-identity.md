@@ -46,3 +46,7 @@
 ## 验收
 
 `CONTEXT.md` 与 [会话与 agent 集群](../../design/sessions.md) 里搜不到「session = 运行中的 agent」「同一个实体的两个视角」「一段 session 就是一个独立的 agent」这三种说法；术语表的 session 一行明说 1 : N；上面那条「待拍板」出现在 sessions.md 的待拍板段里，不是散落在正文。
+
+**实现注（2026-09-10）。** 上面那条「待拍板」已由 [记忆的作用域由产品声明](2026-09-07-memory-scopes-by-product.md) 定为「要」：缺省作用域里有 role 层，锚在 `<ECHO_HOME>/agents/<名字>/memory/`，`AgentRef.name` 于是成了个人记忆的外键。
+
+运行中造**新的具名身份**不用重启、不用先落定义文件：`sessions.create({ agent: { name, definition } })`，模型面的 `session_create` 在 inline 定义里带 `name` 即可。名字必须过 `isValidAgentName`（字母或数字开头，其后只有字母、数字、`.`、`_`、`-`，最长 64——它会成为目录名，放宽了 `a/b` 与 `a_b` 会落进同一个目录），且不能与已注册的具名定义撞名（同名两份定义会共用一份记忆却各说各的）。同名再开一段就是同一个身份，共享个人记忆；越权检查（`tools` 只能收紧）照旧。没注册过的**名字字符串**仍然判红——那是「点名一个已有定义」，不是「造一个」。

@@ -14,7 +14,7 @@ import { errText } from "../errors.ts";
 import { PROMPT_ORDER, type PromptSection } from "../prompt/types.ts";
 import { toolError, toolOk, type ModelTool } from "../tools/types.ts";
 import type { EchoSessions, SessionRow } from "./sessions.ts";
-import type { AgentDefinition } from "../agent-def/types.ts";
+import { isValidAgentName, type AgentDefinition, type AgentRef } from "../agent-def/types.ts";
 
 export type SessionToolsOptions = {
   /** 挂不挂 `session_create`。装配层按「是不是 main」与「容器给没给 runner」决定。 */
@@ -82,7 +82,7 @@ function describe(row: SessionRow, canWake: boolean): string {
  * 现写的那份**只认三项**：多出来的键一律判红——静默丢掉一个模型以为生效了的字段，
  * 是「看起来能用其实没用」的典型，而它写下那个键正是因为它想要那个效果。
  */
-function parseAgentParam(raw: unknown): { ok: true; value: string | AgentDefinition } | { ok: false; why: string } {
+function parseAgentParam(raw: unknown): { ok: true; value: string | AgentDefinition | AgentRef } | { ok: false; why: string } {
   if (typeof raw === "string") {
     return raw.trim() === "" ? { ok: false, why: "agent must not be empty: give a defined agent's name, or an inline definition" } : { ok: true, value: raw };
   }
@@ -90,17 +90,27 @@ function parseAgentParam(raw: unknown): { ok: true; value: string | AgentDefinit
     return { ok: false, why: "agent must be a name (string) or an inline definition object with identity / tools / model" };
   }
   const d = raw as Record<string, unknown>;
-  const extra = Object.keys(d).filter((k) => k !== "identity" && k !== "tools" && k !== "model");
-  if (extra.length > 0) return { ok: false, why: `inline agent definition has no field(s) ${extra.join(", ")}; only identity, tools and model exist` };
+  const extra = Object.keys(d).filter((k) => k !== "name" && k !== "identity" && k !== "tools" && k !== "model");
+  if (extra.length > 0) return { ok: false, why: `inline agent definition has no field(s) ${extra.join(", ")}; only name, identity, tools and model exist` };
+  if (d["name"] !== undefined && (typeof d["name"] !== "string" || !isValidAgentName(d["name"]))) {
+    return { ok: false, why: "agent.name must start with a letter or number and contain only letters, numbers, '.', '_' and '-' (at most 64)" };
+  }
   if (d["identity"] !== undefined && typeof d["identity"] !== "string") return { ok: false, why: "agent.identity must be a string" };
   if (d["model"] !== undefined && typeof d["model"] !== "string") return { ok: false, why: "agent.model must be a string" };
   if (d["tools"] !== undefined && (!Array.isArray(d["tools"]) || d["tools"].some((t) => typeof t !== "string"))) {
     return { ok: false, why: "agent.tools must be an array of tool names" };
   }
+  const definition: AgentDefinition = {
+    ...(d["identity"] !== undefined ? { identity: d["identity"] as string } : {}),
+    ...(d["tools"] !== undefined ? { tools: d["tools"] as string[] } : {}),
+    ...(d["model"] !== undefined ? { model: d["model"] as string } : {}),
+  };
+  // 带名字时空定义也有意义：产品原样，但是一个**有自己记忆的身份**
+  if (d["name"] !== undefined) return { ok: true, value: { name: d["name"] as string, definition } };
   if (d["identity"] === undefined && d["tools"] === undefined && d["model"] === undefined) {
-    return { ok: false, why: "inline agent definition is empty: give at least one of identity, tools, model" };
+    return { ok: false, why: "inline agent definition is empty: give at least one of name, identity, tools, model" };
   }
-  return { ok: true, value: d as AgentDefinition };
+  return { ok: true, value: definition };
 }
 
 function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?: string; workspace?: string; agent?: unknown }> {
@@ -114,7 +124,8 @@ function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?:
       "use session_send to say more to it. Its answers come back to you as messages, not as the result of this call.\n" +
       "By default it runs the plain product with no agent definition. Pass 'agent' to give it one: the name of a " +
       "defined agent, or an inline definition. An inline definition may only narrow what you already have — " +
-      "its tools must be a subset of yours, or the call is refused.",
+      "its tools must be a subset of yours, or the call is refused. Give an inline definition a name to make it a lasting agent: " +
+      "every session started under that name is the same agent and shares its personal memory.",
     parameters: {
       type: "object",
       properties: {
@@ -131,6 +142,12 @@ function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?:
               type: "object",
               description: "An agent written out here and now",
               properties: {
+                name: {
+                  type: "string",
+                  description:
+                    "Stable name that makes this a lasting agent: sessions started with the same name share its personal memory. " +
+                    "Must not be the name of a defined agent",
+                },
                 identity: { type: "string", description: "Replaces the product identity: who this session is" },
                 tools: { type: "array", items: { type: "string" }, description: "Tool names it may use — must be a subset of yours" },
                 model: { type: "string", description: "Model id; defaults to the product's" },
@@ -146,7 +163,7 @@ function createTool(sessions: EchoSessions): ModelTool<{ message: string; name?:
         return toolError("message is required: a session is started to do something");
       }
       // 验形在**动盘之前**，与 `sessions.create` 里的不越权检查同一条纪律：判红时盘上不留半段会话
-      let agent: string | AgentDefinition | undefined;
+      let agent: string | AgentDefinition | AgentRef | undefined;
       if (params.agent !== undefined) {
         const parsed = parseAgentParam(params.agent);
         if (!parsed.ok) return toolError(parsed.why);

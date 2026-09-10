@@ -14,6 +14,13 @@
 //   ⑦ Agent 接线:工具普通注册、system 冻结快照、run 内写下个 run 可见、dispose 链
 
 import { describe, expect, test } from "bun:test";
+// 原子提交判据要的几件（别名避免与本文件已有的导入撞名）
+import { existsSync as existsLock, mkdtempSync as mkdtempLock, readFileSync as readLock, rmSync as rmLock, writeFileSync as writeLock } from "node:fs";
+import { tmpdir as tmpLock } from "node:os";
+import { join as joinLock } from "node:path";
+import { FileDir as FileDirLock } from "../src/storage/file-dir.ts";
+import { defaultExtractPrompt as extractPromptText } from "../src/memory/extract.ts";
+import { defaultDreamPrompt as dreamPromptText } from "../src/memory/dream.ts";
 import { registerTool, unregisterTool, listTools } from "../src/tools/harness.ts";
 import { Agent } from "../src/agent.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
@@ -742,6 +749,157 @@ describe("模块声明真的生效", () => {
   test("工具说明不再写死具体层名（层由产品声明，模型从 system 的 Memory 段读）", () => {
     const tool = memoryTool(memories(new InMemoryDir()));
     expect(tool.description).not.toMatch(/\b(user|project|session)\//);
+  });
+});
+
+/* ───────────────────────── ⑨ 共享层的原子提交（2026-09-10） ───────────────────────── */
+
+const oneLayer = (name: string): MemoryScopeDef => ({ name, order: 1, describe: name, anchor: { kind: "home" }, prefix: "" });
+const sleepLock = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("共享层的原子提交", () => {
+  test("两个 harness 实例、同一个字节面对象（不带 lock 原语）：按对象互斥，两边的修改都在（find_job 并发探针同形）", async () => {
+    const raw = new InMemoryDir();
+    await raw.write("note.md", "A B");
+    // 写得慢一点，把「两边都读到旧内容」的窗口撑开——没有锁时这里必然丢一边
+    const slow: MemoryDir = {
+      read: (p) => raw.read(p),
+      list: (p) => raw.list(p),
+      remove: (p) => raw.remove(p),
+      write: async (p, c) => {
+        if (p === "note.md") await sleepLock(20);
+        await raw.write(p, c);
+      },
+    };
+    const bind = () => {
+      const h = createAgentMemories({ memories: [residentMemory("note")] });
+      bindMemoryScopes(h, memoryScopeTable([{ def: oneLayer("project"), dir: slow }]));
+      return h;
+    };
+    const [a, b] = await Promise.all([
+      memoryStrReplace(bind(), "project/note.md", "A", "AA"),
+      memoryStrReplace(bind(), "project/note.md", "B", "BB"),
+    ]);
+    expect([a.isError, b.isError]).toEqual([false, false]);
+    expect(await raw.read("note.md")).toBe("AA BB");
+  });
+
+  test("不同的视图对象、同一个底层字节面：互斥靠视图转发下去的 lock 原语，不靠对象身份", async () => {
+    const raw = new InMemoryDir();
+    await raw.write("project/note.md", "A B");
+    const view = (): MemoryDir => ({
+      read: (p) => raw.read("project/" + p),
+      list: async (p) => (await raw.list("project/" + p)).map((k) => k.slice("project/".length)),
+      remove: (p) => raw.remove("project/" + p),
+      write: async (p, c) => {
+        if (p === "note.md") await sleepLock(20);
+        await raw.write("project/" + p, c);
+      },
+      lock: (n, o) => raw.lock("project/" + n, o),
+    });
+    const bind = () => {
+      const h = createAgentMemories({ memories: [residentMemory("note")] });
+      bindMemoryScopes(h, memoryScopeTable([{ def: oneLayer("project"), dir: view() }]));
+      return h;
+    };
+    const [a, b] = await Promise.all([
+      memoryStrReplace(bind(), "project/note.md", "A", "AA"),
+      memoryStrReplace(bind(), "project/note.md", "B", "BB"),
+    ]);
+    expect([a.isError, b.isError]).toEqual([false, false]);
+    expect(await raw.read("project/note.md")).toBe("AA BB");
+  });
+
+  test("等不到锁 = 明确报冲突，一个字节都不写；锁一放就能写", async () => {
+    const raw = new InMemoryDir();
+    const h = createAgentMemories({ memories: [residentMemory("note")], lockTimeoutMs: 30 });
+    bindMemoryScopes(h, memoryScopeTable([{ def: oneLayer("project"), dir: raw }]));
+    const release = await raw.lock(".locks/note");
+    const r = await memoryCreate(h, "project/note.md", "x");
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("being written by another session");
+    expect(await raw.read("note.md")).toBeNull();
+    await release();
+    expect((await memoryCreate(h, "project/note.md", "x")).isError).toBe(false);
+  });
+
+  test("两个 FileDir 实例并发往同一个 indexed 模块写：正文一条不少、索引一条不少、锁文件用完即删", async () => {
+    const dir = mkdtempLock(joinLock(tmpLock(), "echo-mem-lock-"));
+    try {
+      const bind = () => {
+        const h = createAgentMemories({ memories: [indexedMemory("notes")] });
+        bindMemoryScopes(h, memoryScopeTable([{ def: oneLayer("project"), dir: new FileDirLock(dir) }]));
+        return h;
+      };
+      const a = bind();
+      const b = bind();
+      const results = await Promise.all(
+        Array.from({ length: 12 }, (_, i) => memoryCreate(i % 2 === 0 ? a : b, `project/notes/n${i}.md`, `---\ndescription: 第 ${i} 条\n---\n`)),
+      );
+      expect(results.every((r) => r.isError !== true)).toBe(true);
+      const index = readLock(joinLock(dir, "notes", "INDEX.md"), "utf8");
+      for (let i = 0; i < 12; i++) expect(index).toContain(`project/notes/n${i}.md`);
+      expect(existsLock(joinLock(dir, ".locks", "notes.lock"))).toBe(false);
+    } finally {
+      rmLock(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("真的两个进程同时读改写同一个文件：成功的插入一条不丢，失败必须是明确返回的", async () => {
+    const dir = mkdtempLock(joinLock(tmpLock(), "echo-mem-xproc-"));
+    const writer = joinLock(import.meta.dir, "fixtures", "memory-writer.ts");
+    try {
+      writeLock(joinLock(dir, "note.md"), "base");
+      const run = (tag: string) => {
+        const proc = Bun.spawn(["bun", writer, dir, tag, "25"], { stdout: "pipe", stderr: "pipe" });
+        return (async () => {
+          const out = await new Response(proc.stdout).text();
+          const err = await new Response(proc.stderr).text();
+          await proc.exited;
+          const last = out.trim().split("\n").at(-1) ?? "";
+          try {
+            return JSON.parse(last) as { tag: string; failed: number };
+          } catch {
+            throw new Error(`子进程没给出报告：${out}\n${err}`);
+          }
+        })();
+      };
+      const [ra, rb] = await Promise.all([run("a"), run("b")]);
+      const lines = readLock(joinLock(dir, "note.md"), "utf8").split("\n");
+      expect(lines.filter((l) => l.startsWith("a-")).length).toBe(25 - ra.failed);
+      expect(lines.filter((l) => l.startsWith("b-")).length).toBe(25 - rb.failed);
+      expect(ra.failed + rb.failed).toBe(0); // 锁等得到：十秒的窗口里不该有一次等不到
+      expect(lines.at(-1)).toBe("base");
+    } finally {
+      rmLock(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+/* ───────────────────────── ⑩ 判据跟着模块走（2026-09-10） ───────────────────────── */
+
+describe("判据跟着模块走", () => {
+  test("只有自定义模块时：记忆段、提取、整理的 prompt 里都没有 coding 味的判据，模块自己的说明原样在", async () => {
+    const custom = createAgentMemories({
+      memories: [indexedMemory("experiences", { instructions: "moments you shared with this person, including one-off ones" })],
+    });
+    bindMemoryScopes(custom, tableOf({ user: new InMemoryDir(), project: new InMemoryDir(), session: new InMemoryDir() }));
+    const system = await renderMemorySystem(custom);
+    expect(system).not.toContain("next month");
+    expect(system).not.toContain("repository already states");
+    expect(system).toContain("moments you shared");
+    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), "user: hi");
+    expect(extract).not.toContain("next month");
+    expect(extract).not.toContain("true only inside this conversation");
+    expect(extract).toContain("moments you shared");
+    const dream = dreamPromptText(listMemories(custom), memoryScopeTableOf(custom), "user");
+    expect(dream).not.toContain("true only once");
+  });
+
+  test("内建模块在时，判据跟着它们出现（在模块的说明里，不在全局规则里）", async () => {
+    const system = await renderMemorySystem(memories(new InMemoryDir()));
+    expect(system).toContain("next month");
+    expect(system).toContain("repository already states");
   });
 });
 

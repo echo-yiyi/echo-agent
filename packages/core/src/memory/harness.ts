@@ -32,8 +32,9 @@ import {
   type DreamState,
 } from "./dream.ts";
 import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
-import { lateBoundMemoryDir, splitScopePath, type LateBoundMemoryDir, type MemoryScopeTable } from "./scope.ts";
-import { assertFresh, withMemoryFileLock } from "./lock.ts";
+import { lateBoundMemoryDir, safeScopeSegment, splitScopePath, type LateBoundMemoryDir, type MemoryScopeTable } from "./scope.ts";
+import { assertFresh, withMemoryRegionLock } from "./lock.ts";
+import { StorageLockBusy } from "../storage/name-lock.ts";
 import { memoryOps, type MemoryCommand } from "./tool-commands.ts";
 import {
   declaredScopes,
@@ -63,6 +64,8 @@ export type MemoryHarnessOptions = {
   checkWrite?: CheckWrite;
   /** 透传给缺省工具工厂(description / 逐命令 handlers)。 */
   tool?: CreateMemoryToolOptions;
+  /** 一次提交等锁最多多久（缺省 `DEFAULT_LOCK_TIMEOUT_MS`）。测试用它把「等不到」压到毫秒级。 */
+  lockTimeoutMs?: number;
 };
 
 /**
@@ -94,6 +97,8 @@ export type AgentMemories = MemoryDeps & {
    * 放在这里而不是让装配方自己记:它是 `createAgentMemories` 那一刻就定了的事实。
    */
   builtinModules: boolean;
+  /** 一次提交等锁最多多久；不给用字节面的缺省。 */
+  lockTimeoutMs?: number;
   /** 距上次 dream 的写次数 / 轮次——闸靠它判。 */
   writesSinceDream: number;
   turnsSinceDream: number;
@@ -125,6 +130,7 @@ export function createAgentMemories(opts?: MemoryHarnessOptions): AgentMemories 
     gates: opts?.dream ?? DEFAULT_DREAM_GATES,
     ...(opts?.tool !== undefined ? { toolOpts: opts.tool } : {}),
     builtinModules: opts?.memories === undefined,
+    ...(opts?.lockTimeoutMs !== undefined ? { lockTimeoutMs: opts.lockTimeoutMs } : {}),
     writesSinceDream: 0,
     turnsSinceDream: 0,
   };
@@ -313,8 +319,8 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise
   }
   const deleteDenied = opsGate(frame.owner, "delete");
   if (deleteDenied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", deleteDenied));
-  // 删也是「读改写」的一种（存在性检查 + 删 + 重建索引），进与 writeMemory 同一把按路径的锁
-  return withMemoryFileLock(ctx, path, async () => {
+  // 删也是「读改写」的一种（存在性检查 + 删 + 重建索引），进与 writeMemory 同一把提交锁
+  return commitUnderLock(ctx, frame.owner, path, frame, async () => {
     let removed: boolean;
     try {
       removed = await ctx.dir.remove(path);
@@ -363,9 +369,8 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
   if (renameDenied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", renameDenied));
   const guard = guardIndexFile(from) ?? guardIndexFile(to);
   if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
-  // **只锁目标**（写入点）。两个都锁的话，两个方向相反的并发 rename 会互锁；
-  // 源的删除是幂等的，最坏是留下一份副本，不会丢内容。
-  return withMemoryFileLock(ctx, to, async () => {
+  // rename 只在同一层同一个模块内（跨层跨模块在前面已拒），所以一把「层 × 模块」的提交锁就罩住了源与目标
+  return commitUnderLock(ctx, fromOwner, to, frame, async () => {
   let content: string | null;
   let existing: string | null;
   try {
@@ -763,9 +768,9 @@ async function writeMemory(
   const command = OPERATION_COMMAND[operation as keyof typeof OPERATION_COMMAND];
   const denied = command === undefined ? null : opsGate(owner, command);
   if (denied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", denied));
-  // **「读—改—写」整段进锁**:同一进程里的前台、提取、整理三个写者对同一个文件真互斥。
-  // 跨进程那一半靠落盘前的 `assertFresh`——两者合起来才是"读改写不被插队"(memory/lock.ts)。
-  return withMemoryFileLock(ctx, path, async () => {
+  // **「读—改—写」整段进提交锁**（层 × 模块，跨实例跨进程都互斥，见 `commitUnderLock`）。
+  // `assertFresh` 留着挡不守这套协议的写者（人手改文件）。
+  return commitUnderLock(ctx, owner, path, frame, async () => {
     let prepared: Prepared;
     try {
       prepared = await prepare(path);
@@ -816,6 +821,38 @@ const OPERATION_COMMAND: Readonly<Record<"create" | "replace" | "insert", Memory
   replace: "str_replace",
   insert: "insert",
 };
+
+/**
+ * 一次提交的互斥范围：**层 × 模块**（2026-09-10）。锁挂在那一层的**字节面**上，名字 `.locks/<模块>`——
+ * 同一层同一个模块的读改写、预算校验、落盘、索引重建整段独占，跨 harness 实例、跨进程都算数。
+ * 点开头的 `.locks/` 模型够不到（jail），也不进索引与目录概览。
+ * 等不到锁 = 有别的写者正在提交这个模块：**明确报冲突**，一个字节都不写（不静默覆盖、不自动抢）。
+ */
+async function commitUnderLock(
+  ctx: AgentMemories,
+  owner: AnyMemory,
+  path: string,
+  frame: MutationFrame,
+  run: () => Promise<AgentToolResult>,
+): Promise<AgentToolResult> {
+  const scope = splitScopePath(path)?.scope;
+  const entry = scope === undefined ? undefined : ctx.binding.table().byName.get(scope);
+  if (entry === undefined) return run(); // 路由在前面已判过；这里只是类型上的兜底
+  try {
+    return await withMemoryRegionLock(entry.dir, `.locks/${safeScopeSegment(owner.name)}`, run, ctx.lockTimeoutMs);
+  } catch (e) {
+    if (!(e instanceof StorageLockBusy)) throw e;
+    return finishMemoryMutation(
+      ctx,
+      frame,
+      rejected(
+        "busy",
+        `Module '${owner.name}' in ${scope}/ is being written by another session right now; nothing was written. Try again.` +
+          (e.holder === null ? "" : ` (lock held by ${e.holder})`),
+      ),
+    );
+  }
+}
 
 /** INDEX.md 由系统维护(写方法重建),不许直接写——直接改会被下一次重建覆盖,等于白改。返回拒绝原文。 */
 function guardIndexFile(path: string): string | null {

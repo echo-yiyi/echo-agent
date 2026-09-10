@@ -11,7 +11,7 @@ import { createRecordIdSource, recordPath, serializeRecord, type InboxRecordV1 }
 import type { StorageDir } from "../storage/types.ts";
 import { listSessions, setSessionStatus, SessionService, assertSafeSessionId } from "./service.ts";
 import { newSessionId, type SessionInfo } from "./types.ts";
-import { describeAgentRef, DEFAULT_AGENT_REF, type AgentDefinition, type AgentRef } from "../agent-def/types.ts";
+import { describeAgentRef, DEFAULT_AGENT_REF, isAgentRef, isValidAgentName, type AgentDefinition, type AgentRef } from "../agent-def/types.ts";
 import { readSessionPhase, type SessionPhase } from "./status.ts";
 
 /** 会话间消息的 `source`。收方的 transcript 里就是一条普通 environment 消息。 */
@@ -51,8 +51,13 @@ export type CreateSessionInput = {
    * 一段 reviewer 派出去的活默认不该也是 reviewer，那是它自己要说的事。
    *
    * 现写的定义里 `tools` **必须 ⊆ 创建者此刻的工具集**：越权判红，盘上不建目录。
+   *
+   * **带名字的现写定义**（`{ name, definition }`，2026-09-10）：运行中造一个**新的具名身份**，不用重启、
+   * 不用先落一份定义文件。名字就是身份——同名的 session 共用 `agents/<名字>/` 下那份个人记忆，跨 session
+   * 恢复靠的就是它。名字必须过 `isValidAgentName`，且**不能与已有的具名定义撞名**（同名两份定义会共用
+   * 一份记忆却各说各的）。越权检查对它照旧。
    */
-  readonly agent?: string | AgentDefinition;
+  readonly agent?: string | AgentDefinition | AgentRef;
   readonly workspace?: string;
   /**
    * 第一条消息，投进新段的 inbox。**工具面必填**（见 `echo:sessions`）：
@@ -253,9 +258,22 @@ export class EchoSessions implements SessionFace {
    * `agent` 参数 → 一份 `AgentRef`。名字从三处来源那张表里找，**找不到判红**——
    * 静默退回缺省的话，模型以为自己开了个 reviewer，实际开出来的是产品原样。
    */
-  private resolveAgent(input: string | AgentDefinition | undefined): AgentRef {
+  private resolveAgent(input: string | AgentDefinition | AgentRef | undefined): AgentRef {
     if (input === undefined) return DEFAULT_AGENT_REF;
-    if (typeof input !== "string") return { definition: input };
+    if (typeof input !== "string") {
+      if (!isAgentRef(input)) return { definition: input };
+      if (input.name === undefined) return { definition: input.definition };
+      if (!isValidAgentName(input.name)) {
+        throw new Error(`agent 名字 '${input.name}' 不能用：字母或数字开头，其后只有字母、数字、.、_、-，最长 64（名字会成为它个人记忆的目录名）`);
+      }
+      if (this.deps.agentDefs?.().has(input.name) === true) {
+        throw new Error(
+          `已经有一份名叫 '${input.name}' 的 agent 定义：要用它就只传名字；要一个新身份就换个名字——` +
+            `同名两份定义会共用一份个人记忆却各说各的`,
+        );
+      }
+      return { name: input.name, definition: input.definition };
+    }
     const defs = this.deps.agentDefs?.();
     const found = defs?.get(input);
     if (found === undefined) {

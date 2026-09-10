@@ -25,7 +25,7 @@
 - memory 目录的多写者保护（多段 session 同时往 project 级记）。归 memory 线，本文只定作用域。
 - 会话的回收（GC / TTL）。`closed` 的段留在盘上；不会跑的段靠 §7 的挂载条件与 runner 失败判红不产生，而不是事后清。
 
-**待拍板。** 一条：**agent 这个身份有没有跨 session 的持久状态**——同一个 HR 的两段 session 要不要共享一份「我跟这个候选人聊到哪了」。不要 = agent 就是「定义 + 名字」，作用域仍是 session / project / user 三层；要 = 三层之外多一层 agent 作用域，`AgentRef.name` 也从「来历」变成外键。两条后果与判据见 [agent 是身份](../decisions/implemented/2026-09-07-agent-is-an-identity.md) 的「待拍板」。**这条不定，`--resume` 与 `session_create` 的行为一个字都不用改**；定了才动记忆那条线。
+**待拍板。** 没有了。原先那条「agent 这个身份有没有跨 session 的持久状态」已定为**要**：记忆的缺省作用域里有 role 层，锚在 `<ECHO_HOME>/agents/<名字>/memory/`，`AgentRef.name` 是它的外键；运行中造具名身份见 [agent 是身份](../decisions/implemented/2026-09-07-agent-is-an-identity.md) 的实现注（2026-09-10）。
 
 其余的：记忆三层怎么切 2026-09-07 拍了：模块（`agent.md` / `user.md` / 笔记索引）与作用域（session / project / user）分开，哪层放什么、注入什么、怎么选层、什么顺序落地，全在 [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) 的「切法」一段，2026-09-07 已实现。dream 的计数与锁跟着整理范围下到 session 层，「两段 session 同时整理同一份」于是不再成立。
 
@@ -244,7 +244,7 @@ type SessionRow = {
 
 type CreateSessionInput = {
   readonly name?: string;
-  /** 名字（从三处来源那张表里找）或现写一份定义（形状见 packages/core/src/agent-def/types.ts 的 AgentDefinition）；不给 = 产品原样，不继承创建者的角色。 */
+  /** 名字（从三处来源那张表里找）、现写一份定义，或 `{ name, definition }` 现写一个具名身份（2026-09-10）；不给 = 产品原样，不继承创建者的角色。 */
   readonly agent?: string | { readonly identity: string; readonly tools?: readonly string[]; readonly model?: string };
   readonly workspace?: string;
   /** 第一条消息，投进新段的 inbox。工具面必填：一段 session 是为了做某件事才开的，没有这条就是一个永远躺着的空目录。 */
@@ -292,7 +292,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 | 工具 | 参数 | 挂给谁 |
 |---|---|---|
-| `session_create` | `name`、`agent`（名字或 inline 定义）、`workspace?`、`message` | 只 main，且容器给了 `SessionRunner` |
+| `session_create` | `name`、`agent`（名字、inline 定义，或带 `name` 的 inline 定义——具名身份，同名的段共享个人记忆）、`workspace?`、`message` | 只 main，且容器给了 `SessionRunner` |
 | `session_send` | `to`、`message`、`wait?`、`timeoutMs?`、`replyTo?` | 全部 |
 | `session_list` | `workspace?`、`includeClosed?` | 全部 |
 | `session_close` | `id` | 全部 |

@@ -50,6 +50,20 @@ export type AgentRef = {
 /** 缺省（产品原样，没有角色）。`--continue` 的老会话、容器自己开的段都是它。 */
 export const DEFAULT_AGENT_REF: AgentRef = { definition: {} };
 
+/**
+ * agent 的名字能不能用（2026-09-10）。名字是身份：同名的 session 共用一份个人记忆，目录就是
+ * `<ECHO_HOME>/agents/<名字>/`——所以它必须是一个干净的路径段：字母或数字开头，其后只有字母、数字、
+ * `.`、`_`、`-`，最长 64。不在这里收紧的话，`a/b` 与 `a_b` 消毒后会落进同一个目录，两个身份悄悄合并。
+ */
+export function isValidAgentName(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name);
+}
+
+/** `{ name?, definition }`（一份带来历的引用）还是裸的定义。两者只差 `definition` 这一个键。 */
+export function isAgentRef(x: AgentDefinition | AgentRef): x is AgentRef {
+  return typeof (x as { definition?: unknown }).definition === "object" && (x as { definition?: unknown }).definition !== null;
+}
+
 /** 这份定义有没有真的要改什么。全空 = 挂它等于不挂，`echo:inline-agent` 因此不必上场。 */
 export function isEmptyDefinition(d: AgentDefinition): boolean {
   return d.identity === undefined && d.tools === undefined && d.model === undefined;

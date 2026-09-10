@@ -480,3 +480,36 @@ test("改过名之后，清单与 list 都按新名字认它", async () => {
   expect((await listSessions(h.root)).map((i) => i.name)).toEqual(["改接口"]);
   expect((await h.sessions.list()).map((r) => r.name)).toEqual(["改接口"]);
 });
+
+/* ───────────────────────── 运行中造具名身份（2026-09-10） ───────────────────────── */
+
+test("运行中造具名身份：{ name, definition } 不用预先注册；名字进 meta、行里显示名字；越权、撞名、坏名字都判红且不留半段", async () => {
+  // 此前带不了名字：现写的定义没有 `AgentRef.name`，拿不到个人记忆那一层；想要名字只能重启、落定义文件。
+  const h = harness({ run: async () => {}, tools: ["read_file"], agentDefs: new Map([["reviewer", { tools: ["read_file"] }]]) });
+  const a = await h.sessions.create({ message: "面试 A", main: false, agent: { name: "hr-a", definition: { tools: ["read_file"] } } });
+  const b = await h.sessions.create({ message: "面试 B", main: false, agent: { name: "hr-b", definition: {} } });
+  expect([a.agent, b.agent]).toEqual(["hr-a", "hr-b"]);
+  // 同名再开一段 = 同一个身份（个人记忆按名字锚在 agents/<名字>/ 下，跨 session 恢复靠它）
+  const a2 = await h.sessions.create({ message: "面试 A 续", main: false, agent: { name: "hr-a", definition: { tools: ["read_file"] } } });
+  expect(a2.agent).toBe("hr-a");
+  expect((await listSessions(h.root)).map((i) => i.agent.name).sort()).toEqual(["hr-a", "hr-a", "hr-b"]);
+
+  await expect(h.sessions.create({ message: "x", main: false, agent: { name: "hr-c", definition: { tools: ["shell"] } } })).rejects.toThrow("shell");
+  await expect(h.sessions.create({ message: "x", main: false, agent: { name: "reviewer", definition: {} } })).rejects.toThrow("reviewer");
+  await expect(h.sessions.create({ message: "x", main: false, agent: { name: "../hr", definition: {} } })).rejects.toThrow("不能用");
+  expect((await listSessions(h.root)).length).toBe(3); // 三次判红，盘上一段都没多
+});
+
+test("工具面：inline 定义带 name 就是一个具名身份；带名字时空定义也行；名字不合法当场判红", async () => {
+  const h = harness({ run: async () => {}, tools: ["read_file"], agentDefs: new Map() });
+  const create = makeSessionTools(h.sessions, { canCreate: true })[0]!;
+  const named = await create.execute({ message: "干活", agent: { name: "hr-x", tools: ["read_file"] } }, ctx());
+  expect(named.isError).toBe(false);
+  expect(JSON.stringify(named)).toContain("agent hr-x");
+  const bare = await create.execute({ message: "干活", agent: { name: "hr-y" } }, ctx());
+  expect(bare.isError).toBe(false);
+  const bad = await create.execute({ message: "干活", agent: { name: "a/b" } }, ctx());
+  expect(bad.isError).toBe(true);
+  expect((await listSessions(h.root)).map((i) => i.agent.name).sort()).toEqual(["hr-x", "hr-y"]);
+});
+

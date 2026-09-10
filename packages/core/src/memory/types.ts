@@ -143,13 +143,16 @@ export const agentMemory: ResidentMemory = residentMemory("agent", {
   budget: 2200,
   instructions:
     "how you yourself tend to work here — habits worth repeating, approaches that went wrong, the shape of a good answer for this person. " +
-    "Facts about the environment or the project belong in the notes module, not here. Keep it short and dense.",
+    "Facts about the environment or the project belong in the notes module, not here. " +
+    "Keep only what will still hold in a different session next month. Keep it short and dense.",
 });
 
 /** agent 对**这个用户**的认知(预算量级取自 Hermes USER.md 的 1375 chars)。 */
 export const userMemory: ResidentMemory = residentMemory("user", {
   budget: 1400,
-  instructions: "who the user is — identity, preferences, how they communicate, corrections they gave you. Keep it dense.",
+  instructions:
+    "who the user is — identity, preferences, how they communicate, corrections they gave you. " +
+    "Keep only what will still be true in a different session next month. Keep it dense.",
 });
 
 /**
@@ -160,8 +163,13 @@ export const notesMemory: IndexedMemory = indexedMemory("memory", {
   budget: 25_000,
   fileBudget: 4096,
   instructions:
-    "facts worth keeping across sessions, and where to find things — one .md file per item, with frontmatter (name, description; " +
-    "the description decides whether you will find it again). Only the index is shown in the system prompt; view a file to read it.",
+    "facts worth keeping across sessions, and where to find things. Worth keeping: the user corrected you or told you how they want you to work; " +
+    "something that would trip you again (an environment quirk, a tool that behaves differently than its docs say); a decision that got settled, " +
+    "with its reasoning; a fact you had to discover rather than read. Keep it only if it will still be true and useful in a different session next month. " +
+    "Leave out progress on the current task (the transcript has it), anything the repository already states (layout, code, version history, its " +
+    "instruction files), and anything true only inside this conversation. One fact per .md file, with frontmatter (name, description — the " +
+    "description decides whether you will find it again); say why it matters, not just what happened. Only the index is shown in the system prompt; " +
+    "view a file to read it.",
 });
 
 /* ───────────────────────── 行为的函数类型(实现在 compose.ts) ───────────────────────── */

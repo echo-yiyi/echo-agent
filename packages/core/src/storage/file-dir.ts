@@ -4,6 +4,7 @@
 // 写入原子:临时文件 → rename,读者永远看到旧完整文件或新完整文件,不会看到半截。
 // 单进程假设:不做跨进程文件锁(两个进程共写同一 root 的并发防护列为后续,先诚实写明)。
 
+import { DEFAULT_LOCK_TIMEOUT_MS, StorageLockBusy } from "./name-lock.ts";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve as resolvePath, sep } from "node:path";
@@ -112,6 +113,43 @@ export class FileDir implements StorageDir {
     const temp = `${target}.${process.pid}.${(++FileDir.tempSeq).toString(36)}.${Date.now().toString(36)}.tmp`;
     await fs.writeFile(temp, content, "utf8");
     await fs.rename(temp, target); // 原子替换:不留半截文件
+  }
+
+  /**
+   * 锁文件 `<name>.lock`，`open(…, "wx")` 原子地「不存在才建」——跨实例、跨进程互斥。
+   * 等不到就轮询到 `timeoutMs`，然后抛 `StorageLockBusy`（带锁文件里记的持有者与位置）。
+   * **不自动接管陈旧锁**（`storage/name-lock.ts` 头注）。释放只删**自己那一把**：锁文件里的 token
+   * 不是我的就不动。
+   */
+  async lock(name: string, opts?: { timeoutMs?: number }): Promise<() => Promise<void>> {
+    const lockPath = `${await this.resolveSafe(name)}.lock`;
+    await fs.mkdir(dirname(lockPath), { recursive: true });
+    const token = `pid ${process.pid} · ${(++FileDir.tempSeq).toString(36)} · ${new Date().toISOString()}`;
+    const deadline = Date.now() + (opts?.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
+    for (;;) {
+      try {
+        const fh = await fs.open(lockPath, "wx");
+        try {
+          await fh.writeFile(token, "utf8");
+        } finally {
+          await fh.close();
+        }
+        return async () => {
+          try {
+            if ((await fs.readFile(lockPath, "utf8")) === token) await fs.unlink(lockPath);
+          } catch (e) {
+            if (!isNotFound(e)) throw e;
+          }
+        };
+      } catch (e) {
+        if ((e as { code?: string }).code !== "EEXIST") throw e;
+        if (Date.now() >= deadline) {
+          const holder = await fs.readFile(lockPath, "utf8").catch(() => "");
+          throw new StorageLockBusy(name, `${holder === "" ? "持有者未知" : holder}；锁文件 ${lockPath}`);
+        }
+        await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
+      }
+    }
   }
 
   async remove(path: string): Promise<boolean> {
