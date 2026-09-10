@@ -30,6 +30,10 @@
       "bilingual": false
     },
     {
+      "path": ".claude/skills/release/SKILL.md",
+      "bilingual": false
+    },
+    {
       "path": "packages/core/README.md",
       "bilingual": false
     },
