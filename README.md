@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 An agent runtime and two products built on it: `echo-agent`, the general agent, and `echo-coding`, the coding agent. Assemble a runtime, extend one with your own tools and prompt, or put a different shell in front of it; the same agent runs interactively and through a Unix pipe.
 
-> **Status: pre-release and not published.** The workspace packages are currently private. Install from source for now; the public API may change before the first `0.x` release.
+> **Status: pre-release and not published.** Nothing is on npm yet. Install from source for now; the public API may change before the first `0.x` release.
 
 ## Quick start
 
@@ -26,7 +26,7 @@ Each session is its own state root: `$ECHO_HOME/sessions/<session-id>`, or `~/.e
 
 ## Two products
 
-The repository ships two commands on the same runtime. `echo-agent` is the general agent and knows nothing about any specific product; `echo-coding` depends on `echo-agent` and adds file, search, and shell tools on top of it.
+The repository ships two commands on the same runtime. They are siblings: neither depends on the other. `echo-agent` is the general agent; `echo-coding` adds file, search, shell and web tools, and its own identity and conduct. Both are assembled from `@echo-agent/base` and pick the same terminal shell, `@echo-agent/tui`.
 
 | | `echo-agent` | `echo-coding` |
 |---|---|---|
@@ -34,7 +34,7 @@ The repository ships two commands on the same runtime. `echo-agent` is the gener
 | Tools | Core's `echo:*` builtins | The builtins plus `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` |
 | Command | `echo-agent` | `echo-coding` |
 
-File and shell tools belong to `echo-coding` only. `echo-coding` does not change a line of `echo-agent`: it hands its own preset (system prompt, permission policy, the two extensions) to `echo-agent`'s startup logic, which is also how a third-party product builds on this runtime.
+File and shell tools belong to `echo-coding` only. A product owns its identity section, its conduct section, its own extensions and its executable; the launcher parts, the host capabilities and the pipe shell come from `@echo-agent/base`, and the interactive form is whichever `Shell` implementation its executable hands in. A third-party product builds on this runtime the same way — and one that draws its own interface depends on `@echo-agent/base` alone, without installing a terminal library.
 
 ```bash
 MOONSHOT_API_KEY=sk-... bun packages/coding/bin/echo-coding.ts
@@ -62,7 +62,7 @@ Select a provider with `--provider`; override its default model with `--model`.
 
 The MiniMax adapter is covered by fixtures but has not yet been exercised against the live service.
 
-Use repeatable `--extensions <directory>` flags to choose the extension search directories; with no flag, the CLI searches `./extensions`. Pass `--no-memory` to omit Memory and Dream, or `--agent-id <id>` to choose the identity recorded as the lock holder.
+Use repeatable `--extensions <directory>` flags to choose the extension search directories; with no flag, the CLI searches `./extensions`. Pass `--no-memory` to omit Memory and Dream, or `--observe content` to record model text and tool payloads in the observation database (it defaults to `metadata`: shapes and counts only).
 
 Every launch starts a new session. `--continue` resumes the latest session of this command in the current directory; `--resume <id>` resumes a specific one. A session belongs to a directory and a command, so `echo-agent` and `echo-coding` never share a conversation even in the same directory, and a resumed session announces how many messages it brought back.
 
@@ -96,8 +96,10 @@ try {
 | Package | Role |
 |---|---|
 | `@echo-agent/core` | Runtime, engine, provider adapters, persistence, memory, tasks, and the extension API |
-| `echo-agent` | General agent: official CLI with interactive and piped modes; knows no specific product |
-| `@echo-agent/coding` | Coding agent: depends on `echo-agent`, adds the `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions and the `echo-coding` command |
+| `@echo-agent/base` | Assembly layer: the product contract, launcher parts, host capabilities (credentials, settings, project instructions, the observe panel) and the pipe shell. No terminal dependency |
+| `@echo-agent/tui` | Terminal shell: the interactive TUI and first-run setup, packaged as the terminal implementation of the shell port |
+| `echo-agent` | General agent product: its identity and conduct sections, its `Product`, and the `echo-agent` command |
+| `@echo-agent/coding` | Coding agent product: its identity and conduct sections, the four `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions, and the `echo-coding` command |
 
 Runnable consumers live in [`examples/`](examples/): a real-provider hello world, a credential-free scripted agent, and extension auto-discovery. The distribution test packs the workspaces, installs the tarballs in clean projects, type-checks all three examples, and runs the two credential-free ones with Bun; Node runs a generated smoke script against the installed package instead (the hello example needs a real key, so it is only type-checked).
 
@@ -106,8 +108,10 @@ Runnable consumers live in [`examples/`](examples/): a real-provider hello world
 | Path | Contents |
 |---|---|
 | [`packages/core/`](packages/core/) | `@echo-agent/core` runtime and SDK |
-| [`packages/cli/`](packages/cli/) | `echo-agent` CLI and TUI shell |
-| [`packages/coding/`](packages/coding/) | `echo-coding` CLI: coding preset, its two extensions, and the command |
+| [`packages/base/`](packages/base/) | `@echo-agent/base` assembly layer |
+| [`packages/tui/`](packages/tui/) | `@echo-agent/tui` terminal shell |
+| [`packages/cli/`](packages/cli/) | `echo-agent`: the general agent product |
+| [`packages/coding/`](packages/coding/) | `echo-coding`: the coding agent product, its four tool extensions, its prompt pack and the command |
 | [`examples/`](examples/) | Executable package consumers |
 | [`test/`](test/) | Repository-level distribution and documentation checks |
 
