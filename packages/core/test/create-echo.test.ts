@@ -17,6 +17,7 @@ import { createProviderStreams } from "../src/provider/dialect.ts";
 import { scriptedDialect, textTurn, toolTurn } from "../src/testing.ts";
 import { defineExtension } from "../src/extension/abi.ts";
 import { AgentTools } from "../src/extension/registries.ts";
+import { definePromptPack } from "../src/extension/builtin.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
@@ -902,4 +903,47 @@ test("会话命名：产品挂一个更早的钩子就能接管（缺省那个�
   await echo.agent.start();
   await echo.send("随便说一句");
   expect(echo.agent.sessionName).toBe("产品说了算");
+});
+
+/* ───────────── 角色与产品 prompt 的挂载顺序（2026-09-10） ───────────── */
+
+test("产品经 extensions 给 identity 段 + 同时传 agentDef.identity：角色替得上——产品段必须先于 echo:inline-agent 挂", async () => {
+  // 复现：真实产品（echo-agent / echo-coding）的 identity 都在 `opts.extensions` 里；角色靠 replace 替它，
+  // 所以产品那代必须先 mount。此前 `echo:inline-agent` 排在 inline 那代（早于 extensions），replace 时段还不存在。
+  const product = definePromptPack("test:product-identity");
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: await tmp(),
+    withoutMemory: true,
+    extensionDirs: [],
+    extensions: [
+      {
+        entryId: "test:product-identity",
+        definition: product as never,
+        config: { sections: [{ name: "identity", order: 0, render: () => "PRODUCT IDENTITY" }] },
+      },
+    ],
+    agentDef: { name: "reviewer", definition: { identity: "ROLE IDENTITY" } },
+  });
+  running.push(echo);
+  const sys = (await echo.agent.assemblePrompt()) ?? "";
+  expect(sys.startsWith("ROLE IDENTITY")).toBe(true);
+  expect(sys).not.toContain("PRODUCT IDENTITY");
+  // 清单顺序 = 挂载顺序：角色在产品之后
+  const ids = echo.extensions.map((e) => e.entryId);
+  expect(ids.indexOf("test:product-identity")).toBeLessThan(ids.indexOf("echo:inline-agent"));
+});
+
+test("只传 agentDef.identity、产品没有 identity 段：仍然判红（悄悄多出一段和替换是两件事）", async () => {
+  await expect(
+    createEcho({
+      provider: scripted([textTurn("ok")]),
+      allowNetwork: false,
+      stateDir: await tmp(),
+      withoutMemory: true,
+      extensionDirs: [],
+      agentDef: { definition: { identity: "替不上去" } },
+    }),
+  ).rejects.toThrow(/不存在/);
 });

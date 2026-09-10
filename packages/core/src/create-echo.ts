@@ -81,6 +81,8 @@ const SESSION_NAME_MAX = 60;
 const BOOT_GENERATION = "boot";
 /** `agent.tools` 转成的 inline Extension 那一代：显式装配，fail-loud。 */
 const INLINE_GENERATION = "boot:inline";
+/** 角色（`echo:inline-agent`）那一代：**最后 mount**——它替产品的 identity 段，产品那代必须已在。 */
+const ROLE_GENERATION = "boot:agent";
 
 const MODULE_EXTS: ReadonlySet<string> = new Set([".ts", ".mts", ".js", ".mjs"]);
 /** 一层子目录的入口文件，按此顺序取第一个存在的。 */
@@ -504,14 +506,6 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       ...(inlineTools.length === 0
         ? []
         : [{ entryId: "echo:inline-tools", definition: defineToolPack("echo:inline-tools"), config: { tools: inlineTools } }]),
-      // ── `echo:inline-agent`：这一段挂的角色（2026-09-07）──────────────────────────────
-      //
-      // **排在 inline-tools 之后、盘上发现的之前**：identity 要替的那一段、tools 要收紧的那个池，
-      // 都得先由产品与内建装好。角色只做两件——替 identity、收工作集，第三件（model）在装配
-      // 更早的地方接（见上面 `createAgent` 那里）。空定义不挂：挂它等于不挂。
-      ...(isEmptyDefinition(agentRef.definition)
-        ? []
-        : [{ entryId: INLINE_AGENT_ENTRY, definition: inlineAgentExtension(), config: agentRef.definition }]),
       // ── `echo:sessions`：会话面的模型可见工具（2026-09-03，sessions.md §7）──────────────
       //
       // **不在 builtin 表里**，因为它要的东西 `Agent` 没有：会话面是**容器**级的
@@ -527,8 +521,19 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
         ? [] // **开关**：容器不提会话面，这个 agent 就是今天的单会话形态，工具一件不多
         : await sessionToolsEntry(sessions, sessionDirOf, agent.state.sessionId, opts.sessions.run !== undefined)),
     ];
-    // 顺序与从前一致：inline → 盘上发现的 → extra。差别只在**代的划分**：
-    //   · inline / extra 是显式装配 → 各自一代、fail-loud；
+    // ── `echo:inline-agent`：这一段挂的角色（2026-09-07）──────────────────────────────
+    //
+    // **最后一代，排在 extra（产品自带的 extension）之后**（2026-09-10 修）：角色替的是产品的
+    // `identity` 段（受控 replace，同名必须已存在），而真实产品的 identity 都在 `opts.extensions`
+    // 里——此前它排在 inline 那代、早于 extra，replace 时那段还没注册，`echo-agent` / `echo-coding`
+    // 一带 agentDef.identity 就判红「不存在：replace 无从替起」。收紧工作集不挑顺序（动态过滤，
+    // `restrictTools`），跟着一起挪没有代价。第三件（model）在装配更早的地方接（见上面 `createAgent`）。
+    // 空定义不挂：挂它等于不挂。
+    const role: ExtensionEntry[] = isEmptyDefinition(agentRef.definition)
+      ? []
+      : [{ entryId: INLINE_AGENT_ENTRY, definition: inlineAgentExtension(), config: agentRef.definition }];
+    // 顺序：inline → 盘上发现的 → extra → 角色。差别只在**代的划分**：
+    //   · inline / extra / 角色是显式装配 → 各自一代、fail-loud；
     //   · 盘上发现的每个一代 → 坏 apply 只回滚它自己，记诊断继续（D6）。
     if (inline.length > 0) {
       await host.mount(INLINE_GENERATION, inline);
@@ -549,12 +554,17 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       await host.mount(BOOT_GENERATION, extra);
       mountedGens.push(BOOT_GENERATION);
     }
+    if (role.length > 0) {
+      await host.mount(ROLE_GENERATION, role);
+      mountedGens.push(ROLE_GENERATION);
+    }
 
     const loaded: LoadedExtension[] = [
       ...builtin.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
       ...inline.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
       ...mounted.map((d) => ({ entryId: d.entry.entryId, name: d.entry.definition.name, file: d.file })),
       ...extra.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
+      ...role.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
     ];
 
     /**

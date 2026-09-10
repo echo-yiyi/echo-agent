@@ -158,7 +158,7 @@ model: kimi-k3                            # 可省，缺省用产品的
 
 **能替代什么，各自可选，没给的项产品原样生效**：identity 段**替换**产品的 identity（纪律段、工具习惯段照旧）；`tools` 是产品工具池的子集，只能少不能多；`model` 可选。权限策略继承产品的，角色改不了。其他 prompt 段不可替换——它们是产品对自己工具的承诺。
 
-**挂载走已有的先例**：`CreateEchoOptions` 今天把 `agent.tools` 变成一条内联 extension `echo:inline-tools`。角色（按名读到的文件，或 `AgentRef.kind === "inline"` 现写的）同样在 mount 时变成一条 `echo:inline-agent`，`apply()` 里三件事：有 identity 就替换 identity 段，有 `tools` 就收紧工作集，有 `model` 就换模型。定义整份存在 meta 里，`--resume` 原样重挂。
+**挂载走已有的先例**：`CreateEchoOptions` 今天把 `agent.tools` 变成一条内联 extension `echo:inline-tools`。角色（按名读到的文件，或 `AgentRef.kind === "inline"` 现写的）同样在 mount 时变成一条 `echo:inline-agent`，`apply()` 里三件事：有 identity 就替换 identity 段，有 `tools` 就收紧工作集，有 `model` 就换模型。定义整份存在 meta 里，`--resume` 原样重挂。**它是最后一代**（`boot:agent`，2026-09-10 修）：replace 要求产品的 identity 段已在，而产品的段来自 `opts.extensions`，所以角色必须排在那一代之后；判据见 [产品段先于角色挂](../../packages/core/test/create-echo.test.ts#test=产品经-extensions-给-identity-段-同时传-agentdefidentity角色替得上产品段必须先于-echoinline-agent-挂)。
 
 为此在现有 registry 上开两个最小的口，都带 disposer、卸载复原。角色就是 `registries.ts` 注释里等的那个「受控 replace 的真实消费者」：
 
