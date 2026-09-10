@@ -86,11 +86,13 @@ function copyTracked(pkgRel: string, dest: string): number {
 }
 
 /**
- * pack 一个 workspace 包：拷 tracked 文件、把它对**别的 workspace 包**的链接换成那些包的真 tarball、
- * `bun pm pack`。返回 tarball 的绝对路径。
+ * pack 一个 workspace 包：拷 tracked 文件、把它对**别的 workspace 包**的 `workspace:*` 换成那些包的
+ * **版本号**、`bun pm pack`。返回 tarball 的绝对路径。
  *
- * 2026-09-09 拆包之后这是一条**链**：core → base → tui → 产品。`workspace:*` 在没有 workspace 的地方
- * 解析不了，所以每一层都得先有自己的 tarball，下一层才装得出来。
+ * 换成版本号而不是 `file:` 路径，是因为真发布物里就是版本号——tarball 的依赖形状因此与发出去的逐字
+ * 一致；版本号落到哪个本地 tarball，由 consumer 那一层的 `overrides` 决定（见 `pinAll`）。
+ * 2026-09-09 拆包之后这是一条**链**：core → base → tui → 产品，所以每一层都得先有自己的 tarball，
+ * 下一层的 consumer 才装得出来。
  */
 function packWorkspace(work: string, pkgRel: string, tarballs: Readonly<Record<string, string>>, expectBin?: string): string {
   const name = pkgRel.split("/").at(-1)!;
@@ -459,14 +461,14 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   //   · 装完之后有没有生成 `node_modules/.bin/echo-agent`（`bin` 字段写错就没有）；
   //   · 用户敲那个命令时走的入口能不能执行（shebang、可执行位、依赖解析）。
   // 拷目录跑源文件对这三件事全都恒绿。这一条走真路：
-  // patch 依赖 → **pack TUI 自己** → 干净 consumer 装 tarball → 从**装出来的** `.bin` 执行。
+  // patch 依赖 → **pack `echo-agent` 自己** → 干净 consumer 装 tarball → 从**装出来的** `.bin` 执行。
   test(
     "echo-agent 分发：pack `echo-agent` → 干净项目安装 → 从 `node_modules/.bin` 真执行",
     () => {
       const { work, tarball: coreTgz, cleanup } = packCore();
       try {
-        // ①② 拷一份 TUI、把它对 core 的 workspace 链接换成 core 的真 tarball、pack 它自己（`packCli`）——
-        //    不换链接的话，pack 出来的 tui 装到别处会解析不了 `workspace:*`。
+        // ①② 链上每一环各出一个真 tarball（core → base → tui），再拷一份 `echo-agent`、把它的
+        //    `workspace:*` 换成版本号、pack 它自己——不换的话，pack 出来的包装到别处会解析不了 `workspace:*`。
         const stack = packStack(work, coreTgz);
         const tuiTgz = packWorkspace(work, "packages/cli", stack, "echo-agent");
         // tarball 里必须有 bin——`files` 字段写漏时这里当场红，而不是等用户装完发现没这个命令
@@ -503,15 +505,15 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   test(
     "coding 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
     () => {
-      // `echo-agent` 是它真实的依赖（启动逻辑从那儿复用，`packages/coding/src/cli.ts`），显式写出来——判据仍是「恰好等于」
+      // base 与 tui 是它真实的依赖（启动器部件来自 base、壳来自 tui，见 `packages/coding/src/cli.ts`），显式写出来——判据仍是「恰好等于」
       isolatedConsumer("packages/coding", 5, ["@echo-agent/base", "@echo-agent/tui"]);
     },
     300_000,
   );
 
-  // **`echo-coding` 的分发门**（2026-09-01）：与 `echo-agent` 那条同形，多一层——它依赖 `echo-agent`，
-  // 于是装出来的包要经过**两级** `file:` 依赖（coding → echo-agent → core）才谈得上「用户拿到的能用」。
-  // 拷目录跑源文件对这一条同样恒绿（workspace 软链会把两级依赖全抹平），所以照样走真路。
+  // **`echo-coding` 的分发门**：与 `echo-agent` 那条同形——它依赖装配层与壳，于是装出来的包要经过
+  // **三级**依赖（coding → tui → base → core）才谈得上「用户拿到的能用」。
+  // 拷目录跑源文件对这一条同样恒绿（workspace 软链会把多级依赖全抹平），所以照样走真路。
   test(
     "echo-coding 分发：pack `echo-coding` → 干净项目安装 → 从 `node_modules/.bin` 真执行",
     () => {
@@ -540,7 +542,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         expect([binPath, existsSync(binPath)]).toEqual([binPath, true]);
 
         // ⑤ **从装出来的入口执行**。`--help` 打的必须是**本产品**的用法：名字走的是 `Product`，
-        //    所以这一步顺带证明 `echo-agent` 的 `mainFor()` 在装出来的包上真被复用了（两级依赖都解析到了）。
+        //    所以这一步顺带证明 `@echo-agent/base` 的 `mainFor()` 在装出来的包上真被复用了（三级依赖都解析到了）。
         const help = sh([binPath, "--help"], consumer);
         expect([help.ok, help.out.slice(0, 600)]).toEqual([true, help.out.slice(0, 600)]);
         expect(help.out).toContain("用法：echo-coding");

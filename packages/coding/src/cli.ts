@@ -1,9 +1,11 @@
-// `echo-coding` 的命令行面：**复用 `echo-agent` 的整条启动逻辑**，自己只交一个 `Product`。
+// `echo-coding` 的命令行面：**用装配层的启动器部件把本产品跑起来**，自己只交一个 `Product`
+// 和一个壳。
 //
-// 依赖方向（2026-09-01 拍板）：`@echo-agent/core` ← `echo-agent`（通用展示层，不认识任何产品）
-// ← `echo-coding`。本包不改 `echo-agent` 一行代码——它就是「第三方怎么基于我们的 agent
-// 做产品」的样板。参数解析、凭据、引导设置、形态分叉、装配、收摊全在 `echo-agent` 的
-// `mainFor()` 里，这里一行都不复制。
+// 依赖方向（2026-09-09 拆包，记录见 `docs/decisions/implemented/2026-09-09-assembly-layer-packages.md`）：
+// `@echo-agent/core` ← `@echo-agent/base` ← {`@echo-agent/tui`, 各产品}。**产品之间平级**——
+// 本包不依赖 `echo-agent`，那是它的兄弟不是它的上游。参数解析、凭据、引导设置、形态分叉、
+// 装配、收摊全在 base 的 `mainFor()` 里，这里一行都不复制；交互形态起哪个壳由本文件挑
+// （`terminalShell`），装配层不写死。
 //
 // **权限：缺省全放行**（2026-09-01 用户拍板，两种形态都是）。`permission: false` = 不装策略，
 // bash / write_file / edit_file 不问直接跑。理由：这是用户自己在自己的仓库里开的 coding agent，
