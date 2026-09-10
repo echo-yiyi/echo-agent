@@ -92,7 +92,7 @@
 | 记忆的产生补上提取，不再只靠前台自觉（已实现） | 每条 reply 结束跑一次隔离子 agent，走独立通道不进 admission | [记录](decisions/implemented/2026-09-07-memory-extraction.md) |
 | dream 按层各整理各的，门加一道水位单开（已实现） | 整理哪些模块由模块声明；从 admission 挪进独立通道 | [记录](decisions/implemented/2026-09-07-dream-rework.md) |
 | 记忆文件的并发（已实现） | 进程内按路径串行 + 跨进程乐观校验；`stop()` 等两条通道收完 | [记录](decisions/implemented/2026-09-07-memory-concurrency.md) |
-| session 的身份 | meta 记 `product`（哪个产品开的）与 `agent`（角色）；`agentId` / `agentName` 退场 | [记录](decisions/proposed/2026-09-07-session-identity.md) |
+| session 的身份 | meta 记 `product`（哪个产品开的）与 `agent`（角色）；`agentId` / `agentName` 退场 | [记录](decisions/implemented/2026-09-07-session-identity.md) |
 | 人优先，后台让位（已合入 e48a366，本表只为措辞改准） | 自称可让位的实例被请走时交还 lease；不可让位的照旧不抢占 | [记录](decisions/implemented/2026-09-07-preemptible-lease.md) |
 | lifecycle 四条小决策（已落地；第二个 prompt 那条就是现状） | abort reason 保留、`agent_end` 保留名字、stop hook 三次留硬编码、第二个 prompt 留 fail-fast | [abort](decisions/implemented/2026-09-01-abort-reason.md) · [agent_end](decisions/implemented/2026-09-01-agent-end-barrier.md) · [stop hook](decisions/implemented/2026-09-01-stop-continuation-limit.md) · [second prompt](decisions/implemented/2026-09-01-second-prompt-policy.md) |
 | 装配层独立成包（2026-09-09 拍板） | `@echo-agent/base` 装启动器部件与宿主能力，`@echo-agent/tui` 装终端壳；产品只剩身份与自带扩展，`Product` 收成身份牌 | [记录](decisions/implemented/2026-09-09-assembly-layer-packages.md) |

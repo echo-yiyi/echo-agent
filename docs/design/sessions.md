@@ -1,9 +1,9 @@
 # 会话（Session）与 agent 集群
 
-> 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、3、4 步已实现并合入 main**（布局 / 通道 / 工具，加会话命名）；第 5 步（壳）实现了看与切两半（`/sessions`、`/resume`），`/clear` 落盘那半还没做；第 2 步（角色定义）未做；记忆三层 2026-09-07 已实现（那一条的决策记录随之移入 `implemented/`）——逐条见 §9。其余决策记录留在 `docs/decisions/proposed/` 直到各自实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
+> 状态：设计 2026-09-03 口头拍板，2026-09-07 修正 §4（agent 定义是产品内的角色，不是产品打包）。**§9 的第 1、2、3、4 步已实现并合入 main**（布局 / 角色定义 / 通道 / 工具，加会话命名与记忆三层）；第 5 步（壳）实现了看与切两半（`/sessions`、`/resume`），**只剩 `/clear` 落盘**与第 3 步里的 `wait` / `inbox.watch`——逐条见 §9。其余决策记录留在 `docs/decisions/proposed/` 直到各自实现完再移入 `implemented/`（花名册注释里 proposed 的定义是「提出到实现之间」）<br>
 > 读者：要实现会话面、给产品接会话工具、把 echo 嵌进常驻程序（多段会话同时工作）的人<br>
 > 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) 的实例生命周期与 admission；[Context 与 Message Flow](context-and-message-flow.md) 的 transcript / working context 术语；[Compaction](compaction.md) 的「策略是 extension、状态在 core」这条分法——本文对会话用同一条<br>
-> 决策记录（八条，本文只指向，不复述论证。状态见各自文件头，`implemented/` 的已落地）：[状态根 = session 目录](../decisions/implemented/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md) · [人优先，后台让位](../decisions/implemented/2026-09-07-preemptible-lease.md) · [agent 定义 = 产品内的角色](../decisions/implemented/2026-09-07-role-agent.md) · [session 的身份三件](../decisions/proposed/2026-09-07-session-identity.md) · [agent 是身份，session 是它的实例](../decisions/implemented/2026-09-07-agent-is-an-identity.md)
+> 决策记录（八条，本文只指向，不复述论证。状态见各自文件头，`implemented/` 的已落地）：[状态根 = session 目录](../decisions/implemented/2026-09-03-session-is-the-state-root.md) · [记忆三级作用域](../decisions/implemented/2026-09-03-memory-three-scopes.md) · [会话对等、通道是 inbox](../decisions/proposed/2026-09-03-sessions-are-peers.md) · [main 与状态](../decisions/proposed/2026-09-03-main-and-status.md) · [人优先，后台让位](../decisions/implemented/2026-09-07-preemptible-lease.md) · [agent 定义 = 产品内的角色](../decisions/implemented/2026-09-07-role-agent.md) · [session 的身份三件](../decisions/implemented/2026-09-07-session-identity.md) · [agent 是身份，session 是它的实例](../decisions/implemented/2026-09-07-agent-is-an-identity.md)
 >
 > 被后来的记录**改掉了一半**、读的时候要连着后一条看：[agent 是 extension](../decisions/implemented/2026-09-03-agent-is-an-extension.md)（产品打包成 bundle 那一半由 [agent 定义 = 产品内的角色](../decisions/implemented/2026-09-07-role-agent.md) 撤回）
 
@@ -119,7 +119,7 @@ type SessionInfo = {
 };
 ```
 
-相对今天的 [`SessionInfo`](../../packages/core/src/session/types.ts#symbol=SessionInfo)：产品名从 `agent` 字段挪到新的 `product` 字段（容器给，创建时写）；`agent` 变成 `AgentRef`（`named` 引用一个角色文件、`inline` 现写；2026-09-07 起没有 `extensions` 字段，角色不打包 extension）；加 `main`、`status`。`--continue` 的筛选条件「本产品在本目录的最近一段」= `workspace` 相同、`product` 相同、`main` 为真、`status` 为 active。`agentId` / `agentName` 随之退场，见 [session 的身份](../decisions/proposed/2026-09-07-session-identity.md)。
+相对今天的 [`SessionInfo`](../../packages/core/src/session/types.ts#symbol=SessionInfo)：产品名从 `agent` 字段挪到新的 `product` 字段（容器给，创建时写）；`agent` 变成 [`AgentRef`](../../packages/core/src/agent-def/types.ts#symbol=AgentRef)——`{ name?, definition }`，**不是判别联合**：`name` 只是来历（按名建的记下名字），权威永远是 `definition` 那份创建期快照，因为名字指向的文件随时会变。人读的三种说法（具名角色的名字 / `inline` / `default`）由 [`describeAgentRef()`](../../packages/core/src/agent-def/types.ts#symbol=describeAgentRef) 算出来，不是类型上的分支。2026-09-07 起没有 `extensions` 字段，角色不打包 extension。加 `main`、`status`。`--continue` 的筛选条件「本产品在本目录的最近一段」= `workspace` 相同、`product` 相同、`main` 为真、`status` 为 active。`agentId` / `agentName` 随之退场，见 [session 的身份](../decisions/implemented/2026-09-07-session-identity.md)。
 
 三条不变量沿用：**每段一个写者**（lease）、**坏档判红不给半截**、**transcript 只增不改**。两条新规矩：
 
@@ -333,7 +333,20 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 1. **布局（已实现，2026-09-03）**：状态根 = session 目录；`SessionService` 扁平化，清单改自由函数 `listSessions()`（扫上一层）；memory / skills 提到 user 层；空会话延迟写 meta；`SessionInfo` 加 `main` / `status`；删旧 `SessionManager` / `InMemorySessionManager` / `AgentOptions.sessions`；`CreateAgentOptions` 加 `sessionsRoot` 与 `sharedStore`；`observe` 的 `--agent-id` 换成 `--session`。lease 每段一把随之成立。
    **补齐（2026-09-07）**：这一步只把 memory 提到 user 层**一层**；§2 的三层由 memory 线自己那次改动落地——模块表加 `scopes`、路径带作用域前缀、dream 的整理范围与状态一起下到 session 层。
-2. **角色定义**（2026-09-07 改，原「agent 打包」作废，见 §4）：角色文件的加载（产品自带 / user 层 / 项目层三处合并）；`AgentPrompt.section(…, { replace: true })` 与 `AgentTools.restrict()` 两个口；`AgentRef` 进 meta；角色 → `echo:inline-agent`；不越权检查；`session_create` 的 `agent` 参数回来。**排在第 5 步之前做**（2026-09-07 拍板：`/clear` 与 `wait` 都会碰 AgentRef 与「这段挂什么」）。
+2. **角色定义（已实现，2026-09-07；原「agent 打包」作废，见 §4）**：文件形状与三处来源的合并在
+   [`loadAgentDefs()`](../../packages/core/src/agent-def/loader.ts#symbol=loadAgentDefs)（项目层 > user 层 > 产品自带，
+   撞名先到先得 + 诊断，坏档跳过不拖垮整批）；registry 两个口
+   [`AgentPromptRegistry.section`](../../packages/core/src/extension/registries.ts#symbol=AgentPromptRegistry.section) 的
+   `{ replace: true }`（同名**必须已存在**才换得成，disposer 把原来那段放回去）与
+   [`AgentToolsRegistry.restrict`](../../packages/core/src/extension/registries.ts#symbol=AgentToolsRegistry.restrict)
+   （工作集 = 池 ∩ names，**查询时求交**所以收紧之后注册的工具也露不出来）；`AgentRef` 进 meta（§3）；
+   角色 → [`echo:inline-agent`](../../packages/core/src/agent-def/extension.ts#symbol=inlineAgentExtension)（空定义不挂）；
+   不越权检查在 `EchoSessions.create` 里、**动盘之前**（判红时 `sessions/` 下不多一个目录），
+   对具名定义与现写的一视同仁；`session_create` 的 `agent` 参数回来（名字或现写一份，见 §7）。
+
+   **`model` 那一项不在 `echo:inline-agent` 里**：角色写的是模型 id，而 `setModel()` 要 `Model` 对象，
+   按 id 查目录的能力只有装配层有。为它在 ABI 上开一条「查模型」的 Service 是扩公共面，而模型缺省
+   本来就是装配期的事——所以在 `createEcho` 里接，显式 `--model` 赢过角色的缺省。
 3. **通道（已实现，2026-09-03）**：record id 改**写者自己发号**（`createRecordIdSource`，
    `<12 位十六进制毫秒>-<4 位同毫秒计数><12 位十六进制随机>`；同一写者严格递增，跨写者靠随机区分）；
    `InboxStore.refresh()` 重扫盘上别人写进来的 record；`Agent` 每秒轮询一次自己的 inbox 目录
@@ -372,13 +385,13 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 - **跨进程消息**：A 进程 `session_send` 到 B，B 进程不重启，下一轮的 provider 请求里含那条 environment 消息，`source` 为 `session`、`ref` 指向 A。
 - **同进程与跨进程同一条**：同一个容器里两段互发，盘上 `inbox/` 里有那条 record，ack marker 在消费后出现。
 - **多写者不撞号**：两个进程同时往同一段的 inbox 各投 100 条，盘上恰好 200 个 record 文件，消费后 200 条都进过 transcript。
-- **wait 不双送**：A `wait: true` 命中回信后，那条回信不再以 environment 消息出现在 A 的任何一轮 provider 请求里；超时后到的回信恰好出现一次。
+- **wait 不双送**（**`wait` 还没做**，见 §9 第 3、4 步；这条与下面那条是它落地时的判据，今天跑不出来）：A `wait: true` 命中回信后，那条回信不再以 environment 消息出现在 A 的任何一轮 provider 请求里；超时后到的回信恰好出现一次。
 - **崩在 working**：一段的进程在 working 时被杀，`session_list` 里它 `alive = false`、`phase = null`。
 - **runner 失败不留孤儿**：runner 抛错或超过 `runTimeoutMs` 不 resolve，`create` 判红，那段在盘上 `status = closed`，`session_list` 缺省不列它；runner 成功时 `create` 返回的行 `alive = true`。
 - **project 哈希校验**：把一个 project 目录的 `workspace.json` 改成别的路径，从原 workspace 起的 session 打开时判红。
 - **快照只能收紧**：一段 inline 定义的 session，在工具比创建时少的容器里 `--resume`，工具集是交集、不报错；没有任何路径能让它多出快照外的工具。
 - **只跟活着的段说话**（2026-09-07 替代原「留言」判据）：send 到没进程的段，容器给了 runner 就先叫醒再投递、返回 `accepted` 且对方此刻活着；叫不醒（没给 runner 或 runner 失败）返回 `rejected: unreachable`，盘上 `inbox/` 里不多任何 record。
-- **wait**：A `wait: true` 发给 B，B 回信带 `replyTo`，A 的工具调用在回信落盘后返回；超时返回 `timedOut`。
+- **wait**（**还没做**，同上）：A `wait: true` 发给 B，B 回信带 `replyTo`，A 的工具调用在回信落盘后返回；超时返回 `timedOut`。
 - **main**：非 main 的 session 工具表里没有 `session_create`；宿主 API 的 `create` 不受限。
 - **不越权**：inline 点名创建者当前工具集（§4）之外的工具，`create` 判红、`~/.echo/sessions/` 下不多目录；池里有、但被角色收紧挡掉或已禁用的，同样判红。判据见 [不越权比的是工具集而不是池](../../packages/core/test/create-echo.test.ts#test=不越权比的是创建者此刻的工具集而不是池被角色收紧挡掉的被禁用的判红没取过的延迟工具放行)。
 - **`/clear` 落盘**：`/clear` 后旧段 `status = closed`，新段 id 不同；`--resume` 旧段回来的是清之前的对话，`--continue` 挑到的是新段。
@@ -392,7 +405,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 
 | 层 | 夹具 | 落哪些判据 |
 |---|---|---|
-| **单元（`InMemoryDir`，零盘）** | `packages/core/test/session-service.test.ts`、`inbox-durable.test.ts`（含 durable ingress 的 conformance suite）、`extension-host.test.ts`、`create-agent.test.ts` | 布局扁平化与 `list()` 扫上级目录；空会话延迟写 meta；meta 的 `agent` / `main` / `status` 验形；**多写者不撞号**（两个 `InboxStore` 实例对同一个 `StorageDir` 各投 100 条）；`watch` 命中即消费、超时不消费；`echo:inline-agent` 装上时 identity 段替换、工作集收紧，卸下时复原；三层作用域解析与 `workspace.json` 校验；角色不越权判红、快照只能收紧 |
+| **单元（`InMemoryDir`，零盘）** | `packages/core/test/session-service.test.ts`、`inbox-durable.test.ts`（含 durable ingress 的 conformance suite）、`extension-host.test.ts`、`create-agent.test.ts` | 布局扁平化与 `list()` 扫上级目录；空会话延迟写 meta；meta 的 `agent` / `main` / `status` 验形；**多写者不撞号**（两个 `InboxStore` 实例对同一个 `StorageDir` 各投 100 条）；`watch` 命中即消费、超时不消费（**随 `wait` 一起还没做**）；`echo:inline-agent` 装上时 identity 段替换、工作集收紧，卸下时复原；三层作用域解析与 `workspace.json` 校验；角色不越权判红、快照只能收紧 |
 | **单进程集成（真盘，脚本化 provider）** | `create-agent.test.ts` 的 `fakeProvider`、`packages/cli/test/cli.test.ts` 的 `scriptedProvider`：脚本让模型按顺序调 `session_create` / `session_send` | 同一个容器里两段互发、先落盘再投、ack marker；`wait` 的回信不双送；runner 失败 / 超时判红并置 closed、成功时 `alive = true`；非 main 的工具表；`alive = false` 则 `phase = null` |
 | **跨进程（真 spawn，已实现）** | `packages/core/test/sessions-cross-process.test.ts` + `fixtures/session-peer.ts`：一个真进程起一段 session 然后**待着**，末行吐 JSON 报告 | 别的进程写进它 inbox 的一条，它不重启就看见（反证过：把轮询摘掉这条立刻红）；两段各拿各的锁、同时活着、收摊都还回去。留言之后 `--resume` 第一轮看到那条仍在 `resident-v0.test.ts` 里。注意 `resident-v0` 的 replay 阶段本来就有 ack 裁决窗口的抖动，别把新判据挂在那个窗口上 |
 | **壳（真 spawn `bin`）** | `cli.test.ts` 的 `spawnBin` | `--continue` 只挑 main 且 active；`/clear` 后旧段 closed、新段 main、`--resume` 旧段是清之前的对话；启动即退出不留目录；续了壳有提示 |

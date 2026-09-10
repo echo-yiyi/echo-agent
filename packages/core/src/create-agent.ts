@@ -234,7 +234,9 @@ export type CreateAgentOptions = {
 
   /**
    * 其余一律透传给低层 `Agent`。
-   * **不含 `model` / `sessionService` / `stateLock` / `agentId`**——那几件由本函数装配。
+   * **不含 `model` / `sessionService` / `stateLock` / `product` / `agent`**——那几件由本函数装配。
+   * （`product` / `agent` 是 2026-09-07 顶掉 `agentId` 的那两个；omit 列表当时漏了改，
+   *   于是它们能在嵌套里传进来又被 spread 顶掉——正是下一段说的那种最坏的参数。）
    *
    * `sessionId` 也在 omit 之列：本函数在顶层收它、并据此定状态根，
    * 嵌套里再给一个只会被**静默覆盖**——写了没生效是最坏的一种参数。
@@ -249,7 +251,8 @@ export type CreateAgentOptions = {
     | "model"
     | "sessionService"
     | "stateLock"
-    | "agentId"
+    | "product"
+    | "agent"
     | "preemptible"
     | "sessionId"
     | "memory"

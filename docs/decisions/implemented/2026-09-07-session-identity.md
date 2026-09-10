@@ -1,6 +1,6 @@
 # session 的身份三件：`product`（哪个产品开的）、`agent`（角色）、`main`；`agentId` / `agentName` 退场
 
-> 状态:proposed · 提出 2026-09-07 · 拍板 2026-09-07(口头,实现后移入 implemented) · 来源 2026-09-07 领域模型 review · 补 [角色定义](../implemented/2026-09-07-role-agent.md)、[main 与状态](2026-09-03-main-and-status.md)
+> 状态:implemented · 提出 2026-09-07 · 拍板 2026-09-07(口头) · 挪入 implemented 2026-09-10(对照代码逐条核过验收) · 来源 2026-09-07 领域模型 review · 补 [角色定义](2026-09-07-role-agent.md)、[main 与状态](../proposed/2026-09-03-main-and-status.md)
 
 ## 现状(拍板前)
 
@@ -31,3 +31,16 @@
 ## 验收
 
 新建段的 `meta.json` 有 `product`;同一目录先后用 echo-agent 与 echo-coding 各开一段,各自 `--continue` 挑到自己的那段;API 快照与 `CreateAgentOptions` 里没有 `agentId` / `agentName`;`.lock` 文件的 holder 字段形如 `echo-coding:<sessionId>`;`packages/core/src/session/types.ts` 的 `SessionInfo` 与 sessions.md §3 的类型块逐字一致。
+
+## 落地时定的一件本记录没议的事（2026-09-10 补记）
+
+**观测层与 prompt 的 `agentId` 字段名保留，换的是值的来源。** 本记录的验收只点名了 `meta.json`、
+`CreateAgentOptions` / API 快照、`.lock` 的 holder 三处,没说观测那一整套 `agentId` 维度
+([`ObservationEnvelope`](../../../packages/core/src/observability/types.ts#symbol=ObservationEnvelope) 的 scope 字段、
+[`AssembleContext`](../../../packages/core/src/prompt/types.ts#symbol=AssembleContext) 的同名字段)算不算在射程内——
+2026-09-07 的架构 review 也把这条列为「判断不了,建议单独问一次」。
+
+实现时选的是**字段名不动、值改成 `product`**([`Agent`](../../../packages/core/src/agent.ts#symbol=Agent) 的
+`observationIdentity()` 与 `observationScope()`)。理由:那是**落盘格式**——改字段名要动已有 SQLite 库里的
+scope 键,而收益只是名字更贴切;值从几乎恒为 `"default"` 变成产品名,本来就比原来有信息量。
+代价登记在此:观测记录里的 `agentId` 与词表里的「agent」不是一个意思,读观测数据时按「哪个产品」理解。
