@@ -66,6 +66,29 @@ MiniMax adapter 目前有 fixture 覆盖，但还没有用真实服务验证。
 
 每次启动都是新的一段会话。`--continue` 续本命令在当前目录的最近一段；`--resume <id>` 续指定的那一段。会话归属于「目录 + 命令」，所以 `echo-agent` 与 `echo-coding` 即使在同一目录里也不会共用一段对话；续上的会话会说明带回了多少条消息。
 
+## 看一次 run 做了什么
+
+每次 run 都会把自己记进会话状态根下的 `observations.sqlite`：run 的起止、回应 / 轮 / 尝试的嵌套、每一次模型生成与工具调用，以及它们背后的能力事实（记忆、任务、闹钟、收件）。记多少由 `--observe <档>` 决定。
+
+| 档位 | 落盘的内容 |
+|---|---|
+| `off` | 什么都不记 |
+| `metadata`（缺省） | 只有形状与计数——不含模型文本、工具参数与结果 |
+| `content` | 在上面之外，再加模型文本、思考、工具参数与结果，**明文写在盘上** |
+
+`observe` 子命令只读已落盘的记录。它不启动 agent、也不取会话锁，所以正在跑的会话它也能看——看到的是已经提交的那部分：
+
+```bash
+bun packages/cli/bin/echo-agent.ts observe last          # the most recent run, as text
+bun packages/cli/bin/echo-agent.ts observe show <run-id>
+bun packages/cli/bin/echo-agent.ts observe health        # where the database is, and how much is in it
+bun packages/cli/bin/echo-agent.ts observe serve         # local read-only panel, Ctrl+C to stop
+```
+
+`observe serve` 会开一个面板，在 agent 跑着的时候轮询数据库。不给 `--session <id>` 时每个子命令都覆盖全部会话，所以一个面板就能看整个集群。管道形态每轮结束会在 stderr 打一行 `[run] <run-id> …`，那个 id 就是拿去 `observe show` 的。
+
+观测永远拦不住 run：数据库写不动时 run 照跑，结果里会如实报出来。记录格式、两条 lane、失败语义与尚未做的部分，详见 [`docs/design/observability.md`](docs/design/observability.md)。
+
 ## 使用 runtime
 
 `createEcho()` 是高层 composition root。它装配持久化、记忆、任务和 extensions，但生命周期仍由调用方显式控制：
@@ -90,6 +113,8 @@ try {
 ```
 
 `createEcho()` 是装配 runtime 的唯一一处，所以自定义 host 从这里起步。要给运行中的 agent 加工具、prompt 段、压缩阶段或 hook，就写一条 extension：它声明自己注入什么、提供什么，生命周期归 host 管，卸载时不留残骸。壳也是一条 extension，只是它注入的是 `AgentRuntime` 这个 service 并把它渲染出来。`Agent` 类正在收进内部：已拍板、尚未实现（`docs/decisions/proposed/2026-09-07-agent-class-internal.md`），所以今天它仍然导出，但不是受支持的入口——它有相当一部分是为承载 host 专用接线而存在的，第三方需要的一切都在 extension API 上。
+
+`echo.send()` 在返回结果的同时给出 run id，`echo.observations` 读的是 `observe` 子命令读的同一份账本——`getRun()`、`lastRun()`、`listRuns()`、`snapshot()` 与 `subscribe()`。采集档用 `createEcho({ observation: { capture: "content" } })` 设。想在不起 runtime 的情况下读一个状态根，用 `openObservationReader({ stateRoot })` 开一个不取锁的只读连接，用完关掉。观测永远拦不住 run：数据库写不动时 run 照跑，只是结果里的 `observationPersistence` 报 `degraded`。
 
 ## Packages
 

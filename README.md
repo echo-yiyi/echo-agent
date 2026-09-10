@@ -66,6 +66,29 @@ Use repeatable `--extensions <directory>` flags to choose the extension search d
 
 Every launch starts a new session. `--continue` resumes the latest session of this command in the current directory; `--resume <id>` resumes a specific one. A session belongs to a directory and a command, so `echo-agent` and `echo-coding` never share a conversation even in the same directory, and a resumed session announces how many messages it brought back.
 
+## See what a run did
+
+Every run writes a record of itself to `observations.sqlite` under the session state root: run boundaries, the reply / turn / attempt nesting, each model generation and tool call, and the capability facts behind them (memory, tasks, schedules, inbox). `--observe <policy>` chooses how much is kept.
+
+| Policy | What is written |
+|---|---|
+| `off` | Nothing |
+| `metadata` (default) | Shapes and counts only — no model text, tool arguments, or results |
+| `content` | The above plus model text, thinking, tool arguments and results, **in plaintext on disk** |
+
+The `observe` subcommand reads what is already on disk. It never starts an agent and never takes the session lock, so it can read a session that is currently running — it sees the part that has been committed:
+
+```bash
+bun packages/cli/bin/echo-agent.ts observe last          # the most recent run, as text
+bun packages/cli/bin/echo-agent.ts observe show <run-id>
+bun packages/cli/bin/echo-agent.ts observe health        # where the database is, and how much is in it
+bun packages/cli/bin/echo-agent.ts observe serve         # local read-only panel, Ctrl+C to stop
+```
+
+`observe serve` opens a panel that polls the database while the agent runs. With no `--session <id>` every subcommand covers all sessions at once, so one panel watches the whole cluster. In piped mode each turn prints `[run] <run-id> …` to stderr; that is the id to pass to `observe show`.
+
+Observation never blocks a run: if the database cannot be written the run still completes, and the result says so. [`docs/design/observability.md`](docs/design/observability.md) covers the record format, the two lanes, the failure semantics, and what is not built yet.
+
 ## Use the runtime
 
 `createEcho()` is the high-level composition root. It wires persistence, memory, tasks, and extensions, while lifecycle remains explicit:
@@ -90,6 +113,8 @@ try {
 ```
 
 `createEcho()` is the one place a runtime is put together, so a host starts there. An extension is how you add tools, prompt sections, compaction stages, or hooks to a running agent: it declares what it injects and what it provides, and the host owns its lifetime, so it can be unmounted without leaving anything behind. A shell is an extension too, one that injects the `AgentRuntime` service and renders it. The `Agent` class is on its way inside: the decision is made but not yet implemented (`docs/decisions/proposed/2026-09-07-agent-class-internal.md`), so it is still exported today, but it is not a supported entry point — much of it exists to carry host-only wiring, and everything a third party needs is on the extension API.
+
+`echo.send()` returns the run id alongside the outcome, and `echo.observations` reads the same journal the `observe` subcommand reads — `getRun()`, `lastRun()`, `listRuns()`, `snapshot()` and `subscribe()`. Set the capture policy with `createEcho({ observation: { capture: "content" } })`. To read a state root without starting a runtime, `openObservationReader({ stateRoot })` opens a read-only connection that takes no lock; close it when done. Observation never blocks a run: if the database cannot be written, the run still completes and the result reports `observationPersistence: "degraded"`.
 
 ## Packages
 

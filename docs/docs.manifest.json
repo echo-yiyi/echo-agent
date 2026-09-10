@@ -54,6 +54,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/design/observability.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/design/run-loop-layers.md",
       "bilingual": false
     },
