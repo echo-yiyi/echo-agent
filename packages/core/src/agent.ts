@@ -2680,6 +2680,8 @@ export class Agent {
     const memory = this.memory;
     const scope = this.activeScope ?? this.lastScope;
     if (memory === undefined || !this.memoryWorkAllowed || scope === undefined) return;
+    // 一个模块都没有（`memory.builtin: false` 且没有扩展注册）：没有地方可写，不为此起一次模型调用
+    if (memory.memories.size === 0) return;
     // **重叠保护**：这条 reply 里前台自己已经写过记忆就跳过——不然刚写完一条，
     // 提取回头看见"这轮有值得记的"，又写一条几乎一样的。
     if (this.memoryWrittenThisReply) {

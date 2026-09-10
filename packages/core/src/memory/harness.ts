@@ -34,6 +34,7 @@ import {
 import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
 import { lateBoundMemoryDir, splitScopePath, type LateBoundMemoryDir, type MemoryScopeTable } from "./scope.ts";
 import { assertFresh, withMemoryFileLock } from "./lock.ts";
+import { memoryOps, type MemoryCommand } from "./tool-commands.ts";
 import {
   declaredScopes,
   MEMORY_INDEX_FILE,
@@ -310,6 +311,8 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise
   if (frame.owner === undefined) {
     return finishMemoryMutation(ctx, frame, rejected("outside_regions", `Path '${path}' is not inside any memory module. Modules: ${describeModules(ctx)}`));
   }
+  const deleteDenied = opsGate(frame.owner, "delete");
+  if (deleteDenied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", deleteDenied));
   // 删也是「读改写」的一种（存在性检查 + 删 + 重建索引），进与 writeMemory 同一把按路径的锁
   return withMemoryFileLock(ctx, path, async () => {
     let removed: boolean;
@@ -356,6 +359,8 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
       rejected("cross_scope", `rename must stay within one scope (${String(fromScope)} → ${String(toScope)}); create it in the other layer instead`),
     );
   }
+  const renameDenied = opsGate(fromOwner, "rename");
+  if (renameDenied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", renameDenied));
   const guard = guardIndexFile(from) ?? guardIndexFile(to);
   if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
   // **只锁目标**（写入点）。两个都锁的话，两个方向相反的并发 rename 会互锁；
@@ -589,7 +594,35 @@ export async function dreamTask(ctx: AgentMemories, scope: string): Promise<{ pr
   await updateDreamState(ctx, scope, (s) => ({ ...s, startedAt: Date.now() }));
   return {
     prompt: defaultDreamPrompt(listMemories(ctx), ctx.binding.table(), scope),
-    tools: [createMemoryTool(ctx, { ...ctx.toolOpts, scope })],
+    tools: [dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, scope }))],
+  };
+}
+
+/**
+ * 整理那把工具的第二道门：层之外（`scope`）挡过了，这里挡**同层里声明了 `dream: false` 的模块**——
+ * 模块说"别整理我"，prompt 里不列它只是纪律，工具碰不到它才是门。读不拦（整理要看全貌才判断得了归位）。
+ */
+function dreamOnlyTool(ctx: AgentMemories, tool: ModelTool<MemoryToolParams>): ModelTool<MemoryToolParams> {
+  return {
+    ...tool,
+    async execute(params, tctx) {
+      if (params.command !== "view") {
+        for (const raw of [params.path, params.new_path]) {
+          if (raw === undefined) continue;
+          let path: string;
+          try {
+            path = normalizeMemoryPath(raw);
+          } catch {
+            continue; // 越狱路径交给 jail 出那条更准的报错
+          }
+          const owner = memoryFor(ctx, path);
+          if (owner !== undefined && owner.dream !== true) {
+            return toolError(`'${path}' belongs to module '${owner.name}', which opted out of consolidation (dream: false); leave it as it is.`);
+          }
+        }
+      }
+      return tool.execute(params, tctx);
+    },
   };
 }
 
@@ -727,6 +760,9 @@ async function writeMemory(
     return finishMemoryMutation(ctx, frame, rejected("outside_regions", `Path '${path}' is not inside any memory module. Modules: ${describeModules(ctx)}`));
   }
   frame.owner = owner;
+  const command = OPERATION_COMMAND[operation as keyof typeof OPERATION_COMMAND];
+  const denied = command === undefined ? null : opsGate(owner, command);
+  if (denied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", denied));
   // **「读—改—写」整段进锁**:同一进程里的前台、提取、整理三个写者对同一个文件真互斥。
   // 跨进程那一半靠落盘前的 `assertFresh`——两者合起来才是"读改写不被插队"(memory/lock.ts)。
   return withMemoryFileLock(ctx, path, async () => {
@@ -763,6 +799,23 @@ async function writeMemory(
     return finishMemoryMutation(ctx, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length)));
   });
 }
+
+/**
+ * **动词闸**（2026-09-10 接线）：模块声明的 `ops` 在**唯一写路径**上生效，不在工具 schema 上——
+ * 一把工具服务所有模块，它的动词枚举是全局的，按模块删枚举做不到；落在方法上则无论谁调
+ * （缺省工具、复写的 handlers、模块自带工具）都挡得住。返回拒绝原文；null = 允许。
+ */
+function opsGate(owner: AnyMemory, command: MemoryCommand): string | null {
+  const allowed = memoryOps(owner);
+  if (allowed.includes(command)) return null;
+  return `Module '${owner.name}' does not support '${command}' (supported: ${allowed.join(", ") || "none"})`;
+}
+
+const OPERATION_COMMAND: Readonly<Record<"create" | "replace" | "insert", MemoryCommand>> = {
+  create: "create",
+  replace: "str_replace",
+  insert: "insert",
+};
 
 /** INDEX.md 由系统维护(写方法重建),不许直接写——直接改会被下一次重建覆盖,等于白改。返回拒绝原文。 */
 function guardIndexFile(path: string): string | null {

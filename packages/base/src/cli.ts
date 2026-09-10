@@ -262,8 +262,8 @@ export function echoOptions(
   /** 要续的那一段（`--continue` / `--resume` 解析出来的 id）；不给 = 新建一段。 */
   sessionId: string | undefined,
 ): Parameters<typeof createEcho>[0] {
-  // **产品层的装配片段**（`product.ts`）：`agent`（权限策略等）与 `extensions`（产品自带的，含它的 prompt 段）。
-  // 能来自产品的只有这两个字段——`Product.preset` 的返回类型就这么窄——所以它盖不掉下面任何一项，
+  // **产品层的装配片段**（`product.ts`）：`agent`（权限策略等）、`extensions`（产品自带的，含它的 prompt 段）
+  // 与 `memory`（记忆的形状）。能来自产品的只有这三个字段——`Product.preset` 的返回类型就这么窄——所以它盖不掉下面任何一项，
   // 尤其盖不掉 `extensionDirs`：去哪发现扩展归 `--extensions`、归用户。
   const preset = product.preset?.(form, { credentials }) ?? {};
   return {
@@ -294,6 +294,8 @@ export function echoOptions(
     // 提问（`ask_user`，2026-09-05）：有人坐在终端前就 `host`（壳子摆出来等答），管道 / CI 没人可答就 `none`——
     // 工具当场如实回话、不等人。与权限策略是两条通道：那条由产品 preset 定，这条由形态定。
     // 产品 preset 自己定了 questions 就用它的（类型允许，不能静默盖掉）；没定才按形态给
+    // 记忆的**形状**（装哪些模块、分哪几层）归产品；**开关**（`--no-memory` → `withoutMemory`）归用户，产品碰不到
+    ...(preset.memory !== undefined ? { memory: preset.memory } : {}),
     agent: { ...(preset.agent ?? {}), questions: preset.agent?.questions ?? { responder: form.interactive ? "host" : "none", askTimeoutMs: null } },
     // `echo-agent` 恒挂的两段（纪律、项目指令）在前，产品自带的在后。顺序只影响 `echo.extensions`
     // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。

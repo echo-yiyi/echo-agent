@@ -84,6 +84,10 @@ export type MemoryShape = {
   readonly ops?: readonly MemoryCommand[];
 };
 
+/**
+ * 一个记忆模块的声明：内核认识的两种（`Memory`），或上层经 `CustomMemories` 填进来的自定义种类。
+ * `AgentMemory.module()` 收的就是它——纯数据，不需要构造器；写入永远走 core 的唯一写路径。
+ */
 export type AnyMemory = Memory | (CustomMemories[keyof CustomMemories] & MemoryShape);
 
 /* ───────────────────────── 构造器与内建值 ───────────────────────── */

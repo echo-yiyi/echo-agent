@@ -108,3 +108,5 @@ interface AgentMemoryRegistry {
 - 模块声明 `ops: ["view"]` → `create` 到它的路径被拒。
 - 自带工具的模块:它的工具拿到的对象上没有 `read` / `write` / `list` / `remove`(拿不到 `dir`)。
 - 全仓 grep 不到「模块」这个词(CONTEXT.md 词条、设计文档、代码注释、错误文案都换成「记忆模块」)。
+
+**实现注（2026-09-10）。** `memory.builtin` 落在 `CreateAgentOptions.memory.builtin`，产品经 `Product.preset` 返回的 `memory` 字段给（开关 `withoutMemory` 仍归用户）。`ops` 的限制落在 harness 的唯一写路径上（`op_not_supported`）——**是运行时拒绝，不是工具面上没有这个动词**：一把工具服务所有模块，动词枚举是全局的，按模块从 schema 里删做不到；落在方法上则缺省工具与复写的 handlers 都挡得住。自带 `tools` 回调未落地，现状见 [记忆设计](../../design/memory.md) 第 8 节。

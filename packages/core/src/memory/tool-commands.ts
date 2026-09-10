@@ -4,6 +4,10 @@
 // 命令面**对齐 Anthropic memory tool**(view/create/str_replace/insert/delete/rename)
 // ——判据与 skill 加载器同一条:「别人训练好的行为能不能在我们这直接跑」。
 
+/**
+ * 记忆工具的六个动词。记忆模块用 `ops` 声明自己支持其中哪几个（只能在 mode 的缺省集合里收紧），
+ * 在 harness 的唯一写路径上生效——声明之外的动词被拒（`op_not_supported`），不靠 prompt 约束。
+ */
 export type MemoryCommand = "view" | "create" | "str_replace" | "insert" | "delete" | "rename";
 
 export const MEMORY_COMMANDS: readonly MemoryCommand[] = ["view", "create", "str_replace", "insert", "delete", "rename"];

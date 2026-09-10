@@ -93,11 +93,12 @@ export type CreateMemoryToolOptions = {
 };
 
 const DEFAULT_DESCRIPTION =
-  "Read and write your persistent memory (kept across sessions). The regions, their paths and what goes in each are in the Memory section of the system prompt. " +
-  "Every path starts with the scope that decides who sees it: user/ (every session), project/ (this workspace), session/ (this session only) — e.g. user/agent.md, project/user.md, session/memory/x.md. " +
+  "Read and write your persistent memory (kept across sessions). The modules, the layers, their paths and what goes in each are in the Memory section of the system prompt. " +
+  "Every path starts with the layer that decides who sees it (the layers for this session are listed there, widest first), followed by the module's path — e.g. <layer>/agent.md, <layer>/memory/x.md. " +
   "Commands: view (a directory — path ending in / or empty for everything — or a file), create (create or overwrite a whole file), " +
   "str_replace (replace the single occurrence of old_str with new_str), insert (insert after line insert_line), " +
-  "delete, rename. A write that exceeds a region's budget is refused with the current numbers: consolidate (merge, delete stale entries) first, then write.";
+  "delete, rename. Some modules support only some of these; a refused command says which ones it supports. " +
+  "A write that exceeds a module's budget is refused with the current numbers: consolidate (merge, delete stale entries) first, then write.";
 
 const PARAMETERS: Record<string, unknown> = {
   type: "object",
@@ -107,7 +108,7 @@ const PARAMETERS: Record<string, unknown> = {
       enum: ["view", "create", "str_replace", "insert", "delete", "rename"],
       description: "The operation to perform",
     },
-    path: { type: "string", description: "Target path, scope first: user/agent.md, project/user.md, session/memory/xxx.md; for view, '' shows everything" },
+    path: { type: "string", description: "Target path, layer first (see the Memory section for this session's layers): <layer>/agent.md, <layer>/memory/x.md; for view, '' shows everything" },
     file_text: { type: "string", description: "create: the full file content" },
     old_str: { type: "string", description: "str_replace: the exact text to replace (must occur exactly once)" },
     new_str: { type: "string", description: "str_replace: the replacement text" },

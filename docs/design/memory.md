@@ -27,9 +27,11 @@
 
 受支持入口是 [`createEcho()`](../../packages/core/src/create-echo.ts#symbol=createEcho)。默认装配记忆；一次性评测或不希望保留跨任务状态时传 `withoutMemory: true`，记忆工具、记忆 section 及这两条后台工作随能力一起缺席。不要围着裸 Agent 复制装配。
 
+**开关归用户，形状归产品。** `withoutMemory` 对应用户的 `--no-memory`，产品碰不到；装哪些模块、分哪几层由产品经 `Product.preset` 返回的 `memory` 决定。`memory.builtin: false` 不装内建的三个模块（agent / user / notes），模块全部来自扩展经 `AgentMemory.module()` 的注册——扩展注册在缺省情况下只是**追加**，要替换就得先关掉内建这组。想保留其中某几个，就把 `@echo-agent/core/extension` 导出的定义再注册一遍。
+
 **作用域回答“谁共享”，记忆模块回答“记什么”。** 路径由两者组合：`<作用域>/<模块路径>`。例如 `project/agent.md` 是这个项目里共同使用的行为记忆，不是某个 agent 实例的私有文件。相同内容出现在不同作用域时，不自动覆盖、去重或跨层提升。
 
-产品通过 [`CreateAgentOptions`](../../packages/core/src/create-agent.ts#symbol=CreateAgentOptions) 的 `memoryScopes` 整份替换默认声明。每项 [`MemoryScopeDef`](../../packages/core/src/memory/scope.ts#symbol=MemoryScopeDef) 指定名字、顺序、可见性说明、锚点、相对前缀及可选留痕。默认真盘位置由 [`DEFAULT_MEMORY_SCOPES`](../../packages/core/src/create-agent.ts#symbol=DEFAULT_MEMORY_SCOPES) 给出：
+产品通过 [`CreateAgentOptions`](../../packages/core/src/create-agent.ts#symbol=CreateAgentOptions) 的 `memory.scopes` 整份替换默认声明。每项 [`MemoryScopeDef`](../../packages/core/src/memory/scope.ts#symbol=MemoryScopeDef) 指定名字、顺序、可见性说明、锚点、相对前缀及可选留痕。默认真盘位置由 [`DEFAULT_MEMORY_SCOPES`](../../packages/core/src/create-agent.ts#symbol=DEFAULT_MEMORY_SCOPES) 给出：
 
 | 作用域 | 默认根 | 共享范围 |
 | --- | --- | --- |
@@ -51,7 +53,7 @@
 
 ## 3. 模块、预算与召回
 
-内建模块与第三方都经 [`AgentMemoryRegistry.module()`](../../packages/core/src/extension/registries.ts#symbol=AgentMemoryRegistry.module) 登记。extension 注入 `AgentMemory`，在自己的 effect 中注册并交还 disposer；没有记忆能力时这个 service 缺席。扩展只增加内容声明，不另建落盘流程。
+内建模块与第三方都经 [`AgentMemoryRegistry.module()`](../../packages/core/src/extension/registries.ts#symbol=AgentMemoryRegistry.module) 登记。extension 注入 `AgentMemory`，在自己的 effect 中注册并交还 disposer；没有记忆能力时这个 service 缺席。扩展只增加内容声明，不另建落盘流程。模块声明的 `ops` 在 harness 的唯一写路径上生效（`op_not_supported` 拒绝），不在工具 schema 上——一把工具服务所有模块，动词枚举是全局的；落在方法上则无论缺省工具还是复写的 handlers 都挡得住。整理那把工具除了限定在当前层，还碰不到同层声明了 `dream: false` 的模块（读不拦）。
 
 当前内建定义见 [`agentMemory`](../../packages/core/src/memory/types.ts#symbol=agentMemory)、[`userMemory`](../../packages/core/src/memory/types.ts#symbol=userMemory)、[`notesMemory`](../../packages/core/src/memory/types.ts#symbol=notesMemory)：
 
@@ -147,17 +149,9 @@
 
 以下不是待写功能清单，而是当前实现与已登记承诺的具体差异。复现仅使用内存字节面，不触碰用户记忆，也不证明真实模型的语义质量。
 
-### 动词与模块整理边界未接线
+### 模块自带工具未落地
 
-`memoryOps()` 有定义，但默认工具及写方法没有调用它。声明 `ops: ["view"]` 不阻止 create；同层 dream:false 模块也能被 Dream 工具写入。模块决策里的自带 tools 回调与 `memory.builtin` 产品选项目前也没有按所述形状落地：实际 registry 接收 `AnyMemory`，harness 通过 memories 参数决定是否带内建模块。
-
-复现应在修复后变为拒绝，而不是只修改 schema 描述：
-
-```bash
-bun -e 'import {createAgentMemories,bindMemoryScopes,dreamTask} from "./packages/core/src/memory/harness.ts"; import {residentMemory} from "./packages/core/src/memory/types.ts"; import {memoryScopeTable} from "./packages/core/src/memory/scope.ts"; import {InMemoryDir} from "./packages/core/src/memory/in-memory-dir.ts"; const m=createAgentMemories({memories:[residentMemory("locked",{ops:["view"],dream:false}),residentMemory("open")]}); bindMemoryScopes(m,memoryScopeTable([{def:{name:"team",order:1,describe:"team",anchor:{kind:"home"},prefix:""},dir:new InMemoryDir()}])); const task=await dreamTask(m,"team"); const r=await task.tools[0].execute({command:"create",path:"team/locked.md",file_text:"changed"},{toolCallId:"probe",workspace:"/",sessionId:null,iteration:0}); console.log({isError:r.isError,body:await m.dir.read("team/locked.md")});'
-```
-
-当前结果是成功写入 changed。此外，工具 description 和路径 schema 仍写死旧的 user / project / session 示例，不能声称模型可见说明已经完全跟随产品作用域。
+记忆模块决策里的 `tools` 回调（模块自带工具，只拿 harness 方法、拿不到字节面）没有落地：registry 接收的是 `AnyMemory`，模块形状里没有这一格。harness 的写方法也不在公共面上，所以**包外扩展今天没有办法给自己的模块配一件专用写工具**，只能靠缺省的 `memory` 工具。
 
 ### 忙时提取重跑旧快照
 

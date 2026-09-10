@@ -43,13 +43,17 @@ export type Product = Readonly<{
   /** 欢迎头里显示的版本，各产品从自己的 `package.json` 取。 */
   version: string;
   /**
-   * 产品层的装配片段：权限策略、自带的 Extension（含产品自己的 prompt 段）。形态定了之后调一次，
+   * 产品层的装配片段：权限策略、自带的 Extension（含产品自己的 prompt 段）、记忆的形状（`memory`：
+   * 装哪些模块、分哪几层）。形态定了之后调一次，
    * 返回值原样展开进 `createEcho()`。不给 = 通用 agent，只有 core 的 `echo:*` builtin
    * 加 `echo-agent` 恒挂的纪律 / 项目指令段。
    *
    * 与 `--extensions` 的关系：**正交**。那个 flag 决定去哪些目录**发现**扩展；这里的
    * `extensions` 是显式传入的。两者在 `createEcho()` 里同一代 mount，顺序是发现的在前、
    * 显式的在后（`create-echo.ts`）；工具撞名整组失败，不静默覆盖。
+   *
+   * 与 `--no-memory` 的关系同一条分界：**开关归用户**（`withoutMemory`），**形状归产品**（`memory`）。
+   * 产品能换掉内建的记忆模块（`memory.builtin: false`），但关不掉用户要的记忆，也打不开用户关掉的。
    */
-  preset?: (form: PresetForm, host: ProductHost) => Pick<CreateEchoOptions, "agent" | "extensions">;
+  preset?: (form: PresetForm, host: ProductHost) => Pick<CreateEchoOptions, "agent" | "extensions" | "memory">;
 }>;

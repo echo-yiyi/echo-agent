@@ -18,6 +18,8 @@ import { scriptedDialect, textTurn, toolTurn } from "../src/testing.ts";
 import { defineExtension } from "../src/extension/abi.ts";
 import { AgentTools } from "../src/extension/registries.ts";
 import { definePromptPack } from "../src/extension/builtin.ts";
+// 记忆模块经**公开入口**取（2026-09-10 进公共面）：判据要证明包外的扩展作者 import 得到
+import { AgentMemory as PublicAgentMemory, defineExtension as publicDefineExtension, notesMemory, type AnyMemory } from "../src/extension/public.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
@@ -947,3 +949,64 @@ test("只传 agentDef.identity、产品没有 identity 段：仍然判红（悄�
     }),
   ).rejects.toThrow(/不存在/);
 });
+
+/** 一个只声明记忆模块的扩展，写法与包外作者一致（逆序撤销、中途撞名先撤已注册的）。 */
+function memoryPack(modules: readonly AnyMemory[]) {
+  return publicDefineExtension({
+    name: "test:companion-memory",
+    hostAbiVersion: 1,
+    inject: { memory: { service: PublicAgentMemory, required: true } },
+    apply(ctx) {
+      const memory = ctx.get(PublicAgentMemory);
+      void ctx.effect({
+        boundary: "turn",
+        start: () => {
+          const offs: (() => void)[] = [];
+          try {
+            for (const m of modules) offs.push(memory.module(m));
+          } catch (e) {
+            for (const off of offs.reverse()) off();
+            throw e;
+          }
+          return { value: offs.length, dispose: () => { for (const off of [...offs].reverse()) off(); } };
+        },
+      });
+    },
+  });
+}
+
+const relationship: AnyMemory = {
+  name: "relationship",
+  mode: "indexed",
+  path: "relationship/",
+  budget: 25_000,
+  fileBudget: 4096,
+  instructions: "who this person is to you — shared history, how the relationship has changed",
+  dream: true,
+};
+
+test("memory.builtin: false：内建三个不装，模块全部来自扩展（保留笔记 = 把导出的定义再注册一遍）", async () => {
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    extensionDirs: [],
+    memory: { builtin: false },
+    extensions: [{ entryId: "test:companion-memory", definition: memoryPack([relationship, notesMemory]) as never }],
+  });
+  running.push(echo);
+  expect([...echo.agent.memory!.memories.keys()].sort()).toEqual(["memory", "relationship"]);
+});
+
+test("缺省（builtin 不给）：扩展注册的模块是**追加**，内建三个仍在", async () => {
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    extensionDirs: [],
+    extensions: [{ entryId: "test:companion-memory", definition: memoryPack([relationship]) as never }],
+  });
+  running.push(echo);
+  expect([...echo.agent.memory!.memories.keys()].sort()).toEqual(["agent", "memory", "relationship", "user"]);
+});
+

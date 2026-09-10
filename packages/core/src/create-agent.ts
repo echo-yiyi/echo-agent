@@ -68,7 +68,7 @@ const PROJECTS_DIR = "projects";
  * **core 的缺省记忆作用域**(2026-09-07 用户拍板):user / project / role 三层。
  *
  * 缺省件属于装配层,不属于能力层——`memory/` 里因此一个具体层名都不出现(名字、前缀、有几层
- * 全是产品的事)。产品给 `memoryScopes` 就整份替换:常驻产品换成「产品级 + role」,
+ * 全是产品的事)。产品给 `memory.scopes` 就整份替换:常驻产品换成「产品级 + role」,
  * 想把某层记忆放进仓库就声明 `{ anchor: "workspace", prefix: ".echo/memory/" }`。
  *
  * `order` 同时是**宽度序**(小 = 宽),模型选层时按它读 `describe`。
@@ -188,13 +188,24 @@ export type CreateAgentOptions = {
    */
   sharedStore?: StorageDir;
   /**
-   * 记忆的作用域声明,**整份替换** `DEFAULT_MEMORY_SCOPES`(2026-09-07)。
-   *
-   * 不同产品要的分层本来就不一样:coding 要 user / role / project,常驻产品要产品级 / role
-   * (它没有"这台机器的用户"这个概念)。core 只定义"作用域"这个位置——一个有序的、各带一个
-   * 根的命名集合——名字、前缀、有几层由产品填。声明是**纯数据**,能写进配置文件。
+   * 记忆的**形状**（2026-09-10）：装哪些模块、分哪几层。归产品——`Product.preset` 能给它。
+   * 记忆的**开关**是下面的 `withoutMemory`（对应 `--no-memory`），归用户，产品碰不到。
    */
-  memoryScopes?: readonly MemoryScopeDef[];
+  memory?: {
+    /**
+     * `false` = 不装内建的三个记忆模块（agent / user / notes）；registry 与写入路径照旧，等扩展经
+     * `AgentMemory.module()` 注册自己的——这是「换一套模块」的入口，与 `compaction.builtin` 同款。
+     * 想保留其中某几个，就在扩展里把 `@echo-agent/core/extension` 导出的定义再注册一遍。缺省 true。
+     */
+    builtin?: boolean;
+    /**
+     * 作用域声明，**整份替换** `DEFAULT_MEMORY_SCOPES`（2026-09-07）。不同产品要的分层本来就不一样：
+     * coding 要 user / role / project，常驻产品要产品级 / role（它没有"这台机器的用户"这个概念）。
+     * core 只定义"作用域"这个位置——一个有序的、各带一个根的命名集合——名字、前缀、有几层由产品填。
+     * 声明是**纯数据**，能写进配置文件。
+     */
+    scopes?: readonly MemoryScopeDef[];
+  };
   /**
    * 关掉记忆（C6/D7 的装配面）。缺省 **false** = 装配记忆并让 `start()` 打开 Dream 自调度。
    * 评测与一次性跑给 `true`：那时「跨任务变好」不是目标，整理只会让轨迹不确定。
@@ -490,7 +501,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     // **装配期不再对 project 层做撞车检查**(2026-09-07):作用域现在是 `start()` 里 session
     // 加载完才解析的,只有那一个解析点,"早点判红比晚点好"这条理由不再成立——早的那一次
     // 查的是**可能不对**的 workspace。检查跟着解析走,见 `resolveMemoryScopes`。
-    const parts = prepareCapabilities({ assembly, shared, sharedUser, clock: opts.clock, withoutMemory: opts.withoutMemory, workspace: memoryWorkspace });
+    const parts = prepareCapabilities({ assembly, shared, sharedUser, clock: opts.clock, withoutMemory: opts.withoutMemory, memoryBuiltin: opts.memory?.builtin, workspace: memoryWorkspace });
 
     // 形状到此为止。**seal 只冻结形状，不转移所有权**——转移发生在构造成功之后的 `adoptInto()`。
     assembly.seal();
@@ -587,7 +598,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     const resolveScopes = parts.resolveMemoryScopes;
     const memories = parts.memory;
     if (resolveScopes !== undefined && memories !== undefined) {
-      const defs = opts.memoryScopes ?? DEFAULT_MEMORY_SCOPES;
+      const defs = opts.memory?.scopes ?? DEFAULT_MEMORY_SCOPES;
       attachMemoryHost(agent, {
         bindScopes: async (facts) => bindMemoryScopes(memories, await resolveScopes(defs, facts)),
       });
@@ -655,6 +666,8 @@ function prepareCapabilities(input: {
   sharedUser: StorageDir;
   clock?: Clock;
   withoutMemory?: boolean;
+  /** `memory.builtin`：`false` = 内建三个模块不装（见 `CreateAgentOptions.memory`）。 */
+  memoryBuiltin?: boolean;
   /** project 层记忆**先**按它分目录(`projects/<hash>/`);`start()` 拿到盘上权威的 workspace 后重指一次。 */
   workspace: string;
 }): AssembledCapabilities {
@@ -739,7 +752,11 @@ function prepareCapabilities(input: {
   // **别给它们补登记 disposer**：start 之后的收摊（`disposeMemory` / `disposeSchedule` / session settle）
   // 已经在 `Agent.stop()` 的第 ② 档按类型做过一次，再登记一份就是同一件事收两次。
   const memory =
-    input.withoutMemory === true ? undefined : assembly.adopt("echo:memory", () => createAgentMemories());
+    input.withoutMemory === true ? undefined : assembly.adopt("echo:memory", () =>
+          // `memory.builtin: false` → 交一张空的模块表：`builtinModules` 随之为 false，
+          // `echo:memory` 那组不再注册内建三个，模块全部来自扩展的 `AgentMemory.module()`
+          createAgentMemories(input.memoryBuiltin === false ? { memories: [] } : undefined),
+        );
 
   // 任务清单与闹钟也落在同一个状态根下。
   // `TaskStore` 是字节面（D3 收窄后），所以这里就是把 `StorageDir` 的两个方法接过去——

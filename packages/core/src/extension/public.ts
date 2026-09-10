@@ -31,6 +31,7 @@ export {
   AgentBackgroundService,
   AgentCompaction,
   AgentHooks,
+  AgentMemory,
   AgentPrompt,
   AgentPolicies,
   type AgentPoliciesRegistry,
@@ -40,10 +41,18 @@ export {
   agentRegistries,
   type AgentCompactionRegistry,
   type AgentHooksRegistry,
+  type AgentMemoryRegistry,
   type AgentPromptRegistry,
   type AgentSkillsRegistry,
   type AgentToolsRegistry,
 } from "./registries.ts";
+// 记忆模块（2026-09-10 进公共面）：第一个真实的包外消费者是陪伴产品——它要在 extension 里经
+// `AgentMemory.module()` 声明自己的模块（relationship / collaboration / experiences），并在
+// `memory.builtin: false` 之后按需把内建的某几个再注册回来。所以内建三个的**定义**与模块的**类型**
+// 一起导出；harness 的操作面仍不导出——扩展只声明数据，写入永远走 core 的唯一写路径。
+export { agentMemory, notesMemory, userMemory } from "../memory/types.ts";
+export type { AnyMemory, IndexedMemory, Memory, ResidentMemory } from "../memory/types.ts";
+export type { MemoryCommand } from "../memory/tool-commands.ts";
 export {
   BUILTIN_GENERATION,
   builtinEntries,

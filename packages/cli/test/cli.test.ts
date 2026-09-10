@@ -933,3 +933,20 @@ test("--resume 点名不存在的会话 / --continue 没有可续的 → 退出�
     restore();
   }
 });
+
+test("preset 能给记忆的**形状**（memory），给不了**开关**（withoutMemory 归用户的 --no-memory）", () => {
+  // 2026-09-10：记忆按 product.ts 头注那条分界切——开关归用户，形状归产品。preset 的返回类型放宽到 `memory`，
+  // 装配现场逐字段取、不是展开，所以这里读的是**装配现场那一份入参**，证明它真的被带进了 createEcho。
+  const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+  const product = { name: "p", version: "0", preset: () => ({ memory: { builtin: false } }) };
+  const on = echoOptions(product, { interactive: false }, { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined);
+  expect(on.memory).toEqual({ builtin: false });
+  expect(on.withoutMemory).toBe(false);
+  // 用户关掉的记忆，产品给了形状也打不开
+  const off = echoOptions(product, { interactive: false }, { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined);
+  expect(off.withoutMemory).toBe(true);
+  // 产品不给 = 不出这个字段（不是给一个空对象），core 走缺省
+  const plain = echoOptions({ name: "q", version: "0" }, { interactive: false }, { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined);
+  expect("memory" in plain).toBe(false);
+});
+

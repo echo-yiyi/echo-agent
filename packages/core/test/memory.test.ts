@@ -694,3 +694,54 @@ describe("Agent 接线", () => {
     expect(closed).toBe(true);
   });
 });
+
+/* ───────────────────────── ⑧ 模块声明真的生效（2026-09-10 接线） ───────────────────────── */
+
+describe("模块声明真的生效", () => {
+  test("ops 在唯一写路径上生效：声明只读的模块 create / str_replace / delete 都被拒，view 照常", async () => {
+    const dir = new InMemoryDir();
+    await dir.write("user/locked.md", "原文");
+    const h = memories(dir, { memories: [residentMemory("locked", { ops: ["view"] })] });
+    for (const r of [
+      await memoryCreate(h, "user/locked.md", "改了"),
+      await memoryStrReplace(h, "user/locked.md", "原文", "改了"),
+      await memoryDelete(h, "user/locked.md"),
+    ]) {
+      expect(r.isError).toBe(true);
+      expect(r.content).toContain("does not support");
+    }
+    expect(await dir.read("user/locked.md")).toBe("原文");
+    expect((await memoryView(h, "user/locked.md")).isError).toBe(false);
+  });
+
+  test("ops 只能收紧：indexed 模块声明不含 rename 就改不了名；不声明时六个全有", async () => {
+    const dir = new InMemoryDir();
+    const h = memories(dir, { memories: [indexedMemory("frozen", { ops: ["view", "create"] }), indexedMemory("open")] });
+    await memoryCreate(h, "user/frozen/a.md", "---\ndescription: 甲\n---\n");
+    const r = await memoryRename(h, "user/frozen/a.md", "user/frozen/b.md");
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("does not support 'rename'");
+    await memoryCreate(h, "user/open/a.md", "---\ndescription: 乙\n---\n");
+    expect((await memoryRename(h, "user/open/a.md", "user/open/b.md")).isError).toBe(false);
+  });
+
+  test("整理那把工具碰不到同层 dream:false 的模块（memory.md 第 8 节那条复现，修复后变拒绝）", async () => {
+    const dir = new InMemoryDir();
+    const h = memories(dir, { memories: [residentMemory("locked", { dream: false }), residentMemory("open")] });
+    const task = await dreamTask(h, "session");
+    const tool = task.tools[0]!;
+    const denied = await tool.execute(tool.prepareArguments!({ command: "create", path: "session/locked.md", file_text: "changed" }), ctx());
+    expect(denied.isError).toBe(true);
+    expect(await dir.read("session/locked.md")).toBeNull();
+    const ok = await tool.execute(tool.prepareArguments!({ command: "create", path: "session/open.md", file_text: "fine" }), ctx());
+    expect(ok.isError).toBe(false);
+    // 读不拦：整理要看全貌才判断得了归位
+    expect((await tool.execute(tool.prepareArguments!({ command: "view", path: "session/" }), ctx())).isError).toBe(false);
+  });
+
+  test("工具说明不再写死具体层名（层由产品声明，模型从 system 的 Memory 段读）", () => {
+    const tool = memoryTool(memories(new InMemoryDir()));
+    expect(tool.description).not.toMatch(/\b(user|project|session)\//);
+  });
+});
+
