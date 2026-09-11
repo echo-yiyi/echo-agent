@@ -4,7 +4,7 @@
 
 ## 现状(拍板前)
 
-`createEcho()` 给会话面的 `isAlive(id)` 只看 `<sessionDir>/.lock` 是否合法（`inspectStateLock().state === "valid"`）。文件锁**不做 stale takeover**（崩溃后人工删锁，[`state-lock.test.ts`](../../../packages/core/test/state-lock.test.ts#test=文件锁不做-stale-takeover哪怕持有者-pid-早就没了也拒绝)），所以崩溃留下的锁在盘上是合法的：会话面据此判它「活着」，`send` 直接投递并回「它会读」，消息躺在没人读的 inbox 里——这正是 2026-09-07「先确保它活着再投递」那条要消灭的空话。
+`createEcho()` 给会话面的 `isAlive(id)` 只看 `<sessionDir>/.lock` 是否合法（`inspectStateLock().state === "valid"`）。文件锁**不做 stale takeover**（崩溃后人工删锁，当时由 `state-lock.test.ts` 钉死），所以崩溃留下的锁在盘上是合法的：会话面据此判它「活着」，`send` 直接投递并回「它会读」，消息躺在没人读的 inbox 里——这正是 2026-09-07「先确保它活着再投递」那条要消灭的空话。
 
 ## 不拍板的代价
 
@@ -22,3 +22,7 @@
 ## 验收
 
 锁记录合法但 `pid` 不存在的会话，`echo.sessions.send()` 走叫醒路径（没 runner 时 `unreachable`）；`pid` 是本进程时照旧 `accepted`。判据在 `packages/core/test/create-echo.test.ts#test=会话面判活着看的是锁-持有者进程崩溃留下的锁pid-没了算没在跑发过去走叫醒review-2026-09-07-902026-09-09-拍板加-pid-探针`。
+
+## 后续
+
+2026-09-10 文件锁改成带递增编号的锁，持有者确认已死就自动接管（[决策](2026-09-10-generation-lock-takeover.md)）。`isAlive` 的判法随之与接管共用 `holderGone`：多了「host 是本机」一项，别的机器上的持有者一律当活着。本记录的验收判据不变。

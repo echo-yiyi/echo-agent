@@ -12,7 +12,7 @@ import { mkdtemp } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileStateLock, SessionService, FileDir } from "@echo-agent/core";
+import { fileStateLock, inspectStateLock, SessionService, FileDir } from "@echo-agent/core";
 import { parseArgs } from "@echo-agent/base";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-agent.ts");
@@ -36,10 +36,10 @@ function spawnServe(root: string, id: string): ReturnType<typeof Bun.spawn> {
   });
 }
 
-async function waitFor(check: () => boolean, what: string, ms = 20_000): Promise<void> {
+async function waitFor(check: () => boolean | Promise<boolean>, what: string, ms = 20_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
-    if (check()) return;
+    if (await check()) return;
     await new Promise((r) => setTimeout(r, 25));
   }
   throw new Error(`等超时：${what}`);
@@ -61,13 +61,13 @@ test(
 
     const child = spawnServe(root, "s-served");
     try {
-      await waitFor(() => existsSync(lockPath), "宿主没拿到那一段的锁");
+      await waitFor(async () => (await inspectStateLock(lockPath)).state === "valid", "宿主没拿到那一段的锁");
 
       // **人来了**：请它让位。这条只有对「自称可被请走」的持有者才成立——
       // `--serve` 起来的宿主正是那种，人开的会话不是。
       const lock = fileStateLock(lockPath);
       expect(await lock.requestHandoff?.({ by: "人", timeoutMs: 15_000 }), "请不动它").toBe(true);
-      expect(existsSync(lockPath), "让了却没还锁").toBe(false);
+      expect((await inspectStateLock(lockPath)).state, "让了却没还锁").toBe("missing");
 
       // 让完它就没事可干了：进程自己退，退干净
       expect(await child.exited).toBe(0);
@@ -87,7 +87,7 @@ test(
 
     const child = spawnServe(root, "s-taken");
     try {
-      await waitFor(() => existsSync(lockPath), "宿主没拿到锁");
+      await waitFor(async () => (await inspectStateLock(lockPath)).state === "valid", "宿主没拿到锁");
       const lock = fileStateLock(lockPath);
       expect(await lock.requestHandoff?.({ by: "人", timeoutMs: 15_000 })).toBe(true);
       const mine = await lock.acquire({ holder: "人" });

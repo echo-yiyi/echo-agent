@@ -1,6 +1,6 @@
 import { test, expect, afterEach } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm, chmod } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -889,10 +889,12 @@ test("会话面判「活着」看的是锁 + 持有者进程：崩溃留下的�
   await main.start();
   const peer = await main.sessions.create({ message: "干活", main: false });
   const lock = join(root, peer.id, ".lock");
-  await writeFile(lock, JSON.stringify({ holder: "死掉的", pid: 2 ** 22, at: Date.now() }));
-  // 锁文件合法但进程没了：不算活着 → 要叫醒 → 这个容器没 runner → unreachable（此前会判「活着」直接投递，消息躺在没人读的 inbox 里）
+  // 伪造两代认领（代号取大，免得撞上真实的）：先是本机上一个已经死掉的持有者
+  await mkdir(lock, { recursive: true });
+  await writeFile(join(lock, "g100"), JSON.stringify({ holder: "死掉的", pid: 2 ** 22, host: hostname(), at: Date.now() }));
+  // 锁合法但进程没了：不算活着 → 要叫醒 → 这个容器没 runner → unreachable（此前会判「活着」直接投递，消息躺在没人读的 inbox 里）
   expect(await main.sessions.send(peer.id, "在吗")).toMatchObject({ kind: "rejected", reason: "unreachable" });
-  await writeFile(lock, JSON.stringify({ holder: "活着的", pid: process.pid, at: Date.now() }));
+  await writeFile(join(lock, "g101"), JSON.stringify({ holder: "活着的", pid: process.pid, host: hostname(), at: Date.now() }));
   expect(await main.sessions.send(peer.id, "在吗")).toMatchObject({ kind: "accepted", alive: true });
 });
 

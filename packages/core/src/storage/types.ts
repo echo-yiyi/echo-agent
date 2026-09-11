@@ -17,9 +17,9 @@ export interface StorageDir {
   /**
    * 独占一个名字，返回释放函数（2026-09-10，记忆的原子提交要它）。
    *
-   * 同一个底层位置上的持有者互斥：`FileDir` 用 `open(…, "wx")` 锁文件，跨实例、跨进程都互斥；
-   * `InMemoryDir` 在同一个实例内互斥。等到 `timeoutMs` 还拿不到就抛 `StorageLockBusy`——
-   * **不自动接管陈旧锁**（与 lease 同一条，见 `storage/name-lock.ts`）。
+   * 同一个底层位置上的持有者互斥：`FileDir` 用带递增编号的锁目录（与 lease 同一个实现），跨实例、
+   * 跨进程都互斥，持有者崩溃后（同一台机器、pid 查无此号）自动接管；`InMemoryDir` 在同一个实例内互斥。
+   * 活着的持有者占着、等到 `timeoutMs` 还拿不到就抛 `StorageLockBusy`。
    * 视图（前缀、写入闸）要把它原样转发下去，否则底下的互斥在视图这一层就断了。
    * 不实现 = 这个字节面没有互斥原语，调用方自己决定退路。
    */

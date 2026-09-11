@@ -11,6 +11,7 @@ const projectPrefix = (workspace: string): string => `projects/${projectDirName(
 import { SessionService, listSessions } from "../src/session/service.ts";
 import { InboxStore } from "../src/inbox/store.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
+import { inspectStateLock } from "../src/storage/file-lock.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { kimiProvider, deepseekProvider } from "../src/provider/openai.ts";
@@ -164,8 +165,8 @@ test("缺省每次启动新建会话，各占一个目录；显式 sessionId 才
   await a2.start(); // **同一台机器、同一个 workspace、同一个产品，两段同时活着**
   expect(a2.state.sessionId).not.toBe(a.state.sessionId); // 同 workspace、同产品 → 仍是新的一段
   // 各占各的目录、各持各的锁。旧布局（状态根 = agents/<agentId>）下这里是同一把，第二个 start() 直接 fail-loud
-  expect(existsSync(join(home, "sessions", a.state.sessionId!, ".lock"))).toBe(true);
-  expect(existsSync(join(home, "sessions", a2.state.sessionId!, ".lock"))).toBe(true);
+  expect((await inspectStateLock(join(home, "sessions", a.state.sessionId!, ".lock"))).state).toBe("valid");
+  expect((await inspectStateLock(join(home, "sessions", a2.state.sessionId!, ".lock"))).state).toBe("valid");
 
   await a.prompt("你好"); // 说一句才落盘：空会话不留目录
   await a.stop();
@@ -440,10 +441,10 @@ test("不传 store / lock 时用 first-party 默认件（真落盘）", async ()
   });
   await mountBuiltinTools(agent); // 工具面由 `echo:*` builtin Extension 装
   await agent.start();
-  expect(existsSync(join(dir, ".lock"))).toBe(true); // 文件锁真的建了
+  expect((await inspectStateLock(join(dir, ".lock"))).state).toBe("valid"); // 文件锁真的拿到了
   await agent.prompt("落个盘");
   await agent.stop();
-  expect(existsSync(join(dir, ".lock"))).toBe(false); // stop 还锁
+  expect((await inspectStateLock(join(dir, ".lock"))).state).toBe("missing"); // stop 还锁
   expect(existsSync(join(dir, "meta.json"))).toBe(true); // stateDir 就是这一段的目录
 });
 

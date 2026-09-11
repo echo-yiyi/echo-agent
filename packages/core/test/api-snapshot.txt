@@ -410,9 +410,11 @@ value  echoHome
 value  expandHome
 both   FileDir
 
--- src/storage/file-lock.ts (4) --
+-- src/storage/file-lock.ts (2) --
 value  fileStateLock
 value  inspectStateLock
+
+-- src/storage/generation-lock.ts (2) --
 type   PeekedLockRecord
 type   StateLockInspection
 

@@ -50,6 +50,7 @@ import { inlineAgentExtension, INLINE_AGENT_ENTRY } from "./agent-def/extension.
 import { DEFAULT_AGENT_REF, isEmptyDefinition, type AgentRef } from "./agent-def/types.ts";
 import type { ParsedAgentFile } from "./agent-def/parse.ts";
 import { inspectStateLock } from "./storage/file-lock.ts";
+import { holderGone } from "./storage/generation-lock.ts";
 import { errText, type Diagnostic } from "./errors.ts";
 import { defineExtension, type ExtensionDefinition } from "./extension/abi.ts";
 import { ExtensionHost, type ExtensionEntry } from "./extension/host.ts";
@@ -65,15 +66,6 @@ export const EXTENSIONS_DIR = "extensions";
 /** 与 `create-agent.ts` 同一个名字：会话面判「那一段活着吗」读的就是它。 */
 const LOCK_FILE = ".lock";
 
-/** 进程还在不在：signal 0 只探不杀。ESRCH = 没了；EPERM = 在（别人的进程，杀不了但存在）；其余按在算，不误判死。 */
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as { code?: string }).code !== "ESRCH";
-  }
-}
 /** 缺省会话名的长度上限：一行标题，长了在列表里挤掉别的列。 */
 const SESSION_NAME_MAX = 60;
 
@@ -388,9 +380,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // 会话面（2026-09-03）：一个容器一个实例，三个消费者共用（工具 / 壳 / 宿主）。
   //
   // 这里注进去的两件都是**宿主知识**，core 自己给不出：
-  //   · `isAlive` 读的是那一段的 `.lock`——文件锁是 node 的事，而且**陈尸锁也算活着**
-  //     （单写者设计不做自动接管，见 `storage/file-lock.ts`）：读到 valid 就当有人占着，
-  //     要不要清由人决定。
+  //   · `isAlive` 读的是那一段的 `.lock`——文件锁是 node 的事。崩溃留下的锁在被下一个人接管之前
+  //     仍是 valid，所以还要看持有者死没死，判法与锁接管用的是同一个（`holderGone`）。
   //   · `run` 是「怎么让新的一段跑起来」，core 不起进程（sessions.md 的 Non-Goals）。
   //
   // 别人那一段的目录**不过本 Agent 的写入闸**：闸管的是「本段的 lease 还在不在手上」，
@@ -399,11 +390,12 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   const sessions = new EchoSessions({
     root: new FileDir(sessionsRoot),
     storeFor: (id) => new FileDir(sessionDirOf(id)),
-    // 「活着」= 锁合法 **且** 持有者进程还在（2026-09-09 拍板加 pid 探针，review 2026-09-07 #90）。core 不接管锁（不删、不抢），
-    // 但会话面拿这个判「直投还是叫醒」：崩溃留下的锁若算活着，发给它的消息就躺在没人读的 inbox 里，工具还回「它会读」。
+    // 「活着」= 锁合法 **且** 持有者没有确认死掉（2026-09-09 拍板加 pid 探针，review 2026-09-07 #90）。
+    // 会话面拿这个判「直投还是叫醒」：崩溃留下的锁若算活着，发给它的消息就躺在没人读的 inbox 里，工具还回「它会读」。
+    // 「确认死掉」与锁接管同一个判法——同一台机器、pid 查无此号；别的机器、EPERM 一律当活着。
     isAlive: async (id) => {
       const cur = await inspectStateLock(join(sessionDirOf(id), LOCK_FILE));
-      return cur.state === "valid" && processExists(cur.record.pid);
+      return cur.state === "valid" && !holderGone(cur.record);
     },
     self: () => ({
       sessionId: agent.state.sessionId,

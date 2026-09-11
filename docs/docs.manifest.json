@@ -130,6 +130,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-10-generation-lock-takeover.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-05-retry-owned-by-loop.md",
       "bilingual": false
     },

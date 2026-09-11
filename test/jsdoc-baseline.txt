@@ -118,7 +118,6 @@ src/skill/format.ts#SKILL_ENTRY_FILE
 src/skill/types.ts#SkillActivation
 src/skill/types.ts#SkillCreation
 src/storage/file-dir.ts#FileDir
-src/storage/file-lock.ts#StateLockInspection
 src/storage/lock.ts#StateLock
 src/storage/types.ts#StorageDir
 src/task/fs.ts#fileTaskStore

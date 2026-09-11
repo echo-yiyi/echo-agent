@@ -2,7 +2,7 @@
 // 判据：真 createEcho 跑一轮落盘 → 进程内调 `runObserve()` 读回来；活 writer 旁边也能读；没库时诚实报错。
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEcho, createProvider, createProviderStreams, observationDatabasePath, type Echo, type Provider } from "@echo-agent/core";
@@ -192,10 +192,13 @@ test("main：`observe` 在一切启动逻辑之前分走——不装配、不取
   const echo = await echoAt([textTurn("一句")]);
   const r = await echo.send("x");
   await echo.stop();
+  // 锁目录在 stop() 放锁之后仍留着（当前代不删）；observe 若取过锁，里面会多出一代认领
+  const lockDir = join(dir, echo.agent.state.sessionId!, ".lock");
+  const before = readdirSync(lockDir).sort();
   // 主命令的形态判断、凭据检查都不该被触发：这里没有 provider 凭据，非交互形态本该以 1 退出并抱怨凭据
   const code = await mainFor(ECHO_AGENT, terminalShell)(["observe", "show", r.runId, "--state-dir", dir], false);
   expect(code).toBe(0);
-  expect(existsSync(join(dir, echo.agent.state.sessionId!, ".lock")), "observe 不许取锁").toBe(false);
+  expect(readdirSync(lockDir).sort(), "observe 不许取锁").toEqual(before);
   expect(await mainFor(ECHO_AGENT, terminalShell)(["observe", "bogus"], false)).toBe(2);
 });
 

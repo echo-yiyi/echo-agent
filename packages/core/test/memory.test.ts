@@ -15,8 +15,9 @@
 
 import { describe, expect, test } from "bun:test";
 // 原子提交判据要的几件（别名避免与本文件已有的导入撞名）
-import { existsSync as existsLock, mkdtempSync as mkdtempLock, readFileSync as readLock, rmSync as rmLock, writeFileSync as writeLock } from "node:fs";
-import { tmpdir as tmpLock } from "node:os";
+import { mkdirSync as mkdirLock, mkdtempSync as mkdtempLock, readFileSync as readLock, rmSync as rmLock, writeFileSync as writeLock } from "node:fs";
+import { hostname as hostLock, tmpdir as tmpLock } from "node:os";
+import { inspectStateLock as inspectLock } from "../src/storage/file-lock.ts";
 import { join as joinLock } from "node:path";
 import { FileDir as FileDirLock } from "../src/storage/file-dir.ts";
 import { defaultExtractPrompt as extractPromptText } from "../src/memory/extract.ts";
@@ -823,7 +824,7 @@ describe("共享层的原子提交", () => {
     expect((await memoryCreate(h, "project/note.md", "x")).isError).toBe(false);
   });
 
-  test("两个 FileDir 实例并发往同一个 indexed 模块写：正文一条不少、索引一条不少、锁文件用完即删", async () => {
+  test("两个 FileDir 实例并发往同一个 indexed 模块写：正文一条不少、索引一条不少、锁用完即放", async () => {
     const dir = mkdtempLock(joinLock(tmpLock(), "echo-mem-lock-"));
     try {
       const bind = () => {
@@ -839,7 +840,25 @@ describe("共享层的原子提交", () => {
       expect(results.every((r) => r.isError !== true)).toBe(true);
       const index = readLock(joinLock(dir, "notes", "INDEX.md"), "utf8");
       for (let i = 0; i < 12; i++) expect(index).toContain(`project/notes/n${i}.md`);
-      expect(existsLock(joinLock(dir, ".locks", "notes.lock"))).toBe(false);
+      expect((await inspectLock(joinLock(dir, ".locks", "notes.lock"))).state).toBe("missing"); // 锁目录常驻（当前代不删），但已释放
+    } finally {
+      rmLock(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("写者崩在提交中途（锁没放就死了）：下一个写者自动接管，不再一直 busy", async () => {
+    const dir = mkdtempLock(joinLock(tmpLock(), "echo-mem-crash-"));
+    try {
+      // 本机上一个已经死掉的进程留下的认领。此前（单文件锁、不接管）这一层的这个模块会一直 busy，要人手删
+      mkdirLock(joinLock(dir, ".locks", "note.lock"), { recursive: true });
+      writeLock(
+        joinLock(dir, ".locks", "note.lock", "g1"),
+        JSON.stringify({ holder: "崩掉的", pid: 2 ** 22, host: hostLock(), at: Date.now(), token: "dead" }),
+      );
+      const h = createAgentMemories({ memories: [residentMemory("note")], lockTimeoutMs: 2_000 });
+      bindMemoryScopes(h, memoryScopeTable([{ def: oneLayer("project"), dir: new FileDirLock(dir) }]));
+      expect((await memoryCreate(h, "project/note.md", "接着写")).isError).toBe(false);
+      expect(readLock(joinLock(dir, "note.md"), "utf8")).toContain("接着写");
     } finally {
       rmLock(dir, { recursive: true, force: true });
     }

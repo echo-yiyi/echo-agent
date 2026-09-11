@@ -5,6 +5,7 @@
 // 单进程假设:不做跨进程文件锁(两个进程共写同一 root 的并发防护列为后续,先诚实写明)。
 
 import { DEFAULT_LOCK_TIMEOUT_MS, StorageLockBusy } from "./name-lock.ts";
+import { claimGeneration, describeRecord } from "./generation-lock.ts";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve as resolvePath, sep } from "node:path";
@@ -116,39 +117,22 @@ export class FileDir implements StorageDir {
   }
 
   /**
-   * 锁文件 `<name>.lock`，`open(…, "wx")` 原子地「不存在才建」——跨实例、跨进程互斥。
-   * 等不到就轮询到 `timeoutMs`，然后抛 `StorageLockBusy`（带锁文件里记的持有者与位置）。
-   * **不自动接管陈旧锁**（`storage/name-lock.ts` 头注）。释放只删**自己那一把**：锁文件里的 token
-   * 不是我的就不动。
+   * 锁目录 `<name>.lock/`，带递增编号的锁（`generation-lock.ts`）——跨实例、跨进程互斥；
+   * 持有者崩在持锁期间（同一台机器、pid 查无此号）时，下一个来拿的人自动接管。
+   * 活着的持有者占着就轮询到 `timeoutMs`，然后抛 `StorageLockBusy`（带持有者与锁的位置）。
+   * 释放只放**自己那一代**。
    */
   async lock(name: string, opts?: { timeoutMs?: number }): Promise<() => Promise<void>> {
-    const lockPath = `${await this.resolveSafe(name)}.lock`;
-    await fs.mkdir(dirname(lockPath), { recursive: true });
-    const token = `pid ${process.pid} · ${(++FileDir.tempSeq).toString(36)} · ${new Date().toISOString()}`;
+    const lockDir = `${await this.resolveSafe(name)}.lock`;
     const deadline = Date.now() + (opts?.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
     for (;;) {
-      try {
-        const fh = await fs.open(lockPath, "wx");
-        try {
-          await fh.writeFile(token, "utf8");
-        } finally {
-          await fh.close();
-        }
-        return async () => {
-          try {
-            if ((await fs.readFile(lockPath, "utf8")) === token) await fs.unlink(lockPath);
-          } catch (e) {
-            if (!isNotFound(e)) throw e;
-          }
-        };
-      } catch (e) {
-        if ((e as { code?: string }).code !== "EEXIST") throw e;
-        if (Date.now() >= deadline) {
-          const holder = await fs.readFile(lockPath, "utf8").catch(() => "");
-          throw new StorageLockBusy(name, `${holder === "" ? "持有者未知" : holder}；锁文件 ${lockPath}`);
-        }
-        await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
+      const got = await claimGeneration(lockDir, { holder: `FileDir.lock ${name}` });
+      if (got.ok) return () => got.claim.release();
+      if (Date.now() >= deadline) {
+        const who = got.seen.kind === "held" ? describeRecord(got.seen.record) : `锁是坏的（${got.seen.why}）`;
+        throw new StorageLockBusy(name, `${who}；锁 ${lockDir}`);
       }
+      await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
     }
   }
 

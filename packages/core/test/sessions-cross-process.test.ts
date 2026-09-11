@@ -9,7 +9,6 @@
 
 import { test, expect } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EchoSessions } from "../src/session/sessions.ts";
@@ -73,7 +72,7 @@ test(
       if ((await inspectStateLock(join(home, "sessions", "s-peer", ".lock"))).state === "valid") break;
       await new Promise((r) => setTimeout(r, 25));
     }
-    expect(existsSync(join(home, "sessions", "s-peer", ".lock")), "peer 进程没起来（锁没出现）").toBe(true);
+    expect((await inspectStateLock(join(home, "sessions", "s-peer", ".lock"))).state, "peer 进程没起来（锁没出现）").toBe("valid");
     // 再多等一拍：确保它已经 restore 完、进了 running，这条是**它跑起来之后**才到的
     await new Promise((r) => setTimeout(r, 300));
 
@@ -118,8 +117,8 @@ test(
     expect(ra.report?.ok, `s-front 挂了：${ra.out}`).toBe(true);
     expect(rb.report?.ok, `s-back 挂了：${rb.out}`).toBe(true);
     // 收摊之后两把锁都还回去了
-    expect(existsSync(join(home, "sessions", "s-front", ".lock"))).toBe(false);
-    expect(existsSync(join(home, "sessions", "s-back", ".lock"))).toBe(false);
+    expect((await inspectStateLock(join(home, "sessions", "s-front", ".lock"))).state).toBe("missing");
+    expect((await inspectStateLock(join(home, "sessions", "s-back", ".lock"))).state).toBe("missing");
   },
   60_000,
 );

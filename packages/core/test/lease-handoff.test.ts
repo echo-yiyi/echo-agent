@@ -16,7 +16,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InMemoryStateLock, type StateLock } from "../src/storage/lock.ts";
-import { fileStateLock } from "../src/storage/file-lock.ts";
+import { fileStateLock, inspectStateLock } from "../src/storage/file-lock.ts";
 import { createAgent } from "../src/create-agent.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
@@ -133,14 +133,16 @@ test("文件锁：请求写在锁旁边，让完就清掉——不许留给下�
   await next!.release();
 });
 
-test("文件锁：可让位这件事写进锁文件——请它走的人在另一个进程里，只能从盘上看出来", async () => {
+test("文件锁：可让位这件事写进认领记录——请它走的人在另一个进程里，只能从盘上看出来", async () => {
   const { lock, path } = await fileLockAt();
   const held = await lock.acquire({ holder: "后台", preemptible: true });
-  expect(JSON.parse(await Bun.file(path).text()).preemptible).toBe(true);
+  const a = await inspectStateLock(path);
+  expect(a.state === "valid" && a.record.preemptible).toBe(true);
   await held!.release();
 
   const plain = await lock.acquire({ holder: "人" });
-  expect(JSON.parse(await Bun.file(path).text()).preemptible).toBeUndefined(); // 缺省不写
+  const b = await inspectStateLock(path);
+  expect(b.state === "valid" && b.record.preemptible).toBeUndefined(); // 缺省不写
   await plain!.release();
 });
 

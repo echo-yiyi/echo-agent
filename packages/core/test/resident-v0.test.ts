@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -117,7 +117,7 @@ test(
     expect(readdirSync(join(dir, "memory", "memory")).length).toBeGreaterThanOrEqual(10);
 
     // ⑪ 干净 stop 之后锁必须还回去
-    expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock")), "stop() 之后锁没释放").toBe(false);
+    expect((await inspectStateLock(join(dir, "sessions", ra.sessionId!, ".lock"))).state, "stop() 之后锁没释放").toBe("missing");
 
     /* ─── ⑤ 闹钟到点 → Inbox → **Agent 自己醒来** ─── */
     // 「不是测试直接调 loop」是这一条的全部意义：宿主只 `schedule_create` 了一个
@@ -166,7 +166,7 @@ test(
     expect(last.systemPrompt, "任务清单跑进 system 了——每轮变的东西不许进 system 段").not.toContain("任务清单");
 
     // ⑪ 再次干净收摊
-    expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock"))).toBe(false);
+    expect((await inspectStateLock(join(dir, "sessions", ra.sessionId!, ".lock"))).state).toBe("missing");
 
     /* ─── ⑩ 崩溃：未消费的入站事实留存 + 任务改完即落盘 ─── */
     // 任务与 inbox 也归 session：要验「崩溃前那条还在、重启后被吃掉」，crash 就得续同一段
@@ -178,24 +178,16 @@ test(
     // 干净 stop 掩盖了这个缺口——崩溃时那条任务会丢。
     expect(readFileSync(join(dir, "sessions", ra.sessionId!, "tasks.json"), "utf8"), "崩溃前建的任务没落盘").toContain("崩溃前建的");
 
-    /* ─── 单写契约：崩溃留下的锁**不许被自动抢占**（这一步是运维，不是产品能力）─── */
-    // 2026-08-18 那条 P0 的直接后果：自动 stale takeover 会双授，已取消。
-    // 代价就是这里——新进程必须**拒绝启动**，等人来清。**这不叫「自动恢复」**，
-    // 所以第 8 条不由这条路证明（它已经由上面的干净重启证过了）。
-    expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock")), "崩溃应当留下锁").toBe(true);
-    const blocked = runPhase(dir, "c", ra.sessionId!);
-    expect(blocked.ok, "陈尸锁在，新进程却启动了——单写者当场破").toBe(false);
-    expect(blocked.out).toContain("已被另一个写者持有");
-
-    // 人工清锁的前提是**看得见是谁占着**——这就是 `inspectStateLock` 存在的理由
+    /* ─── 崩溃之后直接接着跑：持有者已经死了，下一个进程自动接管（2026-09-10）─── */
+    // 此前（单文件锁）这里要人工删锁：自动接管得「读 → 判陈旧 → 删 → 重建」，压测下会双授。
+    // 现在锁按代认领，持有者确认已死（同一台机器、pid 查无此号）就往上叠一代，没有「删」这一步。
     const who = await inspectStateLock(join(dir, "sessions", ra.sessionId!, ".lock"));
-    expect(who.state).toBe("valid");
+    expect(who.state, "崩溃应当留下那一代的认领").toBe("valid");
     // holder = `${产品}:${会话 id}`（2026-09-07，替代 `agent:${agentId}`）：
-    // 锁文件旁边看一眼就知道是谁占着**哪一段**——从前那个 id 几乎恒为 "default"，说不出是哪段
+    // 看一眼就知道是谁占着**哪一段**——从前那个 id 几乎恒为 "default"，说不出是哪段
     expect(who.state === "valid" && who.record.holder).toBe(`default:${ra.sessionId!}`);
-    rmSync(join(dir, "sessions", ra.sessionId!, ".lock")); // ← 显式运维步骤
 
-    /* ─── ⑩ 清锁之后：那条入站事实被 Agent 自己吃掉 ─── */
+    /* ─── ⑩ 接管之后：那条入站事实被 Agent 自己吃掉 ─── */
     const replay = runPhase(dir, "c", ra.sessionId!);
     expect(replay.ok, `replay 挂了：\n${replay.out}`).toBe(true);
     expect(
@@ -203,7 +195,7 @@ test(
       "崩溃时未消费的那条没被重放",
     ).toContain("后台任务跑完了");
     expect(inboxRecordCount(dir, ra.sessionId!), "消费完盘上还留着").toBe(0);
-    expect(existsSync(join(dir, "sessions", ra.sessionId!, ".lock"))).toBe(false);
+    expect((await inspectStateLock(join(dir, "sessions", ra.sessionId!, ".lock"))).state).toBe("missing");
   },
   120_000,
 );

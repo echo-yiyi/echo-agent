@@ -1474,7 +1474,7 @@ export class Agent {
    * →（M4/M5 起）恢复 Memory / Skills / Tasks / Schedules / Inbox → 启动后台 → 发 ready。
    *
    * **不变量：中途任何一步失败，必须释放已取得的 lease 再抛**——否则状态根会被一个
-   * 起不来的进程永久占住，下次启动只能人工删锁。
+   * 起不来、却还活着的进程一直占住（锁只在持有者确认已死时才会被接管）。
    */
   /**
    * 受生命周期管的 Agent = 装配了持久化或单写锁的那种。
@@ -1573,8 +1573,8 @@ export class Agent {
           }
         }
         if (lease === null) {
-          // 拿不到就是拿不到——core 不抢占。
-          // 但**必须说清是谁占着**：不接管的代价是人工删锁，而人工删锁得先看得见对面是谁。
+          // 拿不到就是拿不到——core 不抢占（持有者确认已死的锁，实现在 acquire 里就接管了）。
+          // 但**必须说清是谁占着**：对面还活着就该去找它；确认不了死活或锁坏了，人得先看得见对面是谁才能清。
           const who = (await this.stateLock.describeHolder?.()) ?? null;
           throw new Error(
             `状态根已被另一个写者持有（${holder}）：拒绝启动` +

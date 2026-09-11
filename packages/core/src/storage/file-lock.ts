@@ -1,31 +1,21 @@
 // first-party 的 single-writer 文件锁（D6）。**node-only**——`node:fs`，只在根入口。
 //
-// 用 `open(path, "wx")`：这是文件系统给的**原子 create-if-absent**，正是 `StorageDir`
-// 没有、因而要单独立 `StateLock` 端口的那件事。
+// 底下是带递增编号的锁（`generation-lock.ts`，2026-09-10）：`path` 是一个目录，里面按代记认领与释放。
+// **持有者崩溃之后，下一个来拿的人自动接管**——前提是能确认它死了（同一台机器、pid 查无此号）；
+// 确认不了（别的机器、pid 被复用、记录坏了）就照旧拿不到，报错说清是谁占着、锁在哪。
 //
-// ## 不做自动 stale takeover（2026-08-18 定，此前做过，**并发压测下会双授**）
+// 2026-08-18 那一版是单个锁文件、不自动接管，因为「读 → 判陈旧 → 删 → 重建」会双授（压测第 136 次）；
+// 代价是崩溃后 `--resume` 起不来、要人工删锁。新实现里当前代从不删除，接管是往上叠一代，
+// 那条双授的路径不存在了（理由与判据见 `generation-lock.ts` 头注）。
 //
-// 曾经的实现是「锁在 → 读它 → pid 死了或文件坏了就 rm 再抢」。两个致命问题：
-//
-//   ① **read → rm → create 之间没有任何互斥**：两个进程可以同时判定 stale、同时 rm、
-//      同时 create——`open(…, "wx")` 只保证「创建那一刻」原子，挡不住这条三步链。
-//      实测（review 压测）第 136 次并发就出现两个调用同时拿到 Lease。
-//   ② **「锁文件刚创建但还没写完」会被误判成坏档**：持有者 `open` 成功、`writeFile` 尚未落，
-//      此刻另一个进程读到空内容 → `JSON.parse` 抛 → 当成 stale 删掉。
-//      把「坏档」与「正在写」混为一谈，等于给正常竞争开了一道门。
-//
-// **加随机 token 解决不了**：TOCTOU 在于「判定与删除之间状态会变」，不在于名字撞不撞。
-//
-// 所以 V0 的选择是：**锁在就拒绝，绝不抢占**。这与 core 侧口径一致
-// （「`acquire` 返回 `null` 就 fail-loud，core 不猜对面是不是死了」）——现在实现侧也不猜。
-// 代价是崩溃后要人工删锁文件，所以报错信息里写清了是谁、在哪、怎么清。
-// 真要自动接管，得用带内核仲裁的 advisory lock（`flock`/`fcntl`）或远程租约，
-// 那是另一个实现，不是在这段逻辑上打补丁。
+// 可让位的交还请求写在锁目录旁边的 `<path>.handoff`：要请它走的人在另一个进程里。
 
-import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { claimGeneration, describeRecord, holderGone, inspectGeneration, type StateLockInspection } from "./generation-lock.ts";
 import type { Lease, StateLock } from "./lock.ts";
+
+export type { PeekedLockRecord, StateLockInspection } from "./generation-lock.ts";
 
 /** 交还请求的轮询间隔。请求是人触发的、一次性的，不值得为它上 fs.watch。 */
 const HANDOFF_POLL_MS = 50;
@@ -67,127 +57,24 @@ function waitFor<T>(probe: () => Promise<T | null>): { readonly promise: Promise
   };
 }
 
-/** 锁文件里记的东西——报错时要能说清「是谁占着」。**我们写出去的一定四个字段都全**。 */
-type LockRecord = {
-  readonly holder: string;
-  readonly pid: number;
-  readonly at: number;
-  /**
-   * 这个持有者可不可以被请走（2026-09-07）。**写进锁文件**是因为要请它走的人在另一个进程里，
-   * 只能从盘上看出来——看不出来就只能盲等，而不可让位的持有者是永远不会让的。
-   */
-  readonly preemptible?: boolean;
-  /**
-   * 这把锁的身份。**`pid + at` 不够**：pid 会被复用，`at` 只有毫秒精度，
-   * 同一毫秒内起的两个进程可以撞成同一对，于是 A 的 `release()` 会把 B 的锁删掉。
-   * 随机 token 让「这把是不是我的」变成一个确定的判断。
-   */
-  readonly token: string;
-};
-
-/**
- * 读锁文件的结果。**三态，不是「有/没有」**。
- *
- * 折叠成一个 `null` 是上一版的 P1 根因：`release()` 见 null 就直接成功返回，于是
- * 「锁文件坏了、我删不掉它」被报告成「已释放」——实测把持有中的锁文件改成 `{}`，
- * `release()` resolved、锁文件仍在、下一个 `acquire()` **永久拿不到**。
- * 这恰好绕过了刚补的「release 失败时 stop() 必须抛」。
- */
-/**
- * 盘上读回来的记录。**`token` 是可选的**，而我们自己写的（`LockRecord`）一定有。
- *
- * 这个不对称是有意的：验形分两件事——「说得出话吗」（holder/pid/at，给人看的）与
- * 「是不是我的」（token，严格相等）。把 token 也算进验形，会让一份**只是没有 token**
- * 的记录整份作废，人就再也看不到 holder 是谁了——而那正是最需要看的时候。
- * 缺 token 的记录在所有权比较里天然不等于任何 token，照样删不得。
- */
-export type PeekedLockRecord = {
-  /** 这个持有者可不可以被请走。旧锁文件里没有这个字段 = 不可以（缺省最保守）。 */
-  readonly preemptible?: boolean;
-  readonly holder: string;
-  readonly pid: number;
-  readonly at: number;
-  readonly token?: string;
-};
-
-export type StateLockInspection =
-  | { readonly state: "missing" }
-  | { readonly state: "corrupt"; readonly why: string }
-  | { readonly state: "valid"; readonly record: PeekedLockRecord };
-
-function isPeekedRecord(v: unknown): v is PeekedLockRecord {
-  const r = v as Record<string, unknown> | null;
-  return (
-    typeof r === "object" &&
-    r !== null &&
-    typeof r["holder"] === "string" &&
-    Number.isInteger(r["pid"]) &&
-    (r["pid"] as number) > 0 && // 0 / 负数 / 小数不是进程号：`process.kill(0, 0)` 会成功，会被探活判成活着（review 2026-09-09）
-    typeof r["at"] === "number" &&
-    Number.isFinite(r["at"]) &&
-    (r["token"] === undefined || typeof r["token"] === "string")
-  );
-}
-
-async function peek(path: string): Promise<StateLockInspection> {
-  let raw: string;
-  try {
-    raw = await readFile(path, "utf8");
-  } catch (e) {
-    if ((e as { code?: string }).code === "ENOENT") return { state: "missing" };
-    // 读失败（权限、IO）**不是「没有」**——当成没有就会把删不掉报成删掉了
-    return { state: "corrupt", why: `读不出来：${(e as Error).message}` };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    return { state: "corrupt", why: `解不开：${(e as Error).message}` };
-  }
-  // 字段也要验形：`{}` 能 parse，但 `new Date(undefined)` 会让诊断抛 RangeError（实测）
-  if (!isPeekedRecord(parsed)) return { state: "corrupt", why: "缺 holder / pid / at（或类型不对）" };
-  return { state: "valid", record: parsed };
+/** 这把锁此刻空着吗：没人持有，或持有者确认已死（下一次 acquire 会接管）。 */
+function isFree(cur: StateLockInspection): boolean {
+  return cur.state === "missing" || (cur.state === "valid" && holderGone(cur.record));
 }
 
 /**
- * `path` 是锁文件本身（不是目录），例如 `<stateDir>/.lock`。
+ * `path` 是锁目录，例如 `<stateDir>/.lock`。
  *
- * **拿不到就是拿不到**：不接管、不重试、不等待。`release()` 只删自己那把。
+ * 活着的持有者占着 → `null`（不等待、不抢）；持有者确认已死 → 接管。`release()` 只放自己那一代。
  */
 export function fileStateLock(path: string): StateLock {
-  /** 交还请求：锁文件旁边的一个小文件。用文件而不是信号，因为要跨进程、而且要能被崩溃后清掉。 */
+  /** 交还请求：锁旁边的一个小文件。用文件而不是信号，因为要跨进程、而且要能被崩溃后清掉。 */
   const handoffPath = `${path}.handoff`;
   return {
     async acquire(opts: { holder: string; preemptible?: boolean }): Promise<Lease | null> {
-      await mkdir(dirname(path), { recursive: true });
-      const record: LockRecord = {
-        holder: opts.holder,
-        pid: process.pid,
-        at: Date.now(),
-        token: randomUUID(),
-        ...(opts.preemptible === true ? { preemptible: true } : {}),
-      };
-
-      let fh: Awaited<ReturnType<typeof open>>;
-      try {
-        // 原子 create-if-absent。已存在 → EEXIST → 直接放弃，**不看里面写了什么**。
-        fh = await open(path, "wx");
-      } catch (e) {
-        if ((e as { code?: string }).code === "EEXIST") return null;
-        throw e;
-      }
-
-      try {
-        await fh.writeFile(JSON.stringify(record));
-      } catch (e) {
-        // 内容没写成，锁文件却已经建出来了——留着它会变成谁也拿不到的死锁。
-        // 这一路是我们自己建的，删它是安全的。
-        await fh.close().catch(() => undefined);
-        await rm(path, { force: true }).catch(() => undefined);
-        throw e;
-      }
-      await fh.close();
-      // 上一轮别人留下的请求不该算在这一把头上：**拿到锁之后**才把旧请求擦掉。放在 `open("wx")` 之前的话，
+      const got = await claimGeneration(path, { holder: opts.holder, ...(opts.preemptible === true ? { preemptible: true } : {}) });
+      if (!got.ok) return null;
+      // 上一轮别人留下的请求不该算在这一把头上：**拿到锁之后**才把旧请求擦掉。放在认领之前的话，
       // 任何一次拿不到锁的 acquire 都会先删掉别人正在等的 `.handoff`——人的让位请求被第三方的失败尝试抹掉（review 2026-09-07）
       await rm(handoffPath, { force: true }).catch(() => undefined);
 
@@ -208,28 +95,12 @@ export function fileStateLock(path: string): StateLock {
 
       return {
         release: async () => {
-          // 这把租约到头了：先停 handoff 轮询，再去动锁文件（删不删得掉都不该再盯着 `.handoff`）
+          // 这把租约到头了：先停 handoff 轮询，再去放锁（放不放得掉都不该再盯着 `.handoff`）
           handoff?.stop();
-          // **只删 token 对得上的那把，且删不掉必须说出来。** 三态各有各的归宿：
-          //   missing → 没什么可清的，正常返回（release 是终点，重复调不该炸）
-          //   corrupt → **不删**（可能是别人正在写它），但**抛**：锁还在盘上，
-          //             下一个 acquire 会永久拿不到，调用方必须知道
-          //   token 不匹配 → 这把已经是别人的了，单写已经破了，更要抛
-          // 用 token 而不是 `pid + at`：后者会撞（pid 复用、同毫秒），撞了就删掉别人的锁。
-          const cur = await peek(path);
-          if (cur.state === "missing") return;
-          if (cur.state === "corrupt") {
-            throw new Error(`锁文件 ${path} ${cur.why}——没有删除它（可能是别人的），需人工确认`);
-          }
-          if (cur.record.token !== record.token) {
-            throw new Error(
-              `锁文件 ${path} 现在属于 holder=${cur.record.holder} pid=${cur.record.pid}，不是我这把——` +
-                `没有删除它。单写者约束可能已经被破坏，需人工确认`,
-            );
-          }
-          await rm(path, { force: true });
+          // 只放自己那一代；已经不是我的、或记录读不出来时抛——调用方必须知道单写者约束可能破了
+          await got.claim.release();
         },
-        // 本地文件锁没有租约到期这回事：拿住了就一直拿着，直到 release。
+        // 本地文件锁没有租约到期这回事：活着就一直拿着，直到 release（只有确认已死才会被接管）。
         lost: new Promise<Error>(() => {}),
         handoffRequested: handoff === null ? new Promise<{ by: string }>(() => {}) : handoff.promise,
       };
@@ -241,14 +112,14 @@ export function fileStateLock(path: string): StateLock {
      * **只对自称 `preemptible` 的持有者生效**——不可让位的立刻返回 `false`，调用方按老规矩
      * fail-loud。这样人开的那种会话不会被后台顶掉，而后台为处理一条消息叫醒的那种临时宿主会让开。
      *
-     * 请求写在锁文件旁边的 `<lock>.handoff` 里。持有者自己在轮询它（见 `acquire`），
-     * 看到就 drain 完手上的活、release。这里等锁文件消失，超时就如实说没让成。
-     * **不删对方的锁**——core 不抢占那条一个字没变。
+     * 请求写在锁旁边的 `<path>.handoff` 里。持有者自己在轮询它（见 `acquire`），
+     * 看到就 drain 完手上的活、release。这里等锁空出来，超时就如实说没让成。
+     * **不动对方的锁**——让不让是持有者自己决定的。
      */
     async requestHandoff(opts: { by: string; timeoutMs: number }): Promise<boolean> {
-      const cur = await peek(path);
-      if (cur.state === "missing") return true; // 已经空着
-      if (cur.state === "corrupt") return false; // 坏档要人来看，不是请一下就能解决的
+      const cur = await inspectGeneration(path);
+      if (isFree(cur)) return true; // 已经空着（或持有者已死，acquire 会接管）
+      if (cur.state !== "valid") return false; // 坏档要人来看，不是请一下就能解决的
       if (cur.record.preemptible !== true) return false;
 
       await mkdir(dirname(path), { recursive: true });
@@ -256,10 +127,10 @@ export function fileStateLock(path: string): StateLock {
       const deadline = Date.now() + opts.timeoutMs;
       try {
         while (Date.now() < deadline) {
-          if ((await peek(path)).state === "missing") return true;
+          if (isFree(await inspectGeneration(path))) return true;
           await new Promise((r) => setTimeout(r, HANDOFF_POLL_MS));
         }
-        return (await peek(path)).state === "missing";
+        return isFree(await inspectGeneration(path));
       } finally {
         // 请求是一次性的：让没让成都不该留在盘上，否则下一个持有者一上来就以为有人在等
         await rm(handoffPath, { force: true }).catch(() => undefined);
@@ -268,28 +139,24 @@ export function fileStateLock(path: string): StateLock {
 
     /**
      * 端口的可选诊断口。`start()` 拿不到锁时用它把「是谁占着」写进报错。
-     * **坏档也要说得出话**——那正是最需要人去看一眼的情形；此前 `{}` 会让这里
-     * `new Date(undefined)` 抛 RangeError，报错反被诊断代码盖掉。
+     * **坏档也要说得出话**——那正是最需要人去看一眼的情形。
      */
     async describeHolder(): Promise<string | null> {
-      const cur = await peek(path);
+      const cur = await inspectGeneration(path);
       if (cur.state === "missing") return null;
-      if (cur.state === "corrupt") return `锁文件 ${path} 是坏的（${cur.why}），需人工确认后删除`;
-      const { holder, pid, at } = cur.record;
-      return `holder=${holder} pid=${pid} 自 ${new Date(at).toISOString()} 起，锁文件 ${path}`;
+      if (cur.state === "corrupt") return `锁 ${path} 是坏的（${cur.why}），需人工确认后删除`;
+      return `${describeRecord(cur.record)}，锁 ${path}`;
     },
   };
 }
 
 /**
- * 锁被谁占着——**只用于给人看的诊断**，不参与任何取舍判断。
+ * 锁被谁占着——给人看，也给会话面判「活着」（配合 `holderGone`）。不改任何东西。
  *
- * 三态照实报，不折叠：`missing`（没有锁）· `corrupt`（有但读不出/字段不全，附原因）·
- * `valid`（附记录）。折叠成 `null` 会让调用方分不清「没锁」和「锁坏了删不掉」——
- * 那正是上一版 `release()` 把失败报成成功的根因。
- *
- * 从根入口导出：不接管的代价是「崩溃后人工删锁」，而人工删锁的前提是看得见是谁占着。
+ * 三态照实报，不折叠：`missing`（没人持有）· `corrupt`（有但读不出/字段不全，附原因）·
+ * `valid`（附当前代的记录，**持有者可能已经死了**）。折叠成 `null` 会让调用方分不清「没锁」和
+ * 「锁坏了」——那曾是 `release()` 把失败报成成功的根因。
  */
 export async function inspectStateLock(path: string): Promise<StateLockInspection> {
-  return peek(path);
+  return inspectGeneration(path);
 }

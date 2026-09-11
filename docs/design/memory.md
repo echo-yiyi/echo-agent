@@ -136,8 +136,8 @@
 
 当前只能确认以下边界：
 
-- **提交锁**：同一层、同一个记忆模块的一次提交（读、改、预算校验、落盘、重建索引）整段独占，锁挂在那一层的**字节面**上，名字 `.locks/<模块>`（[`withMemoryRegionLock()`](../../packages/core/src/memory/lock.ts#symbol=withMemoryRegionLock)）。字节面有 `lock` 原语时——`FileDir` 的 `open(…, "wx")` 锁文件、`InMemoryDir` 的实例内互斥，经前缀视图与写入闸视图一路转发——跨实例、跨进程都互斥；没有时按字节面对象在进程内互斥。等不到（缺省 10 秒）返回 `busy`，一个字节都不写。
-- **不自动接管陈旧锁**（与 lease 同一条，见 `storage/name-lock.ts` 头注）：持有者恰好崩在持锁窗口里，锁文件会留着，这个模块在那一层的写入一直返回 `busy`，报错里带锁文件的位置与持有者，要人手删。
+- **提交锁**：同一层、同一个记忆模块的一次提交（读、改、预算校验、落盘、重建索引）整段独占，锁挂在那一层的**字节面**上，名字 `.locks/<模块>`（[`withMemoryRegionLock()`](../../packages/core/src/memory/lock.ts#symbol=withMemoryRegionLock)）。字节面有 `lock` 原语时——`FileDir` 的锁目录（带递增编号的锁，与 lease 同一个实现）、`InMemoryDir` 的实例内互斥，经前缀视图与写入闸视图一路转发——跨实例、跨进程都互斥；没有时按字节面对象在进程内互斥。等不到（缺省 10 秒）返回 `busy`，一个字节都不写。
+- **持有者崩溃后自动接管**（与 lease 同一个实现，[决策](../decisions/implemented/2026-09-10-generation-lock-takeover.md)）：持有者崩在持锁窗口里，下一个写者确认它已死（同一台机器、pid 查无此号）就接管，不会一直 `busy`。确认不了死活（别的机器、pid 被复用）或记录被写坏时，照旧等到超时返回 `busy`，报错里带锁的位置与持有者。
 - [`assertFresh()`](../../packages/core/src/memory/lock.ts#symbol=assertFresh) 仍在落盘前重读旧内容，挡的是**不守提交锁**的写者（人手改文件）；create 整体覆盖不做这项比对。
 - Dream 的 startedAt 是状态文件里的标记；shouldDream 的检查和 dreamTask 的设置分开，不能推出多个 session 只有一个整理者。
 - 正文、预算、索引在同一把提交锁里；Dream 状态（计数、startedAt）另写，不在这把锁里——多个 session 的 Dream 计数仍可能丢增量。

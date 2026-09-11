@@ -71,7 +71,7 @@
 
 三条硬约定怎么守：
 
-- **single-writer**：每段一把 lease（`packages/core/src/storage/file-lock.ts`），core 不猜对面死没死，也不抢占没有自称可让位的持有者（可让位的实例被请走时自己交还，2026-09-07）；门 `packages/core/test/state-lock.test.ts`（互斥与坏锁）、`packages/core/test/lease-handoff.test.ts`（可让位交还）。lease 之下还有一道 Host-internal 的写入闸（`packages/core/src/state/write-gate.ts`）：拿到 lease 之前、revoke 之后任何**经闸的状态根写入**都被拒（读与 list 不经闸），门 `packages/core/test/write-gate.test.ts`。**观测库是闸外的例外**：它是 `createAgent()` 直接开的 SQLite，装配期（拿到 lease 之前）就建目录建库，写也不经闸；它的封口走 lease lifecycle port（`packages/core/src/state/lease-lifecycle.ts`，装配侧接在 `createAgent()` 里）——正常交还前 flush 尾巴，丢锁或失败后交还则只封不 flush。把建库推迟到拿到 lease 之后是另一件事，见 §7。
+- **single-writer**：每段一把 lease（`packages/core/src/storage/file-lock.ts`，底下是带递增编号的锁 `generation-lock.ts`）。活着的持有者不会被抢；持有者确认已死（同一台机器、pid 查无此号）时下一个 acquire 自动接管（2026-09-10）；没有自称可让位的持有者不会被请走（可让位的实例被请走时自己交还，2026-09-07）；门 `packages/core/test/state-lock.test.ts`（互斥、崩溃接管、坏锁、多进程压测）、`packages/core/test/lease-handoff.test.ts`（可让位交还）。lease 之下还有一道 Host-internal 的写入闸（`packages/core/src/state/write-gate.ts`）：拿到 lease 之前、revoke 之后任何**经闸的状态根写入**都被拒（读与 list 不经闸），门 `packages/core/test/write-gate.test.ts`。**观测库是闸外的例外**：它是 `createAgent()` 直接开的 SQLite，装配期（拿到 lease 之前）就建目录建库，写也不经闸；它的封口走 lease lifecycle port（`packages/core/src/state/lease-lifecycle.ts`，装配侧接在 `createAgent()` 里）——正常交还前 flush 尾巴，丢锁或失败后交还则只封不 flush。把建库推迟到拿到 lease 之后是另一件事，见 §7。
 - **一次写失败就封存该会话**：`packages/core/src/session/service.ts`，继续写只会产出 parent 指向不存在 entry 的坏档。
 - **观测不得影响执行**：观测库是 SQLite（`packages/core/src/observability/sqlite-store.ts`），落状态根下；给了自定义 `store` 又没点名 `stateDir` 时落 `:memory:`，所以注入内存端口的装配一个文件都不写。store 写不动时 run 照跑、`observationPersistence` 报 degraded；`echo-agent observe` 只读它，不装配、不取锁（`packages/base/src/observe.ts`）。
 
@@ -107,7 +107,7 @@
 | 公共符号表不漂 | `packages/core/test/api-snapshot.test.ts`（清点脚本 `packages/core/scripts/api-inventory.ts`） |
 | core 零运行时依赖（manifest 三字段恒空；`src/**` 里 import 只许 `node:` / `bun` / 相对路径） | `packages/core/test/zero-runtime-deps.test.ts` |
 | 四层事件成对且严格嵌套（允许空层：reply 可零 turn、turn 可零 attempt） | `packages/core/test/loop-layers.test.ts` |
-| 单写者（互斥、可让位交还）与写入闸 | `packages/core/test/state-lock.test.ts`、`packages/core/test/lease-handoff.test.ts`、`packages/core/test/write-gate.test.ts` |
+| 单写者（互斥、崩溃接管、可让位交还）与写入闸 | `packages/core/test/state-lock.test.ts`、`packages/core/test/lease-handoff.test.ts`、`packages/core/test/write-gate.test.ts` |
 | 装配所有权（adopt / borrow、失败 unwind） | `packages/core/test/assembly.test.ts`、`packages/core/test/create-echo.test.ts` |
 | 文档花名册、链接、代码块编译、文件引用 | `scripts/docs-lint.ts`、`test/docs.test.ts`、`test/export-jsdoc.test.ts` |
 | 分发（tarball 装得上、examples 跑得通） | `test/distribution-gate.test.ts` |

@@ -31,6 +31,7 @@ import {
   type ProviderEvent,
 } from "@echo-agent/core";
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
+import { inspectStateLock } from "@echo-agent/core";
 import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
 import { echoOptions, mainFor, parseArgs, usage, wakeArgs, type PresetForm } from "@echo-agent/base";
@@ -159,8 +160,8 @@ test("输入耗尽即收摊:状态落盘、锁已释放(dispose 真的跑了)", 
   const echo = await agentWith([textTurn("好")]);
   await run({ echo, input: ["记一笔"], out: sink(), err: sink() });
 
-  // `.lock` 在 dispose 的最后一段被删掉。它还在 = 没收摊,下一个进程会被挡在门外。
-  expect(existsSync(join(dir, ".lock")), "收摊后锁还在").toBe(false);
+  // `.lock` 在 dispose 的最后一段被释放。还被持有着 = 没收摊,下一个进程会被挡在门外。
+  expect((await inspectStateLock(join(dir, ".lock"))).state, "收摊后锁还在").toBe("missing");
   // 会话落盘:证明 start() 真的跑过而不是被跳过。`stateDir` 就是这一段自己的目录(2026-09-03),
   // 所以 meta 与 entries 在它的根上,不再有 `sessions/<id>/` 那一层。
   expect(existsSync(join(dir, "meta.json")), "会话没落盘,start() 恐怕没跑").toBe(true);
@@ -183,7 +184,7 @@ test("abort:停止收新输入,并且照样干净收摊", async () => {
   expect(code).toBe(0);
   expect(out.text).toContain("第一句");
   expect(out.text, "abort 之后还在收新输入").not.toContain("不该跑到这句");
-  expect(existsSync(join(dir, ".lock")), "被中止时没收摊").toBe(false);
+  expect((await inspectStateLock(join(dir, ".lock"))).state, "被中止时没收摊").toBe("missing");
 });
 
 /* ─────────────────────────── 参数解析:不认识就报错 ─────────────────────────── */
