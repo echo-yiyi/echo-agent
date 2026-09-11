@@ -138,9 +138,10 @@
 
 - **提交锁**：同一层、同一个记忆模块的一次提交（读、改、预算校验、落盘、重建索引）整段独占，锁挂在那一层的**字节面**上，名字 `.locks/<模块>`（[`withMemoryRegionLock()`](../../packages/core/src/memory/lock.ts#symbol=withMemoryRegionLock)）。字节面有 `lock` 原语时——`FileDir` 的锁目录（带递增编号的锁，与 lease 同一个实现）、`InMemoryDir` 的实例内互斥，经前缀视图与写入闸视图一路转发——跨实例、跨进程都互斥；没有时按字节面对象在进程内互斥。等不到（缺省 10 秒）返回 `busy`，一个字节都不写。
 - **持有者崩溃后自动接管**（与 lease 同一个实现，[决策](../decisions/implemented/2026-09-10-generation-lock-takeover.md)）：持有者崩在持锁窗口里，下一个写者确认它已死（同一台机器、pid 查无此号）就接管，不会一直 `busy`。确认不了死活（别的机器、pid 被复用）或记录被写坏时，照旧等到超时返回 `busy`，报错里带锁的位置与持有者。
-- [`assertFresh()`](../../packages/core/src/memory/lock.ts#symbol=assertFresh) 仍在落盘前重读旧内容，挡的是**不守提交锁**的写者（人手改文件）；create 整体覆盖不做这项比对。
-- Dream 的 startedAt 是状态文件里的标记；shouldDream 的检查和 dreamTask 的设置分开，不能推出多个 session 只有一个整理者。
-- 正文、预算、索引在同一把提交锁里；Dream 状态（计数、startedAt）另写，不在这把锁里——多个 session 的 Dream 计数仍可能丢增量。
+- **覆写前核对读到的版本**（[决策](../decisions/implemented/2026-09-11-memory-read-version-check.md)）：提交锁只罩住一次工具调用，而模型「读完 → 思考 → 写回」横跨好几次调用。每把记忆工具记一本 [`MemoryReads`](../../packages/core/src/memory/harness.ts#symbol=MemoryReads)（view 看到的全文）；整份覆写已有文件、insert、delete 之前核对它还是不是现在这一版，不是就拒（`not_read` / `stale_read`），让模型重看。str_replace 不核对（old_str 在最新内容上找得到本身就是核对），rename 搬的就是最新内容。前台那把工具、每次提取、每次整理各一本账；程序直接调写方法、不给账，就不核对。
+- [`assertFresh()`](../../packages/core/src/memory/lock.ts#symbol=assertFresh) 仍在落盘前重读旧内容，挡的是**不守提交锁**的写者（人手改文件）。
+- **一层同时只有一个整理者**：整理前按层试拿一次 `.dream/pass`（[`claimDreamPass()`](../../packages/core/src/memory/harness.ts#symbol=claimDreamPass)，不等），拿不到（别的 session 正在整理这一层）就跳过这一层，拿到之后再判一次门。startedAt 仍是状态文件里的标记，管的是失败之后的退避。
+- 正文、预算、索引在同一把提交锁里；Dream 状态（计数、startedAt）的读改写在这一层另一把短锁（`.dream/state`）里，多个 session 同时记数不丢增量。
 
 [`Agent.settleDream()`](../../packages/core/src/agent.ts#symbol=Agent.settleDream) 虽沿用旧名字，实际会同时 abort 并等待提取、Dream 两条通道，接入 stop / 丢锁路径。停发新工作与等待在飞工作结束是两件事；不能以“后台不阻塞前台”推导“退出不必等后台”。
 

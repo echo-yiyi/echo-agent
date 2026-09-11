@@ -134,6 +134,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-11-memory-read-version-check.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-05-retry-owned-by-loop.md",
       "bilingual": false
     },

@@ -12,6 +12,9 @@
 //   · 没有（测试替身、别人包的一层）→ 按**字节面对象**在进程内互斥：共用同一个对象的写者照样排队。
 // 活着的持有者占着、等到超时，抛 `StorageLockBusy`，调用方把它报成明确的冲突。
 //
+// 提交锁只罩住**一次**工具调用。模型「读完 → 思考 → 写回」横跨好几次调用，那一段靠的是
+// `MemoryReads`（harness.ts）：覆写前核对「你上次看到的还是不是现在这一版」，不是就拒。
+//
 // `assertFresh` 留着：它挡的是**不守这套协议**的写者（人手改文件、旧版本的进程），落盘前内容变了就拒。
 
 import type { StorageDir } from "../storage/types.ts";
@@ -21,21 +24,25 @@ import { NameMutex } from "../storage/name-lock.ts";
 const fallback = new WeakMap<object, NameMutex>();
 
 /**
+ * 在 `dir` 上独占 `name`，返回释放函数。有 lock 原语用它，没有就按字节面对象在进程内互斥。
+ * 等到 `timeoutMs` 还拿不到抛 `StorageLockBusy`；`timeoutMs: 0` = 只试一次、不等。
+ */
+export async function acquireMemoryLock(dir: StorageDir, name: string, timeoutMs?: number): Promise<() => Promise<void>> {
+  if (dir.lock !== undefined) return dir.lock(name, timeoutMs === undefined ? undefined : { timeoutMs });
+  let mutex = fallback.get(dir);
+  if (mutex === undefined) {
+    mutex = new NameMutex();
+    fallback.set(dir, mutex);
+  }
+  return mutex.acquire(name, timeoutMs);
+}
+
+/**
  * 在 `dir` 上独占 `name` 跑完 `run`。拿不到锁时抛 `StorageLockBusy`（由调用方报成冲突）。
  * 释放在 finally 里——`run` 抛错也不会把锁留在盘上。
  */
 export async function withMemoryRegionLock<T>(dir: StorageDir, name: string, run: () => Promise<T>, timeoutMs?: number): Promise<T> {
-  let release: () => Promise<void>;
-  if (dir.lock !== undefined) {
-    release = await dir.lock(name, timeoutMs === undefined ? undefined : { timeoutMs });
-  } else {
-    let mutex = fallback.get(dir);
-    if (mutex === undefined) {
-      mutex = new NameMutex();
-      fallback.set(dir, mutex);
-    }
-    release = await mutex.acquire(name, timeoutMs);
-  }
+  const release = await acquireMemoryLock(dir, name, timeoutMs);
   try {
     return await run();
   } finally {

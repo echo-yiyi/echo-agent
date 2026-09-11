@@ -56,6 +56,7 @@ import { environmentDedupeKey, scheduleDedupeKey } from "./inbox/records.ts";
 import { stateHostOf } from "./state/host-wiring.ts";
 import { DurableDeliveryDeferred, type DurableDeliveryRequest, type DurableDeliveryResult, type DurableIngressPort } from "./inbox/ingress.ts";
 import {
+  claimDreamPass,
   disposeMemory,
   dreamScopes,
   dreamTask,
@@ -2735,31 +2736,40 @@ export class Agent {
         // 门控：节流四道全满足，或者水位单独到线
         if (!(await shouldDream(memory, layer))) continue;
         if (signal.aborted || !this.memoryWorkAllowed) return;
-        // 门过了才上锁：dreamTask 有副作用（写 startedAt），不能放在判断之前
-        const task = await dreamTask(memory, layer);
-        const runId = `dream-${crypto.randomUUID()}`;
-        let result: LoopResult;
+        // 这一层的整理独占（2026-09-11）：试拿一次、不等。拿不到 = 别的 session 正在整理这一层，这轮跳过
+        const release = await claimDreamPass(memory, layer);
+        if (release === null) continue;
         try {
-          // 只给这一层的那把记忆工具。不是「过滤掉危险的」，是**只给这一件**，而且够不到别的层。
-          // **事件不外发**：整理的中间过程不该混进对外事件流。
-          result = await this.runSubagent(
-            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, turnInjections: "inherit" },
-            scope,
-            signal,
-            async () => {},
-          );
+          // 拿到之后再判一次：刚放手的那个 session 可能已经整理完、把计数清零了
+          if (!(await shouldDream(memory, layer))) continue;
+          // 门过了才上锁：dreamTask 有副作用（写 startedAt），不能放在判断之前
+          const task = await dreamTask(memory, layer);
+          const runId = `dream-${crypto.randomUUID()}`;
+          let result: LoopResult;
+          try {
+            // 只给这一层的那把记忆工具。不是「过滤掉危险的」，是**只给这一件**，而且够不到别的层。
+            // **事件不外发**：整理的中间过程不该混进对外事件流。
+            result = await this.runSubagent(
+              { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, turnInjections: "inherit" },
+              scope,
+              signal,
+              async () => {},
+            );
+          } finally {
+            this.permissions.closeRun(runId);
+          }
+          // **只有真的跑完才算数。** `runAgentLoop` 对失败不抛，它把结果放在 outcome 里；
+          // 无条件 `markDreamed()` 会让一次失败的整理被记成成功、下一次要等满 24 小时（实测过）。
+          // 被中断同理不提交：startedAt 会在 DREAM_LOCK_STALE_MS 后过期，下次重来。
+          if (signal.aborted) return;
+          if (result.outcome.kind !== "completed") {
+            this.reportDiagnostic({ code: "dream_failed", message: `记忆整理没跑完（${layer}/：${result.outcome.kind}）：不记成成功，锁留给下次` });
+            continue;
+          }
+          await markDreamed(memory, layer);
         } finally {
-          this.permissions.closeRun(runId);
+          await release();
         }
-        // **只有真的跑完才算数。** `runAgentLoop` 对失败不抛，它把结果放在 outcome 里；
-        // 无条件 `markDreamed()` 会让一次失败的整理被记成成功、下一次要等满 24 小时（实测过）。
-        // 被中断同理不提交：锁会在 DREAM_LOCK_STALE_MS 后过期，下次重来。
-        if (signal.aborted) return;
-        if (result.outcome.kind !== "completed") {
-          this.reportDiagnostic({ code: "dream_failed", message: `记忆整理没跑完（${layer}/：${result.outcome.kind}）：不记成成功，锁留给下次` });
-          continue;
-        }
-        await markDreamed(memory, layer);
       } catch (e) {
         // 实测破坏路径：`shouldDream()` / `dreamTask()` 读写状态文件失败——一层坏了不该拖垮别的层
         this.reportDiagnostic({ code: "dream_failed", message: `记忆整理失败（${layer}/）：${errText(e)}` });

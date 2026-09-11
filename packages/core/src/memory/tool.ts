@@ -8,11 +8,14 @@
 // 上层写自己的工具(比如 remember),里面调 memoryCreate(memory, ...) 即可,
 // 计数与索引重建都在方法里,换工具断不了。经 ToolHarness 普通注册(source "memory"),
 // 无特权;整体顶掉用 register(mine, {replace:true}),只换一个动词用 opts.handlers。
+//
+// **每把工具一本「读到过的版本」账**（`MemoryReads`，2026-09-11）：view 记下看到的全文，整份覆写已有文件、
+// insert、delete 前核对它还是不是现在这一版——模型读完去想的那段时间里别人写过，就拒、让它重看。
 
 import type { AgentToolResult, ModelTool, ToolExecutionContext } from "../tools/types.ts";
 import {
   memoryCreate, memoryDelete, memoryInsert, memoryRename, memoryStrReplace, memoryView,
-  type AgentMemories,
+  type AgentMemories, type MemoryReads,
 } from "./harness.ts";
 import type { MemoryScope } from "./scope.ts";
 
@@ -78,6 +81,8 @@ export type MemoryCommandHandler = (
   params: MemoryToolParams,
   memory: AgentMemories,
   ctx: ToolExecutionContext,
+  /** 这把工具的「读到过的版本」账：换掉 view 的要往里记，换掉写动词的要把它传给 harness 方法。 */
+  reads: MemoryReads,
 ) => Promise<AgentToolResult>;
 
 export type CreateMemoryToolOptions = {
@@ -98,7 +103,8 @@ const DEFAULT_DESCRIPTION =
   "Commands: view (a directory — path ending in / or empty for everything — or a file), create (create or overwrite a whole file), " +
   "str_replace (replace the single occurrence of old_str with new_str), insert (insert after line insert_line), " +
   "delete, rename. Some modules support only some of these; a refused command says which ones it supports. " +
-  "A write that exceeds a module's budget is refused with the current numbers: consolidate (merge, delete stale entries) first, then write.";
+  "A write that exceeds a module's budget is refused with the current numbers: consolidate (merge, delete stale entries) first, then write. " +
+  "View a file before overwriting it with create, inserting into it or deleting it: other sessions may write to the same memory, and a change based on a version you have not seen (or one that changed since you viewed it) is refused — view it again and redo the change.";
 
 const PARAMETERS: Record<string, unknown> = {
   type: "object",
@@ -120,6 +126,7 @@ const PARAMETERS: Record<string, unknown> = {
 };
 
 export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolOptions): ModelTool<MemoryToolParams> {
+  const reads: MemoryReads = new Map();
   return {
     kind: "model",
     name: MEMORY_TOOL_NAME,
@@ -156,23 +163,23 @@ export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolO
         }
       }
       const custom = opts?.handlers?.[params.command];
-      if (custom !== undefined) return custom(params, memory, ctx);
+      if (custom !== undefined) return custom(params, memory, ctx, reads);
       switch (params.command) {
         case "view":
-          return memoryView(memory, params.path);
+          return memoryView(memory, params.path, reads);
         case "create":
           if (params.file_text === undefined) return { content: "create needs file_text", isError: true, metadata: null };
-          return memoryCreate(memory, params.path, params.file_text);
+          return memoryCreate(memory, params.path, params.file_text, reads);
         case "str_replace":
-          return memoryStrReplace(memory, params.path, params.old_str ?? "", params.new_str ?? "");
+          return memoryStrReplace(memory, params.path, params.old_str ?? "", params.new_str ?? "", reads);
         case "insert":
           if (params.insert_text === undefined) return { content: "insert needs insert_text", isError: true, metadata: null };
-          return memoryInsert(memory, params.path, params.insert_line ?? -1, params.insert_text);
+          return memoryInsert(memory, params.path, params.insert_line ?? -1, params.insert_text, reads);
         case "delete":
-          return memoryDelete(memory, params.path);
+          return memoryDelete(memory, params.path, reads);
         case "rename":
           if (params.new_path === undefined) return { content: "rename needs new_path", isError: true, metadata: null };
-          return memoryRename(memory, params.path, params.new_path);
+          return memoryRename(memory, params.path, params.new_path, reads);
       }
     },
   };

@@ -14,6 +14,18 @@
 //   ⑦ Agent 接线:工具普通注册、system 冻结快照、run 内写下个 run 可见、dispose 链
 
 import { describe, expect, test } from "bun:test";
+// 覆写前核对读到的版本、整理独占（2026-09-11）要的几件（别名避免与本文件已有的导入撞名）
+import {
+  claimDreamPass as claimCas,
+  memoryCreate as createCas,
+  memoryDelete as deleteCas,
+  memoryInsert as insertCas,
+  memoryStrReplace as replaceCas,
+  memoryView as viewCas,
+  type MemoryReads,
+} from "../src/memory/harness.ts";
+import { createMemoryTool as toolCas } from "../src/memory/tool.ts";
+import { readDreamState as dreamStateCas } from "../src/memory/dream.ts";
 // 原子提交判据要的几件（别名避免与本文件已有的导入撞名）
 import { mkdirSync as mkdirLock, mkdtempSync as mkdtempLock, readFileSync as readLock, rmSync as rmLock, writeFileSync as writeLock } from "node:fs";
 import { hostname as hostLock, tmpdir as tmpLock } from "node:os";
@@ -99,8 +111,17 @@ function ctx(): ToolExecutionContext {
   return { toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
 }
 
+/**
+ * 一个 harness 一把工具：同一条测试里接连的调用就是同一个模型在操作——它读过、写过的版本要连着记
+ * （每把工具一本「读到过的版本」账，2026-09-11）。每次新建一把，等于每一步都换了个没看过文件的模型。
+ */
+const toolOf = new WeakMap<AgentMemories, ReturnType<typeof memoryTool>>();
 async function call(h: AgentMemories, params: Record<string, unknown>) {
-  const tool = memoryTool(h);
+  let tool = toolOf.get(h);
+  if (tool === undefined) {
+    tool = memoryTool(h);
+    toolOf.set(h, tool);
+  }
   return tool.execute(tool.prepareArguments!(params), ctx());
 }
 
@@ -919,6 +940,146 @@ describe("判据跟着模块走", () => {
     const system = await renderMemorySystem(memories(new InMemoryDir()));
     expect(system).toContain("next month");
     expect(system).toContain("repository already states");
+  });
+});
+
+/* ───────────────────────── ⑪ 覆写前核对读到的版本（2026-09-11） ───────────────────────── */
+
+describe("覆写前核对读到的版本", () => {
+  // 提交锁只罩住一次调用；模型「读完 → 思考 → 写回」横跨好几次调用，中间别人写过的那一笔要靠这里保住
+  const bindCas = (dir: MemoryDir) => {
+    const h = createAgentMemories({ memories: [residentMemory("note"), indexedMemory("notes")] });
+    bindMemoryScopes(h, memoryScopeTable([{ def: oneLayer("project"), dir }]));
+    return h;
+  };
+  const T = undefined as never; // 缺省动词不看工具上下文
+
+  test("A 读完去想、B 写了一笔、A 凭旧内容整份写回：被拒，B 那一笔还在；A 重看之后再写，两边都在", async () => {
+    const raw = new InMemoryDir();
+    await raw.write("note.md", "A B");
+    const h = bindCas(raw);
+    const a: MemoryReads = new Map();
+    const b: MemoryReads = new Map();
+    await viewCas(h, "project/note.md", a);
+    await viewCas(h, "project/note.md", b);
+    expect((await replaceCas(h, "project/note.md", "B", "BB", b)).isError).toBe(false);
+    const stale = await createCas(h, "project/note.md", "AA B", a);
+    expect(stale.isError).toBe(true);
+    expect(stale.content).toContain("changed since you viewed it");
+    expect(await raw.read("note.md")).toBe("A BB");
+    await viewCas(h, "project/note.md", a);
+    expect((await createCas(h, "project/note.md", "AA BB", a)).isError).toBe(false);
+    expect(await raw.read("note.md")).toBe("AA BB");
+  });
+
+  test("没看过的已有文件：不许整份覆写、不许按行插、不许删；新建文件不用先看", async () => {
+    const raw = new InMemoryDir();
+    const h = bindCas(raw);
+    const r: MemoryReads = new Map();
+    expect((await createCas(h, "project/notes/a.md", "---\ndescription: a\n---\n", r)).isError).toBe(false);
+    await raw.write("note.md", "别人写的");
+    await raw.write("notes/b.md", "---\ndescription: b\n---\n");
+    for (const res of [
+      await createCas(h, "project/note.md", "x", r),
+      await insertCas(h, "project/note.md", 0, "x", r),
+      await deleteCas(h, "project/notes/b.md", r),
+    ]) {
+      expect(res.isError).toBe(true);
+      expect(res.content).toContain("have not viewed it");
+    }
+    expect(await raw.read("note.md")).toBe("别人写的");
+    expect(await raw.read("notes/b.md")).not.toBeNull();
+    await viewCas(h, "project/notes/b.md", r);
+    expect((await deleteCas(h, "project/notes/b.md", r)).isError).toBe(false);
+  });
+
+  test("看完之后文件被别人删了：凭旧内容重建被拒（不把别人整理掉的东西复活）", async () => {
+    const raw = new InMemoryDir();
+    await raw.write("note.md", "旧的");
+    const h = bindCas(raw);
+    const r: MemoryReads = new Map();
+    await viewCas(h, "project/note.md", r);
+    await raw.remove("note.md");
+    const res = await createCas(h, "project/note.md", "旧的", r);
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("deleted by another session");
+    expect(await raw.read("note.md")).toBeNull();
+  });
+
+  test("str_replace 不核对（在最新内容上找得到就是核对），但凭过期的账写成之后这一条作废：接着整份覆写得先重看", async () => {
+    const raw = new InMemoryDir();
+    await raw.write("note.md", "A B");
+    const h = bindCas(raw);
+    const r: MemoryReads = new Map();
+    await viewCas(h, "project/note.md", r);
+    await raw.write("note.md", "A BB"); // 别人那一笔
+    expect((await replaceCas(h, "project/note.md", "A", "AA", r)).isError).toBe(false);
+    expect(await raw.read("note.md")).toBe("AA BB"); // 两笔都在
+    const res = await createCas(h, "project/note.md", "AA B", r); // 它以为文件是 AA B
+    expect(res.isError).toBe(true);
+    expect(await raw.read("note.md")).toBe("AA BB");
+  });
+
+  test("工具：各把各的账（提取看过的不替前台作保）；自己看过、自己写过，接着写不用重看；rename 账跟着文件搬", async () => {
+    const raw = new InMemoryDir();
+    await raw.write("note.md", "A");
+    await raw.write("notes/a.md", "---\ndescription: a\n---\n");
+    const h = bindCas(raw);
+    const front = toolCas(h);
+    const extract = toolCas(h);
+    await extract.execute({ command: "view", path: "project/note.md" }, T);
+    expect((await front.execute({ command: "create", path: "project/note.md", file_text: "B" }, T)).isError).toBe(true);
+    await front.execute({ command: "view", path: "project/note.md" }, T);
+    expect((await front.execute({ command: "create", path: "project/note.md", file_text: "B" }, T)).isError).toBe(false);
+    expect((await front.execute({ command: "create", path: "project/note.md", file_text: "C" }, T)).isError).toBe(false);
+    expect(await raw.read("note.md")).toBe("C");
+
+    await front.execute({ command: "view", path: "project/notes/a.md" }, T);
+    expect((await front.execute({ command: "rename", path: "project/notes/a.md", new_path: "project/notes/c.md" }, T)).isError).toBe(false);
+    expect((await front.execute({ command: "create", path: "project/notes/c.md", file_text: "---\ndescription: c\n---\n" }, T)).isError).toBe(false);
+  });
+});
+
+describe("整理这一层的独占与计数", () => {
+  const bindAt = (dir: string) => {
+    const h = createAgentMemories({ memories: [residentMemory("note"), indexedMemory("notes")] });
+    bindMemoryScopes(h, memoryScopeTable([{ def: oneLayer("project"), dir: new FileDirLock(dir) }]));
+    return h;
+  };
+
+  test("同一层已有整理在跑：再来一个试拿不到、当场跳过（不等）；放手之后能拿到——两个 FileDir 实例，跨实例算数", async () => {
+    const dir = mkdtempLock(joinLock(tmpLock(), "echo-dream-pass-"));
+    try {
+      const a = bindAt(dir);
+      const b = bindAt(dir);
+      const held = await claimCas(a, "project");
+      expect(held).not.toBeNull();
+      const t0 = Date.now();
+      expect(await claimCas(b, "project")).toBeNull();
+      expect(Date.now() - t0).toBeLessThan(1_000);
+      await held!();
+      const next = await claimCas(b, "project");
+      expect(next).not.toBeNull();
+      await next!();
+    } finally {
+      rmLock(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("两个实例同时往同一层的两个模块写（两把提交锁互不相干）：这一层的写入计数一个不少", async () => {
+    const dir = mkdtempLock(joinLock(tmpLock(), "echo-dream-count-"));
+    try {
+      const a = bindAt(dir);
+      const b = bindAt(dir);
+      await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          i % 2 === 0 ? createCas(a, `project/notes/n${i}.md`, `---\ndescription: 第 ${i} 条\n---\n`) : createCas(b, "project/note.md", `第 ${i} 版`),
+        ),
+      );
+      expect((await dreamStateCas(a.dir, "project")).writes).toBe(20);
+    } finally {
+      rmLock(dir, { recursive: true, force: true });
+    }
   });
 });
 

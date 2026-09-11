@@ -33,7 +33,7 @@ import {
 } from "./dream.ts";
 import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
 import { lateBoundMemoryDir, safeScopeSegment, splitScopePath, type LateBoundMemoryDir, type MemoryScopeTable } from "./scope.ts";
-import { assertFresh, withMemoryRegionLock } from "./lock.ts";
+import { acquireMemoryLock, assertFresh, withMemoryRegionLock } from "./lock.ts";
 import { StorageLockBusy } from "../storage/name-lock.ts";
 import { memoryOps, type MemoryCommand } from "./tool-commands.ts";
 import {
@@ -108,6 +108,19 @@ export type AgentMemories = MemoryDeps & {
    */
   observe?: CapabilityFactSink<MemoryFact>;
 };
+
+/**
+ * 一个读写方读到过的版本：路径 → 它上次看到的全文（2026-09-11）。
+ *
+ * 提交锁只罩住一次工具调用，而模型「读完 → 思考 → 写回」横跨好几次调用：中间别的 session 写过一笔，
+ * 它凭旧内容整份写回，就把那一笔吃掉了（两次写入没有同时发生，锁拦不住）。所以**整份覆写已有文件、
+ * insert、delete** 先核对「你上次看到的还是不是现在这一版」，不是就拒，让它重看。
+ * `str_replace` 不核对——old_str 在最新内容上找得到本身就是核对；`rename` 搬的就是最新内容。
+ *
+ * **每个读写方一份**：前台那把工具、每次提取、每次整理各自一份（`createMemoryTool` 里建）。
+ * 共用一份的话，提取看过的版本会替前台作保。程序直接调写方法、不给它，就不核对。
+ */
+export type MemoryReads = Map<string, string>;
 
 /** `dir` 必给（2026-08-17 起）：能力层不自带落盘默认件，理由见下方 doc comment。评测/单测传 InMemoryDir。 */
 /**
@@ -225,7 +238,7 @@ export function memoryFor(ctx: AgentMemories, path: string): AnyMemory | undefin
    全部收相对路径(也认 /memories/ 前缀),内部统一 jail;绝不 throw,失败 = error 结果。 */
 
 /** 看目录("" = 全部模块概览,目录以 / 结尾)或文件(带行号)。 */
-export async function memoryView(ctx: AgentMemories, rawPath: string): Promise<AgentToolResult> {
+export async function memoryView(ctx: AgentMemories, rawPath: string, reads?: MemoryReads): Promise<AgentToolResult> {
   try {
     const path = normalizeMemoryPath(rawPath);
     if (path === "" || path.endsWith("/")) {
@@ -250,19 +263,35 @@ export async function memoryView(ctx: AgentMemories, rawPath: string): Promise<A
     }
     const content = await ctx.dir.read(path);
     if (content === null) return toolError(`'${path}' does not exist`);
+    reads?.set(path, content);
     return toolOk(content.split("\n").map((l, i) => `${i + 1}\t${l}`).join("\n"));
   } catch (e) {
     return toolError(errText(e));
   }
 }
 
-/** 建/整文件覆写。上层自己的写入工具(remember 之类)最终都该落到这里。 */
-export async function memoryCreate(ctx: AgentMemories, rawPath: string, text: string): Promise<AgentToolResult> {
-  return writeMemory(ctx, "create", rawPath, async () => ({ ok: true, content: text }), (path, n) => `Wrote ${path} (${n} characters)`);
+/**
+ * 建/整文件覆写。上层自己的写入工具(remember 之类)最终都该落到这里。
+ * 给了 `reads`：覆写已有文件前核对它读到的就是现在这一版（见 `MemoryReads`）；新建不用先看。
+ */
+export async function memoryCreate(ctx: AgentMemories, rawPath: string, text: string, reads?: MemoryReads): Promise<AgentToolResult> {
+  return writeMemory(
+    ctx,
+    "create",
+    rawPath,
+    async (path) => {
+      const current = await ctx.dir.read(path);
+      const unread = checkRead(reads, path, current);
+      if (unread !== null) return unread;
+      return current === null ? { ok: true, content: text } : { ok: true, content: text, basedOn: current };
+    },
+    (path, n) => `Wrote ${path} (${n} characters)`,
+    reads,
+  );
 }
 
 /** 把唯一出现的 oldStr 换成 newStr。零命中/多义都拒(为 LLM 设计的寻址协议)。 */
-export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldStr: string, newStr: string): Promise<AgentToolResult> {
+export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldStr: string, newStr: string, reads?: MemoryReads): Promise<AgentToolResult> {
   if (oldStr === "") {
     return finishMemoryMutation(ctx, { operation: "replace", path: pathForFact(rawPath), at: Date.now() }, rejected("empty_old_str", "str_replace needs old_str"));
   }
@@ -279,11 +308,12 @@ export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldS
       return { ok: true, content: content.replace(oldStr, newStr), basedOn: content };
     },
     (path, n) => `Replaced one occurrence in ${path} (now ${n} characters)`,
+    reads,
   );
 }
 
 /** 在第 line 行之后插入(0 = 文件开头)。 */
-export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: number, text: string): Promise<AgentToolResult> {
+export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: number, text: string, reads?: MemoryReads): Promise<AgentToolResult> {
   if (!Number.isInteger(line) || line < 0) {
     return finishMemoryMutation(ctx, { operation: "insert", path: pathForFact(rawPath), at: Date.now() }, rejected("bad_line", "insert_line must be an integer ≥ 0 (0 = start of file)"));
   }
@@ -294,16 +324,20 @@ export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: nu
     async (path) => {
       const content = await ctx.dir.read(path);
       if (content === null) return reject("not_found", `'${path}' does not exist (use create for a new file)`);
+      // 按行号插：文件在你看过之后变了，行号就对不上了
+      const unread = checkRead(reads, path, content);
+      if (unread !== null) return unread;
       const lines = content.split("\n");
       if (line > lines.length) return reject("line_out_of_range", `insert_line out of range: the file has only ${lines.length} lines`);
       lines.splice(line, 0, text);
       return { ok: true, content: lines.join("\n"), basedOn: content };
     },
     (path, n) => `Inserted after line ${line} of ${path} (now ${n} characters)`,
+    reads,
   );
 }
 
-export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise<AgentToolResult> {
+export async function memoryDelete(ctx: AgentMemories, rawPath: string, reads?: MemoryReads): Promise<AgentToolResult> {
   const at = Date.now();
   const norm = normalizeOrReject(rawPath);
   if (!norm.ok) return finishMemoryMutation(ctx, { operation: "delete", path: pathForFact(rawPath), at }, norm.verdict);
@@ -321,6 +355,18 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise
   if (deleteDenied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", deleteDenied));
   // 删也是「读改写」的一种（存在性检查 + 删 + 重建索引），进与 writeMemory 同一把提交锁
   return commitUnderLock(ctx, frame.owner, path, frame, async () => {
+    // 删掉的是你看过的那一版吗：看过之后别人往里写了一笔，删掉就把那一笔一起删了
+    if (reads !== undefined) {
+      let current: string | null;
+      try {
+        current = await ctx.dir.read(path);
+      } catch (e) {
+        return finishMemoryMutation(ctx, frame, failed("read", errText(e)));
+      }
+      if (current === null) return finishMemoryMutation(ctx, frame, rejected("not_found", `'${path}' does not exist`));
+      const unread = checkRead(reads, path, current);
+      if (unread !== null && !unread.ok) return finishMemoryMutation(ctx, frame, rejected(unread.reasonCode, unread.message));
+    }
     let removed: boolean;
     try {
       removed = await ctx.dir.remove(path);
@@ -328,6 +374,7 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise
       return finishMemoryMutation(ctx, frame, failed("remove", errText(e)));
     }
     if (!removed) return finishMemoryMutation(ctx, frame, rejected("not_found", `'${path}' does not exist`));
+    reads?.delete(path);
     await bumpWriteCounter(ctx, path);
     const indexOutcome = await refreshIndex(ctx, frame.owner, path);
     return finishMemoryMutation(ctx, frame, committed(undefined, indexOutcome, `Deleted ${path}`));
@@ -340,7 +387,7 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string): Promise
  * **不复用公开的 `memoryCreate()`**：那会在 rename 之外再发一条 create 事实（「rename 内部不得双发」）。
  * 目标写成功、源删失败是 **partial**（带 stage），不能谎报 committed，也不能像从前那样报成整体失败。
  */
-export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: string): Promise<AgentToolResult> {
+export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: string, reads?: MemoryReads): Promise<AgentToolResult> {
   const at = Date.now();
   const normFrom = normalizeOrReject(rawFrom);
   if (!normFrom.ok) return finishMemoryMutation(ctx, { operation: "rename", path: pathForFact(rawFrom), toPath: pathForFact(rawTo), at }, normFrom.verdict);
@@ -397,8 +444,15 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
   try {
     await ctx.dir.remove(from);
   } catch (e) {
+    if (reads?.get(from) === content) reads.set(to, content);
     const indexOutcome = await refreshIndex(ctx, fromOwner, to);
     return finishMemoryMutation(ctx, frame, partial("remove-source", indexOutcome, `Renamed ${from} to ${to} but failed to remove the source: ${errText(e)}`));
+  }
+  // 账跟着文件搬：看过的是哪一版，搬过去还是那一版；没看过（或看的是旧版）就两头都不记
+  if (reads !== undefined) {
+    const knew = reads.get(from) === content;
+    reads.delete(from);
+    if (knew) reads.set(to, content);
   }
   const indexOutcome = await refreshIndex(ctx, fromOwner, to);
   return finishMemoryMutation(ctx, frame, committed(content.length, indexOutcome, `Renamed ${from} to ${to}`));
@@ -477,9 +531,14 @@ async function updateDreamState(
   return run;
 
   async function doUpdate(): Promise<DreamState> {
-    const next = mutate(await readDreamState(ctx.dir, scope));
-    await writeDreamState(ctx.dir, scope, next);
-    return next;
+    const update = async (): Promise<DreamState> => {
+      const next = mutate(await readDreamState(ctx.dir, scope));
+      await writeDreamState(ctx.dir, scope, next);
+      return next;
+    };
+    // 上面的串行链只管同一个 ctx；共享层是多个 session 一起记数的，读改写还得进这一层的短锁（跨进程也不丢增量）
+    const entry = ctx.binding.table().byName.get(scope);
+    return entry === undefined ? update() : withMemoryRegionLock(entry.dir, DREAM_STATE_LOCK, update, ctx.lockTimeoutMs);
   }
 }
 
@@ -637,6 +696,27 @@ export async function markDreamed(ctx: AgentMemories, scope: string): Promise<vo
   await updateDreamState(ctx, scope, () => ({ lastAt: Date.now(), startedAt: null, writes: 0, turns: 0 }));
 }
 
+/** 一层的整理状态（计数、startedAt）读改写用的短锁；与模块的提交锁同在那一层的字节面上。 */
+const DREAM_STATE_LOCK = ".dream/state";
+/** 一层「正在整理」的独占，整理跑多久就拿多久。 */
+const DREAM_PASS_LOCK = ".dream/pass";
+
+/**
+ * 这一层这一轮整理的独占（2026-09-11）：**试拿一次、不等**，返回释放函数；拿不到返回 `null`——
+ * 别的 session 正在整理这一层，这一轮跳过（同一层两份整理同时跑不会写坏，但活白干一份，还会互相撞 stale）。
+ * 锁在那一层的字节面上，跨进程算数；持有者崩了，下一个来拿的人接管（`storage/generation-lock.ts`）。
+ */
+export async function claimDreamPass(ctx: AgentMemories, scope: string): Promise<(() => Promise<void>) | null> {
+  const entry = ctx.binding.table().byName.get(scope);
+  if (entry === undefined) return null;
+  try {
+    return await acquireMemoryLock(entry.dir, DREAM_PASS_LOCK, 0);
+  } catch (e) {
+    if (e instanceof StorageLockBusy) return null;
+    throw e;
+  }
+}
+
 /* ───────────── AgentHarness 基座 ───────────── */
 
 
@@ -681,6 +761,38 @@ function partial(stage: MemoryMutationStage, indexOutcome: MemoryIndexOutcome, m
 }
 function committed(chars: number | undefined, indexOutcome: MemoryIndexOutcome, text: string): MutationVerdict {
   return { outcome: "committed", chars, indexOutcome, text };
+}
+
+/**
+ * 覆写前核对：这个读写方上次看到的，是不是现在这一版（见 `MemoryReads`）。不给 `reads` 不核对。
+ * `current === null` = 文件现在不存在：没看过 = 新建，放行；看过 = 看完之后被别人删了，拒——
+ * 凭旧内容重建，会把别人整理掉的东西复活。
+ */
+function checkRead(reads: MemoryReads | undefined, path: string, current: string | null): Prepared | null {
+  if (reads === undefined) return null;
+  const seen = reads.get(path);
+  if (current === null) {
+    return seen === undefined
+      ? null
+      : reject("stale_read", `'${path}' was deleted by another session after you viewed it; nothing was written. View the directory again before recreating it.`);
+  }
+  if (seen === undefined) {
+    return reject("not_read", `'${path}' already exists and you have not viewed it; nothing was written. View it first, then redo the change.`);
+  }
+  if (seen !== current) {
+    return reject("stale_read", `'${path}' changed since you viewed it (another session wrote to it); nothing was written. View it again and redo the change.`);
+  }
+  return null;
+}
+
+/**
+ * 写成之后记账。这次写之前那一版就是它看着的（或文件是它新建的）→ 记下新内容，接着写不用重看；
+ * 否则（比如凭过期的账做了一次 str_replace，结果里有它没看过的别人那一笔）→ 作废这一条，下次覆写前得重看。
+ */
+function noteWrite(reads: MemoryReads | undefined, path: string, before: string | null, after: string): void {
+  if (reads === undefined) return;
+  if (before === null || reads.get(path) === before) reads.set(path, after);
+  else reads.delete(path);
 }
 
 /** jail 校验：非法路径是 semantic reject，不是 I/O failure。 */
@@ -751,6 +863,7 @@ async function writeMemory(
   rawPath: string,
   prepare: (path: string) => Promise<Prepared>,
   okText: (path: string, chars: number) => string,
+  reads?: MemoryReads,
 ): Promise<AgentToolResult> {
   const at = Date.now();
   const norm = normalizeOrReject(rawPath);
@@ -799,6 +912,7 @@ async function writeMemory(
     } catch (e) {
       return finishMemoryMutation(ctx, frame, failed("write", errText(e)));
     }
+    noteWrite(reads, path, prepared.basedOn ?? null, prepared.content);
     await bumpWriteCounter(ctx, path);
     const indexOutcome = await refreshIndex(ctx, owner, path);
     return finishMemoryMutation(ctx, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length)));
