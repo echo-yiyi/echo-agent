@@ -290,6 +290,11 @@ async function main(): Promise<void> {
     // **盯可观测结果，不睡固定时长**——本文件自己强调过这条，上一版却在这里 sleep(50)，
     // CI 上一抖就假红/假绿。没有待消费时这句立即返回。
     await waitFor(async () => (await new InboxStore(new FileDir(sessionDir(agent.state.sessionId!))).restore()).length === 0);
+    // 账本空了**还不等于**接得了新活：`closeRun()` 已把 status 置回 idle，而 `inboxTicketOutstanding`
+    // 要等 `ackBatch()` 裁决才清，这中间 `prompt()` 照拒（见 `Agent.acceptsWork` 的注释）。
+    // 所以这里等的是**与 `prompt()` 同一份判据**的那个只读面，不是从外面拼一个近似条件——
+    // 拼的那个在 CI 的 ubuntu runner 上必现「Inbox 的一批还在等 ack 裁决」（2026-09-13，4/4）。
+    await waitFor(() => agent.acceptsWork);
     await agent.prompt("刚才我们聊到哪了？");
     const snapshot = {
       taskCount: agent.state.tasks.total,
