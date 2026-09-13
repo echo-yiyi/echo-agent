@@ -1,6 +1,6 @@
 {
   "name": "@echo-agent/tui",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "description": "Echo's terminal shell: the interactive TUI and the first-run credential setup, packaged as the terminal implementation of the assembly layer's shell port. Requires Bun.",

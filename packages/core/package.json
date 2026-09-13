@@ -1,6 +1,6 @@
 {
   "name": "@echo-agent/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "description": "The Echo agent runtime and SDK: a persistent agent — state machine, commands, events — and its pure loop. Zero runtime dependencies; the Agent owns the mechanism while you supply the ports and the policy.",

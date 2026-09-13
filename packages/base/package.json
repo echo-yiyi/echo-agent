@@ -1,6 +1,6 @@
 {
   "name": "@echo-agent/base",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "description": "Echo's assembly layer: the launcher parts, the product contract, the shell port, host capabilities and the pipe form. No terminal dependency — a web or desktop product depends on this and brings its own shell. Requires Bun.",
