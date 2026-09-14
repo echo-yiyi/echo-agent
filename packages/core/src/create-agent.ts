@@ -51,7 +51,8 @@ import { sealAgentAssemblyObservation, type BuiltinSlotContribution } from "./ob
 import { attachObservationHost } from "./observability/host-wiring.ts";
 import { ObservationRuntime } from "./observability/runtime.ts";
 import type { ObservationCapturePolicy } from "./observability/types.ts";
-import { MEMORY_PATH, SqliteCanonicalObservationStore, observationDatabasePath } from "./observability/sqlite-store.ts";
+import { MEMORY_PATH, observationDatabasePath } from "./observability/sqlite-store.ts";
+import { WorkerObservationStore } from "./observability/worker-store.ts";
 import type { AgentRef } from "./agent-def/types.ts";
 
 /** 不给产品名时的缺省（2026-09-07，原 `DEFAULT_AGENT_ID`）。 */
@@ -432,7 +433,8 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
 
   // canonical observation store：open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——
   // 那是状态根坏了 / 文件系统不支持，启动时就该看见。起来之后的写失败**不再**影响 run
-  // （观测层只降级，见 observability/runtime.ts 头注）。
+  // （观测层只降级，见 observability/runtime.ts 头注）。SQLite 连接住在 Worker 线程：主线程不做同步磁盘调用，
+  // 磁盘卡住或库被锁时 agent 循环照跑（observability/worker-store.ts 头注）。
   //
   // **注入了自定义 store 又没点名 stateDir 时，观测库落内存**（2026-09-07）。此前它无条件按
   // `<ECHO_HOME>/sessions/<id>` 落真盘——于是每一次 `createAgent({ store: new InMemoryDir() })`
@@ -440,7 +442,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   // 连测试夹具的会话 id（`bad` / `main` / `s`）都在。
   // 与 `sharedStore ?? store` 同一条理由：说了「我自己给存储」的调用方，不该发现东西仍旧写进了真盘。
   const observationPath = opts.store !== undefined && opts.stateDir === undefined ? MEMORY_PATH : observationDatabasePath(stateDir);
-  const observationStore = await SqliteCanonicalObservationStore.open({ path: observationPath, busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
+  const observationStore = await WorkerObservationStore.open({ path: observationPath, busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
 
   // 装配现场：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
   // 它撑住的是「值已经造好、`new Agent()` 还没成功」那个窗口——上一版那时抛错，root store 就再没人关过。
@@ -509,7 +511,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     // 形状到此为止。**seal 只冻结形状，不转移所有权**——转移发生在构造成功之后的 `adoptInto()`。
     assembly.seal();
 
-    // 观测 Runtime：唯一 Sequencer + 上面那条 SQLite；装配快照只封 builtin 槽的身份与安全配置摘要，
+    // 观测 Runtime：唯一 Sequencer + 上面那个写入端（SQLite 在 Worker 线程）；装配快照只封 builtin 槽的身份与安全配置摘要，
     // **不放对象本体、凭据、路径正文**（assembly.ts 头注）。每个 run 的 `run.assembly` 记录引用这份 digest。
     const observation = new ObservationRuntime({
       runtimeId: `rt:${crypto.randomUUID()}`,

@@ -9,7 +9,7 @@
 
 **解决什么。** agent 跑完一次，除了终端上滚过去的字，什么都不剩。会话目录里的 `entries/` 是**功能用的回放队列**（模型要求原样带回上一轮的 reasoning，所以它必须留），不是给人读的历史：它没有时间、没有耗时、没有嵌套、没有失败原因，也不记「这次 run 装配了哪些 extension、绑了哪个模型」。想回答「这次为什么慢」「哪一步失败了」「模型到底想了什么」，没有第二个地方可查。观测层就是那个地方：**它是这个仓里唯一为「读」而存在的记录**。
 
-**最终形态。** 每次 run 把自己写进会话状态根下的一个 SQLite 账本。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的纪律：观测拦不住 agent**——写不动就降级并如实报出来，绝不让 run 等、绝不拒 run、绝不把异常抛进 Agent 控制流（§5）。
+**最终形态。** 每次 run 把自己写进会话状态根下的一个 SQLite 账本。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的纪律：观测拦不住 agent**——写不动就降级并如实报出来，绝不让 run 等、绝不拒 run、绝不把异常抛进 Agent 控制流；碰磁盘的活全在 worker 线程，磁盘卡住也占不住 agent 所在的主线程（§5）。
 
 **Non-Goals（已决，不做）。**
 
@@ -26,6 +26,7 @@
 
 - `bun test packages/core/test/observability-sequencer.test.ts` —— lane 语义、seq 预留与 hole/gap 配对、prefix barrier、CAS、run 边界 body 的封闭校验（含子循环来源与 `startedBy`）。
 - `bun test packages/core/test/observability-sqlite-store.test.ts` —— 同事务全见或全不见、幂等重提、corruption 判定。
+- `bun test packages/core/test/observability-worker-store.test.ts` —— 库写入端在 worker 线程：库被别的连接锁住时主线程照常跳、`run.closed` 到期降级返回、锁放开后照样落盘；corruption 跨线程仍是同一个类；开关一次库之后进程的 exit 监听照常运行。
 - `bun test packages/core/test/observability-projection.test.ts` —— 循环 / 压缩 / Agent 自身事实的逐 kind 固定投影、三档的字段差异、投影抛错留 hole + gap、投影自身在同步预算内。
 - `bun test packages/core/test/observability-runtime.test.ts` —— 真实 `createEcho → send → SQLite → reader` 链路：脚本化 run 的整段记录**逐项**比对执行顺序、run 开头与结尾两份同形的状态快照、run 之外的相位迁移、前台 / 后台子 agent 各是自己的 run 并链回派出它的工具调用。
 - `bun test packages/core/test/observability-decisions.test.ts` —— 决定点：工具被拦的原因、等人审批的 span、每轮工作集、装备变更。
@@ -107,6 +108,18 @@
 - `run.closed` 仍等它 COMMIT——它在 run 的活干完之后，`send()` 靠它如实报 `observationPersistence`。等待**有界**（`boundaryDeadlineMs`，`createAgent` 定为 500ms），到期即降级返回。
 - `ObservationRuntime` 每个公开方法都不抛。
 
+**碰磁盘的都在 worker 线程**（2026-09-14 拍板）。`bun:sqlite` 的调用全是同步的，放在主线程上，磁盘卡住或库被别的连接锁住时停下的是整条事件循环：agent 循环、模型流、定时器全停，上面那个 500ms 的有界等待也触发不了（实测：库被锁、`busy_timeout` 3 秒时，`run.closed` 等了 9 秒，主线程一拍都没跳）。所以 `createAgent` 装配的写入端是 [`WorkerObservationStore`](../../packages/core/src/observability/worker-store.ts#symbol=WorkerObservationStore)：开库、提交、回读、进程内查询、关库都在 worker 线程里跑同一个 `SqliteCanonicalObservationStore`，主线程每个方法是一次跨线程往返。切在存储接口这一层，Sequencer 不动。
+
+| 在哪个线程 | 做什么 |
+|---|---|
+| 主线程（节点当场） | 探针投影、canonical 编码、预留 seq、进内存 ring——纯 CPU、有预算，不碰磁盘；顺序与缺口保证靠同步预留 |
+| worker 线程 | 开库 / PRAGMA / migrate、批量提交、read-after-error 回读、`echo.observations` 的查询、关库 |
+
+两条从实测来的实现约束（Bun 1.3.14），写在 [worker-protocol.ts](../../packages/core/src/observability/worker-protocol.ts#symbol=STORE_WORKER_METHODS) 与 `worker-store.ts` 头注里：
+
+- **回信除了消息事件，还要定时器兜底取**。`bun test` 的 `await expect(p).resolves / .rejects` 在原生代码里阻塞着等，这期间跨线程消息从第二条起派发不出来，只靠事件的话 `expect(agent.start()).rejects` 会永远挂住；有请求在途时每 5ms 用 `receiveMessageOnPort` 取一次。
+- **worker 线程不许加载 `node:fs` / `node:worker_threads`，线程由主线程 terminate**。否则进程退出时 `process.on("exit")` 的监听不再运行。库目录因此由主线程建。
+
 于是调用方拿到的是三个可读的信号，而不是一次异常：
 
 | 信号 | 含义 |
@@ -177,8 +190,7 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 2. **降级后不自动 reopen**，**没有 crash recovery 的库层部分**（[sqlite-store.ts](../../packages/core/src/observability/sqlite-store.ts#symbol=SqliteCanonicalObservationStore) 头注自己写着「O3a 不做，O3b 做」）。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals 的第一条。
 3. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
 4. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
-5. **`bun:sqlite` 是同步调用**，没隔 Worker：磁盘真挂住会占事件循环。
-6. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
-7. **记忆的能力摘要没接。** 状态快照的能力摘要跑在同步封口路径上，记忆的状态在盘上要异步读。
-8. **`sourceSeq` 没有生产者。** 它原本是转手 `AgentEvent` 时带的事件 seq；观测改成插桩之后没有任何记录再带它。envelope 上这个可选字段留在已发布的公开类型里没删。
-9. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。
+5. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
+6. **记忆的能力摘要没接。** 状态快照的能力摘要跑在同步封口路径上，记忆的状态在盘上要异步读。
+7. **`sourceSeq` 没有生产者。** 它原本是转手 `AgentEvent` 时带的事件 seq；观测改成插桩之后没有任何记录再带它。envelope 上这个可选字段留在已发布的公开类型里没删。
+8. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。

@@ -1,5 +1,5 @@
 // ObservationRuntime（O3a）：完整 Runtime 里 canonical writer 的宿主——
-// 持有唯一的 Sequencer 与 SQLite store，是 run 三条边界（`run.accepted / run.started / run.closed`）的**唯一 emission owner**，
+// 持有唯一的 Sequencer 与观测库写入端（生产装配里 SQLite 连接住在 Worker 线程，见 worker-store.ts），是 run 三条边界（`run.accepted / run.started / run.closed`）的**唯一 emission owner**，
 // 并按 `capabilitySink(descriptor, owner)` 给各执行节点发探针（循环、压缩、Agent 自身、各能力模块）。
 // **不订阅、不转发 AgentEvent**：那是给壳的事件协议，观测是插桩（`docs/design/observability.md`）。
 //
@@ -20,12 +20,12 @@ import type { Model } from "../provider/types.ts";
 import { BUILTIN_GENERATION } from "../extension/builtin.ts";
 import { snapshotRunModelBinding } from "./assembly.ts";
 import { RUN_ASSEMBLY_RECORD, type BoundaryObservationDraft, type RunAcceptedBodyV1, type RunAssemblyBodyV1, type RunObservationHeaderSeed, type RunStartedBodyV1 } from "./draft.ts";
-import { LiveEchoObservations } from "./query.ts";
+import { LiveEchoObservations, type ObservationReadPort } from "./query.ts";
 import { factSinkToIngest, type CapabilityFactDescriptor, type CapabilityFactSink } from "./fact-sink.ts";
 import { sha256Hex } from "./hash.ts";
 import { redactedLabel } from "./redact.ts";
 import { ObservationSequencer, type SequencerLimits } from "./sequencer.ts";
-import type { SqliteCanonicalObservationStore } from "./sqlite-store.ts";
+import type { CanonicalObservationStore } from "./store.ts";
 import type {
   AgentAssemblyObservationSnapshot,
   EchoObservableState,
@@ -55,12 +55,23 @@ export const MEMORY_ENTRY_ID = "echo:memory";
 export const TASKS_ENTRY_ID = "echo:tasks";
 export const SCHEDULER_ENTRY_ID = "echo:scheduler";
 
+/**
+ * Runtime 持有的观测库写入端：canonical store 本体 + live 查询要的读方法 + path key + 关库。
+ * `createAgent()` 给 `WorkerObservationStore`（主线程不碰 SQLite）；测试可以直接给同步的 `SqliteCanonicalObservationStore`。
+ */
+export type ObservationRuntimeStore = CanonicalObservationStore &
+  ObservationReadPort &
+  Readonly<{
+    readPathDigestKey(): Uint8Array;
+    close(): void | Promise<void>;
+  }>;
+
 export type ObservationRuntimeOptions = Readonly<{
   runtimeId: string;
   /** RuntimeGeneration；O3a 只有 boot 一代。 */
   runtimeGeneration: string;
   capturePolicy: ObservationCapturePolicy;
-  store: SqliteCanonicalObservationStore;
+  store: ObservationRuntimeStore;
   clock: Clock;
   /** `createAgent()` 封口的 builtin 槽快照；每个 run 的 `run.assembly` 记录引用它。 */
   assembly: AgentAssemblyObservationSnapshot;
@@ -111,9 +122,9 @@ export class ObservationRuntime {
   readonly runtimeGeneration: string;
   readonly capturePolicy: ObservationCapturePolicy;
   readonly assembly: AgentAssemblyObservationSnapshot;
-  readonly store: SqliteCanonicalObservationStore;
+  readonly store: ObservationRuntimeStore;
   readonly sequencer: ObservationSequencer;
-  /** live 查询面（`echo.observations`）：同一个 Sequencer + 同一条 SQLite connection 的只读查询。 */
+  /** live 查询面（`echo.observations`）：同一个 Sequencer + 同一个写入端的只读查询。 */
   readonly observations: LiveEchoObservations;
   private readonly clock: Clock;
   /** 随库首建、永不改写；库关了之后挂 sink（stop 后再 start 的拒绝路径）也不能再去读它。 */
@@ -272,15 +283,18 @@ export class ObservationRuntime {
     }
   }
 
-  /** 收摊：先把 ring 里的尾巴写完，再关 SQLite。single-flight。 */
+  /** 收摊：先把 ring 里的尾巴写完，再关库（worker 版连线程一起结束）。single-flight。 */
   dispose(): Promise<void> {
     return (this.disposing ??= (async () => {
       this.phase = "disposing";
       try {
         await this.sequencer.flushPending();
       } finally {
-        this.store.close();
-        this.phase = "disposed";
+        try {
+          await this.store.close();
+        } finally {
+          this.phase = "disposed";
+        }
       }
     })());
   }

@@ -10,7 +10,6 @@
 // **`bun:sqlite` 只在 `open()` 里动态 import**：根入口（`createEcho` 所在）在 Node 下也要能加载——分发门用 `new Agent`
 // 在 Node 跑一次；顶层 import 会让整个包在 Node 下 import 即炸。O3a 不做 crash recovery / retention / reopen（O3b）。
 
-import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { canonicalJsonBytes } from "./normalize.ts";
 import { ObservationCorruptionError, runIndexDigest, type CanonicalObservationStore, type CommitBatchInput, type CommitBatchResult } from "./store.ts";
@@ -75,6 +74,11 @@ export type SqliteObservationOpenOptions = Readonly<{
   path: string;
   /** 有界 busy_timeout（毫秒）。缺省 5s；不允许无上限等待。 */
   busyTimeoutMs?: number;
+  /**
+   * writer open 时先建库文件所在目录。缺省 true。`WorkerObservationStore` 在主线程建好目录后给 false：
+   * worker 线程不许加载 `node:fs`（原因见 worker-protocol.ts），所以 `node:fs` 只在需要建目录时才动态加载。
+   */
+  createDirectory?: boolean;
 }>;
 
 /** `listRunIndex` 的分页游标：`(acceptedAt, runId)` 倒序稳定分页。 */
@@ -321,7 +325,10 @@ export class SqliteCanonicalObservationStore extends SqliteObservationReader imp
 
   static async open(opts: SqliteObservationOpenOptions): Promise<SqliteCanonicalObservationStore> {
     const { Database } = await import("bun:sqlite");
-    if (opts.path !== MEMORY_PATH) mkdirSync(dirname(opts.path), { recursive: true });
+    if (opts.path !== MEMORY_PATH && opts.createDirectory !== false) {
+      const { mkdirSync } = await import("node:fs");
+      mkdirSync(dirname(opts.path), { recursive: true });
+    }
     let db: SqliteDatabase;
     try {
       db = new Database(opts.path, { create: true, readwrite: true, strict: true }) as unknown as SqliteDatabase;

@@ -26,6 +26,12 @@ import type {
 const DEFAULT_PAGE = 20;
 const MAX_PAGE = 200;
 
+/**
+ * live 与离线查询共用的只读面：按 RunIndex 取一个 run、分页列 run。离线 reader 是同步 SQLite 连接（observe CLI 的独立进程）；
+ * live 面是 Runtime 的写入端（`WorkerObservationStore`，连接在 Worker 线程）。
+ */
+export type ObservationReadPort = Pick<SqliteObservationReader, "readRunIndex" | "readRunRecords" | "listRunIndex">;
+
 /** opaque cursor 坏了 / 篡改了：fail-loud，不用可漂移的偏移量猜。 */
 export class ObservationCursorError extends Error {
   readonly code = "observation_cursor_invalid";
@@ -64,7 +70,7 @@ function decodeCursor(raw: string): RunIndexCursor {
   return { acceptedAt: c.a, runId: c.r };
 }
 
-async function lookupRun(store: SqliteObservationReader, runId: string): Promise<RunLookupResult> {
+async function lookupRun(store: ObservationReadPort, runId: string): Promise<RunLookupResult> {
   const index = await store.readRunIndex(runId);
   if (index === null) return { kind: "unknown" };
   if (index.bodyState === "pruned") {
@@ -77,7 +83,7 @@ async function lookupRun(store: SqliteObservationReader, runId: string): Promise
   return { kind: "found", observation: materializeRunObservation(index, bytes.map(decodeObservationEnvelope)) };
 }
 
-async function listRuns(store: SqliteObservationReader, options: ListRunsOptions | undefined): Promise<RunObservationPage> {
+async function listRuns(store: ObservationReadPort, options: ListRunsOptions | undefined): Promise<RunObservationPage> {
   const limit = Math.min(MAX_PAGE, Math.max(1, Math.floor(options?.limit ?? DEFAULT_PAGE)));
   const after = options?.cursor === undefined ? undefined : decodeCursor(options.cursor);
   // 多取一条判断有没有下一页，不用 COUNT
@@ -89,7 +95,7 @@ async function listRuns(store: SqliteObservationReader, options: ListRunsOptions
 }
 
 /** 最近一次顶层 run：按 `(acceptedAt, runId)` 倒序翻页，跳过隔离子循环（source 带 `parentRunId`）。 */
-async function lastRun(store: SqliteObservationReader): Promise<RunLookupResult> {
+async function lastRun(store: ObservationReadPort): Promise<RunLookupResult> {
   let after: RunIndexCursor | undefined;
   for (;;) {
     const entries = await store.listRunIndex({ limit: MAX_PAGE, ...(after === undefined ? {} : { after }) });
@@ -107,7 +113,7 @@ export class LiveEchoObservations implements EchoObservations {
     private readonly deps: Readonly<{
       runtimeId: string;
       sequencer: ObservationSequencer;
-      store: SqliteObservationReader;
+      store: ObservationReadPort;
       clock: Readonly<{ now(): number }>;
       phase: () => RuntimePhase;
     }>,
