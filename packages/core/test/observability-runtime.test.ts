@@ -259,6 +259,28 @@ describe("send → getRun → render（completed）", () => {
     const err = await openObservationReader({ stateRoot: join(await tmp(), "never") }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ObservationDatabaseMissingError);
   });
+
+  test("生命周期相位在 Agent 自己迁移的节点上记下（run 之外）；stopped 进不了账本，最后一拍是 running→stopping", async () => {
+    const stateDir = join(await tmp(), "state");
+    const echo = await echoWith({ stateDir, turns: [textTurn("one")] });
+    await echo.send("a");
+    await echo.stop();
+    const reader = await openObservationReader({ stateRoot: stateDir });
+    try {
+      // recentActivity 只读 run 之外的记录，最新在前
+      const phases = [...(await reader.recentActivity({ limit: 500 }))].reverse().filter((e) => e.name === "agent.phase.changed");
+      expect(phases.map((e) => e.attributes)).toEqual([
+        { from: "new", to: "starting" },
+        { from: "starting", to: "restored", restoredReason: "deferred-start" },
+        { from: "restored", to: "running" },
+        // 写入端是 stop 流程里被关掉的东西之一，`stopping → stopped` 在它关掉之后才成立
+        { from: "running", to: "stopping" },
+      ]);
+      for (const e of phases) expect(e.instrumentation.name).toBe("echo.agent");
+    } finally {
+      await reader.close();
+    }
+  });
 });
 
 describe("error / abort / Tool 抛错", () => {

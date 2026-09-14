@@ -140,6 +140,7 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "inbox.acked": { zh: "收件已结", en: "inbox.acked", tone: "positive", hint: "run 之后整批 ack 落盘，不会再重投" },
   "inbox.released": { zh: "收件放回", en: "inbox.released", tone: "caution", hint: "整批放回队列：run 被拒、入队抛错或 ack 没提交，下次再投" },
   "inbox.sealed": { zh: "收件账本已封", en: "inbox.sealed", tone: "critical", hint: "ack 无法裁决，账本封了：之后一律拒收，要人来处理" },
+  "agent.phase.changed": { zh: "相位变化", en: "agent.phase.changed", tone: "neutral", hint: "Agent 实例的生命周期相位：new / starting / restored / running / pausing / stopping / lost" },
   "agent.queue.updated": { zh: "队列变化", en: "agent.queue.updated", tone: "neutral", hint: "steering / followUp / inbox 队列长度" },
   "agent.resource.changed": { zh: "资源变化", en: "agent.resource.changed", tone: "neutral", hint: "工具 / skill / MCP 注册或卸载" },
   "agent.custom_event": { zh: "自定义事件", en: "agent.custom_event", tone: "neutral", hint: "上层 agent 的领域事件，metadata 档 body 恒空" },

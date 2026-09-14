@@ -119,6 +119,12 @@ const INBOX_POLL_MS = 1_000;
  */
 const HANDOFF_TIMEOUT_MS = 10_000;
 
+/** Agent 实例的生命周期相位（状态图见 `Agent.phase` 的注释）。只有 `setPhase()` 改它。 */
+export type AgentLifecyclePhase = "new" | "starting" | "restored" | "running" | "pausing" | "stopping" | "stopped" | "lost";
+
+/** `restored` 是怎么来的：启动恢复完、等 `activate()`，还是 handoff 暂停完。 */
+export type RestoredReason = "deferred-start" | "paused";
+
 export type AgentState = {
   /* 装备（慢变；仅 idle 可换） */
   readonly model: Model;
@@ -582,9 +588,9 @@ export class Agent {
    *          restored / running → stopping → stopped
    *          restored / running ── 丢锁 ──→ lost
    */
-  private phase: "new" | "starting" | "restored" | "running" | "pausing" | "stopping" | "stopped" | "lost" = "new";
+  private phase: AgentLifecyclePhase = "new";
   /** `restored` 是怎么来的：两种 reason 各有各的消费者，调错必须 fail-loud。 */
-  private restoredReason: "deferred-start" | "paused" | null = null;
+  private restoredReason: RestoredReason | null = null;
   /**
    * **唯一的 lifecycle actor**：start / activate / pauseManagedWork / resumeManagedWork / stop 与丢锁善后
    * 全排在这一条链上。上一版只串行了中间三个，于是 `activate()` 卡在 catch-up 时 `stop()` 能插进来先
@@ -1497,6 +1503,25 @@ export class Agent {
     return this.phase === "restored" ? `restored(${this.restoredReason ?? "?"})` : this.phase;
   }
 
+  /**
+   * 相位只在这里改，改的同时在这个节点上记一条事实（`agent-observe.ts`）。
+   * 进 `restored` 之前先把 `restoredReason` 赋好：记下的事实里要带上是哪一种 restored。
+   *
+   * **`stopping → stopped` 进不了账本**：观测写入端本身就是 stop 流程要关掉的东西之一（`createAgent` 的
+   * `finalDisposables`，排在 root store 关闭与空会话目录清理之前，这个顺序不能动），`stopped` 在它关闭之后才成立。
+   * 所以一次正常收摊在账本里的最后一拍相位是 `running → stopping`。
+   */
+  private setPhase(to: AgentLifecyclePhase): void {
+    const from = this.phase;
+    this.phase = to;
+    probeAgent(this.agentProbeNow(), {
+      kind: "phase_changed",
+      from,
+      to,
+      ...(to === "restored" && this.restoredReason !== null ? { restoredReason: this.restoredReason } : {}),
+    });
+  }
+
   private get lifecycleManaged(): boolean {
     return this.stateLock !== undefined || this.sessionService !== undefined;
   }
@@ -1559,7 +1584,7 @@ export class Agent {
     if (this.startFencedError !== null) {
       throw new Error(`这个 Agent 在取得租约之后启动失败过，写入格已作废：请新建一个（原因：${this.startFencedError.message}）`);
     }
-    this.phase = "starting";
+    this.setPhase("starting");
     await this.doStart(activation);
   }
 
@@ -1696,8 +1721,8 @@ export class Agent {
       // **恢复到此为止**：规则、会话、任务、skill、inbox 都回来了，但一件自己动的事都还没做。
       // deferred 停在这儿等 `activate()`；immediate 直接往下走（保持既有 `start()` 语义）。
       this.assertTransitionAlive("start"); // 恢复途中可能已经丢锁：吸收态不许被写回
-      this.phase = "restored";
       this.restoredReason = "deferred-start";
+      this.setPhase("restored");
       if (activation === "immediate") await this.beginManagedWork();
     } catch (e) {
       // **把已经起来的东西收干净，再把原错误抛出去。**
@@ -1734,8 +1759,8 @@ export class Agent {
       // 回到 new：**拿锁之前**失败是可重试的（换个状态根、修好坏档再来），不是终态。
       // install 之后失败则由 `startFencedError` 挡住重试；**lost 也是终态**，不能被这一行打回可重试。
       if (this.phase === "starting" || this.phase === "restored") {
-        this.phase = "new";
         this.restoredReason = null;
+        this.setPhase("new");
       }
       throw e;
     }
@@ -1762,7 +1787,7 @@ export class Agent {
       this.assertTransitionAlive("pauseManagedWork");
       if (this.phase === "restored" && this.restoredReason === "paused") return;
       if (this.phase !== "running") throw new Error(`pauseManagedWork 只允许从 running 进入，当前是 ${this.phaseLabel}`);
-      this.phase = "pausing";
+      this.setPhase("pausing");
       // ① 关新的 producer intake：Schedule timer、Inbox consumer、Dream，**以及 RunIntakeGate 的
       //    reconfiguration barrier**——不立那道闸的话，drain 期间源源不断的 followUp 能把前台 run 无限延长，
       //    handoff 永远等不到头（实测饥饿）。business gate 同时 open → draining：不接新 permit / operation，
@@ -1790,8 +1815,8 @@ export class Agent {
       //    **提交之前重问一遍**：这段里可能已经 stop() 或丢锁了，那两个是吸收态。
       this.assertTransitionAlive("pauseManagedWork");
       this.gate?.setActiveBusinessMode("closed");
-      this.phase = "restored";
       this.restoredReason = "paused";
+      this.setPhase("restored");
     });
   }
 
@@ -1884,8 +1909,8 @@ export class Agent {
     this.autoConsumeInbox = true;
     this.startInboxPoll();
 
-    this.phase = "running";
     this.restoredReason = null;
+    this.setPhase("running");
     // 起来了、还没活干：别人现在问它，它能马上答。**必须在 phase 变 running 之后**——
     // publishPhase 的守卫只在 running 时写盘，此前这句排在前面等于没写（review 2026-09-07）
     this.publishPhase("idle");
@@ -1922,7 +1947,7 @@ export class Agent {
     // 轮到 stop 时前面那个 transition 必然已经 settle。上一版靠 `await this.startInFlight` 自己等，
     // 那在「stop 先入队、start 后入队」时会死等一个还没轮到的 promise。
     if (this.phase === "stopped") return; // 等的过程中被别人停掉了
-    this.phase = "stopping"; // 吸收态：从这里起任何在飞的 transition 都不许再写回 running
+    this.setPhase("stopping"); // 吸收态：从这里起任何在飞的 transition 都不许再写回 running
 
     // **收摊期间租约还在手上，`this.lease` 就不能提前清掉。**
     // 上一版在这里就置 undefined，于是 `watchLease` 的过期判据（`this.lease !== lease`）
@@ -1957,7 +1982,7 @@ export class Agent {
     } catch (e) {
       shutdownError = { e };
     }
-    this.phase = "stopped";
+    this.setPhase("stopped");
 
     let releaseError: { readonly e: unknown } | null = null;
     if (shutdownError !== null) errors.push(shutdownError.e);
@@ -2033,7 +2058,7 @@ export class Agent {
     this.sessionService?.seal(); // ①
     this.persistSealed = true; // ① 的另一半：任务清单与 skill 落盘也是持久化，此前它们没被封
     this.leaseLostError = error; // ③ 的开关，先置上免得 abort 触发的收尾又开新活
-    this.phase = "lost";
+    this.setPhase("lost");
     this.intake.closeForReconfiguration(); // 新的 steer / followUp 不再 accepted
     this.abort(ABORT_REASON.leaseLost); // ②
     // admission 关门：排队的 rejected(lease-lost)，在跑的（含整理）abort 并**等它真停**——
