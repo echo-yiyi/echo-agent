@@ -14,7 +14,10 @@
 import { memoryPaths, type AnyMemory } from "./types.ts";
 import type { MemoryScopeTable } from "./scope.ts";
 
-/** 提取子 agent 的轮数上限:够它"view 一下现有的 → 写两三条",又给成本一个硬上界。 */
+/**
+ * 提取子 agent 的轮数上限：够它「看一两个要改的文件 → 写两三条 → 收尾」，又给成本一个硬上界。
+ * 已存的清单由 prompt 自带（`memoryManifest`），不用一个个 view 去摸——摸的话 5 轮不够（2026-09-14 实测）。
+ */
 export const DEFAULT_EXTRACT_MAX_TURNS = 5;
 
 /** 提取 prompt 的第一句。脚本化模型的测试靠它认出一次模型调用是提取子循环发的。 */
@@ -24,13 +27,14 @@ export const EXTRACT_PROMPT_OPENING = "A reply just finished.";
  * 提取的 prompt。**没有替换口子，也不需要**：什么值得记由各模块的 instructions 定——判据跟着模块走，
  * `memory.builtin: false` 换掉模块时判据一起换掉（2026-09-10）。这里只有机制：先看、写对地方、可以什么都不写。
  *
- * **层与模块的清单必须由 prompt 自带**:`runSubagent` 是独立 context,子 agent 拿不到
- * system prompt——dream 那边同理,它的 prompt 也自己列 regions。
+ * **层、模块与此刻存着什么都必须由 prompt 自带**:`runSubagent` 是独立 context,子 agent 拿不到
+ * system prompt——dream 那边同理,它的 prompt 也自己列 regions。`stored` 是 `memoryManifest()` 的输出
+ * （与前台记忆段同一种呈现），没有它模型只能逐个 view 摸现状，轮数先用完。
  *
  * 最后一条是这份 prompt 里最要紧的:**什么都不写是正常结果**。被派了活就想产出,
  * 是记忆变脏的主要来源。
  */
-export function defaultExtractPrompt(memories: readonly AnyMemory[], table: MemoryScopeTable, transcript: string): string {
+export function defaultExtractPrompt(memories: readonly AnyMemory[], table: MemoryScopeTable, transcript: string, stored: string): string {
   const layers = table.entries.map((e) => `- ${e.def.name}/ — ${e.def.describe}`).join("\n");
   const modules = memories
     .map((m) => {
@@ -42,17 +46,19 @@ export function defaultExtractPrompt(memories: readonly AnyMemory[], table: Memo
   return [
     `${EXTRACT_PROMPT_OPENING} Read the conversation below and decide whether anything in it is worth keeping after this session ends.`,
     "Work in this order:\n" +
-      "1. View what is already stored before writing anything — most of what feels new is already there in some form.\n" +
+      "1. Check what is already stored — it is listed under \"Stored now\" below (resident modules in full, indexed modules by their index). Most of what feels new is already there in some form.\n" +
       "2. Pick out only what the module descriptions below say is worth keeping.\n" +
-      "3. Write it where it belongs, then stop.",
+      "3. Write it where it belongs, then stop. View a file only when you are about to change it: overwriting, inserting into or deleting a file you have not viewed is refused.",
     "What is worth keeping — and what to leave out — is set by each module's description below. That is the only standard; follow it.",
     "Writing:\n" +
       "- Every file in an indexed module gets a one-line description. That line is all a future session sees when deciding whether to open it — write it to be found by what it is about.\n" +
+      "- Each indexed module's INDEX.md is rebuilt by the system after every write — never write it yourself.\n" +
       "- Merge into an existing entry instead of adding a near-duplicate.\n" +
       "- Absolute dates, never \"yesterday\".\n" +
       "- Credentials, tokens, keys — never, in any module.",
     `Layers — the first path segment picks who will see an entry, widest first:\n${layers}\nPick the widest layer the fact is actually true for.`,
     `Modules:\n${modules}`,
+    `Stored now:\n${stored === "" ? "(nothing stored yet)" : stored}`,
     "Writing nothing is a normal outcome. Most replies produce no memory. Do not invent something to record.",
     `--- conversation ---\n${transcript}`,
   ].join("\n\n");

@@ -15,9 +15,11 @@
 import type { AgentToolResult, ModelTool, ToolExecutionContext } from "../tools/types.ts";
 import {
   memoryCreate, memoryDelete, memoryInsert, memoryRename, memoryStrReplace, memoryView,
-  type AgentMemories, type MemoryReads,
+  type AgentMemories, type MemoryCaller,
 } from "./harness.ts";
 import type { MemoryScope } from "./scope.ts";
+import type { CapabilityFactSink } from "../observability/fact-sink.ts";
+import type { MemoryFact } from "./observe.ts";
 
 export const MEMORY_TOOL_NAME = "memory";
 
@@ -81,8 +83,8 @@ export type MemoryCommandHandler = (
   params: MemoryToolParams,
   memory: AgentMemories,
   ctx: ToolExecutionContext,
-  /** 这把工具的「读到过的版本」账：换掉 view 的要往里记，换掉写动词的要把它传给 harness 方法。 */
-  reads: MemoryReads,
+  /** 这把工具的调用方状态（读到过的版本、写入事实往哪发）：换掉 view 的要往 `reads` 里记，换掉写动词的要把它原样传给 harness 方法。 */
+  caller: MemoryCaller,
 ) => Promise<AgentToolResult>;
 
 export type CreateMemoryToolOptions = {
@@ -95,6 +97,11 @@ export type CreateMemoryToolOptions = {
    * 不给 = 三层都能碰(前台那份工具)。检查在 `execute` 的最前面,复写了 handlers 也照样管。
    */
   scope?: MemoryScope;
+  /**
+   * 这把工具的写入事实往哪发（2026-09-14）。不给 = 记忆面上挂的那个（Agent 此刻开着的 run）；
+   * 提取 / 整理的子循环给自己的——事实挂在那个循环实例的 run 上。
+   */
+  observe?: CapabilityFactSink<MemoryFact>;
 };
 
 const DEFAULT_DESCRIPTION =
@@ -126,7 +133,7 @@ const PARAMETERS: Record<string, unknown> = {
 };
 
 export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolOptions): ModelTool<MemoryToolParams> {
-  const reads: MemoryReads = new Map();
+  const caller: MemoryCaller = { reads: new Map(), ...(opts?.observe === undefined ? {} : { observe: opts.observe }) };
   return {
     kind: "model",
     name: MEMORY_TOOL_NAME,
@@ -163,23 +170,23 @@ export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolO
         }
       }
       const custom = opts?.handlers?.[params.command];
-      if (custom !== undefined) return custom(params, memory, ctx, reads);
+      if (custom !== undefined) return custom(params, memory, ctx, caller);
       switch (params.command) {
         case "view":
-          return memoryView(memory, params.path, reads);
+          return memoryView(memory, params.path, caller);
         case "create":
           if (params.file_text === undefined) return { content: "create needs file_text", isError: true, metadata: null };
-          return memoryCreate(memory, params.path, params.file_text, reads);
+          return memoryCreate(memory, params.path, params.file_text, caller);
         case "str_replace":
-          return memoryStrReplace(memory, params.path, params.old_str ?? "", params.new_str ?? "", reads);
+          return memoryStrReplace(memory, params.path, params.old_str ?? "", params.new_str ?? "", caller);
         case "insert":
           if (params.insert_text === undefined) return { content: "insert needs insert_text", isError: true, metadata: null };
-          return memoryInsert(memory, params.path, params.insert_line ?? -1, params.insert_text, reads);
+          return memoryInsert(memory, params.path, params.insert_line ?? -1, params.insert_text, caller);
         case "delete":
-          return memoryDelete(memory, params.path, reads);
+          return memoryDelete(memory, params.path, caller);
         case "rename":
           if (params.new_path === undefined) return { content: "rename needs new_path", isError: true, metadata: null };
-          return memoryRename(memory, params.path, params.new_path, reads);
+          return memoryRename(memory, params.path, params.new_path, caller);
       }
     },
   };

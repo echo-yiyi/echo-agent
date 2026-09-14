@@ -12,7 +12,8 @@ import { ABORT_REASON, AbortReason, errText, type AgentError } from "./errors.ts
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
-import { memoryFactDescriptor } from "./memory/observe.ts";
+import { memoryFactDescriptor, type MemoryFact } from "./memory/observe.ts";
+import type { CapabilityFactSink } from "./observability/fact-sink.ts";
 import { memoryHostOf } from "./memory/host-wiring.ts";
 import { MemoryChannel } from "./memory/channel.ts";
 import { MEMORY_TOOL_NAME } from "./memory/tool.ts";
@@ -60,6 +61,7 @@ import { DurableDeliveryDeferred, type DurableDeliveryRequest, type DurableDeliv
 import {
   claimDreamPass,
   disposeMemory,
+  memoryManifest,
   dreamScopes,
   dreamTask,
   markDreamed,
@@ -2837,12 +2839,27 @@ export class Agent {
   ): Promise<void> {
     if (transcript === "" || !this.memoryWorkAllowed || signal.aborted) return;
     const table = memoryScopeTableOf(memory);
-    const prompt = defaultExtractPrompt(listMemories(memory), table, transcript);
+    // 此刻存着什么由 prompt 自带：子循环没有 system prompt，不给它就只能一个个 view 去摸，轮数先用完（2026-09-14 实测）
+    const prompt = defaultExtractPrompt(listMemories(memory), table, transcript, await memoryManifest(memory));
+    const runId = `extract-${crypto.randomUUID()}`;
+    const observe = this.memoryFactsFor(runId);
+    const tool = memoryTool(memory, observe === undefined ? undefined : { observe });
+    // 数这次写成了几条：没跑完时诊断要说清已经落盘几条——那几条是真的写进去了，不是失败
+    let written = 0;
+    const counted: typeof tool = {
+      ...tool,
+      async execute(params, ctx) {
+        const r = await tool.execute(params, ctx);
+        if (params.command !== "view" && r.isError !== true) written += 1;
+        return r;
+      },
+    };
     const result = await this.runSubagent(
       {
         prompt,
         systemPrompt: null,
-        tools: [memoryTool(memory)],
+        tools: [counted],
+        runId,
         source: { kind: "extract", parentRunId: scope.runId },
         maxIterations: DEFAULT_EXTRACT_MAX_TURNS,
         turnInjections: "none",
@@ -2854,7 +2871,10 @@ export class Agent {
     // `runAgentLoop` 对失败不抛，结果在 outcome 里：没跑完（provider 错、轮数用完）要报出来，与通道兜住的抛错同一个 code。
     // aborted 不报——那是 stop() / 丢锁在收摊。
     if (result.outcome.kind === "error") {
-      this.reportDiagnostic({ code: "memory_extract_failed", message: `记忆提取没跑完（${result.outcome.error.code}）：${result.outcome.error.message}` });
+      this.reportDiagnostic({
+        code: "memory_extract_failed",
+        message: `记忆提取没跑完（${result.outcome.error.code}）：${result.outcome.error.message}；${written > 0 ? `此前已写入 ${written} 条` : "没有写入"}`,
+      });
     }
   }
 
@@ -2879,11 +2899,13 @@ export class Agent {
           // 拿到之后再判一次：刚放手的那个 session 可能已经整理完、把计数清零了
           if (!(await shouldDream(memory, layer))) continue;
           // 门过了才上锁：dreamTask 有副作用（写 startedAt），不能放在判断之前
-          const task = await dreamTask(memory, layer);
+          const runId = `dream-${crypto.randomUUID()}`;
+          const observe = this.memoryFactsFor(runId);
+          const task = await dreamTask(memory, layer, observe === undefined ? undefined : { observe });
           // 只给这一层的那把记忆工具。不是「过滤掉危险的」，是**只给这一件**，而且够不到别的层。
           // **事件不外发**：整理的中间过程不该混进对外事件流。
           const result = await this.runSubagent(
-            { prompt: task.prompt, systemPrompt: null, tools: task.tools, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "inherit" },
+            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "inherit" },
             scope,
             signal,
             async () => {},
@@ -2923,6 +2945,8 @@ export class Agent {
       systemPrompt: string | null;
       tools: readonly AgentTool[];
       source: SubloopRunSource;
+      /** 调用方先定好 runId（要让这次循环里的能力事实挂到这个 run 上时）；不给就这里生成。 */
+      runId?: string;
       maxIterations?: number;
       turnInjections: "inherit" | "none";
       seed?: readonly AgentMessage[];
@@ -2931,7 +2955,7 @@ export class Agent {
     signal: AbortSignal,
     emit: Emit,
   ): Promise<LoopResult> {
-    const runId = `${spec.source.kind}-${crypto.randomUUID()}`;
+    const runId = spec.runId ?? `${spec.source.kind}-${crypto.randomUUID()}`;
     const base = this.createLoopConfig(scope);
     const tools = [...spec.tools];
     const rt = this.observationRuntime();
@@ -3578,6 +3602,17 @@ export class Agent {
    * turn 归属跟 gate 里开着的 turnId——loop 产的那一个，与 `projectLoopFact` 里 turn span 的 scope 同一份。**必须返回对象**：
    * 供给返回 undefined 会被 sink 判成「run 归属不可知」而开 gap。
    */
+  /**
+   * 子循环里那把记忆工具的写入事实往哪发：挂在那个循环实例自己的 run 上（2026-09-14）。
+   * 记忆面上挂的 sink 取的是 Agent 此刻开着的 admission run——提取 / 整理跑在它之后或与它并行，那样记出来的 run 是空的或是错的。
+   * 没有观测运行时（低层 `new Agent()`）就不给，工具退回记忆面上的那个。
+   */
+  private memoryFactsFor(runId: string): CapabilityFactSink<MemoryFact> | undefined {
+    const rt = this.observationRuntime();
+    if (rt === undefined) return undefined;
+    return rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID), () => ({ ...this.observationIdentityScope(), runId }));
+  }
+
   private observationScope(): Readonly<Record<string, string>> {
     const runId = this.activeRun !== undefined && this.currentRunId !== null ? this.currentRunId : undefined;
     const turnId = this.intake.activeTurnId;

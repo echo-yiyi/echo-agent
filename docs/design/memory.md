@@ -106,7 +106,7 @@
 
 [`defaultExtractPrompt()`](../../packages/core/src/memory/extract.ts#symbol=defaultExtractPrompt) 把这份会话材料连同作用域与模块说明给隔离子循环，要求先查看已有记忆、避免重复、只保留以后有用的事实，允许什么都不写。
 
-[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract) 当前只给 memory 工具，不继承父的动态注入；上限来自 [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS)。模型绑定仍来自父 scope，**没有单独实现“便宜模型档”选择**；轮数上限也不等于费用或墙钟时间的硬上界。
+[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract) 当前只给 memory 工具，不继承父的动态注入；上限来自 [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS)。子循环拿不到 system prompt，所以此刻存着什么由提取 prompt 自带（[`memoryManifest()`](../../packages/core/src/memory/harness.ts#symbol=memoryManifest)，与前台记忆段同一种呈现：常驻模块全文、indexed 模块给索引），并说明 INDEX.md 由系统重建——不给的话模型只能逐个 view 摸现状，5 轮先用完（2026-09-14 实测）。模型绑定仍来自父 scope，**没有单独实现“便宜模型档”选择**；轮数上限也不等于费用或墙钟时间的硬上界。
 
 提取不通过 admission，不抢前台许可；独立消息数组、不消费前台 steer / followUp，子循环事件不发进主 transcript。但它复用父的循环配置与相关服务，不能笼统宣称与前台完全不共享可变状态。
 
@@ -145,7 +145,7 @@
 
 [`Agent.settleDream()`](../../packages/core/src/agent.ts#symbol=Agent.settleDream) 虽沿用旧名字，实际会同时 abort 并等待提取、Dream 两条通道，接入 stop / 丢锁路径。停发新工作与等待在飞工作结束是两件事；不能以“后台不阻塞前台”推导“退出不必等后台”。
 
-正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。提取没跑完会报诊断 `memory_extract_failed`：通道兜住的抛错，与子循环以 error 收场（provider 出错、轮数用完）是同一个 code；stop / 丢锁造成的 aborted 不报。
+正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。子循环里那把记忆工具带自己的 sink（[`MemoryCaller`](../../packages/core/src/memory/harness.ts#symbol=MemoryCaller)），写入事实挂在那次提取 / 整理自己的 run 上，不借 Agent 此刻开着的 admission run。提取没跑完会报诊断 `memory_extract_failed`，并说明此前已写入几条（那几条已经落盘）：通道兜住的抛错，与子循环以 error 收场（provider 出错、轮数用完）是同一个 code；stop / 丢锁造成的 aborted 不报。
 
 ## 8. 尚未兑现的契约
 

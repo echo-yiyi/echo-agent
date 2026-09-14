@@ -22,7 +22,7 @@ import {
   memoryInsert as insertCas,
   memoryStrReplace as replaceCas,
   memoryView as viewCas,
-  type MemoryReads,
+  type MemoryCaller,
 } from "../src/memory/harness.ts";
 import { createMemoryTool as toolCas } from "../src/memory/tool.ts";
 import { readDreamState as dreamStateCas } from "../src/memory/dream.ts";
@@ -928,7 +928,7 @@ describe("判据跟着模块走", () => {
     expect(system).not.toContain("next month");
     expect(system).not.toContain("repository already states");
     expect(system).toContain("moments you shared");
-    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), "user: hi");
+    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), "user: hi", "");
     expect(extract).not.toContain("next month");
     expect(extract).not.toContain("true only inside this conversation");
     expect(extract).toContain("moments you shared");
@@ -958,8 +958,8 @@ describe("覆写前核对读到的版本", () => {
     const raw = new InMemoryDir();
     await raw.write("note.md", "A B");
     const h = bindCas(raw);
-    const a: MemoryReads = new Map();
-    const b: MemoryReads = new Map();
+    const a: MemoryCaller = { reads: new Map() };
+    const b: MemoryCaller = { reads: new Map() };
     await viewCas(h, "project/note.md", a);
     await viewCas(h, "project/note.md", b);
     expect((await replaceCas(h, "project/note.md", "B", "BB", b)).isError).toBe(false);
@@ -975,7 +975,7 @@ describe("覆写前核对读到的版本", () => {
   test("没看过的已有文件：不许整份覆写、不许按行插、不许删；新建文件不用先看", async () => {
     const raw = new InMemoryDir();
     const h = bindCas(raw);
-    const r: MemoryReads = new Map();
+    const r: MemoryCaller = { reads: new Map() };
     expect((await createCas(h, "project/notes/a.md", "---\ndescription: a\n---\n", r)).isError).toBe(false);
     await raw.write("note.md", "别人写的");
     await raw.write("notes/b.md", "---\ndescription: b\n---\n");
@@ -997,7 +997,7 @@ describe("覆写前核对读到的版本", () => {
     const raw = new InMemoryDir();
     await raw.write("note.md", "旧的");
     const h = bindCas(raw);
-    const r: MemoryReads = new Map();
+    const r: MemoryCaller = { reads: new Map() };
     await viewCas(h, "project/note.md", r);
     await raw.remove("note.md");
     const res = await createCas(h, "project/note.md", "旧的", r);
@@ -1010,7 +1010,7 @@ describe("覆写前核对读到的版本", () => {
     const raw = new InMemoryDir();
     await raw.write("note.md", "A B");
     const h = bindCas(raw);
-    const r: MemoryReads = new Map();
+    const r: MemoryCaller = { reads: new Map() };
     await viewCas(h, "project/note.md", r);
     await raw.write("note.md", "A BB"); // 别人那一笔
     expect((await replaceCas(h, "project/note.md", "A", "AA", r)).isError).toBe(false);

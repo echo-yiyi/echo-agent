@@ -269,6 +269,37 @@ describe("send → getRun → render（completed）", () => {
     expect(last.kind === "found" && last.observation.runId).toBe(user.runId);
   });
 
+  test("记忆提取是自己的 run，它写的记忆事实挂在这个 run 上——不是空 run，也不是父 run（2026-09-14 实测此前 run_id 为空）", async () => {
+    const stateDir = join(await tmp(), "state");
+    const echo = await echoWith({
+      stateDir,
+      withMemory: true,
+      turns: [
+        textTurn("好，记住了"),
+        toolTurn("m1", "memory", { command: "create", path: "user/memory/obs-pref.md", file_text: "---\ndescription: 观测判据用的一条\n---\n\n内容" }),
+        textTurn("记下了"),
+      ],
+    });
+    const user = await echo.send("以后回答简短一点");
+    expect(user.outcome.kind).toBe("completed");
+
+    let extractRunId: string | undefined;
+    for (let i = 0; i < 150 && extractRunId === undefined; i++) {
+      const h = (await echo.observations.listRuns({ limit: 10 })).items.find((x) => x.source.kind === "extract" && x.status !== "running");
+      extractRunId = h?.runId;
+      if (extractRunId === undefined) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(extractRunId, "提取 run 没有封口").toBeDefined();
+    const lookup = await echo.observations.getRun(extractRunId!);
+    if (lookup.kind !== "found") throw new Error("提取 run 没读回来");
+    const mutation = lookup.observation.records.find((r) => r.name === "memory.mutation.committed");
+    expect(mutation, "提取写的记忆事实不在提取 run 里").toBeDefined();
+    expect(mutation?.scope.runId).toBe(extractRunId);
+    const parent = await echo.observations.getRun(user.runId);
+    if (parent.kind !== "found") throw new Error("父 run 没读回来");
+    expect(parent.observation.records.some((r) => r.name.startsWith("memory.mutation"))).toBe(false);
+  });
+
   test("后台子 agent 也是自己的 run：background 为 true，父 run 封口之后照样封口", async () => {
     const stateDir = join(await tmp(), "state");
     const echo = await echoWith({

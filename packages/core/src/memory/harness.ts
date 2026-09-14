@@ -122,6 +122,16 @@ export type AgentMemories = MemoryDeps & {
  */
 export type MemoryReads = Map<string, string>;
 
+/**
+ * 一把记忆工具自己的那份调用方状态（2026-09-14 由 `MemoryReads` 扩成）：读到过的版本，以及这把工具的写入事实往哪发。
+ * 子循环里那把工具带自己的 `observe`——写入事实挂在那个循环实例的 run 上；记忆面上挂的那个取的是 Agent 此刻开着的
+ * admission run，提取 / 整理跑在它之后或与它并行，记出来的 run 是空的或是错的（2026-09-14 实测）。
+ */
+export type MemoryCaller = {
+  readonly reads: MemoryReads;
+  readonly observe?: CapabilityFactSink<MemoryFact>;
+};
+
 /** `dir` 必给（2026-08-17 起）：能力层不自带落盘默认件，理由见下方 doc comment。评测/单测传 InMemoryDir。 */
 /**
  * **`dir` 必给，本层不自带落盘默认件**（2026-08-17，C12/D16）。
@@ -238,7 +248,7 @@ export function memoryFor(ctx: AgentMemories, path: string): AnyMemory | undefin
    全部收相对路径(也认 /memories/ 前缀),内部统一 jail;绝不 throw,失败 = error 结果。 */
 
 /** 看目录("" = 全部模块概览,目录以 / 结尾)或文件(带行号)。 */
-export async function memoryView(ctx: AgentMemories, rawPath: string, reads?: MemoryReads): Promise<AgentToolResult> {
+export async function memoryView(ctx: AgentMemories, rawPath: string, caller?: MemoryCaller): Promise<AgentToolResult> {
   try {
     const path = normalizeMemoryPath(rawPath);
     if (path === "" || path.endsWith("/")) {
@@ -263,7 +273,7 @@ export async function memoryView(ctx: AgentMemories, rawPath: string, reads?: Me
     }
     const content = await ctx.dir.read(path);
     if (content === null) return toolError(`'${path}' does not exist`);
-    reads?.set(path, content);
+    caller?.reads.set(path, content);
     return toolOk(content.split("\n").map((l, i) => `${i + 1}\t${l}`).join("\n"));
   } catch (e) {
     return toolError(errText(e));
@@ -274,26 +284,26 @@ export async function memoryView(ctx: AgentMemories, rawPath: string, reads?: Me
  * 建/整文件覆写。上层自己的写入工具(remember 之类)最终都该落到这里。
  * 给了 `reads`：覆写已有文件前核对它读到的就是现在这一版（见 `MemoryReads`）；新建不用先看。
  */
-export async function memoryCreate(ctx: AgentMemories, rawPath: string, text: string, reads?: MemoryReads): Promise<AgentToolResult> {
+export async function memoryCreate(ctx: AgentMemories, rawPath: string, text: string, caller?: MemoryCaller): Promise<AgentToolResult> {
   return writeMemory(
     ctx,
     "create",
     rawPath,
     async (path) => {
       const current = await ctx.dir.read(path);
-      const unread = checkRead(reads, path, current);
+      const unread = checkRead(caller?.reads, path, current);
       if (unread !== null) return unread;
       return current === null ? { ok: true, content: text } : { ok: true, content: text, basedOn: current };
     },
     (path, n) => `Wrote ${path} (${n} characters)`,
-    reads,
+    caller,
   );
 }
 
 /** 把唯一出现的 oldStr 换成 newStr。零命中/多义都拒(为 LLM 设计的寻址协议)。 */
-export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldStr: string, newStr: string, reads?: MemoryReads): Promise<AgentToolResult> {
+export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldStr: string, newStr: string, caller?: MemoryCaller): Promise<AgentToolResult> {
   if (oldStr === "") {
-    return finishMemoryMutation(ctx, { operation: "replace", path: pathForFact(rawPath), at: Date.now() }, rejected("empty_old_str", "str_replace needs old_str"));
+    return finishMemoryMutation(ctx, caller, { operation: "replace", path: pathForFact(rawPath), at: Date.now() }, rejected("empty_old_str", "str_replace needs old_str"));
   }
   return writeMemory(
     ctx,
@@ -308,14 +318,14 @@ export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldS
       return { ok: true, content: content.replace(oldStr, newStr), basedOn: content };
     },
     (path, n) => `Replaced one occurrence in ${path} (now ${n} characters)`,
-    reads,
+    caller,
   );
 }
 
 /** 在第 line 行之后插入(0 = 文件开头)。 */
-export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: number, text: string, reads?: MemoryReads): Promise<AgentToolResult> {
+export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: number, text: string, caller?: MemoryCaller): Promise<AgentToolResult> {
   if (!Number.isInteger(line) || line < 0) {
-    return finishMemoryMutation(ctx, { operation: "insert", path: pathForFact(rawPath), at: Date.now() }, rejected("bad_line", "insert_line must be an integer ≥ 0 (0 = start of file)"));
+    return finishMemoryMutation(ctx, caller, { operation: "insert", path: pathForFact(rawPath), at: Date.now() }, rejected("bad_line", "insert_line must be an integer ≥ 0 (0 = start of file)"));
   }
   return writeMemory(
     ctx,
@@ -325,7 +335,7 @@ export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: nu
       const content = await ctx.dir.read(path);
       if (content === null) return reject("not_found", `'${path}' does not exist (use create for a new file)`);
       // 按行号插：文件在你看过之后变了，行号就对不上了
-      const unread = checkRead(reads, path, content);
+      const unread = checkRead(caller?.reads, path, content);
       if (unread !== null) return unread;
       const lines = content.split("\n");
       if (line > lines.length) return reject("line_out_of_range", `insert_line out of range: the file has only ${lines.length} lines`);
@@ -333,51 +343,51 @@ export async function memoryInsert(ctx: AgentMemories, rawPath: string, line: nu
       return { ok: true, content: lines.join("\n"), basedOn: content };
     },
     (path, n) => `Inserted after line ${line} of ${path} (now ${n} characters)`,
-    reads,
+    caller,
   );
 }
 
-export async function memoryDelete(ctx: AgentMemories, rawPath: string, reads?: MemoryReads): Promise<AgentToolResult> {
+export async function memoryDelete(ctx: AgentMemories, rawPath: string, caller?: MemoryCaller): Promise<AgentToolResult> {
   const at = Date.now();
   const norm = normalizeOrReject(rawPath);
-  if (!norm.ok) return finishMemoryMutation(ctx, { operation: "delete", path: pathForFact(rawPath), at }, norm.verdict);
+  if (!norm.ok) return finishMemoryMutation(ctx, caller, { operation: "delete", path: pathForFact(rawPath), at }, norm.verdict);
   const path = norm.path;
   const frame: MutationFrame = { operation: "delete", path, owner: memoryFor(ctx, path), at };
-  if (path === "" || path.endsWith("/")) return finishMemoryMutation(ctx, frame, rejected("not_a_file", "delete needs a file path, not a directory"));
+  if (path === "" || path.endsWith("/")) return finishMemoryMutation(ctx, caller, frame, rejected("not_a_file", "delete needs a file path, not a directory"));
   const guard = guardIndexFile(path);
-  if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
+  if (guard !== null) return finishMemoryMutation(ctx, caller, frame, rejected("index_file_protected", guard));
   // 与 writeMemory 同一道闸（review 2026-09-07）：此前 delete 不查模块归属，模型能删掉自己建不出来的文件。
   // **放在锁外**：它是纯判断，注定被拒的请求不必先去排一次队。
   if (frame.owner === undefined) {
-    return finishMemoryMutation(ctx, frame, rejected("outside_regions", `Path '${path}' is not inside any memory module. Modules: ${describeModules(ctx)}`));
+    return finishMemoryMutation(ctx, caller, frame, rejected("outside_regions", `Path '${path}' is not inside any memory module. Modules: ${describeModules(ctx)}`));
   }
   const deleteDenied = opsGate(frame.owner, "delete");
-  if (deleteDenied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", deleteDenied));
+  if (deleteDenied !== null) return finishMemoryMutation(ctx, caller, frame, rejected("op_not_supported", deleteDenied));
   // 删也是「读改写」的一种（存在性检查 + 删 + 重建索引），进与 writeMemory 同一把提交锁
-  return commitUnderLock(ctx, frame.owner, path, frame, async () => {
+  return commitUnderLock(ctx, caller, frame.owner, path, frame, async () => {
     // 删掉的是你看过的那一版吗：看过之后别人往里写了一笔，删掉就把那一笔一起删了
-    if (reads !== undefined) {
+    if (caller !== undefined) {
       let current: string | null;
       try {
         current = await ctx.dir.read(path);
       } catch (e) {
-        return finishMemoryMutation(ctx, frame, failed("read", errText(e)));
+        return finishMemoryMutation(ctx, caller, frame, failed("read", errText(e)));
       }
-      if (current === null) return finishMemoryMutation(ctx, frame, rejected("not_found", `'${path}' does not exist`));
-      const unread = checkRead(reads, path, current);
-      if (unread !== null && !unread.ok) return finishMemoryMutation(ctx, frame, rejected(unread.reasonCode, unread.message));
+      if (current === null) return finishMemoryMutation(ctx, caller, frame, rejected("not_found", `'${path}' does not exist`));
+      const unread = checkRead(caller?.reads, path, current);
+      if (unread !== null && !unread.ok) return finishMemoryMutation(ctx, caller, frame, rejected(unread.reasonCode, unread.message));
     }
     let removed: boolean;
     try {
       removed = await ctx.dir.remove(path);
     } catch (e) {
-      return finishMemoryMutation(ctx, frame, failed("remove", errText(e)));
+      return finishMemoryMutation(ctx, caller, frame, failed("remove", errText(e)));
     }
-    if (!removed) return finishMemoryMutation(ctx, frame, rejected("not_found", `'${path}' does not exist`));
-    reads?.delete(path);
+    if (!removed) return finishMemoryMutation(ctx, caller, frame, rejected("not_found", `'${path}' does not exist`));
+    caller?.reads.delete(path);
     await bumpWriteCounter(ctx, path);
     const indexOutcome = await refreshIndex(ctx, frame.owner, path);
-    return finishMemoryMutation(ctx, frame, committed(undefined, indexOutcome, `Deleted ${path}`));
+    return finishMemoryMutation(ctx, caller, frame, committed(undefined, indexOutcome, `Deleted ${path}`));
   });
 }
 
@@ -387,20 +397,20 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string, reads?: 
  * **不复用公开的 `memoryCreate()`**：那会在 rename 之外再发一条 create 事实（「rename 内部不得双发」）。
  * 目标写成功、源删失败是 **partial**（带 stage），不能谎报 committed，也不能像从前那样报成整体失败。
  */
-export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: string, reads?: MemoryReads): Promise<AgentToolResult> {
+export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: string, caller?: MemoryCaller): Promise<AgentToolResult> {
   const at = Date.now();
   const normFrom = normalizeOrReject(rawFrom);
-  if (!normFrom.ok) return finishMemoryMutation(ctx, { operation: "rename", path: pathForFact(rawFrom), toPath: pathForFact(rawTo), at }, normFrom.verdict);
+  if (!normFrom.ok) return finishMemoryMutation(ctx, caller, { operation: "rename", path: pathForFact(rawFrom), toPath: pathForFact(rawTo), at }, normFrom.verdict);
   const normTo = normalizeOrReject(rawTo);
-  if (!normTo.ok) return finishMemoryMutation(ctx, { operation: "rename", path: normFrom.path, toPath: pathForFact(rawTo), at }, normTo.verdict);
+  if (!normTo.ok) return finishMemoryMutation(ctx, caller, { operation: "rename", path: normFrom.path, toPath: pathForFact(rawTo), at }, normTo.verdict);
   const from = normFrom.path;
   const to = normTo.path;
   const fromOwner = memoryFor(ctx, from);
   const frame: MutationFrame = { operation: "rename", path: from, toPath: to, owner: fromOwner, at };
-  if (to === "" || to.endsWith("/")) return finishMemoryMutation(ctx, frame, rejected("not_a_file", "new_path needs a file path"));
+  if (to === "" || to.endsWith("/")) return finishMemoryMutation(ctx, caller, frame, rejected("not_a_file", "new_path needs a file path"));
   const toOwner = memoryFor(ctx, to);
   if (fromOwner === undefined || toOwner === undefined || fromOwner.name !== toOwner.name) {
-    return finishMemoryMutation(ctx, frame, rejected("cross_region", `rename must stay within one region (${String(fromOwner?.name)} → ${String(toOwner?.name)})`));
+    return finishMemoryMutation(ctx, caller, frame, rejected("cross_region", `rename must stay within one region (${String(fromOwner?.name)} → ${String(toOwner?.name)})`));
   }
   // 换层 = 换「谁看得见」,也换预算域:同样不许靠 rename 静默发生——读出来在目标层重新 create
   const fromScope = splitScopePath(from)?.scope;
@@ -408,54 +418,55 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
   if (fromScope !== toScope) {
     return finishMemoryMutation(
       ctx,
+      caller,
       frame,
       rejected("cross_scope", `rename must stay within one scope (${String(fromScope)} → ${String(toScope)}); create it in the other layer instead`),
     );
   }
   const renameDenied = opsGate(fromOwner, "rename");
-  if (renameDenied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", renameDenied));
+  if (renameDenied !== null) return finishMemoryMutation(ctx, caller, frame, rejected("op_not_supported", renameDenied));
   const guard = guardIndexFile(from) ?? guardIndexFile(to);
-  if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
+  if (guard !== null) return finishMemoryMutation(ctx, caller, frame, rejected("index_file_protected", guard));
   // rename 只在同一层同一个模块内（跨层跨模块在前面已拒），所以一把「层 × 模块」的提交锁就罩住了源与目标
-  return commitUnderLock(ctx, fromOwner, to, frame, async () => {
+  return commitUnderLock(ctx, caller, fromOwner, to, frame, async () => {
   let content: string | null;
   let existing: string | null;
   try {
     content = await ctx.dir.read(from);
     existing = content === null ? null : await ctx.dir.read(to);
   } catch (e) {
-    return finishMemoryMutation(ctx, frame, failed("read", errText(e)));
+    return finishMemoryMutation(ctx, caller, frame, failed("read", errText(e)));
   }
-  if (content === null) return finishMemoryMutation(ctx, frame, rejected("not_found", `'${from}' does not exist`));
-  if (existing !== null) return finishMemoryMutation(ctx, frame, rejected("target_exists", `Target '${to}' already exists`));
+  if (content === null) return finishMemoryMutation(ctx, caller, frame, rejected("not_found", `'${from}' does not exist`));
+  if (existing !== null) return finishMemoryMutation(ctx, caller, frame, rejected("target_exists", `Target '${to}' already exists`));
   let verdict: Awaited<ReturnType<CheckWrite>>;
   try {
     verdict = await ctx.checkFn(fromOwner, ctx.dir, to, content);
   } catch (e) {
-    return finishMemoryMutation(ctx, frame, failed("check", errText(e)));
+    return finishMemoryMutation(ctx, caller, frame, failed("check", errText(e)));
   }
-  if (!verdict.ok) return finishMemoryMutation(ctx, frame, rejected("budget_exceeded", verdict.reason));
+  if (!verdict.ok) return finishMemoryMutation(ctx, caller, frame, rejected("budget_exceeded", verdict.reason));
   try {
     await ctx.dir.write(to, content);
   } catch (e) {
-    return finishMemoryMutation(ctx, frame, failed("write", errText(e)));
+    return finishMemoryMutation(ctx, caller, frame, failed("write", errText(e)));
   }
   await bumpWriteCounter(ctx, to);
   try {
     await ctx.dir.remove(from);
   } catch (e) {
-    if (reads?.get(from) === content) reads.set(to, content);
+    if (caller?.reads.get(from) === content) caller.reads.set(to, content);
     const indexOutcome = await refreshIndex(ctx, fromOwner, to);
-    return finishMemoryMutation(ctx, frame, partial("remove-source", indexOutcome, `Renamed ${from} to ${to} but failed to remove the source: ${errText(e)}`));
+    return finishMemoryMutation(ctx, caller, frame, partial("remove-source", indexOutcome, `Renamed ${from} to ${to} but failed to remove the source: ${errText(e)}`));
   }
   // 账跟着文件搬：看过的是哪一版，搬过去还是那一版；没看过（或看的是旧版）就两头都不记
-  if (reads !== undefined) {
-    const knew = reads.get(from) === content;
-    reads.delete(from);
-    if (knew) reads.set(to, content);
+  if (caller !== undefined) {
+    const knew = caller.reads.get(from) === content;
+    caller.reads.delete(from);
+    if (knew) caller.reads.set(to, content);
   }
   const indexOutcome = await refreshIndex(ctx, fromOwner, to);
-  return finishMemoryMutation(ctx, frame, committed(content.length, indexOutcome, `Renamed ${from} to ${to}`));
+  return finishMemoryMutation(ctx, caller, frame, committed(content.length, indexOutcome, `Renamed ${from} to ${to}`));
   });
 }
 
@@ -490,8 +501,22 @@ export async function composeMemoryRegion(ctx: AgentMemories, memory: AnyMemory)
 }
 
 /** 缺省 memory 工具(六动词薄壳,逐个调上面的方法)。Agent 构造时注册(source "memory")。 */
-export function memoryTool(ctx: AgentMemories): ModelTool<MemoryToolParams> {
-  return createMemoryTool(ctx, ctx.toolOpts);
+export function memoryTool(ctx: AgentMemories, opts?: { observe?: CapabilityFactSink<MemoryFact> }): ModelTool<MemoryToolParams> {
+  return createMemoryTool(ctx, opts?.observe === undefined ? ctx.toolOpts : { ...ctx.toolOpts, observe: opts.observe });
+}
+
+/**
+ * 此刻存着什么：每个模块每一层一段，与前台记忆段同一种呈现（常驻模块全文，indexed 模块是它的索引）。
+ * 提取子循环没有 system prompt、拿不到前台那段——不给它的话，它只能一个个 view 去摸，5 轮不够（2026-09-14 实测：
+ * 前三轮全在 view，第四轮才写，第五轮去写 INDEX.md，轮数用完）。
+ */
+export async function memoryManifest(ctx: AgentMemories): Promise<string> {
+  const blocks: string[] = [];
+  for (const m of listMemories(ctx)) {
+    const block = await composeMemoryRegion(ctx, m);
+    if (block !== "") blocks.push(block);
+  }
+  return blocks.join("\n\n");
 }
 
 /* ───────────── Dream:判断归 harness,触发与执行归 core(Agent 的独立通道) ───────────── */
@@ -653,12 +678,16 @@ export async function shouldDream(ctx: AgentMemories, scope: string): Promise<bo
  * 工具是**限定在这一层**的那一把(不是前台那把):别的层不在这次整理的范围里。
  * 限定在工具上而不是只写进 prompt 里——后者是纪律,前者才是门。
  */
-export async function dreamTask(ctx: AgentMemories, scope: string): Promise<{ prompt: string; tools: ModelTool[] }> {
+export async function dreamTask(
+  ctx: AgentMemories,
+  scope: string,
+  opts?: { observe?: CapabilityFactSink<MemoryFact> },
+): Promise<{ prompt: string; tools: ModelTool[] }> {
   // 上锁也走串行链:它是同一份状态的读改写,和计数并发时会互相盖掉
   await updateDreamState(ctx, scope, (s) => ({ ...s, startedAt: Date.now() }));
   return {
     prompt: defaultDreamPrompt(listMemories(ctx), ctx.binding.table(), scope),
-    tools: [dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, scope }))],
+    tools: [dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, scope, ...(opts?.observe === undefined ? {} : { observe: opts.observe }) }))],
   };
 }
 
@@ -817,7 +846,7 @@ function pathForFact(raw: string): string {
  * **唯一 emission point**：五种 mutation 在 semantic reject、primary storage settle、index refresh outcome
  * 都已知之后到这里，恰发一次事实，再投影成 `AgentToolResult`。sink 按契约永不抛，这里再兜一层。
  */
-function finishMemoryMutation(ctx: AgentMemories, frame: MutationFrame, verdict: MutationVerdict): AgentToolResult {
+function finishMemoryMutation(ctx: AgentMemories, caller: MemoryCaller | undefined, frame: MutationFrame, verdict: MutationVerdict): AgentToolResult {
   const fact: MemoryFact = {
     kind: "mutation",
     operation: frame.operation,
@@ -833,7 +862,8 @@ function finishMemoryMutation(ctx: AgentMemories, frame: MutationFrame, verdict:
     occurredAt: frame.at,
   };
   try {
-    ctx.observe?.offer(fact);
+    // 这把工具自己带了 sink（子循环里那把）就发到它那里——事实挂在那个循环实例的 run 上
+    (caller?.observe ?? ctx.observe)?.offer(fact);
   } catch {
     // sink 契约是 never-throw；真抛了也不能改变 mutation 的结果
   }
@@ -863,59 +893,59 @@ async function writeMemory(
   rawPath: string,
   prepare: (path: string) => Promise<Prepared>,
   okText: (path: string, chars: number) => string,
-  reads?: MemoryReads,
+  caller?: MemoryCaller,
 ): Promise<AgentToolResult> {
   const at = Date.now();
   const norm = normalizeOrReject(rawPath);
-  if (!norm.ok) return finishMemoryMutation(ctx, { operation, path: pathForFact(rawPath), at }, norm.verdict);
+  if (!norm.ok) return finishMemoryMutation(ctx, caller, { operation, path: pathForFact(rawPath), at }, norm.verdict);
   const path = norm.path;
   const frame: MutationFrame = { operation, path, at };
-  if (path === "" || path.endsWith("/")) return finishMemoryMutation(ctx, frame, rejected("not_a_file", "a file path is required, not a directory"));
+  if (path === "" || path.endsWith("/")) return finishMemoryMutation(ctx, caller, frame, rejected("not_a_file", "a file path is required, not a directory"));
   const guard = guardIndexFile(path);
-  if (guard !== null) return finishMemoryMutation(ctx, frame, rejected("index_file_protected", guard));
+  if (guard !== null) return finishMemoryMutation(ctx, caller, frame, rejected("index_file_protected", guard));
   const owner = memoryFor(ctx, path);
   if (owner === undefined) {
-    return finishMemoryMutation(ctx, frame, rejected("outside_regions", `Path '${path}' is not inside any memory module. Modules: ${describeModules(ctx)}`));
+    return finishMemoryMutation(ctx, caller, frame, rejected("outside_regions", `Path '${path}' is not inside any memory module. Modules: ${describeModules(ctx)}`));
   }
   frame.owner = owner;
   const command = OPERATION_COMMAND[operation as keyof typeof OPERATION_COMMAND];
   const denied = command === undefined ? null : opsGate(owner, command);
-  if (denied !== null) return finishMemoryMutation(ctx, frame, rejected("op_not_supported", denied));
+  if (denied !== null) return finishMemoryMutation(ctx, caller, frame, rejected("op_not_supported", denied));
   // **「读—改—写」整段进提交锁**（层 × 模块，跨实例跨进程都互斥，见 `commitUnderLock`）。
   // `assertFresh` 留着挡不守这套协议的写者（人手改文件）。
-  return commitUnderLock(ctx, owner, path, frame, async () => {
+  return commitUnderLock(ctx, caller, owner, path, frame, async () => {
     let prepared: Prepared;
     try {
       prepared = await prepare(path);
     } catch (e) {
-      return finishMemoryMutation(ctx, frame, failed("read", errText(e)));
+      return finishMemoryMutation(ctx, caller, frame, failed("read", errText(e)));
     }
-    if (!prepared.ok) return finishMemoryMutation(ctx, frame, rejected(prepared.reasonCode, prepared.message));
+    if (!prepared.ok) return finishMemoryMutation(ctx, caller, frame, rejected(prepared.reasonCode, prepared.message));
     let verdict: Awaited<ReturnType<CheckWrite>>;
     try {
       verdict = await ctx.checkFn(owner, ctx.dir, path, prepared.content);
     } catch (e) {
-      return finishMemoryMutation(ctx, frame, failed("check", errText(e)));
+      return finishMemoryMutation(ctx, caller, frame, failed("check", errText(e)));
     }
-    if (!verdict.ok) return finishMemoryMutation(ctx, frame, rejected("budget_exceeded", verdict.reason));
+    if (!verdict.ok) return finishMemoryMutation(ctx, caller, frame, rejected("budget_exceeded", verdict.reason));
     // 别的进程在这几毫秒里改过同一个文件 → **拒绝而不是覆盖**:无声吃掉别人一条记忆
     // 是查不出来的丢失,让模型重看一次再改便宜得多。
     let fresh: Awaited<ReturnType<typeof assertFresh>>;
     try {
       fresh = await assertFresh(ctx.dir, path, prepared.basedOn);
     } catch (e) {
-      return finishMemoryMutation(ctx, frame, failed("read", errText(e)));
+      return finishMemoryMutation(ctx, caller, frame, failed("read", errText(e)));
     }
-    if (!fresh.fresh) return finishMemoryMutation(ctx, frame, rejected("stale_read", fresh.reason));
+    if (!fresh.fresh) return finishMemoryMutation(ctx, caller, frame, rejected("stale_read", fresh.reason));
     try {
       await ctx.dir.write(path, prepared.content);
     } catch (e) {
-      return finishMemoryMutation(ctx, frame, failed("write", errText(e)));
+      return finishMemoryMutation(ctx, caller, frame, failed("write", errText(e)));
     }
-    noteWrite(reads, path, prepared.basedOn ?? null, prepared.content);
+    noteWrite(caller?.reads, path, prepared.basedOn ?? null, prepared.content);
     await bumpWriteCounter(ctx, path);
     const indexOutcome = await refreshIndex(ctx, owner, path);
-    return finishMemoryMutation(ctx, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length)));
+    return finishMemoryMutation(ctx, caller, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length)));
   });
 }
 
@@ -944,6 +974,7 @@ const OPERATION_COMMAND: Readonly<Record<"create" | "replace" | "insert", Memory
  */
 async function commitUnderLock(
   ctx: AgentMemories,
+  caller: MemoryCaller | undefined,
   owner: AnyMemory,
   path: string,
   frame: MutationFrame,
@@ -958,6 +989,7 @@ async function commitUnderLock(
     if (!(e instanceof StorageLockBusy)) throw e;
     return finishMemoryMutation(
       ctx,
+      caller,
       frame,
       rejected(
         "busy",

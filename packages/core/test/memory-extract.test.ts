@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { Agent } from "../src/agent.ts";
-import { bindMemoryScopes, createAgentMemories, type AgentMemories } from "../src/memory/harness.ts";
+import { bindMemoryScopes, createAgentMemories, memoryCreate, type AgentMemories } from "../src/memory/harness.ts";
 import { memoryScopeTable, type MemoryScopeDef } from "../src/memory/scope.ts";
 import { agentMemory, notesMemory, userMemory } from "../src/memory/types.ts";
 import { EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
@@ -124,3 +124,68 @@ test("提取的模型调用出错（循环不抛，outcome 是 error）→ 报 m
 
   expect(await until(async () => notices.some((m) => m.includes("memory_extract_failed"))), "提取没跑完却没有诊断").toBe(true);
 });
+
+/* ───────── 2026-09-14 实测：提取前三轮全在 view、第五轮去写 INDEX.md，轮数用完 ───────── */
+
+test("提取 prompt 自带此刻存着的记忆：indexed 模块给索引、常驻模块给全文，并说明 INDEX.md 由系统维护——不用一个个 view 去摸", async () => {
+  const dir = new InMemoryDir();
+  const mem = memoriesOn(dir);
+  await memoryCreate(mem, "session/memory/old-pref.md", "---\ndescription: 早就记过的回答偏好\n---\n\n回答要带代码位置。");
+  await memoryCreate(mem, "session/agent.md", "先跑窄测试，再跑全量。");
+  let extractPrompt = "";
+  const foreground = scriptedStreamFn([textTurn("好的")]);
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: (model, context, options) => {
+      const seen = JSON.stringify(context.messages);
+      if (!seen.includes(EXTRACT_PROMPT_OPENING)) return foreground(model, context, options);
+      extractPrompt = seen;
+      return scriptedStreamFn([textTurn("没什么可记的。")])(model, context, options);
+    },
+    memory: mem,
+  });
+
+  await agent.prompt("随便聊一句");
+
+  expect(await until(async () => extractPrompt !== ""), "提取没有起来").toBe(true);
+  expect(extractPrompt).toContain("Stored now");
+  expect(extractPrompt).toContain("早就记过的回答偏好"); // indexed 模块：索引里的描述行
+  expect(extractPrompt).not.toContain("回答要带代码位置"); // 正文不进清单，要改时再 view
+  expect(extractPrompt).toContain("先跑窄测试，再跑全量。"); // 常驻模块：全文
+  expect(extractPrompt).toContain("INDEX.md is rebuilt by the system");
+});
+
+test("撞上轮数上限：诊断说清已经写进去几条——那几条是真的落了盘，不是失败", async () => {
+  const dir = new InMemoryDir();
+  const mem = memoriesOn(dir);
+  const notices: string[] = [];
+  const hooks = new HookRuntime();
+  hooks.on("notification", (e) => {
+    notices.push(e.message);
+  });
+  const foreground = scriptedStreamFn([textTurn("答完")]);
+  // 写一条，然后一直 view 到轮数用完（每轮都还在要工具，循环要第六轮才收得了尾）
+  const extract = scriptedStreamFn([
+    toolTurn("w1", "memory", { command: "create", path: "session/memory/a.md", file_text: "---\ndescription: 一条\n---\n\n甲" }),
+    toolTurn("v1", "memory", { command: "view", path: "session/memory/" }),
+    toolTurn("v2", "memory", { command: "view", path: "session/memory/" }),
+    toolTurn("v3", "memory", { command: "view", path: "session/memory/" }),
+    toolTurn("v4", "memory", { command: "view", path: "session/memory/" }),
+  ]);
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: (model, context, options) =>
+      JSON.stringify(context.messages).includes(EXTRACT_PROMPT_OPENING) ? extract(model, context, options) : foreground(model, context, options),
+    memory: mem,
+    hooks,
+  });
+
+  await agent.prompt("干点活");
+
+  expect(await until(async () => notices.some((m) => m.includes("memory_extract_failed"))), "轮数用完却没有诊断").toBe(true);
+  const notice = notices.find((m) => m.includes("memory_extract_failed"))!;
+  expect(notice).toContain("max_iterations");
+  expect(notice).toContain("已写入 1 条");
+  expect(await dir.read("memory/a.md")).toContain("甲");
+});
+
