@@ -2,8 +2,9 @@
 
 ## Supported versions
 
-echo-agent is **pre-release**. Nothing is published to npm and there are no tagged releases, so
-only the current `main` branch is supported. Fixes land on `main`; there are no backports.
+echo-agent is at `0.x`. Only the latest published version and the current `main` branch are
+supported. Fixes land on `main` and ship in the next release; there are no backports to older
+versions.
 
 ## Reporting a vulnerability
 
@@ -20,7 +21,7 @@ Please include:
 - A minimal reproduction — a repository state, a prompt, a tool call, or a short script.
 - The commit you tested against and your Bun version.
 
-This is a pre-release project maintained by one person. Expect an acknowledgement within about a
+This is a `0.x` project maintained by one person. Expect an acknowledgement within about a
 week; a fix timeline follows once we agree on the impact. If you intend to disclose publicly, tell
 us when, and we will aim to have a fix on `main` by that date.
 

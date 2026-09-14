@@ -1,7 +1,7 @@
 # Contributing to echo-agent
 
-Thanks for looking. This project is **pre-release**: nothing is published to npm yet, and the public
-API can still change. Design mistakes get fixed at the root
+Thanks for looking. This project is at `0.x`: the packages are on npm, and until `1.0` the public
+API can still change between minor versions. Design mistakes get fixed at the root
 rather than papered over with compatibility shims — see the pre-release section of
 [AGENTS.md](AGENTS.md) for what that means in practice.
 

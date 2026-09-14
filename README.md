@@ -4,23 +4,25 @@ English | [中文](README.zh.md)
 
 An agent runtime and two products built on it: `echo-agent`, the general agent, and `echo-coding`, the coding agent. Assemble a runtime, extend one with your own tools and prompt, or put a different shell in front of it; the same agent runs interactively and through a Unix pipe.
 
-> **Status: pre-release and not published.** Nothing is on npm yet. Install from source for now; the public API may change before the first `0.x` release.
+> **Status: `0.x`, published on npm.** Until `1.0`, a minor version may contain breaking changes; pin an exact version if you depend on the runtime API.
 
 ## Quick start
 
-[Bun](https://bun.sh/) is required to work from this repository. The default provider is Kimi.
+The two commands run on [Bun](https://bun.sh/); install it first. The default provider is Kimi.
 
 ```bash
-bun install
-MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
+bun add -g echo-agent
+MOONSHOT_API_KEY=sk-... echo-agent
 ```
 
 In a terminal, the command opens the interactive UI. With redirected stdin, each input line is one turn; model text goes to stdout and operational output goes to stderr.
 
 ```bash
 printf 'Introduce yourself in one sentence.\n' |
-  MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
+  MOONSHOT_API_KEY=sk-... echo-agent
 ```
+
+To try it without installing, run `bunx echo-agent`. `npm install -g echo-agent` also works as long as Bun is on your `PATH`: the executable is TypeScript with a `#!/usr/bin/env bun` shebang.
 
 Each session is its own state root: `$ECHO_HOME/sessions/<session-id>`, or `~/.echo/sessions/<session-id>` when `ECHO_HOME` is unset. Its conversation log, inbox, task list, schedules and lock all live there, so two sessions run side by side without fighting over a lock. Memory and skills are shared across sessions and live one level up, at `$ECHO_HOME`. Use `--state-dir <path>` to put session directories somewhere else.
 
@@ -37,7 +39,8 @@ The repository ships two commands on the same runtime. They are siblings: neithe
 File and shell tools belong to `echo-coding` only. A product owns its identity section, its conduct section, its own extensions and its executable; the launcher parts, the host capabilities and the pipe shell come from `@echo-agent/base`, and the interactive form is whichever `Shell` implementation its executable hands in. A third-party product builds on this runtime the same way — and one that draws its own interface depends on `@echo-agent/base` alone, without installing a terminal library.
 
 ```bash
-MOONSHOT_API_KEY=sk-... bun packages/coding/bin/echo-coding.ts
+bun add -g @echo-agent/coding
+MOONSHOT_API_KEY=sk-... echo-coding
 ```
 
 Both commands accept the same options (`--help`). `echo-coding` runs every tool without asking, in the interactive UI and through a pipe alike — treat it as a script that may change files in the current directory.
@@ -47,7 +50,7 @@ Both commands accept the same options (`--help`). `echo-coding` runs every tool 
 See every option with:
 
 ```bash
-bun packages/cli/bin/echo-agent.ts --help
+echo-agent --help
 ```
 
 Select a provider with `--provider`; override its default model with `--model`.
@@ -79,10 +82,10 @@ Every run writes a record of itself to `observations.sqlite` under the session s
 The `observe` subcommand reads what is already on disk. It never starts an agent and never takes the session lock, so it can read a session that is currently running — it sees the part that has been committed:
 
 ```bash
-bun packages/cli/bin/echo-agent.ts observe last          # the most recent run, as text
-bun packages/cli/bin/echo-agent.ts observe show <run-id>
-bun packages/cli/bin/echo-agent.ts observe health        # where the database is, and how much is in it
-bun packages/cli/bin/echo-agent.ts observe serve         # local read-only panel, Ctrl+C to stop
+echo-agent observe last          # the most recent run, as text
+echo-agent observe show <run-id>
+echo-agent observe health        # where the database is, and how much is in it
+echo-agent observe serve         # local read-only panel, Ctrl+C to stop
 ```
 
 `observe serve` opens a panel that polls the database while the agent runs. With no `--session <id>` every subcommand covers all sessions at once, so one panel watches the whole cluster. In piped mode each turn prints `[run] <run-id> …` to stderr; that is the id to pass to `observe show`.
@@ -90,6 +93,12 @@ bun packages/cli/bin/echo-agent.ts observe serve         # local read-only panel
 Observation never blocks a run: if the database cannot be written the run still completes, and the result says so. [`docs/design/observability.md`](docs/design/observability.md) covers the record format, the two lanes, the failure semantics, and what is not built yet.
 
 ## Use the runtime
+
+Install the runtime into your project. It ships compiled JavaScript and runs on Bun or Node:
+
+```bash
+bun add @echo-agent/core    # or: npm install @echo-agent/core
+```
 
 `createEcho()` is the high-level composition root. It wires persistence, memory, tasks, and extensions, while lifecycle remains explicit:
 
@@ -146,6 +155,8 @@ Runnable consumers live in [`examples/`](examples/): a real-provider hello world
 bun install
 bun run typecheck
 bun test
+bun packages/cli/bin/echo-agent.ts       # run echo-agent from source
+bun packages/coding/bin/echo-coding.ts   # run echo-coding from source
 ```
 
 ## Acknowledgements

@@ -4,23 +4,25 @@
 
 一个自主 agent 的运行时，以及基于它的两个产品：通用 agent `echo-agent` 与 coding agent `echo-coding`。可以装配一个 runtime、用自己的工具与 prompt 扩展它，或者给它换一个壳；同一个 agent 既能交互运行，也能接入 Unix 管道。
 
-> **状态：尚未发布。** 尚未发布到 npm。现阶段请从源码安装；首个 `0.x` 版本发布前，公共 API 仍可能变化。
+> **状态：`0.x`，已发布到 npm。** `1.0` 之前，次版本号也可能包含破坏性变更；依赖 runtime API 时请锁定精确版本。
 
 ## 快速开始
 
-从本仓库运行需要 [Bun](https://bun.sh/)。默认 provider 是 Kimi。
+两个命令运行在 [Bun](https://bun.sh/) 上，请先安装它。默认 provider 是 Kimi。
 
 ```bash
-bun install
-MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
+bun add -g echo-agent
+MOONSHOT_API_KEY=sk-... echo-agent
 ```
 
 在终端中运行会打开交互界面。stdin 被重定向时，每一行输入是一轮对话；模型正文写入 stdout，运行信息写入 stderr。
 
 ```bash
 printf 'Introduce yourself in one sentence.\n' |
-  MOONSHOT_API_KEY=sk-... bun packages/cli/bin/echo-agent.ts
+  MOONSHOT_API_KEY=sk-... echo-agent
 ```
+
+不想安装的话可以直接 `bunx echo-agent`。只要 `PATH` 里有 Bun，`npm install -g echo-agent` 也能用：可执行文件是带 `#!/usr/bin/env bun` shebang 的 TypeScript。
 
 每一段会话就是一个独立的状态根：`$ECHO_HOME/sessions/<session-id>`；未设置 `ECHO_HOME` 时是 `~/.echo/sessions/<session-id>`。它的对话账本、inbox、任务清单、闹钟与锁都在那儿，所以两段会话可以并排跑、不抢同一把锁。记忆与技能是跨会话共享的，放在上一层的 `$ECHO_HOME`。用 `--state-dir <path>` 可以把会话目录挪到别处。
 
@@ -37,7 +39,8 @@ printf 'Introduce yourself in one sentence.\n' |
 文件工具和 shell 工具只属于 `echo-coding`。一个产品自己拥有身份段、纪律段、自带的 extension 与可执行文件；启动器部件、宿主能力与管道壳来自 `@echo-agent/base`，交互形态则由它的可执行文件交进来的那个 `Shell` 实现决定。第三方基于这个 runtime 做产品走的是同一条路——自己画界面的产品只依赖 `@echo-agent/base`，不必装一个终端库。
 
 ```bash
-MOONSHOT_API_KEY=sk-... bun packages/coding/bin/echo-coding.ts
+bun add -g @echo-agent/coding
+MOONSHOT_API_KEY=sk-... echo-coding
 ```
 
 两个命令接受同一套选项（`--help`）。`echo-coding` 的所有工具都不询问、直接执行，交互界面和管道形态一样——把它当作一个会改当前目录文件的脚本来用。
@@ -47,7 +50,7 @@ MOONSHOT_API_KEY=sk-... bun packages/coding/bin/echo-coding.ts
 查看全部选项：
 
 ```bash
-bun packages/cli/bin/echo-agent.ts --help
+echo-agent --help
 ```
 
 用 `--provider` 选择 provider；用 `--model` 覆盖该 provider 的默认模型。
@@ -79,10 +82,10 @@ MiniMax adapter 目前有 fixture 覆盖，但还没有用真实服务验证。
 `observe` 子命令只读已落盘的记录。它不启动 agent、也不取会话锁，所以正在跑的会话它也能看——看到的是已经提交的那部分：
 
 ```bash
-bun packages/cli/bin/echo-agent.ts observe last          # the most recent run, as text
-bun packages/cli/bin/echo-agent.ts observe show <run-id>
-bun packages/cli/bin/echo-agent.ts observe health        # where the database is, and how much is in it
-bun packages/cli/bin/echo-agent.ts observe serve         # local read-only panel, Ctrl+C to stop
+echo-agent observe last          # the most recent run, as text
+echo-agent observe show <run-id>
+echo-agent observe health        # where the database is, and how much is in it
+echo-agent observe serve         # local read-only panel, Ctrl+C to stop
 ```
 
 `observe serve` 会开一个面板，在 agent 跑着的时候轮询数据库。不给 `--session <id>` 时每个子命令都覆盖全部会话，所以一个面板就能看整个集群。管道形态每轮结束会在 stderr 打一行 `[run] <run-id> …`，那个 id 就是拿去 `observe show` 的。
@@ -90,6 +93,12 @@ bun packages/cli/bin/echo-agent.ts observe serve         # local read-only panel
 观测永远拦不住 run：数据库写不动时 run 照跑，结果里会如实报出来。记录格式、两条 lane、失败语义与尚未做的部分，详见 [`docs/design/observability.md`](docs/design/observability.md)。
 
 ## 使用 runtime
+
+把 runtime 装进你的项目。它发布的是编译后的 JavaScript，Bun 与 Node 都能运行：
+
+```bash
+bun add @echo-agent/core    # or: npm install @echo-agent/core
+```
 
 `createEcho()` 是高层 composition root。它装配持久化、记忆、任务和 extensions，但生命周期仍由调用方显式控制：
 
@@ -146,6 +155,8 @@ try {
 bun install
 bun run typecheck
 bun test
+bun packages/cli/bin/echo-agent.ts       # run echo-agent from source
+bun packages/coding/bin/echo-coding.ts   # run echo-coding from source
 ```
 
 ## 致谢

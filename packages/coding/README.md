@@ -1,23 +1,22 @@
 # @echo-agent/coding
 
-Echo's coding agent: file, search, shell and web tools mounted on top of
-[`echo-agent`](https://www.npmjs.com/package/echo-agent). Installs the `echo-coding` command.
+Echo's coding agent: file, search, shell and web tools, as a product built from
+`@echo-agent/base` and `@echo-agent/tui`. Installs the `echo-coding` command.
 
 > **Requires [Bun](https://bun.sh/).** The executable is TypeScript with a `#!/usr/bin/env bun`
 > shebang, and the package entry point is TypeScript source. Node is not supported for this
 > package.
 
-> **Status: pre-release.** Nothing is published to npm yet and the public surface may change
-> before the first `0.x` release. Install from source for now.
+> **Status: `0.x`.** Until `1.0`, a minor version may contain breaking changes.
 
 ## Run it
 
 ```bash
-git clone https://github.com/echo-yiyi/echo-agent.git
-cd echo-agent
-bun install
-MOONSHOT_API_KEY=sk-... bun packages/coding/bin/echo-coding.ts
+bun add -g @echo-agent/coding
+MOONSHOT_API_KEY=sk-... echo-coding
 ```
+
+Or run it once without installing: `bunx --package @echo-agent/coding echo-coding`.
 
 The command name stays `echo-coding` even though the package is scoped — the unscoped name was
 already taken on npm by an unrelated project.
@@ -31,10 +30,11 @@ conversation even in the same directory.
 
 ## What this package is
 
-A **product**, not a framework layer. It owns its system prompt, its permission policy and the
-`echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions, then hands that preset
-to `echo-agent`'s startup logic. It does not change a line of `echo-agent` — which is exactly the
-path a third-party product would take on this runtime.
+A **product**, not a framework layer. It owns its identity and conduct sections, its permission
+policy and the `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions; the
+launcher parts come from `@echo-agent/base` and the terminal shell from `@echo-agent/tui`. It does
+not depend on `echo-agent` — the two are siblings, which is exactly the path a third-party product
+would take on this runtime.
 
 Full documentation is in the
 [repository README](https://github.com/echo-yiyi/echo-agent#readme).
