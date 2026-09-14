@@ -399,6 +399,63 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   );
 
   test(
+    "Node：热部署的机制——复制子目录快照再 import 拿到新代码（相对依赖跟着刷）、Host.replace() 在 dist 产物上换代",
+    () => {
+      // 热部署的 Node 侧证据。**验的是机制不是装配**：`createEcho()` 今天在 Node 下起不来——`createAgent()` 开观测库
+      // 走 `bun:sqlite`（既有限制，上面那条 Node 门也只跑 `new Agent`）。所以这里照 `create-echo.ts` 的做法手工走一遍
+      // Node 独有的两截：`fs.cp` 整棵复制 + 经 realpath 的 `file:` URL import 能拿到新模块且 `./helper.mjs` 是新的，
+      // 以及 `ExtensionHost.replace()` 在 dist 产物上先卸后装。只在 Bun 上绿就只对一半人成立。
+      const { consumer, cleanup } = packAndInstall();
+      try {
+        writeFileSync(
+          join(consumer, "reload.mjs"),
+          [
+            'import { cp, mkdir, realpath, writeFile } from "node:fs/promises";',
+            'import { join } from "node:path";',
+            'import { pathToFileURL } from "node:url";',
+            'import { ExtensionHost } from "@echo-agent/core/extension";',
+            'const dir = join(process.cwd(), "extensions");',
+            'await mkdir(join(dir, "pack"), { recursive: true });',
+            "globalThis.applied = [];",
+            "const entry = [",
+            '  \'import { defineExtension } from "@echo-agent/core/extension";\',',
+            '  \'import { VALUE } from "./helper.mjs";\',',
+            '  \'export default defineExtension({ name: "pack", hostAbiVersion: 1, reload: "run", apply(ctx) {\',',
+            '  \'  globalThis.applied.push(VALUE);\',',
+            '  \'  void ctx.effect({ boundary: "turn", start: () => ({ value: VALUE, dispose: () => { globalThis.applied.push("dispose:" + VALUE); } }) });\',',
+            "  '} });',",
+            '].join("\\n");',
+            'await writeFile(join(dir, "pack", "helper.mjs"), \'export const VALUE = "h1";\\n\');',
+            'await writeFile(join(dir, "pack", "index.mjs"), entry);',
+            "const host = new ExtensionHost();",
+            'const v1 = (await import(pathToFileURL(join(dir, "pack", "index.mjs")).href)).default;',
+            'await host.mount("boot", [{ entryId: "pack", definition: v1 }]);',
+            // 改 helper、整棵复制到原目录旁边（与 create-echo.ts 的 snapshotExtension 同一形状）、经 realpath import
+            'await writeFile(join(dir, "pack", "helper.mjs"), \'export const VALUE = "h2";\\n\');',
+            'const snap = join(dir, ".pack.echo-" + process.pid + "-1");',
+            'await cp(join(dir, "pack"), snap, { recursive: true });',
+            'const v2 = (await import(pathToFileURL(await realpath(join(snap, "index.mjs"))).href)).default;',
+            'const result = await host.replace("boot", { generation: "reload-1", entries: [{ entryId: "pack", definition: v2 }] }, { safePoint: "run" });',
+            "console.log(JSON.stringify({ result: result.kind, applied: globalThis.applied, generations: host.mountedGenerations }));",
+          ].join("\n"),
+        );
+
+        const run = sh(["node", "reload.mjs"], consumer);
+        expect(run.ok, `Node 热部署机制跑失败：\n${run.out}`).toBe(true);
+        const line = run.out.split("\n").filter(Boolean).at(-1) ?? "{}";
+        const got = JSON.parse(line) as { result: string; applied: string[]; generations: string[] };
+        expect(got.result).toBe("replaced");
+        // 新模块拿到了新的 helper（h2），旧代先卸、新代后装
+        expect(got.applied).toEqual(["h1", "dispose:h1", "h2"]);
+        expect(got.generations).toEqual(["reload-1"]);
+      } finally {
+        cleanup();
+      }
+    },
+    180_000,
+  );
+
+  test(
     "exports 的每条 dist 支在装完之后都真实存在（含 .d.ts，不然 TS 用户拿到 any）",
     () => {
       // **仓内的静态检查守不到这一半**：仓库里只有源码（`bun` 支指源码），`dist/` 是 build

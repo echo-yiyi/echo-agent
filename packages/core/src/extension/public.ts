@@ -25,7 +25,9 @@ export {
   type ServiceKey,
   type ServiceKind,
 } from "./abi.ts";
-export { ExtensionHost, ExtensionMountError, type ExtensionEntry, type FiberInfo } from "./host.ts";
+export { ExtensionHost, ExtensionMountError, type ExtensionEntry, type FiberInfo, type ReplaceResult } from "./host.ts";
+// 热部署的结果形状（2026-09-14）：壳照 `AgentRuntime.reloadExtensions()` 的回报显示，得念得出它们
+export type { ReloadChange, ReloadReport, ReloadResult } from "./reload.ts";
 export type { FiberStatus } from "./fiber.ts";
 export {
   AgentBackgroundService,
@@ -74,7 +76,7 @@ export {
 } from "./builtin.ts";
 export { unmountGenerations, type UnmountTarget } from "./cleanup.ts";
 export { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult, type RuntimeTurnResult } from "./runtime.ts";
-export { ECHO_AGENT, agentRuntimeOf, type RuntimeSource } from "./builtin.ts";
+export { ECHO_AGENT, agentRuntimeOf, type RuntimeAssemblyOps, type RuntimeSource } from "./builtin.ts";
 
 /** `AgentPolicies.declare()` 收的形状与三项的全集：扩展作者写 config 时要念得出它们。 */
 export type { AgentPolicyValues, DeclaredPolicies } from "../policies.ts";

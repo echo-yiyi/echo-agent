@@ -8,7 +8,7 @@
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
 import { errText, NO_SESSION_FACE, type AgentState, type CredentialStore, type Model, type Provider, type SessionFace, type ThinkingLevel } from "@echo-agent/core";
-import type { AgentRuntime } from "@echo-agent/core/extension";
+import type { AgentRuntime, ReloadChange } from "@echo-agent/core/extension";
 import {
   decodeKittyPrintable,
   Editor,
@@ -566,6 +566,38 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     rerender();
   };
 
+  /**
+   * `/reload`：协议 `reloadExtensions()`——重扫扩展目录、换代（2026-09-14）。结果**逐条**显示：没变的不刷屏，
+   * 变了的一行一个；`refused` / `rolled_back` / `failed` / `lost` 把原因带上——用户改坏了一个文件，得当场看见是哪个、为什么。
+   */
+  const reloadExtensionsNow = async (): Promise<void> => {
+    transcript.push({ kind: "notice", text: "[扩展] 重新加载…" });
+    rerender();
+    const result = await agent.reloadExtensions();
+    if (result.kind === "rejected") {
+      transcript.push({ kind: "notice", text: `[扩展] 没重载：${result.reason}` });
+    } else {
+      const changed = result.report.changes.filter((c) => c.kind !== "unchanged");
+      if (changed.length === 0) {
+        transcript.push({ kind: "notice", text: `[扩展] 没有变化（${result.report.changes.length} 个扩展）` });
+      } else {
+        const verb: Record<ReloadChange["kind"], string> = {
+          added: "装上",
+          removed: "卸下",
+          replaced: "换代",
+          unchanged: "没变",
+          refused: "拒绝换代",
+          rolled_back: "新版没装上，旧版仍在",
+          failed: "没装上",
+          lost: "旧版已卸、新版也没装上",
+        };
+        const lines = changed.map((c) => `  ${verb[c.kind]}  ${c.file}${"reason" in c ? `——${c.reason}` : ""}`);
+        transcript.push({ kind: "notice", text: `[扩展] 重载完成：\n${lines.join("\n")}` });
+      }
+    }
+    rerender();
+  };
+
   /** `/model <id>` 的参数补全：全目录（不分家）按 id fuzzy 过滤；低层用法没给 configure 就没有菜单。 */
   const modelIdCompletions = (prefix: string): AutocompleteItem[] | null => {
     if (configure === undefined) return null;
@@ -678,6 +710,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       description: "手动压缩上下文，可带侧重指令",
       run: (rest) => void compactNow(rest),
     },
+    { name: "reload", description: "重新加载 extensions/ 目录里的扩展（改过的换代、新增的装上、删掉的卸下）", run: () => void reloadExtensionsNow() },
   ];
   const slashMenuText = slashCommands
     .map((c) => `/${c.name}${c.argumentHint === undefined ? "" : ` ${c.argumentHint}`}`)

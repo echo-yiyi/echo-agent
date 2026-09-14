@@ -18,6 +18,7 @@ import {
   type EffectLease,
   type ExtensionContext,
   type ExtensionEntry,
+  type ReloadBoundary,
 } from "../src/extension/public.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { defineToolPack, mountBuiltinTools } from "../src/extension/builtin.ts";
@@ -690,4 +691,182 @@ test("默认 Host 把**能力端口**也提供出去：inject 后台队列的扩
 
   await host.unmount("probe");
   await agent.dispose();
+});
+
+/* ─────────────── 换代事务 replace()（热部署，2026-09-14）：卸一代、装一代，装不上就装回去 ─────────────── */
+
+/** 一条「第 N 版」的扩展：apply / dispose 都记日志；`failApply` 让它装不上，`reload` 是它声明的边界。 */
+function versioned(log: string[], version: string, opts: { reload?: ReloadBoundary; failApply?: boolean } = {}) {
+  return defineExtension({
+    name: "hot",
+    hostAbiVersion: 1,
+    reload: opts.reload ?? "turn",
+    config: (input) => ({ tag: String((input as { tag?: string } | undefined)?.tag ?? "") }),
+    apply(ctx, config) {
+      if (opts.failApply === true) throw new Error(`v${version} 装不上`);
+      log.push(`apply:${version}${config.tag === "" ? "" : `(${config.tag})`}`);
+      void ctx.effect({
+        boundary: "turn",
+        start: () => ({
+          value: version,
+          dispose: () => {
+            log.push(`dispose:${version}`);
+          },
+        }),
+      });
+    },
+  });
+}
+
+test("replace：先卸旧再装新——旧的 disposer 跑了、新的 apply 跑了，表里只剩新的一代", async () => {
+  const log: string[] = [];
+  const host = new ExtensionHost();
+  await host.mount("g1", [entry("hot", versioned(log, "1"))]);
+
+  const r = await host.replace("g1", { generation: "g2", entries: [entry("hot", versioned(log, "2"))] }, { safePoint: "run" });
+  expect(r.kind).toBe("replaced");
+  // 顺序是契约：工具 / skill / prompt 段按名注册，新的先装会撞名，所以必须先卸
+  expect(log).toEqual(["apply:1", "dispose:1", "apply:2"]);
+  expect(host.mountedGenerations).toEqual(["g2"]);
+  expect(host.inspect().map((f) => `${f.entryId}@${f.generation}:${f.status}`)).toEqual(["hot@g2:active"]);
+});
+
+test("replace：新的装不上 → 旧的按**原 entries**装回来（rolled_back），config 是当初那份，原因带出来", async () => {
+  const log: string[] = [];
+  const host = new ExtensionHost();
+  await host.mount("g1", [entry("hot", versioned(log, "1"), { tag: "orig" })]);
+
+  const r = await host.replace("g1", { generation: "g2", entries: [entry("hot", versioned(log, "2", { failApply: true }))] }, { safePoint: "run" });
+  expect(r.kind).toBe("rolled_back");
+  expect((r as { error: Error }).error.message).toContain("v2 装不上");
+  // 装回来的是旧 definition + 旧 config——Fiber 里存的是解析过的 config，回滚要用 mount 时收到的原件
+  expect(log).toEqual(["apply:1(orig)", "dispose:1", "apply:1(orig)"]);
+  expect(host.mountedGenerations).toEqual(["g1"]);
+  expect(host.inspect().map((f) => f.status)).toEqual(["active"]);
+});
+
+test("replace：旧代声明的 reload 比 safePoint 强 → refused，Host 零变化；报文说清要重启谁", async () => {
+  for (const [reload, how] of [
+    ["agent", "重启 Agent"],
+    ["process", "重启进程"],
+  ] as const) {
+    const log: string[] = [];
+    const host = new ExtensionHost();
+    await host.mount("g1", [entry("hot", versioned(log, "1", { reload }))]);
+
+    const r = await host.replace("g1", { generation: "g2", entries: [entry("hot", versioned(log, "2"))] }, { safePoint: "run" });
+    expect(r.kind).toBe("refused");
+    expect((r as { reason: string }).reason).toContain(`reload '${reload}'`);
+    expect((r as { reason: string }).reason).toContain(how);
+    // **零变化**：没卸、没装、没碰新 definition
+    expect(log).toEqual(["apply:1"]);
+    expect(host.mountedGenerations).toEqual(["g1"]);
+  }
+  // `run` / `turn` 在 run 边界都能换——这是 ReloadBoundary 第一次在运行时被读取
+  for (const reload of ["turn", "run"] as const) {
+    const log: string[] = [];
+    const host = new ExtensionHost();
+    await host.mount("g1", [entry("hot", versioned(log, "1", { reload }))]);
+    expect((await host.replace("g1", { generation: "g2", entries: [entry("hot", versioned(log, "2", { reload }))] }, { safePoint: "run" })).kind).toBe("replaced");
+  }
+});
+
+test("replace：别的代还绑在它的 provider 上 → refused（连带重装不在这一版），报文点名 consumer", async () => {
+  const Svc = defineService<{ v: number }>({ id: "hot.svc", version: 1, kind: "single", scope: "agent", reload: "turn" });
+  const provider = (v: number) =>
+    defineExtension({
+      name: "p",
+      hostAbiVersion: 1,
+      reload: "turn",
+      provide: [Svc],
+      apply(ctx) {
+        ctx.provide(Svc, { v });
+      },
+    });
+  const consumer = defineExtension({
+    name: "c",
+    hostAbiVersion: 1,
+    reload: "turn",
+    inject: { svc: { service: Svc, required: true } },
+    apply() {},
+  });
+  const host = new ExtensionHost();
+  await host.mount("P", [entry("p", provider(1))]);
+  await host.mount("C", [entry("c", consumer)]);
+
+  const r = await host.replace("P", { generation: "P2", entries: [entry("p", provider(2))] }, { safePoint: "run" });
+  expect(r.kind).toBe("refused");
+  expect((r as { reason: string }).reason).toContain("'c'@C → 'p'@P");
+  expect(host.mountedGenerations).toEqual(["P", "C"]);
+});
+
+test("replace：next 为 null = 只卸（文件删掉了），旧的 disposer 跑了、表里没它了", async () => {
+  const log: string[] = [];
+  const host = new ExtensionHost();
+  await host.mount("g1", [entry("hot", versioned(log, "1"))]);
+  const r = await host.replace("g1", null, { safePoint: "run" });
+  expect(r.kind).toBe("replaced");
+  expect(log).toEqual(["apply:1", "dispose:1"]);
+  expect(host.mountedGenerations).toEqual([]);
+});
+
+test("replace：新的装不上、旧的也装不回来 → lost，两个原因都带着，什么都不挂着", async () => {
+  const log: string[] = [];
+  let applies = 0;
+  // 第一次装得上，回滚那次装不上——模拟「旧版依赖的东西在它被卸掉之后也没了」
+  const flaky = defineExtension({
+    name: "hot",
+    hostAbiVersion: 1,
+    reload: "turn",
+    apply() {
+      applies += 1;
+      if (applies > 1) throw new Error("旧版第二次装不上");
+      log.push("apply:1");
+    },
+  });
+  const host = new ExtensionHost();
+  await host.mount("g1", [entry("hot", flaky)]);
+
+  const r = await host.replace("g1", { generation: "g2", entries: [entry("hot", versioned(log, "2", { failApply: true }))] }, { safePoint: "run" });
+  expect(r.kind).toBe("lost");
+  expect((r as { error: Error }).error.message).toContain("v2 装不上");
+  expect((r as { rollbackError: Error }).rollbackError.message).toContain("旧版第二次装不上");
+  expect(host.mountedGenerations).toEqual([]);
+});
+
+test("replace：卸旧代时 disposer 抛 → 收进 unwindErrors，换代照样完成（卸都卸了，不能停在半路）", async () => {
+  const log: string[] = [];
+  const angry = defineExtension({
+    name: "hot",
+    hostAbiVersion: 1,
+    reload: "turn",
+    apply(ctx) {
+      void ctx.effect({
+        boundary: "turn",
+        start: () => ({
+          value: 1,
+          dispose: () => {
+            throw new Error("disposer 炸了");
+          },
+        }),
+      });
+    },
+  });
+  const host = new ExtensionHost();
+  await host.mount("g1", [entry("hot", angry)]);
+  const r = await host.replace("g1", { generation: "g2", entries: [entry("hot", versioned(log, "2"))] }, { safePoint: "run" });
+  expect(r.kind).toBe("replaced");
+  expect((r as { unwindErrors: readonly Error[] }).unwindErrors.map((e) => e.message)).toEqual(["disposer 炸了"]);
+  expect(host.mountedGenerations).toEqual(["g2"]);
+  expect(log).toEqual(["apply:2"]);
+});
+
+test("replace：新代的 generation 名已被占 / 旧代根本没 mount → 事先就抛，不动任何一代", async () => {
+  const log: string[] = [];
+  const host = new ExtensionHost();
+  await host.mount("g1", [entry("hot", versioned(log, "1"))]);
+  await expect(host.replace("g1", { generation: "g1", entries: [] }, { safePoint: "run" })).rejects.toThrow("已经 mount 过");
+  await expect(host.replace("nope", null, { safePoint: "run" })).rejects.toThrow("没有 mount");
+  expect(log).toEqual(["apply:1"]);
+  expect(host.mountedGenerations).toEqual(["g1"]);
 });

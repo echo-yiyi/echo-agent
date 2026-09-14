@@ -12,8 +12,11 @@
 // host singleton identity gate。**本文件只做最后一步的最小形态**：直接 `import()` 源文件。
 // 差在哪、为什么现在可以这样，逐条说清：
 //
-//   - **不编译、不内容寻址**：因此**没有热重载**——同一路径的模块在进程内只求值一次，
-//     改了文件要重启。`mount` 用固定 generation `"boot"`，换代是 O4 的事。
+//   - **不编译、不内容寻址**：启动时直接 import 原文件。热部署（`reloadExtensions()`，2026-09-14）
+//     不靠模块缓存失效——同一路径的模块在 Node / Bun 里都只求值一次，而且入口的相对依赖不跟着刷
+//     （两边实测）——而是把改过的扩展**复制一份到原文件旁边**（`.foo.echo-<pid>-<n>.ts`）再 import：
+//     路径变了就是新模块，相对路径（`./helper.ts`、`../shared.ts`）与 `node_modules` 的查找都还落在原处。
+//     旧模块留在内存里卸不掉，这是 JS 运行时的限制，只适合开发期；见决策记录的 Non-Goals。
 //   - **不做 singleton resolver**：`ServiceKeyTable` 按 `id + version/kind/scope/reload`
 //     canonicalize（见 `extension/service-key.ts`），所以就算 Extension 解析到了另一份
 //     `@echo-agent/core` 实例，同 id 的 ServiceKey 仍会归一，registry 照样拿得到。
@@ -37,8 +40,9 @@
 // **诊断不是可选项**：跳过而不上报就是静默失败——`Echo.diagnostics` 是机器可读的那份，
 // 壳子怎么显示归壳子（CLI 在 TUI 里发 notice、管道模式写 stderr）。
 
-import { readdir } from "node:fs/promises";
-import { extname, isAbsolute, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { copyFile, cp, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Agent } from "./agent.ts";
 import { createAgent, resolveSessionsRoot, resolveStateDir, type CreateAgentOptions } from "./create-agent.ts";
@@ -59,6 +63,7 @@ import { AGENT_ENTRY_ID, builtinOwner } from "./observability/runtime.ts";
 import { agentRegistries } from "./extension/registries.ts";
 import { BUILTIN_GENERATION, builtinEntriesFor, defineToolPack, mountBuiltinTools } from "./extension/builtin.ts";
 import { unmountGenerations } from "./extension/cleanup.ts";
+import type { ReloadChange, ReloadReport, ReloadResult } from "./extension/reload.ts";
 import type { AgentMessage } from "./messages.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import type { EchoObservations, EchoRunResult } from "./observability/types.ts";
@@ -81,6 +86,18 @@ const ROLE_GENERATION = "boot:agent";
 const MODULE_EXTS: ReadonlySet<string> = new Set([".ts", ".mts", ".js", ".mjs"]);
 /** 一层子目录的入口文件，按此顺序取第一个存在的。 */
 const INDEX_FILES: readonly string[] = ["index.ts", "index.mts", "index.js", "index.mjs"];
+
+/**
+ * 热部署的代码快照命名：`.<原名>.echo-<pid>-<序号>[.<后缀>]`，与原文件同一个父目录。
+ * 点开头是为了不碍眼；pid 是为了几个进程共用一个扩展目录时互不干扰；序号是同一进程内不重名。
+ * 发现、哈希、复制三处都靠它认出「这是我们自己留下的」并跳过——**只跳这一种命名**，别的点开头文件照旧算数。
+ */
+const SNAPSHOT_RE = /^\..+\.echo-\d+-\d+(?:\.[^.]+)?$/;
+function isSnapshotName(name: string): boolean {
+  return SNAPSHOT_RE.test(name);
+}
+/** 换代那次 reload 的安全点：装配层在两次 run 之间调（`Agent.betweenRuns`），所以是 `run`。 */
+const RELOAD_SAFE_POINT = "run" as const;
 
 export type CreateEchoOptions = CreateAgentOptions & {
   /**
@@ -147,13 +164,22 @@ export type Echo = Readonly<{
   send(input: string | AgentMessage): Promise<EchoRunResult>;
   /** live 查询面：`getRun(result.runId)` → `renderRunObservation()`。只有 `createEcho()` 出来的 Runtime 承诺 canonical persistence。 */
   observations: EchoObservations;
-  /** 本次装上的全部 Extension，顺序即 mount 顺序。**被跳过的坏扩展不在这里**——在 `diagnostics`。 */
-  extensions: readonly LoadedExtension[];
   /**
-   * 装配期的诊断（D6）：盘上扩展 load / mount 失败，一条一个，带文件路径。
-   * 空数组 = 全部装上。**显式传入的失败不在这里**——那种直接抛。
+   * 现在装着的全部 Extension：内建 → inline → 盘上发现的（按入口路径）→ 产品自带的 → 角色。
+   * **被跳过的坏扩展不在这里**——在 `diagnostics`。**每次读现算**（2026-09-14）：热部署会增删盘上那一段。
    */
-  diagnostics: readonly Diagnostic[];
+  readonly extensions: readonly LoadedExtension[];
+  /**
+   * 诊断（D6）：盘上扩展 load / mount 失败，一条一个，带文件路径；热部署的失败也进这里（同一个文件按路径替换上一次的）。
+   * 空数组 = 全部装上。**显式传入的失败不在这里**——那种直接抛。每次读现算。
+   */
+  readonly diagnostics: readonly Diagnostic[];
+  /**
+   * 热部署（2026-09-14）：重扫扩展目录，改过的换代、新增的装上、删掉的卸下；新版装不上就装回旧版。
+   * 与 `AgentRuntime.reloadExtensions()`（壳的 `/reload`）是**同一个函数**。仅 idle；忙时 rejected，不排队。
+   * 只管盘上发现的扩展；每个扩展怎么了见 `ReloadReport`。
+   */
+  reloadExtensions(): Promise<ReloadResult>;
   /**
    * 会话面（2026-09-03）：开一段、列一遍、发一句、关一段。
    * 与模型的 `session_*` 工具、壳的 `/sessions` **同一份实现**。
@@ -255,6 +281,7 @@ export async function discoverExtensionFiles(dir: string): Promise<readonly stri
 
   const found: string[] = [];
   for (const entry of entries) {
+    if (isSnapshotName(entry.name)) continue; // 热部署留下的代码快照：是我们自己的副本，不是第二个扩展
     const full = join(dir, entry.name);
     if (entry.isFile() && MODULE_EXTS.has(extname(entry.name))) {
       found.push(full);
@@ -284,10 +311,18 @@ export async function discoverExtensionFiles(dir: string): Promise<readonly stri
  * 验形复用 `defineExtension()` 本身——那是 ABI 的唯一判据，在这里再写一遍形状检查
  * 就是第二份真源。它返回一个新的冻结副本，Host 只认定义的内容，副本没关系。
  */
-export async function loadExtensionFile(file: string): Promise<ExtensionDefinition<unknown>> {
+export function loadExtensionFile(file: string): Promise<ExtensionDefinition<unknown>> {
+  return loadExtensionModule(file, file);
+}
+
+/**
+ * `loadExtensionFile` 的里层：从 `importPath` 加载，报错时指名 `file`。
+ * 热部署 import 的是快照副本，而错误、诊断、清单里出现的都得是用户认识的那个原路径。
+ */
+async function loadExtensionModule(importPath: string, file: string): Promise<ExtensionDefinition<unknown>> {
   let mod: { default?: unknown };
   try {
-    mod = (await import(pathToFileURL(file).href)) as { default?: unknown };
+    mod = (await import(pathToFileURL(importPath).href)) as { default?: unknown };
   } catch (e) {
     throw new ExtensionLoadError(file, e instanceof Error ? e.message : String(e), { cause: e });
   }
@@ -301,6 +336,97 @@ export async function loadExtensionFile(file: string): Promise<ExtensionDefiniti
     throw new ExtensionLoadError(file, e instanceof Error ? e.message : String(e), { cause: e });
   }
 }
+
+/* ───────────── 热部署的三件盘上活：发现（带根）、比对内容、复制快照 ───────────── */
+
+/** 一个盘上扩展：`entry` 是入口文件（entryId、诊断、清单都用它），`root` 是它占的那一块——单文件就是自己，子目录就是那个目录。 */
+type DiscoveredRoot = Readonly<{ entry: string; root: string }>;
+
+/** 扫全部目录，按解析后的绝对路径去重（同一个文件被两个目录指到只算一次），按入口路径排序。 */
+async function discoverRoots(dirs: readonly string[]): Promise<readonly DiscoveredRoot[]> {
+  const out: DiscoveredRoot[] = [];
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    for (const file of await discoverExtensionFiles(dir)) {
+      const entry = resolve(file);
+      if (seen.has(entry)) continue;
+      seen.add(entry);
+      // 子目录入口（`<dir>/<sub>/index.ts`）的根是 `<sub>`；直接文件的根是自己
+      out.push({ entry, root: dirname(entry) === resolve(dir) ? entry : dirname(entry) });
+    }
+  }
+  return out.sort((a, b) => (a.entry < b.entry ? -1 : a.entry > b.entry ? 1 : 0));
+}
+
+/**
+ * 内容哈希：单文件哈希字节；子目录哈希**目录下全部文件**（相对路径 + 字节，按路径排序），
+ * 所以改了 `helper.ts` 没动 `index.ts` 也算变了。跳过 `node_modules`（大、且换依赖不是改扩展）与我们自己的快照。
+ */
+async function hashExtension(root: DiscoveredRoot): Promise<string> {
+  const hash = createHash("sha256");
+  if (root.root === root.entry) {
+    hash.update(await readFile(root.entry));
+    return hash.digest("hex");
+  }
+  const files: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const d of await readdir(dir, { withFileTypes: true, encoding: "utf8" })) {
+      if (d.name === "node_modules" || isSnapshotName(d.name)) continue;
+      const full = join(dir, d.name);
+      if (d.isDirectory()) await walk(full);
+      else if (d.isFile()) files.push(full);
+    }
+  };
+  await walk(root.root);
+  files.sort();
+  for (const f of files) {
+    hash.update(relative(root.root, f));
+    hash.update("\0");
+    hash.update(await readFile(f));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * 把扩展复制到原文件旁边再 import：`extensions/foo.ts` → `extensions/.foo.echo-<pid>-<n>.ts`，
+ * `extensions/bar/` → `extensions/.bar.echo-<pid>-<n>/`（整棵复制，含它自己的 `node_modules`——否则副本里的包解析不到）。
+ * 返回快照根与要 import 的入口。快照在这一代 ACTIVE 期间要留着（扩展可能按 `import.meta.url` 读旁边的文件），换代、删除、收摊时删。
+ *
+ * **入口给的是 realpath**（2026-09-14 实测）：Bun 的模块解析按目录缓存条目，目录路径经过软链（macOS 的 `/var` → `/private/var`）
+ * 时，解析过一次之后新建的文件经软链路径 `import()` 报「Cannot find module」，经真实路径就能找到。
+ */
+async function snapshotExtension(root: DiscoveredRoot, seq: number): Promise<Readonly<{ path: string; entry: string }>> {
+  const dir = dirname(root.root);
+  const base = basename(root.root);
+  const tag = `echo-${process.pid}-${seq}`;
+  if (root.root === root.entry) {
+    const ext = extname(base);
+    const path = join(dir, `.${base.slice(0, base.length - ext.length)}.${tag}${ext}`);
+    await copyFile(root.entry, path);
+    return { path, entry: await realpath(path) };
+  }
+  const path = join(dir, `.${base}.${tag}`);
+  await cp(root.root, path, { recursive: true, filter: (src) => !isSnapshotName(basename(src)) });
+  return { path, entry: await realpath(join(path, basename(root.entry))) };
+}
+
+async function removeSnapshot(path: string | null): Promise<void> {
+  if (path !== null) await rm(path, { recursive: true, force: true });
+}
+
+/** `createEcho()` 里那张盘上扩展账的一行。 */
+type DiscoveredState = {
+  readonly root: DiscoveredRoot;
+  /** 装上（或上次尝试）那一刻的内容哈希。 */
+  readonly hash: string;
+  /** 现在挂着的代；null = 没装上。 */
+  generation: string | null;
+  /** 这一代代码的快照路径；boot 代从原路径加载，null。 */
+  readonly snapshot: string | null;
+  /** `definition.name`；没加载成功就 null。 */
+  readonly name: string | null;
+};
 
 /**
  * 装配一个带默认件、并且已经把 `extensions/` 装好的 Agent。
@@ -319,16 +445,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
 
   // **先扫盘、后造 Agent**：发现阶段一行用户代码都不执行（「不允许边发现边执行」），
   // 这一段失败时还没有 Agent 要收拾。去重按解析后的绝对路径——同一个文件被两个目录指到只装一次。
-  const files: string[] = [];
-  const seen = new Set<string>();
-  for (const dir of dirs) {
-    for (const file of await discoverExtensionFiles(dir)) {
-      const key = resolve(file);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      files.push(file);
-    }
-  }
+  const roots = await discoverRoots(dirs);
 
   // **把 `agent.tools` 摘出来**：它不再走构造函数直注册，改成下面那条 inline Extension。
   const inlineTools = opts.agent?.tools ?? [];
@@ -444,6 +561,13 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   // 从这里起 Agent 已经存在：任何（fail-loud 路径上的）失败都必须把它停掉，否则 store 与文件锁没人收。
   // 角色文件的加载诊断（坏档、撞名）从这里开始攒——与盘上扩展同一条口径：不挡启动，但看得见。
   const diagnostics: Diagnostic[] = [...agentDefsLoaded.diagnostics];
+  /**
+   * 盘上扩展的账（2026-09-14）：入口路径 → 现在什么样。热部署拿它比对上一次；清单（`Echo.extensions`）从它现算。
+   * `generation` 为 null = 没装上（诊断里有）；`snapshot` 是这一代代码的副本（boot 代从原路径加载，null）。
+   */
+  const discovered = new Map<string, DiscoveredState>();
+  /** 快照序号：同一进程内每次复制都不重名。 */
+  let snapshotSeq = 0;
   /** 已经 mount 上的**非 builtin** 代，按 mount 顺序。收摊与失败回滚都按它逆序卸。 */
   // **会话的缺省命名**（2026-09-07，sessions.md §3）：拿第一句人话的首行当名字。
   //
@@ -472,13 +596,19 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   try {
     // 盘上的扩展逐个加载：**坏一个记一条诊断、跳过它**（D6，头注）。`loadExtensionFile` 本身照抛
     // ExtensionLoadError——低层调用方仍然 fail-loud，宽恕只发生在装配这一层、只对盘上的文件。
-    const discovered: { entry: ExtensionEntry; file: string }[] = [];
-    for (const file of files) {
+    //
+    // **每个盘上扩展都进 `discovered` 表**，装没装上都进（`generation` 为 null = 没装上，诊断里有它）：
+    // 热部署要拿它比对「上次是什么样」——文件删了要报 removed，上次坏着这次修好了要报 added。
+    const loaded: { entry: ExtensionEntry; file: string }[] = [];
+    for (const root of roots) {
+      const hash = await hashExtension(root);
       try {
-        const definition = await loadExtensionFile(file);
-        discovered.push({ entry: { entryId: resolve(file), definition }, file });
+        const definition = await loadExtensionFile(root.entry);
+        loaded.push({ entry: { entryId: root.entry, definition }, file: root.entry });
+        discovered.set(root.entry, { root, hash, generation: null, snapshot: null, name: definition.name });
       } catch (e) {
-        diagnostics.push({ code: "extension_load_failed", message: errText(e), path: file });
+        diagnostics.push({ code: "extension_load_failed", message: errText(e), path: root.entry });
+        discovered.set(root.entry, { root, hash, generation: null, snapshot: null, name: null });
       }
     }
 
@@ -492,7 +622,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     //   · 换代——将来热重载外部扩展时，builtin 这一代不用跟着重装。
     // **算一次，mount 与公开清单共用同一份**：分两次算的话 `echo:agent` 会真的装上、
     // 清单里却没有（review 二轮 P1 实测）。
-    const builtin = builtinEntriesFor(agent);
+    // 热部署的入口挂在协议上（`AgentRuntime.reloadExtensions`）：函数体在下面，装配完才会被调，闭包引用没问题。
+    const builtin = builtinEntriesFor(agent, { reloadExtensions: () => reloadExtensions() });
     await mountBuiltinTools(agent, host, builtin); // 与低层用户 / 单测**同一条路、同一张表**
 
     // ── ② 外部：磁盘发现的 + 显式传入的 ──────────────────────────────────────────
@@ -536,13 +667,12 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       await host.mount(INLINE_GENERATION, inline);
       mountedGens.push(INLINE_GENERATION);
     }
-    const mounted: { entry: ExtensionEntry; file: string }[] = [];
-    for (const d of discovered) {
+    for (const d of loaded) {
       const gen = `${BOOT_GENERATION}:${d.entry.entryId}`;
       try {
         await host.mount(gen, [d.entry]);
         mountedGens.push(gen);
-        mounted.push(d);
+        discovered.get(d.file)!.generation = gen;
       } catch (e) {
         diagnostics.push({ code: "extension_mount_failed", message: errText(e), path: d.file });
       }
@@ -556,13 +686,153 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       mountedGens.push(ROLE_GENERATION);
     }
 
-    const loaded: LoadedExtension[] = [
-      ...builtin.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
-      ...inline.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
-      ...mounted.map((d) => ({ entryId: d.entry.entryId, name: d.entry.definition.name, file: d.file })),
-      ...extra.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
-      ...role.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
-    ];
+    /** 清单**现算**（2026-09-14）：热部署会增删盘上那一段，冻结一份就是第二份会漂的真相。顺序：内建 → inline → 盘上（按入口路径）→ 产品自带 → 角色。 */
+    const listExtensions = (): readonly LoadedExtension[] =>
+      Object.freeze([
+        ...builtin.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
+        ...inline.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
+        ...[...discovered.values()]
+          .filter((d): d is DiscoveredState & { name: string } => d.generation !== null && d.name !== null)
+          .map((d) => ({ entryId: d.root.entry, name: d.name, file: d.root.entry })),
+        ...extra.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
+        ...role.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
+      ]);
+
+    /**
+     * 热部署（2026-09-14 用户拍板，决策记录 `docs/decisions/proposed/2026-09-14-extension-hot-reload.md`）。
+     *
+     * 整个跑在 `agent.betweenRuns()` 里：拿 admission 的 permit，此刻没有 run、也排不进新的；忙就 rejected。
+     * 重扫目录，和 `discovered` 表比对：
+     *   · 表里有、盘上没了 → `host.replace(旧代, null)` 卸掉；
+     *   · 内容哈希没变且挂着 → unchanged，**不重新加载**；
+     *   · 其余 → 先复制快照、import、验形（这一步失败旧代一个字不动）→ 没挂着的 `mount`、挂着的 `host.replace()`。
+     * `refused` / `rolled_back` / `lost` 的含义见 `extension/reload.ts`；每条失败同时进 `diagnostics`（按文件路径替换上一次的）。
+     * **只管盘上发现的**：builtin / inline / extra / 角色四代不在 `discovered` 表里，这里碰不到它们。
+     */
+    const reloadExtensions = async (): Promise<ReloadResult> => {
+      const admitted = await agent.betweenRuns(async (signal) => {
+        const changes: ReloadChange[] = [];
+        const current = new Map((await discoverRoots(dirs)).map((r) => [r.entry, r]));
+        const dropDiagnostics = (file: string): void => {
+          for (let i = diagnostics.length - 1; i >= 0; i--) if (diagnostics[i]!.path === file) diagnostics.splice(i, 1);
+        };
+        const noteUnwind = (file: string, errors: readonly unknown[]): void => {
+          for (const e of errors) diagnostics.push({ code: "extension_unmount_failed", message: errText(e), path: file });
+        };
+        const swapGeneration = (gen: string, next: string | null): void => {
+          const i = mountedGens.indexOf(gen);
+          if (next === null) {
+            if (i >= 0) mountedGens.splice(i, 1);
+          } else if (i >= 0) mountedGens[i] = next;
+          else mountedGens.push(next);
+        };
+
+        /* ── 盘上没了的 ── */
+        for (const [file, prev] of [...discovered]) {
+          if (current.has(file)) continue;
+          if (prev.generation !== null) {
+            const r = await host.replace(prev.generation, null, { safePoint: RELOAD_SAFE_POINT });
+            if (r.kind === "refused") {
+              changes.push({ kind: "refused", file, reason: r.reason });
+              continue;
+            }
+            noteUnwind(file, r.unwindErrors);
+            swapGeneration(prev.generation, null);
+            await removeSnapshot(prev.snapshot);
+          }
+          dropDiagnostics(file);
+          discovered.delete(file);
+          changes.push({ kind: "removed", file });
+        }
+
+        /* ── 新的、改过的、上次没装上的 ── */
+        for (const [file, root] of current) {
+          const hash = await hashExtension(root);
+          const prev = discovered.get(file);
+          if (prev !== undefined && prev.generation !== null && prev.hash === hash) {
+            changes.push({ kind: "unchanged", file });
+            continue;
+          }
+          const mounted = prev !== undefined && prev.generation !== null;
+          if (signal.aborted) {
+            changes.push({ kind: mounted ? "rolled_back" : "failed", file, reason: "Agent 正在收摊，这一项没做" });
+            continue;
+          }
+          // 加载新代码：失败时旧代还没被碰过，旧的照旧
+          let snapshot: Readonly<{ path: string; entry: string }> | null = null;
+          let definition: ExtensionDefinition<unknown>;
+          try {
+            snapshot = await snapshotExtension(root, ++snapshotSeq);
+            definition = await loadExtensionModule(snapshot.entry, file);
+          } catch (e) {
+            await removeSnapshot(snapshot?.path ?? null);
+            if (!mounted) {
+              dropDiagnostics(file);
+              discovered.set(file, { root, hash, generation: null, snapshot: null, name: null });
+            }
+            diagnostics.push({ code: "extension_load_failed", message: errText(e), path: file });
+            changes.push({ kind: mounted ? "rolled_back" : "failed", file, reason: errText(e) });
+            continue;
+          }
+          const gen = `reload-${snapshotSeq}:${file}`;
+          const entry: ExtensionEntry = { entryId: file, definition };
+          if (prev === undefined || prev.generation === null) {
+            try {
+              await host.mount(gen, [entry]);
+            } catch (e) {
+              await removeSnapshot(snapshot.path);
+              dropDiagnostics(file);
+              diagnostics.push({ code: "extension_mount_failed", message: errText(e), path: file });
+              discovered.set(file, { root, hash, generation: null, snapshot: null, name: null });
+              changes.push({ kind: "failed", file, reason: errText(e) });
+              continue;
+            }
+            swapGeneration(gen, gen);
+            dropDiagnostics(file);
+            discovered.set(file, { root, hash, generation: gen, snapshot: snapshot.path, name: definition.name });
+            changes.push({ kind: "added", file });
+            continue;
+          }
+          const r = await host.replace(prev.generation, { generation: gen, entries: [entry] }, { safePoint: RELOAD_SAFE_POINT });
+          switch (r.kind) {
+            case "refused":
+              await removeSnapshot(snapshot.path);
+              changes.push({ kind: "refused", file, reason: r.reason });
+              break;
+            case "replaced":
+              swapGeneration(prev.generation, gen);
+              await removeSnapshot(prev.snapshot);
+              dropDiagnostics(file);
+              noteUnwind(file, r.unwindErrors);
+              discovered.set(file, { root, hash, generation: gen, snapshot: snapshot.path, name: definition.name });
+              changes.push({ kind: "replaced", file });
+              break;
+            case "rolled_back":
+              await removeSnapshot(snapshot.path);
+              dropDiagnostics(file);
+              noteUnwind(file, r.unwindErrors);
+              diagnostics.push({ code: "extension_mount_failed", message: errText(r.error), path: file });
+              changes.push({ kind: "rolled_back", file, reason: errText(r.error) });
+              break;
+            case "lost":
+              await removeSnapshot(snapshot.path);
+              await removeSnapshot(prev.snapshot);
+              swapGeneration(prev.generation, null);
+              dropDiagnostics(file);
+              noteUnwind(file, r.unwindErrors);
+              diagnostics.push({ code: "extension_mount_failed", message: errText(r.error), path: file });
+              diagnostics.push({ code: "extension_rollback_failed", message: errText(r.rollbackError), path: file });
+              discovered.set(file, { root, hash, generation: null, snapshot: null, name: null });
+              changes.push({ kind: "lost", file, reason: `新版：${errText(r.error)}；装回旧版也失败：${errText(r.rollbackError)}` });
+              break;
+          }
+        }
+        changes.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+        const report: ReloadReport = { changes };
+        return report;
+      });
+      return admitted.kind === "rejected" ? admitted : { kind: "done", report: admitted.value };
+    };
 
     /**
      * 收摊。**single-flight**：所有调用共享同一个 promise，因此也共享同一个完成或失败结果。
@@ -585,6 +855,14 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
         await agent.stop();
       } catch (e) {
         errors.push(e);
+      }
+      // 热部署留下的代码快照：本进程的都收掉。别的进程的、崩溃留下的不动（决策记录 Non-Goals）。
+      for (const d of discovered.values()) {
+        try {
+          await removeSnapshot(d.snapshot);
+        } catch (e) {
+          errors.push(e);
+        }
       }
       if (errors.length === 1) throw errors[0];
       if (errors.length > 1) {
@@ -614,8 +892,14 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       send,
       sessions,
       observations: observation.observations,
-      extensions: Object.freeze(loaded),
-      diagnostics: Object.freeze(diagnostics),
+      // 两张表都是 **getter**（2026-09-14）：热部署之后清单与诊断都会变，冻结快照会把「装了什么」说成启动那一刻的样子
+      get extensions(): readonly LoadedExtension[] {
+        return listExtensions();
+      },
+      get diagnostics(): readonly Diagnostic[] {
+        return Object.freeze([...diagnostics]);
+      },
+      reloadExtensions,
       stop: (): Promise<void> => (stopPromise ??= doStop()),
     });
   } catch (e) {

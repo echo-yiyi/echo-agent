@@ -1,7 +1,8 @@
 // ExtensionHost：把一组 Entry 作为一个 generation mount / unmount 的内核。
 //
-// O2a 的边界：只有 PREPARE（成图、验规则）→ 按拓扑 LOADING → ACTIVE，与逆拓扑 unmount。
-// reload 事务（QUIESCE / SWAP）、loader / import、ManagedRunSources（要 admission）都不在这里。
+// 边界：PREPARE（成图、验规则）→ 按拓扑 LOADING → ACTIVE，与逆拓扑 unmount；外加一条换代事务
+// `replace()`（2026-09-14）：卸一代、装一代，装不上就把旧的装回去。loader / import、安全时机（谁来保证此刻没有
+// run 在跑）、ManagedRunSources（要 admission）都不在这里——安全时机归 `Agent.betweenRuns()`，加载归装配层。
 //
 // 三条纪律：
 //   - mount 是**全有或全无**：任何一个 Fiber 失败，它自己 LIFO unwind，本次已 ACTIVE 的按逆序全部卸掉，再抛；
@@ -10,7 +11,7 @@
 //   - mount / unmount 走同一条串行事务链，**按调用顺序**执行：并发 mount 同一 generation 只有第一个成功（第二个
 //     执行时发现已存在而拒绝）；unmount(g) 紧接 mount(g) 先卸后装。所有检查都在链内做，链外不看 Host 状态。
 
-import { ExtensionAbiError, type ExtensionDefinition, type ServiceKey } from "./abi.ts";
+import { ExtensionAbiError, RELOAD_BOUNDARY_RANK, type ExtensionDefinition, type ReloadBoundary, type ServiceKey } from "./abi.ts";
 import { Fiber, type FiberStatus } from "./fiber.ts";
 import { resolveGraph } from "./graph.ts";
 import { ServiceKeyTable } from "./service-key.ts";
@@ -47,7 +48,22 @@ export class ExtensionMountError extends Error {
   }
 }
 
-type Generation = { readonly id: string; readonly fibers: readonly Fiber[] }; // fibers 按 load 顺序
+/**
+ * `replace()` 的结果。四种都**不抛**：换代是运行中做的事，抛出去只会让壳子把「新版没装上」显示成崩溃。
+ *   · `replaced`：旧的已卸、新的已 ACTIVE（`next` 为 null 时就是只卸）；
+ *   · `refused`：不能在此刻换——旧代里有 Fiber 声明的 `reload` 比 `safePoint` 强，或别的代还绑在它 provide 的 Service 上。**Host 状态零变化**；
+ *   · `rolled_back`：新的没装上，旧的按原 entries 重装回来了（`error` 是新代失败的原因）；
+ *   · `lost`：旧的卸了、新的没装上、旧的也装不回来——这一代现在**没挂着**。
+ * `unwindErrors` 是卸旧代时 disposer 报的错：一个都不吞，但也不因此中断换代（卸都卸了）。
+ */
+export type ReplaceResult =
+  | Readonly<{ kind: "replaced"; unwindErrors: readonly unknown[] }>
+  | Readonly<{ kind: "refused"; reason: string }>
+  | Readonly<{ kind: "rolled_back"; error: unknown; unwindErrors: readonly unknown[] }>
+  | Readonly<{ kind: "lost"; error: unknown; rollbackError: unknown; unwindErrors: readonly unknown[] }>;
+
+/** fibers 按 load 顺序；entries 是 mount 时收到的原件——回滚要按它重装（Fiber 里的 config 是 `definition.config()` 解析过的）。 */
+type Generation = { readonly id: string; readonly fibers: readonly Fiber[]; readonly entries: readonly ExtensionEntry[] };
 
 /** 一个装上的 Fiber 在观测里的样子：身份、声明、依赖边实际连到了谁。只读 PREPARE 解析好的图，不碰 config。 */
 function fiberFact(f: Fiber): ExtensionFiberFact {
@@ -156,6 +172,25 @@ export class ExtensionHost {
     });
   }
 
+  /**
+   * 换代事务（2026-09-14）：卸掉 `old`，装上 `next`；`next` 装不上就按 `old` 当初的 entries 把它装回去。
+   * `next` 为 null = 只卸（文件删掉了）。**同一条事务链**，中间插不进别的 mount / unmount。
+   *
+   * `safePoint` 是调用方此刻所处的安全点（装配层在两次 run 之间调，给 `"run"`）：旧代里任何 Fiber 声明的
+   * `reload` 比它强就 `refused`——这是 `ReloadBoundary` 第一次在运行时被读取，此前只有声明期校验。
+   * 别的代还有 consumer 绑在旧代的 provider 上也 `refused`（连带重装不在这一版，见决策记录 Non-Goals）。
+   *
+   * **先卸再装，不先装再卸**：依赖图允许两代 overlap，但工具 / skill / prompt 段都按名注册，新代先装会撞名。
+   * 所以调用方要在调这里之前把新代码 import 好、config 验过——那一步失败旧代一个字都不动。
+   */
+  replace(
+    old: string,
+    next: Readonly<{ generation: string; entries: readonly ExtensionEntry[] }> | null,
+    opts: Readonly<{ safePoint: ReloadBoundary }>,
+  ): Promise<ReplaceResult> {
+    return this.serialize(() => this.doReplace(old, next, opts.safePoint));
+  }
+
   private serialize<T>(work: () => Promise<T>): Promise<T> {
     const run = this.chain.then(work);
     this.chain = run.then(
@@ -227,12 +262,72 @@ export class ExtensionHost {
       }
     }
     keys.commit();
-    this.generations.set(generation, { id: generation, fibers: order });
+    this.generations.set(generation, { id: generation, fibers: order, entries });
   }
 
   private async doUnmount(generation: string): Promise<void> {
     const g = this.generations.get(generation);
     if (g === undefined) return;
+    const dependents = this.dependentsOf(g);
+    if (dependents.length > 0) {
+      throw new ExtensionAbiError(`不能卸载 generation '${generation}'：别的 generation 还有 consumer 绑在它的 provider 上（先卸 consumer）：${dependents.join("；")}`);
+    }
+    const errors = await this.retire(g);
+    if (errors.length > 0) throw new AggregateError(errors, `unmount generation '${generation}'：${errors.length} 处清理失败（其余已全部尝试）`);
+  }
+
+  private async doReplace(
+    old: string,
+    next: Readonly<{ generation: string; entries: readonly ExtensionEntry[] }> | null,
+    safePoint: ReloadBoundary,
+  ): Promise<ReplaceResult> {
+    const g = this.generations.get(old);
+    if (g === undefined) throw new ExtensionAbiError(`generation '${old}' 没有 mount，无从换代`);
+    if (next !== null && this.generations.has(next.generation)) throw new ExtensionAbiError(`generation '${next.generation}' 已经 mount 过，不能拿它当新的一代`);
+    if (!(safePoint in RELOAD_BOUNDARY_RANK)) throw new ExtensionAbiError(`safePoint 必须是 turn | run | agent | process，收到 ${String(safePoint)}`);
+
+    /* ── 能不能换：两条都在改任何状态之前判，refused 时 Host 零变化 ── */
+    const tooStrong = g.fibers.filter((f) => RELOAD_BOUNDARY_RANK[f.reload] > RELOAD_BOUNDARY_RANK[safePoint]);
+    if (tooStrong.length > 0) {
+      // 没声明就是缺省 `agent`（ABI：保守）。这是热部署最常撞上的一堵墙，报文得告诉作者那一行怎么写
+      const who = tooStrong.map((f) => `${f.label} ${f.definition.reload === undefined ? "没声明 reload（缺省 'agent'）" : `声明 reload '${f.reload}'`}`).join("；");
+      const how = tooStrong.some((f) => f.reload === "process") ? "重启进程" : "重启 Agent";
+      const hint = tooStrong.some((f) => f.definition.reload === undefined) ? `；能在两次 run 之间换的扩展请在 defineExtension 里声明 reload: "run"` : "";
+      return { kind: "refused", reason: `${who}——比当前安全点 '${safePoint}' 强，要换只能${how}${hint}` };
+    }
+    const dependents = this.dependentsOf(g);
+    if (dependents.length > 0) {
+      return { kind: "refused", reason: `别的 generation 还有 consumer 绑在它的 provider 上（连带重装不在这一版，先卸 consumer）：${dependents.join("；")}` };
+    }
+
+    /* ── 卸旧：disposer 的错收着，不中断——卸都卸了，剩下的只有往前走 ── */
+    const unwindErrors = await this.retire(g);
+    if (next === null) return { kind: "replaced", unwindErrors };
+
+    /* ── 装新；装不上就把旧的按原 entries 装回去 ── */
+    try {
+      await this.doMount(next.generation, next.entries);
+      return { kind: "replaced", unwindErrors };
+    } catch (error) {
+      try {
+        await this.doMount(old, g.entries);
+        return { kind: "rolled_back", error, unwindErrors };
+      } catch (rollbackError) {
+        return { kind: "lost", error, rollbackError, unwindErrors };
+      }
+    }
+  }
+
+  /** 从表里摘掉这一代并逆序卸它的 Fiber。返回 disposer 报的错（不抛）。 */
+  private async retire(g: Generation): Promise<unknown[]> {
+    this.generations.delete(g.id);
+    const errors: unknown[] = [];
+    for (const f of [...g.fibers].reverse()) await this.unloadFiber(f, errors);
+    return errors;
+  }
+
+  /** 别的代里仍 ACTIVE、且绑在这一代某个 provider 上的 consumer：`consumer → provider` 一条一个。 */
+  private dependentsOf(g: Generation): string[] {
     const mine = new Set(g.fibers);
     const dependents: string[] = [];
     for (const other of this.generations.values()) {
@@ -244,13 +339,7 @@ export class ExtensionHost {
         }
       }
     }
-    if (dependents.length > 0) {
-      throw new ExtensionAbiError(`不能卸载 generation '${generation}'：别的 generation 还有 consumer 绑在它的 provider 上（先卸 consumer）：${dependents.join("；")}`);
-    }
-    this.generations.delete(generation);
-    const errors: unknown[] = [];
-    for (const f of [...g.fibers].reverse()) await this.unloadFiber(f, errors);
-    if (errors.length > 0) throw new AggregateError(errors, `unmount generation '${generation}'：${errors.length} 处清理失败（其余已全部尝试）`);
+    return dependents;
   }
 
   /** 关闸 → abort → 等 pending start → LIFO unwind → 撤 Service。每一步都做，错误收进 errors。 */

@@ -34,6 +34,7 @@ import type { PromptSection, PromptVariable } from "../prompt/types.ts";
 import { builtinVariables, environmentSection } from "../prompt/sections.ts";
 import type { AgentPolicySlots } from "../policies.ts";
 import { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult } from "./runtime.ts";
+import type { ReloadResult } from "./reload.ts";
 import type { CompactionStage } from "../compaction/types.ts";
 import type { AgentMemories } from "../memory/harness.ts";
 import type { AnyMemory } from "../memory/types.ts";
@@ -394,8 +395,8 @@ export type BuiltinMountable = RuntimeSource & {
  * 而 `mountBuiltinTools()` 内部另算一次带 runtime 的拿去 mount——于是 `echo:agent`
  * 真的装上了、清单里却没有。**清单与真相分家是最难查的一类假绿**：看清单的人以为它不在。
  */
-export function builtinEntriesFor(agent: BuiltinMountable): readonly ExtensionEntry[] {
-  return builtinEntries(agent.builtinTools, agentRuntimeOf(agent)) as readonly ExtensionEntry[];
+export function builtinEntriesFor(agent: BuiltinMountable, assembly: RuntimeAssemblyOps = {}): readonly ExtensionEntry[] {
+  return builtinEntries(agent.builtinTools, agentRuntimeOf(agent, assembly)) as readonly ExtensionEntry[];
 }
 
 export async function mountBuiltinTools(
@@ -466,13 +467,20 @@ export const ECHO_AGENT: ExtensionDefinition<{ runtime: AgentRuntime }> = define
 });
 
 /**
+ * 协议里**装配层才做得了、Agent 自己没有**的那几支（2026-09-14）：`reloadExtensions` 要重扫目录、动 Host，
+ * 那两样都在 `createEcho()` 手里，Agent 只出让「此刻没有 run」这个事实（`betweenRuns`）。
+ * 不给 = 这条装配没有这项能力，协议方法恒 rejected 并说明原因——不假装做了。
+ */
+export type RuntimeAssemblyOps = Readonly<{ reloadExtensions?: () => Promise<ReloadResult> }>;
+
+/**
  * 把一个 Agent 收窄成 `AgentRuntime`。
  *
  * **是收窄不是转发**：协议里没有 `start`/`stop`/`deliver`/`consumeInbox`/`pauseManagedWork`——
  * 壳子拿不到它们（理由见 `runtime.ts` 文件头那张表）。这一层的存在就是为了让
  * 「壳能碰什么」由协议说了算，而不是「Agent 上有什么壳就能调什么」。
  */
-export function agentRuntimeOf(agent: RuntimeSource): AgentRuntime {
+export function agentRuntimeOf(agent: RuntimeSource, assembly: RuntimeAssemblyOps = {}): AgentRuntime {
   /** 装备操作的统一包法：守卫抛什么（正在运行 / 形状不合格）就把原因原样带出去，**不抛不静默**。 */
   const equip = (change: () => void): Promise<EquipResult> => {
     try {
@@ -520,6 +528,10 @@ export function agentRuntimeOf(agent: RuntimeSource): AgentRuntime {
         return { kind: "rejected", reason: errText(e) };
       }
     },
+    // 热部署：装配层给了才有；没给的装配（低层 `mountBuiltinTools` 那条路）如实说没有，不假装扫了个空目录
+    reloadExtensions:
+      assembly.reloadExtensions ??
+      (() => Promise.resolve({ kind: "rejected", reason: "这条装配没有扩展目录可扫：热部署只在 createEcho() 装出来的 Runtime 上有" })),
     get acceptsWork() {
       return agent.acceptsWork;
     },

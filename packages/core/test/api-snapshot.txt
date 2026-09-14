@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 336（value 120 · type 196 · both 20）
+符号 339（value 120 · type 199 · both 20）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -164,6 +164,11 @@ value  NON_DETERMINISTIC_EVENTS
 type   ProviderEvent
 type   ResourceChange
 type   StreamItem
+
+-- src/extension/reload.ts (3) --
+type   ReloadChange
+type   ReloadReport
+type   ReloadResult
 
 -- src/hooks/runtime.ts (16) --
 type   ExternalHookConfig
@@ -474,7 +479,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 73（value 33 · type 36 · both 4）
+符号 78（value 33 · type 41 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -492,7 +497,7 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (20) --
+-- src/extension/builtin.ts (21) --
 value  agentRuntimeOf
 value  BUILTIN_GENERATION
 value  builtinEntries
@@ -512,6 +517,7 @@ value  ECHO_TASKS
 value  ECHO_TOOL_SEARCH
 value  mountBuiltinTools
 type   PromptPackConfig
+type   RuntimeAssemblyOps
 type   RuntimeSource
 
 -- src/extension/cleanup.ts (2) --
@@ -521,11 +527,12 @@ type   UnmountTarget
 -- src/extension/fiber.ts (1) --
 type   FiberStatus
 
--- src/extension/host.ts (4) --
+-- src/extension/host.ts (5) --
 type   ExtensionEntry
 both   ExtensionHost
 both   ExtensionMountError
 type   FiberInfo
+type   ReplaceResult
 
 -- src/extension/registries.ts (17) --
 value  AgentBackgroundService
@@ -545,6 +552,11 @@ value  AgentSkills
 type   AgentSkillsRegistry
 value  AgentTools
 type   AgentToolsRegistry
+
+-- src/extension/reload.ts (3) --
+type   ReloadChange
+type   ReloadReport
+type   ReloadResult
 
 -- src/extension/runtime.ts (5) --
 type   AgentRuntime

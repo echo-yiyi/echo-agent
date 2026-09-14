@@ -1490,6 +1490,35 @@ export class Agent {
     return { kind: "done", stages: outcome.stages, contextTokens: outcome.contextTokens };
   }
 
+  /**
+   * 在两次 run 之间**独占地**做一件事（热部署的安全时机，2026-09-14）。与 `compact()` 同一条路：经 admission 拿
+   * permit——忙时 rejected 不排队，期间 `state.status` 为 generating、新工作一律拒、Inbox / Dream 排不进来。
+   * **不是一个 run**：不发 agent_start / agent_end。`work` 收到的 signal 在收摊 / 丢锁时 abort。
+   *
+   * Agent 自己不知道要做什么，也不该知道（重扫目录、动 Host 都是装配层的事）——它只出让「此刻没有 run」这个事实。
+   * `work` 抛了原样抛回给调用方，**不走 admission 的失败合成**：那条路会往对话里塞一条失败的 assistant 消息，
+   * 而这里根本没有对话发生。
+   */
+  async betweenRuns<T>(work: (signal: AbortSignal) => Promise<T>): Promise<Readonly<{ kind: "done"; value: T }> | Readonly<{ kind: "rejected"; reason: string }>> {
+    const refuse = this.refuseWorkReason();
+    if (refuse !== null) return { kind: "rejected", reason: refuse };
+    const box: { value?: T; failure?: { error: unknown } } = {};
+    try {
+      await this.admitUserRun(async (_scope, signal) => {
+        try {
+          box.value = await work(signal);
+        } catch (error) {
+          box.failure = { error };
+        }
+        return { outcome: { kind: "completed" }, messages: [] };
+      });
+    } catch (e) {
+      return { kind: "rejected", reason: errText(e) };
+    }
+    if (box.failure !== undefined) throw box.failure.error;
+    return { kind: "done", value: box.value as T };
+  }
+
   /* ───────────── 生命周期（D4） ───────────── */
 
   /**

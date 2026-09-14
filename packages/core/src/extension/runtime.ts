@@ -36,6 +36,7 @@ import type { FollowUpResult, SteerResult } from "../loop/intake.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionAsk } from "../permission/types.ts";
 import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk } from "../question/types.ts";
 import { defineService, type ServiceKey } from "./abi.ts";
+import type { ReloadResult } from "./reload.ts";
 
 /** 一轮跑完的结果。壳子只关心成没成、错在哪。 */
 export type RuntimeTurnResult = { readonly outcome: AgentOutcome };
@@ -150,6 +151,14 @@ export interface AgentRuntime {
    * core 不解释路径，存不存在调用方先看；`rejected` 只在空串或入账失败。
    */
   setWorkspace(workspace: string): Promise<EquipResult>;
+
+  /**
+   * 热部署（2026-09-14 用户拍板）：重扫扩展目录——改过的卸旧装新、新增的装上、删掉的卸下；新版装不上就装回旧版。
+   * **只管盘上发现的扩展**：内建、产品自带的（`opts.extensions`）、壳、角色都不动，它们是产品代码，改了就重启。
+   * 仅 idle；忙时 rejected，不排队（同 `compact`）。每个扩展怎么了逐条回报（`ReloadReport`），壳照着显示。
+   * 低层装配（没有扩展目录可扫）恒 rejected。触发只来自人和程序——模型没有这件工具（决策记录 ①）。
+   */
+  reloadExtensions(): Promise<ReloadResult>;
 
   /**
    * 现在能不能收新输入。**壳子必须读它而不是自己猜**：

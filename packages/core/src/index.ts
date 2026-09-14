@@ -306,6 +306,8 @@ export {
   EXTENSIONS_DIR,
 } from "./create-echo.ts";
 export type { CreateEchoOptions, Echo, LoadedExtension } from "./create-echo.ts";
+/** 热部署的结果形状（2026-09-14）：`Echo.reloadExtensions()` 返回的就是它。 */
+export type { ReloadChange, ReloadReport, ReloadResult } from "./extension/reload.ts";
 
 /** skill 加载器：扫目录读文件（`node:fs/promises`）。skill 的形状与操作是纯的，在上半段。 */
 export { loadSkills, loadSkillsFromDir, SKILL_ENTRY_FILE } from "./skill/loader.ts";

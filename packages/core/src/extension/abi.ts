@@ -4,7 +4,14 @@
 // 这里只有**声明**：模块求值阶段必须 declaration-only，长期副作用只能在 `apply()` 里经 `ctx.effect()` 建立
 // ——那样 Host 才拿得到 disposer，热重载才有东西可卸。
 
-/** turn < run < agent < process：越靠右越「强」——需要越大的安全点才能换代。 */
+/**
+ * turn < run < agent < process：越靠右越「强」——需要越大的安全点才能换代。
+ *
+ * 各档的含义（热部署自 2026-09-14 起在运行时读它，见 `host.ts` 的 `replace()`）：
+ *   · `turn` / `run`：两次 run 之间可以卸下重装；
+ *   · `agent`：与这一代 Agent 同寿，要换只能重启 Agent；
+ *   · `process`：要换只能重启进程。
+ */
 export type ReloadBoundary = "turn" | "run" | "agent" | "process";
 export type ExtensionScope = "process" | "agent";
 export type Disposer = () => void | Promise<void>;

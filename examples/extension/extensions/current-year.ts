@@ -21,6 +21,9 @@ const currentYear: ModelTool = {
 export default defineExtension({
   name: "current-year",
   hostAbiVersion: 1,
+  // 可以在两次 run 之间卸下重装：改了这个文件，TUI 里敲 `/reload`（或程序调 `echo.reloadExtensions()`）就换上新的，不用重启。
+  // 不声明的话缺省是 `agent`（保守），热部署会拒绝它并提示加这一行。
+  reload: "run",
   // 声明我要往工具表里注册东西。`ctx.get()` 只能拿这里声明过的 Service。
   inject: { tools: { service: AgentTools, required: true } },
   apply(ctx) {

@@ -104,6 +104,7 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
     compact: (i) => base.compact(i),
     setWorkspace: (w) => base.setWorkspace(w),
     answerQuestion: (a) => base.answerQuestion(a),
+    reloadExtensions: () => base.reloadExtensions(),
   };
   // **不能用 `Object.assign`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter-only，
   // 赋值会抛 "Attempted to assign to readonly property"（实测）。覆盖项一律走 `defineProperty`，
@@ -1786,6 +1787,67 @@ test("/clear：协议 reset() 清会话真相，屏幕投影一起清；装备�
 
   quit(ui);
   await done;
+});
+
+test("/reload：协议 reloadExtensions()，变了的一行一个（带原因），没变的不刷屏", async () => {
+  const ui = fakeTui();
+  const agent = agentWith([textTurn("不该被跑到")]);
+  const done = runTui({
+    agent: runtimeOf(agent, {
+      reloadExtensions: async () => ({
+        kind: "done",
+        report: {
+          changes: [
+            { kind: "unchanged", file: "/x/quiet.ts" },
+            { kind: "replaced", file: "/x/b.ts" },
+            { kind: "rolled_back", file: "/x/c.ts", reason: "语法错" },
+          ],
+        },
+      }),
+    }),
+    ui,
+  });
+  await flush();
+
+  for (const ch of "/reload") ui.feed(ch);
+  ui.feed(ENTER);
+  await flush(200);
+
+  const screen = ui.screen();
+  expect(screen).toContain("换代  /x/b.ts");
+  expect(screen).toContain("新版没装上，旧版仍在  /x/c.ts——语法错");
+  expect(screen, "没变的不该刷屏").not.toContain("quiet.ts");
+  expect(agent.state.messages, "斜杠命令不发给模型").toEqual([]);
+
+  quit(ui);
+  await done;
+});
+
+test("/reload：忙时协议 rejected → 原样显示原因；全部没变 → 一句「没有变化」", async () => {
+  const busyUi = fakeTui();
+  const busyAgent = agentWith([textTurn("x")]);
+  const busyDone = runTui({ agent: runtimeOf(busyAgent, { reloadExtensions: async () => ({ kind: "rejected", reason: "Agent 正在处理上一个 prompt" }) }), ui: busyUi });
+  await flush();
+  for (const ch of "/reload") busyUi.feed(ch);
+  busyUi.feed(ENTER);
+  await flush(200);
+  expect(busyUi.screen()).toContain("[扩展] 没重载：Agent 正在处理上一个 prompt");
+  quit(busyUi);
+  await busyDone;
+
+  const quietUi = fakeTui();
+  const quietAgent = agentWith([textTurn("x")]);
+  const quietDone = runTui({
+    agent: runtimeOf(quietAgent, { reloadExtensions: async () => ({ kind: "done", report: { changes: [{ kind: "unchanged", file: "/x/a.ts" }, { kind: "unchanged", file: "/x/b.ts" }] } }) }),
+    ui: quietUi,
+  });
+  await flush();
+  for (const ch of "/reload") quietUi.feed(ch);
+  quietUi.feed(ENTER);
+  await flush(200);
+  expect(quietUi.screen()).toContain("[扩展] 没有变化（2 个扩展）");
+  quit(quietUi);
+  await quietDone;
 });
 
 test("不认识的斜杠命令：报一句、原文放回输入行，不发给模型", async () => {
