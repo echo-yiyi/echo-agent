@@ -119,7 +119,7 @@ type SessionInfo = {
 };
 ```
 
-相对今天的 [`SessionInfo`](../../packages/core/src/session/types.ts#symbol=SessionInfo)：产品名从 `agent` 字段挪到新的 `product` 字段（容器给，创建时写）；`agent` 变成 [`AgentRef`](../../packages/core/src/agent-def/types.ts#symbol=AgentRef)——`{ name?, definition }`，**不是判别联合**：`name` 只是来历（按名建的记下名字），权威永远是 `definition` 那份创建期快照，因为名字指向的文件随时会变。人读的三种说法（具名角色的名字 / `inline` / `default`）由 [`describeAgentRef()`](../../packages/core/src/agent-def/types.ts#symbol=describeAgentRef) 算出来，不是类型上的分支。2026-09-07 起没有 `extensions` 字段，角色不打包 extension。加 `main`、`status`。`--continue` 的筛选条件「本产品在本目录的最近一段」= `workspace` 相同、`product` 相同、`main` 为真、`status` 为 active。`agentId` / `agentName` 随之退场，见 [session 的身份](../decisions/implemented/2026-09-07-session-identity.md)。
+相对今天的 [`SessionInfo`](../../packages/core/src/session/types.ts#symbol=SessionInfo)：产品名从 `agent` 字段挪到新的 `product` 字段（容器给，创建时写）；`agent` 变成 [`AgentRef`](../../packages/core/src/agent-def/types.ts#symbol=AgentRef)——`{ name?, definition }`，**不是判别联合**，两个字段各管一半：`definition` 管这一段怎么跑，是创建期快照（`--resume` 不回头读文件，名字指向的文件随时会变）；`name` 管它是谁，是个人记忆（role 层）的外键，同名的几段共享一份（2026-09-10，见导读的待拍板与 [agent 是身份](../decisions/implemented/2026-09-07-agent-is-an-identity.md) 的实现注）。人读的三种说法（具名角色的名字 / `inline` / `default`）由 [`describeAgentRef()`](../../packages/core/src/agent-def/types.ts#symbol=describeAgentRef) 算出来，不是类型上的分支。2026-09-07 起没有 `extensions` 字段，角色不打包 extension。加 `main`、`status`。`--continue` 的筛选条件「本产品在本目录的最近一段」= `workspace` 相同、`product` 相同、`main` 为真、`status` 为 active。`agentId` / `agentName` 随之退场，见 [session 的身份](../decisions/implemented/2026-09-07-session-identity.md)。
 
 三条不变量沿用：**每段一个写者**（lease）、**坏档判红不给半截**、**transcript 只增不改**。两条新规矩：
 
@@ -342,7 +342,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
    （工作集 = 池 ∩ names，**查询时求交**所以收紧之后注册的工具也露不出来）；`AgentRef` 进 meta（§3）；
    角色 → [`echo:inline-agent`](../../packages/core/src/agent-def/extension.ts#symbol=inlineAgentExtension)（空定义不挂）；
    不越权检查在 `EchoSessions.create` 里、**动盘之前**（判红时 `sessions/` 下不多一个目录），
-   对具名定义与现写的一视同仁；`session_create` 的 `agent` 参数回来（名字或现写一份，见 §7）。
+   对具名定义与现写的一视同仁；`session_create` 的 `agent` 参数回来（名字、现写一份，或 2026-09-10 起带 `name` 的现写——运行中造一个具名身份，见 §7）。
 
    **`model` 那一项不在 `echo:inline-agent` 里**：角色写的是模型 id，而 `setModel()` 要 `Model` 对象，
    按 id 查目录的能力只有装配层有。为它在 ABI 上开一条「查模型」的 Service 是扩公共面，而模型缺省

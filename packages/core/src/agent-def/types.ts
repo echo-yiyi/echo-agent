@@ -36,11 +36,14 @@ export type AgentDefinition = {
 };
 
 /**
- * session 挂的那份 agent 定义，**连同它的来历**。
+ * session 挂的那份 agent 定义，**连同它的身份**。两个字段各管一半：
  *
- * `name` 只是来历——按名建的记下名字，方便人在清单里认；现写（inline）的没有名字。
- * 权威永远是 `definition` 那份快照，不是名字：名字指向的文件随时可能变，而一段 session
- * 是什么不该在它跑着的时候被别人从盘上改掉。
+ * - `definition` 管**这一段怎么跑**（identity / tools / model），是创建那一刻的快照。
+ *   `--resume` 不回头按名去读文件——名字指向的文件随时可能变，而一段 session 是什么
+ *   不该在它跑着的时候被别人从盘上改掉。
+ * - `name` 管**它是谁**：个人记忆（role 层，`<ECHO_HOME>/agents/<name>/memory/`）的外键
+ *   （2026-09-10，见 `docs/decisions/implemented/2026-09-07-agent-is-an-identity.md` 的实现注）。
+ *   同名的几段是同一个身份，共享那份记忆。没有名字的（现写且没起名、或产品原样）没有个人记忆。
  */
 export type AgentRef = {
   readonly name?: string;
