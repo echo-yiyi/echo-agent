@@ -14,6 +14,7 @@ import { ExtensionAbiError, type ExtensionDefinition, type ServiceKey } from "./
 import { Fiber, type FiberStatus } from "./fiber.ts";
 import { resolveGraph } from "./graph.ts";
 import { ServiceKeyTable } from "./service-key.ts";
+import { probeExtension, type ExtensionFiberFact, type ExtensionProbe } from "./observe.ts";
 
 export type ExtensionEntry = Readonly<{
   /** 稳定身份（跨 generation 不变）。 */
@@ -48,18 +49,39 @@ export class ExtensionMountError extends Error {
 
 type Generation = { readonly id: string; readonly fibers: readonly Fiber[] }; // fibers 按 load 顺序
 
+/** 一个装上的 Fiber 在观测里的样子：身份、声明、依赖边实际连到了谁。只读 PREPARE 解析好的图，不碰 config。 */
+function fiberFact(f: Fiber): ExtensionFiberFact {
+  return {
+    entryId: f.entryId,
+    name: f.definition.name,
+    scope: f.scope,
+    reload: f.reload,
+    effects: f.effects.size,
+    injects: f.dependencies.map((d) => ({
+      service: d.service.id,
+      required: d.required,
+      provider: d.provider === null ? null : d.provider === "host" ? "host" : d.provider.entryId,
+    })),
+    provides: [...f.declaredProvides].map((k) => k.id),
+  };
+}
+
 export class ExtensionHost {
   private readonly keys = new ServiceKeyTable();
   private readonly hostServices = new Map<ServiceKey<unknown>, unknown>();
   private readonly generations = new Map<string, Generation>();
   /** mount / unmount 的串行事务链：同一时刻只有一个事务在改 Host 状态，按调用顺序执行。 */
   private chain: Promise<unknown> = Promise.resolve();
+  /** 观测探针（`extension/observe.ts`）：装载 / 卸载的结果在事务链上当场记。可选——低层用法不给照跑。 */
+  private readonly observe: ExtensionProbe | undefined;
 
   /**
    * @param opts.services Host 自带的 Service（AgentTools / AgentHooks 这类 registry）。任何 Fiber 都可 inject；
    *                      没有 Fiber 能 provide 它们。
+   * @param opts.observe  观测探针。与 services 无关——它不是 extension 能拿到的东西，是插在 Host 事务上的节点。
    */
-  constructor(opts: { services?: ReadonlyArray<readonly [ServiceKey<unknown>, unknown]> } = {}) {
+  constructor(opts: { services?: ReadonlyArray<readonly [ServiceKey<unknown>, unknown]>; observe?: ExtensionProbe } = {}) {
+    this.observe = opts.observe;
     for (const [key, value] of opts.services ?? []) {
       const k = this.keys.canonical(key);
       if (this.hostServices.has(k)) throw new ExtensionAbiError(`Host Service '${k.id}' 重复`);
@@ -85,7 +107,26 @@ export class ExtensionHost {
    * 误拒；并发 mount 同一 generation 则由串行本身保证只有第一个成功（上一版两个都越过 has()，Effect 泄漏，实测）。
    */
   mount(generation: string, entries: readonly ExtensionEntry[]): Promise<void> {
-    return this.serialize(() => this.doMount(generation, entries));
+    return this.serialize(async () => {
+      try {
+        await this.doMount(generation, entries);
+      } catch (e) {
+        // PREPARE 与 LOADING 的失败都走到这：前者还没加载任何 Entry，后者是某个 Entry 的 apply / Effect start 失败并已回滚
+        const failed = e instanceof ExtensionMountError;
+        probeExtension(this.observe, {
+          kind: "generation_mount_failed",
+          generation,
+          entryIds: entries.map((x) => x.entryId),
+          stage: failed ? "apply" : "prepare",
+          ...(failed ? { failedEntryId: e.entryId } : {}),
+          error: failed ? e.cause : e,
+          unwindErrors: failed ? e.unwindErrors.length : 0,
+        });
+        throw e;
+      }
+      const g = this.generations.get(generation);
+      if (g !== undefined) probeExtension(this.observe, { kind: "generation_mounted", generation, fibers: g.fibers.map(fiberFact) });
+    });
   }
 
   /**
@@ -96,7 +137,23 @@ export class ExtensionHost {
    * unmount(g) 紧接 mount(g) 则先卸后装。
    */
   unmount(generation: string): Promise<void> {
-    return this.serialize(() => this.doUnmount(generation));
+    return this.serialize(async () => {
+      const g = this.generations.get(generation);
+      if (g === undefined) return this.doUnmount(generation); // 未 mount：幂等返回，没有发生任何事，不记
+      const entryIds = g.fibers.map((f) => f.entryId);
+      try {
+        await this.doUnmount(generation);
+      } catch (e) {
+        // 看状态而不是解析错误文本：被拒时这一代原样留着；清理出错时它已经从表里摘掉了
+        if (this.generations.has(generation)) {
+          probeExtension(this.observe, { kind: "generation_unmount_refused", generation, entryIds, error: e });
+        } else {
+          probeExtension(this.observe, { kind: "generation_unmounted", generation, entryIds, cleanupErrors: e instanceof AggregateError ? e.errors.length : 1 });
+        }
+        throw e;
+      }
+      probeExtension(this.observe, { kind: "generation_unmounted", generation, entryIds, cleanupErrors: 0 });
+    });
   }
 
   private serialize<T>(work: () => Promise<T>): Promise<T> {

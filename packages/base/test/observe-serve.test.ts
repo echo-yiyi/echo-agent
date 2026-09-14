@@ -201,6 +201,7 @@ const EMITTED_RECORD_NAMES = [
   "task.state.committed", "task.store.saved", "task.store.failed",
   "schedule.created", "schedule.cancelled", "schedule.delivered", "schedule.bookkeeping-failed", "schedule.missed",
   "inbox.accepted", "inbox.rejected", "inbox.restored", "inbox.consumed", "inbox.acked", "inbox.released", "inbox.sealed",
+  "extension.generation.mounted", "extension.generation.mount_failed", "extension.generation.unmounted", "extension.generation.unmount_refused",
 ];
 /**
  * core 已经不再发出、但用户盘上的旧库里还有的记录名。观测改成在执行节点插探针之后（2026-09-13），

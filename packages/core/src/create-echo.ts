@@ -54,6 +54,8 @@ import { holderGone } from "./storage/generation-lock.ts";
 import { errText, type Diagnostic } from "./errors.ts";
 import { defineExtension, type ExtensionDefinition } from "./extension/abi.ts";
 import { ExtensionHost, type ExtensionEntry } from "./extension/host.ts";
+import { extensionFactDescriptor } from "./extension/observe.ts";
+import { AGENT_ENTRY_ID, builtinOwner } from "./observability/runtime.ts";
 import { agentRegistries } from "./extension/registries.ts";
 import { BUILTIN_GENERATION, builtinEntriesFor, defineToolPack, mountBuiltinTools } from "./extension/builtin.ts";
 import { unmountGenerations } from "./extension/cleanup.ts";
@@ -434,6 +436,9 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       // 与内建 `echo:sessions` 是同一份实现——不会长出第二套「会话是什么」
       sessions,
     }),
+    // 观测探针：五代装载（builtin / inline / 盘上发现的 / boot / role）的结果都在 Host 的事务链上当场记。
+    // 盘上发现的 extension 装坏时，此前只进一条 diagnostic；现在账本里也有，带是哪个 Entry、在哪个阶段失败
+    observe: observation.capabilitySink(extensionFactDescriptor, builtinOwner(AGENT_ENTRY_ID)),
   });
 
   // 从这里起 Agent 已经存在：任何（fail-loud 路径上的）失败都必须把它停掉，否则 store 与文件锁没人收。
