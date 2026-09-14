@@ -3,7 +3,14 @@
 //
 // 机制在别处：换代事务在 `host.ts` 的 `replace()`，安全时机在 `Agent.betweenRuns()`，
 // 重扫目录 / 比对内容 / 加载新代码在 `create-echo.ts`（那是 node-only 的那一层）。
-// 决策记录：`docs/decisions/implemented/2026-09-14-extension-hot-reload.md`。
+// 决策记录：`docs/decisions/implemented/2026-09-14-extension-hot-reload.md`；
+// 模型自己触发（`extension_reload` 工具，`reload-tool.ts`）：`docs/decisions/implemented/2026-09-14-model-triggered-reload.md`。
+
+/**
+ * 「登记一件 run 收尾后做的事」的结果：`Agent.afterRun()` 返回它，`extension_reload` 工具把它原样翻给模型。
+ * `rejected` 的两种常态：没有进行中的 run（无「收尾」可等）、同一 run 里已经登记过。
+ */
+export type ScheduleResult = Readonly<{ kind: "scheduled" }> | Readonly<{ kind: "rejected"; reason: string }>;
 
 /**
  * 一个盘上扩展在这次 reload 里发生了什么。`file` 是它的入口文件（与 `LoadedExtension.file` 同一个路径）。

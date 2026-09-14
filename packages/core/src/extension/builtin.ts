@@ -34,7 +34,8 @@ import type { PromptSection, PromptVariable } from "../prompt/types.ts";
 import { builtinVariables, environmentSection } from "../prompt/sections.ts";
 import type { AgentPolicySlots } from "../policies.ts";
 import { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult } from "./runtime.ts";
-import type { ReloadResult } from "./reload.ts";
+import type { ReloadResult, ScheduleResult } from "./reload.ts";
+import { makeExtensionReloadTool } from "./reload-tool.ts";
 import type { CompactionStage } from "../compaction/types.ts";
 import type { AgentMemories } from "../memory/harness.ts";
 import type { AnyMemory } from "../memory/types.ts";
@@ -218,6 +219,8 @@ export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
 export const ECHO_TOOL_SEARCH = defineToolPack("echo:tool-search");
 /** 提问 `ask_user`（2026-09-05）：恒装；有没有人答由 `AgentOptions.questions` 定，没人时工具如实回话。 */
 export const ECHO_ASK = defineToolPack("echo:ask");
+/** 模型触发的热部署 `extension_reload`（2026-09-14）：装配层给了登记口才有（`builtinEntriesFor` 的第二个参数），低层没有。 */
+export const ECHO_RELOAD = defineToolPack("echo:reload");
 /** 委派 `subagent`（2026-09-06）：恒装；子 agent 的 prompt / system / 工具集由模型在调用时决定。 */
 export const ECHO_SUBAGENT = defineToolPack("echo:subagent");
 
@@ -296,6 +299,8 @@ export type BuiltinToolGroups = {
   readonly askUser: BuiltinToolGroup | undefined;
   /** 委派 `subagent`，恒在。 */
   readonly subagent: BuiltinToolGroup | undefined;
+  /** 模型触发的热部署 `extension_reload`（2026-09-14）。Agent 自己给不出（没有扩展目录可扫），装配层经 `builtinEntriesFor` 补。 */
+  readonly reload: BuiltinToolGroup | undefined;
   /** `undefined` = `compaction.builtin === false`：不装缺省阶梯（流水线与 registry 仍在，等别的扩展注册阶段）。 */
   readonly compaction: CompactionPackConfig | undefined;
 };
@@ -337,6 +342,7 @@ export function builtinEntries(
     ["echo:tool-search", ECHO_TOOL_SEARCH as ExtensionDefinition<unknown>, groups.toolSearch],
     ["echo:ask", ECHO_ASK as ExtensionDefinition<unknown>, groups.askUser],
     ["echo:subagent", ECHO_SUBAGENT as ExtensionDefinition<unknown>, groups.subagent],
+    ["echo:reload", ECHO_RELOAD as ExtensionDefinition<unknown>, groups.reload],
     ["echo:compaction", ECHO_COMPACTION as ExtensionDefinition<unknown>, groups.compaction],
   ];
   return [
@@ -396,7 +402,13 @@ export type BuiltinMountable = RuntimeSource & {
  * 真的装上了、清单里却没有。**清单与真相分家是最难查的一类假绿**：看清单的人以为它不在。
  */
 export function builtinEntriesFor(agent: BuiltinMountable, assembly: RuntimeAssemblyOps = {}): readonly ExtensionEntry[] {
-  return builtinEntries(agent.builtinTools, agentRuntimeOf(agent, assembly)) as readonly ExtensionEntry[];
+  const groups: BuiltinToolGroups = {
+    ...agent.builtinTools,
+    // 模型触发的热部署（2026-09-14）：装配层给了登记口才有这件工具。低层 `mountBuiltinTools()` 没有热部署，
+    // 「能力不在就不出条目」（与 echo:ask「没人能答就不装」同一口径）
+    reload: assembly.requestReload === undefined ? undefined : { tools: [makeExtensionReloadTool({ request: assembly.requestReload })] },
+  };
+  return builtinEntries(groups, agentRuntimeOf(agent, assembly)) as readonly ExtensionEntry[];
 }
 
 export async function mountBuiltinTools(
@@ -471,7 +483,14 @@ export const ECHO_AGENT: ExtensionDefinition<{ runtime: AgentRuntime }> = define
  * 那两样都在 `createEcho()` 手里，Agent 只出让「此刻没有 run」这个事实（`betweenRuns`）。
  * 不给 = 这条装配没有这项能力，协议方法恒 rejected 并说明原因——不假装做了。
  */
-export type RuntimeAssemblyOps = Readonly<{ reloadExtensions?: () => Promise<ReloadResult> }>;
+export type RuntimeAssemblyOps = Readonly<{
+  reloadExtensions?: () => Promise<ReloadResult>;
+  /**
+   * 模型触发的热部署（2026-09-14）：`extension_reload` 工具调它登记「本 run 收尾后重载」。装配层把
+   * `Agent.afterRun()` + `reloadExtensions` + 报告投 inbox 串好再给进来；给了才装 `echo:reload` 那一条。
+   */
+  requestReload?: () => ScheduleResult;
+}>;
 
 /**
  * 把一个 Agent 收窄成 `AgentRuntime`。

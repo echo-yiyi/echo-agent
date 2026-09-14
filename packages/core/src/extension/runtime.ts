@@ -156,7 +156,8 @@ export interface AgentRuntime {
    * 热部署（2026-09-14 用户拍板）：重扫扩展目录——改过的卸旧装新、新增的装上、删掉的卸下；新版装不上就装回旧版。
    * **只管盘上发现的扩展**：内建、产品自带的（`opts.extensions`）、壳、角色都不动，它们是产品代码，改了就重启。
    * 仅 idle；忙时 rejected，不排队（同 `compact`）。每个扩展怎么了逐条回报（`ReloadReport`），壳照着显示。
-   * 低层装配（没有扩展目录可扫）恒 rejected。触发只来自人和程序——模型没有这件工具（决策记录 ①）。
+   * 低层装配（没有扩展目录可扫）恒 rejected。模型走的是另一条：`extension_reload` 工具登记、run 收尾后由装配层调
+   * 同一个函数（2026-09-14，`docs/decisions/implemented/2026-09-14-model-triggered-reload.md`）。
    */
   reloadExtensions(): Promise<ReloadResult>;
 

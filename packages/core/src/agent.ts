@@ -88,6 +88,7 @@ import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.t
 import { activeTools, effectiveRestriction, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap, type ToolRestrictions } from "./tools/harness.ts";
 import { makeToolSearchTool, TOOL_SEARCH_NAME } from "./tools/tool-search.ts";
 import { makeAskUserTool } from "./question/tool.ts";
+import type { ScheduleResult } from "./extension/reload.ts";
 import { makeSubagentTool, makeReceiptBook, renderReceiptLine, finalStatusOf, SUBAGENT_NAME, REPORT_NAME, type Receipt, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
 import type { Diagnostic } from "./errors.ts";
 import type { StorageDir } from "./storage/types.ts";
@@ -451,6 +452,8 @@ export class Agent {
   private readonly intake: RunIntakeGate;
   /** run admission：prompt / continue / Inbox / Dream 都经它取 permit；单 permit、前台高于 Dream。 */
   private readonly admission: StandaloneRunAdmission;
+  /** `afterRun()` 登记、`finishRun()` 收尾时 drain 的那几件事。 */
+  private readonly afterRunQueue: (() => Promise<void>)[] = [];
   /** 用户 run 从 enqueue 到 settle 之间：prompt() 的重入检查要看它（permit 落位之前 activeRun 还是空）。 */
   private userRunPending = false;
   /**
@@ -870,6 +873,9 @@ export class Agent {
         initialPolicies.questions.responder === "host"
           ? { tools: [makeAskUserTool({ ask: (input, signal) => this.askQuestion(input, signal) })] }
           : undefined,
+      // 模型触发的热部署 `extension_reload`（2026-09-14）：**由装配层补**（`builtinEntriesFor` 的第二个参数）——
+      // Agent 自己没有扩展目录可扫，这里恒 undefined；低层 `mountBuiltinTools()` 路径因此没有这件工具（能力不在就不出条目）
+      reload: undefined,
       // 委派 `subagent`（2026-09-06）：常驻；子 agent 的 prompt / system / 工具集由模型在调用时决定，
       // 机制是 `runSubagent`（与 Dream 同一段隔离循环）。fresh / fork 两种模式与回执工具见 `subagent/tool.ts`（2026-09-14）
       subagent: {
@@ -1514,6 +1520,30 @@ export class Agent {
     }
     if (box.failure !== undefined) throw box.failure.error;
     return { kind: "done", value: box.value as T };
+  }
+
+  /**
+   * 登记一件「本 run 收尾之后、自主工作（inbox 消费 / dream）之前」做的事（2026-09-14，模型触发的热部署是第一个用户）。
+   * 只在 run 进行中可登记——工具就是在 run 里调的；没有 run 就没有「收尾」可等。登记的活按顺序跑、**绝不抛**
+   * （失败进诊断）；它跑的时候 permit 已经放了，所以里面可以 `betweenRuns()`。
+   * Host-internal：不在 `AgentRuntime` 协议上（壳不该碰），装配层经闭包交给工具。
+   */
+  afterRun(work: () => Promise<void>): ScheduleResult {
+    if (this.activeRun === undefined) return { kind: "rejected", reason: "没有进行中的 run，没有「收尾」可等" };
+    this.afterRunQueue.push(work);
+    return { kind: "scheduled" };
+  }
+
+  /** `afterRun` 登记的活：顺序执行，一件失败不影响下一件，错误进诊断。 */
+  private async drainAfterRun(): Promise<void> {
+    while (this.afterRunQueue.length > 0) {
+      const work = this.afterRunQueue.shift()!;
+      try {
+        await work();
+      } catch (e) {
+        this.reportDiagnostic({ code: "after_run_work_failed", message: errText(e) });
+      }
+    }
   }
 
   /* ───────────── 生命周期（D4） ───────────── */
@@ -2699,7 +2729,13 @@ export class Agent {
   /** finally 段。注意 agent_end 只表示「不会再有循环事件」，**idle 比它晚一步**。 */
   private finishRun(): void {
     this.closeRun();
-    this.scheduleAutonomousWork();
+    // run 收尾后登记的活（`afterRun`）先做，再排自主工作：热部署要在 inbox 消费与 dream 之前完成，
+    // 它投进 inbox 的报告才会被紧接着的那次消费拿到，而不是排在 dream 后面
+    if (this.afterRunQueue.length === 0) {
+      this.scheduleAutonomousWork();
+      return;
+    }
+    void this.drainAfterRun().then(() => this.scheduleAutonomousWork());
   }
 
   /**

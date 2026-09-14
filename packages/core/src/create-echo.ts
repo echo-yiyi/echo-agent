@@ -40,7 +40,7 @@
 // **诊断不是可选项**：跳过而不上报就是静默失败——`Echo.diagnostics` 是机器可读的那份，
 // 壳子怎么显示归壳子（CLI 在 TUI 里发 notice、管道模式写 stderr）。
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFile, cp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -64,7 +64,9 @@ import { agentRegistries } from "./extension/registries.ts";
 import { BUILTIN_GENERATION, builtinEntriesFor, defineToolPack, mountBuiltinTools } from "./extension/builtin.ts";
 import { unmountGenerations } from "./extension/cleanup.ts";
 import type { ReloadChange, ReloadReport, ReloadResult } from "./extension/reload.ts";
-import type { AgentMessage } from "./messages.ts";
+import { environmentMessage, type AgentMessage } from "./messages.ts";
+import { renderReloadReport } from "./extension/reload-tool.ts";
+import type { ScheduleResult } from "./extension/reload.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import type { EchoObservations, EchoRunResult } from "./observability/types.ts";
 
@@ -623,7 +625,27 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     // **算一次，mount 与公开清单共用同一份**：分两次算的话 `echo:agent` 会真的装上、
     // 清单里却没有（review 二轮 P1 实测）。
     // 热部署的入口挂在协议上（`AgentRuntime.reloadExtensions`）：函数体在下面，装配完才会被调，闭包引用没问题。
-    const builtin = builtinEntriesFor(agent, { reloadExtensions: () => reloadExtensions() });
+    //
+    // **模型自己触发**（2026-09-14 用户拍板，`docs/decisions/implemented/2026-09-14-model-triggered-reload.md`）：
+    // `extension_reload` 工具只登记；run 收尾后（`agent.afterRun`，在 inbox 消费与 dream 之前）调**同一个**
+    // `reloadExtensions()`，把报告作为一条 `environment` 消息投进本段会话自己的 inbox——紧接着的自主工作就把它
+    // 消费成下一个 run，模型在那里接着验证。同一 run 里只登记一次；报告投不进去（收摊中）记一条诊断，不抛。
+    let reloadPending = false;
+    const requestReload = (): ScheduleResult => {
+      if (reloadPending) return { kind: "rejected", reason: "已经登记过了：结束这条回复即可，重载会在本 run 收尾后执行，报告随后到达" };
+      const scheduled = agent.afterRun(async () => {
+        reloadPending = false;
+        const result = await reloadExtensions();
+        const report = renderReloadReport(result, agent.state.tools.map((t) => t.name));
+        const delivered = await agent.ingress.deliverDurable({ message: environmentMessage(report, "echo:reload"), dedupeKey: `echo:reload:${randomUUID()}` });
+        if (delivered.kind === "rejected") {
+          diagnostics.push({ code: "extension_reload_report_undelivered", message: `热部署做完了，报告没投进 inbox（${delivered.reason}）：${report}` });
+        }
+      });
+      if (scheduled.kind === "scheduled") reloadPending = true;
+      return scheduled;
+    };
+    const builtin = builtinEntriesFor(agent, { reloadExtensions: () => reloadExtensions(), requestReload });
     await mountBuiltinTools(agent, host, builtin); // 与低层用户 / 单测**同一条路、同一张表**
 
     // ── ② 外部：磁盘发现的 + 显式传入的 ──────────────────────────────────────────

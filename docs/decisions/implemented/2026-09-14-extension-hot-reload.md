@@ -1,6 +1,6 @@
 # 盘上扩展的热部署：两次 run 之间卸旧装新，装不上就装回去
 
-> 状态:implemented · 提出 2026-09-13 · 拍板 2026-09-13（口头：不引 Cordis、不抄 dsh，agent 自己给自己换代；① 触发只来自人和程序，② 协议加 `reloadExtensions()`，③ `Echo.extensions` / `diagnostics` 改现算，④ 快照放原文件旁边）· 合入 2026-09-14（PR #3）· 参考 `~/Code/deepseek-harness`（dsh）的 HMR 与数据热刷新，只借做法不借依赖
+> 状态:implemented · 提出 2026-09-13 · 拍板 2026-09-13（口头：不引 Cordis、不抄 dsh，agent 自己给自己换代；① 触发只来自人和程序，② 协议加 `reloadExtensions()`，③ `Echo.extensions` / `diagnostics` 改现算，④ 快照放原文件旁边）· 合入 2026-09-14（PR #3）· **① 于 2026-09-14 改写**：模型也能触发，见 [模型自己触发热部署](2026-09-14-model-triggered-reload.md) · 参考 `~/Code/deepseek-harness`（dsh）的 HMR 与数据热刷新，只借做法不借依赖
 
 **给谁看**：改 `createEcho()` / `ExtensionHost` / `AgentRuntime` 的人，和写 `extensions/` 里扩展的人。假设已知 extension 的 generation / Fiber / Effect 模型（[架构总览](../../architecture.md) §5）。
 
@@ -33,7 +33,7 @@
 
 ## Non-Goals（这一版不做；每条注明走哪条路）
 
-- **不监听文件变化**（选项 C）：等「延后到 run 结束执行」做出来之后，与模型工具（选项 B）共用那一层，再接 watcher。用 chokidar 算新增依赖，届时另拍。
+- **不监听文件变化**（选项 C）：「延后到 run 结束执行」已随模型工具做出来（`Agent.afterRun()`，[模型自己触发热部署](2026-09-14-model-triggered-reload.md)），watcher 以后接在同一处。用 chokidar 算新增依赖，届时另拍。选项 B 已实现，不再是 Non-Goal。
 - **不重载产品代码**（builtin / `opts.extensions` / 壳）：它们的代码在 `@echo-agent/core` 与 `node_modules` 里，进程内换等于装第二份 core。产品升级的热部署走**进程间交接**：可让位 lease（[决策](../implemented/2026-09-07-preemptible-lease.md)）+ `pauseManagedWork({ reason: "handoff" })` + `start({ activation: "deferred" })` / `activate()` 已在，缺编排与「请走不可让位的前台进程」的规矩，另拍。
 - **角色定义不在这里**：它是 `.md` 数据不是代码，`loadAgentDefs()` 只在装配时读一次。刷新它是数据热刷新（同 AGENTS.md 每 run 重读那一类），便宜、另议：`session_create` 新开一段时现读，正在跑的段继续用创建期快照。
 - **不做依赖方连带重装**：盘上扩展 A 用了盘上扩展 B provide 的 Service，换 B 时 `refused` 并点名 A。仓库里还没有这种扩展；真有了再按那个场景设计（Host 的 `dependentsOf` 已经在算这张表）。

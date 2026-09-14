@@ -96,6 +96,7 @@ const AGENT_BUILTIN_TOOLS = [
   "TaskList",
   "TaskUpdate",
   "subagent", // 2026-09-06 委派工具，core 恒装；子 agent 的样子由模型在调用时决定
+  "extension_reload", // 2026-09-14 模型自己触发热部署；`createEcho()` 有扩展目录可扫就装（低层没有）
   "schedule_cancel",
   "schedule_create",
   "schedule_list",

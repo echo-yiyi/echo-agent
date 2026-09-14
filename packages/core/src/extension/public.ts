@@ -27,7 +27,7 @@ export {
 } from "./abi.ts";
 export { ExtensionHost, ExtensionMountError, type ExtensionEntry, type FiberInfo, type ReplaceResult } from "./host.ts";
 // 热部署的结果形状（2026-09-14）：壳照 `AgentRuntime.reloadExtensions()` 的回报显示，得念得出它们
-export type { ReloadChange, ReloadReport, ReloadResult } from "./reload.ts";
+export type { ReloadChange, ReloadReport, ReloadResult, ScheduleResult } from "./reload.ts";
 export type { FiberStatus } from "./fiber.ts";
 export {
   AgentBackgroundService,
@@ -68,6 +68,7 @@ export {
   ECHO_TASKS,
   ECHO_TOOL_SEARCH,
   ECHO_ASK,
+  ECHO_RELOAD,
   ECHO_SUBAGENT,
   type BuiltinToolGroup,
   type BuiltinToolGroups,
