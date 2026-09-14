@@ -18,7 +18,7 @@ import { OBSERVATION_SYNC_LIMITS, type ObservationRecordKind } from "../src/obse
  * 循环探针在节点上交出的事实；`at` 由探针补，这里按序号给一个确定的时刻。
  * 只约束 `kind`（事实名拼错编译不过），载荷放宽：夹具里的消息是故意不完整的最小形状，载荷对不对由投影断言验。
  */
-const fact = (n: number, body: { kind: LoopFactBody["kind"] } & Record<string, unknown>): LoopFact => ({ ...body, at: 1_000 + n }) as unknown as LoopFact;
+const fact = (n: number, body: { kind: LoopFactBody["kind"] } & Record<string, unknown>): LoopFact => ({ runId: "run:t", ...body, at: 1_000 + n }) as unknown as LoopFact;
 
 /** gap 只有在 run.accepted 成功、RunIndex 已建立之后才挂 runId（2026-08-27 review P0），所以要先建 run。 */
 async function establishRun(seq: ObservationSequencer, runId: string, runtimeId = "rt", generation = "g", capturePolicy = "metadata"): Promise<void> {
@@ -88,10 +88,10 @@ describe("循环事实逐 kind 固定投影（metadata 档）", () => {
   }
 
   test("压缩与 Agent 自身的事实走各自的 descriptor，产出的仍是同一套记录名", () => {
-    const start = projectCompactionFact({ kind: "compaction_started", reason: "auto", at: 1_009 }, "metadata")!;
+    const start = projectCompactionFact({ kind: "compaction_started", reason: "auto", runId: "run:t", at: 1_009 }, "metadata")!;
     expect([start.kind, start.name]).toEqual(["span_start", "context.compact"]);
     const end = projectCompactionFact(
-      { kind: "compaction_ended", reason: "auto", compaction: { spans: [{ from: 0, to: 2, summary: "s" }], clearedBefore: 0 } as never, stages: ["summary"], contextTokens: 12, at: 1_010 },
+      { kind: "compaction_ended", reason: "auto", compaction: { spans: [{ from: 0, to: 2, summary: "s" }], clearedBefore: 0 } as never, stages: ["summary"], contextTokens: 12, runId: "run:t", at: 1_010 },
       "metadata",
     )!;
     expect([end.kind, end.name, end.attributes]).toEqual(["span_end", "context.compact", { reason: "auto", changed: true }]);
@@ -100,18 +100,18 @@ describe("循环事实逐 kind 固定投影（metadata 档）", () => {
     expect([res.kind, res.name, res.attributes, res.body]).toEqual(["event", "agent.resource.changed", { kind: "tool", action: "added", source: "test" }, { kind: "tool", action: "added", name: "x", source: "test" }]);
     const q = projectAgentFact({ kind: "queue_updated", queue: "inbox", size: 2, at: 1_014 }, "metadata")!;
     expect([q.kind, q.name, q.body]).toEqual(["event", "agent.queue.updated", { queue: "inbox", size: 2 }]);
-    expect(projectCompactionFact({ kind: "compaction_started", reason: "auto", at: 1 }, "off")).toBeNull();
+    expect(projectCompactionFact({ kind: "compaction_started", reason: "auto", runId: "run:t", at: 1 }, "off")).toBeNull();
     expect(projectAgentFact({ kind: "queue_updated", queue: "inbox", size: 2, at: 1 }, "off")).toBeNull();
   });
 
   test("压缩失败：阶段名是标识 metadata 档就记，第三方阶段的错误消息只在 content 档进 body", () => {
-    const failed = { kind: "compaction_failed", reason: "overflow", stage: "summary", message: "model said: <context text>", at: 1_020 } as const;
+    const failed = { kind: "compaction_failed", reason: "overflow", stage: "summary", message: "model said: <context text>", runId: "run:t", at: 1_020 } as const;
     const meta = projectCompactionFact(failed, "metadata")!;
     expect([meta.kind, meta.name, meta.attributes]).toEqual(["event", "context.compact.failed", { reason: "overflow", stage: "summary" }]);
     expect(JSON.stringify(meta.body)).not.toContain("<context text>");
     expect((projectCompactionFact(failed, "content")!.body as Record<string, unknown>).message).toBe("model said: <context text>");
     // 不带 stage：整条流水线跑完没有一段改动上下文
-    expect(projectCompactionFact({ kind: "compaction_failed", reason: "auto", message: "no compaction stage changed the context", at: 1 }, "metadata")!.attributes).toEqual({ reason: "auto" });
+    expect(projectCompactionFact({ kind: "compaction_failed", reason: "auto", message: "no compaction stage changed the context", runId: "run:t", at: 1 }, "metadata")!.attributes).toEqual({ reason: "auto" });
   });
 
   test("off 档一律不生成；metadata 档流式增量 / 工具进展不成记录", () => {
@@ -579,10 +579,11 @@ describe("content 档正文按整条 fact 的剩余预算截断（2026-08-27 rev
   /** 穿过 Sequencer：committed 里是记录本身而不是 observation.gap。 */
   async function throughSequencer(e: LoopFact): Promise<{ accepted: boolean; truncated: boolean }> {
     const { seq, clock } = sequencerWith("content");
+    await establishRun(seq, e.runId, "rt", "g", "content");
     factSinkToIngest(loopFactDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
     clock.advance(1_000);
     await seq.idle();
-    const rec = seq.committedRecords()[0];
+    const rec = seq.committedRecords().find((r) => r.name !== "run.accepted");
     const body = rec?.body as Record<string, unknown> | undefined;
     return { accepted: rec?.name === "model.generate", truncated: body?.textTruncated === true };
   }
@@ -622,10 +623,11 @@ describe("代理区必须成对看（2026-08-27 review P1）", () => {
 
   async function throughSequencer(e: LoopFact): Promise<boolean> {
     const { seq, clock } = sequencerWith("content");
+    await establishRun(seq, e.runId, "rt", "g", "content");
     factSinkToIngest(loopFactDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
     clock.advance(1_000);
     await seq.idle();
-    return seq.committedRecords()[0]?.name === "model.generate";
+    return seq.committedRecords().find((r) => r.name !== "run.accepted")?.name === "model.generate";
   }
 
   test("孤立 surrogate 不许击穿落库保证——JSON.stringify 把它转义成 6 字节", async () => {

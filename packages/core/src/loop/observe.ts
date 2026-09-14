@@ -70,15 +70,32 @@ export type ToolDecidedBy = "hook" | "policy" | "human" | "timeout";
 
 export const SPAN_PERMISSION_WAIT = "permission.wait";
 
-/** 带发生时刻的事实。时刻由 `probe()` 在节点上补，调用处不必各写一遍。 */
-export type LoopFact = LoopFactBody & Readonly<{ at: number }>;
+/**
+ * 带发生时刻与**本循环实例身份**的事实：`runId` 是发出它的这个循环的 run（`config.runId`），`turnId` 只在 turn 里的节点才有。
+ * 投影直接用它们填 scope，**不从外面那个 Agent 补 run / turn**：同一个 Agent 里可能同时跑着好几个循环实例
+ * （主循环、子 agent、Dream、记忆提取），Agent 的「当前 run / 开着的 turn」只对主循环成立——从那里补，
+ * 子循环的事实就会挂到别人的 run 与 turn 上。
+ */
+export type LoopFact = LoopFactBody & Readonly<{ at: number; runId: string; turnId?: string }>;
 
 /** 循环拿到的探针。 */
 export type LoopProbe = CapabilityFactSink<LoopFact>;
 
-/** 节点上调它：补发生时刻，交给探针。探针自身同步、永不抛（`fact-sink.ts`），没给就什么都不做。 */
-export function probe(sink: LoopProbe | undefined, fact: LoopFactBody): void {
-  sink?.offer({ ...fact, at: Date.now() } as LoopFact);
+/** 一个循环实例的探针函数：节点上调它，给 turn 里的节点再带上 turnId。时刻与 runId 由它补。 */
+export type LoopProbeFn = (fact: LoopFactBody, turnId?: string) => void;
+
+/**
+ * 为一个循环实例造探针函数：`runId` 在循环开始时钉住。探针自身同步、永不抛（`fact-sink.ts`）；
+ * 没给探针（纯循环、评测直打）就是空函数。
+ */
+export function loopProbeFor(sink: LoopProbe | undefined, runId: string): LoopProbeFn {
+  if (sink === undefined) return () => {};
+  return (fact, turnId) => sink.offer({ ...fact, at: Date.now(), runId, ...(turnId !== undefined ? { turnId } : {}) } as LoopFact);
+}
+
+/** 事实自带的身份 → scope。`extra` 是某些事实另有的维度（工具调用的 toolCallId）。 */
+function scopeOf(fact: LoopFact, extra: Readonly<{ toolCallId?: string }> = {}): Readonly<Record<string, string>> {
+  return { runId: fact.runId, ...(fact.turnId !== undefined ? { turnId: fact.turnId } : {}), ...extra };
 }
 
 type Attrs = Record<string, string | number | boolean>;
@@ -270,7 +287,7 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
   const content = policy === "content";
   switch (fact.kind) {
     case "loop_started":
-      return { ...base, kind: "event", name: "agent.loop.started", scope: {}, attributes: {}, body: {} };
+      return { ...base, kind: "event", name: "agent.loop.started", scope: scopeOf(fact), attributes: {}, body: {} };
     case "loop_ended": {
       const attrs = outcomeAttrs(fact.outcome);
       const body: Record<string, unknown> = { ...attrs };
@@ -279,20 +296,20 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         body.retryable = fact.outcome.error.retryable;
         if (content) body.errorMessage = fact.outcome.error.message;
       }
-      return { ...base, kind: "event", name: "agent.loop.ended", scope: {}, attributes: attrs, body };
+      return { ...base, kind: "event", name: "agent.loop.ended", scope: scopeOf(fact), attributes: attrs, body };
     }
     // reply：对一条输入的完整回应。replyId 由 loop 产（`${runId}/${k}`）；scope 没有 replyId 这一维，进 attributes
     case "reply_started":
-      return { ...base, kind: "span_start", name: SPAN_REPLY_EXECUTE, scope: {}, attributes: { replyId: fact.replyId, source: fact.source }, body: { replyId: fact.replyId, source: fact.source } };
+      return { ...base, kind: "span_start", name: SPAN_REPLY_EXECUTE, scope: scopeOf(fact), attributes: { replyId: fact.replyId, source: fact.source }, body: { replyId: fact.replyId, source: fact.source } };
     case "reply_ended": {
       const attrs: Attrs = { replyId: fact.replyId, ...outcomeAttrs(fact.outcome), turns: fact.turns };
       const body: Record<string, unknown> = { ...attrs, hasFinal: fact.hasFinal };
       if (fact.outcome.kind === "error" && content) body.errorMessage = fact.outcome.error.message;
-      return { ...base, kind: "span_end", name: SPAN_REPLY_EXECUTE, scope: {}, attributes: attrs, body };
+      return { ...base, kind: "span_end", name: SPAN_REPLY_EXECUTE, scope: scopeOf(fact), attributes: attrs, body };
     }
     // attempt：turn 里的一次模型请求。重试 = 同一 turn 的下一个 attempt，靠 `(turnId, attempt)` 配对
     case "attempt_started":
-      return { ...base, kind: "span_start", name: SPAN_ATTEMPT_EXECUTE, scope: { turnId: fact.turnId }, attributes: { turnId: fact.turnId, attempt: fact.attempt }, body: { attempt: fact.attempt } };
+      return { ...base, kind: "span_start", name: SPAN_ATTEMPT_EXECUTE, scope: scopeOf(fact), attributes: { turnId: fact.turnId, attempt: fact.attempt }, body: { attempt: fact.attempt } };
     case "attempt_ended": {
       const attrs: Attrs = { turnId: fact.turnId, attempt: fact.attempt, result: fact.result.kind };
       const body: Record<string, unknown> = { attempt: fact.attempt, result: fact.result.kind };
@@ -302,7 +319,7 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         attrs.retryable = fact.result.error.retryable;
         if (content) body.errorMessage = fact.result.error.message;
       }
-      return { ...base, kind: "span_end", name: SPAN_ATTEMPT_EXECUTE, scope: { turnId: fact.turnId }, attributes: attrs, body };
+      return { ...base, kind: "span_end", name: SPAN_ATTEMPT_EXECUTE, scope: scopeOf(fact), attributes: attrs, body };
     }
     // turn span 的 scope.turnId 就是 loop 产的 turnId（与 Agent 的观测 scope 供给、permission 引用的同一份）；
     // iteration 从它的 n 取（`loop/ids.ts`），不另外算
@@ -313,7 +330,7 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         ...base,
         kind: "span_start",
         name: SPAN_TURN_EXECUTE,
-        scope: { turnId: fact.turnId },
+        scope: scopeOf(fact),
         attributes: { iteration, replyId: fact.replyId, cause: fact.cause, toolCount: fact.tools.length },
         body: { iteration, replyId: fact.replyId, cause: fact.cause, tools: [...fact.tools] },
       };
@@ -335,7 +352,7 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         ...base,
         kind: "span_end",
         name: SPAN_TURN_EXECUTE,
-        scope: { turnId: fact.turnId },
+        scope: scopeOf(fact),
         attributes: { iteration, result: fact.result.kind, stopReason, toolResultCount: fact.toolResultCount },
         body,
       };
@@ -345,12 +362,12 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         ...base,
         kind: "event",
         name: "model.retry.scheduled",
-        scope: {},
+        scope: scopeOf(fact),
         attributes: { attempt: fact.attempt, maxAttempts: fact.maxAttempts, cause: fact.cause },
         body: { attempt: fact.attempt, maxAttempts: fact.maxAttempts, delayMs: fact.delayMs, cause: fact.cause },
       };
     case "generation_started":
-      return { ...base, kind: "span_start", name: SPAN_MODEL_GENERATE, scope: {}, attributes: { role: "assistant" }, body: {} };
+      return { ...base, kind: "span_start", name: SPAN_MODEL_GENERATE, scope: scopeOf(fact), attributes: { role: "assistant" }, body: {} };
     case "generation_delta": {
       if (!content) return null; // metadata：token 级 delta 只做 span 聚合，不逐条成记录
       const d = fact.delta as { type: string; text?: string; argsText?: string; signature?: string; redacted?: boolean };
@@ -361,7 +378,7 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
       // （`reasoning_content` / `reasoning` / `reasoning_text`），redacted 是「正文被抹了但仍要原样回传」。
       if (typeof d.signature === "string") body.signature = d.signature;
       if (d.redacted === true) body.redacted = true;
-      return { ...base, kind: "event", name: "model.generate.delta", scope: {}, attributes: { deltaType: d.type }, body };
+      return { ...base, kind: "event", name: "model.generate.delta", scope: scopeOf(fact), attributes: { deltaType: d.type }, body };
     }
     case "message_committed": {
       const m = fact.message;
@@ -395,15 +412,15 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
           ...base,
           kind: "span_end",
           name: SPAN_MODEL_GENERATE,
-          scope: {},
+          scope: scopeOf(fact),
           attributes: { role: "assistant", stopReason: m.stopReason, hasError: m.error !== undefined },
           body,
         };
       }
-      return { ...base, kind: "event", name: "agent.message.appended", scope: {}, attributes: { role: m.role }, body: messageBody(m, policy) };
+      return { ...base, kind: "event", name: "agent.message.appended", scope: scopeOf(fact), attributes: { role: m.role }, body: messageBody(m, policy) };
     }
     case "usage":
-      return { ...base, kind: "event", name: "model.usage", scope: {}, attributes: {}, body: { inputTokens: fact.usage.inputTokens, outputTokens: fact.usage.outputTokens } };
+      return { ...base, kind: "event", name: "model.usage", scope: scopeOf(fact), attributes: {}, body: { inputTokens: fact.usage.inputTokens, outputTokens: fact.usage.outputTokens } };
     case "tool_started": {
       const est = estimatePayloadBytes(fact.params);
       const body: Record<string, unknown> = { toolName: fact.toolName, argsBytes: est.payloadBytes, argsTruncated: est.payloadTruncated };
@@ -412,7 +429,7 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         ...base,
         kind: "span_start",
         name: SPAN_TOOL_EXECUTE,
-        scope: { toolCallId: fact.toolCallId },
+        scope: scopeOf(fact, { toolCallId: fact.toolCallId }),
         attributes: { toolName: fact.toolName, toolCallId: fact.toolCallId },
         body,
       };
@@ -423,7 +440,7 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         ...base,
         kind: "event",
         name: "tool.execute.progress",
-        scope: { toolCallId: fact.toolCallId },
+        scope: scopeOf(fact, { toolCallId: fact.toolCallId }),
         attributes: { toolCallId: fact.toolCallId },
         body: { partial: fact.partial },
       };
@@ -444,7 +461,7 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         ...base,
         kind: "span_end",
         name: SPAN_TOOL_EXECUTE,
-        scope: { toolCallId: fact.toolCallId },
+        scope: scopeOf(fact, { toolCallId: fact.toolCallId }),
         attributes: { toolName: fact.toolName, toolCallId: fact.toolCallId, isError: r.isError },
         body,
       };
@@ -455,20 +472,20 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
       if (fact.decidedBy !== undefined) attrs.decidedBy = fact.decidedBy;
       const body: Record<string, unknown> = { ...attrs };
       if (content) body.reason = fact.reason;
-      return { ...base, kind: "event", name: "tool.rejected", scope: { toolCallId: fact.toolCallId }, attributes: attrs, body };
+      return { ...base, kind: "event", name: "tool.rejected", scope: scopeOf(fact, { toolCallId: fact.toolCallId }), attributes: attrs, body };
     }
     case "permission_asked": {
       const attrs: Attrs = { toolName: fact.toolName, toolCallId: fact.toolCallId, permissionId: fact.permissionId };
       const body: Record<string, unknown> = { ...attrs };
       if (content) body.reason = fact.reason;
-      return { ...base, kind: "span_start", name: SPAN_PERMISSION_WAIT, scope: { toolCallId: fact.toolCallId }, attributes: attrs, body };
+      return { ...base, kind: "span_start", name: SPAN_PERMISSION_WAIT, scope: scopeOf(fact, { toolCallId: fact.toolCallId }), attributes: attrs, body };
     }
     case "permission_settled": {
       const attrs: Attrs = { toolName: fact.toolName, toolCallId: fact.toolCallId, permissionId: fact.permissionId, decision: fact.decision };
       if (fact.decidedBy !== undefined) attrs.decidedBy = fact.decidedBy;
       const body: Record<string, unknown> = { ...attrs };
       if (content && fact.reason !== undefined) body.reason = fact.reason;
-      return { ...base, kind: "span_end", name: SPAN_PERMISSION_WAIT, scope: { toolCallId: fact.toolCallId }, attributes: attrs, body };
+      return { ...base, kind: "span_end", name: SPAN_PERMISSION_WAIT, scope: scopeOf(fact, { toolCallId: fact.toolCallId }), attributes: attrs, body };
     }
   }
 }

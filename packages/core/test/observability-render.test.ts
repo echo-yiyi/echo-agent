@@ -94,14 +94,15 @@ async function fixtureRun(): Promise<RunObservation> {
   });
   try {
     let turnId: string | null = null;
-    const sink = rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => ({ ...identity, runId: "run:fixed", ...(turnId !== null ? { turnId } : {}) }));
+    // 与生产同形：scope 供给只给「是哪个 agent、哪段会话」，run / turn 由循环事实自带
+    const sink = rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => ({ ...identity }));
     rt.acceptRun({ runId: "run:fixed", source: { kind: "user" }, ...identity, modelBinding: binding });
     clock.advance(1);
     rt.startRun("run:fixed", identity);
     for (const f of script()) {
-      // 与 Agent 的 scope 供给同一规则：turn 归属只在 turn 开着时补，用的就是事实里的 turnId（turn_ended 自带，之后清掉）
+      // 与循环里的探针同一规则：turn 里的节点带上本 turn 的 id（turn_ended 仍在 turn 里，之后清掉）
       if (f.kind === "turn_started") turnId = f.turnId;
-      sink.offer(f);
+      sink.offer({ ...f, runId: "run:fixed", ...(turnId !== null ? { turnId } : {}) });
       if (f.kind === "turn_ended") turnId = null;
     }
     clock.advance(130);

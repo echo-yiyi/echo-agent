@@ -22,13 +22,21 @@ export type CompactionFactBody =
    */
   | { kind: "compaction_failed"; reason: CompactionReason; stage?: string; message: string };
 
-export type CompactionFact = CompactionFactBody & Readonly<{ at: number }>;
+/**
+ * 带发生时刻与所在循环身份的事实：`runId` 是跑这次压缩的循环的 run，`turnId` 只在 turn 里撞窗应急时才有
+ * （轮首的自动压缩发生在两轮之间）。与循环事实同一条规矩：身份自带，不从外面那个 Agent 补。
+ */
+export type CompactionFact = CompactionFactBody & Readonly<{ at: number; runId: string; turnId?: string }>;
 
 export type CompactionProbe = CapabilityFactSink<CompactionFact>;
 
-/** 节点上调它：补发生时刻，交给探针。没给探针就什么都不做。 */
-export function probeCompaction(sink: CompactionProbe | undefined, fact: CompactionFactBody): void {
-  sink?.offer({ ...fact, at: Date.now() } as CompactionFact);
+/** 节点上调它：补发生时刻与身份，交给探针。没给探针就什么都不做。 */
+export function probeCompaction(sink: CompactionProbe | undefined, where: Readonly<{ runId: string; turnId?: string }>, fact: CompactionFactBody): void {
+  sink?.offer({ ...fact, at: Date.now(), runId: where.runId, ...(where.turnId !== undefined ? { turnId: where.turnId } : {}) } as CompactionFact);
+}
+
+function scopeOf(fact: CompactionFact): Readonly<Record<string, string>> {
+  return { runId: fact.runId, ...(fact.turnId !== undefined ? { turnId: fact.turnId } : {}) };
 }
 
 export function projectCompactionFact(fact: CompactionFact, policy: ObservationCapturePolicy): ObservationFactProjection | null {
@@ -37,7 +45,7 @@ export function projectCompactionFact(fact: CompactionFact, policy: ObservationC
   const content = policy === "content";
   switch (fact.kind) {
     case "compaction_started":
-      return { ...base, kind: "span_start", name: SPAN_CONTEXT_COMPACT, scope: {}, attributes: { reason: fact.reason }, body: { reason: fact.reason } };
+      return { ...base, kind: "span_start", name: SPAN_CONTEXT_COMPACT, scope: scopeOf(fact), attributes: { reason: fact.reason }, body: { reason: fact.reason } };
     case "compaction_ended": {
       // metadata 档：只有形状（段数、清到哪、哪些阶段动了、压完多大）；content 档才带各段摘要正文
       const body: Record<string, unknown> = {
@@ -47,7 +55,7 @@ export function projectCompactionFact(fact: CompactionFact, policy: ObservationC
         clearedBefore: fact.compaction.clearedBefore,
         contextTokens: fact.contextTokens,
       };
-      return { ...base, kind: "span_end", name: SPAN_CONTEXT_COMPACT, scope: {}, attributes: { reason: fact.reason, changed: fact.stages.length > 0 }, body };
+      return { ...base, kind: "span_end", name: SPAN_CONTEXT_COMPACT, scope: scopeOf(fact), attributes: { reason: fact.reason, changed: fact.stages.length > 0 }, body };
     }
     case "compaction_failed": {
       // 阶段名是标识，metadata 档就记；错误消息来自第三方阶段，可能带上下文正文，只在 content 档记
@@ -55,7 +63,7 @@ export function projectCompactionFact(fact: CompactionFact, policy: ObservationC
       if (fact.stage !== undefined) attrs.stage = fact.stage;
       const body: Record<string, unknown> = { ...attrs };
       if (content) body.message = fact.message;
-      return { ...base, kind: "event", name: "context.compact.failed", scope: {}, attributes: attrs, body };
+      return { ...base, kind: "event", name: "context.compact.failed", scope: scopeOf(fact), attributes: attrs, body };
     }
   }
 }

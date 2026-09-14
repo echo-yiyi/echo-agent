@@ -22,7 +22,7 @@ import { renderTranscriptMessage } from "./compaction/tool.ts";
 import { DEFAULT_EXTRACT_MAX_TURNS, defaultExtractPrompt } from "./memory/extract.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
-import { loopFactDescriptor, probe } from "./loop/observe.ts";
+import { loopFactDescriptor, loopProbeFor } from "./loop/observe.ts";
 import { compactionFactDescriptor } from "./compaction/observe.ts";
 import { agentFactDescriptor, probeAgent, type AgentProbe } from "./agent-observe.ts";
 import { sha256Hex } from "./observability/hash.ts";
@@ -2616,27 +2616,29 @@ export class Agent {
     try {
       // 循环没来得及自己关层就抛了：这里是收尾的执行节点，合成的每一拍都与探针并列记——
       // 循环里没走到的那几个关层节点，观测同样没记过，所以这里补的正好是缺的那几拍
-      const observe = this.loopProbes?.loop;
-      probe(observe, { kind: "generation_started" });
+      // 探针按这个 run 钉住；还开着的 turn 先读下来——失败消息那两拍也属于它（中间的消息事件不改层状态）
+      const probe = loopProbeFor(this.loopProbes?.loop, runId);
+      const open = this.openLayers;
+      const inTurn = open.turnId ?? undefined;
+      probe({ kind: "generation_started" }, inTurn);
       await this.processEvents({ type: "message_start", role: "assistant" });
-      probe(observe, { kind: "message_committed", message: failure });
+      probe({ kind: "message_committed", message: failure }, inTurn);
       await this.processEvents({ type: "message_end", message: failure });
       // 收还开着的层（attempt → turn → reply），配对不缺一拍；没开的不补
-      const open = this.openLayers;
       const result: AttemptResult = aborted ? { kind: "aborted" } : { kind: "failed", error: err };
       if (open.turnId !== null && open.attempt !== null) {
-        probe(observe, { kind: "attempt_ended", turnId: open.turnId, attempt: open.attempt, result });
+        probe({ kind: "attempt_ended", turnId: open.turnId, attempt: open.attempt, result }, open.turnId);
         await this.processEvents({ type: "attempt_end", turnId: open.turnId, attempt: open.attempt, result });
       }
       if (open.turnId !== null) {
-        probe(observe, { kind: "turn_ended", turnId: open.turnId, result, toolResultCount: 0 });
+        probe({ kind: "turn_ended", turnId: open.turnId, result, toolResultCount: 0 }, open.turnId);
         await this.processEvents({ type: "turn_end", turnId: open.turnId, result, toolResults: [] });
       }
       if (open.replyId !== null) {
-        probe(observe, { kind: "reply_ended", replyId: open.replyId, outcome, hasFinal: false, turns: this._state.iteration });
+        probe({ kind: "reply_ended", replyId: open.replyId, outcome, hasFinal: false, turns: this._state.iteration });
         await this.processEvents({ type: "reply_end", replyId: open.replyId, outcome, final: null, turns: this._state.iteration });
       }
-      probe(observe, { kind: "loop_ended", outcome });
+      probe({ kind: "loop_ended", outcome });
       await this.processEvents({ type: "agent_end", outcome });
       return { outcome, messages: [failure] };
     } catch (sinkError) {
@@ -3417,8 +3419,9 @@ export class Agent {
     rt.attachDiagnostics((d) => this.reportDiagnostic(d));
     rt.bindScope(() => this.observationScope());
     this.loopProbes = {
-      loop: rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID)),
-      compaction: rt.capabilitySink(compactionFactDescriptor, builtinOwner(AGENT_ENTRY_ID)),
+      // 循环与压缩的事实自带 run / turn：scope 供给只给「是哪个 agent、哪段会话」，不从 Agent 身上补
+      loop: rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => this.observationIdentityScope()),
+      compaction: rt.capabilitySink(compactionFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => this.observationIdentityScope()),
     };
     this.agentProbe = rt.capabilitySink(agentFactDescriptor, builtinOwner(AGENT_ENTRY_ID));
     // 三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
@@ -3439,12 +3442,22 @@ export class Agent {
     const runId = this.activeRun !== undefined && this.currentRunId !== null ? this.currentRunId : undefined;
     const turnId = this.intake.activeTurnId;
     return {
-      agentId: this.product,
-      agentInstanceId: this.agentInstanceId,
-      ...(this._state.sessionId === null ? {} : { sessionId: this._state.sessionId }),
+      ...this.observationIdentityScope(),
       ...(runId === undefined ? {} : { runId }),
       // turn 归属只在 turn 开着时补：agent_end 这类 turn 之外的事实不能被记成「最后一个 turn 里的」
       ...(runId !== undefined && turnId !== null ? { turnId } : {}),
+    };
+  }
+
+  /**
+   * 只有「是哪个 agent、哪段会话」的 scope：循环与压缩探针用它。它们的 run / turn 由事实自带——
+   * 同一个 Agent 里可能同时跑着几个循环实例，Agent 的当前 run / 开着的 turn 只对主循环成立。
+   */
+  private observationIdentityScope(): Readonly<Record<string, string>> {
+    return {
+      agentId: this.product,
+      agentInstanceId: this.agentInstanceId,
+      ...(this._state.sessionId === null ? {} : { sessionId: this._state.sessionId }),
     };
   }
 

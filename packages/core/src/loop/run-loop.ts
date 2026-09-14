@@ -18,7 +18,7 @@ import type { AgentOutcome } from "../events.ts";
 import { userMessage, type AgentMessage, type AssistantMessage } from "../messages.ts";
 import { createCompactor } from "../compaction/pipeline.ts";
 import { replyIdOf } from "./ids.ts";
-import { probe, type LoopProbe } from "./observe.ts";
+import { loopProbeFor, type LoopProbeFn } from "./observe.ts";
 import { runTurn, type RunDeps } from "./run-turn.ts";
 import type { AgentContext, AgentLoopConfig, Emit, LoopDeps, LoopProbes, LoopResult, ReplySource, TurnCause } from "./types.ts";
 import type { StreamFn } from "../provider/types.ts";
@@ -76,6 +76,8 @@ export async function runLoop(deps: LoopDeps, first: ReplyInput): Promise<LoopRe
     startedAt: Date.now(),
     // 压缩簿记（`compaction/pipeline.ts`）：轮首按阈值压、轮末记 provider 的 usage 当基准、撞窗后应急一次
     compactor: createCompactor({ ...deps, signal: merged }),
+    // 本循环实例的探针：runId 钉成这个循环自己的——同一个 Agent 里别的循环实例（子 agent、Dream、提取）各有各的
+    probe: loopProbeFor(deps.observe?.loop, config.runId),
   };
 
   let outcome: AgentOutcome = { kind: "completed" };
@@ -83,7 +85,7 @@ export async function runLoop(deps: LoopDeps, first: ReplyInput): Promise<LoopRe
   const leftovers = { steers: [] as AgentMessage[], followUps: [] as AgentMessage[] };
   let failure: { error: unknown } | null = null;
   try {
-    probe(deps.observe?.loop, { kind: "loop_started" });
+    runDeps.probe({ kind: "loop_started" });
     await emit({ type: "agent_start" });
 
     let replies = 0;
@@ -141,7 +143,7 @@ export async function runLoop(deps: LoopDeps, first: ReplyInput): Promise<LoopRe
     // rejected，不是「accepted 随后被丢掉」的假 accepted
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     config.intake?.closeRun(leftovers);
-    probe(deps.observe?.loop, { kind: "loop_ended", outcome });
+    runDeps.probe({ kind: "loop_ended", outcome });
     await emit({ type: "agent_end", outcome });
   }
   if (failure !== null) throw failure.error;
@@ -164,8 +166,8 @@ type ReplyEnd = {
 
 async function runReply(deps: RunDeps, replyId: string, source: ReplySource, input: readonly AgentMessage[]): Promise<ReplyEnd> {
   const { context, config, emit, callerSignal, deadline, compactor } = deps;
-  const observe = deps.observe?.loop;
-  probe(observe, { kind: "reply_started", replyId, source });
+  const { probe } = deps;
+  probe({ kind: "reply_started", replyId, source });
   await emit({ type: "reply_start", replyId, source });
 
   let n = 0;
@@ -177,7 +179,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
   let ended = false;
   try {
     // 输入消息的 message_end 紧挨在它引发的 turn_start 之前（中间只可能有轮首压缩的 compaction_*）
-    await absorb(context, input, emit, observe);
+    await absorb(context, input, emit, probe);
 
     for (;;) {
       /* 硬闸：三条都在轮首集中判 */
@@ -224,7 +226,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
          本 turn 交出的 steer 一并并入——「跑的中途插话 → 下一圈开头」 */
       const stop = final.stopReason;
       if (stop === "tool_use" || stop === "max_tokens") {
-        await absorb(context, turn.steers, emit, deps.observe?.loop);
+        await absorb(context, turn.steers, emit, probe);
         cause = stop;
         continue;
       }
@@ -246,7 +248,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
 
       /* ④ 有人插话 → 并入，继续干 */
       if (turn.steers.length > 0) {
-        await absorb(context, turn.steers, emit, deps.observe?.loop);
+        await absorb(context, turn.steers, emit, probe);
         cause = "steer";
         continue;
       }
@@ -255,7 +257,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
     }
 
     ended = true;
-    probe(observe, { kind: "reply_ended", replyId, outcome, hasFinal: final !== null, turns: n });
+    probe({ kind: "reply_ended", replyId, outcome, hasFinal: final !== null, turns: n });
     await emit({ type: "reply_end", replyId, outcome, final, turns: n });
     return { outcome, final, finalText: final === null ? "" : textOf(final), turns: n, stopped, unconsumedSteers };
   } catch (e) {
@@ -263,7 +265,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
     if (!ended) {
       ended = true;
       const failed: AgentOutcome = { kind: "error", error: agentError("internal", "internal", errText(e), false) };
-      probe(observe, { kind: "reply_ended", replyId, outcome: failed, hasFinal: final !== null, turns: n });
+      probe({ kind: "reply_ended", replyId, outcome: failed, hasFinal: final !== null, turns: n });
       await emit({ type: "reply_end", replyId, outcome: failed, final, turns: n });
     }
     throw e;
@@ -295,10 +297,10 @@ async function timedOut(deps: RunDeps): Promise<AgentOutcome> {
  * 队列消息并入 context。**每条进入 transcript 的消息都要发 message_end**——否则循环的 context 与
  * Agent 的 messages 就分叉了（实测踩到过：插话真的并入了循环，却没进 transcript）。
  */
-async function absorb(context: AgentContext, messages: readonly AgentMessage[], emit: Emit, observe: LoopProbe | undefined): Promise<void> {
+async function absorb(context: AgentContext, messages: readonly AgentMessage[], emit: Emit, probe: LoopProbeFn): Promise<void> {
   for (const m of messages) {
     context.messages.push(m);
-    probe(observe, { kind: "message_committed", message: m });
+    probe({ kind: "message_committed", message: m });
     await emit({ type: "message_end", message: m });
   }
 }

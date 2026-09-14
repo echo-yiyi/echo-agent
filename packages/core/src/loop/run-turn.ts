@@ -33,13 +33,15 @@ import { isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type
 import { buildWorkingMessages } from "../compaction/view.ts";
 import { clampDelay, sleep } from "./backoff.ts";
 import { turnIdOf } from "./ids.ts";
-import { probe } from "./observe.ts";
+import type { LoopProbeFn } from "./observe.ts";
 import type { AgentLoopConfig, AttemptResult, Emit, LoopDeps, TurnCause, TurnResult } from "./types.ts";
 
 type Compactor = ReturnType<typeof createCompactor>;
 
 /** run 内三层共用的依赖：LoopDeps 之外多了 run 级的东西（由 runLoop 建一次）。`signal` 已与 deadline 合并。 */
 export type RunDeps = LoopDeps & {
+  /** 本循环实例的探针函数：runId 在 runLoop 开头钉住，节点调用时给 turnId。 */
+  readonly probe: LoopProbeFn;
   /** 调用方的 signal（未与 deadline 合并）：reply 靠它区分「调用方取消」与「run 超时」。 */
   readonly callerSignal: AbortSignal;
   /** run 的 deadline signal；没配 timeoutMs 就没有。 */
@@ -71,8 +73,8 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
   };
   // turn 开门（RunIntakeGate）：同样在 turn_start 之前——订阅者收到 turn_start 就能 steer()
   config.intake?.openTurn(turnId);
-  const observe = deps.observe?.loop;
-  probe(observe, { kind: "turn_started", turnId, replyId, cause, tools: workset.tools.map((t) => t.name) });
+  const { probe } = deps;
+  probe({ kind: "turn_started", turnId, replyId, cause, tools: workset.tools.map((t) => t.name) }, turnId);
   await emit({ type: "turn_start", turnId, replyId, cause });
 
   const toolResults: ToolResultMessage[] = [];
@@ -97,13 +99,13 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
       // 撞窗（provider 说上下文超了）：**应急压缩一次**再来一个 attempt。压不动 / 第二次撞 → 按失败收场。
       // 它不是重试（上下文变了），所以不发 retry_scheduled——压缩事件已说明原因
       if (err.code === "context_overflow") {
-        if (await deps.compactor.recover()) continue;
+        if (await deps.compactor.recover(turnId)) continue;
         break;
       }
       if (!err.retryable) break;
       const next = attempt + 1;
       const delayMs = clampDelay(config.retryPolicy.backoffMs(attempt), config.maxRetryDelayMs);
-      probe(observe, { kind: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code });
+      probe({ kind: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code }, turnId);
       await emit({ type: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code });
       await workset.hooks.notify({ type: "retryScheduled", attempt: next, maxAttempts, delayMs, cause: err.code }, config.hookContext);
       await sleep(delayMs, signal);
@@ -127,7 +129,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
           if (one.status === "rejected") throw one.reason; // 与逐个 await 时一样：turn 由外层 catch 关成 failed
           const msg = one.value;
           context.messages.push(msg);
-          probe(observe, { kind: "message_committed", message: msg });
+          probe({ kind: "message_committed", message: msg }, turnId);
           await emit({ type: "message_end", message: msg });
           toolResults.push(msg as ToolResultMessage);
         }
@@ -139,7 +141,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
     /* ③ 关 turn：gate 的 turn 边界与事件的 turn 边界重合。交出的 steer 由 reply 决定吸收 */
     const steers = (await config.intake?.closeTurn()) ?? [];
     ended = true;
-    probe(observe, { kind: "turn_ended", turnId, result, toolResultCount: toolResults.length });
+    probe({ kind: "turn_ended", turnId, result, toolResultCount: toolResults.length }, turnId);
     await emit({ type: "turn_end", turnId, result, toolResults });
     return { turnId, result, toolResults, steers };
   } catch (e) {
@@ -148,7 +150,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
     if (!ended) {
       ended = true;
       const failed: AttemptResult = { kind: "failed", error: agentError("internal", "internal", errText(e), false) };
-      probe(observe, { kind: "turn_ended", turnId, result: failed, toolResultCount: toolResults.length });
+      probe({ kind: "turn_ended", turnId, result: failed, toolResultCount: toolResults.length }, turnId);
       await emit({ type: "turn_end", turnId, result: failed, toolResults });
     }
     throw e;
@@ -162,33 +164,33 @@ type MessageProgress = { opened: boolean; ended: boolean };
 
 async function runAttempt(deps: RunDeps, turnId: string, attempt: number, workset: TurnWorkset): Promise<AttemptResult> {
   const { context, emit } = deps;
-  const observe = deps.observe?.loop;
-  probe(observe, { kind: "attempt_started", turnId, attempt });
+  const { probe } = deps;
+  probe({ kind: "attempt_started", turnId, attempt }, turnId);
   await emit({ type: "attempt_start", turnId, attempt });
   const progress: MessageProgress = { opened: false, ended: false };
   let ended = false;
   try {
     let result: AttemptResult;
     try {
-      result = await callModel(deps, workset, progress);
+      result = await callModel(deps, turnId, workset, progress);
     } catch (e) {
       // streamFn / 投影 / hook 违约抛出：仍是一次失败的 attempt——不让异常击穿 turn，配对由结构保证。
       // 与 dialect 的「stream 不许 throw」同一态度：throw 只留给 bug，bug 也要有形状。
       const error = agentError("internal", "internal", errText(e), false);
       if (!progress.ended) {
         if (!progress.opened) {
-          probe(observe, { kind: "generation_started" });
+          probe({ kind: "generation_started" }, turnId);
           await emit({ type: "message_start", role: "assistant" });
         }
         const failure: AgentMessage = { role: "assistant", content: [], stopReason: "error", usage: null, error, at: Date.now() };
         context.messages.push(failure);
-        probe(observe, { kind: "message_committed", message: failure });
+        probe({ kind: "message_committed", message: failure }, turnId);
         await emit({ type: "message_end", message: failure });
       }
       result = { kind: "failed", error };
     }
     ended = true;
-    probe(observe, { kind: "attempt_ended", turnId, attempt, result });
+    probe({ kind: "attempt_ended", turnId, attempt, result }, turnId);
     await emit({ type: "attempt_end", turnId, attempt, result });
     return result;
   } catch (e) {
@@ -196,14 +198,14 @@ async function runAttempt(deps: RunDeps, turnId: string, attempt: number, workse
     if (!ended) {
       ended = true;
       const failed: AttemptResult = { kind: "failed", error: agentError("internal", "internal", errText(e), false) };
-      probe(observe, { kind: "attempt_ended", turnId, attempt, result: failed });
+      probe({ kind: "attempt_ended", turnId, attempt, result: failed }, turnId);
       await emit({ type: "attempt_end", turnId, attempt, result: failed });
     }
     throw e;
   }
 }
 
-async function callModel(deps: RunDeps, workset: TurnWorkset, progress: MessageProgress): Promise<AttemptResult> {
+async function callModel(deps: RunDeps, turnId: string, workset: TurnWorkset, progress: MessageProgress): Promise<AttemptResult> {
   const { context, config, emit, signal, streamFn } = deps;
   const { tools, hooks } = workset;
 
@@ -239,15 +241,15 @@ async function callModel(deps: RunDeps, workset: TurnWorkset, progress: MessageP
     { signal, apiKey, thinkingLevel: config.thinkingLevel },
   );
 
-  const observe = deps.observe?.loop;
+  const { probe } = deps;
   for await (const item of stream) {
     if (item.type === "start") {
       progress.opened = true;
-      probe(observe, { kind: "generation_started" });
+      probe({ kind: "generation_started" }, turnId);
       await emit({ type: "message_start", role: "assistant" });
       continue;
     }
-    probe(observe, { kind: "generation_delta", delta: item });
+    probe({ kind: "generation_delta", delta: item }, turnId);
     await emit({ type: "message_update", delta: item, message: item.partial });
   }
 
@@ -256,17 +258,17 @@ async function callModel(deps: RunDeps, workset: TurnWorkset, progress: MessageP
   // 退化路径：违约或无流式后端没发过 start，补一个，保「每个定稿消息必有成对 start/end」。
   if (!progress.opened) {
     progress.opened = true;
-    probe(observe, { kind: "generation_started" });
+    probe({ kind: "generation_started" }, turnId);
     await emit({ type: "message_start", role: "assistant" });
   }
 
   const finalMsg = { ...final, at: Date.now() };
   context.messages.push(finalMsg);
   progress.ended = true;
-  probe(observe, { kind: "message_committed", message: finalMsg });
+  probe({ kind: "message_committed", message: finalMsg }, turnId);
   await emit({ type: "message_end", message: finalMsg });
   if (final.usage !== null) {
-    probe(observe, { kind: "usage", usage: final.usage });
+    probe({ kind: "usage", usage: final.usage }, turnId);
     await emit({ type: "usage", usage: final.usage });
   }
 
@@ -326,13 +328,13 @@ async function runOneTool(
   askGate: AskGate,
 ): Promise<AgentMessage> {
   const { config, emit, signal } = deps;
-  const observe = deps.observe?.loop;
+  const { probe } = deps;
   const { tools, hooks } = workset;
   // **只在本轮快照里找**。找不到的名字只拿一个准确原因回给模型，绝不从实时池里捞对象来执行。
   const tool = tools.find((t) => t.name === use.name);
   if (tool === undefined) {
     const reason = explainMissingTool(config, workset.knownToolNames, use.name);
-    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "lookup", cause: "not_found", reason });
+    probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "lookup", cause: "not_found", reason }, turnId);
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "not_found", message: reason });
     return toolResultMessage(use.id, use.name, reason, true);
   }
@@ -340,7 +342,7 @@ async function runOneTool(
     // 存在但不是模型可调的（InternalTool 不上模型菜单，模型不该点它的名）
     const reason = `Tool '${use.name}' is not available to the model`;
     // 给壳的事件把它并进 not_found；观测分开记——「不存在」与「存在但模型不该点」是两件事
-    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "lookup", cause: "not_visible", reason });
+    probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "lookup", cause: "not_visible", reason }, turnId);
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "not_found", message: reason });
     return toolResultMessage(use.id, use.name, reason, true);
   }
@@ -355,7 +357,7 @@ async function runOneTool(
     params = deepFreezePlain(prepare(tool, use.input));
   } catch (e) {
     const message = `Invalid arguments: ${errText(e)}`;
-    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "arguments", cause: "bad_params", reason: message });
+    probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "arguments", cause: "bad_params", reason: message }, turnId);
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "bad_params", message });
     return toolResultMessage(use.id, use.name, message, true);
   }
@@ -367,7 +369,7 @@ async function runOneTool(
   );
   if (pre.decision === "block") {
     const reason = pre.reason ?? "Blocked by a hook";
-    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "preToolUse", cause: "blocked", decidedBy: "hook", reason });
+    probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "preToolUse", cause: "blocked", decidedBy: "hook", reason }, turnId);
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "hook", reason });
     return toolResultMessage(use.id, use.name, reason, true);
   }
@@ -377,7 +379,7 @@ async function runOneTool(
     } catch (e) {
       const message = `Arguments rewritten by a hook are invalid: ${errText(e)}`;
       // 参数是 hook 改坏的，不是模型给坏的：stage 记 preToolUse，与模型原始参数不合法（arguments）分开
-      probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "preToolUse", cause: "bad_params", decidedBy: "hook", reason: message });
+      probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "preToolUse", cause: "bad_params", decidedBy: "hook", reason: message }, turnId);
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "bad_params", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
@@ -400,7 +402,7 @@ async function runOneTool(
     const raw = await raceAbort(Promise.resolve(config.permission.authorize(authInput)), signal);
     if (raw.kind === "aborted") {
       const message = "The run was aborted while waiting for authorization";
-      probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "aborted", reason: message });
+      probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "aborted", reason: message }, turnId);
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "aborted", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
@@ -416,7 +418,7 @@ async function runOneTool(
     const { permissionId, settled } = await askGate(async () => {
       // 只有真正进入 ask 才有 permissionId：先登记 ledger，再恰好发一次带同一 ID 的 permissionRequest
       const handle = config.permission.ask({ ...authInput, reason: askReason }, signal);
-      probe(observe, { kind: "permission_asked", toolCallId: use.id, toolName: use.name, permissionId: handle.permissionId, reason: askReason });
+      probe({ kind: "permission_asked", toolCallId: use.id, toolName: use.name, permissionId: handle.permissionId, reason: askReason }, turnId);
       await notify(hooks, config, { type: "permissionRequest", permissionId: handle.permissionId, ...authInput, reason: askReason });
       await notify(hooks, config, {
         type: "notification",
@@ -426,7 +428,8 @@ async function runOneTool(
       });
       const outcome = await handle.settled;
       // 在裁决落下的那一刻记：与 permission_asked 配成的 span 时长就是真正等人的时间，不含门闩之后的通知
-      probe(observe, {
+      probe(
+        {
         kind: "permission_settled",
         toolCallId: use.id,
         toolName: use.name,
@@ -436,18 +439,20 @@ async function runOneTool(
           : outcome.kind === "deny"
             ? { decision: "denied", decidedBy: outcome.decidedBy, reason: outcome.reason }
             : { decision: "cancelled", reason: outcome.reason }),
-      });
+        },
+        turnId,
+      );
       return { permissionId: handle.permissionId, settled: outcome };
     });
     if (settled.kind === "cancelled") {
       await notify(hooks, config, { type: "permissionCancelled", permissionId, toolCallId: use.id, reason: settled.reason });
       const message = `Aborted while waiting for approval (${settled.reason})`;
-      probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "cancelled", reason: message });
+      probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "cancelled", reason: message }, turnId);
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "aborted", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
     if (settled.kind === "deny") {
-      probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "denied", decidedBy: settled.decidedBy, reason: settled.reason });
+      probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "denied", decidedBy: settled.decidedBy, reason: settled.reason }, turnId);
       await notify(hooks, config, {
         type: "permissionDenied",
         permissionId,
@@ -461,7 +466,7 @@ async function runOneTool(
     }
     await notify(hooks, config, { type: "permissionGranted", permissionId, toolCallId: use.id, decidedBy: "human" });
   } else if (verdict.kind === "deny") {
-    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "denied", decidedBy: "policy", reason: verdict.reason });
+    probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "denied", decidedBy: "policy", reason: verdict.reason }, turnId);
     await notify(hooks, config, { type: "permissionDenied", toolCallId: use.id, toolName: use.name, reason: verdict.reason, decidedBy: "policy" });
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "permission", reason: verdict.reason });
     return toolResultMessage(use.id, use.name, verdict.reason, true);
@@ -469,7 +474,7 @@ async function runOneTool(
     await notify(hooks, config, { type: "permissionGranted", toolCallId: use.id, decidedBy: "policy" });
   }
 
-  probe(observe, { kind: "tool_started", toolCallId: use.id, toolName: use.name, params });
+  probe({ kind: "tool_started", toolCallId: use.id, toolName: use.name, params }, turnId);
   await emit({ type: "tool_execution_start", toolCallId: use.id, toolName: use.name, params });
 
   /* 执行。铁律说 execute 绝不 reject，但工具由调用方提供——仍兜一层，违约不该击穿这一轮 */
@@ -486,7 +491,7 @@ async function runOneTool(
       iteration,
       signal,
       onUpdate: (partial) => {
-        probe(observe, { kind: "tool_progress", toolCallId: use.id, partial });
+        probe({ kind: "tool_progress", toolCallId: use.id, partial }, turnId);
         updates.push(
           emit({ type: "tool_execution_update", toolCallId: use.id, partial }).catch((e: unknown) => {
             updateFailure ??= e;
@@ -498,7 +503,7 @@ async function runOneTool(
     const message = `Tool '${use.name}' threw: ${errText(e)}`;
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "crashed", message });
     const crashed: AgentToolResult = { content: message, isError: true, metadata: null };
-    probe(observe, { kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: crashed });
+    probe({ kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: crashed }, turnId);
     await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: crashed });
     return toolResultMessage(use.id, use.name, message, true);
   }
@@ -517,16 +522,16 @@ async function runOneTool(
   if (post.decision === "block") {
     const reason = post.reason ?? "Blocked by a hook";
     // 工具已经跑过：这条拦截发生在 tool_started 之后、tool_ended 之前，结果被换成了拦截原因
-    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "postToolUse", cause: "blocked", decidedBy: "hook", reason });
+    probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "postToolUse", cause: "blocked", decidedBy: "hook", reason }, turnId);
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "hook", reason });
     const denied: AgentToolResult = { content: reason, isError: true, metadata: null };
-    probe(observe, { kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: denied });
+    probe({ kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: denied }, turnId);
     await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: denied });
     return toolResultMessage(use.id, use.name, reason, true);
   }
   const finalResult = post.event.result;
 
-  probe(observe, { kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: finalResult });
+  probe({ kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: finalResult }, turnId);
   await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: finalResult });
   return toolResultMessage(
     use.id,
