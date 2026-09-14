@@ -24,10 +24,10 @@
 
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
-- `bun test packages/core/test/observability-sequencer.test.ts` —— lane 语义、seq 预留与 hole/gap 配对、prefix barrier、CAS。
+- `bun test packages/core/test/observability-sequencer.test.ts` —— lane 语义、seq 预留与 hole/gap 配对、prefix barrier、CAS、run 边界 body 的封闭校验（含子循环来源与 `startedBy`）。
 - `bun test packages/core/test/observability-sqlite-store.test.ts` —— 同事务全见或全不见、幂等重提、corruption 判定。
 - `bun test packages/core/test/observability-projection.test.ts` —— 循环 / 压缩 / Agent 自身事实的逐 kind 固定投影、三档的字段差异、投影抛错留 hole + gap、投影自身在同步预算内。
-- `bun test packages/core/test/observability-runtime.test.ts` —— 真实 `createEcho → send → SQLite → reader` 链路：脚本化 run 的整段记录**逐项**比对执行顺序、run 开头与结尾两份同形的状态快照、run 之外的相位迁移。
+- `bun test packages/core/test/observability-runtime.test.ts` —— 真实 `createEcho → send → SQLite → reader` 链路：脚本化 run 的整段记录**逐项**比对执行顺序、run 开头与结尾两份同形的状态快照、run 之外的相位迁移、前台 / 后台子 agent 各是自己的 run 并链回派出它的工具调用。
 - `bun test packages/core/test/observability-decisions.test.ts` —— 决定点：工具被拦的原因、等人审批的 span、每轮工作集、装备变更。
 - `bun test packages/core/test/extension-observe.test.ts` —— extension 一代装上 / prepare 被拒 / apply 失败 / 卸下 / 卸载被拒。
 - `bun test packages/core/test/observability-capture.test.ts` `observability-capabilities.test.ts` —— 三档的采集差异、各能力模块的事实。
@@ -130,6 +130,7 @@
 两条性质值得单说：
 
 - **只读入口不启动 agent、不取会话锁**，所以正在跑的会话也能读——读到的是它已 COMMIT 的部分。reader 走独立的 read-only 连接，只看已提交快照。
+- **`lastRun()` 是最近一次顶层 run**：隔离子循环（§7）是某个 run 派出来的，`source` 带 `parentRunId`，不算「上一次」。`listRuns()` 照常列出全部。
 - **renderer 是纯函数**（[render.ts](../../packages/core/src/observability/render.ts#symbol=renderRunObservation) 头注）：`buildRunObservationViewModel()` 与 `renderRunObservation()` 不读 Agent、不查 store、不看订阅状态，也不改原 envelope。同一批记录必然同一输出，所以能上 golden。时间全部相对 `acceptedAt`，golden 不锁 wall clock。
 
 **跨会话是在装配层做的，不在 core**：core 守「一个 journal、一个 reader」，`packages/base` 的 `SessionObservationReaders` 给每段会话开一个只读 reader 再合并。所以不给 `--session` 时一个面板能看整个集群。
@@ -151,7 +152,7 @@
 | 闹钟 | `schedule/observe.ts` | 排程、触发、取消 |
 | 收件 | `inbox/observe.ts` | accepted / rejected / restored / consumed / acked / released / sealed |
 
-run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走 descriptor。
+run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走 descriptor。调它的有两处：admission 颁发的 run 由 permit 的 executor / finalizer 调；隔离子循环由派出它的 [`Agent.runSubagent`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent) 调（见下面「子循环」）。
 
 几类事实值得单说：
 
@@ -159,6 +160,12 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 - **整体运行状态。** run 开头（`agent.state` 快照）与结尾（`run.closed` 里的 `finalSnapshot`）各一份，**同形、同一个校验器**（[terminal.ts](../../packages/core/src/observability/terminal.ts#symbol=materializeObservableState)）：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数摘要（`echo:tasks` / `echo:scheduler` / `echo:agent` 的收件箱）。模型与绑定不重复记——它们在 `run.assembly`。校验是**白名单重建**：只有逐个校验过的字段进副本，加字段必须同时扩白名单，否则会在封口时被静默剥掉。
 - **生命周期相位。** `Agent` 里所有相位写入都经 [`Agent.setPhase`](../../packages/core/src/agent.ts#symbol=Agent.setPhase)，节点就是它；丢锁那一拍也在这里当场记——这是 Agent 自己做的迁移，不是观测推断死活。**`stopping → stopped` 进不了账本**：观测写入端是 stop 流程里被关掉的东西之一（排在 root store 关闭与空会话目录清理之前，这个顺序不能动），`stopped` 在它之后才成立。一次正常收摊的最后一拍相位是 `running → stopping`。
 - **extension。** 按**代**记，不按 Fiber 记：装载是全有或全无的事务。发生在任何 run 之外，进「运行时活动」。
+- **子循环。** 记忆整理（dream）、记忆提取、子 agent 跑的是同一个循环（[`Agent.runSubagent`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)），**每次调用在账本里是一个 run**，不经 admission：
+  - **身份跟着循环走，不从 Agent 身上补。** 循环与压缩的每条事实自带发出它的那个循环实例的 `runId`，turn 里的再带 `turnId`（[`loopProbeFor`](../../packages/core/src/loop/observe.ts#symbol=loopProbeFor)）；Agent 的 scope 供给只给「是哪个 agent、哪段会话」。同一个 Agent 里可能同时跑着几个循环实例——后台子 agent 在父 run 封口之后才跑、前台子 agent 嵌在父的一次工具调用里——Agent 的当前 run / 开着的 turn 只对主循环成立。所以子循环与主循环用同一组探针，没有专门的观测代码。
+  - **来源链回派出它的 run。** `source` 是 [`SubloopRunSource`](../../packages/core/src/observability/types.ts#symbol=SubloopRunSource)：dream / extract 带 `parentRunId`；subagent 另带 `parentToolCallId`（派出它的那次工具调用）与 `background`。admission 的 `RunSource` 不动——header 上的类型是两者的并集 `ObservedRunSource`。runId 是 `<kind>-<uuid>`，前台子 agent 不再借父 run 的 runId，turnId 与权限 tombstone 都不再撞。
+  - **边界与主循环同一套**，两处不同：`run.started` 的 `startedBy` 是 `subloop`；`run.closed` 不等 COMMIT（主循环等它是为了 `send()` 如实报 persistence，子循环没有这样的读者），失败进诊断。
+  - **状态快照照拍**，`state.agent.activeRunId` 记 Agent 此刻开着的 admission run——子循环里是派出它的那个，或者没有。run 开头的 `agent.state` 自带 `runId`，同样不从 Agent 身上补。
+  - 面板：子循环的行调暗、「跟随最新」跳过它们；子 agent 的那次工具调用能跳到子 run，子 run 的概览能跳回父 run。
 
 **新工具自动进观测**：工具执行的事实只有一个来源（`loop/run-turn.ts` 的探针），所以产品加工具不需要额外埋点。但**面板要念出人话**得在术语表 `packages/base/src/observe/lexicon.ts` 里登记——没登记只会显示原始名字。那份表是手抄的快照，不是推导出来的门（§8）。
 
@@ -172,7 +179,6 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 4. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
 5. **`bun:sqlite` 是同步调用**，没隔 Worker：磁盘真挂住会占事件循环。
 6. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
-7. **子循环没有观测。** Dream、记忆提取、子 agent 共用的 [`Agent.runSubagent`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent) 不挂探针，内部的 turn / 模型 / 工具不进账本。接上之前要先定记录挂在哪：后台子 agent 在父 run 封口之后才跑，scope 供给会把事实记进无关的 run；同一批并发的前台子 agent 挂着同一个父 turn，span 配对键相同会互相配错；Dream 与提取的 runId 不在 RunIndex 里。
-8. **记忆的能力摘要没接。** 状态快照的能力摘要跑在同步封口路径上，记忆的状态在盘上要异步读。
-9. **`sourceSeq` 没有生产者。** 它原本是转手 `AgentEvent` 时带的事件 seq；观测改成插桩之后没有任何记录再带它。envelope 上这个可选字段留在已发布的公开类型里没删。
-10. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。
+7. **记忆的能力摘要没接。** 状态快照的能力摘要跑在同步封口路径上，记忆的状态在盘上要异步读。
+8. **`sourceSeq` 没有生产者。** 它原本是转手 `AgentEvent` 时带的事件 seq；观测改成插桩之后没有任何记录再带它。envelope 上这个可选字段留在已发布的公开类型里没删。
+9. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。

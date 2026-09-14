@@ -7,7 +7,11 @@
 // 探针放在 emit **之前**：它同步、永不抛，emit 自己坏了，「到过这个节点」也已经记下；各层的 `ended` 标记照样
 // 挡住 catch 分支里的重复关层。循环是纯方法（评测直接打它），探针可选——不给照跑。
 //
-// run 边界（run.accepted / started / closed）不在这里，它们只有 admission / executor / finalizer 一个 emission owner。
+// 每条事实自带发出它的循环实例的 runId（turn 里的再带 turnId），由 `loopProbeFor` 在节点上补：同一个 Agent 里可能同时跑着
+// 几个循环实例（主循环、子 agent、记忆整理 / 提取），Agent 的当前 run 只对主循环成立。
+//
+// run 边界（run.accepted / started / closed）不在这里，唯一 emission owner 是 `ObservationRuntime`：admission 颁发的 run
+// 由 permit 的 executor / finalizer 调，隔离子循环由派出它的 `Agent.runSubagent` 调。
 // 压缩的事实在 `compaction/observe.ts`，Agent 自身的（队列、资源）在 `agent-observe.ts`。
 //
 // 纯 Web-standard（不碰 `node:`）。
@@ -23,7 +27,7 @@ import type { AttemptResult, ReplySource, TurnCause } from "./types.ts";
 
 export const LOOP_INSTRUMENTATION = { name: "echo.loop", version: "1" } as const;
 
-/** 固定 span 名。四层里 run 由 admission 发边界，其余三层各是一对 span；模型生成与工具执行各一对。 */
+/** 固定 span 名。四层里 run 是边界（`ObservationRuntime` 发），其余三层各是一对 span；模型生成与工具执行各一对。 */
 export const SPAN_REPLY_EXECUTE = "reply.execute";
 export const SPAN_ATTEMPT_EXECUTE = "attempt.execute";
 export const SPAN_TURN_EXECUTE = "turn.execute";

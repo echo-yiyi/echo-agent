@@ -49,7 +49,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .filters { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-8) var(--ctl-list-item-pad-x); border-bottom: 1px solid var(--border); }
 .filters .selrow { display: flex; align-items: center; gap: var(--space-6); }
 /* 来源片一行放得下就别换行：列表栏只有 280px，片子被 flex 压扁会变成「全...」「用...」，等于没有标签 */
-.filters .chiprow { display: flex; align-items: center; gap: var(--space-4); }
+.filters .chiprow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
 .filters .chiprow .chip { flex: 0 0 auto; max-width: none; padding: 0 var(--space-6); }
 .select {
   flex: 1 1 auto; min-width: 0; height: 24px; padding: 0 var(--space-6); border: 1px solid var(--border); border-radius: var(--r-sm);
@@ -326,9 +326,9 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 .evt .evthead .verb { font-size: var(--size-content); font-weight: 600; color: var(--ink); }
 .evt .evthead .obj { font-family: var(--font-mono); color: var(--ink-70); overflow: hidden; text-overflow: ellipsis; }
 .evt .nav { margin-left: auto; display: flex; gap: var(--space-4); }
-.evt .navbtn { height: 20px; min-width: 22px; padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--ink-70); font-size: var(--size-caption); cursor: pointer; }
+.evt .navbtn, .detail .sub .navbtn { height: 20px; min-width: 22px; padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--ink-70); font-size: var(--size-caption); cursor: pointer; }
 .evt .navbtn:disabled { opacity: 0.4; cursor: default; }
-.evt .navbtn:hover:not(:disabled) { background: var(--ui-raised); }
+.evt .navbtn:hover:not(:disabled), .detail .sub .navbtn:hover { background: var(--ui-raised); }
 .evt .fields { grid-template-columns: 5.5em 1fr; row-gap: var(--space-4); }
 .evt .fields dt, .evt .fields dd { font-size: var(--size-caption); }
 /* 「最耗时的几步」：右栏没选中时的入口，行形与时间线一致（动词 对象 …… 耗时） */
@@ -506,7 +506,7 @@ function renderFilters() {
   const filtered = STATE.filter !== "all" || STATE.product !== "all" || STATE.session !== "all";
   // 计数跟着下拉那一行右对齐：放在片子那一行会把最后一枚片子挤到换行（console.md §7：计数是筛后数）
   box.append(el("div", { class: "selrow" }, sel, el("span", { class: "count", text: filtered ? `${shown}/${STATE.runs.length}` : `${shown} 条` })));
-  // 第二行：来源。四五个短词，一行放得下，用片子——可点的东西长得像可点的东西。
+  // 第二行：来源。几个短词，用片子——可点的东西长得像可点的东西；列表栏放不下一行就折行，不横向溢出。
   // 无数据只降透明度不移除（console.md §7）
   const row = el("div", { class: "chiprow", role: "group", "aria-label": "按来源筛选" });
   const counts = {};
@@ -544,20 +544,21 @@ function renderRuns() {
   for (const r of runs) {
     const dur = r.endedAt === null ? LEX.runStatus.running.zh : fmtMs(r.endedAt - r.acceptedAt);
     const ws = sessionOf(r)?.workspace ?? "";
-    const minor = r.source.kind === "dream"; // 记忆整理：系统自理，整行调暗，不与对话争扫读
+    // 隔离子循环（整理 / 提取 / 子 agent，source 带 parentRunId）：由某个 run 派出，整行调暗，不与对话争扫读
+    const minor = "parentRunId" in r.source;
     const parts = [];
     if (showProduct) parts.push(productOf(r));
     if (showSession && r.sessionId) parts.push(sessionLabel(r.sessionId));
     if (parts.length === 0) parts.push(LEX.runSource[r.source.kind]?.zh ?? r.source.kind); // 都不区分时，至少说清这是哪一类
     const open = () => openRun(r.runId);
     // **每行恒两行**（2026-09-07 用户定）：第一行名称 + 右对齐耗时，第二行时间 · 状态 · 来源。
-    // 整理 run 走同一副骨架，只把整行调暗——此前它是一行、对话是三行，两种读法交替，视线一直在切换。
+    // 子循环 run 走同一副骨架，只把整行调暗——此前整理是一行、对话是三行，两种读法交替，视线一直在切换。
     const item = el("button", {
       class: `run${minor ? " run--minor" : ""}`, role: "option", "aria-selected": STATE.selected === r.runId,
       title: `${r.runId}${ws ? `\n${ws}` : ""}`, onclick: open,
     },
       el("div", { class: "l1" },
-        el("span", { class: "name", text: minor && parts.length === 0 ? LEX.runSource.dream.zh : parts.join(" · ") }),
+        el("span", { class: "name", text: parts.join(" · ") }),
         el("span", { class: "dur mono", text: dur })),
       el("div", { class: "l2" },
         el("span", { class: "mono", text: fmtClock(r.acceptedAt) }),
@@ -998,6 +999,11 @@ function renderEventDetail(entries, vm) {
   // 关联运行：收件消费这类事实带着来源 run，能直接跳过去（多 agent 排查要顺着线索走）
   const linked = typeof attrs.runId === "string" && attrs.runId !== vm.header.runId ? attrs.runId : null;
   if (linked) field("关联", el("button", { class: "navbtn", text: "打开那条 run", onclick: () => openRun(linked) }));
+  // 这次工具调用派出的子循环（子 agent 在账本里是自己的 run，source 链回这次调用）。只在列表已加载的那几十条里找
+  const spawned = typeof attrs.toolCallId === "string"
+    ? STATE.runs.find((r) => r.source.parentRunId === vm.header.runId && r.source.parentToolCallId === attrs.toolCallId)
+    : undefined;
+  if (spawned) field("子循环", el("button", { class: "navbtn", text: "打开那条 run", onclick: () => openRun(spawned.runId) }));
   box.append(dl);
 
   const { secs, strip } = contentSections(t, end);
@@ -1051,6 +1057,7 @@ function renderDetail() {
   if (STATE.markWhy) ov.append(el("p", { class: "markwhy", text: STATE.markWhy }));
   ov.append(el("div", { class: "sub" },
     el("span", { text: LEX.runSource[h.source.kind]?.zh ?? h.source.kind, title: LEX.runSource[h.source.kind]?.hint ?? "" }),
+    h.source.parentRunId ? el("button", { class: "navbtn", text: "派出它的 run", title: h.source.parentRunId, onclick: () => openRun(h.source.parentRunId) }) : null,
     el("span", { class: "mono", text: fmtClock(h.acceptedAt) }),
     sess ? el("span", { text: sess.agent }) : el("span", { class: "muted", text: h.sessionId ? "产品未上报" : "无会话" }),
     el("span", { class: "mono", text: `${vm.modelBinding.providerId}/${vm.modelBinding.modelId}`, title: `目录版本 ${vm.modelBinding.catalogRevision}` }),
@@ -1209,9 +1216,10 @@ async function loadRuns() {
     STATE.sessions = page.sessions ?? {};
     lastOk = Date.now();
     if (STATE.follow) {
-      // 跟随：最新的非整理 run > 最新的。列表按 acceptedAt 倒序，活着的 agent 的新 run 自然排最前；
-      // 不再优先「running」——那只是没封口，可能是早就死了的进程留下的，跟着它会被钉住
-      const target = STATE.runs.find((r) => r.source.kind !== "dream") ?? STATE.runs[0] ?? null;
+      // 跟随：最新的顶层 run > 最新的。子循环（source 带 parentRunId）是某个 run 派出来的，不抢焦点。
+      // 列表按 acceptedAt 倒序，活着的 agent 的新 run 自然排最前；不优先「running」——那只是没封口，
+      // 可能是早就死了的进程留下的，跟着它会被钉住
+      const target = STATE.runs.find((r) => !("parentRunId" in r.source)) ?? STATE.runs[0] ?? null;
       const next = target ? target.runId : null;
       // 换了 run 就清掉上一条的事件选择与折叠，否则 seq 会串到另一条 run 的记录上
       if (next !== STATE.selected) { STATE.selected = next; STATE.selectedEvent = null; STATE.collapsed.clear(); STATE.markWhy = ""; await loadRun(); }

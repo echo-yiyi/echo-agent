@@ -145,7 +145,7 @@
 
 [`Agent.settleDream()`](../../packages/core/src/agent.ts#symbol=Agent.settleDream) 虽沿用旧名字，实际会同时 abort 并等待提取、Dream 两条通道，接入 stop / 丢锁路径。停发新工作与等待在飞工作结束是两件事；不能以“后台不阻塞前台”推导“退出不必等后台”。
 
-正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环当前不作为独立 admission run 出现在 run 列表里。通道捕获抛出的异常，但提取调用点没有检查非抛出的 error outcome，因此“后台失败都有明确提取失败诊断”尚不成立。
+正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。通道捕获抛出的异常，但提取调用点没有检查非抛出的 error outcome，因此“后台失败都有明确提取失败诊断”尚不成立。
 
 ## 8. 尚未兑现的契约
 
@@ -172,7 +172,7 @@ bun -e 'import {MemoryChannel} from "./packages/core/src/memory/channel.ts"; let
 - [resident 超预算拒绝](../../packages/core/test/memory.test.ts#test=resident-超预算拒拒因带整理指引)：写入超预算时返回整理指引；同文件另有索引、路径、层绑定与 system 冻结测试。
 - [具名角色的目录](../../packages/core/test/create-agent.test.ts#test=有角色名时-role-层就在落在-agents角色名memory与角色定义同一棵树)：默认 role 层的装配落点；同文件另有无角色名的情形。
 - [Dream 未达写入门不启动](../../packages/core/test/dream-schedule.test.ts#test=门不满足-不跑写入数没到)：基本触发条件；同文件另有前台并行、主 transcript 隔离、失败不记成功及 stop 等待测试。
-- [后台工作不列成 admission run](../../packages/core/test/observability-runtime.test.ts#test=记忆的后台活不再是-admission-run用户那条照常可查run-列表里只有它)：观测列表的当前口径。
+- [子循环是自己的 run](../../packages/core/test/observability-runtime.test.ts#test=前台子-agent-是自己的-run链回派出它的工具调用turn-挂在自己的-runid-下不与父撞lastrun-仍是用户那条)：提取、整理与子 agent 共用 `Agent.runSubagent`，账本口径由子 agent 的端到端用例验证；提取与整理本身没有端到端的观测用例。
 
 旧测试中的 session 层是显式 fixture，不代表默认产品仍有该层；标题中的“只整理 session”不能被当成当前全局设计。链接门只检查文件或符号存在，不审判这些测试的语义。
 
