@@ -1,6 +1,6 @@
 # 盘上扩展的热部署：两次 run 之间卸旧装新，装不上就装回去
 
-> 状态:proposed · 提出 2026-09-13 · 拍板 2026-09-13（口头：不引 Cordis、不抄 dsh，agent 自己给自己换代；① 触发只来自人和程序，② 协议加 `reloadExtensions()`，③ `Echo.extensions` / `diagnostics` 改现算，④ 快照放原文件旁边）· 实现 2026-09-14（分支 `hot-reload`，实现后移入 implemented）· 参考 `~/Code/deepseek-harness`（dsh）的 HMR 与数据热刷新，只借做法不借依赖
+> 状态:implemented · 提出 2026-09-13 · 拍板 2026-09-13（口头：不引 Cordis、不抄 dsh，agent 自己给自己换代；① 触发只来自人和程序，② 协议加 `reloadExtensions()`，③ `Echo.extensions` / `diagnostics` 改现算，④ 快照放原文件旁边）· 合入 2026-09-14（PR #3）· 参考 `~/Code/deepseek-harness`（dsh）的 HMR 与数据热刷新，只借做法不借依赖
 
 **给谁看**：改 `createEcho()` / `ExtensionHost` / `AgentRuntime` 的人，和写 `extensions/` 里扩展的人。假设已知 extension 的 generation / Fiber / Effect 模型（[架构总览](../../architecture.md) §5）。
 

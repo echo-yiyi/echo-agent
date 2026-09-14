@@ -699,7 +699,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       ]);
 
     /**
-     * 热部署（2026-09-14 用户拍板，决策记录 `docs/decisions/proposed/2026-09-14-extension-hot-reload.md`）。
+     * 热部署（2026-09-14 用户拍板，决策记录 `docs/decisions/implemented/2026-09-14-extension-hot-reload.md`）。
      *
      * 整个跑在 `agent.betweenRuns()` 里：拿 admission 的 permit，此刻没有 run、也排不进新的；忙就 rejected。
      * 重扫目录，和 `discovered` 表比对：

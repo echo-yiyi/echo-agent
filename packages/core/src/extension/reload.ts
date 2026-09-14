@@ -3,7 +3,7 @@
 //
 // 机制在别处：换代事务在 `host.ts` 的 `replace()`，安全时机在 `Agent.betweenRuns()`，
 // 重扫目录 / 比对内容 / 加载新代码在 `create-echo.ts`（那是 node-only 的那一层）。
-// 决策记录：`docs/decisions/proposed/2026-09-14-extension-hot-reload.md`。
+// 决策记录：`docs/decisions/implemented/2026-09-14-extension-hot-reload.md`。
 
 /**
  * 一个盘上扩展在这次 reload 里发生了什么。`file` 是它的入口文件（与 `LoadedExtension.file` 同一个路径）。

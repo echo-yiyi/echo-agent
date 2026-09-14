@@ -56,7 +56,7 @@
 
 **Host**（`packages/core/src/extension/host.ts`）：按代 mount，依赖图拓扑排序（`graph.ts`），一代全有或全无，卸载逆序；后代可以 inject 前代已 ACTIVE 的 Service。换代走 `replace()`：先卸旧代再装新代，装不上就按原 entries 装回旧代；旧代里有 Fiber 声明的 `reload` 比调用方所处的安全点强、或别的代还绑在它的 provider 上，就拒绝（Host 零变化）。
 
-**热部署**（`Echo.reloadExtensions()` / 壳的 `/reload`，[决策](decisions/proposed/2026-09-14-extension-hot-reload.md)）：只管 `extensions/` 目录里发现的扩展；整个跑在 `Agent.betweenRuns()` 里（经 admission 拿 permit，忙时 rejected 不排队）；按内容哈希比对，改过的把文件复制到原文件旁边（`.foo.echo-<pid>-<n>.ts`）再 import——同一路径的模块进程内只求值一次，复制一份才是新模块，而相对依赖与 `node_modules` 仍落在原处。扩展要声明 `reload: "run"`（或 `"turn"`）才换得了，缺省 `agent` 会被拒并提示。门 `packages/core/test/extension-host.test.ts`（`replace()` 八条）、`packages/core/test/extension-reload.test.ts`（端到端）。
+**热部署**（`Echo.reloadExtensions()` / 壳的 `/reload`，[决策](decisions/implemented/2026-09-14-extension-hot-reload.md)）：只管 `extensions/` 目录里发现的扩展；整个跑在 `Agent.betweenRuns()` 里（经 admission 拿 permit，忙时 rejected 不排队）；按内容哈希比对，改过的把文件复制到原文件旁边（`.foo.echo-<pid>-<n>.ts`）再 import——同一路径的模块进程内只求值一次，复制一份才是新模块，而相对依赖与 `node_modules` 仍落在原处。扩展要声明 `reload: "run"`（或 `"turn"`）才换得了，缺省 `agent` 会被拒并提示。门 `packages/core/test/extension-host.test.ts`（`replace()` 八条）、`packages/core/test/extension-reload.test.ts`（端到端）。
 
 **Service 两种**（`packages/core/src/extension/registries.ts`）：
 

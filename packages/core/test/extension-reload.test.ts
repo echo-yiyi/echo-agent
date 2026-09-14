@@ -1,4 +1,4 @@
-// 热部署（2026-09-14 用户拍板）的端到端判据：决策记录 `docs/decisions/proposed/2026-09-14-extension-hot-reload.md` 的验收表。
+// 热部署（2026-09-14 用户拍板）的端到端判据：决策记录 `docs/decisions/implemented/2026-09-14-extension-hot-reload.md` 的验收表。
 //
 // 全部走 `createEcho()`（唯一 composition root），扩展是写进临时目录的真文件、真 import。
 // **「换上了 ≠ 用得上」**（沿用 create-echo.test.ts 的口径）：只看清单里名字变了不够，
