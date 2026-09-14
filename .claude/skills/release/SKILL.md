@@ -16,8 +16,10 @@ disable-model-invocation: true
 ## 1. 核对前置（只信实时状态）
 
 - `git fetch` 之后确认：在 `main`、工作树干净、HEAD 等于 `origin/main`，且 `origin/main` 最近一次 CI 双平台都绿（`gh run list --branch main --limit 1`）。
+- CI 那条要分清三种情况：**绿**就往下走；**红**先查清再说，别急着发；**长时间 queued 且没分配 job**（`gh run view <id> --json jobs` 为空）是 GitHub 调度侧的事，跟本仓无关——此时 main 并没有红，而 `v*` tag 触发的 Release 自己会重跑 typecheck 与全套测试，可以继续，但要如实告诉用户这一条没跑完。
 - 目标版本合法且比线上新：`npm dist-tag ls echo-agent` 看当前 `latest`。0.x 阶段，有破坏性变更就升次版本号（0.1 → 0.2），否则升修订号。
-- trusted publishing 已配好：对五个包各跑一次 `npm trust list <包名>`，每个都应列出 `release.yml`。查不出结果（命令报错、要求 2FA）就把原话告诉用户，说明不配好的话 CI 会在发布那步失败，由用户决定先去配还是继续。
+- trusted publishing **没法从命令行核对**，别浪费时间试。这个账号的包设了「要求 2FA 并禁用 token」，本机 npm CLI 恒为 401：`npm whoami` / `token list` / `trust list` / `stage list` 全部用不了；而 `npm view`、`npm dist-tag ls`、安装这些公开读不受影响（发布脚本判断「版本发过没有」照常工作）。
+- 所以这一条的实际做法：问用户五个包是否都在 npmjs.com 网页上配好了，**尤其「Allowed actions」要勾上允许 `npm publish`**（只给 stage 的话发布会停在待批准）。账户类操作一律走网页——用户的 2FA 只有 passkey、没有一次性码，服务端不给命令行认证机会。没配好也不会造成半套发布：CI 会在第一个包就失败。
 
 完成判据：一张小表列出以上每项的实际状态；全部满足，或者不满足的项已经由用户拍板。
 
@@ -47,6 +49,7 @@ bun scripts/release.ts            # 演练：五个包打包、过守卫、npm p
 
 - 判绿看每条命令的真实退出码。
 - `bun test` 有几条已知的并跑抖动（resident-v0、cli setup、cli serve）。只红这几条时单独重跑，重跑绿了就按抖动处理。
+- **但「重跑还红」就不是抖动。** 判据是三方对照：本地多次、CI 的另一个平台、CI 的同一平台重跑。2026-09-13 那次 ubuntu 连红 4 次而 macOS 与本地全绿，根因是测试等错了就绪判据（等「inbox 账本空了」而不是 `agent.acceptsWork`）——那种情况要去读代码，别靠一遍遍重跑。
 - 演练要对五个包都打出「✓ 演练」，最后一行是「演练完成」。
 
 完成判据：五条命令退出码全是 0，演练输出覆盖五个包。
@@ -78,12 +81,13 @@ git push origin "v$V"
 
 ## 7. 从 registry 验证
 
-- 用 `npm dist-tag ls <包名>` 核对五个包的 `latest` 都是 `$V`。新发的 scoped 包在 CDN 上会负缓存 404 一段时间，所以以 dist-tag 为准，`npm view` 暂时查不到不代表没发出去。
+- **发布后有几分钟的传播窗口，别在窗口里下结论。** 2026-09-14 实测约 5–8 分钟：元数据（packument、`dist-tags`）已经显示新版本，**tarball 还取不到**，`npm i` 报 404 / ETARGET。当时据此判过一次「这个版本是坏的」，实际只是没到。
+- 因此 `dist-tag ls` **不足以证明发布成功**（它会先于 tarball 变成新版本）。以这两条为准：`curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/<包名>/-/<去掉 scope 的名字>-$V.tgz` 返回 200，以及下面的真安装。都还没好就等几分钟重试。
 - 在干净目录里实装冒烟：
   - npm 装 `@echo-agent/core@$V`，用 Node import，能拿到导出；
   - bun 装 `echo-agent@$V` 和 `@echo-agent/coding@$V`，`echo-agent --help` 与 `echo-coding --help` 都能打出用法。
 
-完成判据：五个 `latest` 都是 `$V`，三项冒烟全部通过。
+完成判据：五个包的 `latest` 都是 `$V`，五个 tarball 都返回 200，三项冒烟全部通过。
 
 ## 8. 汇报
 
@@ -93,5 +97,6 @@ git push origin "v$V"
 
 - **Release 挂在测试**：多半是那几条已知抖动，`gh run rerun <id> --failed` 即可。发布脚本可以重跑，已经发过的会跳过。
 - **Release 挂在发布（403 / 404 / OIDC 相关）**：要么 trusted publishing 没配，要么 `repository.url` 和仓库没有精确匹配（这一项只有 CI 真发时才验得到）。修好之后：一个包都还没发出去的话，删掉远端 tag 重推（`git push --delete origin "v$V"` 之后再推一次）；已经发出去一部分的话，重跑那次运行，脚本会跳过已发的。
+- **Release 成功了但装不上**：先按上面那条当作传播窗口处理——等几分钟，用 tarball 直接 GET 加真安装复核，别急着补发。超过十几分钟仍取不到才当成事故。另注意 `scripts/release.ts` 目前在 `npm publish` 成功时只打自己的「✓ 发布」、吞掉了 npm 的原始输出，所以日志里分不出「真发布」和「进了 staging」——排查时别指望从日志看出来。
 - **要在本地发**（CI 不可用）：只有用户明确要求时，才跑 `bun scripts/release.ts --publish --git-tag "v$V"`。用户的 npm 2FA 是 passkey，没有 6 位验证码，本地真发只能用恢复码（一次性），或者临时建一个 granular token、发完就删。
 - **测发布脚本本身**：在 PATH 前面放一个只记录参数的假 `npm`，并把 `NPM_CONFIG_REGISTRY` 指向一个连不上的地址，这样测试不可能真发。
