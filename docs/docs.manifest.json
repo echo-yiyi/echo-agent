@@ -282,6 +282,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-14-inject-soft-dependency-tryget.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md",
       "bilingual": false
     },

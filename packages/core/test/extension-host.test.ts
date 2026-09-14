@@ -14,6 +14,7 @@ import {
   agentRegistries,
   defineExtension,
   defineService,
+  registerAll,
   type Disposer,
   type EffectLease,
   type ExtensionContext,
@@ -447,6 +448,82 @@ test("AgentSkills registry：批量 add 先查后写；disposer 只卸那一批�
   pool.set("s2", skill("s2"));
   await expect(host.mount("g2", [entry("skills", ext)])).rejects.toThrow("已存在");
   expect([...pool.keys()]).toEqual(["s2"]);
+});
+
+/* ─────────────── 软依赖的读法 tryGet（2026-09-14 拍板，decisions/implemented/2026-09-14-inject-soft-dependency-tryget.md） ─────────────── */
+
+test("tryGet：软依赖缺 provider 返回 undefined、get 抛并指向 tryGet；有 provider 时两者同值；未声明的 tryGet 照抛", async () => {
+  const S = defineService<number>({ id: "soft.s", version: 1, kind: "single", scope: "agent", reload: "agent" });
+  const Other = defineService<number>({ id: "soft.other", version: 1, kind: "single", scope: "agent", reload: "agent" });
+  const seen: { tryGet: number | undefined; getError: string | null; undeclared: string | null }[] = [];
+  const wants = defineExtension({
+    name: "wants",
+    hostAbiVersion: 1,
+    inject: { s: { service: S } }, // 不写 required = 软依赖
+    apply: (ctx) => {
+      let getError: string | null = null;
+      try {
+        ctx.get(S);
+      } catch (e) {
+        getError = (e as Error).message;
+      }
+      let undeclared: string | null = null;
+      try {
+        ctx.tryGet(Other);
+      } catch (e) {
+        undeclared = (e as Error).message;
+      }
+      seen.push({ tryGet: ctx.tryGet(S), getError, undeclared });
+    },
+  });
+  // 没有 provider：能 mount；tryGet 是 undefined，get 抛并告诉作者用 tryGet，未声明的 tryGet 与 get 同一道门
+  const bare = new ExtensionHost();
+  await bare.mount("g", [entry("wants", wants)]);
+  expect(seen[0]).toEqual({
+    tryGet: undefined,
+    getError: expect.stringContaining("要降级请用 tryGet()"),
+    undeclared: expect.stringContaining("未在 inject 声明"),
+  });
+  // 有 provider：tryGet 与 get 同值
+  const provider = defineExtension({ name: "p", hostAbiVersion: 1, provide: [S], apply: (ctx) => ctx.provide(S, 42) });
+  const withProvider = new ExtensionHost();
+  await withProvider.mount("g", [entry("p", provider), entry("wants", wants)]);
+  expect(seen[1]).toEqual({ tryGet: 42, getError: null, undeclared: expect.stringContaining("未在 inject 声明") });
+});
+
+test("软依赖 + tryGet 的 conformance：Host 没给 skills 时扩展照常装上工具、不注册技能；给了 skills 再装，技能也注册上", async () => {
+  const skill = (name: string): Skill => ({ name, description: name, content: name, files: [], requiredTools: [], modelInvocable: true, frontmatter: {} });
+  // 「有 skill 池就顺手注册技能，没有也照常装工具」——记忆 / skill 这类能力不在时 agentRegistries 不提供那条 Service，
+  // 这正是软依赖存在的理由；恒有的 AgentTools 照旧硬依赖
+  const ext = defineExtension({
+    name: "graceful",
+    hostAbiVersion: 1,
+    reload: "turn",
+    inject: { tools: { service: AgentTools, required: true }, skills: { service: AgentSkills } },
+    apply(ctx) {
+      const tools = ctx.get(AgentTools);
+      const skills = ctx.tryGet(AgentSkills);
+      void ctx.effect({
+        boundary: "turn",
+        start: () => registerAll([() => tools.register(tool("t1")), ...(skills === undefined ? [] : [() => skills.add([skill("s1")])])]),
+      });
+    },
+  });
+  const noSkills: ToolMap = new Map();
+  const h1 = new ExtensionHost({ services: agentRegistries({ tools: noSkills, hooks: new HookRuntime() }) });
+  await h1.mount("g", [entry("graceful", ext)]);
+  expect([...noSkills.keys()]).toEqual(["t1"]);
+  await h1.unmount("g");
+  expect(noSkills.size).toBe(0);
+
+  const withSkills: ToolMap = new Map();
+  const pool = new Map<string, Skill>();
+  const h2 = new ExtensionHost({ services: agentRegistries({ tools: withSkills, hooks: new HookRuntime(), skills: { pool, active: new Map() } }) });
+  await h2.mount("g", [entry("graceful", ext)]);
+  expect([...withSkills.keys()]).toEqual(["t1"]);
+  expect([...pool.keys()]).toEqual(["s1"]);
+  await h2.unmount("g");
+  expect(pool.size).toBe(0);
 });
 
 /* ─────────────── review 反例：并发事务 / staged ServiceKey / 未 await 的 start / registry 单 owner ─────────────── */

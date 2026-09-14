@@ -56,15 +56,11 @@ export const ECHO_WORKTREE = defineExtension({
  * （`AgentBackgroundService`，见 `extension/registries.ts` 文件头）。于是本扩展变成
  * 纯静态的一条 definition，装配层只管把它列进 `createEcho({ extensions })`。
  *
- * **`required: true`，不是 optional**（2026-08-31 review 三轮 P1 修正）：上一版写的是
- * `required: false`，理由是「没接后台队列照样能跑命令」——听起来合理，**但 ABI 里根本没有
- * 读 optional 的方法**：`ctx.get()` 遇到没有 provider 的 optional 依赖直接抛
- * （`fiber.ts` 的「optional 依赖 '…' 当前没有 provider」），扩展也无从先问一句「有没有」。
- * 于是那个声明不是「优雅降级」，是**装不上**——review 实测复现。
- *
- * 改 required 之后语义反而更准：`agent.background` 是 **Agent 恒有的能力**
- * （构造函数无条件造），所以任何由 Agent 造出来的 registries 都提供得了它。
- * 走 `createEcho()` 恒有；自己搭 Host 而不传 `background` 就装不上本扩展，
+ * **`required: true`，不是软依赖**（2026-08-31 review 三轮 P1 修正）：上一版写的是 `required: false`，
+ * 理由是「没接后台队列照样能跑命令」——但 apply 里无条件 `ctx.get()`，缺 provider 一样抛，review 实测整代装不上
+ * （那时 ABI 也没有不抛的读法；2026-09-14 加了 `ctx.tryGet()`，软依赖从此有正式用法，但那是给真会缺席的
+ * Service 用的）。`agent.background` 是 **Agent 恒有的能力**（构造函数无条件造），任何由 Agent 造出来的 registries
+ * 都提供得了它，所以这里就该是硬依赖：走 `createEcho()` 恒有；自己搭 Host 而不传 `background` 就在 PREPARE 装不上，
  * 报错明确指向缺的那条 Service——比装上一个「bash 在但后台不灵」的半残工具好。
  *
  * （`makeBashTool()` 的 `deps.background` 仍是可选：那是给「自己给端口、自己注册」的

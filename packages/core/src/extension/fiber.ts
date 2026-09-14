@@ -73,27 +73,43 @@ export class Fiber {
     const assertLive = (what: string): void => {
       if (!fiber.contextLive) throw new ExtensionDisposedError(fiber.entryId, fiber.generation, what);
     };
+    /** `get` / `tryGet` 共用的两道门：Fiber 还活着、这条边在 inject 里声明过。 */
+    const declaredEdge = (service: ServiceKey<unknown>, what: string): { key: ServiceKey<unknown>; edge: FiberEdge } => {
+      assertLive(`${what}('${service.id}')`);
+      const key = host.keys.canonical(service);
+      const edge = fiber.dependencies.find((d) => d.service === key);
+      if (edge === undefined) {
+        throw new ExtensionAbiError(`Extension ${fiber.label} 读取了未在 inject 声明的 Service '${key.id}'——依赖图看不见这条边`);
+      }
+      return { key, edge };
+    };
+    /** 有 provider 的边取值：Host 自带的直接取；别的 Fiber 提供的要它还在提供。 */
+    const resolve = (key: ServiceKey<unknown>, provider: Fiber | "host"): unknown => {
+      if (provider === "host") return host.hostService(key);
+      if (!provider.provided.has(key)) {
+        // provider ACTIVE 后 consumer 才 LOADING，且 provider 的 apply 返回时已验过「声明的都 provide 了」；到这里只剩 provider 已卸
+        throw new ExtensionAbiError(`Service '${key.id}' 的 provider ${provider.label} 已不再提供它`);
+      }
+      return provider.provided.get(key);
+    };
     return {
       entryId: this.entryId,
       generation: this.generation,
       signal: this.abortController.signal,
 
       get<T>(service: ServiceKey<T>): T {
-        assertLive(`get('${service.id}')`);
-        const key = host.keys.canonical(service);
-        const edge = fiber.dependencies.find((d) => d.service === key);
-        if (edge === undefined) {
-          throw new ExtensionAbiError(`Extension ${fiber.label} 读取了未在 inject 声明的 Service '${key.id}'——依赖图看不见这条边`);
-        }
+        const { key, edge } = declaredEdge(service, "get");
         if (edge.provider === null) {
-          throw new ExtensionAbiError(`Extension ${fiber.label} 的 optional 依赖 '${key.id}' 当前没有 provider`);
+          throw new ExtensionAbiError(`Extension ${fiber.label} 的软依赖 '${key.id}' 当前没有 provider——要降级请用 tryGet()`);
         }
-        if (edge.provider === "host") return host.hostService(key) as T;
-        if (!edge.provider.provided.has(key)) {
-          // provider ACTIVE 后 consumer 才 LOADING，且 provider 的 apply 返回时已验过「声明的都 provide 了」；到这里只剩 provider 已卸
-          throw new ExtensionAbiError(`Service '${key.id}' 的 provider ${edge.provider.label} 已不再提供它`);
-        }
-        return edge.provider.provided.get(key) as T;
+        return resolve(key, edge.provider) as T;
+      },
+
+      // 软依赖的读法（2026-09-14 拍板）：与 get 只差「声明了但当前没有 provider」这一种情形
+      tryGet<T>(service: ServiceKey<T>): T | undefined {
+        const { key, edge } = declaredEdge(service, "tryGet");
+        if (edge.provider === null) return undefined;
+        return resolve(key, edge.provider) as T;
       },
 
       provide<T>(service: ServiceKey<T>, value: T): void {

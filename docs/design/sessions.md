@@ -283,7 +283,7 @@ type SessionRunner = (session: SessionRow) => Promise<void>;
 **core 为 extension 新开三个口**：
 
 1. `sessions`（**已实现 2026-09-07**）：`AgentSessionsService`，交出去的是容器那一份 `EchoSessions`（`SessionFace` 接口）。壳的 `/sessions`、第三方自己的会话工具都从这里拿——同一份实现，不会长出第二套「会话是什么」。
-   **恒有**：裸 `new Agent()` 上给 `NO_SESSION_FACE`（`list()` 返回空、`send()` 说 not-found、`create` / `close` 如实说做不到）。不做成可选依赖是因为 ABI 里没有读 optional 的方法——声明成 optional 只会在缺它时装不上却说成可选。
+   **恒有**：裸 `new Agent()` 上给 `NO_SESSION_FACE`（`list()` 返回空、`send()` 说 not-found、`create` / `close` 如实说做不到）。不做成软依赖是因为它恒有：恒有的东西声明成软依赖只是把「装不上」推迟到 apply 期、还说成可选（软依赖的读法 `ctx.tryGet()` 是给真会缺席的 Service 用的，见 [扩展设计](extensions.md) §3）。
    还没做的两点：经这里建的段应当 `main = false`（§6）、`create` 应当做不越权检查（§4，等角色定义落地）。
 2. `inbox.watch(predicate, opts)`：等到匹配的那条 record，**命中即消费**（§5），给 `wait` 用。
 3. `session.main` 与 `session.agent` 可读，工具组据此决定挂什么。

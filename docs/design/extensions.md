@@ -9,7 +9,7 @@
 
 **Non-Goals**（已决，不在本文范围）：不重载产品代码与壳、不监听文件变化、不做依赖方连带重装、不在 run 中途换代、不回收已求值的旧模块。每条走哪条路见 §6 与[热重载决策](../decisions/implemented/2026-09-14-extension-hot-reload.md)的 Non-Goals。
 
-**待拍板**：无。§9 原列的两条已拍板修实现。
+**待拍板**：无。§9 原列的两条已拍板修实现；软依赖的读法已拍板加 `tryGet()`（[决策](../decisions/implemented/2026-09-14-inject-soft-dependency-tryget.md)）。
 
 **验收判据**：§10 的命令全绿，且 §9 两条 `bun -e` 判据的输出与文中写的一致。
 
@@ -23,7 +23,7 @@ extension 是有生命周期的装配单元，不是新建 agent 的工厂，也
 
 | 动作 | 接口 | 所有权 |
 | --- | --- | --- |
-| 使用能力 | inject 声明后 `ctx.get(key)` | service 的 provider 仍拥有它 |
+| 使用能力 | inject 声明后 `ctx.get(key)`；软依赖用 `ctx.tryGet(key)` | service 的 provider 仍拥有它 |
 | 提供能力 | provide 声明后 `ctx.provide(key, value)` | 当前 Fiber 发布值；底层资源仍须登记清理 |
 | 注册内容 | 调拿到的 registry，再把 disposer 交给 `ctx.effect()` | registry 维护内容，effect 持有撤销动作 |
 
@@ -60,7 +60,7 @@ createEcho 的挂载顺序为：
 [`resolveGraph()`](../../packages/core/src/extension/graph.ts#symbol=resolveGraph) 在任何 apply 前处理以下规则：
 
 - required 依赖缺失、依赖成环、同代重复 provider 均拒绝。
-- optional 缺失允许 mount，但之后 get 仍抛，不返回 undefined；已解析为缺失的依赖不会因后来出现 provider 自动重绑。
+- 省略 required 是软依赖：缺 provider 也允许 mount；之后 `ctx.get()` 仍抛，`ctx.tryGet()` 返回 undefined，两者都只能读 inject 里声明过的 key（[决策](../decisions/implemented/2026-09-14-inject-soft-dependency-tryget.md)）；已解析为缺失的依赖不会因后来出现 provider 自动重绑。
 - provider 必须先 ACTIVE，consumer 才开始 LOADING；卸载顺序相反。
 - process-scope 扩展不能依赖 agent-scope service；agent-scope 扩展不能提供 process-scope service。
 - provider 的 reload 边界不得弱于它提供的 service。
@@ -97,7 +97,7 @@ export default defineExtension({
 });
 ```
 
-get/provide 只能用声明过的 key。effect 的 boundary 缺省是 agent，不能比 extension 声明的 reload 更强；只写 `reload: "run"` 却漏写 effect boundary，会因缺省 agent 而被拒。工具或 prompt pack 可复用 [`defineToolPack()`](../../packages/core/src/extension/builtin.ts#symbol=defineToolPack) / [`definePromptPack()`](../../packages/core/src/extension/builtin.ts#symbol=definePromptPack)，但不要把 pack 内弱 effect 边界误认为 definition 已承诺可重载。
+get / tryGet / provide 只能用声明过的 key。恒有的 Service（Host 自带的 registry、能力端口）声明 `required: true`；只有真会缺席的（没装记忆时的 AgentMemory、没给 skill 池时的 AgentSkills）才省略 required、用 `tryGet()` 读。effect 的 boundary 缺省是 agent，不能比 extension 声明的 reload 更强；只写 `reload: "run"` 却漏写 effect boundary，会因缺省 agent 而被拒。工具或 prompt pack 可复用 [`defineToolPack()`](../../packages/core/src/extension/builtin.ts#symbol=defineToolPack) / [`definePromptPack()`](../../packages/core/src/extension/builtin.ts#symbol=definePromptPack)，但不要把 pack 内弱 effect 边界误认为 definition 已承诺可重载。
 
 **注册成功不等于 Host 已经拥有撤销动作。** registry 返回 disposer 后必须把它作为 lease.dispose 交还；直接注册而不登记 effect，卸载不会自动替作者查出并删除内容。provide 自动撤掉发布关系，也不自动 close 被发布的连接。
 

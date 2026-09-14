@@ -158,13 +158,11 @@ export const AgentMemory: ServiceKey<AgentMemoryRegistry> = defineService<AgentM
  * 现有两值够表达，就不该顺手加第三个。
  * `reload: "agent"`：后台队列与 Agent 同寿，换一份就等于把在跑的任务扔了。
  *
- * **消费方应当声明 `required: true`**：ABI 里没有读 optional 的方法——`ctx.get()` 遇到
- * 没有 provider 的 optional 依赖直接抛，扩展也无从先问一句「有没有」。所以把能力端口
- * 声明成 optional 得不到「优雅降级」，只会在缺它时**装不上却说成可选**
- * （2026-08-31 review 实测；要真支持可选依赖，得先给 ABI 加 `tryGet()` 并补 conformance）。
- *
- * 这不构成负担：`agent.background` 是 **Agent 恒有的能力**（构造函数无条件造），
- * 任何由 Agent 造出来的 registries 都提供得了它。
+ * **消费方应当声明 `required: true`**：`agent.background` 是 **Agent 恒有的能力**（构造函数无条件造），
+ * 任何由 Agent 造出来的 registries 都提供得了它；恒有的东西声明成软依赖只是把「装不上」推迟到 apply 期、还说成可选
+ * （2026-08-31 review 实测：那时 ABI 没有不抛的读法，声明成 optional 的 `echo:shell` 整代装不上）。
+ * 软依赖 + `ctx.tryGet()`（2026-09-14 拍板加的读法，`abi.ts`）是给真会缺席的 Service 用的——
+ * 没装记忆时的 `AgentMemory`、没给 skill 池时的 `AgentSkills`，不是给能力端口用的。
  */
 export const AgentBackgroundService: ServiceKey<AgentBackground> = defineService<AgentBackground>({
   id: "echo.agent.background",
@@ -199,8 +197,8 @@ export const AgentPolicies: ServiceKey<AgentPoliciesRegistry> = defineService<Ag
  * 与内建的 `echo:sessions` 是同一份实现，不会长出第二套「会话是什么」。
  *
  * **恒有**：由容器（`createEcho()`）装出来的给真的那一份；裸 `new Agent()` 上给
- * `NO_SESSION_FACE`（一段都没有是事实，开与关如实说做不到）。之所以不做成可选依赖——
- * ABI 里没有读 optional 的方法，声明成 optional 只会在缺它时**装不上却说成可选**
+ * `NO_SESSION_FACE`（一段都没有是事实，开与关如实说做不到）。之所以不做成软依赖——恒有的东西声明成软依赖
+ * 只是把「装不上」推迟到 apply 期、还说成可选；软依赖 + `ctx.tryGet()` 是给真会缺席的 Service 用的
  * （与 `AgentBackgroundService` 那段注释同一条理由）。
  */
 
@@ -225,11 +223,10 @@ export type AgentPoliciesRegistry = {
  * 给 `new ExtensionHost({ services })` 用：把一个 Agent 已公开的 Map / HookRuntime / 能力端口
  * 包成 Service。Agent 本身一行不改——它仍直接拥有原始领域对象。
  *
- * 可选项**不给就不提供那条 Service**（不是提供一个空壳）：扩展 `inject` 时
- * `required: true` 会诚实装不上；**`required: false` 也不是「拿到 `undefined` 自己降级」**——
- * ABI 里没有 `tryGet()`，缺 provider 时 `ctx.get()` 同样抛（`fiber.ts`），所以消费这几条的扩展应当声明
- * `required: true`（本文件上面能力端口那段说的就是这个；review 2026-09-07 此处曾把 optional 写成能降级，
- * 照它写的扩展整代装不上）。这与「能力不在」和「能力在但为空」是两件事那条口径一致。
+ * 可选项**不给就不提供那条 Service**（不是提供一个空壳）：扩展 `inject` 时声明 `required: true` 会在 PREPARE
+ * 诚实装不上；省略 required 是软依赖——`ctx.get()` 缺 provider 仍抛，`ctx.tryGet()` 返回 undefined（2026-09-14 拍板，
+ * `abi.ts`），「有记忆就顺手注册模块、没记忆也照常装工具」这类扩展走后者。在那之前 ABI 没有不抛的读法，review
+ * 2026-09-07 此处曾把 optional 写成能降级，照它写的扩展整代装不上。这与「能力不在」和「能力在但为空」是两件事那条口径一致。
  */
 
 export function agentRegistries(input: {

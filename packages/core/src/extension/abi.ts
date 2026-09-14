@@ -39,7 +39,17 @@ export type ServiceKey<T> = Readonly<{
   reload: ReloadBoundary;
 }> & { readonly __type?: T };
 
-/** `inject` 声明：名字 → Service。`ctx.get()` 只能读这里声明过的。 */
+/**
+ * `inject` 声明：名字 → Service。`ctx.get()` / `ctx.tryGet()` 只能读这里声明过的。
+ *
+ * `required: true` = 硬依赖：没有 provider 整代在 PREPARE 判红，一个 apply 都不跑。
+ * 不写 = 软依赖：没有 provider 也照常 mount，`ctx.get()` 抛、`ctx.tryGet()` 返回 undefined。
+ * 边在 PREPARE 一次性解析：软依赖当时缺，后面哪一代补上了 provider 也不重绑。
+ *
+ * 口径（2026-09-14 拍板，`docs/decisions/implemented/2026-09-14-inject-soft-dependency-tryget.md`）：恒有的 Service
+ * （Host 自带的 registry、能力端口）声明 required；只有真会缺席的（没装记忆时的 `AgentMemory`、没给 skill 池时的
+ * `AgentSkills`）才用软依赖。恒有的东西声明成软依赖只是把「装不上」推迟到 apply 期、还说成可选。
+ */
 export type InjectDeclaration = Readonly<Record<string, Readonly<{ service: ServiceKey<unknown>; required?: boolean }>>>;
 
 export interface ExtensionContext {
@@ -48,8 +58,13 @@ export interface ExtensionContext {
   /** Fiber 进入 UNLOADING 即 abort；Effect 的 start 应当尊重它。 */
   readonly signal: AbortSignal;
 
-  /** 只能读 `inject` 已声明的 Service；required 的一定可得，optional 的当前无 provider 时抛。 */
+  /** 只能读 `inject` 已声明的 Service；required 的一定可得，软依赖当前无 provider 时抛（要降级用 `tryGet()`）。 */
   get<T>(service: ServiceKey<T>): T;
+  /**
+   * 软依赖的读法（2026-09-14 拍板）：当前无 provider 返回 undefined。其余与 `get()` 同一套门——
+   * 只能读 `inject` 已声明的（未声明照抛）、Fiber 已卸载照抛。`tryGet(k) !== undefined` 就是「有没有」。
+   */
+  tryGet<T>(service: ServiceKey<T>): T | undefined;
   /** 只能发布 `provide` 已声明的 Service；single 重复 provide 抛。由当前 Fiber 自动拥有。 */
   provide<T>(service: ServiceKey<T>, value: T): void;
   /**
