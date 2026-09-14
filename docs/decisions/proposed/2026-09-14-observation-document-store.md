@@ -1,6 +1,6 @@
 # 观测的默认存储改成状态根里的文档，过期规则归产品
 
-> 状态:proposed · 提出 2026-09-14 · 方向拍板 2026-09-14（口头：「默认实现不应该用 sqlite，默认用文档 + 文档过期策略」「清理应该是使用方或产品方定义的，我们只建机制」；旧库「不迁移，我们现在用户并不多」）· 下面的目录结构、提交点、读法与「待拍板」四条是提案，确认后实现 · 推翻 [观测的公开线](2026-09-07-observation-public-face.md) 第 3 条里「SQLite 作为缺省不翻（2026-09-01 拍板）」
+> 状态:proposed · 提出 2026-09-14 · 方向拍板 2026-09-14（口头：「默认实现不应该用 sqlite，默认用文档 + 文档过期策略」「清理应该是使用方或产品方定义的，我们只建机制」；旧库「不迁移，我们现在用户并不多」）· 细节拍板 2026-09-14（原「待拍板」四条全部按推荐：「可以，都按照推荐来做」）· 实现后移入 implemented · 推翻 [观测的公开线](2026-09-07-observation-public-face.md) 第 3 条里「SQLite 作为缺省不翻（2026-09-01 拍板）」
 
 **给谁看**：改观测存储、读面（`echo.observations` / `openObservationReader()` / `observe` 面板）的人，和要给观测定清理规则的产品作者。假设已读 [观测：一次 run 留下的账本](../../design/observability.md) 的 §2（envelope）、§3（两条 lane 与 committed prefix）、§6（读面）。
 
@@ -70,9 +70,16 @@ type ObservationBatchFileV1 = Readonly<{
 
 read-after-error：批文件存在且逐字相同 → committed；不存在且 head 没动 → absent；其余 → indeterminate。与今天同三种结论，Sequencer 一行不改。
 
-### 开库
+### 开库与持锁之后
 
-读 `heads/` 与 `runs/`；对每个 runtime，把文件名大于它 head 的批文件按序回放，补齐派生文件（上次进程在 rename 之后、派生文件之前停下的那一段）。新进程的 runtimeId 是新的，写入只进自己的 `batches/<runtimeId>/`；旧 runtime 的批文件只读。key 不存在就生成并写一次。
+装配期（`createAgent`，还没拿 lease）只做两件不和别的写者冲突的事：读或建 `key.json`（在 `StorageDir.lock` 下读、没有才写，建一次后永不改写）；新 runtime 的写入只进自己的 `batches/<runtimeId>/` 与 `heads/<runtimeId>.json`，runtimeId 每个进程唯一——启动前就发生的事实（extension 装载、相位）照常落盘，与 SQLite 时一样不经写入闸。
+
+**拿到 lease 之后**（`Agent.start()` 装上写入闸的那一步，经 lease 生命周期端口新增的 `afterLeaseAcquired` 通知装配层）才碰别的 runtime 留下的东西，而且不阻塞启动：
+
+1. 补齐派生文件：对每个旧 runtime，把文件名大于它 head 的批文件按序回放，补 `runs/` 与 `heads/`（上次进程在 rename 之后、派生文件之前停下的那一段）。
+2. 执行一次过期（见下）。
+
+写批文件、补齐、过期三件事在 store 里排同一条队，互不交错。交还 lease（`beforeLeaseRelease`）或丢锁（`onLeaseLost`）之后不再补齐、不再过期。
 
 ### 读面
 
@@ -80,38 +87,51 @@ read-after-error：批文件存在且逐字相同 → committed；不存在且 h
 
 | 方法 | 做法 |
 |---|---|
-| `getRun(runId)` | 读 `runs/<runId>.json`；按文件名找出覆盖 `[firstSeq, lastSeq]` 的批文件（覆盖 seq `s` 的是第一个 `nextPrefix ≥ s` 的文件），取其中这个 run 的记录物化 |
+| `getRun(runId)` | 读 `runs/<runId>.json`；按文件名找出覆盖 `[firstSeq, lastSeq]` 的批文件（覆盖 seq `s` 的是第一个 `nextPrefix ≥ s` 的文件），取其中这个 run 的记录物化。结果只有 `found` / `unknown` 两态 |
 | `listRuns` / `lastRun` | 列 `runs/`、读全部概要，按 `(acceptedAt, runId)` 倒序分页，游标格式不变。成本随 run 数线性——控制它的正是过期规则 |
 | `recentActivity` | 从各 runtime 最新的批文件往回扫 `runId` 为空的记录，按 `observedAt` 倒序 |
 | `runtimeHeads` / `counts` | 列 `heads/`、`runs/`；记录数由批文件累加 |
-| 订阅回放 `readRecordsAfter` | 该 runtime 的批文件按文件名顺序读 |
+| 订阅回放 `readRecordsAfter` | 该 runtime 的批文件按文件名顺序读；相邻两个批文件的 `expectedCommittedPrefix` 与上一个的 `nextCommittedPrefix` 接不上 = 中间的批被过期删了，这一页连同被删的 seq 区间一起返回（内部接口的返回值随之改成「记录 + 被删区间」），Sequencer 据此交付 `retention-gap` |
 
 **跨进程读**（面板读正在跑的会话）：只读 rename 完成的文件，看不到半截；`runs/` 最多落后正在写派生文件的那一批，读到的是稍旧但自洽的状态。`SessionObservationReaders` 按 `observability/` 目录是否存在发现会话。
 
 ### 过期：规则归产品，机制归 core
 
 ```ts
-import type { ObservationCapturePolicy, RunObservationHeader } from "@echo-agent/core";
+import type { ObservationCapturePolicy, RunObservationHeader, StorageDir } from "@echo-agent/core";
+
+type ObservationExpiryDecision = Readonly<{
+  /** 要删掉的 run。 */
+  runs?: readonly string[];
+  /** 早于这个时刻（毫秒时间戳，比的是记录的 observedAt）的 run 之外记录可以回收。不给 = run 之外的记录不删。 */
+  activityBefore?: number;
+}>;
 
 type CreateAgentObservationOption = {
   observation?: {
     capture?: ObservationCapturePolicy;
-    /** 返回要删掉的 runId。不给 = 永不删。core 不内置任何规则。 */
-    expiry?: (runs: readonly RunObservationHeader[], now: number) => readonly string[];
+    /** 观测放在哪。缺省 = 状态根的存储（`opts.store`，没给就是状态根目录的 `FileDir`），前缀 `observability/`。 */
+    store?: StorageDir;
+    /** 不给 = 永不删。core 不内置任何规则。 */
+    expiry?: (runs: readonly RunObservationHeader[], now: number) => ObservationExpiryDecision;
   };
 };
 ```
 
+**什么时候执行**：core 在两个时点调用规则——启动拿到 lease 之后一次、每个 run 的 `run.closed` 提交之后一次；另有 `echo.observations.expire()`，给要自己挑时机的使用方（没持 lease 时是空操作）。几次调用撞在一起时合并成跑完再跑一次。
+
 core 按返回值执行：
 
 1. 删 `runs/<runId>.json`，这个 run 的 `getRun()` 立刻是 `unknown`。**当前进程里还开着的 run**（Sequencer 正在跟踪的）拒删并报诊断；已封口的、以及以前进程留下的没封口的，删不删由规则定——观测不判断进程死活。父 run 删了，子循环 run 不连带：它们各有自己的 `runs/` 文件，规则要删就一并返回。
-2. 回收批文件：一个批文件里出现过的 run 全都删了（`runs/` 里都不在），且其中 run 之外的记录也已过期（见待拍板 3）→ 删掉。
+2. 回收批文件：一个批文件里出现过的 run 全都删了（`runs/` 里都不在），且其中 run 之外的记录都早于 `activityBefore` → 删掉。只含 run 之外记录的批文件同理。
 3. 订阅回放跨过被删的批文件，交付 `retention-gap`（类型已有）。
 
 ### 撤掉
 
 - `observability/sqlite-store.ts`、`worker-store.ts`、`sqlite-worker.ts`、`worker-protocol.ts` 与各自的测试，`bun:sqlite` 在 `packages/*/src` 里零引用；`create-agent.ts` 的 `:memory:` 分支（注入内存 `store` 时观测跟着在内存）；空会话清理里「观测在不在内存」这个参数。
-- 公共面（API 快照要重录）：`observationDatabasePath`、`SqliteEchoObservationReader`（`openObservationReader` 返回类型改为 `EchoObservationReader` 的新实现）、`ObservationDatabaseMissingError`（「这个状态根没有观测目录」改由 reader 如实返回空，或保留同名错误改指目录——实现时按 `observe` 命令的提示需要定）。`ObservationStoreOpenError` / `ObservationCorruptionError` 保留。
+- 公共面（API 快照要重录）：`observationDatabasePath` → `observationStorePath`（`<stateRoot>/observability`）；`SqliteEchoObservationReader` → `DocumentEchoObservationReader`；`ObservationDatabaseMissingError` → `ObservationStoreMissingError`（这个状态根还没有观测目录）；`RunLookupResult` 去掉 `pruned` 分支，`RunIndexEntryV1` 去掉 `bodyState` / `prunedAt`；`EchoObservations` 加 `expire()`；`createEcho` / `createAgent` 的 `observation` 加 `store` 与 `expiry`。`ObservationStoreOpenError` / `ObservationCorruptionError` 保留。
+- 接线：lease 生命周期端口（Host 内部，不进 Extension ABI）加 `afterLeaseAcquired`。
+- 旧库提示在装配层做：`SessionObservationReaders` 发现某段会话只有 `observability/observations.sqlite`、没有新格式时，把它记进打不开的会话（`observe` 命令与面板已经会把这一类原因打出来），原因写「旧格式观测（observations.sqlite），已不再读取」。
 - 设计文档 §5 的 worker 线程一节与两条 Bun 约束随之删除；`docs/architecture.md`、`README.md` / `README.zh.md` 里的 `observations.sqlite` 改写。
 
 ## Non-Goals
@@ -119,15 +139,15 @@ core 按返回值执行：
 - **不迁移旧库**，也不留读旧库的代码。
 - **不内置任何过期规则**：没有缺省 TTL、没有缺省条数上限。
 - **不做 fsync 与崩溃恢复**：rename 原子保证不留半截文件，掉电丢最后几批与今天同属欠账（设计文档 §8）。
-- **不开「语义层 store」注入**（换成 Postgres 之类）：本条只换缺省实现、开字节面，见待拍板 4。
+- **不开「语义层 store」注入**（换成 Postgres 之类）：本条只换缺省实现、开字节面，见决定 4。
 - **不做按正文字段的部分清理**：删的粒度是 run。
 
-## 待拍板
+## 细节决定（2026-09-14，原「待拍板」四条全部按推荐）
 
-1. **过期什么时候执行。** 推荐：core 在两个固定时点调用规则函数——开库之后一次、每个 run 的 `run.closed` 提交之后一次；另给 `echo.observations.expire()` 供需要自己挑时机的使用方。备选：只给 `expire()`，时机全归使用方。
-2. **删掉 `pruned` 这个读面状态。** 推荐删：粒度是 run 之后「留概要、删正文」没有落点。牵动公开类型 `RunLookupResult` 的 `pruned` 分支与 `RunIndexEntryV1.bodyState` / `prunedAt`，同一次改动里改掉读面与面板对它的处理。
-3. **run 之外的记录（extension 装卸、收件、相位变更…）怎么过期。** 推荐：规则函数的返回值多一个 `activityBefore?: number`，早于它的 run 之外记录可回收；不给 = 永不删。备选：跟随批文件——批文件里的 run 全删了就连带删，不单独给规则。
-4. **可注入的是哪一层。** 推荐：先只开字节面——`observation.store?: StorageDir`，缺省是状态根的 `FileDir`，覆盖「放内存 / 放别处」。「换成另一种数据库」要的是语义层（`CanonicalObservationStore`）注入，而公开线第 2 条又定了 store 接口留在内部，两条在同一份记录里互相顶着；等真有这样的消费者再拍。
+1. **过期的执行时机**：core 在启动拿到 lease 之后、每个 run 的 `run.closed` 提交之后各调一次规则；另给 `echo.observations.expire()`。没选「只给 `expire()`、时机全归使用方」：那样每个产品都得自己挂时机，忘了库就一直涨。
+2. **删掉 `pruned` 读面状态**：粒度是 run 之后「留概要、删正文」没有落点。`RunLookupResult` 的 `pruned` 分支与 `RunIndexEntryV1.bodyState` / `prunedAt` 同一次改动里删，读面与面板对它的处理一起删。
+3. **run 之外的记录**（extension 装卸、收件、相位变更…）：规则的返回值带 `activityBefore`，早于它的可回收；不给 = 不删。没选「跟随批文件连带删」：run 之外的记录与 run 的寿命无关。
+4. **可注入的层**：只开字节面 `observation.store?: StorageDir`。「换成另一种数据库」要的是语义层（`CanonicalObservationStore`）注入，与公开线第 2 条「store 接口留在内部」互相顶着，等真有这样的使用方再拍。
 
 ## 验收
 
