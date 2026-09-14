@@ -79,6 +79,9 @@ async function echoAt(opts: { dir: string; turns?: ScriptedTurn[]; tools?: Model
     allowNetwork: false,
     stateDir: join(await tmp(), "state"),
     extensionDirs: [opts.dir],
+    // 记忆提取的子循环在每条 reply 结束后自己调模型，会把脚本里留给下一次 send 的回复吃掉（实测：第二次 send 报「脚本用尽」）。
+    // 这里不测记忆，关掉；要连记忆一起测的走 fixtures/resident-host.ts 那种按 EXTRACT_PROMPT_OPENING 单独作答的 provider。
+    withoutMemory: true,
     ...(opts.tools === undefined ? {} : { agent: { tools: opts.tools } }),
   });
   running.push(echo);
