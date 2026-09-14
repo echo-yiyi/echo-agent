@@ -72,7 +72,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
   // turn 开门（RunIntakeGate）：同样在 turn_start 之前——订阅者收到 turn_start 就能 steer()
   config.intake?.openTurn(turnId);
   const observe = deps.observe?.loop;
-  probe(observe, { kind: "turn_started", turnId, replyId, cause });
+  probe(observe, { kind: "turn_started", turnId, replyId, cause, tools: workset.tools.map((t) => t.name) });
   await emit({ type: "turn_start", turnId, replyId, cause });
 
   const toolResults: ToolResultMessage[] = [];
@@ -332,12 +332,15 @@ async function runOneTool(
   const tool = tools.find((t) => t.name === use.name);
   if (tool === undefined) {
     const reason = explainMissingTool(config, workset.knownToolNames, use.name);
+    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "lookup", cause: "not_found", reason });
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "not_found", message: reason });
     return toolResultMessage(use.id, use.name, reason, true);
   }
   if (!isModelVisible(tool)) {
     // 存在但不是模型可调的（InternalTool 不上模型菜单，模型不该点它的名）
     const reason = `Tool '${use.name}' is not available to the model`;
+    // 给壳的事件把它并进 not_found；观测分开记——「不存在」与「存在但模型不该点」是两件事
+    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "lookup", cause: "not_visible", reason });
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "not_found", message: reason });
     return toolResultMessage(use.id, use.name, reason, true);
   }
@@ -352,6 +355,7 @@ async function runOneTool(
     params = deepFreezePlain(prepare(tool, use.input));
   } catch (e) {
     const message = `Invalid arguments: ${errText(e)}`;
+    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "arguments", cause: "bad_params", reason: message });
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "bad_params", message });
     return toolResultMessage(use.id, use.name, message, true);
   }
@@ -363,6 +367,7 @@ async function runOneTool(
   );
   if (pre.decision === "block") {
     const reason = pre.reason ?? "Blocked by a hook";
+    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "preToolUse", cause: "blocked", decidedBy: "hook", reason });
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "hook", reason });
     return toolResultMessage(use.id, use.name, reason, true);
   }
@@ -371,6 +376,8 @@ async function runOneTool(
       params = deepFreezePlain(prepare(tool, pre.event.params));
     } catch (e) {
       const message = `Arguments rewritten by a hook are invalid: ${errText(e)}`;
+      // 参数是 hook 改坏的，不是模型给坏的：stage 记 preToolUse，与模型原始参数不合法（arguments）分开
+      probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "preToolUse", cause: "bad_params", decidedBy: "hook", reason: message });
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "bad_params", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
@@ -393,6 +400,7 @@ async function runOneTool(
     const raw = await raceAbort(Promise.resolve(config.permission.authorize(authInput)), signal);
     if (raw.kind === "aborted") {
       const message = "The run was aborted while waiting for authorization";
+      probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "aborted", reason: message });
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "aborted", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
@@ -408,6 +416,7 @@ async function runOneTool(
     const { permissionId, settled } = await askGate(async () => {
       // 只有真正进入 ask 才有 permissionId：先登记 ledger，再恰好发一次带同一 ID 的 permissionRequest
       const handle = config.permission.ask({ ...authInput, reason: askReason }, signal);
+      probe(observe, { kind: "permission_asked", toolCallId: use.id, toolName: use.name, permissionId: handle.permissionId, reason: askReason });
       await notify(hooks, config, { type: "permissionRequest", permissionId: handle.permissionId, ...authInput, reason: askReason });
       await notify(hooks, config, {
         type: "notification",
@@ -415,15 +424,30 @@ async function runOneTool(
         permissionId: handle.permissionId,
         message: `等待授权：${use.name}（${askReason}）`,
       });
-      return { permissionId: handle.permissionId, settled: await handle.settled };
+      const outcome = await handle.settled;
+      // 在裁决落下的那一刻记：与 permission_asked 配成的 span 时长就是真正等人的时间，不含门闩之后的通知
+      probe(observe, {
+        kind: "permission_settled",
+        toolCallId: use.id,
+        toolName: use.name,
+        permissionId: handle.permissionId,
+        ...(outcome.kind === "allow"
+          ? { decision: "granted", decidedBy: outcome.decidedBy }
+          : outcome.kind === "deny"
+            ? { decision: "denied", decidedBy: outcome.decidedBy, reason: outcome.reason }
+            : { decision: "cancelled", reason: outcome.reason }),
+      });
+      return { permissionId: handle.permissionId, settled: outcome };
     });
     if (settled.kind === "cancelled") {
       await notify(hooks, config, { type: "permissionCancelled", permissionId, toolCallId: use.id, reason: settled.reason });
       const message = `Aborted while waiting for approval (${settled.reason})`;
+      probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "cancelled", reason: message });
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "aborted", message });
       return toolResultMessage(use.id, use.name, message, true);
     }
     if (settled.kind === "deny") {
+      probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "denied", decidedBy: settled.decidedBy, reason: settled.reason });
       await notify(hooks, config, {
         type: "permissionDenied",
         permissionId,
@@ -437,6 +461,7 @@ async function runOneTool(
     }
     await notify(hooks, config, { type: "permissionGranted", permissionId, toolCallId: use.id, decidedBy: "human" });
   } else if (verdict.kind === "deny") {
+    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "denied", decidedBy: "policy", reason: verdict.reason });
     await notify(hooks, config, { type: "permissionDenied", toolCallId: use.id, toolName: use.name, reason: verdict.reason, decidedBy: "policy" });
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "permission", reason: verdict.reason });
     return toolResultMessage(use.id, use.name, verdict.reason, true);
@@ -491,6 +516,8 @@ async function runOneTool(
   // 工具已经跑过（tool_execution_start 发过了），所以这里要补 tool_execution_end 把事件配对收口。
   if (post.decision === "block") {
     const reason = post.reason ?? "Blocked by a hook";
+    // 工具已经跑过：这条拦截发生在 tool_started 之后、tool_ended 之前，结果被换成了拦截原因
+    probe(observe, { kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "postToolUse", cause: "blocked", decidedBy: "hook", reason });
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "hook", reason });
     const denied: AgentToolResult = { content: reason, isError: true, metadata: null };
     probe(observe, { kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: denied });

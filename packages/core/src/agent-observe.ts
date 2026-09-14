@@ -22,6 +22,11 @@ export type AgentFactBody =
    * 账本里不会出现 `→ stopped`：写入端在 stop 流程里先关了，见 `Agent.setPhase`。
    */
   | { kind: "phase_changed"; from: AgentLifecyclePhase; to: AgentLifecyclePhase; restoredReason?: RestoredReason }
+  /**
+   * 装备换了（只能在 idle 时换，setter 先守 idle）：模型记 `provider/id`，思考档记档名。工具的增删走 `resource_changed`。
+   * `LifecycleEvent` 里声明过一个 `equipmentChanged`，但全仓没有任何地方发它——这里是观测自己的节点，不依赖它。
+   */
+  | { kind: "equipment_changed"; field: "model" | "thinkingLevel"; from: string; to: string }
   | { kind: "queue_updated"; queue: "steering" | "followUp" | "inbox"; size: number }
   /** `ResourceChange` 自带一个 `kind`（tool / skill / mcp …），与本联合的判别字段同名，所以整个嵌进 `change`。 */
   | { kind: "resource_changed"; change: ResourceChange };
@@ -43,6 +48,10 @@ export function projectAgentFact(fact: AgentFact, policy: ObservationCapturePoli
       const attrs: Record<string, string> = { from: fact.from, to: fact.to };
       if (fact.restoredReason !== undefined) attrs.restoredReason = fact.restoredReason;
       return { ...base, kind: "event", name: "agent.phase.changed", scope: {}, attributes: attrs, body: { ...attrs } };
+    }
+    case "equipment_changed": {
+      const attrs = { field: fact.field, from: fact.from, to: fact.to };
+      return { ...base, kind: "event", name: "agent.equipment.changed", scope: {}, attributes: attrs, body: { ...attrs } };
     }
     case "queue_updated":
       return { ...base, kind: "event", name: "agent.queue.updated", scope: {}, attributes: { queue: fact.queue }, body: { queue: fact.queue, size: fact.size } };

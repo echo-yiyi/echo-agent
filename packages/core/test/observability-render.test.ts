@@ -53,7 +53,7 @@ function script(): readonly LoopFact[] {
   return [
     at(1_001, { kind: "loop_started" }),
     at(1_002, { kind: "reply_started", replyId: "run:fixed/1", source: "prompt" }),
-    at(1_003, { kind: "turn_started", turnId: "run:fixed/1#1", replyId: "run:fixed/1", cause: "input" }),
+    at(1_003, { kind: "turn_started", turnId: "run:fixed/1#1", replyId: "run:fixed/1", cause: "input", tools: ["ping"] }),
     at(1_004, { kind: "attempt_started", turnId: "run:fixed/1#1", attempt: 1 }),
     at(1_005, { kind: "generation_started" }),
     at(1_010, { kind: "message_committed", message: m1 }),
@@ -61,7 +61,7 @@ function script(): readonly LoopFact[] {
     at(1_012, { kind: "tool_started", toolCallId: "c1", toolName: "ping", params: { a: 1 } }),
     at(1_025, { kind: "tool_ended", toolCallId: "c1", toolName: "ping", result: { content: "pong", isError: false, images: [], metadata: null } }),
     at(1_030, { kind: "turn_ended", turnId: "run:fixed/1#1", result: { kind: "landed", message: m1 }, toolResultCount: 1 }),
-    at(1_031, { kind: "turn_started", turnId: "run:fixed/1#2", replyId: "run:fixed/1", cause: "tool_use" }),
+    at(1_031, { kind: "turn_started", turnId: "run:fixed/1#2", replyId: "run:fixed/1", cause: "tool_use", tools: ["ping"] }),
     at(1_032, { kind: "attempt_started", turnId: "run:fixed/1#2", attempt: 1 }),
     at(1_033, { kind: "generation_started" }),
     at(1_040, { kind: "attempt_ended", turnId: "run:fixed/1#2", attempt: 1, result: { kind: "failed", error: retryable } }),

@@ -62,7 +62,7 @@ describe("循环事实逐 kind 固定投影（metadata 档）", () => {
   const cases: [LoopFact, ObservationRecordKind, string][] = [
     [fact(1, { kind: "loop_started" }), "event", "agent.loop.started"],
     [fact(2, { kind: "reply_started", replyId: "r/1", source: "prompt" }), "span_start", "reply.execute"],
-    [fact(3, { kind: "turn_started", turnId: "r/1#1", replyId: "r/1", cause: "input" }), "span_start", "turn.execute"],
+    [fact(3, { kind: "turn_started", turnId: "r/1#1", replyId: "r/1", cause: "input", tools: ["echo"] }), "span_start", "turn.execute"],
     [fact(4, { kind: "attempt_started", turnId: "r/1#1", attempt: 1 }), "span_start", "attempt.execute"],
     [fact(5, { kind: "generation_started" }), "span_start", "model.generate"],
     [fact(6, { kind: "message_committed", message: { role: "assistant", content: [{ type: "text", text: "hi" }], stopReason: "end_turn", usage: null, at: 1 } as never }), "span_end", "model.generate"],
@@ -102,6 +102,16 @@ describe("循环事实逐 kind 固定投影（metadata 档）", () => {
     expect([q.kind, q.name, q.body]).toEqual(["event", "agent.queue.updated", { queue: "inbox", size: 2 }]);
     expect(projectCompactionFact({ kind: "compaction_started", reason: "auto", at: 1 }, "off")).toBeNull();
     expect(projectAgentFact({ kind: "queue_updated", queue: "inbox", size: 2, at: 1 }, "off")).toBeNull();
+  });
+
+  test("压缩失败：阶段名是标识 metadata 档就记，第三方阶段的错误消息只在 content 档进 body", () => {
+    const failed = { kind: "compaction_failed", reason: "overflow", stage: "summary", message: "model said: <context text>", at: 1_020 } as const;
+    const meta = projectCompactionFact(failed, "metadata")!;
+    expect([meta.kind, meta.name, meta.attributes]).toEqual(["event", "context.compact.failed", { reason: "overflow", stage: "summary" }]);
+    expect(JSON.stringify(meta.body)).not.toContain("<context text>");
+    expect((projectCompactionFact(failed, "content")!.body as Record<string, unknown>).message).toBe("model said: <context text>");
+    // 不带 stage：整条流水线跑完没有一段改动上下文
+    expect(projectCompactionFact({ kind: "compaction_failed", reason: "auto", message: "no compaction stage changed the context", at: 1 }, "metadata")!.attributes).toEqual({ reason: "auto" });
   });
 
   test("off 档一律不生成；metadata 档流式增量 / 工具进展不成记录", () => {

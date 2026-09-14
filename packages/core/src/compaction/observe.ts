@@ -15,7 +15,12 @@ export const SPAN_CONTEXT_COMPACT = "context.compact";
 
 export type CompactionFactBody =
   | { kind: "compaction_started"; reason: CompactionReason }
-  | { kind: "compaction_ended"; reason: CompactionReason; compaction: CompactionState; stages: readonly string[]; contextTokens: number };
+  | { kind: "compaction_ended"; reason: CompactionReason; compaction: CompactionState; stages: readonly string[]; contextTokens: number }
+  /**
+   * 带 `stage`：那个阶段抛错（流水线跳过它继续）；不带：整条跑完没有任何一段改动上下文。
+   * 此前给壳的 `compactionFailed` 没人收（TUI 的 default 分支丢掉），观测也不记——压缩失败完全不可见。
+   */
+  | { kind: "compaction_failed"; reason: CompactionReason; stage?: string; message: string };
 
 export type CompactionFact = CompactionFactBody & Readonly<{ at: number }>;
 
@@ -43,6 +48,14 @@ export function projectCompactionFact(fact: CompactionFact, policy: ObservationC
         contextTokens: fact.contextTokens,
       };
       return { ...base, kind: "span_end", name: SPAN_CONTEXT_COMPACT, scope: {}, attributes: { reason: fact.reason, changed: fact.stages.length > 0 }, body };
+    }
+    case "compaction_failed": {
+      // 阶段名是标识，metadata 档就记；错误消息来自第三方阶段，可能带上下文正文，只在 content 档记
+      const attrs: Record<string, string> = { reason: fact.reason };
+      if (fact.stage !== undefined) attrs.stage = fact.stage;
+      const body: Record<string, unknown> = { ...attrs };
+      if (content) body.message = fact.message;
+      return { ...base, kind: "event", name: "context.compact.failed", scope: {}, attributes: attrs, body };
     }
   }
 }

@@ -166,6 +166,7 @@ export async function runCompaction(
       if (next === null) continue;
       next = normalizeCompaction(context.messages, next);
     } catch (e) {
+      probeCompaction(observe, { kind: "compaction_failed", reason, stage: stage.name, message: errText(e) });
       await config.hooks.notify({ type: "compactionFailed", reason, stage: stage.name, message: errText(e) }, config.hookContext);
       // 官方产品里 compactionFailed 没人收（TUI 的 default 分支丢掉、观测层不记），压缩失败等于不可见——
       // 再发一条通用错误通知，壳与 serve 端都认它（review 2026-09-07）
@@ -182,6 +183,7 @@ export async function runCompaction(
   const changed = applied.length > 0;
   if (changed) context.compaction = state;
   else {
+    probeCompaction(observe, { kind: "compaction_failed", reason, message: "no compaction stage changed the context" });
     await config.hooks.notify({ type: "compactionFailed", reason, message: "no compaction stage changed the context" }, config.hookContext);
     await config.hooks.notify({ type: "notification", kind: "error", message: "[compaction_stage_failed] no compaction stage changed the context" }, config.hookContext);
   }

@@ -13,7 +13,7 @@ Timeline
   +1ms      run.started
   +1ms        agent.loop.started
   +2ms        reply.execute …  replyId=run:fixed/1 source=prompt
-  +3ms          turn.execute …  cause=input iteration=1 replyId=run:fixed/1
+  +3ms          turn.execute …  cause=input iteration=1 replyId=run:fixed/1 toolCount=1
   +4ms            attempt.execute …  attempt=1 turnId=run:fixed/1#1
   +5ms            model.generate …  role=assistant
   +10ms           model.generate 5ms  hasError=false role=assistant stopReason=tool_use
@@ -21,7 +21,7 @@ Timeline
   +12ms           tool.execute …  toolCallId=c1 toolName=ping
   +25ms           tool.execute 13ms  isError=false toolCallId=c1 toolName=ping
   +30ms         turn.execute 27ms  iteration=1 result=landed stopReason=tool_use toolResultCount=1
-  +31ms         turn.execute …  cause=tool_use iteration=2 replyId=run:fixed/1
+  +31ms         turn.execute …  cause=tool_use iteration=2 replyId=run:fixed/1 toolCount=1
   +32ms           attempt.execute …  attempt=1 turnId=run:fixed/1#2
   +33ms           model.generate …  role=assistant
   +40ms           attempt.execute 8ms  attempt=1 errorCode=overloaded result=failed retryable=true turnId=run:fixed/1#2

@@ -39,7 +39,8 @@ export type LoopFactBody =
   | { kind: "loop_ended"; outcome: AgentOutcome }
   | { kind: "reply_started"; replyId: string; source: ReplySource }
   | { kind: "reply_ended"; replyId: string; outcome: AgentOutcome; hasFinal: boolean; turns: number }
-  | { kind: "turn_started"; turnId: string; replyId: string; cause: TurnCause }
+  /** `tools`：本轮冻结的工作集——模型这一轮**能看见**的工具名（`turn_start` 之前定格，与模型菜单同一份快照）。 */
+  | { kind: "turn_started"; turnId: string; replyId: string; cause: TurnCause; tools: readonly string[] }
   | { kind: "turn_ended"; turnId: string; result: AttemptResult; toolResultCount: number }
   | { kind: "attempt_started"; turnId: string; attempt: number }
   | { kind: "attempt_ended"; turnId: string; attempt: number; result: AttemptResult }
@@ -51,7 +52,23 @@ export type LoopFactBody =
   | { kind: "usage"; usage: Usage }
   | { kind: "tool_started"; toolCallId: string; toolName: string; params: unknown }
   | { kind: "tool_progress"; toolCallId: string; partial: unknown }
-  | { kind: "tool_ended"; toolCallId: string; toolName: string; result: AgentToolResult };
+  | { kind: "tool_ended"; toolCallId: string; toolName: string; result: AgentToolResult }
+  /**
+   * 工具在执行之前（或 `postToolUse` 在执行之后）被拦下：哪一步、什么原因、谁做的决定。
+   * 执行前被拦的调用**不发 tool_started / tool_ended**——此前观测只能从后面那条 toolResult 的 `isError` 猜。
+   * 词汇沿用 `LifecycleEvent` 里已有的：`toolUseFailed.cause`、`permissionDenied.decidedBy`、hook 名。
+   */
+  | { kind: "tool_rejected"; toolCallId: string; toolName: string; stage: ToolRejectStage; cause: ToolRejectCause; decidedBy?: ToolDecidedBy; reason: string }
+  /** 进入等人审批：只有真正进了 ask 才有；策略直接放行 / 拒绝没有这一拍。与 `permission_settled` 配成一个 span，时长就是等人的时间。 */
+  | { kind: "permission_asked"; toolCallId: string; toolName: string; permissionId: string; reason: string }
+  | { kind: "permission_settled"; toolCallId: string; toolName: string; permissionId: string; decision: "granted" | "denied" | "cancelled"; decidedBy?: ToolDecidedBy; reason?: string };
+
+/** 工具在哪一步被拦：找不到 / 模型不可见 → lookup；参数不合法 → arguments；两个 hook；权限。 */
+export type ToolRejectStage = "lookup" | "arguments" | "preToolUse" | "permission" | "postToolUse";
+export type ToolRejectCause = "not_found" | "not_visible" | "bad_params" | "blocked" | "denied" | "cancelled" | "aborted";
+export type ToolDecidedBy = "hook" | "policy" | "human" | "timeout";
+
+export const SPAN_PERMISSION_WAIT = "permission.wait";
 
 /** 带发生时刻的事实。时刻由 `probe()` 在节点上补，调用处不必各写一遍。 */
 export type LoopFact = LoopFactBody & Readonly<{ at: number }>;
@@ -291,13 +308,14 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
     // iteration 从它的 n 取（`loop/ids.ts`），不另外算
     case "turn_started": {
       const iteration = turnNumberOf(fact.turnId);
+      // 工具名是标识不是正文，metadata 档就记：「这一轮模型为什么没用那个工具」往往答案就是它根本不在工作集里
       return {
         ...base,
         kind: "span_start",
         name: SPAN_TURN_EXECUTE,
         scope: { turnId: fact.turnId },
-        attributes: { iteration, replyId: fact.replyId, cause: fact.cause },
-        body: { iteration, replyId: fact.replyId, cause: fact.cause },
+        attributes: { iteration, replyId: fact.replyId, cause: fact.cause, toolCount: fact.tools.length },
+        body: { iteration, replyId: fact.replyId, cause: fact.cause, tools: [...fact.tools] },
       };
     }
     case "turn_ended": {
@@ -430,6 +448,27 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         attributes: { toolName: fact.toolName, toolCallId: fact.toolCallId, isError: r.isError },
         body,
       };
+    }
+    case "tool_rejected": {
+      // 原因文本可能来自 hook / 人工审批的自由输入，只在 content 档记；哪一步、什么原因、谁决定的是标识，metadata 档就记
+      const attrs: Attrs = { toolName: fact.toolName, toolCallId: fact.toolCallId, stage: fact.stage, cause: fact.cause };
+      if (fact.decidedBy !== undefined) attrs.decidedBy = fact.decidedBy;
+      const body: Record<string, unknown> = { ...attrs };
+      if (content) body.reason = fact.reason;
+      return { ...base, kind: "event", name: "tool.rejected", scope: { toolCallId: fact.toolCallId }, attributes: attrs, body };
+    }
+    case "permission_asked": {
+      const attrs: Attrs = { toolName: fact.toolName, toolCallId: fact.toolCallId, permissionId: fact.permissionId };
+      const body: Record<string, unknown> = { ...attrs };
+      if (content) body.reason = fact.reason;
+      return { ...base, kind: "span_start", name: SPAN_PERMISSION_WAIT, scope: { toolCallId: fact.toolCallId }, attributes: attrs, body };
+    }
+    case "permission_settled": {
+      const attrs: Attrs = { toolName: fact.toolName, toolCallId: fact.toolCallId, permissionId: fact.permissionId, decision: fact.decision };
+      if (fact.decidedBy !== undefined) attrs.decidedBy = fact.decidedBy;
+      const body: Record<string, unknown> = { ...attrs };
+      if (content && fact.reason !== undefined) body.reason = fact.reason;
+      return { ...base, kind: "span_end", name: SPAN_PERMISSION_WAIT, scope: { toolCallId: fact.toolCallId }, attributes: attrs, body };
     }
   }
 }

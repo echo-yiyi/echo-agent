@@ -1080,8 +1080,10 @@ export class Agent {
   set model(value: Model) {
     this.assertIdle("model");
     normalizeModelSnapshot(value); // fail-loud 在这里：admission 时冻结 binding 不能再抛
+    const from = this._state.model;
     this._state.model = value;
     this.catalogRevision += 1;
+    probeAgent(this.agentProbeNow(), { kind: "equipment_changed", field: "model", from: `${from.provider}/${from.id}`, to: `${value.provider}/${value.id}` });
   }
 
   get thinkingLevel(): ThinkingLevel {
@@ -1089,7 +1091,9 @@ export class Agent {
   }
   set thinkingLevel(value: ThinkingLevel) {
     this.assertIdle("thinkingLevel");
+    const from = this._state.thinkingLevel;
     this._state.thinkingLevel = value;
+    probeAgent(this.agentProbeNow(), { kind: "equipment_changed", field: "thinkingLevel", from, to: value });
   }
 
   private assertIdle(what: string): void {
