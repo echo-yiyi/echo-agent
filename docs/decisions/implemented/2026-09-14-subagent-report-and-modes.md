@@ -1,6 +1,6 @@
 # subagent 的回执与模式：`report` 多次提交不停循环、fork 继承父上下文、并行扇出
 
-> 状态：proposed · 提出 2026-09-14 · 拍板 2026-09-14（口头）· 实现在分支 `worktree-subagent-report-modes`，合入时移入 implemented · 相关 [并行工具](../implemented/2026-09-07-parallel-tools.md)（`concurrent` 声明制，本条照抄它的形）、[角色定义](../implemented/2026-09-07-role-agent.md)（那条挂着的「subagent 要不要接受角色名」由本条关闭）
+> 状态：implemented · 提出 2026-09-14 · 拍板 2026-09-14（口头）· 实现并合入 2026-09-14（PR #4）· 相关 [并行工具](2026-09-07-parallel-tools.md)（`concurrent` 声明制，本条照抄它的形）、[角色定义](2026-09-07-role-agent.md)（那条挂着的「subagent 要不要接受角色名」由本条关闭）
 
 ## 现状（拍板前）
 
