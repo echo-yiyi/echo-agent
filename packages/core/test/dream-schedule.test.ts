@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { Agent } from "../src/agent.ts";
+import { Agent as RealAgent } from "../src/agent.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import { bindMemoryScopes, createAgentMemories, memoryCreate, shouldDream, type AgentMemories, type MemoryHarnessOptions } from "../src/memory/harness.ts";
 import { memoryScopeTable, type MemoryScopeDef } from "../src/memory/scope.ts";
@@ -9,6 +9,31 @@ import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { errorTurn, FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { toolOk } from "../src/tools/types.ts";
+
+/**
+ * 这个文件盯的是 dream。2026-09-14 起每条回复收尾会真的跑一次记忆提取（此前 transcript 恒空、从没跑过），
+ * 它和 dream 用同一个脚本化模型——不拦的话，提取会吃掉给 dream 的脚本回合、混进计数与卡点，
+ * 有几条会因此「绿得不对」（比如 errorTurn 被提取吃掉、dream 拿到「脚本用尽」照样是 error）。
+ * 所以这里的 Agent 在最外面把提取那次调用答掉，里面的脚本、计数、卡点都看不到它。
+ * 提取本身的判据在 `memory-extract.test.ts`。
+ */
+const EXTRACT_MARK = "A reply just finished.";
+class Agent extends RealAgent {
+  constructor(opts: ConstructorParameters<typeof RealAgent>[0]) {
+    const inner = opts.streamFunction;
+    super(
+      inner === undefined
+        ? opts
+        : {
+            ...opts,
+            streamFunction: (model, context, options) =>
+              JSON.stringify(context.messages[0] ?? null).includes(EXTRACT_MARK)
+                ? scriptedStreamFn([textTurn("Nothing here is worth keeping.")])(model, context, options)
+                : inner(model, context, options),
+          },
+    );
+  }
+}
 
 // Dream 自调度（C6 / D7）：**触发、互斥、预算、中断、提交都在 core**。
 //

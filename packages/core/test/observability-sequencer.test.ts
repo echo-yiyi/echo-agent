@@ -1539,6 +1539,8 @@ describe("run.accepted 的 header 是逐字段 exact schema（2026-08-27 review 
       // 隔离子循环的来源：只有 dream / extract / subagent 能带父 run，字段齐全、不多不少
       { ...acceptedBody("r4").header, source: { kind: "user", parentRunId: "p" } },
       { ...acceptedBody("r4").header, source: { kind: "extract" } },
+      // dream 不经 admission（2026-09-14 清掉残留）：不带父 run 的 dream 不再是合法来源
+      { ...acceptedBody("r4").header, source: { kind: "dream" } },
       { ...acceptedBody("r4").header, source: { kind: "dream", parentRunId: "" } },
       { ...acceptedBody("r4").header, source: { kind: "extract", parentRunId: "p", extra: 1 } },
       { ...acceptedBody("r4").header, source: { kind: "subagent", parentRunId: "p", parentToolCallId: "c1" } },

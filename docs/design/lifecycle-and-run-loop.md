@@ -40,7 +40,6 @@ run loop 本身已经形成了一条可解释的主线：同一时刻只执行�
 | inner loop | 因 `tool_use`、`max_tokens` 或 `steer` 继续下一 turn | 新 run |
 | outer loop | 因 `followUp` 或 stop hook 注入的新工作继续 | 新 Agent |
 | foreground | 用户 prompt 或 inbox 工作 | 所有高优先级后台任务 |
-| maintenance | 当前只有 dream 类工作 | 任意定时任务 |
 
 源码里的公开 `AgentStatus` 只有 `idle / generating / acting / compacting`，描述的是 run 内状态，而不是实例是否已经 `start()`。实例阶段是另一个私有字段 `phase`。见 [`AgentStatus`](../../packages/core/src/agent.ts#symbol=AgentStatus)、[`AgentState`](../../packages/core/src/agent.ts#symbol=AgentState) 和 [`Agent.phase`](../../packages/core/src/agent.ts#symbol=Agent.phase)。
 
@@ -127,7 +126,7 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { InMemoryS
 
 ### 2.1 Admission 保证
 
-Standalone admission 同时只发一个执行许可。用户与 inbox 属于 foreground，优先于 dream；foreground 到来时可以中断或取代 maintenance dream。ticket 只 settle 一次并且自身不 reject；callback 抛错会被规范化成终止结果。类型契约见 [`AgentAdmissionTicket`](../../packages/core/src/admission/types.ts#symbol=AgentAdmissionTicket)，实现见 [`StandaloneRunAdmission`](../../packages/core/src/admission/standalone.ts#symbol=StandaloneRunAdmission)。
+Standalone admission 同时只发一个执行许可，按到达顺序发；来源只有用户与 inbox，都是 foreground。记忆的提取与整理是隔离子循环，走各自的通道、不经 admission（见[记忆设计](memory.md)）。ticket 只 settle 一次并且自身不 reject；callback 抛错会被规范化成终止结果。类型契约见 [`AgentAdmissionTicket`](../../packages/core/src/admission/types.ts#symbol=AgentAdmissionTicket)，实现见 [`StandaloneRunAdmission`](../../packages/core/src/admission/standalone.ts#symbol=StandaloneRunAdmission)。
 
 模型绑定在 admission 时冻结，包括 provider、model snapshot、stream function、key resolver、thinking 和 retry policy，见 [`Agent.modelBinding()`](../../packages/core/src/agent.ts#symbol=Agent.modelBinding)。工具列表不在这里冻结；它按 turn 重新取快照。
 

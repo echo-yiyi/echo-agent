@@ -20,7 +20,7 @@ import type {
 import { assertInternalRunRequest } from "./request.ts";
 import type { Model } from "../provider/types.ts";
 
-export type FakePendingRequest = Readonly<{ requestId: string; source: RunSource; purpose: "foreground" | "maintenance" }>;
+export type FakePendingRequest = Readonly<{ requestId: string; source: RunSource; purpose: "foreground" }>;
 
 export type FakeAgentAdmission = Readonly<{
   port: AgentAdmissionPort;
@@ -29,12 +29,12 @@ export type FakeAgentAdmission = Readonly<{
   /** 还没裁决的 request（按到达顺序）。 */
   pending(): readonly FakePendingRequest[];
   /**
-   * 把 permit 给下一个（foreground 优先）：跑它的 execute，返回该 ticket 的结算。没有 pending → null。
+   * 按到达顺序把 permit 给下一个：跑它的 execute，返回该 ticket 的结算。没有 pending → null。
    * 不给 binding 就按 request 派生一份缺省的（source / purpose 与 request 一致）。
    */
   grantNext(binding?: RunModelBinding): Promise<AgentAdmissionResult | null>;
   /** 拒下一个：ticket 以 rejected(reason) fulfill，execute 零次。 */
-  rejectNext(reason: "paused" | "stopping" | "lease-lost" | "superseded"): boolean;
+  rejectNext(reason: "paused" | "stopping" | "lease-lost"): boolean;
   /** abort 正在跑的那个的 scope signal。 */
   abortActive(): void;
   /** 让下一次 callback failure 的规范化自己也抛：fake 必须像真 actor 一样兜底出最小 LoopResult、ticket 照样结算。 */
@@ -45,7 +45,7 @@ export type FakeAgentAdmission = Readonly<{
 type Slot = {
   readonly requestId: string;
   readonly source: RunSource;
-  readonly purpose: "foreground" | "maintenance";
+  readonly purpose: "foreground";
   readonly execute: (scope: AgentAdmissionExecuteScope) => Promise<LoopResult>;
   readonly settle: (r: AgentAdmissionResult) => void;
 };
@@ -60,7 +60,7 @@ function failureResult(aborted: boolean, e: unknown): LoopResult {
 }
 
 /** fake 的缺省 binding：一个不发网络请求的空 model，source / purpose 跟 request 走。 */
-function defaultBinding(source: RunSource, purpose: "foreground" | "maintenance"): RunModelBinding {
+function defaultBinding(source: RunSource, purpose: "foreground"): RunModelBinding {
   return Object.freeze({
     bindingId: `fake-binding:${source.kind}:${purpose}`,
     source: Object.freeze({ ...source }), // 与生产 binding 同一 ABI：冻结副本，不别名 request 的对象
@@ -83,7 +83,7 @@ export function createFakeAgentAdmission(): FakeAgentAdmission {
 
   const submit = <TResult extends LoopResult>(
     source: RunSource,
-    purpose: "foreground" | "maintenance",
+    purpose: "foreground",
     execute: (scope: AgentAdmissionExecuteScope) => Promise<TResult>,
   ): AgentAdmissionTicket<TResult> => {
     const requestId = `fake:${++seq}`;
@@ -94,11 +94,7 @@ export function createFakeAgentAdmission(): FakeAgentAdmission {
     queue.push({ requestId, source, purpose, execute, settle });
     return { requestId, settled };
   };
-  const takeNext = (): Slot | undefined => {
-    const i = queue.findIndex((s) => s.purpose === "foreground");
-    const idx = i >= 0 ? i : 0;
-    return queue.splice(idx, 1)[0];
-  };
+  const takeNext = (): Slot | undefined => queue.shift();
 
   let normalizerBroken = false;
   const port: AgentAdmissionPort = {
@@ -116,7 +112,7 @@ export function createFakeAgentAdmission(): FakeAgentAdmission {
       if (active !== null) throw new Error("fake admission：上一个 permit 还没 close");
       const slot = takeNext();
       if (slot === undefined) return null;
-      const runId = `${slot.source.kind === "dream" ? "dream" : "run"}:fake-${slot.requestId}`;
+      const runId = `run:fake-${slot.requestId}`;
       const controller = new AbortController();
       active = { slot, runId, controller };
       const modelBinding = binding ?? defaultBinding(slot.source, slot.purpose);
@@ -191,7 +187,6 @@ const INBOX_REQUEST: AgentInternalRunRequest = {
   reservationId: "rsv:conformance",
   reservedRecordIds: ["r1", "r2"],
 };
-const DREAM_REQUEST: AgentInternalRunRequest = { source: { kind: "dream" }, priority: "maintenance", purpose: "maintenance" };
 
 const done: LoopResult = { outcome: { kind: "completed" }, messages: [] };
 
@@ -201,12 +196,12 @@ async function driveUntil(sut: AdmissionUnderTest, cond: () => boolean, steps = 
 }
 
 /**
- * ABI 结算规则：foreground 高于 maintenance；在跑的 Dream 可被抢占；scope 的 source / purpose 与 request 一致；
+ * ABI 结算规则：一次一个 permit、按到达顺序；scope 的 source / purpose 与 request 一致；
  * execute 0-or-1 次；LoopResult 原样保留；正常 rejected 只 fulfill；sync throw / async reject / abort 都形成 callback-error 且
  * 各只 settle 一次；execute 里再 enqueue 不会递归执行。抛错 = 不合格。
  */
 export async function runAgentAdmissionConformance(factory: () => AdmissionUnderTest | Promise<AdmissionUnderTest>): Promise<void> {
-  /* 1. foreground 高于 maintenance；scope 与 request 一致；execute 恰一次 */
+  /* 1. 一次一个 permit、按到达顺序；scope 的 source / purpose 与 request 一致；binding 冻结；execute 恰一次 */
   {
     const sut = await factory();
     const order: string[] = [];
@@ -217,9 +212,9 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
         "binding 及其 source / provider / model / retryPolicy 必须是冻结副本（binding ABI）",
       );
     };
-    const dream = sut.port.enqueue(DREAM_REQUEST, async (scope) => {
-      order.push(`dream:${scope.modelBinding.purpose}`);
-      check(scope.modelBinding.source.kind === "dream" && scope.modelBinding.purpose === "maintenance", "Dream 的 binding source/purpose 必须是 dream/maintenance");
+    const inbox = sut.port.enqueue(INBOX_REQUEST, async (scope) => {
+      order.push(`inbox:${scope.modelBinding.purpose}`);
+      check(scope.modelBinding.source.kind === "inbox" && scope.modelBinding.purpose === "foreground", "Inbox run 的 binding source/purpose 必须是 inbox/foreground");
       frozenBinding(scope);
       return done;
     });
@@ -231,60 +226,18 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
       frozenBinding(scope);
       return done;
     });
-    let userSettled = false;
-    void user.settled.then(() => {
-      userSettled = true;
+    let settledBoth = false;
+    void Promise.all([inbox.settled, user.settled]).then(() => {
+      settledBoth = true;
     });
-    await driveUntil(sut, () => userSettled);
-    check(order[0] === "user:foreground", `foreground 必须先于 maintenance 执行，实际顺序 ${order.join(",")}`);
+    await driveUntil(sut, () => settledBoth);
+    check(order.join(",") === "inbox:foreground,user:foreground", `permit 按到达顺序发，实际顺序 ${order.join(",")}`);
     check(userRuns === 1, "用户 execute 必须恰好一次");
-    let dreamSettled: AgentAdmissionResult | null = null;
-    void dream.settled.then((r) => {
-      dreamSettled = r;
-    });
-    await driveUntil(sut, () => dreamSettled !== null);
-    const d = dreamSettled as AgentAdmissionResult | null;
-    check(d !== null, "maintenance ticket 必须结算");
-    check(
-      d!.kind === "executed" || (d!.kind === "rejected" && d!.reason === "superseded"),
-      `被前台挤开的 maintenance 只能是之后 executed 或 rejected(superseded)，实际 ${JSON.stringify(d)}`,
-    );
-    if (d!.kind === "executed") check(order[1] === "dream:maintenance", "maintenance 只能在 foreground 之后执行");
+    const [i, u] = await Promise.all([inbox.settled, user.settled]);
+    check(i.kind === "executed" && u.kind === "executed", "两个 ticket 都必须 executed");
   }
 
-  /* 2. 在跑的 Dream 被前台抢占：signal abort、等它 close 再跑前台 */
-  {
-    const sut = await factory();
-    const order: string[] = [];
-    const dream = sut.port.enqueue(DREAM_REQUEST, (scope) => {
-      order.push("dream:start");
-      return new Promise<LoopResult>((resolve) => {
-        scope.signal.addEventListener("abort", () => {
-          order.push("dream:aborted");
-          resolve({ outcome: { kind: "aborted" }, messages: [] });
-        });
-      });
-    });
-    await driveUntil(sut, () => order.includes("dream:start"));
-    check(order.includes("dream:start"), "空闲时 Dream 必须拿到 permit");
-    const user = sut.admitUser(async () => {
-      order.push("user:start");
-      return done;
-    });
-    let userSettled = false;
-    void user.settled.then(() => {
-      userSettled = true;
-    });
-    // 自动实现自己 abort；手动实现由测试驱动 abortActive
-    await sut.drive();
-    if (!order.includes("dream:aborted")) sut.abortActive();
-    await driveUntil(sut, () => userSettled);
-    check(order.indexOf("dream:aborted") < order.indexOf("user:start"), `前台必须等 Dream close 之后才开工，实际 ${order.join(",")}`);
-    const d = await dream.settled;
-    check(d.kind === "executed" && d.result.outcome.kind === "aborted", "被抢占的 Dream 以 aborted outcome 正常封口（executed）");
-  }
-
-  /* 3. LoopResult 原样保留（泛型 TResult 不被抽成 outcome） */
+  /* 2. LoopResult 原样保留（泛型 TResult 不被抽成 outcome） */
   {
     const sut = await factory();
     type Rich = LoopResult & { extra: number };
@@ -298,7 +251,7 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
     check(got !== null && got.kind === "executed" && got.result.extra === 42, "executed 必须保留完整 TResult");
   }
 
-  /* 4. sync throw / async reject / abort → callback-error，配对的 LoopResult，各只 settle 一次 */
+  /* 3. sync throw / async reject / abort → callback-error，配对的 LoopResult，各只 settle 一次 */
   {
     const sut = await factory();
     const settledCounts = new Map<string, number>();
@@ -348,7 +301,7 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
     for (const [id, n] of settledCounts) check(n === 1, `ticket ${id} 结算了 ${n} 次`);
   }
 
-  /* 5. 正常 rejected 只 fulfill：关门后排队的与新来的都 rejected，execute 零次 */
+  /* 4. 正常 rejected 只 fulfill：关门后排队的与新来的都 rejected，execute 零次 */
   {
     const sut = await factory();
     let ran = 0;
@@ -380,14 +333,14 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
     await first.settled;
   }
 
-  /* 6. execute 里再 enqueue 不递归：新 run 在当前 callback 返回之后才开始 */
+  /* 5. execute 里再 enqueue 不递归：新 run 在当前 callback 返回之后才开始 */
   {
     const sut = await factory();
     const order: string[] = [];
     let innerSettled = false;
     const outer = sut.admitUser(async () => {
       order.push("outer:start");
-      const inner = sut.port.enqueue(DREAM_REQUEST, async () => {
+      const inner = sut.port.enqueue({ ...INBOX_REQUEST, reservationId: "rsv:conformance-inner", reservedRecordIds: ["r3"] }, async () => {
         order.push("inner:start");
         return done;
       });
@@ -406,7 +359,7 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
     check(order.join(",") === "outer:start,outer:end,inner:start", `execute 里 enqueue 的 run 必须在当前 callback 返回后才开始，实际 ${order.join(",")}`);
   }
 
-  /* 7. normalizer 自身失败：ticket 仍恰好结算一次（callback-error + 最小 LoopResult），队列不卡 */
+  /* 6. normalizer 自身失败：ticket 仍恰好结算一次（callback-error + 最小 LoopResult），队列不卡 */
   {
     const sut = await factory();
     sut.breakNormalizer();
@@ -435,7 +388,7 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
     check(ran, "normalizer 失败之后后续 admission 必须继续执行（active 已清、队列已唤醒）");
   }
 
-  /* 8. request 形状按 source.kind 穷举：缺 reservation 的 inbox、带 reservation 的 dream、错的 priority——同步抛、不产生 ticket */
+  /* 7. request 形状按 source.kind 穷举：缺 reservation 的 inbox、错的 priority、不是内建来源的 dream / user——同步抛、不产生 ticket */
   {
     const sut = await factory();
     const malformed: unknown[] = [
@@ -443,8 +396,7 @@ export async function runAgentAdmissionConformance(factory: () => AdmissionUnder
       { source: { kind: "inbox" }, priority: "foreground", purpose: "foreground", reservationId: "", reservedRecordIds: ["r1"] },
       { source: { kind: "inbox" }, priority: "foreground", purpose: "foreground", reservationId: "rsv", reservedRecordIds: ["r1", "r1"] },
       { source: { kind: "inbox" }, priority: "maintenance", purpose: "foreground", reservationId: "rsv", reservedRecordIds: ["r1"] },
-      { source: { kind: "dream" }, priority: "maintenance", purpose: "maintenance", reservationId: "rsv", reservedRecordIds: ["r1"] },
-      { source: { kind: "dream" }, priority: "foreground", purpose: "maintenance" },
+      { source: { kind: "dream" }, priority: "maintenance", purpose: "maintenance" }, // 记忆整理不经 admission
       { source: { kind: "user" }, priority: "foreground", purpose: "foreground" },
     ];
     let ran = 0;

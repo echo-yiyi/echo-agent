@@ -1,5 +1,5 @@
 // Unified Run Admission（standalone 版）：admission 类型面 / normalizeModelSnapshot / StandaloneRunAdmission 的 ABI 结算规则 /
-// Agent 的 prompt · Inbox · Dream 全部经同一 port。conformance 由 fake 与 standalone 共跑一套。
+// Agent 的 prompt · Inbox 经同一 port（记忆的提取与整理不经 admission）。conformance 由 fake 与 standalone 共跑一套。
 
 import { test, expect } from "bun:test";
 import { Agent } from "../src/agent.ts";
@@ -34,7 +34,7 @@ function lifecycle(agent: Agent): LifecycleEvent[] {
   return seen;
 }
 
-const STUB_BINDING = (source: RunSource, purpose: "foreground" | "maintenance"): RunModelBinding =>
+const STUB_BINDING = (source: RunSource, purpose: "foreground"): RunModelBinding =>
   Object.freeze({
     bindingId: "b",
     source: Object.freeze({ ...source }),
@@ -156,7 +156,7 @@ test("conformance：StandaloneRunAdmission 通过", async () => {
   await runAgentAdmissionConformance(standaloneUnderTest);
 });
 
-/* ─────────────── Agent：prompt / Inbox / Dream 都经同一 admission ─────────────── */
+/* ─────────────── Agent：prompt 与 Inbox 都经同一 admission ─────────────── */
 
 test("Inbox：多条 pending 一次 reserve 成一批 → 恰好一次 run；跑完整批 ack；跑的中途新到的进下一批", async () => {
   let runs = 0;
@@ -350,7 +350,7 @@ test("model 快照的精确 schema：class 实例 / capabilities 非法标量 / 
 
 test("binding 递归冻结：source / provider / model / retryPolicy 都是 frozen 副本，不别名 caller 对象", () => {
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]) });
-  const internals = agent as unknown as { modelBinding(input: { source: RunSource; purpose: "foreground" | "maintenance" }): RunModelBinding };
+  const internals = agent as unknown as { modelBinding(input: { source: RunSource; purpose: "foreground" }): RunModelBinding };
   const source: RunSource = { kind: "extension", entryId: "e", sourceId: "s" };
   const b = internals.modelBinding({ source, purpose: "foreground" });
   expect(Object.isFrozen(b)).toBe(true);
@@ -379,7 +379,7 @@ test("conformance：fake admission 通过", async () => {
         return t;
       },
       drive: async () => {
-        // grantNext 要等 execute 跑完才 resolve（在跑的 Dream 要等 abort）：不能阻塞在它上面，发出去就让事件循环转一圈
+        // grantNext 要等 execute 跑完才 resolve（在跑的 run 要等 abort）：不能阻塞在它上面，发出去就让事件循环转一圈
         if (fake.activeRunId === null && fake.pending().length > 0) void fake.grantNext();
         await new Promise((r) => setTimeout(r, 0));
       },

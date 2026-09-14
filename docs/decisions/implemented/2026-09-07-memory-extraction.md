@@ -81,3 +81,5 @@ C 被否:它把两件语义相反的活压进一个 run——提取要读对话�
 - `stop()` 期间在飞的提取被中断并等它收完之后才交出 lease(见 [记忆的并发](2026-09-07-memory-concurrency.md))。
 
 **实现注（2026-09-10）。** 本条「前台那段规则补什么」里的两组判据（事件、持久性）已从 core 的记忆段与提取 prompt **挪进内建模块的 instructions**（主要是笔记模块），core 那三处 prompt 只剩机制。原因：判据是内建模块的语义，不是记忆机制本身的规则——写在 core 里时，产品 `memory.builtin: false` 换掉了模块，coding 味的判据（「下个月另一段会话还成立吗」「只在本对话成立的不记」）却还压在陪伴产品的模块上。现在关掉内建模块会连判据一起拿掉，产品模块用自己的 instructions 带自己的判据。默认用户看到的判据内容不变，只是位置从全局规则挪到了模块说明下面。
+
+**实现注（2026-09-14）：提取从来没真跑过。** d346b56 的 `enqueueExtract` 用 `viewAt(messages, compaction, messages.length)` 取 transcript——`viewAt(…, i)` 是「第 i 条单条在视图里的样子」，i 越界恒为空数组，`runExtract` 见空串直接返回，不报诊断；当时没有一条测试让提取子循环真的起来。改成 [`buildWorkingMessages`](../../../packages/core/src/compaction/view.ts#symbol=buildWorkingMessages)（整个 transcript 经压缩投影，正是本记录要的 working context），端到端判据在 `packages/core/test/memory-extract.test.ts`。

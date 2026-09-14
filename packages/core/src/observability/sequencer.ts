@@ -1038,7 +1038,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     if (!isRecord(source)) return "run.accepted body.header.source 必须是对象";
     const sourceKeys = Object.keys(source);
     const kind = source.kind;
-    if (kind === "user" || kind === "inbox" || (kind === "dream" && !sourceKeys.includes("parentRunId"))) {
+    if (kind === "user" || kind === "inbox") {
       if (sourceKeys.length !== 1) return "run.accepted body.header.source 含未登记字段";
       return undefined;
     }

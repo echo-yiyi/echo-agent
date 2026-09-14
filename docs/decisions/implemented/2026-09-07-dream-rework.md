@@ -83,3 +83,5 @@
 - dream 在跑时前台发来 prompt → 前台**不等**它(不再是抢占关系),两者同时在飞。
 - `stop()` 时在飞的 dream 被中断且等它收完,之后才交出 lease。
 - 把一条项目事实手工写进 `agent.md`,跑一次 dream:它被移进笔记模块、`agent.md` 里那段消失。
+
+**实现注（2026-09-14）：admission 那半没做完。** d346b56 把 dream 挪到了独立的 `dreamChannel`，但 `admission/` 一个文件没改——`RunSource` 与 `AgentInternalRunRequest` 里还有 `"dream"`，`assertInternalRunRequest` 还认它，`StandaloneRunAdmission` 整条 maintenance 档（挤掉排队的、抢占在跑的）和 conformance 里测它的几条还在，只是没人走；上面「`RunSource` 里不再有 `"dream"`」那条验收是一句话，文档门只验链接锚点还在，所以被当成已完成。2026-09-14 清掉：`RunSource` 只剩 user / inbox / extension，`assertInternalRunRequest` 只认 inbox，maintenance 档与 `"superseded"` 结算随之退场，观测里不带父 run 的 dream 不再是合法来源。

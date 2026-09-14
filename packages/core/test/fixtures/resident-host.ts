@@ -100,6 +100,11 @@ function scriptedProvider(turns: ProviderEvent[][]): Provider {
     api: createProviderStreams({
       api: "resident",
       async *request(_model: Model, context: Context): AsyncGenerator<ProviderEvent> {
+        // 记忆提取的子循环（2026-09-14 起真的在跑）不是这份判据要看的：当场答掉，不记进 seen、不吃脚本
+        if (JSON.stringify(context.messages[0] ?? null).includes("A reply just finished.")) {
+          for (const ev of text("Nothing here is worth keeping.")) yield ev;
+          return;
+        }
         seen.push({
           systemPrompt: context.systemPrompt ?? "",
           roles: context.messages.map((m) => m.role),

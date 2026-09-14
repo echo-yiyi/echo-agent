@@ -17,7 +17,6 @@ import { memoryHostOf } from "./memory/host-wiring.ts";
 import { MemoryChannel } from "./memory/channel.ts";
 import { MEMORY_TOOL_NAME } from "./memory/tool.ts";
 import { agentMemory, notesMemory, userMemory } from "./memory/types.ts";
-import { viewAt } from "./compaction/view.ts";
 import { renderTranscriptMessage } from "./compaction/tool.ts";
 import { DEFAULT_EXTRACT_MAX_TURNS, defaultExtractPrompt } from "./memory/extract.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
@@ -1810,7 +1809,7 @@ export class Agent {
       // ② 等已经登记的受管工作真的做完：
       //    - schedule：`stopSchedule()` 只取消后续 timer，**挡不住已经开始的那一拍**，而那一拍还在写
       //      schedules.json——必须 `settleTick()`；
-      //    - Dream 是 maintenance：abort 并等它真停；foreground **不 abort**，正常 drain 到 permit closure；
+      //    - 记忆的提取与整理（各自的通道，不经 admission）：abort 并等它们真停；foreground **不 abort**，正常 drain 到 permit closure；
       //    - Background：等 barrier 之前已登记任务各自的 `settled`（新的进不来，intake 已关）。
       if (this.schedule !== undefined) await settleTick(this.schedule);
       await this.settleDream();
@@ -2587,7 +2586,6 @@ export class Agent {
    * execute 抛了（循环违约或 bug）也要合成完整的事件序列——**订阅方永远看不到「缺一拍」的事件流**。
    * Host-internal、non-throwing：该 run 已有终态 → 复用暂存的 LoopResult，只记 contract failure，不发第二个 agent_end；
    * 尚无终态 → 合成 message/turn/agent 终结事件；sink 自身失败 → non-retryable internal fallback（Observation partial 归 O2f）。
-   * Dream 的事件不外发，只给 LoopResult。
    */
   private async normalizeAdmittedCallbackFailure(input: { runId: string; source: RunSource; error: unknown; aborted: boolean }): Promise<LoopResult> {
     const { runId, error, aborted } = input;
@@ -2614,7 +2612,6 @@ export class Agent {
       ...(aborted ? {} : { error: err }),
     };
     const outcome: AgentOutcome = aborted ? abortedOutcome(this.activeRun?.abortController.signal) : { kind: "error", error: err };
-    if (input.source.kind === "dream") return { outcome, messages: [failure] };
     try {
       // 循环没来得及自己关层就抛了：这里是收尾的执行节点，合成的每一拍都与探针并列记——
       // 循环里没走到的那几个关层节点，观测同样没记过，所以这里补的正好是缺的那几拍
@@ -2656,7 +2653,7 @@ export class Agent {
   }
 
   /** 每次 admission 冻结的 model seam。standalone 没有 catalog：provider 身份固定为 echo:standalone。 */
-  private modelBinding(input: { source: RunSource; purpose: "foreground" | "maintenance" }): RunModelBinding {
+  private modelBinding(input: { source: RunSource; purpose: "foreground" }): RunModelBinding {
     const model = this._state.model;
     return Object.freeze({
       bindingId: `binding:${crypto.randomUUID()}`,
@@ -2763,7 +2760,7 @@ export class Agent {
     }
     // working context = 这次实际送给模型的那份（被压缩预算管着，成本有界）。被压掉的原文
     // 以九节摘要的形态还在它眼前，所以不需要为压缩再加一个联动。
-    const view = viewAt(this._state.messages, this._state.compaction, this._state.messages.length);
+    const view = buildWorkingMessages(this._state.messages, this._state.compaction);
     const transcript = view.map((m, i) => renderTranscriptMessage(m, i)).join("\n");
     this.extractChannel.schedule((signal) => this.runExtract(memory, scope, transcript, signal));
   }

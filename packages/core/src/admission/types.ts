@@ -1,6 +1,7 @@
 // Run admission 的公共类型面。
 //
-// 一条 run 要跑，先取得 permit：用户 prompt、Agent 内建的 Inbox 消费、Dream 整理，最终都经同一个 admission。
+// 一条 run 要跑，先取得 permit：用户 prompt 与 Agent 内建的 Inbox 消费经同一个 admission。记忆的提取与整理是隔离子循环，
+// 走各自的通道（`memory/channel.ts`），不经这里。
 // 这里只有 host port 的形状：`AgentAdmissionPort`、request / ticket / result / execute scope，以及每次 admission
 // 冻结的 model seam（`RunModelBinding`）。RunPermit、并发裁决、失败规范化都是 Host 私有——不从这里出。
 
@@ -10,7 +11,7 @@ import type { RetryPolicy } from "../provider/dialect.ts";
 import type { StreamFn, ThinkingLevel } from "../provider/types.ts";
 
 export type RunSource =
-  | Readonly<{ kind: "user" | "inbox" | "dream" }>
+  | Readonly<{ kind: "user" | "inbox" }>
   | Readonly<{ kind: "extension"; entryId: string; sourceId: string }>;
 
 /** JSON-like：plain object / array / string / boolean / null / finite number。别的（函数、symbol、bigint、class 实例、循环）一律拒。 */
@@ -52,7 +53,7 @@ export type RunModelSnapshot = Readonly<{
 export type RunModelBinding = Readonly<{
   bindingId: string;
   source: RunSource;
-  purpose: "foreground" | "maintenance";
+  purpose: "foreground";
   catalogRevision: string;
   provider: Readonly<{
     id: string;
@@ -68,7 +69,7 @@ export type RunModelBinding = Readonly<{
   maxRetryDelayMs?: number;
 }>;
 
-/** Agent 内建来源的 run 请求：Inbox 一批（带 reservation）或 Dream 整理。用户 run 走 Host 私有入口，不经这里。 */
+/** Agent 内建来源的 run 请求：Inbox 一批（带 reservation）。用户 run 走 Host 私有入口，不经这里。 */
 export type AgentInternalRunRequest =
   | Readonly<{
       source: Readonly<{ kind: "inbox" }>;
@@ -78,11 +79,6 @@ export type AgentInternalRunRequest =
       reservationId: string;
       /** 非空、有序、去重；必须与 reservation 完全相等。 */
       reservedRecordIds: readonly string[];
-    }>
-  | Readonly<{
-      source: Readonly<{ kind: "dream" }>;
-      priority: "maintenance";
-      purpose: "maintenance";
     }>;
 
 export type AgentAdmissionResult<TResult extends LoopResult = LoopResult> =
@@ -91,7 +87,7 @@ export type AgentAdmissionResult<TResult extends LoopResult = LoopResult> =
   | Readonly<{ kind: "callback-error"; runId: string; result: LoopResult; error: AgentError }>
   | Readonly<{
       kind: "rejected";
-      reason: "paused" | "stopping" | "lease-lost" | "superseded";
+      reason: "paused" | "stopping" | "lease-lost";
     }>;
 
 /** `enqueue()` 同步返回：只取得 request ownership，不等 permit、不等 run 完成。`settled` 恰好 fulfill 一次，绝不 reject。 */
