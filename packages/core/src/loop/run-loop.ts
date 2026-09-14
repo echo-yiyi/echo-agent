@@ -18,8 +18,9 @@ import type { AgentOutcome } from "../events.ts";
 import { userMessage, type AgentMessage, type AssistantMessage } from "../messages.ts";
 import { createCompactor } from "../compaction/pipeline.ts";
 import { replyIdOf } from "./ids.ts";
+import { probe, type LoopProbe } from "./observe.ts";
 import { runTurn, type RunDeps } from "./run-turn.ts";
-import type { AgentContext, AgentLoopConfig, Emit, LoopDeps, LoopResult, ReplySource, TurnCause } from "./types.ts";
+import type { AgentContext, AgentLoopConfig, Emit, LoopDeps, LoopProbes, LoopResult, ReplySource, TurnCause } from "./types.ts";
 import type { StreamFn } from "../provider/types.ts";
 
 /** stop hook 最多把 agent 拉回来几次（决策记录 docs/decisions/implemented/2026-09-01-stop-continuation-limit.md）。 */
@@ -34,8 +35,9 @@ export async function runAgentLoop(
   emit: Emit,
   signal: AbortSignal,
   streamFn: StreamFn,
+  observe?: LoopProbes,
 ): Promise<LoopResult> {
-  return runLoop({ context, config, emit, signal, streamFn }, { source: "prompt", input: newMessages });
+  return runLoop({ context, config, emit, signal, streamFn, ...(observe !== undefined ? { observe } : {}) }, { source: "prompt", input: newMessages });
 }
 
 /** 从现有 transcript 续跑：末条必须是 user 或 toolResult（assistant 之后无从续起）。 */
@@ -45,11 +47,12 @@ export async function runAgentLoopContinue(
   emit: Emit,
   signal: AbortSignal,
   streamFn: StreamFn,
+  observe?: LoopProbes,
 ): Promise<LoopResult> {
   const last = context.messages[context.messages.length - 1];
   if (last === undefined) throw new Error("没有可续跑的消息");
   if (last.role === "assistant") throw new Error("末条是 assistant，无从续跑（请先 prompt 或入队消息）");
-  return runLoop({ context, config, emit, signal, streamFn }, { source: "resume", input: [] });
+  return runLoop({ context, config, emit, signal, streamFn, ...(observe !== undefined ? { observe } : {}) }, { source: "resume", input: [] });
 }
 
 /* ─────────────── run ─────────────── */
@@ -80,6 +83,7 @@ export async function runLoop(deps: LoopDeps, first: ReplyInput): Promise<LoopRe
   const leftovers = { steers: [] as AgentMessage[], followUps: [] as AgentMessage[] };
   let failure: { error: unknown } | null = null;
   try {
+    probe(deps.observe?.loop, { kind: "loop_started" });
     await emit({ type: "agent_start" });
 
     let replies = 0;
@@ -137,6 +141,7 @@ export async function runLoop(deps: LoopDeps, first: ReplyInput): Promise<LoopRe
     // rejected，不是「accepted 随后被丢掉」的假 accepted
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     config.intake?.closeRun(leftovers);
+    probe(deps.observe?.loop, { kind: "loop_ended", outcome });
     await emit({ type: "agent_end", outcome });
   }
   if (failure !== null) throw failure.error;
@@ -159,6 +164,8 @@ type ReplyEnd = {
 
 async function runReply(deps: RunDeps, replyId: string, source: ReplySource, input: readonly AgentMessage[]): Promise<ReplyEnd> {
   const { context, config, emit, callerSignal, deadline, compactor } = deps;
+  const observe = deps.observe?.loop;
+  probe(observe, { kind: "reply_started", replyId, source });
   await emit({ type: "reply_start", replyId, source });
 
   let n = 0;
@@ -170,7 +177,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
   let ended = false;
   try {
     // 输入消息的 message_end 紧挨在它引发的 turn_start 之前（中间只可能有轮首压缩的 compaction_*）
-    await absorb(context, input, emit);
+    await absorb(context, input, emit, observe);
 
     for (;;) {
       /* 硬闸：三条都在轮首集中判 */
@@ -217,7 +224,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
          本 turn 交出的 steer 一并并入——「跑的中途插话 → 下一圈开头」 */
       const stop = final.stopReason;
       if (stop === "tool_use" || stop === "max_tokens") {
-        await absorb(context, turn.steers, emit);
+        await absorb(context, turn.steers, emit, deps.observe?.loop);
         cause = stop;
         continue;
       }
@@ -239,7 +246,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
 
       /* ④ 有人插话 → 并入，继续干 */
       if (turn.steers.length > 0) {
-        await absorb(context, turn.steers, emit);
+        await absorb(context, turn.steers, emit, deps.observe?.loop);
         cause = "steer";
         continue;
       }
@@ -248,13 +255,16 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
     }
 
     ended = true;
+    probe(observe, { kind: "reply_ended", replyId, outcome, hasFinal: final !== null, turns: n });
     await emit({ type: "reply_end", replyId, outcome, final, turns: n });
     return { outcome, final, finalText: final === null ? "" : textOf(final), turns: n, stopped, unconsumedSteers };
   } catch (e) {
     // emit / hook / intake 自身坏了：reply 仍由本层关，再上抛（run 的 finally 接着关门）
     if (!ended) {
       ended = true;
-      await emit({ type: "reply_end", replyId, outcome: { kind: "error", error: agentError("internal", "internal", errText(e), false) }, final, turns: n });
+      const failed: AgentOutcome = { kind: "error", error: agentError("internal", "internal", errText(e), false) };
+      probe(observe, { kind: "reply_ended", replyId, outcome: failed, hasFinal: final !== null, turns: n });
+      await emit({ type: "reply_end", replyId, outcome: failed, final, turns: n });
     }
     throw e;
   }
@@ -285,9 +295,10 @@ async function timedOut(deps: RunDeps): Promise<AgentOutcome> {
  * 队列消息并入 context。**每条进入 transcript 的消息都要发 message_end**——否则循环的 context 与
  * Agent 的 messages 就分叉了（实测踩到过：插话真的并入了循环，却没进 transcript）。
  */
-async function absorb(context: AgentContext, messages: readonly AgentMessage[], emit: Emit): Promise<void> {
+async function absorb(context: AgentContext, messages: readonly AgentMessage[], emit: Emit, observe: LoopProbe | undefined): Promise<void> {
   for (const m of messages) {
     context.messages.push(m);
+    probe(observe, { kind: "message_committed", message: m });
     await emit({ type: "message_end", message: m });
   }
 }

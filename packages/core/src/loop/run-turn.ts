@@ -33,6 +33,7 @@ import { isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type
 import { buildWorkingMessages } from "../compaction/view.ts";
 import { clampDelay, sleep } from "./backoff.ts";
 import { turnIdOf } from "./ids.ts";
+import { probe } from "./observe.ts";
 import type { AgentLoopConfig, AttemptResult, Emit, LoopDeps, TurnCause, TurnResult } from "./types.ts";
 
 type Compactor = ReturnType<typeof createCompactor>;
@@ -70,6 +71,8 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
   };
   // turn 开门（RunIntakeGate）：同样在 turn_start 之前——订阅者收到 turn_start 就能 steer()
   config.intake?.openTurn(turnId);
+  const observe = deps.observe?.loop;
+  probe(observe, { kind: "turn_started", turnId, replyId, cause });
   await emit({ type: "turn_start", turnId, replyId, cause });
 
   const toolResults: ToolResultMessage[] = [];
@@ -100,6 +103,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
       if (!err.retryable) break;
       const next = attempt + 1;
       const delayMs = clampDelay(config.retryPolicy.backoffMs(attempt), config.maxRetryDelayMs);
+      probe(observe, { kind: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code });
       await emit({ type: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code });
       await workset.hooks.notify({ type: "retryScheduled", attempt: next, maxAttempts, delayMs, cause: err.code }, config.hookContext);
       await sleep(delayMs, signal);
@@ -123,6 +127,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
           if (one.status === "rejected") throw one.reason; // 与逐个 await 时一样：turn 由外层 catch 关成 failed
           const msg = one.value;
           context.messages.push(msg);
+          probe(observe, { kind: "message_committed", message: msg });
           await emit({ type: "message_end", message: msg });
           toolResults.push(msg as ToolResultMessage);
         }
@@ -134,6 +139,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
     /* ③ 关 turn：gate 的 turn 边界与事件的 turn 边界重合。交出的 steer 由 reply 决定吸收 */
     const steers = (await config.intake?.closeTurn()) ?? [];
     ended = true;
+    probe(observe, { kind: "turn_ended", turnId, result, toolResultCount: toolResults.length });
     await emit({ type: "turn_end", turnId, result, toolResults });
     return { turnId, result, toolResults, steers };
   } catch (e) {
@@ -141,7 +147,9 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
     // 留给 run 关门（closeRun）连同它 accepted 的 steer 一起报出
     if (!ended) {
       ended = true;
-      await emit({ type: "turn_end", turnId, result: { kind: "failed", error: agentError("internal", "internal", errText(e), false) }, toolResults });
+      const failed: AttemptResult = { kind: "failed", error: agentError("internal", "internal", errText(e), false) };
+      probe(observe, { kind: "turn_ended", turnId, result: failed, toolResultCount: toolResults.length });
+      await emit({ type: "turn_end", turnId, result: failed, toolResults });
     }
     throw e;
   }
@@ -154,6 +162,8 @@ type MessageProgress = { opened: boolean; ended: boolean };
 
 async function runAttempt(deps: RunDeps, turnId: string, attempt: number, workset: TurnWorkset): Promise<AttemptResult> {
   const { context, emit } = deps;
+  const observe = deps.observe?.loop;
+  probe(observe, { kind: "attempt_started", turnId, attempt });
   await emit({ type: "attempt_start", turnId, attempt });
   const progress: MessageProgress = { opened: false, ended: false };
   let ended = false;
@@ -166,21 +176,28 @@ async function runAttempt(deps: RunDeps, turnId: string, attempt: number, workse
       // 与 dialect 的「stream 不许 throw」同一态度：throw 只留给 bug，bug 也要有形状。
       const error = agentError("internal", "internal", errText(e), false);
       if (!progress.ended) {
-        if (!progress.opened) await emit({ type: "message_start", role: "assistant" });
+        if (!progress.opened) {
+          probe(observe, { kind: "generation_started" });
+          await emit({ type: "message_start", role: "assistant" });
+        }
         const failure: AgentMessage = { role: "assistant", content: [], stopReason: "error", usage: null, error, at: Date.now() };
         context.messages.push(failure);
+        probe(observe, { kind: "message_committed", message: failure });
         await emit({ type: "message_end", message: failure });
       }
       result = { kind: "failed", error };
     }
     ended = true;
+    probe(observe, { kind: "attempt_ended", turnId, attempt, result });
     await emit({ type: "attempt_end", turnId, attempt, result });
     return result;
   } catch (e) {
     // 连补失败消息的 emit 都坏了：attempt 仍由本层关，再上抛
     if (!ended) {
       ended = true;
-      await emit({ type: "attempt_end", turnId, attempt, result: { kind: "failed", error: agentError("internal", "internal", errText(e), false) } });
+      const failed: AttemptResult = { kind: "failed", error: agentError("internal", "internal", errText(e), false) };
+      probe(observe, { kind: "attempt_ended", turnId, attempt, result: failed });
+      await emit({ type: "attempt_end", turnId, attempt, result: failed });
     }
     throw e;
   }
@@ -222,12 +239,15 @@ async function callModel(deps: RunDeps, workset: TurnWorkset, progress: MessageP
     { signal, apiKey, thinkingLevel: config.thinkingLevel },
   );
 
+  const observe = deps.observe?.loop;
   for await (const item of stream) {
     if (item.type === "start") {
       progress.opened = true;
+      probe(observe, { kind: "generation_started" });
       await emit({ type: "message_start", role: "assistant" });
       continue;
     }
+    probe(observe, { kind: "generation_delta", delta: item });
     await emit({ type: "message_update", delta: item, message: item.partial });
   }
 
@@ -236,14 +256,19 @@ async function callModel(deps: RunDeps, workset: TurnWorkset, progress: MessageP
   // 退化路径：违约或无流式后端没发过 start，补一个，保「每个定稿消息必有成对 start/end」。
   if (!progress.opened) {
     progress.opened = true;
+    probe(observe, { kind: "generation_started" });
     await emit({ type: "message_start", role: "assistant" });
   }
 
   const finalMsg = { ...final, at: Date.now() };
   context.messages.push(finalMsg);
   progress.ended = true;
+  probe(observe, { kind: "message_committed", message: finalMsg });
   await emit({ type: "message_end", message: finalMsg });
-  if (final.usage !== null) await emit({ type: "usage", usage: final.usage });
+  if (final.usage !== null) {
+    probe(observe, { kind: "usage", usage: final.usage });
+    await emit({ type: "usage", usage: final.usage });
+  }
 
   if (final.stopReason === "error") return { kind: "failed", error: final.error ?? agentError("provider", "internal", "未标注的失败", false) };
   if (final.stopReason === "aborted") return { kind: "aborted" };
@@ -301,6 +326,7 @@ async function runOneTool(
   askGate: AskGate,
 ): Promise<AgentMessage> {
   const { config, emit, signal } = deps;
+  const observe = deps.observe?.loop;
   const { tools, hooks } = workset;
   // **只在本轮快照里找**。找不到的名字只拿一个准确原因回给模型，绝不从实时池里捞对象来执行。
   const tool = tools.find((t) => t.name === use.name);
@@ -418,6 +444,7 @@ async function runOneTool(
     await notify(hooks, config, { type: "permissionGranted", toolCallId: use.id, decidedBy: "policy" });
   }
 
+  probe(observe, { kind: "tool_started", toolCallId: use.id, toolName: use.name, params });
   await emit({ type: "tool_execution_start", toolCallId: use.id, toolName: use.name, params });
 
   /* 执行。铁律说 execute 绝不 reject，但工具由调用方提供——仍兜一层，违约不该击穿这一轮 */
@@ -434,6 +461,7 @@ async function runOneTool(
       iteration,
       signal,
       onUpdate: (partial) => {
+        probe(observe, { kind: "tool_progress", toolCallId: use.id, partial });
         updates.push(
           emit({ type: "tool_execution_update", toolCallId: use.id, partial }).catch((e: unknown) => {
             updateFailure ??= e;
@@ -444,12 +472,9 @@ async function runOneTool(
   } catch (e) {
     const message = `Tool '${use.name}' threw: ${errText(e)}`;
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "crashed", message });
-    await emit({
-      type: "tool_execution_end",
-      toolCallId: use.id,
-      toolName: use.name,
-      result: { content: message, isError: true, metadata: null },
-    });
+    const crashed: AgentToolResult = { content: message, isError: true, metadata: null };
+    probe(observe, { kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: crashed });
+    await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: crashed });
     return toolResultMessage(use.id, use.name, message, true);
   }
   await Promise.all(updates); // 都已挂 catch，这里只是等它们 settle、让 updateFailure 定下来（工具返回时 emit 可能还在飞）
@@ -468,11 +493,13 @@ async function runOneTool(
     const reason = post.reason ?? "Blocked by a hook";
     await notify(hooks, config, { type: "toolUseDenied", toolCallId: use.id, toolName: use.name, by: "hook", reason });
     const denied: AgentToolResult = { content: reason, isError: true, metadata: null };
+    probe(observe, { kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: denied });
     await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: denied });
     return toolResultMessage(use.id, use.name, reason, true);
   }
   const finalResult = post.event.result;
 
+  probe(observe, { kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: finalResult });
   await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: finalResult });
   return toolResultMessage(
     use.id,

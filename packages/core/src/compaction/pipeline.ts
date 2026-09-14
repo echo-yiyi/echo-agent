@@ -11,6 +11,7 @@
 
 import type { CompactionReason, CompactionBudget, CompactionModelCall, CompactionState } from "./types.ts";
 import { COMPACTION_SLACK_RATIO, DEFAULT_RESERVE_TOKENS } from "./types.ts";
+import { probeCompaction } from "./observe.ts";
 import { estimateText, estimateTokens, buildWorkingMessages, measureContext, normalizeCompaction, sameCompaction, type ContextAnchor } from "./view.ts";
 import type { LoopDeps, TurnResult } from "../loop/types.ts";
 import { clampDelay, sleep } from "../loop/backoff.ts";
@@ -139,6 +140,8 @@ export async function runCompaction(
   const pre = await config.hooks.intercept({ type: "preCompact", reason }, config.hookContext);
   if (pre.decision === "block") return null;
 
+  const observe = deps.observe?.compaction;
+  probeCompaction(observe, { kind: "compaction_started", reason });
   await emit({ type: "compaction_start", reason });
   const callModel = modelCallFor(deps);
   let state = context.compaction;
@@ -182,6 +185,7 @@ export async function runCompaction(
     await config.hooks.notify({ type: "compactionFailed", reason, message: "no compaction stage changed the context" }, config.hookContext);
     await config.hooks.notify({ type: "notification", kind: "error", message: "[compaction_stage_failed] no compaction stage changed the context" }, config.hookContext);
   }
+  probeCompaction(observe, { kind: "compaction_ended", reason, compaction: state, stages: applied, contextTokens: used });
   await emit({ type: "compaction_end", reason, compaction: state, stages: applied, contextTokens: used });
   if (changed) await config.hooks.notify({ type: "postCompact", reason, compaction: state, stages: applied }, config.hookContext);
   return { changed, state, stages: applied, contextTokens: used };

@@ -1,7 +1,9 @@
 import { test, expect, describe } from "bun:test";
-import type { AgentEvent } from "../src/events.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
-import { MAX_PROJECTED_TEXT_BYTES, MAX_PROJECTED_THINKING_BYTES, agentEventDescriptor, estimatePayloadBytes, projectAgentEvent } from "../src/observability/agent-events.ts";
+import { MAX_PROJECTED_THINKING_BYTES, loopFactDescriptor, projectLoopFact, type LoopFact, type LoopFactBody } from "../src/loop/observe.ts";
+import { MAX_PROJECTED_TEXT_BYTES, estimatePayloadBytes } from "../src/observability/projection.ts";
+import { projectCompactionFact } from "../src/compaction/observe.ts";
+import { projectAgentFact } from "../src/agent-observe.ts";
 import { factSinkToIngest, noopFactSink, type CapabilityFactDescriptor } from "../src/observability/fact-sink.ts";
 import { InMemoryCanonicalObservationStore } from "../src/observability/store.ts";
 import { ObservationIdentityError } from "../src/observability/identity.ts";
@@ -9,10 +11,14 @@ import { ObservationSequencer } from "../src/observability/sequencer.ts";
 import type { Diagnostic } from "../src/errors.ts";
 import { OBSERVATION_SYNC_LIMITS, type ObservationRecordKind } from "../src/observability/types.ts";
 
-// OR2：AgentEvent 的固定投影、custom event 的 generic 投影，以及 descriptor → Sequencer 这条
+// 执行节点上的事实投影（循环 / 压缩 / Agent 自身），以及 descriptor → Sequencer 这条
 // 唯一 adapter 的失败语义（投影抛错 / scope 失败 / 身份超长 → hole + gap 或构造期拒，绝不静默丢、绝不击穿 no-throw）。
 
-const ev = <T extends object>(seq: number, e: T): AgentEvent => ({ seq, at: 1_000 + seq, ...e }) as unknown as AgentEvent;
+/**
+ * 循环探针在节点上交出的事实；`at` 由探针补，这里按序号给一个确定的时刻。
+ * 只约束 `kind`（事实名拼错编译不过），载荷放宽：夹具里的消息是故意不完整的最小形状，载荷对不对由投影断言验。
+ */
+const fact = (n: number, body: { kind: LoopFactBody["kind"] } & Record<string, unknown>): LoopFact => ({ ...body, at: 1_000 + n }) as unknown as LoopFact;
 
 /** gap 只有在 run.accepted 成功、RunIndex 已建立之后才挂 runId（2026-08-27 review P0），所以要先建 run。 */
 async function establishRun(seq: ObservationSequencer, runId: string, runtimeId = "rt", generation = "g", capturePolicy = "metadata"): Promise<void> {
@@ -51,102 +57,93 @@ function sequencerWith(capturePolicy: "metadata" | "content" = "metadata"): { se
 
 const NA = { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", owner: { status: "not-applicable" } } as const;
 
-describe("CoreAgentEvent 逐 type 固定投影（metadata 档）", () => {
-  const cases: [AgentEvent, ObservationRecordKind, string][] = [
-    [ev(1, { type: "agent_start" }), "event", "agent.loop.started"],
-    [ev(2, { type: "turn_start", turnId: "r/1#1", replyId: "r/1", cause: "input" }), "span_start", "turn.execute"],
-    [ev(3, { type: "message_start", role: "assistant" }), "span_start", "model.generate"],
-    [ev(4, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "hi" }], stopReason: "end_turn", usage: null, at: 1 } }), "span_end", "model.generate"],
-    [ev(5, { type: "message_end", message: { role: "user", content: [{ type: "text", text: "q" }], at: 1 } }), "event", "agent.message.appended"],
-    [ev(6, { type: "tool_execution_start", toolCallId: "c1", toolName: "echo", params: { text: "x" } }), "span_start", "tool.execute"],
-    [ev(7, { type: "tool_execution_end", toolCallId: "c1", toolName: "echo", result: { content: "ok", isError: false, metadata: null } }), "span_end", "tool.execute"],
-    [
-      ev(8, {
-        type: "turn_end",
-        turnId: "r/1#1",
-        result: { kind: "landed", message: { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 } },
-        toolResults: [],
-      }),
-      "span_end",
-      "turn.execute",
-    ],
-    [ev(9, { type: "compaction_start", reason: "auto" }), "span_start", "context.compact"],
-    [ev(10, { type: "compaction_end", reason: "auto", compaction: { spans: [{ from: 0, to: 2, summary: "s" }], clearedBefore: 0 }, stages: ["summary"], contextTokens: 12 }), "span_end", "context.compact"],
-    [ev(11, { type: "retry_scheduled", turnId: "r/1#1", attempt: 2, maxAttempts: 3, delayMs: 10, cause: "rate_limit" }), "event", "model.retry.scheduled"],
-    [ev(12, { type: "usage", usage: { inputTokens: 3, outputTokens: 4 } }), "event", "model.usage"],
-    [ev(13, { type: "resource_changed", kind: "tool", action: "added", name: "x", source: "test" }), "event", "agent.resource.changed"],
-    [ev(14, { type: "queue_update", queue: "inbox", size: 2 }), "event", "agent.queue.updated"],
-    [ev(15, { type: "agent_end", outcome: { kind: "completed" } }), "event", "agent.loop.ended"],
+describe("循环事实逐 kind 固定投影（metadata 档）", () => {
+  const landed = { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 } as never;
+  const cases: [LoopFact, ObservationRecordKind, string][] = [
+    [fact(1, { kind: "loop_started" }), "event", "agent.loop.started"],
+    [fact(2, { kind: "reply_started", replyId: "r/1", source: "prompt" }), "span_start", "reply.execute"],
+    [fact(3, { kind: "turn_started", turnId: "r/1#1", replyId: "r/1", cause: "input" }), "span_start", "turn.execute"],
+    [fact(4, { kind: "attempt_started", turnId: "r/1#1", attempt: 1 }), "span_start", "attempt.execute"],
+    [fact(5, { kind: "generation_started" }), "span_start", "model.generate"],
+    [fact(6, { kind: "message_committed", message: { role: "assistant", content: [{ type: "text", text: "hi" }], stopReason: "end_turn", usage: null, at: 1 } as never }), "span_end", "model.generate"],
+    [fact(7, { kind: "message_committed", message: { role: "user", content: [{ type: "text", text: "q" }], at: 1 } as never }), "event", "agent.message.appended"],
+    [fact(8, { kind: "tool_started", toolCallId: "c1", toolName: "echo", params: { text: "x" } }), "span_start", "tool.execute"],
+    [fact(9, { kind: "tool_ended", toolCallId: "c1", toolName: "echo", result: { content: "ok", isError: false, metadata: null } }), "span_end", "tool.execute"],
+    [fact(10, { kind: "attempt_ended", turnId: "r/1#1", attempt: 1, result: { kind: "landed", message: landed } }), "span_end", "attempt.execute"],
+    [fact(11, { kind: "turn_ended", turnId: "r/1#1", result: { kind: "landed", message: landed }, toolResultCount: 0 }), "span_end", "turn.execute"],
+    [fact(12, { kind: "retry_scheduled", turnId: "r/1#1", attempt: 2, maxAttempts: 3, delayMs: 10, cause: "rate_limit" }), "event", "model.retry.scheduled"],
+    [fact(13, { kind: "usage", usage: { inputTokens: 3, outputTokens: 4 } }), "event", "model.usage"],
+    [fact(14, { kind: "reply_ended", replyId: "r/1", outcome: { kind: "completed" }, hasFinal: true, turns: 1 }), "span_end", "reply.execute"],
+    [fact(15, { kind: "loop_ended", outcome: { kind: "completed" } }), "event", "agent.loop.ended"],
   ];
-  for (const [event, kind, name] of cases) {
-    test(`${event.type} → ${kind} ${name}`, () => {
-      const p = projectAgentEvent(event, "metadata")!;
+  for (const [f, kind, name] of cases) {
+    test(`${f.kind} → ${kind} ${name}`, () => {
+      const p = projectLoopFact(f, "metadata")!;
       expect(p.kind).toBe(kind);
       expect(p.name).toBe(name);
-      expect(p.occurredAt).toBe(event.at);
-      expect(p.sourceSeq).toBe(event.seq);
+      expect(p.occurredAt).toBe(f.at);
+      // 探针事实不带 AgentEvent 的 seq：观测与事件协议是两条互不依赖的输出
+      expect(p.sourceSeq).toBeUndefined();
     });
   }
 
-  test("off 档一律不生成；metadata 档 message_update / tool_execution_update 不成记录", () => {
-    expect(projectAgentEvent(ev(1, { type: "agent_start" }), "off")).toBeNull();
-    const upd = ev(2, { type: "message_update", delta: { type: "text_delta", text: "a" }, message: { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 } });
-    expect(projectAgentEvent(upd, "metadata")).toBeNull();
-    expect(projectAgentEvent(upd, "content")?.name).toBe("model.generate.delta");
-    const tupd = ev(3, { type: "tool_execution_update", toolCallId: "c", partial: "p" });
-    expect(projectAgentEvent(tupd, "metadata")).toBeNull();
+  test("压缩与 Agent 自身的事实走各自的 descriptor，产出的仍是同一套记录名", () => {
+    const start = projectCompactionFact({ kind: "compaction_started", reason: "auto", at: 1_009 }, "metadata")!;
+    expect([start.kind, start.name]).toEqual(["span_start", "context.compact"]);
+    const end = projectCompactionFact(
+      { kind: "compaction_ended", reason: "auto", compaction: { spans: [{ from: 0, to: 2, summary: "s" }], clearedBefore: 0 } as never, stages: ["summary"], contextTokens: 12, at: 1_010 },
+      "metadata",
+    )!;
+    expect([end.kind, end.name, end.attributes]).toEqual(["span_end", "context.compact", { reason: "auto", changed: true }]);
+    expect(JSON.stringify(end.body)).not.toContain('"summary":"s"'); // metadata 档只有摘要字数，没有正文
+    const res = projectAgentFact({ kind: "resource_changed", change: { kind: "tool", action: "added", name: "x", source: "test" }, at: 1_013 }, "metadata")!;
+    expect([res.kind, res.name, res.attributes, res.body]).toEqual(["event", "agent.resource.changed", { kind: "tool", action: "added", source: "test" }, { kind: "tool", action: "added", name: "x", source: "test" }]);
+    const q = projectAgentFact({ kind: "queue_updated", queue: "inbox", size: 2, at: 1_014 }, "metadata")!;
+    expect([q.kind, q.name, q.body]).toEqual(["event", "agent.queue.updated", { queue: "inbox", size: 2 }]);
+    expect(projectCompactionFact({ kind: "compaction_started", reason: "auto", at: 1 }, "off")).toBeNull();
+    expect(projectAgentFact({ kind: "queue_updated", queue: "inbox", size: 2, at: 1 }, "off")).toBeNull();
+  });
+
+  test("off 档一律不生成；metadata 档流式增量 / 工具进展不成记录", () => {
+    expect(projectLoopFact(fact(1, { kind: "loop_started" }), "off")).toBeNull();
+    const delta = fact(2, { kind: "generation_delta", delta: { type: "text_delta", text: "a" } as never });
+    expect(projectLoopFact(delta, "metadata")).toBeNull();
+    expect(projectLoopFact(delta, "content")?.name).toBe("model.generate.delta");
+    const progress = fact(3, { kind: "tool_progress", toolCallId: "c", partial: "p" });
+    expect(projectLoopFact(progress, "metadata")).toBeNull();
+    expect(projectLoopFact(progress, "content")?.name).toBe("tool.execute.progress");
   });
 
   test("metadata 只出尺寸与计数，不出正文；content 才带 params / text / result", () => {
-    const start = ev(1, { type: "tool_execution_start", toolCallId: "c1", toolName: "echo", params: { text: "secret-text" } });
-    const meta = projectAgentEvent(start, "metadata")!.body as Record<string, unknown>;
+    const start = fact(1, { kind: "tool_started", toolCallId: "c1", toolName: "echo", params: { text: "secret-text" } });
+    const meta = projectLoopFact(start, "metadata")!.body as Record<string, unknown>;
     expect(JSON.stringify(meta)).not.toContain("secret-text");
     expect(typeof meta.argsBytes).toBe("number");
-    const full = projectAgentEvent(start, "content")!.body as Record<string, unknown>;
+    const full = projectLoopFact(start, "content")!.body as Record<string, unknown>;
     expect(full.params).toEqual({ text: "secret-text" });
 
-    const end = ev(2, { type: "tool_execution_end", toolCallId: "c1", toolName: "echo", result: { content: "result-body", isError: false, metadata: { k: 1 } } });
-    const metaEnd = projectAgentEvent(end, "metadata")!.body as Record<string, unknown>;
+    const end = fact(2, { kind: "tool_ended", toolCallId: "c1", toolName: "echo", result: { content: "result-body", isError: false, metadata: { k: 1 } } });
+    const metaEnd = projectLoopFact(end, "metadata")!.body as Record<string, unknown>;
     expect(JSON.stringify(metaEnd)).not.toContain("result-body");
     expect(metaEnd.resultChars).toBe(11);
     expect(metaEnd.hasMetadata).toBe(true);
-    expect((projectAgentEvent(end, "content")!.body as Record<string, unknown>).content).toBe("result-body");
+    expect((projectLoopFact(end, "content")!.body as Record<string, unknown>).content).toBe("result-body");
   });
 
-  test("agent_end error：metadata 带 code/source/retryable，不带 message；content 才带", () => {
-    const e = ev(1, { type: "agent_end", outcome: { kind: "error", error: { source: "provider", code: "rate_limit", retryable: true, message: "429 secret" } } });
-    const meta = projectAgentEvent(e, "metadata")!;
+  test("循环以 error 收场：metadata 带 code/source/retryable，不带 message；content 才带", () => {
+    const e = fact(1, { kind: "loop_ended", outcome: { kind: "error", error: { source: "provider", code: "rate_limit", retryable: true, message: "429 secret" } } });
+    const meta = projectLoopFact(e, "metadata")!;
     expect(meta.attributes).toEqual({ status: "error", errorCode: "rate_limit", errorSource: "provider" });
     expect(JSON.stringify(meta.body)).not.toContain("429 secret");
-    expect((projectAgentEvent(e, "content")!.body as Record<string, unknown>).errorMessage).toBe("429 secret");
+    expect((projectLoopFact(e, "content")!.body as Record<string, unknown>).errorMessage).toBe("429 secret");
   });
 
-  test("descriptor 与 projector 是同一份投影：agentEventDescriptor.project === projectAgentEvent", () => {
-    expect(agentEventDescriptor.project).toBe(projectAgentEvent);
+  test("descriptor 与 projector 是同一份投影：loopFactDescriptor.project === projectLoopFact", () => {
+    expect(loopFactDescriptor.project).toBe(projectLoopFact);
   });
 });
 
-describe("agent.custom_event（OR2）", () => {
-  const custom = ev(9, { type: "memory_retrieval_hit", text: "private memory text", content: "more", unknownKey: { nested: true } });
-
-  test("metadata：body 恒 {}，customEventType/payloadBytes/payloadTruncated 进 attributes，正文零泄露", () => {
-    const p = projectAgentEvent(custom, "metadata")!;
-    expect(p.name).toBe("agent.custom_event");
-    expect(p.body).toEqual({});
-    expect(p.attributes.customEventType).toBe("memory_retrieval_hit");
-    expect(p.attributes.payloadTruncated).toBe(false);
-    expect(typeof p.attributes.payloadBytes).toBe("number");
-    expect(JSON.stringify(p)).not.toContain("private memory text");
-  });
-
-  test("off 不生成；content 才把其余字段交出去", () => {
-    expect(projectAgentEvent(custom, "off")).toBeNull();
-    const body = projectAgentEvent(custom, "content")!.body as Record<string, unknown>;
-    expect(body.text).toBe("private memory text");
-    expect("type" in body).toBe(false);
-    expect("seq" in body).toBe(false);
-  });
-
+describe("投影的通用预算工具（observability/projection.ts）", () => {
   test("payload 估算：超过同步上限只标 truncated 并给 lower bound；坏 shape 也不抛", () => {
     const big = estimatePayloadBytes({ s: "x".repeat(OBSERVATION_SYNC_LIMITS.maxCanonicalDraftBytes) });
     expect(big.payloadTruncated).toBe(true);
@@ -343,7 +340,7 @@ describe("descriptor.project 抛错：canonical 路径必须留 hole + gap（202
   });
 });
 
-describe("AgentEvent projector 自己也在同步预算内（2026-08-27 review P1）", () => {
+describe("循环事实的投影自己也在同步预算内（2026-08-27 review P1）", () => {
   /** 只暴露 length 与下标的 content：数一数投影到底碰了多少个 block。 */
   function countingBlocks(total: number, make: (i: number) => unknown): { blocks: never; reads: () => number } {
     let reads = 0;
@@ -364,12 +361,12 @@ describe("AgentEvent projector 自己也在同步预算内（2026-08-27 review P
     return { blocks: proxy as never, reads: () => reads };
   }
 
-  const assistantEnd = (content: unknown): AgentEvent =>
-    ev(1, { type: "message_end", message: { role: "assistant", content, stopReason: "end_turn", usage: null, at: 1 } });
+  const assistantEnd = (content: unknown): LoopFact =>
+    fact(1, { kind: "message_committed", message: { role: "assistant", content, stopReason: "end_turn", usage: null, at: 1 } });
 
   test("metadata 档：50 万个 tool_use 只走有界扫描，不建中间数组", () => {
     const { blocks, reads } = countingBlocks(500_000, (i) => ({ type: "tool_use", id: `c${i}`, name: "t", input: { i } }));
-    const body = projectAgentEvent(assistantEnd(blocks), "metadata")!.body as Record<string, unknown>;
+    const body = projectLoopFact(assistantEnd(blocks), "metadata")!.body as Record<string, unknown>;
     // 修复前：整条 content 被遍历 + toolUsesOf() 建 50 万项数组，只为取 .length
     expect(reads()).toBeLessThanOrEqual(1_024);
     expect(body.contentBlocks).toBe(500_000);
@@ -380,14 +377,14 @@ describe("AgentEvent projector 自己也在同步预算内（2026-08-27 review P
 
   test("metadata 档不产生正文：textChars 是计数，body 里没有 text", () => {
     const { blocks } = countingBlocks(2_000, () => ({ type: "text", text: "x".repeat(1_000) }));
-    const body = projectAgentEvent(assistantEnd(blocks), "metadata")!.body as Record<string, unknown>;
+    const body = projectLoopFact(assistantEnd(blocks), "metadata")!.body as Record<string, unknown>;
     expect(body.text).toBeUndefined();
     expect(body.textChars).toBe(1_024 * 1_000);
   });
 
   test("content 档：正文按上限截断并标 textTruncated，不做无界拼接", () => {
     const { blocks, reads } = countingBlocks(500_000, () => ({ type: "text", text: "x".repeat(1_000) }));
-    const body = projectAgentEvent(assistantEnd(blocks), "content")!.body as Record<string, unknown>;
+    const body = projectLoopFact(assistantEnd(blocks), "content")!.body as Record<string, unknown>;
     expect(reads()).toBeLessThanOrEqual(1_024);
     expect((body.text as string).length).toBe(MAX_PROJECTED_TEXT_BYTES);
     expect(body.textTruncated).toBe(true);
@@ -396,7 +393,7 @@ describe("AgentEvent projector 自己也在同步预算内（2026-08-27 review P
 
   test("content 档只扫一遍：同一个 block 不被读第二次", () => {
     const { blocks, reads } = countingBlocks(10, (i) => (i % 2 === 0 ? { type: "text", text: "ab" } : { type: "tool_use", id: `c${i}`, name: "t", input: {} }));
-    const body = projectAgentEvent(assistantEnd(blocks), "content")!.body as Record<string, unknown>;
+    const body = projectLoopFact(assistantEnd(blocks), "content")!.body as Record<string, unknown>;
     // 修复前：metadata 两遍（textOf + toolUsesOf）+ content 再两遍 = 40 次下标读
     expect(reads()).toBe(10);
     expect(body.text).toBe("ababababab");
@@ -404,7 +401,7 @@ describe("AgentEvent projector 自己也在同步预算内（2026-08-27 review P
   });
 
   test("没超上限时不标 truncated，计数与正文都是全量", () => {
-    const body = projectAgentEvent(assistantEnd([{ type: "text", text: "hi" }, { type: "tool_use", id: "c", name: "t", input: {} }]), "content")!.body as Record<string, unknown>;
+    const body = projectLoopFact(assistantEnd([{ type: "text", text: "hi" }, { type: "tool_use", id: "c", name: "t", input: {} }]), "content")!.body as Record<string, unknown>;
     expect(body.contentTruncated).toBeUndefined();
     expect(body.textTruncated).toBeUndefined();
     expect(body.textChars).toBe(2);
@@ -414,16 +411,16 @@ describe("AgentEvent projector 自己也在同步预算内（2026-08-27 review P
 
   test("非 assistant message 的 body 同样有界（agent.message.appended）", () => {
     const { blocks, reads } = countingBlocks(500_000, () => ({ type: "text", text: "y" }));
-    const e = ev(2, { type: "message_end", message: { role: "user", content: blocks, at: 1 } });
-    const body = projectAgentEvent(e, "metadata")!.body as Record<string, unknown>;
+    const e = fact(2, { kind: "message_committed", message: { role: "user", content: blocks, at: 1 } });
+    const body = projectLoopFact(e, "metadata")!.body as Record<string, unknown>;
     expect(reads()).toBeLessThanOrEqual(1_024);
     expect(body.contentTruncated).toBe(true);
     expect(body.chars).toBe(1_024);
   });
 
   test("string content 也按上限截断", () => {
-    const e = ev(3, { type: "message_end", message: { role: "user", content: "z".repeat(200_000), at: 1 } });
-    const body = projectAgentEvent(e, "content")!.body as Record<string, unknown>;
+    const e = fact(3, { kind: "message_committed", message: { role: "user", content: "z".repeat(200_000), at: 1 } });
+    const body = projectLoopFact(e, "content")!.body as Record<string, unknown>;
     expect(body.chars).toBe(200_000); // 计数是全量（读 .length 是 O(1)）
     expect((body.text as string).length).toBe(MAX_PROJECTED_TEXT_BYTES);
     expect(body.textTruncated).toBe(true);
@@ -566,13 +563,13 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
 });
 
 describe("content 档正文按整条 fact 的剩余预算截断（2026-08-27 review P2）", () => {
-  const assistantText = (chars: number, ch = "x"): AgentEvent =>
-    ev(1, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: ch.repeat(chars) }], stopReason: "end_turn", usage: null, at: 1 } });
+  const assistantText = (chars: number, ch = "x"): LoopFact =>
+    fact(1, { kind: "message_committed", message: { role: "assistant", content: [{ type: "text", text: ch.repeat(chars) }], stopReason: "end_turn", usage: null, at: 1 } });
 
   /** 穿过 Sequencer：committed 里是记录本身而不是 observation.gap。 */
-  async function throughSequencer(e: AgentEvent): Promise<{ accepted: boolean; truncated: boolean }> {
+  async function throughSequencer(e: LoopFact): Promise<{ accepted: boolean; truncated: boolean }> {
     const { seq, clock } = sequencerWith("content");
-    factSinkToIngest(agentEventDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
+    factSinkToIngest(loopFactDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
     clock.advance(1_000);
     await seq.idle();
     const rec = seq.committedRecords()[0];
@@ -601,21 +598,21 @@ describe("content 档正文按整条 fact 的剩余预算截断（2026-08-27 rev
   });
 
   test("正文截断按 canonical 字节算，不是 code unit", () => {
-    const control = projectAgentEvent(assistantText(200_000, ""), "content")!.body as Record<string, unknown>;
+    const control = projectLoopFact(assistantText(200_000, ""), "content")!.body as Record<string, unknown>;
     // 每个控制字符最坏占 6 字节，所以留下的 code unit 数远少于字节预算
     expect((control.text as string).length).toBeLessThanOrEqual(MAX_PROJECTED_TEXT_BYTES / 6);
-    const ascii = projectAgentEvent(assistantText(200_000), "content")!.body as Record<string, unknown>;
+    const ascii = projectLoopFact(assistantText(200_000), "content")!.body as Record<string, unknown>;
     expect((ascii.text as string).length).toBe(MAX_PROJECTED_TEXT_BYTES);
   });
 });
 
 describe("代理区必须成对看（2026-08-27 review P1）", () => {
-  const assistantText = (chars: number, ch: string): AgentEvent =>
-    ev(1, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: ch.repeat(chars) }], stopReason: "end_turn", usage: null, at: 1 } });
+  const assistantText = (chars: number, ch: string): LoopFact =>
+    fact(1, { kind: "message_committed", message: { role: "assistant", content: [{ type: "text", text: ch.repeat(chars) }], stopReason: "end_turn", usage: null, at: 1 } });
 
-  async function throughSequencer(e: AgentEvent): Promise<boolean> {
+  async function throughSequencer(e: LoopFact): Promise<boolean> {
     const { seq, clock } = sequencerWith("content");
-    factSinkToIngest(agentEventDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
+    factSinkToIngest(loopFactDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
     clock.advance(1_000);
     await seq.idle();
     return seq.committedRecords()[0]?.name === "model.generate";
@@ -631,12 +628,12 @@ describe("代理区必须成对看（2026-08-27 review P1）", () => {
   });
 
   test("孤立 surrogate 按 6 字节记：留下的 code unit 数是预算的六分之一", () => {
-    const body = projectAgentEvent(assistantText(200_000, "\ud800"), "content")!.body as Record<string, unknown>;
+    const body = projectLoopFact(assistantText(200_000, "\ud800"), "content")!.body as Record<string, unknown>;
     expect((body.text as string).length).toBe(Math.floor(MAX_PROJECTED_TEXT_BYTES / 6));
   });
 
   test("合法代理对按 4 字节记且整体推进，截断不会把一对切成孤立 surrogate", () => {
-    const body = projectAgentEvent(assistantText(200_000, "\u{1f600}"), "content")!.body as Record<string, unknown>;
+    const body = projectLoopFact(assistantText(200_000, "\u{1f600}"), "content")!.body as Record<string, unknown>;
     const text = body.text as string;
     expect(text.length % 2).toBe(0); // 每个 emoji 两个 code unit，切在对中间就会是奇数
     expect(/[\ud800-\udbff]$/.test(text)).toBe(false); // 结尾不是落单的高代理
@@ -645,7 +642,7 @@ describe("代理区必须成对看（2026-08-27 review P1）", () => {
 
   test("高代理紧跟非低代理时按孤立算，不误当成对", async () => {
     // "\ud800a" 里的 \ud800 是孤立的（后面不是低代理），必须按 6 记
-    const body = projectAgentEvent(assistantText(100_000, "\ud800a"), "content")!.body as Record<string, unknown>;
+    const body = projectLoopFact(assistantText(100_000, "\ud800a"), "content")!.body as Record<string, unknown>;
     const text = body.text as string;
     // 每两个 code unit 花 6 + 1 = 7 字节
     expect(text.length).toBe(Math.floor(MAX_PROJECTED_TEXT_BYTES / 7) * 2);
@@ -686,10 +683,10 @@ describe("async reporter 不许击穿主流程（2026-08-27 review P0）", () =>
 // 都是已经发生的事。上一版 `summarizeContent` 只认 text / tool_use，thinking 块连扫描都没进——
 // contentBlocks 算着它、别的字段一个都不提它，读者看不出少了什么，更看不出少的是思考。
 describe("thinking 块进摘要（事实不因预算而丢）", () => {
-  const assistant = (content: unknown): AgentEvent =>
-    ev(1, { type: "message_end", message: { role: "assistant", content, stopReason: "end_turn", usage: null, at: 1 } });
-  const bodyOf = (e: AgentEvent, policy: "metadata" | "content"): Record<string, unknown> =>
-    projectAgentEvent(e, policy)!.body as Record<string, unknown>;
+  const assistant = (content: unknown): LoopFact =>
+    fact(1, { kind: "message_committed", message: { role: "assistant", content, stopReason: "end_turn", usage: null, at: 1 } });
+  const bodyOf = (e: LoopFact, policy: "metadata" | "content"): Record<string, unknown> =>
+    projectLoopFact(e, policy)!.body as Record<string, unknown>;
 
   test("metadata 档：计数出得来，正文一个字都不出", () => {
     const body = bodyOf(assistant([{ type: "thinking", thinking: "secret-thought", signature: "reasoning_content" }, { type: "text", text: "hi" }]), "metadata");
@@ -744,17 +741,13 @@ describe("thinking 块进摘要（事实不因预算而丢）", () => {
   });
 
   test("agent.message.appended：user 消息不挂这两个恒零字段", () => {
-    const body = bodyOf(ev(1, { type: "message_end", message: { role: "user", content: [{ type: "text", text: "q" }], at: 1 } }), "metadata");
+    const body = bodyOf(fact(1, { kind: "message_committed", message: { role: "user", content: [{ type: "text", text: "q" }], at: 1 } }), "metadata");
     expect(body.thinkingBlocks).toBeUndefined();
     expect(body.thinkingChars).toBeUndefined();
   });
 
   test("thinking_end 的回放判据不再丢：signature 与 redacted 进 body（只此一处能看到）", () => {
-    const end = ev(2, {
-      type: "message_update",
-      delta: { type: "thinking_end", signature: "reasoning_text", redacted: true },
-      message: { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 },
-    });
+    const end = fact(2, { kind: "generation_delta", delta: { type: "thinking_end", signature: "reasoning_text", redacted: true } as never });
     const body = bodyOf(end, "content");
     expect(body.deltaType).toBe("thinking_end");
     expect(body.signature).toBe("reasoning_text");
@@ -762,11 +755,7 @@ describe("thinking 块进摘要（事实不因预算而丢）", () => {
   });
 
   test("thinking_delta 的正文照旧逐条落库：摘要被截断也还有第二处可查", () => {
-    const d = ev(3, {
-      type: "message_update",
-      delta: { type: "thinking_delta", text: "一段思考" },
-      message: { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 },
-    });
+    const d = fact(3, { kind: "generation_delta", delta: { type: "thinking_delta", text: "一段思考" } as never });
     const body = bodyOf(d, "content");
     expect(body.deltaType).toBe("thinking_delta");
     expect(body.text).toBe("一段思考");

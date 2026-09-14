@@ -3,12 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeClock } from "../src/schedule/clock.ts";
-import { ObservationRuntime } from "../src/observability/runtime.ts";
+import { AGENT_ENTRY_ID, ObservationRuntime, builtinOwner } from "../src/observability/runtime.ts";
+import { loopFactDescriptor, type LoopFact, type LoopFactBody } from "../src/loop/observe.ts";
 import { SqliteCanonicalObservationStore, observationDatabasePath } from "../src/observability/sqlite-store.ts";
 import { sealAgentAssemblyObservation } from "../src/observability/assembly.ts";
 import { buildRunObservationViewModel, renderRunObservation } from "../src/observability/render.ts";
 import type { RunModelBinding } from "../src/admission/types.ts";
-import type { AgentEvent } from "../src/events.ts";
 import type { AssistantMessage } from "../src/messages.ts";
 import type { RunObservation } from "../src/observability/types.ts";
 
@@ -41,43 +41,38 @@ function assistant(text: string, stopReason: AssistantMessage["stopReason"], at:
   return { role: "assistant", content: [{ type: "text", text }], stopReason, usage: { inputTokens: 10, outputTokens: 5 }, at, model: { provider: "scripted", id: "only" } } as AssistantMessage;
 }
 
-/** 与 Agent 真实事件流同序的最小脚本：agent_start → turn 1（model + tool）→ turn 2（model）→ agent_end。 */
-function script(): readonly AgentEvent[] {
-  let seq = 0;
-  const ev = (at: number, e: Record<string, unknown>): AgentEvent => ({ seq: ++seq, at, ...e }) as unknown as AgentEvent;
+/** 与循环真实执行节点同序的最小脚本：loop_started → turn 1（model + tool）→ turn 2（model）→ loop_ended。 */
+function script(): readonly LoopFact[] {
+  // 只约束 `kind`，载荷放宽：夹具消息是最小形状，载荷对不对由 golden 与时间线断言验
+  const at = (t: number, f: { kind: LoopFactBody["kind"] } & Record<string, unknown>): LoopFact => ({ ...f, at: t }) as unknown as LoopFact;
   const m1 = assistant("call ping", "tool_use", 1_010);
   const m2 = assistant("done", "end_turn", 1_120);
   // 四层齐全（run-loop-layers.md：run ⊃ reply ⊃ turn ⊃ attempt）。turnId 是 loop 产的 `${replyId}#${n}`（loop/ids.ts）。
   // 第二个 turn 里塞一次**重试**：attempt 1 失败 → retry_scheduled → attempt 2 落地，好让 attempt span 的配对真被走到。
   const retryable = { source: "provider", code: "overloaded", retryable: true, message: "upstream busy" } as const;
   return [
-    ev(1_001, { type: "agent_start" }),
-    ev(1_002, { type: "reply_start", replyId: "run:fixed/1", source: "prompt" }),
-    ev(1_003, { type: "turn_start", turnId: "run:fixed/1#1", replyId: "run:fixed/1", cause: "input" }),
-    ev(1_004, { type: "attempt_start", turnId: "run:fixed/1#1", attempt: 1 }),
-    ev(1_005, { type: "message_start", role: "assistant" }),
-    ev(1_010, { type: "message_end", message: m1 }),
-    ev(1_011, { type: "attempt_end", turnId: "run:fixed/1#1", attempt: 1, result: { kind: "landed", message: m1 } }),
-    ev(1_012, { type: "tool_execution_start", toolCallId: "c1", toolName: "ping", params: { a: 1 } }),
-    ev(1_025, { type: "tool_execution_end", toolCallId: "c1", toolName: "ping", result: { content: "pong", isError: false, images: [], metadata: null } }),
-    ev(1_030, {
-      type: "turn_end",
-      turnId: "run:fixed/1#1",
-      result: { kind: "landed", message: m1 },
-      toolResults: [{ role: "toolResult", toolCallId: "c1", toolName: "ping", content: "pong", isError: false, at: 1_025 }],
-    }),
-    ev(1_031, { type: "turn_start", turnId: "run:fixed/1#2", replyId: "run:fixed/1", cause: "tool_use" }),
-    ev(1_032, { type: "attempt_start", turnId: "run:fixed/1#2", attempt: 1 }),
-    ev(1_033, { type: "message_start", role: "assistant" }),
-    ev(1_040, { type: "attempt_end", turnId: "run:fixed/1#2", attempt: 1, result: { kind: "failed", error: retryable } }),
-    ev(1_041, { type: "retry_scheduled", attempt: 1, maxAttempts: 3, delayMs: 10, cause: "overloaded" }),
-    ev(1_060, { type: "attempt_start", turnId: "run:fixed/1#2", attempt: 2 }),
-    ev(1_061, { type: "message_start", role: "assistant" }),
-    ev(1_120, { type: "message_end", message: m2 }),
-    ev(1_121, { type: "attempt_end", turnId: "run:fixed/1#2", attempt: 2, result: { kind: "landed", message: m2 } }),
-    ev(1_122, { type: "turn_end", turnId: "run:fixed/1#2", result: { kind: "landed", message: m2 }, toolResults: [] }),
-    ev(1_123, { type: "reply_end", replyId: "run:fixed/1", outcome: { kind: "completed" }, final: m2, turns: 2 }),
-    ev(1_124, { type: "agent_end", outcome: { kind: "completed" } }),
+    at(1_001, { kind: "loop_started" }),
+    at(1_002, { kind: "reply_started", replyId: "run:fixed/1", source: "prompt" }),
+    at(1_003, { kind: "turn_started", turnId: "run:fixed/1#1", replyId: "run:fixed/1", cause: "input" }),
+    at(1_004, { kind: "attempt_started", turnId: "run:fixed/1#1", attempt: 1 }),
+    at(1_005, { kind: "generation_started" }),
+    at(1_010, { kind: "message_committed", message: m1 }),
+    at(1_011, { kind: "attempt_ended", turnId: "run:fixed/1#1", attempt: 1, result: { kind: "landed", message: m1 } }),
+    at(1_012, { kind: "tool_started", toolCallId: "c1", toolName: "ping", params: { a: 1 } }),
+    at(1_025, { kind: "tool_ended", toolCallId: "c1", toolName: "ping", result: { content: "pong", isError: false, images: [], metadata: null } }),
+    at(1_030, { kind: "turn_ended", turnId: "run:fixed/1#1", result: { kind: "landed", message: m1 }, toolResultCount: 1 }),
+    at(1_031, { kind: "turn_started", turnId: "run:fixed/1#2", replyId: "run:fixed/1", cause: "tool_use" }),
+    at(1_032, { kind: "attempt_started", turnId: "run:fixed/1#2", attempt: 1 }),
+    at(1_033, { kind: "generation_started" }),
+    at(1_040, { kind: "attempt_ended", turnId: "run:fixed/1#2", attempt: 1, result: { kind: "failed", error: retryable } }),
+    at(1_041, { kind: "retry_scheduled", turnId: "run:fixed/1#2", attempt: 1, maxAttempts: 3, delayMs: 10, cause: "overloaded" }),
+    at(1_060, { kind: "attempt_started", turnId: "run:fixed/1#2", attempt: 2 }),
+    at(1_061, { kind: "generation_started" }),
+    at(1_120, { kind: "message_committed", message: m2 }),
+    at(1_121, { kind: "attempt_ended", turnId: "run:fixed/1#2", attempt: 2, result: { kind: "landed", message: m2 } }),
+    at(1_122, { kind: "turn_ended", turnId: "run:fixed/1#2", result: { kind: "landed", message: m2 }, toolResultCount: 0 }),
+    at(1_123, { kind: "reply_ended", replyId: "run:fixed/1", outcome: { kind: "completed" }, hasFinal: true, turns: 2 }),
+    at(1_124, { kind: "loop_ended", outcome: { kind: "completed" } }),
   ];
 }
 
@@ -99,15 +94,15 @@ async function fixtureRun(): Promise<RunObservation> {
   });
   try {
     let turnId: string | null = null;
-    const sink = rt.eventSink(() => ({ ...identity, runId: "run:fixed", ...(turnId !== null ? { turnId } : {}) }));
+    const sink = rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => ({ ...identity, runId: "run:fixed", ...(turnId !== null ? { turnId } : {}) }));
     rt.acceptRun({ runId: "run:fixed", source: { kind: "user" }, ...identity, modelBinding: binding });
     clock.advance(1);
     rt.startRun("run:fixed", identity);
-    for (const e of script()) {
-      // 与 Agent 的 scope 供给同一规则：turn 归属只在 turn 开着时补，用的就是事件里的 turnId（turn_end 自带，之后清掉）
-      if (e.type === "turn_start") turnId = e.turnId;
-      sink.offer(e);
-      if (e.type === "turn_end") turnId = null;
+    for (const f of script()) {
+      // 与 Agent 的 scope 供给同一规则：turn 归属只在 turn 开着时补，用的就是事实里的 turnId（turn_ended 自带，之后清掉）
+      if (f.kind === "turn_started") turnId = f.turnId;
+      sink.offer(f);
+      if (f.kind === "turn_ended") turnId = null;
     }
     clock.advance(130);
     await rt.closeRun(

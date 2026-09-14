@@ -1,6 +1,7 @@
 // ObservationRuntime（O3a）：完整 Runtime 里 canonical writer 的宿主——
 // 持有唯一的 Sequencer 与 SQLite store，是 run 三条边界（`run.accepted / run.started / run.closed`）的**唯一 emission owner**，
-// 并把 AgentEvent 经 `factSinkToIngest(agentEventDescriptor)` 送进 bounded lane。
+// 并按 `capabilitySink(descriptor, owner)` 给各执行节点发探针（循环、压缩、Agent 自身、各能力模块）。
+// **不订阅、不转发 AgentEvent**：那是给壳的事件协议，观测是插桩（`docs/design/observability.md`）。
 //
 // 失败语义（2026-09-03 用户拍板：**观测不得影响 agent 主线**，放弃 fail-closed admission）：
 //   · `run.accepted` / `run.assembly` / `run.started` 只**同步预留 seq**（顺序由预留决定，不由落盘决定），提交是
@@ -17,7 +18,6 @@ import type { AgentEvent, AgentOutcome } from "../events.ts";
 import type { RunModelBinding, RunSource } from "../admission/types.ts";
 import type { Model } from "../provider/types.ts";
 import { BUILTIN_GENERATION } from "../extension/builtin.ts";
-import { agentEventDescriptor } from "./agent-events.ts";
 import { snapshotRunModelBinding } from "./assembly.ts";
 import { RUN_ASSEMBLY_RECORD, type BoundaryObservationDraft, type RunAcceptedBodyV1, type RunAssemblyBodyV1, type RunObservationHeaderSeed, type RunStartedBodyV1 } from "./draft.ts";
 import { LiveEchoObservations } from "./query.ts";
@@ -182,16 +182,9 @@ export class ObservationRuntime {
   }
 
   /**
-   * AgentEvent → bounded lane 的 sink。`scope` 缺省用 `bindScope()` 挂上的供给（runId / turnId 只有 Agent 知道）。
-   * 由 Agent 在 `processEvents()` 的 state apply + required persistence 之后同步调用。
-   */
-  eventSink(scope?: ObservationScopeSupplier): CapabilityFactSink<AgentEvent> {
-    return this.capabilitySink(agentEventDescriptor, builtinOwner(AGENT_ENTRY_ID), scope);
-  }
-
-  /**
-   * 内建 Capability（Memory / Task / Schedule …）的 module-local sink：descriptor 归语义 owner，
+   * 一个执行节点上的探针（循环 / 压缩 / Agent 自身 / Memory / Task / Schedule …）：descriptor 归语义 owner，
    * 这里只把它转成 `ObservationIngest.offer()`，identity / owner / runtime 身份在构造期钉住。
+   * `scope` 缺省用 `bindScope()` 挂上的供给（runId / turnId 只有 Agent 知道）；descriptor 自己投影的 scope 优先。
    */
   capabilitySink<T>(descriptor: CapabilityFactDescriptor<T>, owner: ObservationOwner, scope?: ObservationScopeSupplier): CapabilityFactSink<T> {
     return factSinkToIngest(descriptor, this.sequencer, {

@@ -10,7 +10,9 @@ import type { AgentTool } from "../tools/types.ts";
 import type { ToolResolution } from "../tools/harness.ts";
 import type { PermissionStage } from "../permission/types.ts";
 import type { CompactionStage, CompactionState } from "../compaction/types.ts";
+import type { CompactionProbe } from "../compaction/observe.ts";
 import type { IntakeLeftovers } from "./intake.ts";
+import type { LoopProbe } from "./observe.ts";
 
 /**
  * 循环拿到的**对话快照**：进来那一刻的 messages，循环内部只往里 push。
@@ -194,10 +196,20 @@ export type LoopResult = {
   messages: AgentMessage[];
 };
 
+/**
+ * 观测探针（`docs/design/observability.md`）：与 `emit` 并列的**另一条输出**。`emit` 是给壳的事件协议，
+ * 这里是事后复盘用的插桩，两条互不依赖。可选——纯循环（评测直打）不给也照跑。
+ */
+export type LoopProbes = Readonly<{
+  loop?: LoopProbe;
+  compaction?: CompactionProbe;
+}>;
+
 export type LoopDeps = {
   context: AgentContext;
   config: AgentLoopConfig;
   emit: Emit;
+  observe?: LoopProbes;
   signal: AbortSignal;
   streamFn: StreamFn;
 };

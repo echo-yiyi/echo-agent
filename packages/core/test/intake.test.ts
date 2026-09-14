@@ -1,6 +1,6 @@
 // RunIntakeGate：steer / followUp 的原子裁决与显式 rejected。
 // 反例优先：每条都先写「上一版会怎么错」。
-// （AgentEvent 进 canonical journal 的顺序保证在 observability-runtime.test.ts：sourceSeq 随 seq 单调。）
+// （观测记录按执行节点被走到的顺序落账，保证在 observability-runtime.test.ts：脚本化 run 的整段记录逐项比对。）
 
 import { test, expect } from "bun:test";
 import { Agent } from "../src/agent.ts";

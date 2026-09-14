@@ -13,7 +13,7 @@
 import type { AgentMessage } from "../messages.ts";
 import type { CapabilityFactDescriptor, ObservationFactProjection } from "../observability/fact-sink.ts";
 import { sha256Hex } from "../observability/hash.ts";
-import { takePrefix } from "../observability/agent-events.ts";
+import { takePrefix } from "../observability/projection.ts";
 import { projectionEncodingLimits } from "../observability/normalize.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
 

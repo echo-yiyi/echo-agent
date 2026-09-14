@@ -119,7 +119,7 @@ describe("send → getRun → render（completed）", () => {
     expect(o.endedAt).not.toBeNull();
     expect(o.outcome).toEqual({ status: "completed" });
 
-    // 边界三条 + 装配快照，顺序固定；AgentEvent 投影出的 span 在中间
+    // 边界三条 + 装配快照，顺序固定；执行节点上的探针记下的 span 在中间
     const n = names(o);
     expect(n[0]).toBe("event:run.accepted");
     expect(n[1]).toBe(`snapshot:${RUN_ASSEMBLY_RECORD}`);
@@ -133,10 +133,31 @@ describe("send → getRun → render（completed）", () => {
     expect(n).toContain("span_end:tool.execute");
     // 每条 run 内记录都带 runId；turn 内的 model / tool span 带 turnId
     for (const r of o.records) expect(r.scope.runId).toBe(result.runId);
-    // AgentEvent 经 tap 缓冲**严格按 seq** 释放（慢持久化时后到的 seq 不许抢先）：投影记录的 sourceSeq 随 canonical seq 单调递增
-    const sourceSeqs = o.records.filter((r) => r.sourceSeq !== undefined).map((r) => r.sourceSeq!);
-    expect(sourceSeqs.length).toBeGreaterThan(5);
-    for (let i = 1; i < sourceSeqs.length; i++) expect(sourceSeqs[i]!).toBeGreaterThan(sourceSeqs[i - 1]!);
+    // 观测不再骑在 AgentEvent 上：记录没有 sourceSeq，canonical seq 的顺序就是执行节点被走到的顺序。
+    // 脚本化的 run 执行顺序是确定的，所以逐项比整段——不许被别的时刻（例如持久化完成的时刻）重排，也不许多一拍少一拍
+    expect(o.records.some((r) => r.sourceSeq !== undefined)).toBe(false);
+    expect(n.slice(3, -1)).toEqual([
+      "event:agent.loop.started",
+      "span_start:reply.execute",
+      "event:agent.message.appended", // 用户输入：在它引发的 turn 开始之前入账
+      "span_start:turn.execute",
+      "span_start:attempt.execute",
+      "span_start:model.generate",
+      "span_end:model.generate", // 轮 1 生成出 tool_use
+      "span_end:attempt.execute",
+      "span_start:tool.execute",
+      "span_end:tool.execute",
+      "event:agent.message.appended", // 工具结果入账
+      "span_end:turn.execute",
+      "span_start:turn.execute",
+      "span_start:attempt.execute",
+      "span_start:model.generate",
+      "span_end:model.generate", // 轮 2 生成出最终回答
+      "span_end:attempt.execute",
+      "span_end:turn.execute",
+      "span_end:reply.execute",
+      "event:agent.loop.ended",
+    ]);
     expect(o.records.find((r) => r.name === "model.generate")?.scope.turnId).toBe(`${result.runId}/1#1`);
     expect(o.records.find((r) => r.name === "tool.execute")?.scope.toolCallId).toBe("c1");
 

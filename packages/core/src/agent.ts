@@ -8,7 +8,6 @@
 //   ③ 决策点需要具名外露——convertToLlm / transformContext / streamFunction / hooks
 //      是公共可替换字段：上层换行为不改内核，评测塞假 streamFn 就能跑。
 
-import { redactedLabel } from "./observability/redact.ts";
 import { ABORT_REASON, AbortReason, errText, type AgentError } from "./errors.ts";
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
@@ -23,7 +22,9 @@ import { renderTranscriptMessage } from "./compaction/tool.ts";
 import { DEFAULT_EXTRACT_MAX_TURNS, defaultExtractPrompt } from "./memory/extract.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
-import type { CapabilityFactSink } from "./observability/fact-sink.ts";
+import { loopFactDescriptor, probe } from "./loop/observe.ts";
+import { compactionFactDescriptor } from "./compaction/observe.ts";
+import { agentFactDescriptor, probeAgent, type AgentProbe } from "./agent-observe.ts";
 import type { EchoObservableState, RuntimePhase } from "./observability/types.ts";
 import { HookRuntime, type HookContext, type HookOrigin, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
@@ -40,7 +41,7 @@ import { RunIntakeGate, type FollowUpResult, type IntakeLeftovers, type SteerRes
 import { StandaloneRunAdmission } from "./admission/standalone.ts";
 import { normalizeModelSnapshot } from "./admission/model-snapshot.ts";
 import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTicket, RunModelBinding, RunSource } from "./admission/types.ts";
-import type { AgentContext, AgentLoopConfig, AttemptResult, LoopResult, TransformContext, Emit } from "./loop/types.ts";
+import type { AgentContext, AgentLoopConfig, AttemptResult, LoopProbes, LoopResult, TransformContext, Emit } from "./loop/types.ts";
 import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
@@ -474,11 +475,10 @@ export class Agent {
    */
   private observation: ObservationRuntime | undefined;
   private observationResolved = false;
-  /** AgentEvent → bounded lane 的 sink（`factSinkToIngest(agentEventDescriptor)`），与 `observation` 同时解析。 */
-  private observationSink: CapabilityFactSink<AgentEvent> | undefined;
-  /** tap 的按 seq 释放缓冲（见 releaseToTap）。 */
-  private tapNextSeq = 0;
-  private readonly tapPending = new Map<number, AgentEvent>();
+  /** 循环与压缩的探针（`loop/observe.ts`、`compaction/observe.ts`），与 `observation` 同时解析；run 时交给循环。 */
+  private loopProbes: LoopProbes | undefined;
+  /** Agent 自身节点（队列、资源）的探针（`agent-observe.ts`），与 `observation` 同时解析。 */
+  private agentProbe: AgentProbe | undefined;
 
   /** 持久记忆的操作面：`agent.memory?.shouldDream()`。undefined = 本 agent 没有记忆。 */
   readonly memory?: AgentMemories;
@@ -714,7 +714,10 @@ export class Agent {
 
     // **回调逐个显式给,不打包**（2026-08-05 拆掉 HarnessHost 之后的形态；
     // 全局约定：优先显式依赖注入,不用全局 holder）。
-    const onChanged = (c: ResourceChange): void => void this.processEvents({ type: "resource_changed", ...c });
+    const onChanged = (c: ResourceChange): void => {
+      probeAgent(this.agentProbeNow(), { kind: "resource_changed", change: c });
+      void this.processEvents({ type: "resource_changed", ...c });
+    };
     const report = (d: Diagnostic): void => void this.reportDiagnostic(d);
     const deliver = (m: AgentMessage): void => this.deliver(m);
 
@@ -1125,7 +1128,10 @@ export class Agent {
    */
   async steer(message: AgentMessage | string): Promise<SteerResult> {
     const result = this.intake.steer(typeof message === "string" ? userMessage(message, "steer") : message);
-    if (result.kind === "accepted") void this.emit({ type: "queue_update", queue: "steering", size: this.intake.steeringSize });
+    if (result.kind === "accepted") {
+      probeAgent(this.agentProbeNow(), { kind: "queue_updated", queue: "steering", size: this.intake.steeringSize });
+      void this.emit({ type: "queue_update", queue: "steering", size: this.intake.steeringSize });
+    }
     return result;
   }
 
@@ -1135,7 +1141,10 @@ export class Agent {
    */
   async followUp(message: AgentMessage | string): Promise<FollowUpResult> {
     const result = this.intake.followUp(typeof message === "string" ? userMessage(message, "human") : message);
-    if (result.kind === "accepted") void this.emit({ type: "queue_update", queue: "followUp", size: this.intake.followUpSize });
+    if (result.kind === "accepted") {
+      probeAgent(this.agentProbeNow(), { kind: "queue_updated", queue: "followUp", size: this.intake.followUpSize });
+      void this.emit({ type: "queue_update", queue: "followUp", size: this.intake.followUpSize });
+    }
     return result;
   }
 
@@ -1199,6 +1208,7 @@ export class Agent {
     this.pendingWrites.add(tracked);
     const result = await tracked;
     if (result.kind === "accepted" && !result.deduplicated) {
+      probeAgent(this.agentProbeNow(), { kind: "queue_updated", queue: "inbox", size: this.inbox.pendingCount });
       void this.emit({ type: "queue_update", queue: "inbox", size: this.inbox.pendingCount });
       if (this.autoConsumeInbox && this.activeRun === undefined) void this.consumeInbox();
     }
@@ -1452,8 +1462,9 @@ export class Agent {
       await this.admitUserRun(async (scope, signal) => {
         const context = await this.createContextSnapshot(scope);
         const config = this.createLoopConfig(scope);
+        const observe = this.loopProbesNow();
         box.outcome = await runCompaction(
-          { context, config, emit: (e) => this.processEvents(e), signal, streamFn: scope.modelBinding.streamFunction },
+          { context, config, emit: (e) => this.processEvents(e), ...(observe !== undefined ? { observe } : {}), signal, streamFn: scope.modelBinding.streamFunction },
           { reason: "manual", ...(instructions !== undefined ? { instructions } : {}), anchor: null, calibration: this.lastCalibration },
         );
         return { outcome: { kind: "completed" }, messages: [] };
@@ -2369,7 +2380,14 @@ export class Agent {
 
   private async runContinuation(): Promise<AgentRunResult> {
     return this.admitUserRun(async (scope, signal) =>
-      runAgentLoopContinue(await this.createContextSnapshot(scope), this.createLoopConfig(scope), (e) => this.processEvents(e), signal, scope.modelBinding.streamFunction),
+      runAgentLoopContinue(
+        await this.createContextSnapshot(scope),
+        this.createLoopConfig(scope),
+        (e) => this.processEvents(e),
+        signal,
+        scope.modelBinding.streamFunction,
+        this.loopProbesNow(),
+      ),
     );
   }
 
@@ -2381,7 +2399,15 @@ export class Agent {
         // 全部被拦下：**不进 transcript、不起循环**——没有 agent_start，也就没有半截 run。
         return { outcome: { kind: "aborted", reason: `userPromptSubmit（${source}）被 hook 拦下` }, messages: [] };
       }
-      return runAgentLoop(admitted, await this.createContextSnapshot(scope), this.createLoopConfig(scope), (e) => this.processEvents(e), signal, scope.modelBinding.streamFunction);
+      return runAgentLoop(
+        admitted,
+        await this.createContextSnapshot(scope),
+        this.createLoopConfig(scope),
+        (e) => this.processEvents(e),
+        signal,
+        scope.modelBinding.streamFunction,
+        this.loopProbesNow(),
+      );
     };
   }
 
@@ -2557,18 +2583,29 @@ export class Agent {
     const outcome: AgentOutcome = aborted ? abortedOutcome(this.activeRun?.abortController.signal) : { kind: "error", error: err };
     if (input.source.kind === "dream") return { outcome, messages: [failure] };
     try {
+      // 循环没来得及自己关层就抛了：这里是收尾的执行节点，合成的每一拍都与探针并列记——
+      // 循环里没走到的那几个关层节点，观测同样没记过，所以这里补的正好是缺的那几拍
+      const observe = this.loopProbes?.loop;
+      probe(observe, { kind: "generation_started" });
       await this.processEvents({ type: "message_start", role: "assistant" });
+      probe(observe, { kind: "message_committed", message: failure });
       await this.processEvents({ type: "message_end", message: failure });
       // 收还开着的层（attempt → turn → reply），配对不缺一拍；没开的不补
       const open = this.openLayers;
       const result: AttemptResult = aborted ? { kind: "aborted" } : { kind: "failed", error: err };
       if (open.turnId !== null && open.attempt !== null) {
+        probe(observe, { kind: "attempt_ended", turnId: open.turnId, attempt: open.attempt, result });
         await this.processEvents({ type: "attempt_end", turnId: open.turnId, attempt: open.attempt, result });
       }
-      if (open.turnId !== null) await this.processEvents({ type: "turn_end", turnId: open.turnId, result, toolResults: [] });
+      if (open.turnId !== null) {
+        probe(observe, { kind: "turn_ended", turnId: open.turnId, result, toolResultCount: 0 });
+        await this.processEvents({ type: "turn_end", turnId: open.turnId, result, toolResults: [] });
+      }
       if (open.replyId !== null) {
+        probe(observe, { kind: "reply_ended", replyId: open.replyId, outcome, hasFinal: false, turns: this._state.iteration });
         await this.processEvents({ type: "reply_end", replyId: open.replyId, outcome, final: null, turns: this._state.iteration });
       }
+      probe(observe, { kind: "loop_ended", outcome });
       await this.processEvents({ type: "agent_end", outcome });
       return { outcome, messages: [failure] };
     } catch (sinkError) {
@@ -2781,6 +2818,10 @@ export class Agent {
    * 隔离的子循环（2026-09-06 从 Dream 抽出，Dream 与 `subagent` 工具都走这里）：**独立 context**（主 transcript
    * 一字不动）、只给指定的工具、同一份模型绑定、不吃前台的 steer / followUp。事件去向由调用方给的 `emit` 决定。
    * `turnInjections`：Dream 沿用父的每轮注入（激活 skill、任务清单），委派的子 agent 不要——它看不到这场对话。
+   *
+   * **子循环暂不挂观测探针**，内部的 turn / 模型 / 工具不进 journal——不是忘了，是记录的归属还没定：
+   * 后台子 agent 在父 run 封口之后才跑，scope 供给给出的是「此刻在跑的那个 run」，事实会记进无关的 run；
+   * 同一批并发的两个前台子 agent 挂着同一个父 turn，span 配对键相同会互相配错；Dream / 提取的 runId 不在 RunIndex 里。
    */
   private runSubagent(
     spec: {
@@ -3305,13 +3346,8 @@ export class Agent {
         break;
     }
 
-    try {
-      await this.persist(input);
-    } finally {
-      // 被动 tap：state 与 required persistence 已落才释放，且**严格按 seq 顺序**（见 releaseToTap）。
-      // persist 抛错（run 随之失败）也要放行这一条——否则后面所有 seq 都卡死在缓冲里。
-      this.releaseToTap(event);
-    }
+    // 观测**不在这条链上**：AgentEvent 是给壳的事件协议，观测的事实由各执行节点上的探针记（`loop/observe.ts`）
+    await this.persist(input);
 
     const signal = this.activeRun?.abortController.signal ?? new AbortController().signal;
     for (const listener of this.listeners) {
@@ -3319,40 +3355,27 @@ export class Agent {
     }
   }
 
-  /**
-   * canonical sink 的按 seq 释放缓冲。seq 在 processEvents 入口分配、persist 是 await 的：早一条 message_end 还在慢持久化时，
-   * 外部 steer() fire-and-forget 的 queue_update 拿到更大的 seq，若直接交给 sink 就先到了（实测 [9,queue_update]
-   * 早于 [8,message_end]）。所以每条先进缓冲，只放行 seq 连续的前缀。
-   */
-  private releaseToTap(event: AgentEvent): void {
-    if (this.observationRuntime() === undefined) return;
-    this.tapPending.set(event.seq, event);
-    for (;;) {
-      const next = this.tapPending.get(this.tapNextSeq);
-      if (next === undefined) return;
-      this.tapPending.delete(this.tapNextSeq);
-      this.tapNextSeq += 1;
-      this.deliverToTap(next);
-    }
-  }
-
-  /**
-   * 同步交给 canonical sink，**不 await**。sink 自身 never-throw（fact-sink.ts），这里再兜一层：
-   * 异常原文不进诊断（采集边界）——只留分类 + 稳定 hash；观测层任何异常都不进 Agent 控制流。
-   */
-  private deliverToTap(event: AgentEvent): void {
-    const sink = this.observationSink;
-    if (sink === undefined) return;
-    try {
-      sink.offer(event);
-    } catch (e) {
-      this.reportDiagnostic({ code: "observation_tap_failed", message: `observation sink 抛错（seq ${event.seq}，${event.type}）：${redactedLabel(e)}` });
-    }
-  }
-
   /* ───────────── canonical writer 接线（Host-internal） ───────────── */
 
-  /** 首次调用解析 `attachObservationHost` 挂上的 runtime，并接上诊断与 AgentEvent sink；没挂就永远 undefined。 */
+  /** 循环与压缩的探针。先解析一次运行时，保证探针在 run 跑起来之前就位；没挂观测（低层 `new Agent()`）就是 undefined。 */
+  private loopProbesNow(): LoopProbes | undefined {
+    this.observationRuntime();
+    return this.loopProbes;
+  }
+
+  /**
+   * Agent 自身节点的探针，同样先解析运行时：资源变更在 boot 那一代 extension 装载时就会发生，
+   * 那时 `start()` 还没跑——不在这里懒解析，这批装载事实就丢了。
+   */
+  private agentProbeNow(): AgentProbe | undefined {
+    this.observationRuntime();
+    return this.agentProbe;
+  }
+
+  /**
+   * 首次调用解析 `attachObservationHost` 挂上的 runtime，并把各执行节点的探针接上；没挂就永远 undefined。
+   * **观测是插桩，不是事件协议**：这里不订阅、不转发 AgentEvent，每个发口在自己的节点上记（`docs/design/observability.md`）。
+   */
   private observationRuntime(): ObservationRuntime | undefined {
     if (this.observationResolved) return this.observation;
     const wiring = observationHostOf(this);
@@ -3362,7 +3385,11 @@ export class Agent {
     const rt = wiring.runtime;
     rt.attachDiagnostics((d) => this.reportDiagnostic(d));
     rt.bindScope(() => this.observationScope());
-    this.observationSink = rt.eventSink();
+    this.loopProbes = {
+      loop: rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID)),
+      compaction: rt.capabilitySink(compactionFactDescriptor, builtinOwner(AGENT_ENTRY_ID)),
+    };
+    this.agentProbe = rt.capabilitySink(agentFactDescriptor, builtinOwner(AGENT_ENTRY_ID));
     // 三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
     if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID));
     attachTaskObserver(this.tasks, rt.capabilitySink(taskFactDescriptor, builtinOwner(TASKS_ENTRY_ID)));
@@ -3373,8 +3400,8 @@ export class Agent {
   }
 
   /**
-   * AgentEvent 到达时刻的 scope（fact-sink 的 scope 供给）：run 归属只在 permit 期间有效（`activeRun` 落位到 `closeRun()`），
-   * turn 归属跟 gate 里开着的 turnId——loop 产的那一个，与 `projectAgentEvent` 里 turn span 的 scope 同一份。**必须返回对象**：
+   * 探针被调用那一刻的 scope（fact-sink 的 scope 供给）：run 归属只在 permit 期间有效（`activeRun` 落位到 `closeRun()`），
+   * turn 归属跟 gate 里开着的 turnId——loop 产的那一个，与 `projectLoopFact` 里 turn span 的 scope 同一份。**必须返回对象**：
    * 供给返回 undefined 会被 sink 判成「run 归属不可知」而开 gap。
    */
   private observationScope(): Readonly<Record<string, string>> {
@@ -3465,8 +3492,14 @@ export class Agent {
       code: "queue_dropped",
       message: `${when}：accepted 但未消费的消息被丢弃——steer ${left.steers.length} 条 / followUp ${left.followUps.length} 条（run 已关门，不会转入下一个 run）`,
     });
-    if (left.steers.length > 0) void this.emit({ type: "queue_update", queue: "steering", size: 0 });
-    if (left.followUps.length > 0) void this.emit({ type: "queue_update", queue: "followUp", size: 0 });
+    if (left.steers.length > 0) {
+      probeAgent(this.agentProbeNow(), { kind: "queue_updated", queue: "steering", size: 0 });
+      void this.emit({ type: "queue_update", queue: "steering", size: 0 });
+    }
+    if (left.followUps.length > 0) {
+      probeAgent(this.agentProbeNow(), { kind: "queue_updated", queue: "followUp", size: 0 });
+      void this.emit({ type: "queue_update", queue: "followUp", size: 0 });
+    }
   }
 
   /**

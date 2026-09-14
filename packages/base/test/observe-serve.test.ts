@@ -193,7 +193,7 @@ test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / 
 const EMITTED_RECORD_NAMES = [
   "run.accepted", "run.started", "run.closed", "run.assembly", "observation.gap",
   "agent.loop.started", "agent.loop.ended", "agent.message.appended", "agent.queue.updated",
-  "agent.resource.changed", "agent.custom_event",
+  "agent.resource.changed",
   "reply.execute", "turn.execute", "attempt.execute", "context.compact",
   "model.generate", "model.generate.delta", "model.usage", "model.retry.scheduled",
   "tool.execute", "tool.execute.progress",
@@ -202,6 +202,12 @@ const EMITTED_RECORD_NAMES = [
   "schedule.created", "schedule.cancelled", "schedule.delivered", "schedule.bookkeeping-failed", "schedule.missed",
   "inbox.accepted", "inbox.rejected", "inbox.restored", "inbox.consumed", "inbox.acked", "inbox.released", "inbox.sealed",
 ];
+/**
+ * core 已经不再发出、但用户盘上的旧库里还有的记录名。观测改成在执行节点插探针之后（2026-09-13），
+ * 循环不再转发 AgentEvent，未知事件类型兜底成 `agent.custom_event` 那条路也就没了；
+ * 术语表仍登记它，是因为面板读的是历史数据——那不是兼容别名，是在渲染已经落盘的记录。
+ */
+const NO_LONGER_EMITTED_RECORD_NAMES = ["agent.custom_event"];
 const MODEL_VISIBLE_TOOLS = [
   "bash", "edit_file", "glob", "grep", "job_output", "job_stop", "list_dir", "read_file", "write_file",
   "schedule_cancel", "schedule_create", "schedule_list",
@@ -218,8 +224,8 @@ test("术语表覆盖：每个会落盘的记录名都念得出，每个模型�
   // `agent-behavior.md` §2.3：不允许只显示「正在使用工具」而不说是哪个工具、对什么对象。动词是那条要求的一半
   const missingVerbs = MODEL_VISIBLE_TOOLS.filter((t) => lex.toolVerbs[t] === undefined);
   expect(missingVerbs, "工具没登记动词——那一行会念成「调用 xxx」").toEqual([]);
-  // 反向：术语表里不该留 core 已经不发的名字（会变成永远不出现的死条目）
-  expect(Object.keys(lex.records).filter((n) => !EMITTED_RECORD_NAMES.includes(n))).toEqual([]);
+  // 反向：术语表里不该留 core 已经不发的名字（会变成永远不出现的死条目）——旧库里仍会读到的除外
+  expect(Object.keys(lex.records).filter((n) => !EMITTED_RECORD_NAMES.includes(n) && !NO_LONGER_EMITTED_RECORD_NAMES.includes(n))).toEqual([]);
 });
 
 test("术语表：每条四字段齐全，hint 不是同义反复", () => {
