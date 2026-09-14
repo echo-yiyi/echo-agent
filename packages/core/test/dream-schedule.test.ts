@@ -5,6 +5,7 @@ import { bindMemoryScopes, createAgentMemories, memoryCreate, shouldDream, type 
 import { memoryScopeTable, type MemoryScopeDef } from "../src/memory/scope.ts";
 import { agentMemory, notesMemory, userMemory, type MemoryDir } from "../src/memory/types.ts";
 import { readDreamState } from "../src/memory/dream.ts";
+import { EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { errorTurn, FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
@@ -17,7 +18,6 @@ import { toolOk } from "../src/tools/types.ts";
  * 所以这里的 Agent 在最外面把提取那次调用答掉，里面的脚本、计数、卡点都看不到它。
  * 提取本身的判据在 `memory-extract.test.ts`。
  */
-const EXTRACT_MARK = "A reply just finished.";
 class Agent extends RealAgent {
   constructor(opts: ConstructorParameters<typeof RealAgent>[0]) {
     const inner = opts.streamFunction;
@@ -27,7 +27,7 @@ class Agent extends RealAgent {
         : {
             ...opts,
             streamFunction: (model, context, options) =>
-              JSON.stringify(context.messages[0] ?? null).includes(EXTRACT_MARK)
+              JSON.stringify(context.messages[0] ?? null).includes(EXTRACT_PROMPT_OPENING)
                 ? scriptedStreamFn([textTurn("Nothing here is worth keeping.")])(model, context, options)
                 : inner(model, context, options),
           },

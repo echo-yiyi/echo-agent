@@ -2742,9 +2742,7 @@ export class Agent {
   }
 
   /**
-   * 每条 reply 收尾排一次提取。**不进 admission**：走 maintenance 的话，用户连着说十句话，
-   * 十次全被下一条 prompt 抢占、实际提取 0 次——绕一圈回到「320 轮 0 次写入」。
-   * dream 承受得起被抢占（它整理的是已经落盘的东西），提取承受不起。
+   * 每条 reply 收尾排一次提取。**不进 admission**，走自己的通道——为什么见 `memory/channel.ts` 头注。
    */
   private enqueueExtract(): void {
     const memory = this.memory;

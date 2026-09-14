@@ -172,12 +172,13 @@ bun -e 'import {MemoryChannel} from "./packages/core/src/memory/channel.ts"; let
 - [resident 超预算拒绝](../../packages/core/test/memory.test.ts#test=resident-超预算拒拒因带整理指引)：写入超预算时返回整理指引；同文件另有索引、路径、层绑定与 system 冻结测试。
 - [具名角色的目录](../../packages/core/test/create-agent.test.ts#test=有角色名时-role-层就在落在-agents角色名memory与角色定义同一棵树)：默认 role 层的装配落点；同文件另有无角色名的情形。
 - [Dream 未达写入门不启动](../../packages/core/test/dream-schedule.test.ts#test=门不满足-不跑写入数没到)：基本触发条件；同文件另有前台并行、主 transcript 隔离、失败不记成功及 stop 等待测试。
+- [提取真的起来](../../packages/core/test/memory-extract.test.ts#test=一条回复结束-提取子循环真的起来提取-prompt-里有这次对话模型用记忆工具写的东西落了盘)：一条回复结束后，提取 prompt 里有这次对话、模型经记忆工具写的内容落了盘。它不判断提取选得对不对，也不覆盖第 8 节的忙时重跑。
 - [子循环是自己的 run](../../packages/core/test/observability-runtime.test.ts#test=前台子-agent-是自己的-run链回派出它的工具调用turn-挂在自己的-runid-下不与父撞lastrun-仍是用户那条)：提取、整理与子 agent 共用 `Agent.runSubagent`，账本口径由子 agent 的端到端用例验证；提取与整理本身没有端到端的观测用例。
 
 旧测试中的 session 层是显式 fixture，不代表默认产品仍有该层；标题中的“只整理 session”不能被当成当前全局设计。链接门只检查文件或符号存在，不审判这些测试的语义。
 
 ```bash
-bun test packages/core/test/memory.test.ts packages/core/test/dream-schedule.test.ts \
+bun test packages/core/test/memory.test.ts packages/core/test/memory-extract.test.ts packages/core/test/dream-schedule.test.ts \
   packages/core/test/create-agent.test.ts packages/core/test/observability-runtime.test.ts
 bun scripts/docs-lint.ts
 bun test test/docs.test.ts test/export-jsdoc.test.ts

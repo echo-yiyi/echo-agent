@@ -24,6 +24,7 @@ import { createProvider } from "../../src/provider/models.ts";
 import { createProviderStreams } from "../../src/provider/dialect.ts";
 import { environmentMessage } from "../../src/messages.ts";
 import { readDreamState } from "../../src/memory/dream.ts";
+import { EXTRACT_PROMPT_OPENING } from "../../src/memory/extract.ts";
 import { memoryScopeDir, memoryScopeTable } from "../../src/memory/scope.ts";
 import type { MemoryDir } from "../../src/memory/types.ts";
 import { InboxStore } from "../../src/inbox/store.ts";
@@ -101,7 +102,7 @@ function scriptedProvider(turns: ProviderEvent[][]): Provider {
       api: "resident",
       async *request(_model: Model, context: Context): AsyncGenerator<ProviderEvent> {
         // 记忆提取的子循环（2026-09-14 起真的在跑）不是这份判据要看的：当场答掉，不记进 seen、不吃脚本
-        if (JSON.stringify(context.messages[0] ?? null).includes("A reply just finished.")) {
+        if (JSON.stringify(context.messages[0] ?? null).includes(EXTRACT_PROMPT_OPENING)) {
           for (const ev of text("Nothing here is worth keeping.")) yield ev;
           return;
         }

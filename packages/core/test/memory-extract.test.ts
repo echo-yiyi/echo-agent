@@ -3,6 +3,7 @@ import { Agent } from "../src/agent.ts";
 import { bindMemoryScopes, createAgentMemories, type AgentMemories } from "../src/memory/harness.ts";
 import { memoryScopeTable, type MemoryScopeDef } from "../src/memory/scope.ts";
 import { agentMemory, notesMemory, userMemory } from "../src/memory/types.ts";
+import { EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
 
@@ -52,7 +53,7 @@ test("一条回复结束 → 提取子循环真的起来：提取 prompt 里有�
   await agent.prompt("以后回答简短一点");
 
   expect(await until(async () => (await dir.read("memory/answer-style.md")) !== null), "提取没有把记忆写下来").toBe(true);
-  const extract = calls.find((c) => c.includes("A reply just finished."));
+  const extract = calls.find((c) => c.includes(EXTRACT_PROMPT_OPENING));
   expect(extract, "提取子循环没有起来").toBeDefined();
   // transcript 不是空的：用户说的与助手答的都在提取 prompt 里
   expect(extract).toContain("以后回答简短一点");

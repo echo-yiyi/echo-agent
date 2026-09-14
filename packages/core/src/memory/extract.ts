@@ -7,7 +7,7 @@
 //
 // 形状:隔离子 agent(与 dream 同一段 `runSubagent`)、**全套记忆工具**(它可以先 view 再决定、
 // 要覆写就 str_replace、判断错了还有下一轮纠)、`maxTurns` 限死、看 working context。
-// 跑在**独立通道**上而不是 admission 的 maintenance——见 channel.ts 头注。
+// 跑在**独立通道**上，不经 admission——为什么见 channel.ts 头注。
 //
 // 提示词是**自己写的**(措辞、结构),不抄任何专有产品的文案。
 
@@ -16,6 +16,9 @@ import type { MemoryScopeTable } from "./scope.ts";
 
 /** 提取子 agent 的轮数上限:够它"view 一下现有的 → 写两三条",又给成本一个硬上界。 */
 export const DEFAULT_EXTRACT_MAX_TURNS = 5;
+
+/** 提取 prompt 的第一句。脚本化模型的测试靠它认出一次模型调用是提取子循环发的。 */
+export const EXTRACT_PROMPT_OPENING = "A reply just finished.";
 
 /**
  * 提取的 prompt。**没有替换口子，也不需要**：什么值得记由各模块的 instructions 定——判据跟着模块走，
@@ -37,7 +40,7 @@ export function defaultExtractPrompt(memories: readonly AnyMemory[], table: Memo
     .filter((l): l is string => l !== null)
     .join("\n");
   return [
-    "A reply just finished. Read the conversation below and decide whether anything in it is worth keeping after this session ends.",
+    `${EXTRACT_PROMPT_OPENING} Read the conversation below and decide whether anything in it is worth keeping after this session ends.`,
     "Work in this order:\n" +
       "1. View what is already stored before writing anything — most of what feels new is already there in some form.\n" +
       "2. Pick out only what the module descriptions below say is worth keeping.\n" +
