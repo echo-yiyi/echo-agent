@@ -52,11 +52,7 @@
 
 ## 5. 扩展从哪进
 
-**ABI**（`packages/core/src/extension/abi.ts`，`@echo-agent/core/extension` 子路径）：`defineExtension({ name, hostAbiVersion, inject, provide, reload, config, apply(ctx, config) })`。长期副作用只能在 `apply()` 里经 `ctx.effect()` 建，Host 持有 disposer。
-
-**Host**（`packages/core/src/extension/host.ts`）：按代 mount，依赖图拓扑排序（`graph.ts`），一代全有或全无，卸载逆序；后代可以 inject 前代已 ACTIVE 的 Service。换代走 `replace()`：先卸旧代再装新代，装不上就按原 entries 装回旧代；旧代里有 Fiber 声明的 `reload` 比调用方所处的安全点强、或别的代还绑在它的 provider 上，就拒绝（Host 零变化）。
-
-**热部署**（`Echo.reloadExtensions()` / 壳的 `/reload` / 模型的 `extension_reload`，[决策](decisions/implemented/2026-09-14-extension-hot-reload.md)、[模型触发](decisions/implemented/2026-09-14-model-triggered-reload.md)）：只管 `extensions/` 目录里发现的扩展；整个跑在 `Agent.betweenRuns()` 里（经 admission 拿 permit，忙时 rejected 不排队）；按内容哈希比对，改过的把文件复制到原文件旁边（`.foo.echo-<pid>-<n>.ts`）再 import——同一路径的模块进程内只求值一次，复制一份才是新模块，而相对依赖与 `node_modules` 仍落在原处。扩展要声明 `reload: "run"`（或 `"turn"`）才换得了，缺省 `agent` 会被拒并提示。门 `packages/core/test/extension-host.test.ts`（`replace()` 八条）、`packages/core/test/extension-reload.test.ts`（端到端）。
+机制以 [扩展、装配与所有权](design/extensions.md) 为准：ABI、Host 的 PREPARE / LOADING / ACTIVE 与换代事务、依赖图的规则、effect 的所有权与卸载顺序、热部署的时机 / 范围 / 结果怎么读，都在那里，这里不复述。入口是 `@echo-agent/core/extension` 子路径的 `defineExtension()`（`packages/core/src/extension/abi.ts`）；长期副作用只能在 `apply()` 里经 `ctx.effect()` 建，Host 持有 disposer。热部署（`Echo.reloadExtensions()` / 壳的 `/reload` / 模型的 `extension_reload`）只管 `extensions/` 目录里发现的扩展，决策见 [热部署](decisions/implemented/2026-09-14-extension-hot-reload.md) 与 [模型触发](decisions/implemented/2026-09-14-model-triggered-reload.md)。
 
 **Service 两种**（`packages/core/src/extension/registries.ts`）：
 

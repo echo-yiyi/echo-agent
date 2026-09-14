@@ -26,7 +26,7 @@
 
 1. **只重载盘上发现的扩展**。builtin、`opts.extensions`（产品自带的）、壳、角色定义四代不在账上，reload 碰不到它们。
 2. **加载新代码 = 复制到原文件旁边再 import**：`extensions/foo.ts` → `extensions/.foo.echo-<pid>-<n>.ts`，子目录整棵复制到 `extensions/.bar.echo-<pid>-<n>/`。路径变了就是新模块（Node / Bun 都实测过：同路径加 query 不重新求值，或入口刷了依赖不刷），相对路径（`./helper.ts`、`../shared.ts`）与 `node_modules` 的查找仍落在原处。快照在这一代 ACTIVE 期间留着（扩展可能按 `import.meta.url` 读旁边的文件），换代 / 删除 / 收摊时删，发现规则跳过这种命名。**import 用 realpath**：Bun 按目录缓存解析条目，目录路径经软链时新文件经软链路径找不到（实测）。
-3. **先卸再装，不先装再卸**：依赖图允许两代 overlap，但工具 / skill / prompt 段按名注册，新的先装会撞名。所以 import 与验形在卸之前做——那一步失败旧代一个字不动。
+3. **先卸再装，不先装再卸**：依赖图允许两代 overlap，但工具 / skill / prompt 段按名注册，新的先装会撞名。所以 import 与验形在卸之前做，Host 的 PREPARE（config 解析、依赖图）也在卸之前做——到 LOADING 之前的任何失败，旧代一个字不动（2026-09-14 补：初版 PREPARE 在卸旧之后，config 抛会先卸再装回，[扩展设计](../../design/extensions.md) §9 登记后已改）。
 4. **要换得了，扩展得声明 `reload: "run"`（或 `"turn"`）**。ABI 缺省是 `agent`（保守），在 run 边界会被拒；拒绝的报文告诉作者加哪一行。这是 `ReloadBoundary` 第一次在运行时被读取——它的含义随之写实：`turn` / `run` = 两次 run 之间可换，`agent` = 与这一代 Agent 同寿、要换只能重启 Agent，`process` = 要换只能重启进程（`abi.ts`）。不做「按 Effect 边界推断」：那会让「不声明」有两种意思。
 
 形状：`Echo.reloadExtensions(): Promise<ReloadResult>` 与 `AgentRuntime.reloadExtensions()` 是同一个函数（壳的 `/reload` 调后者）；`ReloadResult` = `done` 带 `ReloadReport`（每个盘上扩展一条 `ReloadChange`：`added` / `removed` / `replaced` / `unchanged` / `refused` / `rolled_back` / `failed` / `lost`，含义在 `packages/core/src/extension/reload.ts`）或 `rejected`（忙、不排队）。`ExtensionHost.replace(old, next | null, { safePoint })` 返回 `replaced` / `refused` / `rolled_back` / `lost`，`unwindErrors` 一个不吞。`Echo.extensions` / `Echo.diagnostics` 改为每次读现算。

@@ -61,6 +61,7 @@ export {
   definePromptPack,
   defineToolPack,
   mountBuiltinTools,
+  registerAll,
   ECHO_COMPACTION,
   ECHO_MEMORY,
   ECHO_SCHEDULER,

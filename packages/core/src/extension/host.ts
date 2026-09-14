@@ -1,7 +1,8 @@
 // ExtensionHost：把一组 Entry 作为一个 generation mount / unmount 的内核。
 //
 // 边界：PREPARE（成图、验规则）→ 按拓扑 LOADING → ACTIVE，与逆拓扑 unmount；外加一条换代事务
-// `replace()`（2026-09-14）：卸一代、装一代，装不上就把旧的装回去。loader / import、安全时机（谁来保证此刻没有
+// `replace()`（2026-09-14）：先 PREPARE 新的一代（config、依赖图），过了才卸旧代、LOADING 新代，装不上就把旧的装回去。
+// loader / import、安全时机（谁来保证此刻没有
 // run 在跑）、ManagedRunSources（要 admission）都不在这里——安全时机归 `Agent.betweenRuns()`，加载归装配层。
 //
 // 三条纪律：
@@ -52,7 +53,8 @@ export class ExtensionMountError extends Error {
  * `replace()` 的结果。四种都**不抛**：换代是运行中做的事，抛出去只会让壳子把「新版没装上」显示成崩溃。
  *   · `replaced`：旧的已卸、新的已 ACTIVE（`next` 为 null 时就是只卸）；
  *   · `refused`：不能在此刻换——旧代里有 Fiber 声明的 `reload` 比 `safePoint` 强，或别的代还绑在它 provide 的 Service 上。**Host 状态零变化**；
- *   · `rolled_back`：新的没装上，旧的按原 entries 重装回来了（`error` 是新代失败的原因）；
+ *   · `rolled_back`：新的没装上，旧的仍在（`error` 是新代失败的原因）——新代 PREPARE 就没过（config 解析、依赖图）时
+ *     旧代根本没卸过、`unwindErrors` 为空；LOADING 失败时是卸了再按原 entries 装回来的；
  *   · `lost`：旧的卸了、新的没装上、旧的也装不回来——这一代现在**没挂着**。
  * `unwindErrors` 是卸旧代时 disposer 报的错：一个都不吞，但也不因此中断换代（卸都卸了）。
  */
@@ -64,6 +66,9 @@ export type ReplaceResult =
 
 /** fibers 按 load 顺序；entries 是 mount 时收到的原件——回滚要按它重装（Fiber 里的 config 是 `definition.config()` 解析过的）。 */
 type Generation = { readonly id: string; readonly fibers: readonly Fiber[]; readonly entries: readonly ExtensionEntry[] };
+
+/** PREPARE 的产物：staged 的 key 表、拓扑序的 Fiber、mount 时收到的原 entries。还没碰任何 apply。 */
+type Prepared = Readonly<{ keys: ServiceKeyTable; order: readonly Fiber[]; entries: readonly ExtensionEntry[] }>;
 
 /** 一个装上的 Fiber 在观测里的样子：身份、声明、依赖边实际连到了谁。只读 PREPARE 解析好的图，不碰 config。 */
 function fiberFact(f: Fiber): ExtensionFiberFact {
@@ -126,26 +131,41 @@ export class ExtensionHost {
     return this.serialize(() => this.mountObserved(generation, entries));
   }
 
-  /** `doMount` 加观测：装上 / 没装上各记一条。`mount()` 与 `replace()` 里的装新、装回都走这里——换代在账本里不能是空白。 */
+  /** 装配加观测：装上 / 没装上各记一条。`mount()` 与 `replace()` 里的装回都走这里——换代在账本里不能是空白。 */
   private async mountObserved(generation: string, entries: readonly ExtensionEntry[]): Promise<void> {
+    let prepared: Prepared;
     try {
-      await this.doMount(generation, entries);
+      prepared = this.prepare(generation, entries);
     } catch (e) {
-      // PREPARE 与 LOADING 的失败都走到这：前者还没加载任何 Entry，后者是某个 Entry 的 apply / Effect start 失败并已回滚
-      const failed = e instanceof ExtensionMountError;
-      probeExtension(this.observe, {
-        kind: "generation_mount_failed",
-        generation,
-        entryIds: entries.map((x) => x.entryId),
-        stage: failed ? "apply" : "prepare",
-        ...(failed ? { failedEntryId: e.entryId } : {}),
-        error: failed ? e.cause : e,
-        unwindErrors: failed ? e.unwindErrors.length : 0,
-      });
+      this.noteMountFailed(generation, entries, e); // PREPARE 失败：还没加载任何 Entry
+      throw e;
+    }
+    await this.loadObserved(generation, prepared);
+  }
+
+  /** LOADING 加观测。`replace()` 装新代走这里——它的 PREPARE 在卸旧之前单独做。 */
+  private async loadObserved(generation: string, prepared: Prepared): Promise<void> {
+    try {
+      await this.load(generation, prepared);
+    } catch (e) {
+      this.noteMountFailed(generation, prepared.entries, e); // 某个 Entry 的 apply / Effect start 失败并已回滚
       throw e;
     }
     const g = this.generations.get(generation);
     if (g !== undefined) probeExtension(this.observe, { kind: "generation_mounted", generation, fibers: g.fibers.map(fiberFact) });
+  }
+
+  private noteMountFailed(generation: string, entries: readonly ExtensionEntry[], e: unknown): void {
+    const failed = e instanceof ExtensionMountError;
+    probeExtension(this.observe, {
+      kind: "generation_mount_failed",
+      generation,
+      entryIds: entries.map((x) => x.entryId),
+      stage: failed ? "apply" : "prepare",
+      ...(failed ? { failedEntryId: e.entryId } : {}),
+      error: failed ? e.cause : e,
+      unwindErrors: failed ? e.unwindErrors.length : 0,
+    });
   }
 
   /**
@@ -184,7 +204,8 @@ export class ExtensionHost {
    * 别的代还有 consumer 绑在旧代的 provider 上也 `refused`（连带重装不在这一版，见决策记录 Non-Goals）。
    *
    * **先卸再装，不先装再卸**：依赖图允许两代 overlap，但工具 / skill / prompt 段都按名注册，新代先装会撞名。
-   * 所以调用方要在调这里之前把新代码 import 好、config 验过——那一步失败旧代一个字都不动。
+   * 但**卸之前先把新代 PREPARE 好**（config 解析、依赖图；2026-09-14 修，此前 PREPARE 在卸旧之后，config 抛会先卸再装回）：
+   * 这一步失败旧代一个字都不动，结果是 `rolled_back` 且 `unwindErrors` 为空。调用方只需把新代码 import 好、验过形再调这里。
    */
   replace(
     old: string,
@@ -204,10 +225,18 @@ export class ExtensionHost {
   }
 
   private async doMount(generation: string, entries: readonly ExtensionEntry[]): Promise<void> {
+    await this.load(generation, this.prepare(generation, entries));
+  }
+
+  /**
+   * PREPARE：不碰任何 apply；ServiceKey 记在 staged 表，出错整层丢弃，Host 状态零变化。
+   * `except`：算跨代 provider 时当作已经不在的那一代——`replace()` 在卸旧代之前就 PREPARE 新代，
+   * 新代绑到一个马上要卸的 provider 上是假图。
+   */
+  private prepare(generation: string, entries: readonly ExtensionEntry[], except?: string): Prepared {
     if (typeof generation !== "string" || generation === "") throw new ExtensionAbiError("generation 必须是非空字符串");
     if (this.generations.has(generation)) throw new ExtensionAbiError(`generation '${generation}' 已经 mount 过`);
 
-    /* ── PREPARE：不碰任何 apply；ServiceKey 记在 staged 表，出错整层丢弃，Host 状态零变化 ── */
     const keys = this.keys.fork();
     const seen = new Set<string>();
     const fibers: Fiber[] = [];
@@ -232,11 +261,15 @@ export class ExtensionHost {
       fibers,
       keys,
       hostServices: new Set(this.hostServices.keys()),
-      activeProviders: this.activeProviders(),
+      activeProviders: this.activeProviders(except),
     });
     for (const f of order) f.status = "pending";
+    return { keys, order, entries };
+  }
 
-    /* ── LOADING：按拓扑序逐个 apply；失败全回滚 ── */
+  /** LOADING：按拓扑序逐个 apply；失败全回滚。 */
+  private async load(generation: string, prepared: Prepared): Promise<void> {
+    const { keys, order, entries } = prepared;
     const activated: Fiber[] = [];
     const access = { keys, hostService: (k: ServiceKey<unknown>) => this.hostServices.get(k) };
     for (const f of order) {
@@ -310,14 +343,25 @@ export class ExtensionHost {
       return refuse(`别的 generation 还有 consumer 绑在它的 provider 上（连带重装不在这一版，先卸 consumer）：${dependents.join("；")}`);
     }
 
+    /* ── 先备新代（PREPARE：config 解析、依赖图），过了才卸旧代：新代连声明都不合格时，旧代一个字不动 ── */
+    let prepared: Prepared | null = null;
+    if (next !== null) {
+      try {
+        prepared = this.prepare(next.generation, next.entries, old);
+      } catch (error) {
+        this.noteMountFailed(next.generation, next.entries, error); // 账本里是「新代没装上（prepare）」，没有「卸了又装回」
+        return { kind: "rolled_back", error, unwindErrors: [] };
+      }
+    }
+
     /* ── 卸旧：disposer 的错收着，不中断——卸都卸了，剩下的只有往前走 ── */
     const unwindErrors = await this.retire(g);
     probeExtension(this.observe, { kind: "generation_unmounted", generation: old, entryIds, cleanupErrors: unwindErrors.length });
-    if (next === null) return { kind: "replaced", unwindErrors };
+    if (next === null || prepared === null) return { kind: "replaced", unwindErrors };
 
-    /* ── 装新；装不上就把旧的按原 entries 装回去。两次装都经 mountObserved：装上 / 没装上各一条事实 ── */
+    /* ── 装新（LOADING）；装不上就把旧的按原 entries 装回去。装新与装回都记账：装上 / 没装上各一条事实 ── */
     try {
-      await this.mountObserved(next.generation, next.entries);
+      await this.loadObserved(next.generation, prepared);
       return { kind: "replaced", unwindErrors };
     } catch (error) {
       try {
@@ -370,9 +414,11 @@ export class ExtensionHost {
     f.status = "disposed";
   }
 
-  private activeProviders(): ReadonlyMap<ServiceKey<unknown>, Fiber> {
+  /** 别的代里仍 ACTIVE 的 provider。`except`：这一代当作已经不在（`replace()` 先备新代时，旧代马上要卸）。 */
+  private activeProviders(except?: string): ReadonlyMap<ServiceKey<unknown>, Fiber> {
     const out = new Map<ServiceKey<unknown>, Fiber>();
     for (const g of this.generations.values()) {
+      if (g.id === except) continue;
       for (const f of g.fibers) {
         if (f.status !== "active") continue;
         for (const key of f.declaredProvides) out.set(key, f); // 后 mount 的代覆盖先前的：consumer 绑最新 ACTIVE provider

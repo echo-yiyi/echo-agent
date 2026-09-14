@@ -119,8 +119,11 @@ export class Fiber {
             `Extension ${fiber.label} 声明 reload '${fiber.reload}'，却登记了 boundary '${boundary}' 的 Effect——实际比声明强，Host 不自动升级`,
           );
         }
-        const label = `${fiber.label} effect#${fiber.effects.size + fiber.effects.pending + 1}(${boundary})`;
-        // start 与入栈是同一条被 track 的链：闸关之后才完成的 start，它的 lease 也入栈、随后被 unwind 卸掉
+        // **栈位在这里占**：卸载是登记序的逆序，start 完成得早晚不改变它
+        //（此前 lease 完成才入栈，并行 start 实测按完成序排队——2026-09-14 修，`effects.ts` 头注）
+        const slot = fiber.effects.reserve();
+        const label = `${fiber.label} effect#${slot + 1}(${boundary})`;
+        // start 与填位是同一条被 track 的链：闸关之后才完成的 start，它的 lease 也填进去、随后被 unwind 卸掉
         const started = fiber.effects.track(
           Promise.resolve()
             .then(() => spec.start(fiber.abortController.signal))
@@ -128,7 +131,7 @@ export class Fiber {
               if (typeof lease?.dispose !== "function") {
                 throw new ExtensionAbiError(`${label} 的 start 没有返回带 dispose 的 EffectLease`);
               }
-              fiber.effects.push(boundary, lease as EffectLease<unknown>, label);
+              fiber.effects.fill(slot, boundary, lease as EffectLease<unknown>, label);
               return lease;
             }),
         );

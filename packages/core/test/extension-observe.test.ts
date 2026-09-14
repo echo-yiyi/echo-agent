@@ -158,6 +158,26 @@ test("replace 被拒（声明的 reload 比安全点强）：记 unmount_refused
   expect(facts.at(-1)).toMatchObject({ kind: "generation_unmounted", generation: "g3", entryIds: ["hot"], cleanupErrors: 0 });
 });
 
+test("replace 新代 PREPARE 就没过（config 抛）：只记 mount_failed(prepare)，没有 unmounted——旧代原样，账本里也没有「卸了又装回」", async () => {
+  const { host, facts } = recorder();
+  const h = host();
+  await h.mount("g1", [entry("hot", swappable("v1"))]);
+  const badConfig = defineExtension({
+    name: "demo-swappable-bad",
+    hostAbiVersion: 1,
+    reload: "run",
+    config() {
+      throw new Error("bad config");
+    },
+    apply() {},
+  });
+  const r = await h.replace("g1", { generation: "g2", entries: [entry("hot", badConfig)] }, { safePoint: "run" });
+  expect(r.kind).toBe("rolled_back");
+  expect(facts.map((f) => `${f.kind}:${f.generation}`)).toEqual(["generation_mounted:g1", "generation_mount_failed:g2"]);
+  expect(facts[1]).toMatchObject({ kind: "generation_mount_failed", stage: "prepare", entryIds: ["hot"], unwindErrors: 0 });
+  expect(h.mountedGenerations).toEqual(["g1"]);
+});
+
 test("没给探针的 Host 照常工作（低层用法）", async () => {
   const h = new ExtensionHost();
   await h.mount("g1", [entry("provider", provider)]);

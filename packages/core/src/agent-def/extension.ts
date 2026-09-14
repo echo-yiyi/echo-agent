@@ -11,6 +11,7 @@
 
 import { defineExtension, type ExtensionDefinition } from "../extension/abi.ts";
 import { AgentPrompt, AgentTools } from "../extension/registries.ts";
+import { registerAll } from "../extension/builtin.ts";
 import { PROMPT_ORDER } from "../prompt/types.ts";
 import type { AgentDefinition } from "./types.ts";
 
@@ -43,28 +44,18 @@ export function inlineAgentExtension(): ExtensionDefinition<AgentDefinition> {
       if (config.identity === undefined && config.tools === undefined) return; // 没什么可改的，不占 Fiber 的 effect 位
       const prompt = ctx.get(AgentPrompt);
       const tools = ctx.get(AgentTools);
+      const identity = config.identity;
+      const restrictTo = config.tools;
       void ctx.effect({
         boundary: "agent",
-        start: () => {
-          const offs: (() => void)[] = [];
-          try {
-            if (config.identity !== undefined) {
-              const body = config.identity;
-              offs.push(prompt.section({ name: "identity", order: PROMPT_ORDER.identity, render: () => body }, { replace: true }));
-            }
-            if (config.tools !== undefined) offs.push(tools.restrict(new Set(config.tools)));
-          } catch (e) {
-            // **全有或全无**：identity 换上了但 restrict 抛了的话，registry 必须回到调用前的样子
-            for (let i = offs.length - 1; i >= 0; i--) offs[i]!();
-            throw e;
-          }
-          return {
-            value: offs.length,
-            dispose: () => {
-              for (let i = offs.length - 1; i >= 0; i--) offs[i]!();
-            },
-          };
-        },
+        // **全有或全无**：identity 换上了但 restrict 抛了的话，registry 必须回到调用前的样子——`registerAll` 与内建同一份回滚
+        start: () =>
+          registerAll([
+            ...(identity === undefined
+              ? []
+              : [() => prompt.section({ name: "identity", order: PROMPT_ORDER.identity, render: () => identity }, { replace: true })]),
+            ...(restrictTo === undefined ? [] : [() => tools.restrict(new Set(restrictTo))]),
+          ]),
       });
     },
   });

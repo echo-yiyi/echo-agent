@@ -727,7 +727,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
      * 重扫目录，和 `discovered` 表比对：
      *   · 表里有、盘上没了 → `host.replace(旧代, null)` 卸掉；
      *   · 内容哈希没变且挂着 → unchanged，**不重新加载**；
-     *   · 其余 → 先复制快照、import、验形（这一步失败旧代一个字不动）→ 没挂着的 `mount`、挂着的 `host.replace()`。
+     *   · 其余 → 先复制快照、import、验形 → 没挂着的 `mount`、挂着的 `host.replace()`（它在卸旧之前先 PREPARE 新代：
+     *     config 解析、依赖图）。到 LOADING 之前的任何失败，旧代一个字不动。
      * `refused` / `rolled_back` / `lost` 的含义见 `extension/reload.ts`；每条失败同时进 `diagnostics`（按文件路径替换上一次的）。
      * **只管盘上发现的**：builtin / inline / extra / 角色四代不在 `discovered` 表里，这里碰不到它们。
      */

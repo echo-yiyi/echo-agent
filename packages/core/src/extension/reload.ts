@@ -20,7 +20,8 @@ export type ScheduleResult = Readonly<{ kind: "scheduled" }> | Readonly<{ kind: 
  *   · `replaced`：内容变了，新的一代已 ACTIVE、旧的已卸；
  *   · `unchanged`：内容没变，没动它（也没重新加载——同一份代码不会被求值第二次）；
  *   · `refused`：不能在此刻换（它声明的 `reload` 比当前安全点强，或别的扩展还依赖它 provide 的 Service），**原样保留**；
- *   · `rolled_back`：新版没装上（加载失败 / mount 失败），**旧版仍在**——加载失败时旧版根本没被卸过，mount 失败时是卸了再装回来的；
+ *   · `rolled_back`：新版没装上，**旧版仍在**——加载 / 验形 / config 解析 / 依赖图失败时旧版根本没被卸过
+ *     （Host 在卸旧之前 PREPARE 新代），apply / Effect start 失败时是卸了再装回来的；
  *   · `failed`：本来就没装着（新文件、或上次就坏着的文件），这次也没装上；
  *   · `lost`：旧版卸了、新版没装上、旧版也装不回来——**现在什么都没挂着**。诊断里有两条。
  */

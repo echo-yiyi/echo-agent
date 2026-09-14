@@ -6,11 +6,12 @@
 // 并且规格明写 first-party Extension「是公开扩展面是否够用的第一个 conformance consumer」——
 // 我们自己先用一遍，扩展作者才不会撞上只有他们能看见的坑。
 //
-// **`defineToolPack` 来自 `@echo-agent/core/extension`，不在这里另抄一份**（review 二轮 P1）：
+// **`defineToolPack` 与 `registerAll` 都来自 `@echo-agent/core/extension`，不在这里另抄一份**（review 二轮 P1；
+// 2026-09-14 `registerAll` 导出后，下面两条扩展手抄的逆序撤销也换成了它）：
 // 上一版这里复制了 core 的实现，于是「注册中途撞名要整组回滚」那个修复得改两处——
 // 复制一份实现就是复制一份将来会漏修的地方。
 
-import { AgentBackgroundService, AgentPrompt, AgentRuntimeService, AgentTools, defineExtension, defineToolPack } from "@echo-agent/core/extension";
+import { AgentBackgroundService, AgentPrompt, AgentRuntimeService, AgentTools, defineExtension, defineToolPack, registerAll } from "@echo-agent/core/extension";
 import { makeShellTools } from "./tools/bash.ts";
 import { makeWorktreeTools } from "./tools/worktree.ts";
 import { shellToolsSection } from "./prompt.ts";
@@ -38,21 +39,8 @@ export const ECHO_WORKTREE = defineExtension({
     const tools = makeWorktreeTools({ runtime: ctx.get(AgentRuntimeService) });
     void ctx.effect({
       boundary: "turn",
-      start: () => {
-        const offs: (() => unknown)[] = [];
-        try {
-          for (const tool of tools) offs.push(registry.register(tool));
-        } catch (e) {
-          for (const off of offs.reverse()) void off();
-          throw e;
-        }
-        return {
-          value: tools.map((t) => t.name),
-          dispose: () => {
-            for (const off of offs.reverse()) void off();
-          },
-        };
-      },
+      // 中途撞名整组撤回、卸载逆序全撤：`registerAll`，与内建同一份
+      start: () => registerAll(tools.map((tool) => () => registry.register(tool))),
     });
   },
 });
@@ -98,24 +86,9 @@ export const ECHO_SHELL = defineExtension({
     void ctx.effect({
       // 与 `defineToolPack` 同一档：工具面每轮都可能变，声明得比实际需要强会挡住热重载
       boundary: "turn",
-      start: () => {
-        // 工具与它们的习惯段（`tool:shell`）同一个 effect：一起装、一起撤。
-        // 中途撞名要把已注册的撤回去——半组工具在、半组不在，比整组不在更难排查
-        const offs: (() => unknown)[] = [];
-        try {
-          for (const tool of tools) offs.push(registry.register(tool));
-          offs.push(prompt.section(shellToolsSection()));
-        } catch (e) {
-          for (const off of offs.reverse()) void off();
-          throw e;
-        }
-        return {
-          value: tools.map((t) => t.name),
-          dispose: () => {
-            for (const off of offs.reverse()) void off();
-          },
-        };
-      },
+      // 工具与它们的习惯段（`tool:shell`）同一个 effect：一起装、一起撤。
+      // 中途撞名要把已注册的撤回去——半组工具在、半组不在，比整组不在更难排查（`registerAll`，与内建同一份）
+      start: () => registerAll([...tools.map((tool) => () => registry.register(tool)), () => prompt.section(shellToolsSection())]),
     });
   },
 });

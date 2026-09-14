@@ -870,3 +870,91 @@ test("replace：新代的 generation 名已被占 / 旧代根本没 mount → �
   expect(log).toEqual(["apply:1"]);
   expect(host.mountedGenerations).toEqual(["g1"]);
 });
+
+test("replace：新代 PREPARE 就没过（config 抛 / required 依赖没 provider）→ rolled_back，但旧代根本没卸过、也没重装", async () => {
+  const badConfig = defineExtension({
+    name: "hot",
+    hostAbiVersion: 1,
+    reload: "turn",
+    config() {
+      throw new Error("bad config");
+    },
+    apply() {},
+  });
+  const Missing = defineService<{ v: number }>({ id: "hot.missing", version: 1, kind: "single", scope: "agent", reload: "turn" });
+  const noProvider = defineExtension({ name: "hot", hostAbiVersion: 1, reload: "turn", inject: { m: { service: Missing, required: true } }, apply() {} });
+  for (const [next, reason] of [
+    [badConfig, "config 解析失败"],
+    [noProvider, "没有 provider"],
+  ] as const) {
+    const log: string[] = [];
+    const host = new ExtensionHost();
+    await host.mount("g1", [entry("hot", versioned(log, "1"))]);
+    const r = await host.replace("g1", { generation: "g2", entries: [entry("hot", next)] }, { safePoint: "run" });
+    expect(r.kind).toBe("rolled_back");
+    expect((r as { error: Error }).error.message).toContain(reason);
+    expect((r as { unwindErrors: readonly unknown[] }).unwindErrors).toEqual([]);
+    // 修之前是 ["apply:1", "dispose:1", "apply:1"]：先卸了旧代，PREPARE 才发现新代不合格，再把旧代装回来
+    expect(log).toEqual(["apply:1"]);
+    expect(host.mountedGenerations).toEqual(["g1"]);
+    expect(host.inspect().map((f) => `${f.entryId}@${f.generation}:${f.status}`)).toEqual(["hot@g1:active"]);
+  }
+});
+
+test("replace：新代 inject 的 Service 只有旧代自己 provide → PREPARE 把旧代当作已不在（它马上要卸），rolled_back 且旧代原样", async () => {
+  const Svc = defineService<{ v: number }>({ id: "hot.self", version: 1, kind: "single", scope: "agent", reload: "turn" });
+  const log: string[] = [];
+  const oldGen = defineExtension({
+    name: "hot",
+    hostAbiVersion: 1,
+    reload: "turn",
+    provide: [Svc],
+    apply(ctx) {
+      log.push("apply:1");
+      ctx.provide(Svc, { v: 1 });
+      void ctx.effect({ boundary: "turn", start: () => leaseOf(log, "1", 1) });
+    },
+  });
+  // 新版不再 provide，反倒想 inject 它——旧版一卸这条 Service 就没了，绑上去是假图
+  const nextGen = defineExtension({ name: "hot", hostAbiVersion: 1, reload: "turn", inject: { s: { service: Svc, required: true } }, apply() {} });
+  const host = new ExtensionHost();
+  await host.mount("g1", [entry("hot", oldGen)]);
+  const r = await host.replace("g1", { generation: "g2", entries: [entry("hot", nextGen)] }, { safePoint: "run" });
+  expect(r.kind).toBe("rolled_back");
+  expect((r as { error: Error }).error.message).toContain("没有 provider");
+  expect(log).toEqual(["apply:1"]);
+  expect(host.mountedGenerations).toEqual(["g1"]);
+});
+
+/* ─────────────── Effect 栈位：登记序，不是完成序（2026-09-14 修，design/extensions.md §9） ─────────────── */
+
+test("并行的 Effect start：栈位按登记顺序占，卸载是登记序的逆序——先登记、后完成的那个后卸", async () => {
+  const log: string[] = [];
+  let release: () => void = () => {};
+  const barrier = new Promise<void>((r) => {
+    release = r;
+  });
+  const probe = defineExtension({
+    name: "probe",
+    hostAbiVersion: 1,
+    async apply(ctx) {
+      // 第一个登记、最后完成
+      const first = ctx.effect({
+        start: async () => {
+          await barrier;
+          return leaseOf(log, "first", 1);
+        },
+      });
+      // 第二个登记、立刻完成
+      await ctx.effect({ start: () => leaseOf(log, "second", 2) });
+      release();
+      await first;
+    },
+  });
+  const host = new ExtensionHost();
+  await host.mount("g", [entry("probe", probe)]);
+  expect(host.inspect()[0]?.effects).toBe(2);
+  await host.unmount("g");
+  // 修之前这里是 ["dispose:first", "dispose:second"]——lease 完成才入栈，并行 start 按完成序排队
+  expect(log).toEqual(["dispose:second", "dispose:first"]);
+});

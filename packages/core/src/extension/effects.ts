@@ -1,5 +1,9 @@
 // EffectStack：一个 Fiber 拥有的全部 Effect，按登记顺序入栈、**LIFO** 卸。
 //
+// **栈位在登记那一刻占好**（`reserve()`），lease 到手再填（`fill()`）：两个并行的 start 谁先完成不改变它们的卸载顺序——
+// 卸载是登记序的逆序，不是完成序（2026-09-14 修；此前 lease 完成才入栈，并行 start 实测按完成序排队，
+// `docs/design/extensions.md` §9）。start 失败的那一位没有 lease，卸载跳过。
+//
 // 卸载顺序是契约：关闭登记闸 → abort → 等所有还没完成的 start settle → LIFO dispose。
 // 「异步回调不能在 disposer snapshot 之后偷偷注册新资源」靠两件事：闸关了之后 `ctx.effect()` 直接抛；
 // 闸关之前已经开始、之后才完成的 start，它的 lease 仍会入栈并在随后的 unwind 里被卸掉——
@@ -10,7 +14,10 @@ import type { Disposer, EffectLease, ReloadBoundary } from "./abi.ts";
 type EffectEntry = Readonly<{ boundary: ReloadBoundary; dispose: Disposer; label: string }>;
 
 export class EffectStack {
-  private readonly entries: EffectEntry[] = [];
+  /** 按登记顺序的栈位；null = 这一位的 start 还没完成或已失败（没有 lease 可卸）。 */
+  private readonly entries: (EffectEntry | null)[] = [];
+  /** 已填上 lease 的栈位数——`size` 报的是它，不是占了多少位。 */
+  private filled = 0;
   private readonly pendingStarts = new Set<Promise<unknown>>();
   /**
    * mount 期已失败的 start 的原因，直到第一次 settlePendingStarts() drain 为止一直留着。
@@ -27,7 +34,7 @@ export class EffectStack {
     return this.gate;
   }
   get size(): number {
-    return this.entries.length;
+    return this.filled;
   }
   get pending(): number {
     return this.pendingStarts.size;
@@ -52,8 +59,16 @@ export class EffectStack {
     return started;
   }
 
-  push(boundary: ReloadBoundary, lease: EffectLease<unknown>, label: string): void {
-    this.entries.push({ boundary, dispose: lease.dispose, label });
+  /** 登记时占一个栈位：位号就是登记顺序，start 完成得早晚不改变它。 */
+  reserve(): number {
+    this.entries.push(null);
+    return this.entries.length - 1;
+  }
+
+  /** start 完成、lease 到手：填进当初占的那一位。 */
+  fill(slot: number, boundary: ReloadBoundary, lease: EffectLease<unknown>, label: string): void {
+    this.entries[slot] = { boundary, dispose: lease.dispose, label };
+    this.filled++;
   }
 
   /** 登记闸关上：之后 `ctx.effect()` 抛 ExtensionDisposedError。 */
@@ -89,6 +104,8 @@ export class EffectStack {
     const failed: string[] = [];
     while (this.entries.length > 0) {
       const entry = this.entries.pop()!;
+      if (entry === null) continue; // 这一位的 start 没完成或失败了：没有 lease，无从卸
+      this.filled--;
       try {
         await entry.dispose();
       } catch (e) {
