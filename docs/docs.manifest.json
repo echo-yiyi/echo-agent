@@ -286,6 +286,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/proposed/2026-09-14-observation-document-store.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-parallel-tools.md",
       "bilingual": false
     },

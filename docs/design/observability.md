@@ -16,11 +16,14 @@
 - **观测不订阅、不转发事件协议，也不为观测往事件协议里加成员**（2026-09-11 拍板）。事件协议是功能模块：agent 状态要给前端实时展示，形状由「前端要展示什么」决定；观测是插进执行过程的节点，留下整体运行状态供事后分析评估，覆盖面由「复盘与评估要什么」决定。两者耦合的后果实测过：循环的观测曾经转手 `AgentEvent`，于是 reply / attempt 事件没投影时落成看不出含义的 `agent.custom_event`，Dream 与子 agent 因为不想广播给前端而传了空 `emit`，内部在账本里一条都没有。
 - **观测不判断进程死活**（2026-09-06 拍板）。观测只记别人做过的决定；没封口的 run 只说「未收尾」，不由观测推断它是崩了还是还在跑。`RunObservationStatus` 里的 `interrupted` 今天没有任何写者——将来若有管进程的那一层做了接管决定，由它把决定当事实交给观测记。会话死活另有其人，见[会话存活探针](../decisions/implemented/2026-09-09-session-alive-pid-probe.md)。
 - **不脱敏。** `content` 档把模型文本、思考、工具参数与结果**明文**写进盘上的库。`redact.ts` 只处理第三方异常对象（stack 只留 digest），不是内容脱敏层。谁开这一档，谁承担盘上有明文这件事。
-- **不做 retention / reopen / crash recovery**（列在「欠账」§8，不是本文要设计的东西）。
-- **canonical store 不是用户可换的端口。** in-memory 实现只供参考一致性测试，`createEcho()` 装不进去；能不能换是[公开线那条记录](../decisions/proposed/2026-09-07-observation-public-face.md)要拍的事。
+- **不做 reopen / crash recovery**（列在「欠账」§8，不是本文要设计的东西）。retention 的设计在 [观测的默认存储改成文档](../decisions/proposed/2026-09-14-observation-document-store.md)（proposed）。
+- **canonical store 今天不是用户可换的端口。** in-memory 实现只供参考一致性测试，`createEcho()` 装不进去。[公开线那条记录](../decisions/proposed/2026-09-07-observation-public-face.md)已拍「可注入」、未实现；注入的是哪一层，挂在[默认存储改成文档](../decisions/proposed/2026-09-14-observation-document-store.md)的待拍板里。
 - 面板长什么样归 UI，本文只说它读什么。
 
-**待拍板。** 一条，且卡着：[观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md) 的 A/B/C——650 行的类型面整份公开并冻结（A）、按「extension 作者要什么」划读面 / 写面（B）、还是公开但标 experimental（C）。不拍的代价写在那条记录里：线不画清，API 快照只能整份锁。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
+**待拍板。** 两条记录，本文都只指过去、不复述：
+
+- [观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)：B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部、store 可注入），**未实现**；本文仍按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
+- [观测的默认存储改成状态根里的文档，过期规则归产品](../decisions/proposed/2026-09-14-observation-document-store.md)：方向已拍（默认不用 SQLite、旧库不迁移），目录结构、提交点与四条细节待确认；实现后 §3、§5、§6、§8 按它重写。
 
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
@@ -186,7 +189,7 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 按「会不会随时间恶化」排：
 
-1. **没有 retention。** 库只涨不清，`content` 档下涨得更快。**类型与机制已经全部就位却空转**：`ObservationGapReason` 里有 `"retention"`、`types.ts` 有 `retention-gap` 的传输通知、RunIndex 有 `pruned` 标记、`query.ts` 注释写着「O3b 才会真的产生 pruned 行」——今天没有任何东西真的裁剪。这是唯一会随时间恶化的一条。
+1. **没有 retention。**（设计见 [默认存储改成文档](../decisions/proposed/2026-09-14-observation-document-store.md)，proposed）库只涨不清，`content` 档下涨得更快。**类型与机制已经全部就位却空转**：`ObservationGapReason` 里有 `"retention"`、`types.ts` 有 `retention-gap` 的传输通知、RunIndex 有 `pruned` 标记、`query.ts` 注释写着「O3b 才会真的产生 pruned 行」——今天没有任何东西真的裁剪。这是唯一会随时间恶化的一条。
 2. **降级后不自动 reopen**，**没有 crash recovery 的库层部分**（[sqlite-store.ts](../../packages/core/src/observability/sqlite-store.ts#symbol=SqliteCanonicalObservationStore) 头注自己写着「O3a 不做，O3b 做」）。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals 的第一条。
 3. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
 4. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
