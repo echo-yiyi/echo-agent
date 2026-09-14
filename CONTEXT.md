@@ -161,5 +161,5 @@ _Avoid_：批次、generation（代码里用它，文档用「代」）
 _Avoid_：内置插件、特权扩展
 
 **观测事实**：
-运行期发进观测层、JSON-safe、按 run 归档的一条记录。extension 经能力端口发，core 自己的能力经内部 sink 发。
-_Avoid_：日志、trace
+运行期发进观测层、JSON-safe 的一条记录，挂在它发生时所在的 run 下；run 之外发生的（extension 装卸、生命周期相位、装备变更、收件）进运行时活动。由执行节点上的探针当场记，与该节点给前端发的事件并列、互不依赖（[观测](docs/design/observability.md)）。extension 经能力端口发，core 自己的能力经内部 sink 发。
+_Avoid_：日志、trace、事件（`AgentEvent` / `LifecycleEvent` 是给前端展示的功能协议，不是观测的来源）
