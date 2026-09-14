@@ -1,5 +1,5 @@
 // ObservationRuntime（O3a）：完整 Runtime 里 canonical writer 的宿主——
-// 持有唯一的 Sequencer 与观测库写入端（生产装配里 SQLite 连接住在 Worker 线程，见 worker-store.ts），是 run 三条边界（`run.accepted / run.started / run.closed`）的**唯一 emission owner**，
+// 持有唯一的 Sequencer 与观测写入端（状态根里的文档，见 document-store.ts），是 run 三条边界（`run.accepted / run.started / run.closed`）的**唯一 emission owner**，
 // 并按 `capabilitySink(descriptor, owner)` 给各执行节点发探针（循环、压缩、Agent 自身、各能力模块）。
 // **不订阅、不转发 AgentEvent**：那是给壳的事件协议，观测是插桩（`docs/design/observability.md`）。
 //
@@ -9,6 +9,9 @@
 //   · `run.closed` 仍等它 COMMIT——它在 run 的活干完之后，`send()` 靠它如实报 `observationPersistence`；等待有界
 //     （`boundaryDeadlineMs`），到期即降级返回；
 //   · 观测层任何异常都不进 Agent 控制流——这里每个公开方法都不抛。
+//
+// 过期规则归产品（`expiry`），这里只执行：持锁之后（`activate()`）先补齐以前进程没写完的派生文件、再过期一次；
+// 之后每个 run 封口落盘再过期一次；`observations.expire()` 随时可调。都在后台跑、撞在一起时合并，交还 lease 或丢锁前停下。
 //
 // 由 `createAgent()` 构造并经 `attachObservationHost()` 挂到 Agent 上；低层 `new Agent()` 没有它。
 
@@ -20,12 +23,12 @@ import type { Model } from "../provider/types.ts";
 import { BUILTIN_GENERATION } from "../extension/builtin.ts";
 import { snapshotRunModelBinding } from "./assembly.ts";
 import { RUN_ASSEMBLY_RECORD, type BoundaryObservationDraft, type RunAcceptedBodyV1, type RunAssemblyBodyV1, type RunObservationHeaderSeed, type RunStartedBodyV1 } from "./draft.ts";
-import { LiveEchoObservations, type ObservationReadPort } from "./query.ts";
+import { LiveEchoObservations } from "./query.ts";
 import { factSinkToIngest, type CapabilityFactDescriptor, type CapabilityFactSink } from "./fact-sink.ts";
 import { sha256Hex } from "./hash.ts";
 import { redactedLabel } from "./redact.ts";
 import { ObservationSequencer, type SequencerLimits } from "./sequencer.ts";
-import type { CanonicalObservationStore } from "./store.ts";
+import type { DocumentObservationStore } from "./document-store.ts";
 import type {
   AgentAssemblyObservationSnapshot,
   EchoObservableState,
@@ -36,6 +39,7 @@ import type {
   RunClosedBodyInput,
   RunClosedOutcomeObservation,
   RunIndexEntryV1,
+  RunObservationHeader,
   RuntimePhase,
 } from "./types.ts";
 import { OBSERVATION_BOUNDARY_LIMITS as BOUNDARY_LIMITS } from "./types.ts";
@@ -55,24 +59,26 @@ export const MEMORY_ENTRY_ID = "echo:memory";
 export const TASKS_ENTRY_ID = "echo:tasks";
 export const SCHEDULER_ENTRY_ID = "echo:scheduler";
 
-/**
- * Runtime 持有的观测库写入端：canonical store 本体 + live 查询要的读方法 + path key + 关库。
- * `createAgent()` 给 `WorkerObservationStore`（主线程不碰 SQLite）；测试可以直接给同步的 `SqliteCanonicalObservationStore`。
- */
-export type ObservationRuntimeStore = CanonicalObservationStore &
-  ObservationReadPort &
-  Readonly<{
-    readPathDigestKey(): Uint8Array;
-    close(): void | Promise<void>;
-  }>;
+/** 过期规则的返回值：要删的 run，与 run 之外记录的回收线。都不给 = 这一次什么都不删。 */
+export type ObservationExpiryDecision = Readonly<{
+  /** 要删掉的 run。当前进程还在跟踪的 run 拒删（报诊断）。 */
+  runs?: readonly string[];
+  /** 早于这个时刻（毫秒时间戳，比记录的 observedAt）的 run 之外记录可以回收。不给 = run 之外的记录不删。 */
+  activityBefore?: number;
+}>;
+
+/** 产品给的过期规则：拿到全部 run 的 header（按 acceptedAt 倒序）与此刻，返回要删什么。不给规则 = 永不删。 */
+export type ObservationExpiryRule = (runs: readonly RunObservationHeader[], now: number) => ObservationExpiryDecision;
 
 export type ObservationRuntimeOptions = Readonly<{
   runtimeId: string;
   /** RuntimeGeneration；O3a 只有 boot 一代。 */
   runtimeGeneration: string;
   capturePolicy: ObservationCapturePolicy;
-  store: ObservationRuntimeStore;
+  store: DocumentObservationStore;
   clock: Clock;
+  /** 过期规则（产品给）。不给 = 永不删。 */
+  expiry?: ObservationExpiryRule;
   /** `createAgent()` 封口的 builtin 槽快照；每个 run 的 `run.assembly` 记录引用它。 */
   assembly: AgentAssemblyObservationSnapshot;
   limits?: Partial<SequencerLimits>;
@@ -122,7 +128,7 @@ export class ObservationRuntime {
   readonly runtimeGeneration: string;
   readonly capturePolicy: ObservationCapturePolicy;
   readonly assembly: AgentAssemblyObservationSnapshot;
-  readonly store: ObservationRuntimeStore;
+  readonly store: DocumentObservationStore;
   readonly sequencer: ObservationSequencer;
   /** live 查询面（`echo.observations`）：同一个 Sequencer + 同一个写入端的只读查询。 */
   readonly observations: LiveEchoObservations;
@@ -133,6 +139,13 @@ export class ObservationRuntime {
   private scopeSupplier: ObservationScopeSupplier = () => ({});
   private phase: RuntimePhase = "ready";
   private disposing: Promise<void> | undefined;
+  private readonly expiry: ObservationExpiryRule | undefined;
+  /** 持着 lease：补齐与过期只在这期间做。 */
+  private active = false;
+  /** 在跑的补齐 / 过期；撞上时记一笔跑完再来一次。 */
+  private maintenance: Promise<void> | null = null;
+  private maintenanceAgain = false;
+  private repairPending = false;
 
   constructor(opts: ObservationRuntimeOptions) {
     this.runtimeId = opts.runtimeId;
@@ -141,6 +154,7 @@ export class ObservationRuntime {
     this.assembly = opts.assembly;
     this.store = opts.store;
     this.clock = opts.clock;
+    this.expiry = opts.expiry;
     this.pathDigestKeyBytes = opts.store.readPathDigestKey();
     this.sequencer = new ObservationSequencer({
       runtimeId: opts.runtimeId,
@@ -158,6 +172,7 @@ export class ObservationRuntime {
       store: opts.store,
       clock: opts.clock,
       phase: () => this.phase,
+      expire: () => this.expireNow(),
     });
   }
 
@@ -280,14 +295,81 @@ export class ObservationRuntime {
       await this.sequencer.appendBoundary(this.boundary("run.closed", "event", this.runScope(input.runId, identity), now, body));
     } catch (e) {
       this.report({ code: "observation_boundary_failed", message: `run ${input.runId}：run.closed 落不下去（outcome 不变，persistence degraded）：${redactedLabel(e)}` });
+      return;
+    }
+    // 封口落盘了：按规则过期一次（后台，不让 send() 等）
+    if (this.expiry !== undefined) void this.expireNow();
+  }
+
+  /**
+   * 拿到 lease 之后（lease 生命周期端口的 `afterLeaseAcquired`）：从此可以碰别的进程留下的东西。
+   * 立即返回，活放后台：先补齐以前进程没写完的派生文件，再按规则过期一次。
+   */
+  activate(): void {
+    this.active = true;
+    this.repairPending = true;
+    void this.runMaintenance();
+  }
+
+  /** 交还 lease 或丢锁之前：不再开始新的补齐 / 过期，等在跑的那一次做完（丢锁时调用方不必等）。 */
+  async deactivate(): Promise<void> {
+    this.active = false;
+    this.maintenanceAgain = false;
+    await this.maintenance;
+  }
+
+  /** 按规则过期一次。没规则、没持 lease 时是空操作；撞上在跑的就记一笔跑完再来。不抛。 */
+  expireNow(): Promise<void> {
+    if (this.expiry === undefined || !this.active) return Promise.resolve();
+    return this.runMaintenance();
+  }
+
+  private runMaintenance(): Promise<void> {
+    if (this.maintenance !== null) {
+      this.maintenanceAgain = true;
+      return this.maintenance;
+    }
+    const work = (async () => {
+      do {
+        this.maintenanceAgain = false;
+        if (!this.active) return;
+        if (this.repairPending) {
+          this.repairPending = false;
+          try {
+            await this.store.repairDerived();
+          } catch (e) {
+            this.report({ code: "observation_repair_failed", message: `补齐观测派生文件失败：${redactedLabel(e)}` });
+          }
+        }
+        if (this.active && this.expiry !== undefined) await this.expireOnce(this.expiry);
+      } while (this.maintenanceAgain && this.active);
+    })().finally(() => {
+      this.maintenance = null;
+    });
+    this.maintenance = work;
+    return work;
+  }
+
+  private async expireOnce(rule: ObservationExpiryRule): Promise<void> {
+    try {
+      const headers = (await this.store.readAllRunIndex()).map((e) => e.header);
+      const decision = rule(headers, this.clock.now());
+      if (!this.active) return;
+      const outcome = await this.store.expire(decision, (runId) => this.sequencer.isTrackingRun(runId));
+      if (outcome.refusedRuns.length > 0) {
+        this.report({ code: "observation_expiry_refused", message: `过期规则点名了还在跑的 run，不删：${outcome.refusedRuns.join(", ")}` });
+      }
+    } catch (e) {
+      this.report({ code: "observation_expiry_failed", message: `观测过期失败：${redactedLabel(e)}` });
     }
   }
 
-  /** 收摊：先把 ring 里的尾巴写完，再关库（worker 版连线程一起结束）。single-flight。 */
+  /** 收摊：停下补齐 / 过期，把 ring 里的尾巴写完，再等写入端的队排空。single-flight。 */
   dispose(): Promise<void> {
     return (this.disposing ??= (async () => {
       this.phase = "disposing";
       try {
+        await this.deactivate();
         await this.sequencer.flushPending();
       } finally {
         try {

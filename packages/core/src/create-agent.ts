@@ -51,8 +51,8 @@ import { sealAgentAssemblyObservation, type BuiltinSlotContribution } from "./ob
 import { attachObservationHost } from "./observability/host-wiring.ts";
 import { ObservationRuntime } from "./observability/runtime.ts";
 import type { ObservationCapturePolicy } from "./observability/types.ts";
-import { MEMORY_PATH, observationDatabasePath } from "./observability/sqlite-store.ts";
-import { WorkerObservationStore } from "./observability/worker-store.ts";
+import { DocumentObservationStore, OBSERVATION_STORE_DIR, observationStorePath } from "./observability/document-store.ts";
+import type { ObservationExpiryRule } from "./observability/runtime.ts";
 import type { AgentRef } from "./agent-def/types.ts";
 
 /** 不给产品名时的缺省（2026-09-07，原 `DEFAULT_AGENT_ID`）。 */
@@ -108,11 +108,6 @@ const DEFAULT_OBSERVATION_CAPTURE: ObservationCapturePolicy = "metadata";
  * 正常一次 COMMIT 亚毫秒；磁盘卡住时最多等这么久就降级返回，不用 Sequencer 缺省的 5 s。
  */
 const OBSERVATION_BOUNDARY_DEADLINE_MS = 500;
-/**
- * SQLite 的 busy_timeout 是**同步等待**（占着事件循环）。状态根有单写者锁、WAL 下 reader 不挡 writer，
- * 正常永远不该等；真等到了就是接线错误，快点失败让 Sequencer 降级，别拖主线 5 s。
- */
-const OBSERVATION_BUSY_TIMEOUT_MS = 250;
 const TASKS_FILE = "tasks.json";
 const SKILLS_DIR = "skills";
 const SESSIONS_DIR = "sessions";
@@ -228,14 +223,20 @@ export type CreateAgentOptions = {
   allowNetwork?: boolean;
   /**
    * 观测。`capture` 是采集档（OR9），缺省 `"metadata"`：只记形状与计数——工具名、耗时、参数与结果的字节数、
-   * token 用量——没有正文。`"content"` 才把模型回复文本、工具 `params` 与结果正文、报错消息写进状态根的
-   * `observability/observations.sqlite`；`"off"` 只留 run 边界，不投影任何 fact。
+   * token 用量——没有正文。`"content"` 才把模型回复文本、工具 `params` 与结果正文、报错消息写进观测文档
+   * （缺省在状态根的 `observability/` 下）；`"off"` 只留 run 边界，不投影任何 fact。
+   *
+   * `store`：观测文档放在哪。缺省 = 状态根的存储（`store`，没给就是状态根目录），前缀 `observability/`。
+   * 注入的存储由调用方持有，这里不关它。
+   *
+   * `expiry`：过期规则——拿到全部 run 的 header 与此刻，返回要删的 run 与 run 之外记录的回收线。
+   * **不给 = 永不删**，core 不内置任何规则。启动拿到 lease 之后、每个 run 封口之后各执行一次，另见 `echo.observations.expire()`。
    *
    * 打开 `"content"` 之前要知道的三件事（2026-09-04）：正文**明文落盘、不脱敏**（与会话记录同一状态根、同一暴露面）；
    * 单条记录超 64 KiB 会成 gap、run 的 integrity 变 partial（长 bash 输出、大文件读取）；token 级 delta 逐条成记录，
    * 一轮回复几百条，体积可观。
    */
-  observation?: { capture?: ObservationCapturePolicy };
+  observation?: { capture?: ObservationCapturePolicy; store?: StorageDir; expiry?: ObservationExpiryRule };
 
   /**
    * 其余一律透传给低层 `Agent`。
@@ -431,18 +432,15 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   // 同一个仓库换个 worktree 路径就换一套项目记忆,不是想要的行为。
   const memoryWorkspace = opts.workspace ?? "/";
 
-  // canonical observation store：open / PRAGMA / migrate 任一失败 = 装配失败（fail-loud）——
-  // 那是状态根坏了 / 文件系统不支持，启动时就该看见。起来之后的写失败**不再**影响 run
-  // （观测层只降级，见 observability/runtime.ts 头注）。SQLite 连接住在 Worker 线程：主线程不做同步磁盘调用，
-  // 磁盘卡住或库被锁时 agent 循环照跑（observability/worker-store.ts 头注）。
-  //
-  // **注入了自定义 store 又没点名 stateDir 时，观测库落内存**（2026-09-07）。此前它无条件按
-  // `<ECHO_HOME>/sessions/<id>` 落真盘——于是每一次 `createAgent({ store: new InMemoryDir() })`
-  // 都在开发机的家目录里留一个真目录。实测：805 个空壳、68 MB，里面只有观测库，
-  // 连测试夹具的会话 id（`bad` / `main` / `s`）都在。
-  // 与 `sharedStore ?? store` 同一条理由：说了「我自己给存储」的调用方，不该发现东西仍旧写进了真盘。
-  const observationPath = opts.store !== undefined && opts.stateDir === undefined ? MEMORY_PATH : observationDatabasePath(stateDir);
-  const observationStore = await WorkerObservationStore.open({ path: observationPath, busyTimeoutMs: OBSERVATION_BUSY_TIMEOUT_MS });
+  // 观测写入端：状态根里的文档（observability/document-store.ts），缺省跟着状态根的存储走——注入了 `InMemoryDir`
+  // 观测就在内存，不会在真盘上留目录（与 `sharedStore ?? store` 同一条理由：说了「我自己给存储」的调用方，
+  // 不该发现东西仍旧写进了真盘）。开库只读或建 `key.json`，失败 = 装配失败（fail-loud）；起来之后的写失败
+  // **不再**影响 run（观测层只降级，见 observability/runtime.ts 头注）。
+  const observationDir = opts.observation?.store ?? store;
+  const observationStore = await DocumentObservationStore.open({
+    dir: observationDir,
+    path: opts.observation?.store !== undefined ? `(observation.store)/${OBSERVATION_STORE_DIR}` : opts.store !== undefined ? `(store)/${OBSERVATION_STORE_DIR}` : observationStorePath(stateDir),
+  });
 
   // 装配现场：这里造出来的每个值都有**唯一一个** dispose owner，且转移是原子的。
   // 它撑住的是「值已经造好、`new Agent()` 还没成功」那个窗口——上一版那时抛错，root store 就再没人关过。
@@ -520,6 +518,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       store: observationStore,
       clock: opts.clock ?? systemClock,
       limits: { boundaryDeadlineMs: OBSERVATION_BOUNDARY_DEADLINE_MS },
+      ...(opts.observation?.expiry === undefined ? {} : { expiry: opts.observation.expiry }),
       assembly: sealAgentAssemblyObservation(
         builtinSlotContributions({
           customStore: opts.store !== undefined,
@@ -576,7 +575,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
         // 持有证明（review 2026-09-07）：写入格 `installed` 才是「这一段此刻归我」。`dispose()` 跑在
         // `doStop()` 的 revoke 之前，所以正常收摊时格还是 installed；丢锁后格已 revoke，一个字都不删。
         // 「观测库在内存里」才跳过清理——`store` + `stateDir` 同时给时观测库落真盘（review 2026-09-07：此前按 store 有无判，那种装配留下空壳目录）
-        { dispose: () => removeIfEmptySession(stateDir, observationPath === MEMORY_PATH, () => assembly.writeGate.cell.state() === "installed") },
+        { dispose: () => removeIfEmptySession(stateDir, opts.store === undefined, () => assembly.writeGate.cell.state() === "installed") },
       ],
     });
 
@@ -587,13 +586,19 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     attachStateHost(agent, {
       gate: ledger.writeGate,
       adoption: ledger,
-      // 观测 writer 的封口（review 2026-09-07）：它有自己的 SQLite 连接、不经写入闸，所以只能由这条 port 管——
-      // 正常交还前把 ring 里的尾巴 flush 掉（此时 lease 还在手上）；丢锁、或失败后交还，则只封不 flush。
-      // 此前 `Agent` 一直在调这两个钩子，装配侧却从没提供过实现：丢锁后 `stop()` 照样往已经归别人的
-      // 状态根里写观测库。
+      // 观测 writer 的持锁期（review 2026-09-07）：它不经写入闸，所以只能由这条 port 管——
+      // 拿到 lease 之后才补齐以前进程没写完的派生文件、执行过期（后台，不拖启动）；
+      // 正常交还前停下补齐 / 过期、把 ring 里的尾巴 flush 掉（此时 lease 还在手上）；丢锁、或失败后交还，则只封不 flush。
       leaseLifecycle: {
-        beforeLeaseRelease: () => observation.sequencer.flushPending(),
-        onLeaseLost: async (reason) => observation.sequencer.markLeaseLost(reason),
+        afterLeaseAcquired: async () => observation.activate(),
+        beforeLeaseRelease: async () => {
+          await observation.deactivate();
+          await observation.sequencer.flushPending();
+        },
+        onLeaseLost: async (reason) => {
+          void observation.deactivate();
+          observation.sequencer.markLeaseLost(reason);
+        },
       },
     });
     // canonical writer 同样不进公共 `AgentOptions`（observability/host-wiring.ts 头注）
@@ -811,13 +816,13 @@ const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.jso
  * 不能只看「除了 observability 什么都没有」：收摊会无条件刷一次 `tasks.json`（哪怕一条任务都没有），
  * 于是那条判据永远不满足（实测）。
  *
- * 观测库开在内存里时（注入了自定义 store 又没点名 `stateDir`）**不动**：那时这个路径下本来就没有我们写的东西，
- * 而路径本身可能是调用方另有用处的目录。给了 `stateDir` 的照常清——观测库就在那下面。
+ * 状态根不是本函数建的 `FileDir` 时（注入了自定义 store）**不动**：那时这个路径下本来就没有我们写的东西（观测文档跟着
+ * 注入的 store 走），而路径本身可能是调用方另有用处的目录。
  *
  * 失败只当没发生：收摊阶段为了删一个空目录而抛错，代价远大于留下它。
  */
-async function removeIfEmptySession(stateDir: string, observationInMemory: boolean, holdsLease: () => boolean): Promise<void> {
-  if (observationInMemory) return;
+async function removeIfEmptySession(stateDir: string, ownsStateDir: boolean, holdsLease: () => boolean): Promise<void> {
+  if (!ownsStateDir) return;
   if (!holdsLease()) return;
   try {
     const entries = await readdir(stateDir);

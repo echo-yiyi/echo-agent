@@ -1690,6 +1690,8 @@ export class Agent {
         // acquire 成功后才有写入身份：**cell 与根闸同一步装上**，随后才打开 restore-migration。
         // 装之前任何写都 fail-closed——PREPARE / 尚未 start 的 view 就是这个状态。
         this.gate?.install({ agentInstanceId: this.agentInstanceId, acquisitionId: crypto.randomUUID() });
+        // 持锁之后的 Host 自有工作（完整 Runtime：补齐以前进程没写完的观测派生文件、按规则过期）——实现立即返回，不拖启动
+        await this.leaseLifecycle?.afterLeaseAcquired?.();
       }
       // 恢复期的写（session 建档、legacy migration、任务回写）走 restore-migration；durable ingress 从
       // 持有租约起就可写（lane 表），两者到 revoke fence 才关。

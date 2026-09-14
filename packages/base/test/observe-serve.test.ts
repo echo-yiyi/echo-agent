@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, createProvider, createProviderStreams, environmentMessage, observationDatabasePath, toolError, type Echo, type ModelTool, type Provider } from "@echo-agent/core";
+import { createEcho, createProvider, createProviderStreams, environmentMessage, observationStorePath, toolError, type Echo, type ModelTool, type Provider } from "@echo-agent/core";
 import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { OBSERVE_DEFAULT_PORT, parseObserveArgs, runObserve } from "../src/observe.ts";
 import { observePageHtml, startObserveServer } from "../src/observe/server.ts";
@@ -387,7 +387,7 @@ test("serve：/ 出页面，/api/runs、/api/runs/<id>、/api/health 出 reader 
     const health = (await (await fetch(`${server.url}/api/health`)).json()) as { sessionsRoot: string; sessions: { sessionId: string; path: string; counts: { runs: number }; heads: unknown[] }[] };
     expect(health.sessionsRoot).toBe(dir);
     expect(health.sessions.map((s) => s.sessionId)).toEqual([echo.agent.state.sessionId!]);
-    expect(health.sessions[0]!.path).toBe(observationDatabasePath(stateRoot));
+    expect(health.sessions[0]!.path).toBe(observationStorePath(stateRoot));
     expect(health.sessions[0]!.counts.runs).toBe(1);
     expect(health.sessions[0]!.heads.length).toBe(1);
   } finally {

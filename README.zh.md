@@ -71,7 +71,7 @@ MiniMax adapter 目前有 fixture 覆盖，但还没有用真实服务验证。
 
 ## 看一次 run 做了什么
 
-每次 run 都会把自己记进会话状态根下的 `observations.sqlite`：run 的起止、回应 / 轮 / 尝试的嵌套、每一次模型生成与工具调用，以及它们背后的能力事实（记忆、任务、闹钟、收件）。记多少由 `--observe <档>` 决定。
+每次 run 都会把自己以文档的形式记进会话状态根下的 `observability/`：run 的起止、回应 / 轮 / 尝试的嵌套、每一次模型生成与工具调用，以及它们背后的能力事实（记忆、任务、闹钟、收件）。记多少由 `--observe <档>` 决定。除非产品设了过期规则（`createEcho()` 的 `observation.expiry`），否则一条都不删；`echo-agent` 没有设。
 
 | 档位 | 落盘的内容 |
 |---|---|
@@ -84,7 +84,7 @@ MiniMax adapter 目前有 fixture 覆盖，但还没有用真实服务验证。
 ```bash
 echo-agent observe last          # the most recent run, as text
 echo-agent observe show <run-id>
-echo-agent observe health        # where the database is, and how much is in it
+echo-agent observe health        # where the observation store is, and how much is in it
 echo-agent observe serve         # local read-only panel, Ctrl+C to stop
 ```
 

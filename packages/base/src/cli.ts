@@ -83,7 +83,7 @@ export type CliOptions = {
   serve: boolean;
   /**
    * `--observe <档>`：观测采集档。**不给 = 没说**，由 core 缺省（metadata）。`content` 把模型文本、
-   * 工具参数与结果正文明文写进状态根的 observations.sqlite——看 `echo-agent observe serve` 时才需要。
+   * 工具参数与结果正文明文写进状态根的观测文档（observability/）——看 `echo-agent observe serve` 时才需要。
    */
   observe?: ObservationCapturePolicy;
 };

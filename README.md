@@ -71,7 +71,7 @@ Every launch starts a new session. `--continue` resumes the latest session of th
 
 ## See what a run did
 
-Every run writes a record of itself to `observations.sqlite` under the session state root: run boundaries, the reply / turn / attempt nesting, each model generation and tool call, and the capability facts behind them (memory, tasks, schedules, inbox). `--observe <policy>` chooses how much is kept.
+Every run writes a record of itself as documents under `observability/` in the session state root: run boundaries, the reply / turn / attempt nesting, each model generation and tool call, and the capability facts behind them (memory, tasks, schedules, inbox). `--observe <policy>` chooses how much is kept. Nothing is deleted unless the product sets an expiry rule (`observation.expiry` in `createEcho()`); `echo-agent` sets none.
 
 | Policy | What is written |
 |---|---|
@@ -84,7 +84,7 @@ The `observe` subcommand reads what is already on disk. It never starts an agent
 ```bash
 echo-agent observe last          # the most recent run, as text
 echo-agent observe show <run-id>
-echo-agent observe health        # where the database is, and how much is in it
+echo-agent observe health        # where the observation store is, and how much is in it
 echo-agent observe serve         # local read-only panel, Ctrl+C to stop
 ```
 

@@ -399,10 +399,57 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   );
 
   test(
+    "Node：装 tarball → createEcho 完整装配 → send → echo.observations 与离线 reader 都读得回（观测是状态根里的文档，不靠 bun:sqlite）",
+    () => {
+      const { consumer, cleanup } = packAndInstall();
+      try {
+        // 2026-09-14 观测改文档存储的验收之一：此前 createEcho 在 Node 下起不来（观测库走 bun:sqlite），
+        // 只有 new Agent 那条能跑。现在完整装配（lease、会话、观测写入与读回）都得在 Node 上成立。
+        writeFileSync(
+          join(consumer, "echo.mjs"),
+          [
+            "import { mkdtempSync } from \"node:fs\";",
+            "import { tmpdir } from \"node:os\";",
+            "import { join } from \"node:path\";",
+            "import { createEcho, createProvider, createProviderStreams, openObservationReader } from \"@echo-agent/core\";",
+            "import { scriptedDialect, textTurn } from \"@echo-agent/core/testing\";",
+            "",
+            "process.env.ECHO_HOME = mkdtempSync(join(tmpdir(), \"echo-dist-home-\"));",
+            "const stateDir = join(mkdtempSync(join(tmpdir(), \"echo-dist-state-\")), \"state\");",
+            "const echo = await createEcho({",
+            "  provider: createProvider({ id: \"s\", auth: { apiKey: { resolve: async () => ({ apiKey: \"x\" }) } }, models: [{ id: \"only\", api: \"fake\" }], api: createProviderStreams(scriptedDialect([textTurn(\"hi\")])) }),",
+            "  stateDir,",
+            "  allowNetwork: false,",
+            "  withoutMemory: true,",
+            "  extensionDirs: [],",
+            "});",
+            "await echo.agent.start();",
+            "const r = await echo.send(\"x\");",
+            "const live = await echo.observations.getRun(r.runId);",
+            "await echo.stop();",
+            "const reader = await openObservationReader({ stateRoot: stateDir });",
+            "const offline = await reader.getRun(r.runId);",
+            "await reader.close();",
+            "console.log(JSON.stringify({ outcome: r.outcome.kind, persistence: r.observationPersistence, live: live.kind, offline: offline.kind }));",
+          ].join("\n"),
+        );
+
+        const run = sh(["node", "echo.mjs"], consumer);
+        expect(run.ok, `Node 下 createEcho 跑失败：\n${run.out}`).toBe(true);
+        const line = run.out.split("\n").filter(Boolean).at(-1) ?? "{}";
+        expect(JSON.parse(line)).toEqual({ outcome: "completed", persistence: "stored", live: "found", offline: "found" });
+      } finally {
+        cleanup();
+      }
+    },
+    180_000,
+  );
+
+  test(
     "Node：热部署的机制——复制子目录快照再 import 拿到新代码（相对依赖跟着刷）、Host.replace() 在 dist 产物上换代",
     () => {
-      // 热部署的 Node 侧证据。**验的是机制不是装配**：`createEcho()` 今天在 Node 下起不来——`createAgent()` 开观测库
-      // 走 `bun:sqlite`（既有限制，上面那条 Node 门也只跑 `new Agent`）。所以这里照 `create-echo.ts` 的做法手工走一遍
+      // 热部署的 Node 侧证据。**验的是机制不是装配**：写这条时 `createEcho()` 在 Node 下起不来（观测库走 `bun:sqlite`；
+      // 2026-09-14 观测改成文档存储后已不再挡，这条仍只验机制）。所以这里照 `create-echo.ts` 的做法手工走一遍
       // Node 独有的两截：`fs.cp` 整棵复制 + 经 realpath 的 `file:` URL import 能拿到新模块且 `./helper.mjs` 是新的，
       // 以及 `ExtensionHost.replace()` 在 dist 产物上先卸后装。只在 Bun 上绿就只对一半人成立。
       const { consumer, cleanup } = packAndInstall();

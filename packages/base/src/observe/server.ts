@@ -5,10 +5,10 @@
 //   GET /api/runs?limit          各段会话的 run 合并后按 acceptedAt 倒序的一页 header + 这页用到的会话（产品名 / workspace）
 //   GET /api/runs/<run-id>       `getRun()` → `RunObservationViewModel`（renderer 的 json 格式，UI 消费同一份 ViewModel）
 //   GET /api/activity?limit      run 之外的记录（inbox 收件 / ack、闹钟投递……）合并后按 observedAt 倒序，带 sessionId
-//   GET /api/health              会话根、每段的库路径 / runtime heads / 计数 / 最近 run
-// reader 的每次查询都是短事务，页面轮询不会让 WAL 长住。
+//   GET /api/health              会话根、每段的观测目录 / runtime heads / 计数 / 最近 run
+// reader 只读 rename 完成的观测文档，页面轮询与正在写的 agent 互不干扰。
 //
-// 观测库归 session（状态根 = session 目录，2026-09-03），agent 集群里几段并行——面板缺省把会话根下**全部**有库的段
+// 观测库归 session（状态根 = session 目录，2026-09-03），agent 集群里几段并行——面板缺省把会话根下**全部**有观测的段
 // 一起看，`--session` 才收窄到一段。`echo-agent` 与 `echo-coding` 缺省共用一个会话根，产品名（`SessionInfo.agent`）
 // 与 workspace 是把它们分开看的依据。
 
@@ -118,7 +118,6 @@ export function startObserveServer(opts: ObserveServerOptions): ObserveServer {
         if (m !== null) {
           const lookup = await readers.getRun(decodeURIComponent(m[1]!));
           if (lookup.kind === "unknown") return json({ kind: "unknown" }, 404);
-          if (lookup.kind === "pruned") return json({ kind: "pruned", header: lookup.header, gaps: lookup.gaps });
           const rendered = renderRunObservation(lookup.observation, { format: "json" });
           return new Response(rendered.content, { headers: { "content-type": rendered.mediaType, "cache-control": "no-store" } });
         }

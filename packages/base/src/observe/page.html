@@ -1029,11 +1029,6 @@ function renderDetail() {
     box.append(el("div", { class: "empty" }, STATE.runs.length === 0 ? "还没有 run 可看。" : "选一条 run。"));
     return;
   }
-  if (vm.kind === "pruned") {
-    box.append(el("div", { class: "head" }, el("span", { class: "title mono", text: vm.header.runId }), statusMark(LEX.runStatus[vm.header.status], vm.header.status)),
-      el("p", { class: "muted", text: "这条 run 的记录 body 已被清理（retention），只剩 header 与缺口。" }));
-    return;
-  }
   const h = vm.header;
   const sk = statusKey(h, vm.outcome);
   // 没封口的 run 只说事实：最后一条记录是什么时候。「已跑 N 秒」是在替进程说它还活着，离线读者说不了这句话。
@@ -1235,7 +1230,7 @@ async function loadRuns() {
     // 副标题只放会变的两个数；会话根与「只读」那句是常量，进 title（页头一行装不下就会换行，把标题挤下去）
     const desc = document.getElementById("desc");
     desc.textContent = `${STATE.runs.length} 条 run · ${sessions} 段会话`;
-    desc.title = `${STATE.root}\n只读轮询 SQLite，agent 跑着也能看`;
+    desc.title = `${STATE.root}\n只读轮询观测文档，agent 跑着也能看`;
   } catch (e) {
     document.getElementById("desc").textContent = `连不上 observe 服务：${e.message}。它退出了？重新跑 echo-agent observe serve`;
   }

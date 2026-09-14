@@ -329,7 +329,7 @@ export type RunObservationHeader = Readonly<{
   persistence: "stored" | "degraded";
 }>;
 
-/** RunIndex 行（`observation_run_index`）：retention 之后 header 的唯一真相源；与 records 同事务更新。 */
+/** 一个 run 的 RunIndex（观测目录里的 `runs/<runId>.json`）：header 的唯一真相源；与这个 run 的 records 在同一个批文件里提交。 */
 export type RunIndexEntryV1 = Readonly<{
   schemaVersion: 1;
   runtimeId: string;
@@ -340,8 +340,6 @@ export type RunIndexEntryV1 = Readonly<{
   header: RunObservationHeader;
   firstSeq: number;
   lastSeq: number;
-  bodyState: "retained" | "pruned";
-  prunedAt?: number;
 }>;
 
 /** 一次 run 的硬产物：header + 冻结快照 + records + 派生的 gaps / summary；整体可按 canonical JSON round-trip。 */
@@ -361,15 +359,8 @@ export type RunObservation = RunObservationHeader &
     summary: RunObservationSummary;
   }>;
 
-/** `getRun()` / `lastRun()` 的三态：found / pruned（header 还在、body 已清）/ unknown（从未有过或已出 header 窗口）。 */
-export type RunLookupResult =
-  | Readonly<{ kind: "found"; observation: RunObservation }>
-  | Readonly<{
-      kind: "pruned";
-      header: RunObservationHeader;
-      gaps: readonly ObservationGap[];
-    }>
-  | Readonly<{ kind: "unknown" }>;
+/** `getRun()` / `lastRun()` 的两态：found / unknown（从未有过，或已被过期规则删掉）。 */
+export type RunLookupResult = Readonly<{ kind: "found"; observation: RunObservation }> | Readonly<{ kind: "unknown" }>;
 
 /* ══════════════════ gap 三族与 sink / persistence health ══════════════════ */
 
@@ -544,6 +535,11 @@ export interface EchoObservations {
   listRuns(options?: ListRunsOptions): Promise<RunObservationPage>;
   snapshot(): Promise<EchoObservationSnapshot>;
   subscribe(options: ObservationSubscribeOptions): Promise<() => void>;
+  /**
+   * 现在就按 `observation.expiry` 规则过期一次。core 自己也会在启动拿到 lease 之后、每个 run 封口之后各调一次；
+   * 这个入口给要自己挑时机的使用方。没给规则、或没持 lease（还没 start / 已经 stop / 丢锁）时是空操作。不抛：失败进诊断。
+   */
+  expire(): Promise<void>;
 }
 
 /** 离线 reader（observe CLI 的唯一入口）：read-only 连接，不取 StateLock、不起 Runtime；用完必须 `close()`。 */

@@ -531,7 +531,7 @@ describe("live 扇出", () => {
 
   test("慢订阅者：队列满只出 SinkDeliveryGap（exclusive 区间），canonical 不受影响", async () => {
     const h = harness({ subscriberQueueCapacity: 1 });
-    const items: (ObservationEnvelope | SinkDeliveryGap)[] = [];
+    const items: ObservationSubscribeItem[] = [];
     h.seq.subscribe({ afterSeq: 0, sinkId: "slow", listener: (i) => items.push(i) });
     for (let i = 0; i < 4; i++) h.seq.offer(bounded({ i }));
     await h.flush();

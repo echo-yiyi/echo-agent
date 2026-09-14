@@ -46,7 +46,7 @@ export const INTEGRITY: Readonly<Record<string, Term>> = {
 
 export const PERSISTENCE: Readonly<Record<string, Term>> = {
   stored: { zh: "已落盘", en: "stored", tone: "positive", hint: "run.closed 已 COMMIT 且读回可见" },
-  degraded: { zh: "未落盘", en: "degraded", tone: "caution", hint: "封口那笔没写进 SQLite（writer 降级 / 到期）；agent 的 outcome 不受影响" },
+  degraded: { zh: "未落盘", en: "degraded", tone: "caution", hint: "封口那笔没落盘（writer 降级 / 到期）；agent 的 outcome 不受影响" },
 };
 
 /**

@@ -3,35 +3,32 @@
 > 状态：已实现并在用（本文写的是**现状**，不是目标形态）；公开面尚未拍板，见「待拍板」<br>
 > 读者：要读观测记录排查问题、给观测加事实、或把观测接到别处的人<br>
 > 假设已读：[Run Loop 的四层](run-loop-layers.md)（run / reply / turn / attempt 的定义，本文直接用）、[会话就是状态根](sessions.md)（观测库住在哪一层）<br>
-> 决策记录（本文只指向，论证在记录里）：[观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)（**proposed**，A/B/C 未拍）
+> 决策记录（本文只指向，论证在记录里）：[观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)（B 已拍、未实现）、[观测的默认存储改成状态根里的文档，过期规则归产品](../decisions/implemented/2026-09-14-observation-document-store.md)
 
 ## 导读
 
 **解决什么。** agent 跑完一次，除了终端上滚过去的字，什么都不剩。会话目录里的 `entries/` 是**功能用的回放队列**（模型要求原样带回上一轮的 reasoning，所以它必须留），不是给人读的历史：它没有时间、没有耗时、没有嵌套、没有失败原因，也不记「这次 run 装配了哪些 extension、绑了哪个模型」。想回答「这次为什么慢」「哪一步失败了」「模型到底想了什么」，没有第二个地方可查。观测层就是那个地方：**它是这个仓里唯一为「读」而存在的记录**。
 
-**最终形态。** 每次 run 把自己写进会话状态根下的一个 SQLite 账本。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的纪律：观测拦不住 agent**——写不动就降级并如实报出来，绝不让 run 等、绝不拒 run、绝不把异常抛进 Agent 控制流；碰磁盘的活全在 worker 线程，磁盘卡住也占不住 agent 所在的主线程（§5）。
+**最终形态。** 每次 run 把自己写进会话状态根下的一组观测文档（§5）。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的纪律：观测拦不住 agent**——写不动就降级并如实报出来，绝不让 run 等、绝不拒 run、绝不把异常抛进 Agent 控制流；写盘全是异步文件操作，磁盘卡住也占不住 agent 所在的事件循环（§5）。留多久由产品的过期规则定，core 不内置任何规则（§5）。
 
 **Non-Goals（已决，不做）。**
 
 - **观测不订阅、不转发事件协议，也不为观测往事件协议里加成员**（2026-09-11 拍板）。事件协议是功能模块：agent 状态要给前端实时展示，形状由「前端要展示什么」决定；观测是插进执行过程的节点，留下整体运行状态供事后分析评估，覆盖面由「复盘与评估要什么」决定。两者耦合的后果实测过：循环的观测曾经转手 `AgentEvent`，于是 reply / attempt 事件没投影时落成看不出含义的 `agent.custom_event`，Dream 与子 agent 因为不想广播给前端而传了空 `emit`，内部在账本里一条都没有。
 - **观测不判断进程死活**（2026-09-06 拍板）。观测只记别人做过的决定；没封口的 run 只说「未收尾」，不由观测推断它是崩了还是还在跑。`RunObservationStatus` 里的 `interrupted` 今天没有任何写者——将来若有管进程的那一层做了接管决定，由它把决定当事实交给观测记。会话死活另有其人，见[会话存活探针](../decisions/implemented/2026-09-09-session-alive-pid-probe.md)。
-- **不脱敏。** `content` 档把模型文本、思考、工具参数与结果**明文**写进盘上的库。`redact.ts` 只处理第三方异常对象（stack 只留 digest），不是内容脱敏层。谁开这一档，谁承担盘上有明文这件事。
-- **不做 reopen / crash recovery**（列在「欠账」§8，不是本文要设计的东西）。retention 的设计在 [观测的默认存储改成文档](../decisions/proposed/2026-09-14-observation-document-store.md)（proposed）。
-- **canonical store 今天不是用户可换的端口。** in-memory 实现只供参考一致性测试，`createEcho()` 装不进去。[公开线那条记录](../decisions/proposed/2026-09-07-observation-public-face.md)已拍「可注入」、未实现；注入的是哪一层，挂在[默认存储改成文档](../decisions/proposed/2026-09-14-observation-document-store.md)的待拍板里。
+- **不脱敏。** `content` 档把模型文本、思考、工具参数与结果**明文**写进盘上的观测文档。`redact.ts` 只处理第三方异常对象（stack 只留 digest），不是内容脱敏层。谁开这一档，谁承担盘上有明文这件事。
+- **不做 crash recovery**（列在「欠账」§8，不是本文要设计的东西）。
+- **不内置清理规则。** 留多久、留多少归产品：`observation.expiry` 不给就一条不删（§5）。旧格式的 `observations.sqlite` 不迁移、不读（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)）。
+- **语义层的 canonical store 不是用户可换的端口**，只开字节面：`observation.store?: StorageDir` 决定文档放在哪（内存 / 别处），格式与提交语义仍是 core 的（§5）。in-memory 的 `CanonicalObservationStore` 只供参考一致性测试。「换成另一种数据库」的注入等真有使用方再拍（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)决定 4）。
 - 面板长什么样归 UI，本文只说它读什么。
 
-**待拍板。** 两条记录，本文都只指过去、不复述：
-
-- [观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)：B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部、store 可注入），**未实现**；本文仍按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
-- [观测的默认存储改成状态根里的文档，过期规则归产品](../decisions/proposed/2026-09-14-observation-document-store.md)：方向已拍（默认不用 SQLite、旧库不迁移），目录结构、提交点与四条细节待确认；实现后 §3、§5、§6、§8 按它重写。
+**待拍板。** 一条，本文只指过去、不复述：[观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)——B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部），**未实现**；本文按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
 
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
 - `bun test packages/core/test/observability-sequencer.test.ts` —— lane 语义、seq 预留与 hole/gap 配对、prefix barrier、CAS、run 边界 body 的封闭校验（含子循环来源与 `startedBy`）。
-- `bun test packages/core/test/observability-sqlite-store.test.ts` —— 同事务全见或全不见、幂等重提、corruption 判定。
-- `bun test packages/core/test/observability-worker-store.test.ts` —— 库写入端在 worker 线程：库被别的连接锁住时主线程照常跳、`run.closed` 到期降级返回、锁放开后照样落盘；corruption 跨线程仍是同一个类；开关一次库之后进程的 exit 监听照常运行。
+- `bun test packages/core/test/observability-document-store.test.ts` —— 文档存储：与 in-memory 参考实现同一套提交裁决、提交点在 rename 前后停下时读面与补齐、过期删 run 与回收批文件、回放跨过被删的批时交付 `retention-gap`、关闭之后读写都抛。
 - `bun test packages/core/test/observability-projection.test.ts` —— 循环 / 压缩 / Agent 自身事实的逐 kind 固定投影、三档的字段差异、投影抛错留 hole + gap、投影自身在同步预算内。
-- `bun test packages/core/test/observability-runtime.test.ts` —— 真实 `createEcho → send → SQLite → reader` 链路：脚本化 run 的整段记录**逐项**比对执行顺序、run 开头与结尾两份同形的状态快照、run 之外的相位迁移、前台 / 后台子 agent 各是自己的 run 并链回派出它的工具调用。
+- `bun test packages/core/test/observability-runtime.test.ts` —— 真实 `createEcho → send → 观测文档 → reader` 链路（过期规则在持锁启动后与每个 run 封口后执行也在这里）：脚本化 run 的整段记录**逐项**比对执行顺序、run 开头与结尾两份同形的状态快照、run 之外的相位迁移、前台 / 后台子 agent 各是自己的 run 并链回派出它的工具调用。
 - `bun test packages/core/test/observability-decisions.test.ts` —— 决定点：工具被拦的原因、等人审批的 span、每轮工作集、装备变更。
 - `bun test packages/core/test/extension-observe.test.ts` —— extension 一代装上 / prepare 被拒 / apply 失败 / 卸下 / 卸载被拒。
 - `bun test packages/core/test/observability-capture.test.ts` `observability-capabilities.test.ts` —— 三档的采集差异、各能力模块的事实。
@@ -101,7 +98,7 @@
 
 1. **明文落盘，不脱敏**（Non-Goals 已述）。
 2. **单条记录有预算**：超过就成 `capture_limit` 缺口。正文在投影时先按字节预算截断并标 `textTruncated` / `thinkingTruncated`，思考与回答**各有份额**——思考封顶在正文预算的一半，回答拿剩下的，两边合计不超总预算。原因写在 [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=MAX_PROJECTED_THINKING_BYTES) 的注释里：另开一份等量预算会让 body 翻倍、整条记录穿不过 Sequencer 被丢掉，那是丢更多事实。
-3. **`content` 档下流式增量逐条成记录**（`model.generate.delta`、`tool.execute.progress`）。库因此涨得快得多——而今天没有 retention（§8）。
+3. **`content` 档下流式增量逐条成记录**（`model.generate.delta`、`tool.execute.progress`）。库因此涨得快得多——清不清、清多少由产品的过期规则定（§5）。
 
 ## 5. 观测拦不住 agent
 
@@ -111,17 +108,24 @@
 - `run.closed` 仍等它 COMMIT——它在 run 的活干完之后，`send()` 靠它如实报 `observationPersistence`。等待**有界**（`boundaryDeadlineMs`，`createAgent` 定为 500ms），到期即降级返回。
 - `ObservationRuntime` 每个公开方法都不抛。
 
-**碰磁盘的都在 worker 线程**（2026-09-14 拍板）。`bun:sqlite` 的调用全是同步的，放在主线程上，磁盘卡住或库被别的连接锁住时停下的是整条事件循环：agent 循环、模型流、定时器全停，上面那个 500ms 的有界等待也触发不了（实测：库被锁、`busy_timeout` 3 秒时，`run.closed` 等了 9 秒，主线程一拍都没跳）。所以 `createAgent` 装配的写入端是 [`WorkerObservationStore`](../../packages/core/src/observability/worker-store.ts#symbol=WorkerObservationStore)：开库、提交、回读、进程内查询、关库都在 worker 线程里跑同一个 `SqliteCanonicalObservationStore`，主线程每个方法是一次跨线程往返。切在存储接口这一层，Sequencer 不动。
+**存在哪：状态根里的文档**（[决策](../decisions/implemented/2026-09-14-observation-document-store.md)）。写入端是 [`DocumentObservationStore`](../../packages/core/src/observability/document-store.ts#symbol=DocumentObservationStore)，经 `StorageDir`（缺省是状态根的存储，`observation.store` 可换）写在 `observability/` 下：
 
-| 在哪个线程 | 做什么 |
+| 路径 | 是什么 |
 |---|---|
-| 主线程（节点当场） | 探针投影、canonical 编码、预留 seq、进内存 ring——纯 CPU、有预算，不碰磁盘；顺序与缺口保证靠同步预留 |
-| worker 线程 | 开库 / PRAGMA / migrate、批量提交、read-after-error 回读、`echo.observations` 的查询、关库 |
+| `batches/<runtimeId>/<nextPrefix>.json` | 一次提交一个文件：这一批的记录（canonical JSON 原文）与它改动的 RunIndex。**rename 完成就是提交点** |
+| `runs/<runId>.json` | 这个 run 的 RunIndex（header + firstSeq / lastSeq）——派生，写失败下次补 |
+| `heads/<runtimeId>.json` | 这个 runtime 提交到哪——派生 |
+| `key.json` | 记忆路径的 HMAC key，首建写一次、永不改写，读面不读 |
 
-两条从实测来的实现约束（Bun 1.3.14），写在 [worker-protocol.ts](../../packages/core/src/observability/worker-protocol.ts#symbol=STORE_WORKER_METHODS) 与 `worker-store.ts` 头注里：
+Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个批文件里，一次 rename 同时可见；批文件已存在且逐字相同是幂等重提，不同是 corruption；head 与 RunIndex 的 CAS 对的是写入端内存里的值（状态根只有一个写者，新进程的 runtimeId 是新的）。写入是异步文件操作——主线程上没有同步磁盘调用，磁盘卡住时 `run.closed` 的 500ms 有界等待照样生效。
 
-- **回信除了消息事件，还要定时器兜底取**。`bun test` 的 `await expect(p).resolves / .rejects` 在原生代码里阻塞着等，这期间跨线程消息从第二条起派发不出来，只靠事件的话 `expect(agent.start()).rejects` 会永远挂住；有请求在途时每 5ms 用 `receiveMessageOnPort` 取一次。
-- **worker 线程不许加载 `node:fs` / `node:worker_threads`，线程由主线程 terminate**。否则进程退出时 `process.on("exit")` 的监听不再运行。库目录因此由主线程建。
+**持锁之后才碰别人留下的东西**。装配期只读或建 `key.json`、只写本 runtime 自己的批文件；`Agent.start()` 拿到 lease 后（lease 生命周期端口的 `afterLeaseAcquired`）在后台先补齐以前进程没写完的派生文件、再按规则过期一次。交还 lease 或丢锁前停下。写入端关闭之后读写一律抛——收摊时观测排在最前面关，迟到的事实不许再把刚清掉的空会话目录建回来。
+
+**过期：规则归产品，机制归 core**。产品给 `observation.expiry(runs, now)`，返回 `{ runs?, activityBefore? }`；不给 = 永不删。core 在持锁启动后、每个 run 的 `run.closed` 落盘后各执行一次，另有 `echo.observations.expire()`（没持 lease 时空操作）。执行语义：
+
+- 删 `runs/<runId>.json`，这个 run 的 `getRun()` 立刻是 `unknown`；Sequencer 还在跟踪的 run（封口还没落盘）拒删并报诊断，以前进程留下的没封口的删不删由规则定——观测不判断死活。
+- 批文件里出现过的 run 都删了、run 之外的记录都早于 `activityBefore`，才回收这个批文件。
+- 订阅回放跨过被删的批，交付 `retention-gap`（传输通知，不进 journal、不改 integrity）。
 
 于是调用方拿到的是三个可读的信号，而不是一次异常：
 
@@ -131,7 +135,7 @@
 | `observationIntegrity` | `complete` / `partial`——`partial` 表示这条 run 的记录里有缺口 |
 | `RunObservationStatus` | run 的业务终态：`running` / `completed` / `aborted` / `error`（`interrupted` 无写者） |
 
-**corruption 是唯一 fail-loud 的一类**：同 `recordId` 不同 bytes、半批可见、RunIndex digest 漂移——store 立即抛，writer 被 seal，reader 不「修复」。这不是可降级的错误，是账本不再可信。
+**corruption 是唯一 fail-loud 的一类**：同一个批文件内容不同、committed prefix 或 RunIndex digest 的 CAS 不符、RunIndex 引用了不存在的记录、文档不是它该是的形状——store 立即抛，writer 被 seal，reader 不「修复」。这不是可降级的错误，是账本不再可信。
 
 ## 6. 读面
 
@@ -140,16 +144,17 @@
 | 入口 | 形状 | 取锁 | 用途 |
 |---|---|---|---|
 | `observe` 子命令 | `last` / `show <run-id>` / `export` / `health` / `serve` | **不取** | 命令行排查；`serve` 是本地只读面板 |
-| `echo.observations` | `EchoObservations`：`getRun` `lastRun` `listRuns` `snapshot` `subscribe` | 已在 runtime 内 | 宿主自己读 / 订阅 |
-| `openObservationReader({ stateRoot })` | `EchoObservationReader`：同上去掉 `subscribe`，多一个 `close()` | **不取** | 离线读一个状态根 |
+| `echo.observations` | `EchoObservations`：`getRun` `lastRun` `listRuns` `snapshot` `subscribe` `expire` | 已在 runtime 内 | 宿主自己读 / 订阅 / 按规则过期一次 |
+| `openObservationReader({ stateRoot })` | `EchoObservationReader`：同上去掉 `subscribe` 与 `expire`，多一个 `close()` | **不取** | 离线读一个状态根 |
 
 两条性质值得单说：
 
-- **只读入口不启动 agent、不取会话锁**，所以正在跑的会话也能读——读到的是它已 COMMIT 的部分。reader 走独立的 read-only 连接，只看已提交快照。
+- **只读入口不启动 agent、不取会话锁**，所以正在跑的会话也能读——读到的是它已提交的部分。reader 只读 rename 完成的文档，看不到半截；`runs/` 最多落后正在写派生文件的那一批。
+- **`getRun()` 只有两态**：`found` / `unknown`（从未有过，或已被过期规则删掉）。
 - **`lastRun()` 是最近一次顶层 run**：隔离子循环（§7）是某个 run 派出来的，`source` 带 `parentRunId`，不算「上一次」。`listRuns()` 照常列出全部。
 - **renderer 是纯函数**（[render.ts](../../packages/core/src/observability/render.ts#symbol=renderRunObservation) 头注）：`buildRunObservationViewModel()` 与 `renderRunObservation()` 不读 Agent、不查 store、不看订阅状态，也不改原 envelope。同一批记录必然同一输出，所以能上 golden。时间全部相对 `acceptedAt`，golden 不锁 wall clock。
 
-**跨会话是在装配层做的，不在 core**：core 守「一个 journal、一个 reader」，`packages/base` 的 `SessionObservationReaders` 给每段会话开一个只读 reader 再合并。所以不给 `--session` 时一个面板能看整个集群。
+**跨会话是在装配层做的，不在 core**：core 守「一个状态根、一个 reader」，`packages/base` 的 `SessionObservationReaders` 给每段会话开一个只读 reader 再合并。所以不给 `--session` 时一个面板能看整个集群。只有旧格式 `observations.sqlite` 的会话记进读不了的会话，原因写「旧格式观测，已不再读取」。
 
 ## 7. 谁在发事实
 
@@ -189,8 +194,8 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 按「会不会随时间恶化」排：
 
-1. **没有 retention。**（设计见 [默认存储改成文档](../decisions/proposed/2026-09-14-observation-document-store.md)，proposed）库只涨不清，`content` 档下涨得更快。**类型与机制已经全部就位却空转**：`ObservationGapReason` 里有 `"retention"`、`types.ts` 有 `retention-gap` 的传输通知、RunIndex 有 `pruned` 标记、`query.ts` 注释写着「O3b 才会真的产生 pruned 行」——今天没有任何东西真的裁剪。这是唯一会随时间恶化的一条。
-2. **降级后不自动 reopen**，**没有 crash recovery 的库层部分**（[sqlite-store.ts](../../packages/core/src/observability/sqlite-store.ts#symbol=SqliteCanonicalObservationStore) 头注自己写着「O3a 不做，O3b 做」）。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals 的第一条。
+1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；写入端降级（seal）之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
+2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性——没给过期规则的会话会越来越慢。这是唯一会随时间恶化的一条，控制它的是产品的过期规则。
 3. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
 4. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
 5. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。

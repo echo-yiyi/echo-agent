@@ -1,0 +1,357 @@
+import { test, expect, describe, afterEach } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FakeClock } from "../src/schedule/clock.ts";
+import { ObservationCorruptionError, runIndexDigest, InMemoryCanonicalObservationStore, type CommitBatchInput } from "../src/observability/store.ts";
+import { DocumentObservationReader, DocumentObservationStore, ObservationStoreMissingError, PATH_DIGEST_KEY_BYTES } from "../src/observability/document-store.ts";
+import { DocumentEchoObservationReader } from "../src/observability/query.ts";
+import { ObservationSequencer, type ObservationSubscribeItem } from "../src/observability/sequencer.ts";
+import { encodeCanonical } from "../src/observability/normalize.ts";
+import { FileDir } from "../src/storage/file-dir.ts";
+import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
+import type { StorageDir } from "../src/storage/types.ts";
+import type { BoundaryObservationDraft, BoundedObservationDraft, RunAcceptedBodyV1 } from "../src/observability/draft.ts";
+import type { RunIndexEntryV1, RunObservationHeader } from "../src/observability/types.ts";
+
+// 观测的文档存储（2026-09-14 决策：docs/decisions/implemented/2026-09-14-observation-document-store.md）。
+// 与 in-memory 参考实现同一套裁决，外加文档才有的几件：提交点是批文件的 rename、派生文件落后时持锁补齐、
+// 过期按规则删 run 并回收批文件、回放跨过被删的批时交付 retention-gap、关闭之后读写都抛。
+
+const RT = "rt-doc";
+const temps: string[] = [];
+
+async function tmp(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "echo-obs-doc-"));
+  temps.push(dir);
+  return dir;
+}
+
+afterEach(async () => {
+  for (const dir of temps.splice(0)) await rm(dir, { recursive: true, force: true });
+});
+
+function open(dir: StorageDir = new InMemoryDir()): Promise<DocumentObservationStore> {
+  return DocumentObservationStore.open({ dir, path: "(test)" });
+}
+
+function bytesOf(v: unknown): Uint8Array {
+  return encodeCanonical(v).bytes;
+}
+
+function header(runId: string, acceptedAt = 1_000): RunObservationHeader {
+  return {
+    schemaVersion: 1,
+    runId,
+    source: { kind: "user" },
+    runtimeId: RT,
+    agentId: "a",
+    agentInstanceId: "a#1",
+    sessionId: null,
+    runtimeGeneration: "g",
+    capturePolicy: "metadata",
+    acceptedAt,
+    startedAt: null,
+    endedAt: null,
+    status: "running",
+    integrity: "complete",
+    persistence: "stored",
+  };
+}
+
+function index(runId: string, seq: number, acceptedAt = 1_000): RunIndexEntryV1 {
+  return { schemaVersion: 1, runtimeId: RT, runId, acceptedRecordId: `${RT}:${seq}`, header: header(runId, acceptedAt), firstSeq: seq, lastSeq: seq };
+}
+
+/** `seqs` 连续；每条记录可以各属一个 run（`runs[i]`），不给就是 run 之外的记录。 */
+function batch(seqs: readonly number[], over: Partial<CommitBatchInput> = {}, runs?: string | readonly (string | undefined)[], body?: (seq: number) => unknown): CommitBatchInput {
+  const runOf = (i: number): string | undefined => (typeof runs === "string" ? runs : runs?.[i]);
+  return {
+    runtimeId: RT,
+    expectedCommittedPrefix: (seqs[0] ?? 1) - 1,
+    nextCommittedPrefix: seqs[seqs.length - 1] ?? 0,
+    records: seqs.map((seq, i) => ({
+      recordId: `${RT}:${seq}`,
+      runtimeId: RT,
+      seq,
+      ...(runOf(i) === undefined ? {} : { runId: runOf(i)! }),
+      canonicalEnvelopeBytes: bytesOf(body === undefined ? { seq, runId: runOf(i) ?? null } : body(seq)),
+    })),
+    runIndexMutations: [],
+    ...over,
+  };
+}
+
+/** 包一层：按路径前缀让写失败，模拟停在提交的某一步。 */
+function failingWrites(inner: StorageDir, prefix: string): StorageDir {
+  return {
+    read: (p) => inner.read(p),
+    write: (p, c) => (p.startsWith(prefix) ? Promise.reject(new Error(`disk gone: ${p}`)) : inner.write(p, c)),
+    remove: (p) => inner.remove(p),
+    list: (p) => inner.list(p),
+    ...(inner.lock === undefined ? {} : { lock: (n: string, o?: { timeoutMs?: number }) => inner.lock!(n, o) }),
+  };
+}
+
+describe("open 与 key", () => {
+  test("首建 key.json：32 字节，重开不改写；读面打开时状态根没有观测文档 → ObservationStoreMissingError", async () => {
+    const root = await tmp();
+    const store = await open(new FileDir(root));
+    const key = store.readPathDigestKey();
+    expect(key.byteLength).toBe(PATH_DIGEST_KEY_BYTES);
+    const again = await open(new FileDir(root));
+    expect(again.readPathDigestKey()).toEqual(key);
+    expect(await again.readCommittedPrefix(RT)).toBe(0);
+    expect(await again.readRunIndex("nope")).toBeNull();
+
+    const err = await DocumentEchoObservationReader.open({ stateRoot: await tmp() }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ObservationStoreMissingError);
+  });
+
+  test("关闭之后读写都抛：收摊后迟到的事实不许再落盘", async () => {
+    const store = await open();
+    await store.commitBatchIfAbsent(batch([1]));
+    await store.close();
+    await store.close(); // 幂等
+    await expect(store.commitBatchIfAbsent(batch([2], { expectedCommittedPrefix: 1 }))).rejects.toThrow("已关闭");
+    await expect(store.readCommittedPrefix(RT)).rejects.toThrow("已关闭");
+  });
+});
+
+describe("commitBatchIfAbsent：与 in-memory 同一套裁决", () => {
+  test("一批 records + RunIndex + head；读回逐字一致；按 run 取记录", async () => {
+    const store = await open();
+    const idx = { ...index("r1", 1), lastSeq: 3 };
+    expect(await store.commitBatchIfAbsent(batch([1, 2, 3], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: idx }] }, "r1"))).toBe("committed");
+    expect(await store.readCommittedPrefix(RT)).toBe(3);
+    expect(await store.readRecordBytes(`${RT}:2`)).toEqual(bytesOf({ seq: 2, runId: "r1" }));
+    expect(await store.readRecordBytes("nope")).toBeNull();
+    expect(await store.readRunIndex("r1")).toEqual(idx);
+    const recs = await store.readRunRecords(RT, "r1", 1, 3);
+    expect(recs).toEqual([1, 2, 3].map((seq) => bytesOf({ seq, runId: "r1" })));
+    expect(await store.countRecords()).toBe(3);
+    expect(await store.countRuns()).toBe(1);
+  });
+
+  test("逐字重复提交 → already-committed-same；同一个批文件内容不同 → corruption", async () => {
+    const store = await open();
+    const input = batch([1, 2]);
+    expect(await store.commitBatchIfAbsent(input)).toBe("committed");
+    expect(await store.commitBatchIfAbsent(input)).toBe("already-committed-same");
+    expect(await store.countRecords()).toBe(2);
+    const evil = batch([1, 2]);
+    (evil.records[0] as { canonicalEnvelopeBytes: Uint8Array }).canonicalEnvelopeBytes = bytesOf({ tampered: true });
+    await expect(store.commitBatchIfAbsent(evil)).rejects.toBeInstanceOf(ObservationCorruptionError);
+    expect(await store.readRecordBytes(`${RT}:1`)).toEqual(bytesOf({ seq: 1, runId: null }));
+  });
+
+  test("head CAS 失败、半批重叠、RunIndex digest 不符、RunIndex 引用不存在的记录 → corruption，什么都没落", async () => {
+    const store = await open();
+    await store.commitBatchIfAbsent(batch([1]));
+    await expect(store.commitBatchIfAbsent(batch([2], { expectedCommittedPrefix: 0 }))).rejects.toBeInstanceOf(ObservationCorruptionError);
+    await expect(store.commitBatchIfAbsent(batch([1, 2]))).rejects.toBeInstanceOf(ObservationCorruptionError);
+    await expect(
+      store.commitBatchIfAbsent(batch([2], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: "not-the-digest", nextRunIndex: index("r1", 2) }] }, "r1")),
+    ).rejects.toBeInstanceOf(ObservationCorruptionError);
+    const dangling = { ...index("r1", 2), acceptedRecordId: `${RT}:404` };
+    await expect(store.commitBatchIfAbsent(batch([2], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: dangling }] }, "r1"))).rejects.toBeInstanceOf(
+      ObservationCorruptionError,
+    );
+    expect(await store.readCommittedPrefix(RT)).toBe(1);
+    expect(await store.readRunIndex("r1")).toBeNull();
+    expect(await store.readRecordBytes(`${RT}:2`)).toBeNull();
+  });
+
+  test("与 in-memory 参考实现对同一串输入给出同样的结论", async () => {
+    const doc = await open();
+    const memory = new InMemoryCanonicalObservationStore();
+    const idx = index("r1", 1);
+    const steps: CommitBatchInput[] = [
+      batch([1], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: idx }] }, "r1"),
+      batch([1], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: idx }] }, "r1"),
+      batch([2, 3], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: runIndexDigest(idx), nextRunIndex: { ...idx, lastSeq: 3 } }] }, "r1"),
+      batch([4], { expectedCommittedPrefix: 0 }),
+    ];
+    for (const s of steps) {
+      const a = await doc.commitBatchIfAbsent(s).catch((e: unknown) => (e instanceof ObservationCorruptionError ? "corruption" : "other"));
+      const b = await memory.commitBatchIfAbsent(s).catch((e: unknown) => (e instanceof ObservationCorruptionError ? "corruption" : "other"));
+      expect(a).toBe(b);
+    }
+    expect(await doc.readCommittedPrefix(RT)).toBe(await memory.readCommittedPrefix(RT));
+    expect(await doc.readRunIndex("r1")).toEqual(await memory.readRunIndex("r1"));
+  });
+});
+
+describe("提交点", () => {
+  test("批文件写不成（rename 之前）：抛、不是 corruption；读面看不到这一批，head 没动", async () => {
+    const inner = new InMemoryDir();
+    const store = await open(failingWrites(inner, "observability/batches/"));
+    const err = await store.commitBatchIfAbsent(batch([1, 2], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: index("r1", 1) }] }, "r1")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ObservationCorruptionError);
+    const reader = new DocumentObservationReader(inner, "(test)");
+    expect(await reader.readCommittedPrefix(RT)).toBe(0);
+    expect(await reader.readRecordBytes(`${RT}:1`)).toBeNull();
+    expect(await reader.readRunIndex("r1")).toBeNull();
+  });
+
+  test("批文件写成、派生文件写不成：这批照样 committed；下一个进程持锁补齐后 runs/ 完整", async () => {
+    const inner = new InMemoryDir();
+    const first = await open(failingWrites(inner, "observability/runs/"));
+    const idx = { ...index("r1", 1), lastSeq: 2 };
+    expect(await first.commitBatchIfAbsent(batch([1, 2], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: idx }] }, "r1"))).toBe("committed");
+    const reader = new DocumentObservationReader(inner, "(test)");
+    expect(await reader.readCommittedPrefix(RT)).toBe(2); // 批文件在：已提交
+    expect(await reader.readRunIndex("r1")).toBeNull(); // 派生文件落后
+
+    const next = await open(inner);
+    await next.repairDerived();
+    expect(await reader.readRunIndex("r1")).toEqual(idx);
+    expect((await reader.readRunRecords(RT, "r1", 1, 2)).length).toBe(2);
+  });
+});
+
+describe("读面", () => {
+  test("listRunIndex 按 (acceptedAt, runId) 倒序稳定分页；正在写的临时文件不算", async () => {
+    const root = await tmp();
+    const store = await open(new FileDir(root));
+    const entries = [index("b", 1, 500), index("a", 2, 500), index("c", 3, 100)];
+    for (const e of entries) {
+      await store.commitBatchIfAbsent(
+        batch([e.firstSeq], { expectedCommittedPrefix: e.firstSeq - 1, nextCommittedPrefix: e.firstSeq, runIndexMutations: [{ runId: e.runId, expectedRunIndexDigest: null, nextRunIndex: e }] }, e.runId),
+      );
+    }
+    await Bun.write(join(root, "observability", "runs", "x.json.123.a.b.tmp"), "half");
+    const reader = (await DocumentEchoObservationReader.open({ stateRoot: root })) as unknown as { store: DocumentObservationReader };
+    const page1 = await reader.store.listRunIndex({ limit: 2 });
+    expect(page1.map((e) => e.runId)).toEqual(["b", "a"]);
+    const last = page1[page1.length - 1]!;
+    expect((await reader.store.listRunIndex({ limit: 2, after: { acceptedAt: last.header.acceptedAt, runId: last.runId } })).map((e) => e.runId)).toEqual(["c"]);
+    expect(await reader.store.readRuntimeHeads()).toEqual([{ runtimeId: RT, committedPrefix: 3 }]);
+  });
+});
+
+describe("过期", () => {
+  const MUT = (e: RunIndexEntryV1, prev?: RunIndexEntryV1) => ({ runId: e.runId, expectedRunIndexDigest: prev === undefined ? null : runIndexDigest(prev), nextRunIndex: e });
+
+  /** 三批：A 只有 r1；B 混着 r1 与 r2；C 只有 r2。 */
+  async function threeBatches(store: DocumentObservationStore): Promise<void> {
+    const r1 = index("r1", 1);
+    const r2 = index("r2", 4, 2_000);
+    await store.commitBatchIfAbsent(batch([1, 2], { runIndexMutations: [MUT({ ...r1, lastSeq: 2 })] }, "r1"));
+    await store.commitBatchIfAbsent(batch([3, 4], { runIndexMutations: [MUT({ ...r1, lastSeq: 3 }, { ...r1, lastSeq: 2 }), MUT(r2)] }, ["r1", "r2"]));
+    await store.commitBatchIfAbsent(batch([5], { runIndexMutations: [MUT({ ...r2, lastSeq: 5 }, r2)] }, "r2"));
+  }
+
+  test("删一个 run：getRun 不再有、只含它的批文件回收、与别的 run 共用的留着；再删另一个，剩下的一起回收", async () => {
+    const inner = new InMemoryDir();
+    const store = await open(inner);
+    await threeBatches(store);
+    const batches = async () => (await inner.list("observability/batches/")).filter((p) => p.endsWith(".json")).map((p) => p.split("/").pop());
+
+    expect(await store.expire({ runs: ["r1"] }, () => false)).toEqual({ removedRuns: ["r1"], refusedRuns: [], removedBatches: 1 });
+    expect(await store.readRunIndex("r1")).toBeNull();
+    expect(await batches()).toEqual(["000000000004.json", "000000000005.json"]);
+    expect((await store.readRunRecords(RT, "r2", 4, 5)).length).toBe(2);
+
+    expect(await store.expire({ runs: ["r2"] }, () => false)).toEqual({ removedRuns: ["r2"], refusedRuns: [], removedBatches: 2 });
+    expect(await batches()).toEqual([]);
+    expect(await store.readCommittedPrefix(RT)).toBe(5); // head 不回退
+  });
+
+  test("还在跟踪的 run 拒删；不给 run 也不给 activityBefore 时什么都不动", async () => {
+    const store = await open();
+    await threeBatches(store);
+    expect(await store.expire({ runs: ["r2"] }, (id) => id === "r2")).toEqual({ removedRuns: [], refusedRuns: ["r2"], removedBatches: 0 });
+    expect(await store.readRunIndex("r2")).not.toBeNull();
+    expect(await store.expire({}, () => false)).toEqual({ removedRuns: [], refusedRuns: [], removedBatches: 0 });
+    expect(await store.countRecords()).toBe(5);
+  });
+
+  test("run 之外的记录：早于 activityBefore 的批回收，晚于的留着；不给 activityBefore 一条不删", async () => {
+    const inner = new InMemoryDir();
+    const store = await open(inner);
+    await store.commitBatchIfAbsent(batch([1], {}, undefined, () => ({ observedAt: 500 })));
+    await store.commitBatchIfAbsent(batch([2], {}, undefined, () => ({ observedAt: 2_000 })));
+    expect((await store.expire({ runs: [] }, () => false)).removedBatches).toBe(0);
+    expect((await store.expire({ activityBefore: 1_000 }, () => false)).removedBatches).toBe(1);
+    expect((await store.readActivity(10)).length).toBe(1);
+  });
+
+  test("回放页如实带出被删的 seq 区间（exclusive）：批与批接不上的那一段", async () => {
+    const store = await open();
+    await threeBatches(store);
+    await store.expire({ runs: ["r1"] }, () => false); // 回收的是 seq 1..2 那一批
+    const page = await store.readRecordsAfter(RT, 0, 10);
+    expect(page.removed).toEqual([{ afterSeq: 0, beforeSeq: 3 }]);
+    expect(page.records.length).toBe(3);
+  });
+});
+
+describe("Sequencer 之下", () => {
+  function boundary(name: string, body: unknown, runId?: string): BoundaryObservationDraft {
+    return {
+      lane: "boundary",
+      occurredAt: 1_000,
+      kind: "event",
+      name,
+      scope: runId === undefined ? { runtimeId: RT } : { runtimeId: RT, runId },
+      correlation: {},
+      generation: { runtime: "g" },
+      owner: { status: "not-applicable" },
+      instrumentation: { name: "test", version: "1" },
+      attributes: {},
+      body,
+    } as BoundaryObservationDraft;
+  }
+  function bounded(body: unknown, runId: string): BoundedObservationDraft {
+    return { ...boundary("test.event", body, runId), lane: "bounded" } as BoundedObservationDraft;
+  }
+  const accepted = (runId: string): RunAcceptedBodyV1 => ({
+    header: { runId, source: { kind: "user" }, runtimeId: RT, agentId: "a", agentInstanceId: "a#1", sessionId: null, runtimeGeneration: "g", capturePolicy: "metadata", acceptedAt: 1_000 },
+  });
+
+  async function oneRun(seq: ObservationSequencer, runId: string): Promise<void> {
+    await seq.appendBoundary(boundary("run.accepted", accepted(runId), runId));
+    seq.offer(bounded({ n: 1 }, runId));
+    await seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, runId));
+    await seq.appendBoundary(boundary("run.closed", { outcome: { status: "completed" }, finalSnapshot: null }, runId));
+    await seq.flushPending();
+  }
+
+  test("accepted → bounded → started → closed：RunIndex 终态在文档里，run 的记录能按 run 取回；跟踪中的 run 封口落盘后才不再跟踪", async () => {
+    const store = await open();
+    const seq = new ObservationSequencer({ runtimeId: RT, runtimeGeneration: "g", capturePolicy: "metadata", store, clock: new FakeClock(1_000) });
+    await seq.appendBoundary(boundary("run.accepted", accepted("r1"), "r1"));
+    expect(seq.isTrackingRun("r1")).toBe(true);
+    seq.offer(bounded({ n: 1 }, "r1"));
+    seq.offer(bounded({ n: 2 }, "r1"));
+    await seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, "r1"));
+    await seq.appendBoundary(boundary("run.closed", { outcome: { status: "completed" }, finalSnapshot: null }, "r1"));
+    await seq.flushPending();
+    expect(seq.isTrackingRun("r1")).toBe(false);
+
+    const idx = await store.readRunIndex("r1");
+    expect(idx?.header.status).toBe("completed");
+    expect(idx?.terminalRecordId).toBe(`${RT}:5`);
+    expect((await store.readRunRecords(RT, "r1", idx!.firstSeq, idx!.lastSeq)).length).toBe(5);
+    expect(await store.readCommittedPrefix(RT)).toBe(seq.committedSeq);
+    expect(seq.persistenceState.status).toBe("healthy");
+  });
+
+  test("订阅回放早于内存窗口、跨过被过期删掉的 run：交付 retention-gap，之后的记录照常到", async () => {
+    const store = await open();
+    const seq = new ObservationSequencer({ runtimeId: RT, runtimeGeneration: "g", capturePolicy: "metadata", store, clock: new FakeClock(1_000), limits: { replayWindowRecords: 1 } });
+    await oneRun(seq, "r1"); // seq 1..4
+    await oneRun(seq, "r2"); // seq 5..8
+    await store.expire({ runs: ["r1"] }, () => false);
+
+    const items: ObservationSubscribeItem[] = [];
+    await seq.subscribe({ afterSeq: 0, sinkId: "late", listener: (i) => void items.push(i) });
+    for (let i = 0; i < 50 && items.length < 5; i++) await new Promise((r) => setTimeout(r, 5));
+    const first = items[0];
+    expect(first !== undefined && "kind" in first && first.kind === "retention-gap" ? first.gap : null).toEqual({ afterSeq: 0, beforeSeq: 5, dropped: 4, reason: "retention" });
+    const seqs = items.flatMap((i) => ("recordId" in i ? [i.seq] : []));
+    expect(seqs).toEqual([5, 6, 7, 8]);
+  });
+});

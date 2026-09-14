@@ -1,15 +1,14 @@
 // 查询面（O3a）：live `EchoObservations` 与离线 `EchoObservationReader`。
 //
-// 两者共用同一套「先读 RunIndex、再按 `firstSeq..lastSeq` 取 retained records、再物化」的路径；差别只在
-// live 面还能给 Sequencer 的 health / subscribe。每次查询都是一个短 SQLite 读：bytes 拷到进程内就结束，decode
-// 与物化在事务之外。
+// 两者共用同一套「先读 RunIndex、再按 `firstSeq..lastSeq` 取 records、再物化」的路径；差别只在
+// live 面还能给 Sequencer 的 health / subscribe 与过期入口。读的都是状态根里 rename 完成的文档（document-store.ts）。
 //
-// O3a 不做的（O3b）：retention（`pruned` 只在 index 已标 pruned 时返回）、跨进程 interrupted recovery、
-// 离线 reader 的 runtime health 快照（health 尚未持久化，`snapshot()` fail-loud 而不是编一个）。
+// 不做的：跨进程 interrupted recovery、离线 reader 的 runtime health 快照（health 不落盘，`snapshot()` fail-loud 而不是编一个）。
 
 import { decodeObservationEnvelope, materializeRunObservation } from "./materialize.ts";
 import type { ObservationSequencer } from "./sequencer.ts";
-import { SqliteObservationReader, observationDatabasePath, type RunIndexCursor, type RuntimeHeadRow } from "./sqlite-store.ts";
+import { DocumentObservationReader, ObservationStoreMissingError, hasObservationStore, observationStorePath } from "./document-store.ts";
+import { FileDir } from "../storage/file-dir.ts";
 import type { ObservationEnvelope } from "./types.ts";
 import type {
   EchoObservationReader,
@@ -26,11 +25,14 @@ import type {
 const DEFAULT_PAGE = 20;
 const MAX_PAGE = 200;
 
-/**
- * live 与离线查询共用的只读面：按 RunIndex 取一个 run、分页列 run。离线 reader 是同步 SQLite 连接（observe CLI 的独立进程）；
- * live 面是 Runtime 的写入端（`WorkerObservationStore`，连接在 Worker 线程）。
- */
-export type ObservationReadPort = Pick<SqliteObservationReader, "readRunIndex" | "readRunRecords" | "listRunIndex">;
+/** `listRunIndex` 的分页游标：`(acceptedAt, runId)` 倒序稳定分页。 */
+export type RunIndexCursor = Readonly<{ acceptedAt: number; runId: string }>;
+
+/** 每个 runtime 已提交到哪（`observe health` 用）。 */
+export type RuntimeHeadRow = Readonly<{ runtimeId: string; committedPrefix: number }>;
+
+/** live 与离线查询共用的只读面：按 RunIndex 取一个 run、分页列 run。 */
+export type ObservationReadPort = Pick<DocumentObservationReader, "readRunIndex" | "readRunRecords" | "listRunIndex">;
 
 /** opaque cursor 坏了 / 篡改了：fail-loud，不用可漂移的偏移量猜。 */
 export class ObservationCursorError extends Error {
@@ -73,12 +75,6 @@ function decodeCursor(raw: string): RunIndexCursor {
 async function lookupRun(store: ObservationReadPort, runId: string): Promise<RunLookupResult> {
   const index = await store.readRunIndex(runId);
   if (index === null) return { kind: "unknown" };
-  if (index.bodyState === "pruned") {
-    // body 已清但 header 仍在窗口内：只剩 index 的 header 与 retention gap（O3b 才会真的产生 pruned 行）
-    const bytes = await store.readRunRecords(index.runtimeId, runId, index.firstSeq, index.lastSeq);
-    const records = bytes.map(decodeObservationEnvelope);
-    return { kind: "pruned", header: index.header, gaps: materializeRunObservation(index, records).gaps };
-  }
   const bytes = await store.readRunRecords(index.runtimeId, runId, index.firstSeq, index.lastSeq);
   return { kind: "found", observation: materializeRunObservation(index, bytes.map(decodeObservationEnvelope)) };
 }
@@ -116,6 +112,7 @@ export class LiveEchoObservations implements EchoObservations {
       store: ObservationReadPort;
       clock: Readonly<{ now(): number }>;
       phase: () => RuntimePhase;
+      expire: () => Promise<void>;
     }>,
   ) {}
 
@@ -154,8 +151,12 @@ export class LiveEchoObservations implements EchoObservations {
     };
   }
 
+  expire(): Promise<void> {
+    return this.deps.expire();
+  }
+
   async subscribe(options: ObservationSubscribeOptions): Promise<() => void> {
-    // 只交付 committed prefix 之后的 envelope 与本 sink 自己的 SinkDeliveryGap；O3a 没有 retention，因此没有 ObservationReplayGap
+    // 交付 committed prefix 之后的 envelope、本 sink 自己的 SinkDeliveryGap，回放跨过被过期删掉的批时交付 ObservationReplayGap
     return this.deps.sequencer.subscribe({
       afterSeq: options.afterSeq,
       listener: options.listener,
@@ -164,15 +165,19 @@ export class LiveEchoObservations implements EchoObservations {
   }
 }
 
-/** 离线 reader：read-only SQLite connection，不取 StateLock、不起 Runtime。observe CLI 的唯一入口。 */
-export class SqliteEchoObservationReader implements EchoObservationReader {
-  private constructor(private readonly store: SqliteObservationReader) {}
+/** 离线 reader：只读状态根里的观测文档，不写、不取 StateLock、不起 Runtime。observe CLI 的唯一入口。 */
+export class DocumentEchoObservationReader implements EchoObservationReader {
+  private constructor(private readonly store: DocumentObservationReader) {}
 
-  static async open(options: Readonly<{ stateRoot: string }>): Promise<SqliteEchoObservationReader> {
-    return new SqliteEchoObservationReader(await SqliteObservationReader.openReadOnly({ path: observationDatabasePath(options.stateRoot) }));
+  /** 状态根里还没有观测文档（没有 `observability/key.json`）→ `ObservationStoreMissingError`。 */
+  static async open(options: Readonly<{ stateRoot: string }>): Promise<DocumentEchoObservationReader> {
+    const dir = new FileDir(options.stateRoot);
+    const path = observationStorePath(options.stateRoot);
+    if (!(await hasObservationStore(dir))) throw new ObservationStoreMissingError(path);
+    return new DocumentEchoObservationReader(new DocumentObservationReader(dir, path));
   }
 
-  /** 库文件路径（health 输出用）。 */
+  /** 观测目录的路径（health 输出用）。 */
   get path(): string {
     return this.store.path;
   }
@@ -217,15 +222,14 @@ export class SqliteEchoObservationReader implements EchoObservationReader {
     return (await this.store.readActivity(limit)).map((bytes) => decodeObservationEnvelope(bytes));
   }
 
-  async close(): Promise<void> {
-    this.store.close();
-  }
+  /** 只读、不持有任何句柄：什么都不用关。保留是为了 `EchoObservationReader` 的用法（用完即 close）。 */
+  async close(): Promise<void> {}
 }
 
 /**
- * observe CLI 与 SDK 的离线入口：只读已 COMMIT 的 record / index，活 writer 存在时仍可安全只读。
- * 库不存在抛 `ObservationDatabaseMissingError`（这个 state root 还没记录过 run）。
+ * observe CLI 与 SDK 的离线入口：只读已提交的 record / index（rename 完成的文档），活 writer 存在时仍可安全只读。
+ * 状态根里还没有观测目录抛 `ObservationStoreMissingError`（这个状态根还没记录过任何事实）。
  */
-export function openObservationReader(options: Readonly<{ stateRoot: string }>): Promise<SqliteEchoObservationReader> {
-  return SqliteEchoObservationReader.open(options);
+export function openObservationReader(options: Readonly<{ stateRoot: string }>): Promise<DocumentEchoObservationReader> {
+  return DocumentEchoObservationReader.open(options);
 }

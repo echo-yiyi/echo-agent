@@ -1,6 +1,6 @@
 import { test, expect, afterEach } from "bun:test";
 import { mkdir, mkdtemp } from "node:fs/promises";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "../src/create-agent.ts";
@@ -448,19 +448,22 @@ test("不传 store / lock 时用 first-party 默认件（真落盘）", async ()
   expect(existsSync(join(dir, "meta.json"))).toBe(true); // stateDir 就是这一段的目录
 });
 
-test("自定义 store + stateDir：观测库落真盘，一句话没说的段收摊时目录照样清掉（review 2026-09-07：此前按 store 有无跳过清理，留下只有观测库的空壳）", async () => {
+test("自定义 store + stateDir：观测文档跟着注入的 store 走，真盘的 stateDir 一个字节都不写（2026-09-14 观测改文档存储）", async () => {
+  // 此前观测是 SQLite：给了 stateDir 就落真盘，收摊再按空段清掉目录。改成文档之后观测跟着状态根的存储走——
+  // 说了「我自己给存储」的调用方，不该发现东西仍旧写进了真盘（与 sharedStore ?? store 同一条理由）。
   const dir = await mkdtemp(join(tmpdir(), "echo-agent-"));
+  const store = new InMemoryDir();
   const agent = await createAgent({
     provider: fakeProvider({ id: "t", models: ["only"] }),
-    store: new InMemoryDir(),
+    store,
     lock: new InMemoryStateLock(),
     stateDir: dir,
     allowNetwork: false,
   });
   await agent.start();
-  expect(existsSync(join(dir, "observability"))).toBe(true); // 观测库在这里
+  expect((await store.list("observability/")).length).toBeGreaterThan(0); // 观测在注入的 store 里
   await agent.stop();
-  expect(existsSync(dir)).toBe(false);
+  expect(readdirSync(dir)).toEqual([]); // 真盘上什么都没写
 });
 
 test("本函数装配的件不许从 `agent` 透传口再塞一次——**判据是 tsc**", () => {

@@ -1,16 +1,21 @@
-// 跨 session 的只读读取。观测库**一段 session 一份**（状态根 = session 目录，2026-09-03），agent 集群里几段并行时
-// 要一起看，就得扫会话根、每段开一个 read-only reader、把各段的 run 合起来排。合并在这一层做，
-// core 的 reader 仍是「一个 journal 一个 reader」，不为面板加公共 API。
+// 跨 session 的只读读取。观测**一段 session 一份**（状态根 = session 目录，2026-09-03），agent 集群里几段并行时
+// 要一起看，就得扫会话根、每段开一个只读 reader、把各段的 run 合起来排。合并在这一层做，
+// core 的 reader 仍是「一个状态根一个 reader」，不为面板加公共 API。
 //
-// 会话的出现与消失按 2s 缓存重扫：新出现且已有库的开 reader，目录没了的关掉。`sessionId` 给了就只看那一段——
-// 那时不要求它有 meta（点名的是目录），只要求库文件存在。
+// 会话的出现与消失按 2s 缓存重扫：新出现且已有观测文档的开 reader，目录没了的关掉。`sessionId` 给了就只看那一段——
+// 那时不要求它有 meta（点名的是目录），只要求观测文档存在。
+//
+// 旧格式（2026-09-14 之前的 `observability/observations.sqlite`）**不迁移、不读**：只有它的会话记进打不开的会话，
+// 原因写明——`observe` 命令与面板的健康信息都会把它打出来，不静默当成「没有记录」。
 
 import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   describeAgentRef,
   FileDir,
   listSessions,
-  observationDatabasePath,
+  ObservationStoreMissingError,
+  observationStorePath,
   openObservationReader,
   resolveStateDir,
   type RunLookupResult,
@@ -18,8 +23,12 @@ import {
   type RunObservationHeader,
   type RunObservationPage,
   type SessionInfo,
-  type SqliteEchoObservationReader,
+  type DocumentEchoObservationReader,
 } from "@echo-agent/core";
+
+/** 2026-09-14 之前观测落在这个 SQLite 文件里；新版本不读它，只认出来告诉人。 */
+const LEGACY_OBSERVATION_DATABASE = "observations.sqlite";
+const LEGACY_REASON = `旧格式观测（${LEGACY_OBSERVATION_DATABASE}），已不再读取`;
 import type { ObservationEnvelope } from "@echo-agent/core/observability";
 
 /** 页面要的会话摘要：产品名、workspace、状态。不带 messageCount 之类会随 agent 写盘变化的东西——那是另一份真相。 */
@@ -82,7 +91,7 @@ export type SessionObservationReadersOptions = Readonly<{
 }>;
 
 export class SessionObservationReaders {
-  private readonly readers = new Map<string, SqliteEchoObservationReader>();
+  private readonly readers = new Map<string, DocumentEchoObservationReader>();
   private briefs: Record<string, SessionBrief> = {};
   /** 非 undefined = 这轮会话清单没读出来（坏 / 旧 meta）：run 照看，只是没有产品名与工作目录。 */
   private briefsError: string | undefined;
@@ -97,9 +106,9 @@ export class SessionObservationReaders {
     return resolveStateDir({ sessionsRoot: this.opts.sessionsRoot, sessionId });
   }
 
-  /** 某段会话的库文件路径（存不存在都算得出，报错文案用）。 */
-  databasePath(sessionId: string): string {
-    return observationDatabasePath(this.stateRoot(sessionId));
+  /** 某段会话的观测目录（存不存在都算得出，报错文案用）。 */
+  storePath(sessionId: string): string {
+    return observationStorePath(this.stateRoot(sessionId));
   }
 
   /** 已开 reader 的会话数。0 = 一段都还没有观测记录。 */
@@ -108,7 +117,7 @@ export class SessionObservationReaders {
   }
 
   private unreadableSessions: Readonly<Record<string, string>> = {};
-  /** 有库但打不开的会话 → 原因。`/api/health` 与 `observe health` 报它，其余会话照看。 */
+  /** 有观测目录但读不了的会话（写坏了、或只有旧格式）→ 原因。`/api/health` 与 `observe health` 报它，其余会话照看。 */
   get unreadable(): Readonly<Record<string, string>> {
     return this.unreadableSessions;
   }
@@ -141,23 +150,28 @@ export class SessionObservationReaders {
     for (const s of infos) {
       briefs[s.id] = { product: s.product, agent: describeAgentRef(s.agent), name: s.name, workspace: s.workspace, updatedAt: s.updatedAt, status: s.status };
     }
-    // 清单读不出来时，直接扫会话根下有观测库的目录——run 仍然全都看得见，只是没有名字
-    const discovered = this.briefsError === undefined ? infos.map((s) => s.id) : this.sessionDirsWithDatabase();
+    // 清单读不出来时，直接扫会话根下有观测目录的子目录——run 仍然全都看得见，只是没有名字
+    const discovered = this.briefsError === undefined ? infos.map((s) => s.id) : this.sessionDirsWithStore();
     const wanted = this.opts.sessionId === undefined ? discovered : [this.opts.sessionId];
     const seen = new Set<string>();
     const unreadable: Record<string, string> = {};
     for (const id of wanted) {
-      if (!existsSync(this.databasePath(id))) continue; // 会话有了、agent 还没跑过一条 run：库还没建，不是错
+      if (!existsSync(this.storePath(id))) continue; // 会话有了、agent 还没起来过：观测目录还没建，不是错
       seen.add(id);
       if (this.readers.has(id)) continue;
       try {
         this.readers.set(id, await openObservationReader({ stateRoot: this.stateRoot(id) }));
       } catch (e) {
-        // 一段的库打不开（写坏 / 半建）不该让整个只读面板对全部会话失败（review 2026-09-07）：
+        seen.delete(id);
+        if (e instanceof ObservationStoreMissingError) {
+          // 目录在、新格式不在：只有旧库就说清楚，别的（目录刚建、key 还没写完）不是错
+          if (existsSync(join(this.storePath(id), LEGACY_OBSERVATION_DATABASE))) unreadable[id] = LEGACY_REASON;
+          continue;
+        }
+        // 一段的观测读不了（写坏）不该让整个只读面板对全部会话失败（review 2026-09-07）：
         // 记下原因、跳过它；点名 `--session` 看的就是这一段时照旧抛，让命令行如实报错
         if (this.opts.sessionId !== undefined) throw e;
         unreadable[id] = e instanceof Error ? e.message : String(e);
-        seen.delete(id);
       }
     }
     this.unreadableSessions = unreadable;
@@ -170,15 +184,15 @@ export class SessionObservationReaders {
     this.scannedAt = Date.now();
   }
 
-  /** 会话清单读不出来时的兜底：会话根下每个「有观测库」的子目录就是一段能看的会话。 */
-  private sessionDirsWithDatabase(): string[] {
+  /** 会话清单读不出来时的兜底：会话根下每个「有观测目录」的子目录就是一段能看的会话。 */
+  private sessionDirsWithStore(): string[] {
     let names: string[];
     try {
       names = readdirSync(this.opts.sessionsRoot, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
     } catch {
       return [];
     }
-    return names.filter((id) => existsSync(this.databasePath(id)));
+    return names.filter((id) => existsSync(this.storePath(id)));
   }
 
   /** 各段的最近 `limit` 条 run 合起来按 `(acceptedAt, runId)` 倒序，取前 `limit` 条。 */
@@ -228,8 +242,8 @@ export class SessionObservationReaders {
     let best: { at: number; lookup: RunLookupResult } | undefined;
     for (const reader of this.readers.values()) {
       const lookup = await reader.lastRun();
-      const at = lookup.kind === "found" ? lookup.observation.acceptedAt : lookup.kind === "pruned" ? lookup.header.acceptedAt : undefined;
-      if (at === undefined) continue;
+      if (lookup.kind !== "found") continue;
+      const at = lookup.observation.acceptedAt;
       if (best === undefined || at > best.at) best = { at, lookup };
     }
     return best?.lookup ?? { kind: "unknown" };
@@ -246,7 +260,7 @@ export class SessionObservationReaders {
         path: reader.path,
         heads: await reader.runtimeHeads(),
         counts: await reader.counts(),
-        last: last.kind === "found" ? headerOf(last.observation) : last.kind === "pruned" ? last.header : null,
+        last: last.kind === "found" ? headerOf(last.observation) : null,
       });
     }
     return out;

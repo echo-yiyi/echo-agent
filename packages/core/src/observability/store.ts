@@ -1,6 +1,6 @@
 // CanonicalObservationStore：Sequencer 之下唯一的持久层 seam。
 //
-// V0 生产实现是 `bun:sqlite`（O3a）；这里的 in-memory 实现**只供 O2a reference conformance**，
+// 生产实现是状态根里的文档（`document-store.ts`）；这里的 in-memory 实现**只供 reference conformance**，
 // 不能装进 `createEcho()`，用户配置也不能替换 canonical store。两个实现共用同一套裁决：
 //   · 一批 records + 受影响 RunIndex + runtime head 在同一事务里要么全见、要么全不见；
 //   · recordId 已存在且 bytes、head、index 全部逐字等价 → `already-committed-same`（幂等重试）；
@@ -55,6 +55,15 @@ export type CommitBatchInput = Readonly<{
 
 export type CommitBatchResult = "committed" | "already-committed-same";
 
+/**
+ * 订阅回放的一页：`seq > afterSeq` 之后按 seq 升序的记录，外加这一段里被过期删掉的 seq 区间（`(afterSeq, beforeSeq)` 两端 exclusive）。
+ * hole（被 gap 覆盖的 seq）不算被删：它本来就没有行，gap 记录在后面照常交付。
+ */
+export type ReplayPage = Readonly<{
+  records: readonly Uint8Array[];
+  removed: readonly Readonly<{ afterSeq: number; beforeSeq: number }>[];
+}>;
+
 export interface CanonicalObservationStore {
   commitBatchIfAbsent(input: CommitBatchInput): Promise<CommitBatchResult>;
   readRecordBytes(recordId: string): Promise<Uint8Array | null>;
@@ -63,9 +72,9 @@ export interface CanonicalObservationStore {
   readCommittedPrefix(runtimeId: string): Promise<number>;
   /**
    * 某个 runtime 在 `seq > afterSeq` 之后按 seq 升序的前 `limit` 条 record bytes：subscribe 回放早于内存窗口那段时按页读。
-   * hole（被 gap 覆盖的 seq）没有行，页里自然跳过；返回不足 `limit` 条 = 这个 runtime 之后没有更多记录。
+   * hole（被 gap 覆盖的 seq）没有行，页里自然跳过；返回不足 `limit` 条 = 这个 runtime 之后没有更多记录。被过期删掉的区间放在 `removed` 里。
    */
-  readRecordsAfter(runtimeId: string, afterSeq: number, limit: number): Promise<readonly Uint8Array[]>;
+  readRecordsAfter(runtimeId: string, afterSeq: number, limit: number): Promise<ReplayPage>;
 }
 
 /** RunIndex 的 CAS 键：canonical bytes 的 SHA-256。两个实现必须算得一样。 */
@@ -172,7 +181,7 @@ export class InMemoryCanonicalObservationStore implements CanonicalObservationSt
     return this.heads.get(runtimeId) ?? 0;
   }
 
-  async readRecordsAfter(runtimeId: string, afterSeq: number, limit: number): Promise<readonly Uint8Array[]> {
+  async readRecordsAfter(runtimeId: string, afterSeq: number, limit: number): Promise<ReplayPage> {
     const head = this.heads.get(runtimeId) ?? 0;
     const out: Uint8Array[] = [];
     for (let seq = afterSeq + 1; seq <= head && out.length < limit; seq++) {
@@ -180,7 +189,7 @@ export class InMemoryCanonicalObservationStore implements CanonicalObservationSt
       const bytes = id === undefined ? undefined : this.records.get(id);
       if (bytes !== undefined) out.push(bytes);
     }
-    return out;
+    return { records: out, removed: [] };
   }
 
   /** 测试助手：按 seq 读回。 */

@@ -38,6 +38,7 @@ import type {
   ObservationGapReason,
   ObservationHealth,
   ObservationPersistenceState,
+  ObservationReplayGap,
   RunClosedBodyInput,
   RunClosedBodyV1,
   RunIndexEntryV1,
@@ -138,7 +139,8 @@ export type ObservationSequencerOptions = Readonly<{
   report?: (d: Diagnostic) => void;
 }>;
 
-export type ObservationSubscribeItem = ObservationEnvelope | SinkDeliveryGap;
+/** 交付给订阅方的一项：记录、本 sink 自己的交付缺口，或回放时跨过被过期删掉的区间（`retention-gap`）。 */
+export type ObservationSubscribeItem = ObservationEnvelope | SinkDeliveryGap | ObservationReplayGap;
 export type ObservationSubscribeListener = (item: ObservationSubscribeItem) => void;
 
 export type ObservationSubscribeOptions = Readonly<{
@@ -394,6 +396,14 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   /** 内存窗口里最近 `replayWindowRecords` 条已 committed 的 envelope（按 seq，hole 不在其中）。完整历史在 store。 */
   committedRecords(): readonly ObservationEnvelope[] {
     return this.recentCommitted;
+  }
+
+  /**
+   * 这个 run 还在不在跟踪中：`run.accepted` 已预留、`run.closed` 还没落盘。过期拒删的判据用它而不是 `isRunOpen`——
+   * 封口已预留、还没落盘的那一段 `isRunOpen` 已经是 false，这时删掉概要，随后那批提交会把它写回来。
+   */
+  isTrackingRun(runId: string): boolean {
+    return this.runBoundaries.has(runId);
   }
 
   committedRunIndex(runId: string): RunIndexEntryV1 | undefined {
@@ -1261,7 +1271,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
             },
             firstSeq: slot.seq,
             lastSeq: slot.seq,
-            bodyState: "retained",
           });
           break;
         }
@@ -1561,18 +1570,30 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       (page) => {
         replay.fetching = false;
         if (sub.status === "closed") return;
-        let exhausted = page.length < requested;
+        let exhausted = page.records.length < requested;
+        // 被过期删掉的区间按 seq 插在记录之间交付：它只是传输通知，不进 journal、不改 integrity
+        const removed = [...page.removed].sort((a, b) => a.afterSeq - b.afterSeq);
+        const pushRemovedBefore = (seq: number): void => {
+          while (removed.length > 0 && removed[0]!.beforeSeq <= seq) {
+            const r = removed.shift()!;
+            const beforeSeq = Math.min(r.beforeSeq, replay.upto + 1);
+            if (beforeSeq - r.afterSeq - 1 <= 0) continue;
+            replay.queue.push({ kind: "retention-gap", gap: { afterSeq: r.afterSeq, beforeSeq, dropped: beforeSeq - r.afterSeq - 1, reason: "retention" } });
+          }
+        };
         try {
-          for (const bytes of page) {
+          for (const bytes of page.records) {
             const env = decodeObservationEnvelope(bytes);
             if (env.seq > replay.upto) {
               exhausted = true;
               break;
             }
+            pushRemovedBefore(env.seq);
             replay.cursor = env.seq;
             if (sub.runId !== undefined && env.scope.runId !== sub.runId) continue;
             replay.queue.push(env);
           }
+          if (exhausted) pushRemovedBefore(replay.upto + 1);
         } catch (e) {
           this.failReplay(sub, replay, e);
           return;
@@ -1664,7 +1685,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     // `redactError` 已经是 total function，这里再兜一层是因为**隔离层不能有单点**。
     try {
       if (sub.status === "closed") return; // 异步 reject 可能晚于关闭到达
-      const seq = "recordId" in item ? item.seq : item.beforeSeq - 1;
+      const seq = "recordId" in item ? item.seq : "gap" in item ? item.gap.beforeSeq - 1 : item.beforeSeq - 1;
       this.pushSinkGap(sub, { sinkId: sub.id, afterSeq: seq - 1, beforeSeq: seq + 1, dropped: 1, reason: "sink_failure" });
       // 名字叫 digest 就不能装原文：第三方 listener 的 message 曾把整条 Authorization 头带进可查询的 health。
       const r = redactError(e);

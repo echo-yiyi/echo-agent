@@ -50,7 +50,7 @@
    };
    ```
 
-   **缺省不变**:今天那条路径分支(自定义 `store` 且没点名 `stateDir` → `:memory:`,否则状态根下的文件 SQLite)原样保留,本条只是在它前面加一句「给了 `observation.store` 就用给的」。~~SQLite 作为缺省不翻(2026-09-01 拍板)。~~ **2026-09-14 翻**:缺省改成状态根里的文档,见 [观测的默认存储改成文档](2026-09-14-observation-document-store.md)。`Echo.send()` 回的 `observationPersistence` 报的是**实际那个 store** 的结果,不再暗含「一定落盘」——今天注入 `InMemoryDir` 时它报的已经是内存库的结果,只是调用方无从选择那是哪个库。
+   **缺省不变**:今天那条路径分支(自定义 `store` 且没点名 `stateDir` → `:memory:`,否则状态根下的文件 SQLite)原样保留,本条只是在它前面加一句「给了 `observation.store` 就用给的」。~~SQLite 作为缺省不翻(2026-09-01 拍板)。~~ **2026-09-14 翻**:缺省改成状态根里的文档,见 [观测的默认存储改成文档](../implemented/2026-09-14-observation-document-store.md)。`Echo.send()` 回的 `observationPersistence` 报的是**实际那个 store** 的结果,不再暗含「一定落盘」——今天注入 `InMemoryDir` 时它报的已经是内存库的结果,只是调用方无从选择那是哪个库。
 
 ## 验收
 

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, createProvider, createProviderStreams, observationDatabasePath, type Echo, type Provider } from "@echo-agent/core";
+import { createEcho, createProvider, createProviderStreams, observationStorePath, type Echo, type Provider } from "@echo-agent/core";
 import { scriptedDialect, textTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { parseObserveArgs, runObserve, type ObserveIo } from "@echo-agent/base";
 import { mainFor } from "@echo-agent/base";
@@ -86,28 +86,50 @@ test("一段会话都没有：退出码 1，说清看的是哪儿；不建库", 
   expect(await runObserve(["last", "--state-dir", dir], "echo-agent", o)).toBe(1);
   expect(o.err.text).toContain("还没有任何会话");
   expect(o.err.text).toContain(dir);
-  expect(existsSync(observationDatabasePath(dir))).toBe(false);
+  expect(existsSync(observationStorePath(dir))).toBe(false);
 });
 
-test("点名一段不存在的会话：退出码 1，说清库在哪、为什么没有；不建库", async () => {
+test("点名一段不存在的会话：退出码 1，说清观测目录在哪、为什么没有；不建目录", async () => {
   const o = io();
   expect(await runObserve(["last", "--state-dir", dir, "--session", "s-nope"], "echo-agent", o)).toBe(1);
-  expect(o.err.text).toContain("还没有任何 run");
-  expect(o.err.text).toContain(observationDatabasePath(join(dir, "s-nope")));
-  expect(existsSync(observationDatabasePath(join(dir, "s-nope")))).toBe(false);
+  expect(o.err.text).toContain("还没有任何观测记录");
+  expect(o.err.text).toContain(observationStorePath(join(dir, "s-nope")));
+  expect(existsSync(observationStorePath(join(dir, "s-nope")))).toBe(false);
 });
 
-test("一段的观测库打不开：health 跳过它并报原因，其余会话照看、退出 0（review 2026-09-07：此前整个 observe 对全部会话失败，已开的 reader 也没人关）", async () => {
+test("只有旧格式观测库（observations.sqlite）的会话：跳过并说清是旧格式、不再读取，其余会话照看（2026-09-14 不迁移）", async () => {
   const echo = await echoAt([textTurn("你好")]);
   await echo.send("hi");
   const good = echo.agent.state.sessionId!;
   await echo.stop();
-  // 一段登记在案（meta 照抄好的那段、只换 id）、但观测库是一坨坏字节的会话
+  const oldRoot = join(dir, "old-session");
+  mkdirSync(join(oldRoot, "observability"), { recursive: true });
+  const meta = JSON.parse(readFileSync(join(dir, good, "meta.json"), "utf8")) as Record<string, unknown>;
+  writeFileSync(join(oldRoot, "meta.json"), JSON.stringify({ ...meta, id: "old-session" }));
+  writeFileSync(join(oldRoot, "observability", "observations.sqlite"), "SQLite format 3");
+  const h = io();
+  expect(await runObserve(["health", "--state-dir", dir], "echo-agent", h)).toBe(0);
+  expect(h.out.text).toContain(good);
+  expect(h.err.text).toContain("old-session");
+  expect(h.err.text).toContain("旧格式观测（observations.sqlite），已不再读取");
+  // 点名看它：只说旧格式，不再补一句「还没有记录」
+  const only = io();
+  expect(await runObserve(["last", "--state-dir", dir, "--session", "old-session"], "echo-agent", only)).toBe(1);
+  expect(only.err.text).toContain("旧格式观测");
+  expect(only.err.text).not.toContain("还没有任何观测记录");
+});
+
+test("一段的观测读不了：health 跳过它并报原因，其余会话照看、退出 0（review 2026-09-07：此前整个 observe 对全部会话失败，已开的 reader 也没人关）", async () => {
+  const echo = await echoAt([textTurn("你好")]);
+  await echo.send("hi");
+  const good = echo.agent.state.sessionId!;
+  await echo.stop();
+  // 一段登记在案（meta 照抄好的那段、只换 id）、但观测文档是一坨坏字节的会话
   const badRoot = join(dir, "bad-session");
   mkdirSync(join(badRoot, "observability"), { recursive: true });
   const meta = JSON.parse(readFileSync(join(dir, good, "meta.json"), "utf8")) as Record<string, unknown>;
   writeFileSync(join(badRoot, "meta.json"), JSON.stringify({ ...meta, id: "bad-session" }));
-  writeFileSync(observationDatabasePath(badRoot), "not a database");
+  writeFileSync(join(observationStorePath(badRoot), "key.json"), "not a document");
   const h = io();
   expect(await runObserve(["health", "--state-dir", dir], "echo-agent", h)).toBe(0);
   expect(h.out.text).toContain(good);
@@ -116,7 +138,7 @@ test("一段的观测库打不开：health 跳过它并报原因，其余会话�
   // 点名那一段看的时候照旧如实报错
   const only = io();
   expect(await runObserve(["health", "--state-dir", dir, "--session", "bad-session"], "echo-agent", only)).toBe(1);
-  expect(only.err.text).toContain("打不开观测库");
+  expect(only.err.text).toContain("读不了观测");
 });
 
 test("last / show / export / health：跑一轮落盘后都读得到；stop 之后也读得到", async () => {
@@ -145,7 +167,7 @@ test("last / show / export / health：跑一轮落盘后都读得到；stop 之�
 
   const health = io();
   expect(await runObserve(["health", "--state-dir", dir, "--session", sid], "echo-agent", health)).toBe(0);
-  expect(health.out.text).toContain(`observation database  ${observationDatabasePath(join(dir, sid))}`);
+  expect(health.out.text).toContain(`observation store     ${observationStorePath(join(dir, sid))}`);
   expect(health.out.text).toContain("runs                  1 ·");
   expect(health.out.text).toContain(`last run              ${result.runId} · completed`);
   expect(health.out.text).toContain("not persisted yet");
@@ -181,7 +203,7 @@ test("不点名 --session：show 按 run-id 跨会话找到，last 是全部会�
   expect(await runObserve(["health", "--state-dir", dir], "echo-agent", health)).toBe(0);
   expect(health.out.text).toContain(`session               ${id1}`);
   expect(health.out.text).toContain(`session               ${id2}`);
-  expect(health.out.text.split("observation database  ").length).toBe(3);
+  expect(health.out.text.split("observation store     ").length).toBe(3);
   // 点名就只看那一段：另一段的 run 找不到
   const other = io();
   expect(await runObserve(["show", r1.runId, "--state-dir", dir, "--session", id2], "echo-agent", other)).toBe(1);

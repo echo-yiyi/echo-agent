@@ -9,6 +9,12 @@ export type LeaseLossReason = Error;
 
 export interface StateLeaseLifecycle {
   /**
+   * 刚拿到租约、写入闸已装上：从这一刻起可以碰状态根里别的写者（以前的进程）留下的东西。
+   * **不得阻塞启动**：实现应立即返回、把活放到后台；也不得抛（失败进诊断）。可选——没有要做的就不给。
+   */
+  afterLeaseAcquired?(): Promise<void>;
+
+  /**
    * 正常交还租约之前的最后一站：**cell 仍 installed、根闸仍开**，可以 flush / pause / close 自己的 writer。
    * 返回之后 Agent 才 revoke cell、关根闸、`Lease.release()`——三步之间禁止新的 state-root I/O。
    *

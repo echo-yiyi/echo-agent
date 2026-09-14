@@ -3,15 +3,15 @@
 //   observe last                      最近一次 run，人读文本
 //   observe show <run-id>             指定 run
 //   observe export <run-id> --format  json（缺省）或 text，原样进 stdout
-//   observe health                    库在哪、每个 runtime 裁决到哪、多少 run / record
-//   observe serve [--port N]          本地只读面板（页面轮询 SQLite，agent 跑着也能看），Ctrl+C 停
+//   observe health                    观测目录在哪、每个 runtime 提交到哪、多少 run / record
+//   observe serve [--port N]          本地只读面板（页面轮询观测文档，agent 跑着也能看），Ctrl+C 停
 //
-// **只调 `openObservationReader()`**：read-only SQLite 连接，不 `createEcho()`、不取 Agent StateLock、不起第二个 Agent；
-// 活 writer（正在跑的 agent）旁边照样能读，只见已 COMMIT 的。每条命令结束关连接。
+// **只调 `openObservationReader()`**：只读状态根里的观测文档，不 `createEcho()`、不取 Agent StateLock、不起第二个 Agent；
+// 活 writer（正在跑的 agent）旁边照样能读，只见已提交的。
 //
 // 状态根与主命令同一条解析：`--state-dir` 是**会话目录的上一层**，`--session` 点名看哪一段。
-// 观测库归 session（状态根 = session 目录，2026-09-03），agent 集群里几段并行——不点名就把会话根下
-// **全部**有库的段一起看（2026-09-05）：runId 全局唯一，`show <run-id>` 不必知道它在哪一段；
+// 观测归 session（状态根 = session 目录，2026-09-03），agent 集群里几段并行——不点名就把会话根下
+// **全部**有观测的段一起看（2026-09-05）：runId 全局唯一，`show <run-id>` 不必知道它在哪一段；
 // `last` 是全部会话里最近的那条；`serve` 一个面板看整个集群。
 // 不认识的子命令 / 选项一律报错（退出码 2），不静默按缺省跑——与 `cli.ts` 同一条纪律。
 
@@ -52,7 +52,7 @@ export function observeUsage(name: string): string {
   show <run-id>            指定 run 的观测记录
   export <run-id>          导出（缺省 --format json；--format text 给人读文本）
   health                   库的位置、各 runtime 已裁决到的 seq、run / record 计数
-  serve                    本地只读面板：run 列表 + 时间线 + 摘要，页面轮询 SQLite，agent 跑着也能看；Ctrl+C 停
+  serve                    本地只读面板：run 列表 + 时间线 + 摘要，页面轮询观测文档，agent 跑着也能看；Ctrl+C 停
 
 选项：
   --state-dir <路径>       会话目录的上一层（与主命令同义：缺省 $ECHO_HOME/sessions，再退到 ~/.echo/sessions）
@@ -167,12 +167,8 @@ function printLookup(lookup: RunLookupResult, what: string, format: ObserveForma
       io.out.write(rendered.content.endsWith("\n") ? rendered.content : `${rendered.content}\n`);
       return 0;
     }
-    case "pruned":
-      // body 已清、header 还在窗口内（O3b 的 retention 才会产生）：把 header 与 gap 如实打出来，不冒充完整记录
-      io.out.write(`${headerLine(lookup.header)}\nbody pruned by retention · gaps ${lookup.gaps.length}\n`);
-      return 0;
     case "unknown":
-      io.err.write(`${what}：没有这条 run 的记录（从未有过，或已超出 header 保留窗口）\n`);
+      io.err.write(`${what}：没有这条 run 的记录（从未有过，或已被过期规则删掉）\n`);
       return 1;
   }
 }
@@ -195,19 +191,21 @@ export async function runObserve(argv: readonly string[], name: string, io: Obse
   }
   const sessionsRoot = expandHome(opts.stateDir ?? resolveSessionsRoot());
   const readers = new SessionObservationReaders({ sessionsRoot, ...(opts.sessionId === undefined ? {} : { sessionId: opts.sessionId }) });
-  // refresh 也在 try 里：扫到一半某段库打不开而抛时，已开的 reader 要有人关（review 2026-09-07：此前这条路直接 return，reader 泄漏）
+  // refresh 也在 try 里：扫到一半某段观测读不了而抛时，已开的 reader 要有人关（review 2026-09-07：此前这条路直接 return，reader 泄漏）
   try {
     try {
       await readers.refresh(true);
     } catch (e) {
-      io.err.write(`打不开观测库：${e instanceof Error ? e.message : String(e)}\n`);
+      io.err.write(`读不了观测：${e instanceof Error ? e.message : String(e)}\n`);
       return 1;
     }
-    for (const [id, why] of Object.entries(readers.unreadable)) io.err.write(`会话 ${id} 的观测库打不开，跳过：${why}\n`);
-    // 一个库都没有：面板照样起（agent 稍后起来就有了），查询类命令诚实说没有——分清「没有会话」与「会话有了、还没跑过 run」，
-    // 那两句话指的不是同一件事。
+    for (const [id, why] of Object.entries(readers.unreadable)) io.err.write(`会话 ${id} 的观测读不了，跳过：${why}\n`);
+    // 一段都没有：面板照样起（agent 稍后起来就有了），查询类命令诚实说没有——分清「没有会话」与「会话有了、还没跑过 run」，
+    // 那两句话指的不是同一件事。点名的那段已经在上面说过为什么读不了，就不再补一句「还没有记录」。
     if (readers.size === 0 && opts.command.kind !== "serve") {
-      if (opts.sessionId !== undefined) io.err.write(`会话 ${opts.sessionId} 还没有任何 run 的观测记录（${readers.databasePath(opts.sessionId)} 不存在）\n`);
+      if (opts.sessionId !== undefined) {
+        if (readers.unreadable[opts.sessionId] === undefined) io.err.write(`会话 ${opts.sessionId} 还没有任何观测记录（${readers.storePath(opts.sessionId)} 不存在）\n`);
+      }
       else if (Object.keys(readers.sessions).length === 0) io.err.write(`${sessionsRoot} 下还没有任何会话\n`);
       else io.err.write(`${sessionsRoot} 下的 ${Object.keys(readers.sessions).length} 段会话都还没有 run 的观测记录\n`);
       return 1;
@@ -260,7 +258,7 @@ async function execute(command: ObserveCommand, readers: SessionObservationReade
     case "last": {
       const lookup = await readers.lastRun();
       if (lookup.kind === "unknown") {
-        io.err.write("库里还没有任何 run\n");
+        io.err.write("还没有任何 run 的观测记录\n");
         return 1;
       }
       return printLookup(lookup, "last", command.format, command.body, io);
@@ -282,7 +280,7 @@ async function health(readers: SessionObservationReaders, io: ObserveIo): Promis
     blocks.push(
       [
         `session               ${s.sessionId}${brief === undefined ? "" : ` · ${brief.agent} · ${brief.workspace}`}`,
-        `observation database  ${s.path}`,
+        `observation store     ${s.path}`,
         `runs                  ${s.counts.runs} · records ${s.counts.records}`,
         `runtime heads         ${s.heads.length === 0 ? "(none)" : s.heads.map((h) => `${h.runtimeId} → committed ${h.committedPrefix}`).join(" · ")}`,
         `last run              ${s.last === null ? "(none)" : headerLine(s.last)}`,

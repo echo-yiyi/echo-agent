@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEcho, type Echo } from "../src/create-echo.ts";
-import { openObservationReader, ObservationDatabaseMissingError } from "../src/index.ts";
+import { openObservationReader, ObservationStoreMissingError } from "../src/index.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { scriptedDialect, textTurn, toolTurn, errorTurn, type ScriptedTurn } from "../src/testing.ts";
@@ -13,7 +13,11 @@ import { renderRunObservation, buildRunObservationViewModel } from "../src/obser
 import { RUN_ASSEMBLY_RECORD } from "../src/observability/draft.ts";
 import { ObservationRuntime } from "../src/observability/runtime.ts";
 import { observationHostOf } from "../src/observability/host-wiring.ts";
-import { SqliteCanonicalObservationStore, observationDatabasePath } from "../src/observability/sqlite-store.ts";
+import { DocumentObservationStore } from "../src/observability/document-store.ts";
+import { FileDir } from "../src/storage/file-dir.ts";
+import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
+import type { StorageDir } from "../src/storage/types.ts";
+import type { ObservationExpiryRule } from "../src/observability/runtime.ts";
 import { sealAgentAssemblyObservation } from "../src/observability/assembly.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
 import type { BoundedObservationDraft } from "../src/observability/draft.ts";
@@ -26,7 +30,7 @@ import { mkdtempSync } from "node:fs";
 process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
 // O3a 的端到端判据：**committed send → getRun → render 出非空稳定文本**。
-// 真 createEcho（真 FileDir + 真文件锁 + 真 bun:sqlite），scripted Provider + 进程内 builtin test Tool；
+// 真 createEcho（真 FileDir + 真文件锁 + 真观测文档），scripted Provider + 进程内 builtin test Tool；
 // completed / error / abort 三条路径都能按 runId 取到已 COMMIT 的 record 并渲染；Tool 抛错仍配对；压小 ring 产生
 // canonical gap 时 integrity=partial 且 renderer 显示；离线 reader 在活 writer 旁边读到同一份。
 
@@ -75,18 +79,27 @@ async function echoWith(opts: {
   tool?: ModelTool;
   withMemory?: boolean;
   capture?: "off" | "metadata" | "content";
+  observationStore?: StorageDir;
+  expiry?: ObservationExpiryRule;
+  start?: boolean;
+  sessionId?: string;
 }): Promise<Echo> {
   const echo = await createEcho({
     provider: scripted(opts.turns),
     allowNetwork: false,
     stateDir: opts.stateDir,
+    ...(opts.sessionId === undefined ? {} : { sessionId: opts.sessionId }),
     extensionDirs: [],
     withoutMemory: opts.withMemory !== true,
     agent: { tools: [opts.tool ?? pingTool()] },
-    ...(opts.capture !== undefined ? { observation: { capture: opts.capture } } : {}),
+    observation: {
+      ...(opts.capture === undefined ? {} : { capture: opts.capture }),
+      ...(opts.observationStore === undefined ? {} : { store: opts.observationStore }),
+      ...(opts.expiry === undefined ? {} : { expiry: opts.expiry }),
+    },
   });
   running.push(echo);
-  await echo.agent.start();
+  if (opts.start !== false) await echo.agent.start();
   return echo;
 }
 
@@ -334,7 +347,7 @@ describe("send → getRun → render（completed）", () => {
     await reader.close();
 
     const err = await openObservationReader({ stateRoot: join(await tmp(), "never") }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ObservationDatabaseMissingError);
+    expect(err).toBeInstanceOf(ObservationStoreMissingError);
   });
 
   test("整体运行状态：run 开头与结尾各一份同形快照——装备、上下文、工作目录、能力摘要；两份一比看得出 run 改了什么", async () => {
@@ -466,7 +479,7 @@ describe("canonical gap（硬门 4）", () => {
 
   test("人为压小 ring → observation.gap；index integrity=partial；renderer 显示 gap；run.closed 仍 stored", async () => {
     const stateDir = join(await tmp(), "state");
-    const store = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(stateDir) });
+    const store = await DocumentObservationStore.open({ dir: new FileDir(stateDir), path: stateDir });
     const clock = new FakeClock(1_000);
     const rt = new ObservationRuntime({
       runtimeId: "rt:gap",
@@ -519,12 +532,68 @@ describe("canonical gap（硬门 4）", () => {
   });
 });
 
-describe("观测层坏了不影响 agent 主线（2026-09-03 拍板：放弃 fail-closed admission）", () => {
-  test("SQLite 在 run 之前被关掉：send 照常 completed、persistence 报 degraded；下一次 send 也照跑；stop 不抛", async () => {
+describe("过期规则归产品，core 按时点执行（2026-09-14）", () => {
+  async function until(cond: () => Promise<boolean>, ms = 3_000): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (await cond()) return true;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return cond();
+  }
+
+  test("每个 run 封口之后执行一次：规则「只留最近一条」→ 跑三轮只剩最后一条，前两条 getRun 是 unknown", async () => {
     const stateDir = join(await tmp(), "state");
-    const echo = await echoWith({ stateDir, turns: [textTurn("one"), textTurn("two")] });
+    const keepNewest: ObservationExpiryRule = (runs) => ({ runs: runs.slice(1).map((h) => h.runId) });
+    const echo = await echoWith({ stateDir, turns: [textTurn("one"), textTurn("two"), textTurn("three")], expiry: keepNewest });
+    const a = await echo.send("a");
+    const b = await echo.send("b");
+    const c = await echo.send("c");
+    expect(await until(async () => (await echo.observations.listRuns()).items.length === 1)).toBe(true);
+    expect((await echo.observations.listRuns()).items.map((h) => h.runId)).toEqual([c.runId]);
+    expect((await echo.observations.getRun(a.runId)).kind).toBe("unknown");
+    expect((await echo.observations.getRun(b.runId)).kind).toBe("unknown");
+    expect((await echo.observations.getRun(c.runId)).kind).toBe("found");
+  });
+
+  test("重启拿到 lease 之后执行一次，不等新 run；没 start 之前 expire() 是空操作；不给规则一条不删", async () => {
+    const stateDir = join(await tmp(), "state");
+    const first = await echoWith({ stateDir, turns: [textTurn("one"), textTurn("two")] });
+    await first.send("a");
+    await first.send("b");
+    const sessionId = first.agent.state.sessionId!;
+    await first.observations.expire(); // 没给规则：空操作
+    expect((await first.observations.listRuns()).items.length).toBe(2);
+    await first.stop();
+
+    let calls = 0;
+    const dropAll: ObservationExpiryRule = (runs) => {
+      calls += 1;
+      return { runs: runs.map((h) => h.runId) };
+    };
+    const second = await echoWith({ stateDir, turns: [], expiry: dropAll, start: false, sessionId });
+    await second.observations.expire(); // 还没持 lease
+    expect(calls).toBe(0);
+    expect((await second.observations.listRuns()).items.length).toBe(2);
+    await second.agent.start();
+    expect(await until(async () => (await second.observations.listRuns()).items.length === 0)).toBe(true);
+    expect(calls).toBeGreaterThan(0);
+  });
+});
+
+describe("观测层坏了不影响 agent 主线（2026-09-03 拍板：放弃 fail-closed admission）", () => {
+  test("观测存储写不动：send 照常 completed、persistence 报 degraded；下一次 send 也照跑；stop 不抛", async () => {
+    const stateDir = join(await tmp(), "state");
+    // 模拟存储坏掉：开库（读或建 key）照常，之后每次写批文件都抛，writer 会 seal
+    const inner = new InMemoryDir();
+    const broken: StorageDir = {
+      read: (p) => inner.read(p),
+      write: (p, c) => (p.startsWith("observability/batches/") ? Promise.reject(new Error("disk gone")) : inner.write(p, c)),
+      remove: (p) => inner.remove(p),
+      list: (p) => inner.list(p),
+    };
+    const echo = await echoWith({ stateDir, turns: [textTurn("one"), textTurn("two")], observationStore: broken });
     const rt = observationHostOf(echo.agent)!.runtime;
-    rt.store.close(); // 模拟 store 坏掉：之后每次 commit 都抛，writer 会 seal
 
     const a = await echo.send("a");
     expect(a.outcome.kind).toBe("completed");
@@ -541,7 +610,7 @@ describe("观测层坏了不影响 agent 主线（2026-09-03 拍板：放弃 fai
   });
 });
 
-// 投影的单测证明不了「读得回来」：思考还要穿过 canonical 编码、SQLite、reader 与视图模型。
+// 投影的单测证明不了「读得回来」：思考还要穿过 canonical 编码、观测文档、reader 与视图模型。
 // 这条走的正是面板读的那条路（buildRunObservationViewModel）。
 describe("思考穿过整条链路：canonical → SQLite → reader → 视图模型", () => {
   /** 一轮「先想、再答」：thinking 与 text 两块都进 done 的 message——preserved thinking 就是这个形状。 */

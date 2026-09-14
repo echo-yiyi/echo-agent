@@ -56,4 +56,4 @@
 
 `packages/core/test/extension-host.test.ts` 的 `replace()` 八条：先卸再装的顺序、回滚用原 entries 与原 config、boundary 拒绝零变化、依赖方拒绝、只卸、`lost`、disposer 抛不中断、事前校验。
 
-**Node 侧只到机制层**：`createEcho()` 今天在 Node 下起不来（`createAgent()` 开观测库走 `bun:sqlite`，既有限制，与本条无关），所以 `test/distribution-gate.test.ts` 的热部署一条装 tarball、真 `node` 跑的是两截 Node 独有的实现——`fs.cp` 整棵复制 + 经 realpath 的 import 拿到新模块且 `./helper.mjs` 是新的，以及 dist 产物上的 `ExtensionHost.replace()` 先卸后装。装配层（`reloadExtensions()`）的 Node 证据要等观测库有 Node 路径之后再补。
+**Node 侧只到机制层**：`createEcho()` 当时在 Node 下起不来（`createAgent()` 开观测库走 `bun:sqlite`，既有限制，与本条无关；2026-09-14 [观测改成文档存储](2026-09-14-observation-document-store.md)后已不再挡），所以 `test/distribution-gate.test.ts` 的热部署一条装 tarball、真 `node` 跑的是两截 Node 独有的实现——`fs.cp` 整棵复制 + 经 realpath 的 import 拿到新模块且 `./helper.mjs` 是新的，以及 dist 产物上的 `ExtensionHost.replace()` 先卸后装。装配层（`reloadExtensions()`）的 Node 证据要等观测库有 Node 路径之后再补。

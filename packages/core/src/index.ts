@@ -262,11 +262,12 @@ export { normalizeModelSnapshot, ModelSnapshotError } from "./admission/model-sn
 
 /**
  * 完整 Runtime 的观测公共面（O3a）：`createEcho()` 出来的 `echo.send()` / `echo.observations`，
- * 以及 observe CLI 的唯一离线入口 `openObservationReader()`（read-only SQLite，不取 StateLock、不起 Runtime）。
+ * 以及 observe CLI 的唯一离线入口 `openObservationReader()`（只读状态根里的观测文档，不取 StateLock、不起 Runtime）。
  * 类型与纯函数 renderer 从 `@echo-agent/core/observability` 子路径拿；这里只放会碰盘的入口与其错误类。
  */
-export { openObservationReader, SqliteEchoObservationReader, ObservationCursorError, ObservationNotPersistedError } from "./observability/query.ts";
-export { ObservationDatabaseMissingError, ObservationStoreOpenError, observationDatabasePath } from "./observability/sqlite-store.ts";
+export { openObservationReader, DocumentEchoObservationReader, ObservationCursorError, ObservationNotPersistedError } from "./observability/query.ts";
+export { ObservationStoreMissingError, ObservationStoreOpenError, observationStorePath } from "./observability/document-store.ts";
+export type { ObservationExpiryDecision, ObservationExpiryRule } from "./observability/runtime.ts";
 export { ObservationCorruptionError } from "./observability/store.ts";
 export type { EchoRunResult, EchoObservations, EchoObservationReader, RunLookupResult, RunObservation, RunObservationHeader, ObservedRunSource, SubloopRunSource, ListRunsOptions, RunObservationPage, ObservationCapturePolicy } from "./observability/types.ts";
 export type { AgentRunResult } from "./agent.ts";

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { FakeClock } from "../src/schedule/clock.ts";
 import { AGENT_ENTRY_ID, ObservationRuntime, builtinOwner } from "../src/observability/runtime.ts";
 import { loopFactDescriptor, type LoopFact, type LoopFactBody } from "../src/loop/observe.ts";
-import { SqliteCanonicalObservationStore, observationDatabasePath } from "../src/observability/sqlite-store.ts";
+import { DocumentObservationStore } from "../src/observability/document-store.ts";
+import { FileDir } from "../src/storage/file-dir.ts";
 import { sealAgentAssemblyObservation } from "../src/observability/assembly.ts";
 import { buildRunObservationViewModel, renderRunObservation } from "../src/observability/render.ts";
 import type { RunModelBinding } from "../src/admission/types.ts";
@@ -79,7 +80,7 @@ function script(): readonly LoopFact[] {
 async function fixtureRun(): Promise<RunObservation> {
   const dir = await mkdtemp(join(tmpdir(), "echo-obs-render-"));
   temps.push(dir);
-  const store = await SqliteCanonicalObservationStore.open({ path: observationDatabasePath(dir) });
+  const store = await DocumentObservationStore.open({ dir: new FileDir(dir), path: dir });
   const clock = new FakeClock(1_000);
   const rt = new ObservationRuntime({
     runtimeId: "rt:fixed",
