@@ -17,14 +17,15 @@ import type { Diagnostic } from "../errors.ts";
 /**
  * 一条后台通道:**同时最多一个在跑**,重复排队会被折叠成"跑完再跑一次"。
  *
- * 折叠而不是排队:这两条活都是"看当前状态、把它收拾好",跑三次和跑一次的效果一样,
- * 攒一个队列只会在忙的时候越积越多。
+ * 折叠而不是排队:在跑的时候又排进来几次,跑完只再跑**最后排进来的那一次**。回调捕获的是排它那一刻的
+ * 材料——提取的 transcript 就在闭包里——而最后那份包含前面被折叠掉的几次(transcript 只增不减,被压缩的
+ * 部分以摘要留着)。所以折叠丢的是重复,不是材料;攒一个队列只会在忙的时候越积越多。
  */
 export class MemoryChannel {
   private inflight: Promise<void> | null = null;
   private aborter: AbortController | null = null;
-  /** 在跑的时候又被排了一次:跑完再跑一次(只记一个 bit,不排队)。 */
-  private again = false;
+  /** 在跑的时候最后排进来的那一次:跑完就跑它(只留一个,不排队)。 */
+  private next: ((signal: AbortSignal) => Promise<void>) | null = null;
 
   constructor(
     private readonly name: string,
@@ -38,11 +39,11 @@ export class MemoryChannel {
 
   /**
    * 排一次。**不 await**——调用方(reply 收尾、回 idle)不该被后台活拖住。
-   * 已经在跑就只记一个 bit,等它跑完再跑一次。
+   * 已经在跑就把这次记成"下一个"(顶掉之前记下的),等它跑完再跑。
    */
   schedule(run: (signal: AbortSignal) => Promise<void>): void {
     if (this.inflight !== null) {
-      this.again = true;
+      this.next = run;
       return;
     }
     this.start(run);
@@ -61,9 +62,10 @@ export class MemoryChannel {
     })().then(() => {
       this.inflight = null;
       this.aborter = null;
-      if (this.again) {
-        this.again = false;
-        this.start(run);
+      const next = this.next;
+      if (next !== null) {
+        this.next = null;
+        this.start(next);
       }
     });
   }
@@ -78,7 +80,7 @@ export class MemoryChannel {
   async settle(): Promise<void> {
     // **不永久关闭**:`settle()` 也在丢锁 / 暂停时调,那之后 agent 可能再起来。
     // "停了之后别再起新的"由调用点的 `memoryWorkAllowed` 判,不由通道自己记一个终态。
-    this.again = false;
+    this.next = null;
     this.aborter?.abort();
     const inflight = this.inflight;
     if (inflight !== null) await inflight;

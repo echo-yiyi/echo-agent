@@ -5,7 +5,8 @@ import { memoryScopeTable, type MemoryScopeDef } from "../src/memory/scope.ts";
 import { agentMemory, notesMemory, userMemory } from "../src/memory/types.ts";
 import { EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
-import { FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
+import { HookRuntime } from "../src/hooks/runtime.ts";
+import { errorTurn, FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
 
 // 记忆提取的端到端判据（2026-09-14）。
 //
@@ -59,4 +60,67 @@ test("一条回复结束 → 提取子循环真的起来：提取 prompt 里有�
   expect(extract).toContain("以后回答简短一点");
   expect(extract).toContain("好，之后都简短回答。");
   expect(await dir.read("memory/answer-style.md")).toContain("回答保持简短");
+});
+
+test("提取还在跑时又结束一条回复 → 跑完再跑的那次看的是最新对话，不是把旧材料再提取一遍", async () => {
+  const dir = new InMemoryDir();
+  const mem = memoriesOn(dir);
+  const extractPrompts: string[] = [];
+  let release = (): void => {};
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  let reached = (): void => {};
+  const firstExtractStarted = new Promise<void>((r) => {
+    reached = r;
+  });
+  const foreground = scriptedStreamFn([textTurn("第一条回答"), textTurn("第二条回答")]);
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: async (model, context, options) => {
+      const seen = JSON.stringify(context.messages);
+      if (!seen.includes(EXTRACT_PROMPT_OPENING)) return foreground(model, context, options);
+      extractPrompts.push(seen);
+      if (extractPrompts.length === 1) {
+        reached();
+        await held;
+      }
+      return scriptedStreamFn([textTurn("没什么可记的。")])(model, context, options);
+    },
+    memory: mem,
+  });
+
+  await agent.prompt("第一句");
+  await firstExtractStarted; // 第一次提取卡在模型调用上，通道忙着
+  await agent.prompt("第二句"); // 这条回复收尾时排进来的提取带着第二句
+  release();
+
+  expect(await until(async () => extractPrompts.length >= 2), "跑完之后没有再跑").toBe(true);
+  expect(extractPrompts[1]).toContain("第二句");
+  expect(extractPrompts[1]).toContain("第二条回答");
+});
+
+test("提取的模型调用出错（循环不抛，outcome 是 error）→ 报 memory_extract_failed 诊断", async () => {
+  const dir = new InMemoryDir();
+  const mem = memoriesOn(dir);
+  // 诊断落成一条 notification 生命周期事件（`reportDiagnostic` → `hooks.notify`）
+  const notices: string[] = [];
+  const hooks = new HookRuntime();
+  hooks.on("notification", (e) => {
+    notices.push(e.message);
+  });
+  const foreground = scriptedStreamFn([textTurn("答完")]);
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: (model, context, options) =>
+      JSON.stringify(context.messages).includes(EXTRACT_PROMPT_OPENING)
+        ? scriptedStreamFn([errorTurn("overloaded", "模型挂了", false)])(model, context, options)
+        : foreground(model, context, options),
+    memory: mem,
+    hooks,
+  });
+
+  await agent.prompt("干点活");
+
+  expect(await until(async () => notices.some((m) => m.includes("memory_extract_failed"))), "提取没跑完却没有诊断").toBe(true);
 });

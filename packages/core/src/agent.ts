@@ -2776,7 +2776,7 @@ export class Agent {
     if (transcript === "" || !this.memoryWorkAllowed || signal.aborted) return;
     const table = memoryScopeTableOf(memory);
     const prompt = defaultExtractPrompt(listMemories(memory), table, transcript);
-    await this.runSubagent(
+    const result = await this.runSubagent(
       {
         prompt,
         systemPrompt: null,
@@ -2789,6 +2789,11 @@ export class Agent {
       signal,
       async () => {},
     );
+    // `runAgentLoop` 对失败不抛，结果在 outcome 里：没跑完（provider 错、轮数用完）要报出来，与通道兜住的抛错同一个 code。
+    // aborted 不报——那是 stop() / 丢锁在收摊。
+    if (result.outcome.kind === "error") {
+      this.reportDiagnostic({ code: "memory_extract_failed", message: `记忆提取没跑完（${result.outcome.error.code}）：${result.outcome.error.message}` });
+    }
   }
 
   /**

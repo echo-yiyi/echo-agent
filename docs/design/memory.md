@@ -110,7 +110,7 @@
 
 提取不通过 admission，不抢前台许可；独立消息数组、不消费前台 steer / followUp，子循环事件不发进主 transcript。但它复用父的循环配置与相关服务，不能笼统宣称与前台完全不共享可变状态。
 
-目前重叠保护是“本 reply 出现成功的 memory 工具结束事件”，并非已提交 mutation 事实。因此只读 view 也会跳过提取，别名工具的写入则未必触发跳过。忙时后续触发的材料还可能丢失，见第 8 节；不能承诺每条 reply 恰好完成一次提取。
+目前重叠保护是“本 reply 出现成功的 memory 工具结束事件”，并非已提交 mutation 事实。因此只读 view 也会跳过提取，别名工具的写入则未必触发跳过。提取还在跑时又结束的几条 reply 会折叠成一次：[`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel) 跑完只再跑最后排进来的那次，它的 transcript 包含前面几次的材料；stop / 丢锁时还没开始的那次直接丢掉。所以不能承诺每条 reply 各跑一次提取，但忙时的新材料最终会被看到。
 
 ## 6. Dream 怎样整理
 
@@ -145,7 +145,7 @@
 
 [`Agent.settleDream()`](../../packages/core/src/agent.ts#symbol=Agent.settleDream) 虽沿用旧名字，实际会同时 abort 并等待提取、Dream 两条通道，接入 stop / 丢锁路径。停发新工作与等待在飞工作结束是两件事；不能以“后台不阻塞前台”推导“退出不必等后台”。
 
-正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。通道捕获抛出的异常，但提取调用点没有检查非抛出的 error outcome，因此“后台失败都有明确提取失败诊断”尚不成立。
+正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。提取没跑完会报诊断 `memory_extract_failed`：通道兜住的抛错，与子循环以 error 收场（provider 出错、轮数用完）是同一个 code；stop / 丢锁造成的 aborted 不报。
 
 ## 8. 尚未兑现的契约
 
@@ -155,15 +155,13 @@
 
 记忆模块决策里的 `tools` 回调（模块自带工具，只拿 harness 方法、拿不到字节面）没有落地：registry 接收的是 `AnyMemory`，模块形状里没有这一格。harness 的写方法也不在公共面上，所以**包外扩展今天没有办法给自己的模块配一件专用写工具**，只能靠缺省的 `memory` 工具。
 
-### 忙时提取重跑旧快照
+### 提取的输入、重叠保护与模型档
 
-MemoryChannel 只保留 again 标记，结束后重跑最初的 run 回调；新 schedule 传入的回调被丢弃。而提取的 transcript 被捕获在回调闭包中，结果不是“再看一次最新状态”，而是“再提取一次旧材料”。
+[提取决策](../decisions/implemented/2026-09-07-memory-extraction.md)登记的三件，当前实现（第 5 节）都没兑现：
 
-```bash
-bun -e 'import {MemoryChannel} from "./packages/core/src/memory/channel.ts"; let release; const barrier=new Promise(r=>release=r); const calls=[]; const c=new MemoryChannel("probe"); c.schedule(async()=>{calls.push("old"); await barrier;}); c.schedule(async()=>{calls.push("new");}); release(); await new Promise(r=>setTimeout(r,10)); console.log(calls); await c.settle();'
-```
-
-当前输出 old、old。修复判据必须覆盖忙时的新材料最终被消费，不能只断言“又运行了一次”。重叠保护还应以真实提交写入区分 view 与 mutation，输入快照与模型选择则须对照提取决策分别收口。
+- **重叠保护**：决策按本 reply 是否出现 `memory.mutation.committed` 事实判断；实现看的是 memory 工具成功结束的事件，只读 view 也会让提取跳过。
+- **输入**：决策给「这次 reply 实际送给模型的那份」；实现给 reply 收尾时的压缩视图，不经同一条 transform / hook / 注入管线。
+- **模型档**：决策走产品配的便宜档；实现沿用父 scope 的模型绑定。
 
 ## 9. 验证范围与人工责任
 
@@ -172,13 +170,13 @@ bun -e 'import {MemoryChannel} from "./packages/core/src/memory/channel.ts"; let
 - [resident 超预算拒绝](../../packages/core/test/memory.test.ts#test=resident-超预算拒拒因带整理指引)：写入超预算时返回整理指引；同文件另有索引、路径、层绑定与 system 冻结测试。
 - [具名角色的目录](../../packages/core/test/create-agent.test.ts#test=有角色名时-role-层就在落在-agents角色名memory与角色定义同一棵树)：默认 role 层的装配落点；同文件另有无角色名的情形。
 - [Dream 未达写入门不启动](../../packages/core/test/dream-schedule.test.ts#test=门不满足-不跑写入数没到)：基本触发条件；同文件另有前台并行、主 transcript 隔离、失败不记成功及 stop 等待测试。
-- [提取真的起来](../../packages/core/test/memory-extract.test.ts#test=一条回复结束-提取子循环真的起来提取-prompt-里有这次对话模型用记忆工具写的东西落了盘)：一条回复结束后，提取 prompt 里有这次对话、模型经记忆工具写的内容落了盘。它不判断提取选得对不对，也不覆盖第 8 节的忙时重跑。
+- [提取真的起来](../../packages/core/test/memory-extract.test.ts#test=一条回复结束-提取子循环真的起来提取-prompt-里有这次对话模型用记忆工具写的东西落了盘)：一条回复结束后，提取 prompt 里有这次对话、模型经记忆工具写的内容落了盘；同文件另有忙时折叠（再跑的那次看的是最新对话）与没跑完报诊断两条，通道的折叠语义另见 `memory-channel.test.ts`。它们不判断提取选得对不对。
 - [子循环是自己的 run](../../packages/core/test/observability-runtime.test.ts#test=前台子-agent-是自己的-run链回派出它的工具调用turn-挂在自己的-runid-下不与父撞lastrun-仍是用户那条)：提取、整理与子 agent 共用 `Agent.runSubagent`，账本口径由子 agent 的端到端用例验证；提取与整理本身没有端到端的观测用例。
 
 旧测试中的 session 层是显式 fixture，不代表默认产品仍有该层；标题中的“只整理 session”不能被当成当前全局设计。链接门只检查文件或符号存在，不审判这些测试的语义。
 
 ```bash
-bun test packages/core/test/memory.test.ts packages/core/test/memory-extract.test.ts packages/core/test/dream-schedule.test.ts \
+bun test packages/core/test/memory.test.ts packages/core/test/memory-extract.test.ts packages/core/test/memory-channel.test.ts packages/core/test/dream-schedule.test.ts \
   packages/core/test/create-agent.test.ts packages/core/test/observability-runtime.test.ts
 bun scripts/docs-lint.ts
 bun test test/docs.test.ts test/export-jsdoc.test.ts
