@@ -71,7 +71,7 @@ Every launch starts a new session. `--continue` resumes the latest session of th
 
 ## See what a run did
 
-Every run writes a record of itself as documents under `observability/` in the session state root: run boundaries, the reply / turn / attempt nesting, each model generation and tool call, and the capability facts behind them (memory, tasks, schedules, inbox). `--observe <policy>` chooses how much is kept. Nothing is deleted unless the product sets an expiry rule (`observation.expiry` in `createEcho()`); `echo-agent` sets none.
+Every run writes a record of itself as documents under `observability/` in the session state root: run boundaries, the reply / turn / attempt nesting, each model generation and tool call, and the capability facts behind them (memory, tasks, schedules, inbox). `--observe <policy>` chooses how much is kept. Nothing is deleted unless the product calls `expireObservations()`; `echo-agent` does not.
 
 | Policy | What is written |
 |---|---|
@@ -123,7 +123,7 @@ try {
 
 `createEcho()` is the one place a runtime is put together, so a host starts there. An extension is how you add tools, prompt sections, compaction stages, or hooks to a running agent: it declares what it injects and what it provides, and the host owns its lifetime, so it can be unmounted without leaving anything behind. A shell is an extension too, one that injects the `AgentRuntime` service and renders it. The `Agent` class is on its way inside: the decision is made but not yet implemented (`docs/decisions/proposed/2026-09-07-agent-class-internal.md`), so it is still exported today, but it is not a supported entry point — much of it exists to carry host-only wiring, and everything a third party needs is on the extension API.
 
-`echo.send()` returns the run id alongside the outcome, and `echo.observations` reads the same journal the `observe` subcommand reads — `getRun()`, `lastRun()`, `listRuns()`, `snapshot()` and `subscribe()`. Set the capture policy with `createEcho({ observation: { capture: "content" } })`. To read a state root without starting a runtime, `openObservationReader({ stateRoot })` opens a read-only connection that takes no lock; close it when done. Observation never blocks a run: if the database cannot be written, the run still completes and the result reports `observationPersistence: "degraded"`.
+`echo.send()` returns the run id alongside the outcome, and `echo.observations` reads the same journal the `observe` subcommand reads — `getRun()`, `lastRun()`, `listRuns()`, `snapshot()` and `subscribe()`. Set the capture policy with `createEcho({ observation: { capture: "content" } })`. To read a state root without starting a runtime, `openObservationReader({ stateRoot })` opens a read-only connection that takes no lock; close it when done. Observation never holds up the agent: records are encoded and written on a separate observation thread, so `send()` and `stop()` return without waiting for them, and a run whose records cannot be written still completes. Before moving or deleting a state root after `stop()`, await `echo.observations.flush()`. How long records are kept is up to the product: call `expireObservations({ stateRoot, rule })` whenever it decides to.
 
 ## Packages
 

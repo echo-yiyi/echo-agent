@@ -14,6 +14,7 @@ import { scriptedDialect, textTurn, type ScriptedTurn } from "../src/testing.ts"
 import type { Provider } from "../src/provider/types.ts";
 import type { RunObservationHeader } from "../src/observability/types.ts";
 import { encodeCanonical, syncEncodingLimits } from "../src/observability/normalize.ts";
+import { applyProjectionDigests } from "../src/observability/thread-host.ts";
 
 // Inbox 行的观测（2026-09-05）：账本是唯一发点。
 //   单测：内存账本 + 假 sink，accept / 去重 / reserve → consumed / ack / release 各出一条什么；
@@ -77,7 +78,9 @@ test("descriptor：metadata 档只留结构（id / source / ref / 计数），�
   expect(JSON.stringify(meta.body)).not.toContain("秘密正文");
   expect(JSON.stringify(meta.body)).not.toContain("disk full");
   expect(meta.body).toMatchObject({ records: [{ role: "environment", source: "session", ref: "s-a:m9" }], errorDigest: "abc" });
-  expect((meta.body as { messageDigest: string }).messageDigest).toMatch(/^[0-9a-f]{64}$/);
+  // 摘要在观测线程里算：投影只声明
+  expect(meta.digests).toEqual({ messageDigest: { text: "disk full" } });
+  expect(applyProjectionDigests(meta.body, meta.digests!, undefined).messageDigest).toMatch(/^[0-9a-f]{64}$/);
   const full = inboxFactDescriptor.project(fact, "content")!;
   expect(full.body).toMatchObject({ records: [{ text: "秘密正文" }], message: "disk full" });
   expect(inboxFactDescriptor.project(fact, "off")).toBeNull();

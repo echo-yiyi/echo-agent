@@ -33,7 +33,7 @@ export type CanonicalRecordCandidate = Readonly<{
   recordId: string;
   runtimeId: string;
   seq: number;
-  /** envelope 的 `scope.runId`（有则给）：SQLite 的 `run_id` 列靠它按 run 取记录；不是第二份 identity。 */
+  /** envelope 的 `scope.runId`（有则给）：存储靠它按 run 取记录；不是第二份 identity。 */
   runId?: string;
   canonicalEnvelopeBytes: Uint8Array;
 }>;

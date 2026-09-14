@@ -4,12 +4,13 @@ import { MAX_PROJECTED_THINKING_BYTES, loopFactDescriptor, projectLoopFact, type
 import { MAX_PROJECTED_TEXT_BYTES, estimatePayloadBytes } from "../src/observability/projection.ts";
 import { projectCompactionFact } from "../src/compaction/observe.ts";
 import { projectAgentFact } from "../src/agent-observe.ts";
-import { factSinkToIngest, noopFactSink, type CapabilityFactDescriptor } from "../src/observability/fact-sink.ts";
+import { factSinkToThread, noopFactSink, type CapabilityFactDescriptor, type CapabilityFactSink, type ObservationFactScope } from "../src/observability/fact-sink.ts";
+import { factIngestContext, freezeSinkIdentity, ingestFact, ingestFactFailure } from "../src/observability/thread-host.ts";
 import { InMemoryCanonicalObservationStore } from "../src/observability/store.ts";
 import { ObservationIdentityError } from "../src/observability/identity.ts";
-import { ObservationSequencer } from "../src/observability/sequencer.ts";
+import { ObservationSequencer, type ObservationIngest } from "../src/observability/sequencer.ts";
 import type { Diagnostic } from "../src/errors.ts";
-import { OBSERVATION_SYNC_LIMITS, type ObservationRecordKind } from "../src/observability/types.ts";
+import { OBSERVATION_SYNC_LIMITS, type ObservationCapturePolicy, type ObservationOwner, type ObservationRecordKind } from "../src/observability/types.ts";
 
 // 执行节点上的事实投影（循环 / 压缩 / Agent 自身），以及 descriptor → Sequencer 这条
 // 唯一 adapter 的失败语义（投影抛错 / scope 失败 / 身份超长 → hole + gap 或构造期拒，绝不静默丢、绝不击穿 no-throw）。
@@ -19,6 +20,32 @@ import { OBSERVATION_SYNC_LIMITS, type ObservationRecordKind } from "../src/obse
  * 只约束 `kind`（事实名拼错编译不过），载荷放宽：夹具里的消息是故意不完整的最小形状，载荷对不对由投影断言验。
  */
 const fact = (n: number, body: { kind: LoopFactBody["kind"] } & Record<string, unknown>): LoopFact => ({ runId: "run:t", ...body, at: 1_000 + n }) as unknown as LoopFact;
+
+/**
+ * 测试里的探针：主线程那一半（`factSinkToThread`：scope 供给 + 投影）直接接观测线程那一半（`ingestFact`：物化 + 摘要 + offer），
+ * 只省掉线程之间那一跳（结构化拷贝由 createEcho 的端到端测试覆盖）。身份在构造期冻结，与 `ObservationRuntime.capabilitySink` 同一个函数。
+ */
+function sinkInto<T>(
+  seq: ObservationIngest,
+  descriptor: CapabilityFactDescriptor<T>,
+  opts: { runtimeId?: string; runtimeGeneration?: string; capturePolicy?: ObservationCapturePolicy; owner?: ObservationOwner; scope?: () => ObservationFactScope; report?: (d: Diagnostic) => void } = {},
+): CapabilityFactSink<T> {
+  const ctx = factIngestContext({
+    runtimeId: opts.runtimeId ?? "rt",
+    runtimeGeneration: opts.runtimeGeneration ?? "g",
+    sink: freezeSinkIdentity(opts.owner ?? { status: "not-applicable" }, descriptor.instrumentation),
+    report: opts.report ?? (() => {}),
+  });
+  return factSinkToThread(descriptor, {
+    capturePolicy: opts.capturePolicy ?? "metadata",
+    now: () => 0,
+    ...(opts.scope === undefined ? {} : { scope: opts.scope }),
+    handoff: {
+      fact: (_at, scope, projection) => ingestFact(seq, ctx, { scope, projection }),
+      failed: (_at, runId, why, error) => ingestFactFailure(seq, ctx, runId, why, error),
+    },
+  });
+}
 
 /** gap 只有在 run.accepted 成功、RunIndex 已建立之后才挂 runId（2026-08-27 review P0），所以要先建 run。 */
 async function establishRun(seq: ObservationSequencer, runId: string, runtimeId = "rt", generation = "g", capturePolicy = "metadata"): Promise<void> {
@@ -55,7 +82,6 @@ function sequencerWith(capturePolicy: "metadata" | "content" = "metadata"): { se
   return { seq, clock };
 }
 
-const NA = { runtimeId: "rt", runtimeGeneration: "g", capturePolicy: "metadata", owner: { status: "not-applicable" } } as const;
 
 describe("循环事实逐 kind 固定投影（metadata 档）", () => {
   const landed = { role: "assistant", content: [], stopReason: "end_turn", usage: null, at: 1 } as never;
@@ -172,7 +198,7 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
 
   async function verdict(body: unknown): Promise<"accepted" | "gap"> {
     const { seq, clock } = sequencerWith("content");
-    factSinkToIngest(descriptorFor(body), seq, { ...NA, capturePolicy: "content" }).offer({});
+    sinkInto(seq, descriptorFor(body), { capturePolicy: "content" }).offer({});
     clock.advance(1_000);
     await seq.idle();
     return seq.committedRecords().some((r) => r.name === "observation.gap") ? "gap" : "accepted";
@@ -189,7 +215,7 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
       project: () => ({ kind: "event", name: "small", occurredAt: 1, scope: {}, attributes: {}, body: { ok: 1 } }),
     };
     const { seq } = sequencerWith();
-    expect(() => factSinkToIngest(oversized, seq, NA)).toThrow(ObservationIdentityError);
+    expect(() => sinkInto(seq, oversized)).toThrow(ObservationIdentityError);
   });
 
   test("构造后再改 descriptor.instrumentation.name：用的是构造期冻结的副本，不受影响", async () => {
@@ -199,7 +225,7 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
       project: () => ({ kind: "event", name: "small", occurredAt: 1, scope: {}, attributes: {}, body: { ok: 1 } }),
     };
     const { seq, clock } = sequencerWith();
-    const sink = factSinkToIngest(d, seq, NA);
+    const sink = sinkInto(seq, d);
     mutable.name = "x".repeat(9_000);
     sink.offer({});
     clock.advance(1_000);
@@ -211,7 +237,7 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
   test("超长 owner.entryId 同样在构造期拒", () => {
     const { seq } = sequencerWith();
     const owner = { status: "known", entryId: "x".repeat(5_000), entryGeneration: "1", via: "assembly" } as const;
-    expect(() => factSinkToIngest(descriptorFor({ ok: 1 }), seq, { ...NA, owner })).toThrow(ObservationIdentityError);
+    expect(() => sinkInto(seq, descriptorFor({ ok: 1 }), { owner })).toThrow(ObservationIdentityError);
   });
 
   test("9,000 字节 subject：随 fact 一起量，成 gap", async () => {
@@ -220,7 +246,7 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
       project: () => ({ kind: "event", name: "small", occurredAt: 1, scope: {}, attributes: {}, body: { ok: 1 }, subject: { kind: "k", id: "x".repeat(9_000) } }),
     };
     const { seq, clock } = sequencerWith();
-    factSinkToIngest(withSubject, seq, NA).offer({});
+    sinkInto(seq, withSubject).offer({});
     clock.advance(1_000);
     await seq.idle();
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["observation.gap"]);
@@ -232,7 +258,7 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
       project: () => ({ kind: "event", name: "ok", occurredAt: 1, scope: {}, attributes: {}, body: {}, subject: { kind: "memory", id: "people/alice" } }),
     };
     const { seq, clock } = sequencerWith();
-    factSinkToIngest(d, seq, NA).offer({});
+    sinkInto(seq, d).offer({});
     clock.advance(1_000);
     await seq.idle();
     expect(seq.committedRecords()[0]?.subject).toEqual({ kind: "memory", id: "people/alice" });
@@ -246,8 +272,7 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
       },
     };
     const { seq } = sequencerWith();
-    const sink = factSinkToIngest(bad, seq, {
-      ...NA,
+    const sink = sinkInto(seq, bad, {
       report: () => {
         throw new Error("reporter boom");
       },
@@ -271,7 +296,7 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
     expect(() => noopFactSink<Fact>().offer({ op: "write", path: "p", chars: 1 })).not.toThrow();
     const { seq, clock } = sequencerWith();
     const owner = { status: "known", entryId: "echo:memory", entryGeneration: "1", via: "assembly" } as const;
-    factSinkToIngest(descriptor, seq, { ...NA, owner, scope: () => ({ agentId: "a1" }) }).offer({ op: "write", path: "people/alice.md", chars: 12 });
+    sinkInto(seq, descriptor, { owner, scope: () => ({ agentId: "a1" }) }).offer({ op: "write", path: "people/alice.md", chars: 12 });
     clock.advance(1_000);
     await seq.idle();
     const [rec] = seq.committedRecords();
@@ -298,8 +323,7 @@ describe("descriptor.project 抛错：canonical 路径必须留 hole + gap（202
     const { seq, clock } = sequencerWith();
     if (establish !== undefined) await establishRun(seq, establish);
     const diags: string[] = [];
-    factSinkToIngest(boom(), seq, {
-      ...NA,
+    sinkInto(seq, boom(), {
       report: (d) => diags.push(d.code),
       ...(scope === undefined ? {} : { scope }),
     }).offer({});
@@ -342,7 +366,7 @@ describe("descriptor.project 抛错：canonical 路径必须留 hole + gap（202
 
   test("project 返回 null 是正常省略，不产生 gap", async () => {
     const { seq, clock } = sequencerWith();
-    factSinkToIngest({ instrumentation: { name: "t", version: "1" }, project: () => null }, seq, NA).offer({});
+    sinkInto(seq, { instrumentation: { name: "t", version: "1" }, project: () => null }).offer({});
     clock.advance(1_000);
     await seq.idle();
     expect(seq.health().capture.canonicalGapCount).toBe(0);
@@ -447,8 +471,7 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
     const { seq, clock } = sequencerWith();
     if (establish !== undefined) await establishRun(seq, establish);
     const diags: string[] = [];
-    const sink = factSinkToIngest(okDescriptor, seq, {
-      ...NA,
+    const sink = sinkInto(seq, okDescriptor, {
       report: (d) => diags.push(d.code),
       scope: scope as () => Record<string, string>,
     });
@@ -580,7 +603,7 @@ describe("content 档正文按整条 fact 的剩余预算截断（2026-08-27 rev
   async function throughSequencer(e: LoopFact): Promise<{ accepted: boolean; truncated: boolean }> {
     const { seq, clock } = sequencerWith("content");
     await establishRun(seq, e.runId, "rt", "g", "content");
-    factSinkToIngest(loopFactDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
+    sinkInto(seq, loopFactDescriptor, { capturePolicy: "content" }).offer(e);
     clock.advance(1_000);
     await seq.idle();
     const rec = seq.committedRecords().find((r) => r.name !== "run.accepted");
@@ -624,7 +647,7 @@ describe("代理区必须成对看（2026-08-27 review P1）", () => {
   async function throughSequencer(e: LoopFact): Promise<boolean> {
     const { seq, clock } = sequencerWith("content");
     await establishRun(seq, e.runId, "rt", "g", "content");
-    factSinkToIngest(loopFactDescriptor, seq, { ...NA, capturePolicy: "content" }).offer(e);
+    sinkInto(seq, loopFactDescriptor, { capturePolicy: "content" }).offer(e);
     clock.advance(1_000);
     await seq.idle();
     return seq.committedRecords().find((r) => r.name !== "run.accepted")?.name === "model.generate";
@@ -670,15 +693,15 @@ describe("async reporter 不许击穿主流程（2026-08-27 review P0）", () =>
     };
     process.on("unhandledRejection", on);
     const { seq, clock } = sequencerWith();
-    const sink = factSinkToIngest(
+    const sink = sinkInto(
+      seq,
       {
         instrumentation: { name: "t", version: "1" },
         project: () => {
           throw new Error("projection boom");
         },
       },
-      seq,
-      { ...NA, report: (() => Promise.reject(new Error("reporter down"))) as unknown as (d: Diagnostic) => void },
+      { report: (() => Promise.reject(new Error("reporter down"))) as unknown as (d: Diagnostic) => void },
     );
     sink.offer({});
     sink.offer({});

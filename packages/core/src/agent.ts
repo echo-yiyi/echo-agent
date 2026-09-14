@@ -25,9 +25,8 @@ import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import { loopFactDescriptor, loopProbeFor } from "./loop/observe.ts";
 import { compactionFactDescriptor } from "./compaction/observe.ts";
 import { agentFactDescriptor, probeAgent, type AgentProbe } from "./agent-observe.ts";
-import { sha256Hex } from "./observability/hash.ts";
-import { canonicalJson } from "./observability/normalize.ts";
-import type { EchoObservableState, ObservationValue, RuntimePhase, SubloopRunSource } from "./observability/types.ts";
+import type { ObservationValue, RuntimePhase, SubloopRunSource } from "./observability/types.ts";
+import type { ObservableStateInput } from "./observability/worker-protocol.ts";
 import { HookRuntime, type HookContext, type HookOrigin, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
@@ -491,8 +490,6 @@ export class Agent {
   private loopProbes: LoopProbes | undefined;
   /** Agent 自身节点（队列、资源）的探针（`agent-observe.ts`），与 `observation` 同时解析。 */
   private agentProbe: AgentProbe | undefined;
-  /** run 开头的状态快照走这一根：快照自带 runId，scope 供给只给「是哪个 agent、哪段会话」（与循环探针同一条规矩）。 */
-  private agentStateProbe: AgentProbe | undefined;
 
   /** 持久记忆的操作面：`agent.memory?.shouldDream()`。undefined = 本 agent 没有记忆。 */
   readonly memory?: AgentMemories;
@@ -524,9 +521,6 @@ export class Agent {
    */
   private get gate(): import("./state/write-gate.ts").StateWriteGate | undefined {
     return stateHostOf(this)?.gate;
-  }
-  private get leaseLifecycle(): import("./state/lease-lifecycle.ts").StateLeaseLifecycle | undefined {
-    return stateHostOf(this)?.leaseLifecycle;
   }
   /**
    * 装配现场转过来的所有权账本。**`stop()` 是排空它的唯一触发点**——
@@ -1690,8 +1684,6 @@ export class Agent {
         // acquire 成功后才有写入身份：**cell 与根闸同一步装上**，随后才打开 restore-migration。
         // 装之前任何写都 fail-closed——PREPARE / 尚未 start 的 view 就是这个状态。
         this.gate?.install({ agentInstanceId: this.agentInstanceId, acquisitionId: crypto.randomUUID() });
-        // 持锁之后的 Host 自有工作（完整 Runtime：补齐以前进程没写完的观测派生文件、按规则过期）——实现立即返回，不拖启动
-        await this.leaseLifecycle?.afterLeaseAcquired?.();
       }
       // 恢复期的写（session 建档、legacy migration、任务回写）走 restore-migration；durable ingress 从
       // 持有租约起就可写（lane 表），两者到 revoke fence 才关。
@@ -1798,12 +1790,6 @@ export class Agent {
       this.stopInboxPoll();
       if (this.schedule !== undefined) stopSchedule(this.schedule);
       if (acquired !== undefined) {
-        // Host 的观测 writer 先把尾巴写完——**此时 lease 还在手上**，这是它最后一次合法落盘
-        try {
-          await this.leaseLifecycle?.beforeLeaseRelease({ reason: "stop" });
-        } catch {
-          /* 收尾失败不该盖掉真正的启动错误 */
-        }
         // **revoke 排在 release 之前**：只 release 的话，锁已经还回去了而本代 view 还写得进去——
         // 公开的 `addSchedule(agent.schedule, …)` 就能往已经不归自己的状态根里写（实测）。
         this.gate?.revoke();
@@ -1813,14 +1799,6 @@ export class Agent {
           await acquired.release();
         } catch {
           /* 释放失败不该盖掉真正的启动错误 */
-        }
-        // 租约已交还，状态根从这一刻起不归本进程：观测 writer 一并封口（review 2026-09-07）——
-        // 否则宿主随后调 `stop()`，`finalDisposables` 里的观测收摊仍会把 ring 里的尾巴 flush 进
-        // 一个可能已经归别人的目录。写入闸管不到它（它有自己的 SQLite 连接），只能由这条 port 封。
-        try {
-          await this.leaseLifecycle?.onLeaseLost(new Error("start() 在取得租约之后失败，租约已交还"));
-        } catch {
-          /* 同上 */
         }
       }
       // 回到 new：**拿锁之前**失败是可重试的（换个状态根、修好坏档再来），不是终态。
@@ -2054,17 +2032,6 @@ export class Agent {
     let releaseError: { readonly e: unknown } | null = null;
     if (shutdownError !== null) errors.push(shutdownError.e);
     try {
-      // **最后一站，且 cell 仍 installed**：Host 自己的 writer 在这里 flush / close。
-      // 它不拥有 ingress target、也不重复 drain——那些在 dispose() 里已经做完了。
-      // **只有仍持合法租约、且没进过 loss fence 时才调**：从没 start() 过、或者已经丢锁走过 `onLeaseLost()` 的，
-      // 这条正常释放 fence 根本不该发生（丢锁路径只做 loss-safe 的资源清理）。
-      if (gateUsable && lease !== undefined && this.leaseLostError === null) {
-        await this.leaseLifecycle?.beforeLeaseRelease({ reason: "stop" });
-      }
-    } catch (e) {
-      errors.push(e);
-    }
-    try {
       // **固定顺序**：revoke cell + 关根闸 → 再 release。这三步之间禁止任何 state-root I/O，
       // 所以 revoke 必须排在 release 之前——反过来的话，锁已经归别人而本进程的 view 还写得进去。
       this.gate?.revoke();
@@ -2087,7 +2054,7 @@ export class Agent {
       );
     }
     if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) throw new AggregateError(errors, `stop() 收摊有 ${errors.length} 处失败（收摊 / lifecycle fence / 释放）`);
+    if (errors.length > 1) throw new AggregateError(errors, `stop() 收摊有 ${errors.length} 处失败（收摊 / 释放）`);
   }
 
   /**
@@ -2141,12 +2108,6 @@ export class Agent {
       }
       await this.admission.close("lease-lost");
       await this.settleDream();
-      // Host 自己的 writer 也要封口（幂等，每份 Lease 至多一次）；它同样不 flush 已失权的状态根
-      try {
-        await this.leaseLifecycle?.onLeaseLost(error);
-      } catch (e) {
-        this.reportDiagnostic({ code: "lease_lost_fence_failed", message: `丢锁封口失败：${errText(e)}` });
-      }
       this.reportDiagnostic({ code: "lease_lost", message: `single-writer 租约丢失：${error.message}` }); // ④
     });
   }
@@ -2994,12 +2955,8 @@ export class Agent {
       throw e;
     } finally {
       this.permissions.closeRun(runId);
-      // 封口不等 COMMIT：主循环等它是为了 `send()` 如实报 persistence，子循环没有这样的读者；顺序在同步段已定
-      if (rt !== undefined && outcome !== undefined) {
-        rt.closeRun({ runId, outcome, finalState: this.observableState(rt, this.admittedRunId()) }, this.observationIdentity()).catch((e: unknown) =>
-          this.reportDiagnostic({ code: "observation_boundary_failed", message: `run ${runId}：run.closed 没封上（子循环照常结束）：${errText(e)}` }),
-        );
-      }
+      // 封口交给观测线程，不等
+      if (rt !== undefined && outcome !== undefined) rt.closeRun({ runId, outcome, finalState: this.observableState(rt, this.admittedRunId()) }, this.observationIdentity());
     }
   }
 
@@ -3589,9 +3546,8 @@ export class Agent {
       compaction: rt.capabilitySink(compactionFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => this.observationIdentityScope()),
     };
     this.agentProbe = rt.capabilitySink(agentFactDescriptor, builtinOwner(AGENT_ENTRY_ID));
-    this.agentStateProbe = rt.capabilitySink(agentFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => this.observationIdentityScope());
     // 三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
-    if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID));
+    if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor, builtinOwner(MEMORY_ENTRY_ID));
     attachTaskObserver(this.tasks, rt.capabilitySink(taskFactDescriptor, builtinOwner(TASKS_ENTRY_ID)));
     if (this.schedule !== undefined) this.schedule.observe = rt.capabilitySink(scheduleFactDescriptor, builtinOwner(SCHEDULER_ENTRY_ID));
     // inbox 没有自己的 tool pack，账本是 Agent 自己的一部分：owner 记 echo:agent，instrumentation（echo.inbox）区分它和 agent 事件
@@ -3612,7 +3568,7 @@ export class Agent {
   private memoryFactsFor(runId: string): CapabilityFactSink<MemoryFact> | undefined {
     const rt = this.observationRuntime();
     if (rt === undefined) return undefined;
-    return rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID), () => ({ ...this.observationIdentityScope(), runId }));
+    return rt.capabilitySink(memoryFactDescriptor, builtinOwner(MEMORY_ENTRY_ID), () => ({ ...this.observationIdentityScope(), runId }));
   }
 
   private observationScope(): Readonly<Record<string, string>> {
@@ -3644,21 +3600,20 @@ export class Agent {
     return { agentId: this.product, agentInstanceId: this.agentInstanceId, sessionId: this._state.sessionId };
   }
 
-  /** admission 颁发 permit 时：`run.accepted` 只同步预留、不等落盘——观测层永远拦不住也拖不住 run。 */
+  /** admission 颁发 permit 时：交给观测线程就返回——观测层永远拦不住也拖不住 run。 */
   private observeRunAccepted(input: { runId: string; source: RunSource; modelBinding: RunModelBinding }): void {
     this.observationRuntime()?.acceptRun({ runId: input.runId, source: input.source, ...this.observationIdentity(), modelBinding: input.modelBinding });
   }
 
   /**
-   * 进入 loop 的那一拍（permit executor，或派出隔离子循环的 Agent）：同样只预留、不等。紧跟着拍一份 run 开头的状态，
-   * 与结尾的 finalSnapshot 同形，一比就知道这个 run 改了什么。状态里的 `activeRunId` 是 Agent 此刻开着的 admission run——
+   * 进入 loop 的那一拍（permit executor，或派出隔离子循环的 Agent）：同样交出去就返回，带上 run 开头的状态——
+   * 与结尾的 finalSnapshot 同形，一比就知道这个 run 改了什么。状态里的 `activeRunId` 是 Agent 此刻开着的 admission run：
    * 主循环就是它自己，隔离子循环是派出它的那个（或者没有）。
    */
   private observeRunStarted(runId: string, startedBy: "permit-executor" | "subloop"): void {
     const rt = this.observationRuntime();
     if (rt === undefined) return;
-    rt.startRun(runId, this.observationIdentity(), startedBy);
-    probeAgent(this.agentStateProbe, { kind: "state_snapshot", moment: "run_started", runId, state: this.observableState(rt, this.admittedRunId()) });
+    rt.startRun(runId, this.observationIdentity(), startedBy, this.observableState(rt, this.admittedRunId()));
   }
 
   /** Agent 此刻开着的 admission run（permit 期间），没有就是 null。 */
@@ -3666,27 +3621,25 @@ export class Agent {
     return this.activeRun !== undefined ? this.currentRunId : null;
   }
 
-  /** permit finalizer：业务 outcome 已冻结（executed / callback-error 都是）；finalSnapshot 由本 Agent 此刻的状态投影。 */
-  private async observeRunClosed(input: { runId: string; result: AgentAdmissionResult }): Promise<void> {
+  /** permit finalizer：业务 outcome 已冻结（executed / callback-error 都是）；finalSnapshot 由本 Agent 此刻的状态投影。交出去就返回。 */
+  private observeRunClosed(input: { runId: string; result: AgentAdmissionResult }): void {
     const rt = this.observationRuntime();
     if (rt === undefined || input.result.kind === "rejected") return;
-    await rt.closeRun({ runId: input.runId, outcome: input.result.result.outcome, finalState: this.observableState(rt, input.runId) }, this.observationIdentity());
+    rt.closeRun({ runId: input.runId, outcome: input.result.result.outcome, finalState: this.observableState(rt, input.runId) }, this.observationIdentity());
   }
 
   /**
-   * `EchoObservableState`：run 开头（`observeRunStarted`）与结尾（`observeRunClosed`）两个节点各拍一份，同形。
-   * 只放低基数的事实：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数摘要。
+   * run 开头（`observeRunStarted`）与结尾（`observeRunClosed`）两个节点各拍一份，同形。
+   * 只放低基数的事实：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数。
    * 工具 / skill 名单取 `state` getter 的派生视图——与模型菜单、`agent.state` 同一个口径，不另算一份。
+   * 摘要、`runtime.status` 与 persistence 由观测线程补（thread-host.ts 的 `completeObservableState`）。
    */
-  private observableState(rt: ObservationRuntime, activeRunId: string | null): EchoObservableState {
+  private observableState(rt: ObservationRuntime, activeRunId: string | null): ObservableStateInput {
     const phase = this.observationPhase();
-    const persistence = rt.sequencer.persistenceState.status;
     const s = this.state;
     return {
       runtime: {
         phase,
-        status: phase === "ready" && persistence !== "healthy" ? "degraded" : phase,
-        observationPersistence: persistence,
         generation: rt.runtimeGeneration,
         activeEntryCount: 0,
       },
@@ -3703,22 +3656,19 @@ export class Agent {
         tools: s.tools.map((t) => t.name),
         activeSkills: s.activeSkills.map((k) => k.name),
       },
-      capabilities: this.capabilitySummaries(s.tasks),
-      omittedCapabilitySummaryCount: 0,
+      capabilities: this.capabilityStates(s.tasks),
     };
   }
 
   /**
-   * 各内建能力此刻的计数摘要，挂在**真实装上的 Entry id** 下（`echo:tasks` / `echo:scheduler`；收件箱没有独立 extension，
-   * 是 `echo:agent` 的一部分）。**只放同步可读的**：这里跑在同步封口路径上。记忆的状态在盘上要异步读，不接——
-   * 不给它一个假的 0。`stateDigest` 覆盖能判断「状态变没变」的最小表示（计数相同但哪件任务做完了变了，也看得出）；
-   * entry 的 `digest` 覆盖整条摘要。
+   * 各内建能力此刻的计数与状态的最小表示，挂在**真实装上的 Entry id** 下（`echo:tasks` / `echo:scheduler`；收件箱没有独立 extension，
+   * 是 `echo:agent` 的一部分）。**只放同步可读的**：记忆的状态在盘上要异步读，不接——不给它一个假的 0。
+   * 状态表示取「能判断状态变没变」的最小形状（计数相同但哪件任务做完了变了，也看得出）；它的摘要在观测线程里算。
    */
-  private capabilitySummaries(tasks: TaskSnapshot): EchoObservableState["capabilities"] {
-    const out: EchoObservableState["capabilities"][number][] = [];
-    const add = (id: string, counters: Record<string, number>, stateRepr: ObservationValue): void => {
-      const summary = { schemaVersion: 1 as const, stateDigest: sha256Hex(canonicalJson(stateRepr)), counters, detailBytes: 0, detailTruncated: false };
-      out.push({ id, digest: sha256Hex(canonicalJson(summary)), summary });
+  private capabilityStates(tasks: TaskSnapshot): ObservableStateInput["capabilities"] {
+    const out: ObservableStateInput["capabilities"][number][] = [];
+    const add = (id: string, counters: Record<string, number>, state: ObservationValue): void => {
+      out.push({ id, counters, state });
     };
     add(AGENT_ENTRY_ID, { inboxPending: this.inbox.pendingCount }, { inboxPending: this.inbox.pendingCount });
     add(

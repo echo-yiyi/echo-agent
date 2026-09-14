@@ -266,8 +266,9 @@ export { normalizeModelSnapshot, ModelSnapshotError } from "./admission/model-sn
  * 类型与纯函数 renderer 从 `@echo-agent/core/observability` 子路径拿；这里只放会碰盘的入口与其错误类。
  */
 export { openObservationReader, DocumentEchoObservationReader, ObservationCursorError, ObservationNotPersistedError } from "./observability/query.ts";
-export { ObservationStoreMissingError, ObservationStoreOpenError, observationStorePath } from "./observability/document-store.ts";
-export type { ObservationExpiryDecision, ObservationExpiryRule } from "./observability/runtime.ts";
+export { ObservationStoreMissingError, observationStorePath } from "./observability/document-store.ts";
+export { expireObservations } from "./observability/expiry.ts";
+export type { ExpireObservationsOptions, ObservationExpiryDecision, ObservationExpiryResult, ObservationExpiryRule } from "./observability/expiry.ts";
 export { ObservationCorruptionError } from "./observability/store.ts";
 export type { EchoRunResult, EchoObservations, EchoObservationReader, RunLookupResult, RunObservation, RunObservationHeader, ObservedRunSource, SubloopRunSource, ListRunsOptions, RunObservationPage, ObservationCapturePolicy } from "./observability/types.ts";
 export type { AgentRunResult } from "./agent.ts";

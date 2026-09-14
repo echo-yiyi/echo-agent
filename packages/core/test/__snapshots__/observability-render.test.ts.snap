@@ -11,6 +11,7 @@ Timeline
   +0ms      run.accepted
   +0ms      run.assembly
   +1ms      run.started
+  +1ms        agent.state  capabilities=0 moment=run_started
   +1ms        agent.loop.started
   +2ms        reply.execute …  replyId=run:fixed/1 source=prompt
   +3ms          turn.execute …  cause=input iteration=1 replyId=run:fixed/1 toolCount=1
@@ -38,6 +39,6 @@ Final State         status generating · iteration 2 · messages 5 · runtime re
 Outcome             completed
 Tool Analysis       ping calls=1 ok=1 err=0 denied=0 total=13ms args=7B result=4ch
 Model               calls=2 in=20 out=10 total=64ms
-Observation Health  integrity complete · gaps 0 · persistence stored · redacted yes · records 26
+Observation Health  integrity complete · gaps 0 · persistence stored · redacted yes · records 27
 "
 `;

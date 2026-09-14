@@ -1,4 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
+import { observationHostOf } from "../src/observability/host-wiring.ts";
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -18,7 +19,6 @@ import { kimiProvider, deepseekProvider } from "../src/provider/openai.ts";
 import { createTasks } from "../src/task/harness.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
-import { observationHostOf } from "../src/observability/host-wiring.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { scriptedDialect, scriptedStreamFn, textTurn } from "../src/testing.ts";
 import { environmentMessage } from "../src/messages.ts";
@@ -389,8 +389,6 @@ test("start() 中途失败必须释放已取得的 lease（否则状态根被死
 
   const a = await createAgent({ provider, store, lock, allowNetwork: false, sessionId: "bad" });
   await expect(a.start()).rejects.toThrow(/meta\.json 解不开/);
-  // 租约已交还：观测 writer 一并封口，之后宿主调 stop() 不会再往可能已归别人的状态根 flush（review 2026-09-07）
-  expect(observationHostOf(a)?.runtime.sequencer.persistenceState.status).toBe("lost-lease");
 
   // lease 被还回去了，所以另一个 agent 还能启动
   const b = await createAgent({ provider, store: new InMemoryDir(), lock, allowNetwork: false });
@@ -414,9 +412,6 @@ test("丢锁 → 停止持久化 + 拒绝新工作（丢锁善后的 ①③）",
   await new Promise((r) => setTimeout(r, 0));
 
   await expect(agent.prompt("还能干活吗")).rejects.toThrow(/已丢失 single-writer 租约/);
-  // Host 的观测 writer 也封了口（装配侧接上了 leaseLifecycle，review 2026-09-07）——它有自己的 SQLite 连接、
-  // 不经写入闸，此前 `Agent` 一直在调 onLeaseLost 而装配侧从没提供实现，丢锁后 stop() 照样往别人的目录里 flush
-  expect(observationHostOf(agent)?.runtime.sequencer.persistenceState.status).toBe("lost-lease");
   await agent.stop(); // loss-safe 清理，必须 resolve
 });
 
@@ -461,8 +456,11 @@ test("自定义 store + stateDir：观测文档跟着注入的 store 走，真�
     allowNetwork: false,
   });
   await agent.start();
+  const observation = observationHostOf(agent)!.runtime;
+  await observation.flush(); // 被读一次就开始写（没有 run 的 runtime 之前一个字都不写，thread-host.ts 头注）
   expect((await store.list("observability/")).length).toBeGreaterThan(0); // 观测在注入的 store 里
   await agent.stop();
+  await observation.flush(); // stop 不等观测；等它收完摊再看真盘
   expect(readdirSync(dir)).toEqual([]); // 真盘上什么都没写
 });
 
@@ -859,9 +857,10 @@ test("没 start() 过就 stop()：目录不动——没持有过 lease 就没资
   const home = await mkdtemp(join(tmpdir(), "echo-empty-"));
   process.env.ECHO_HOME = home;
   const provider = fakeProvider({ id: "t", models: ["only"] });
-  const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo", sessionId: "someone-elses" });
+  // 别的进程正在用的那一段：目录已经在（装配期不碰观测，不会替它建目录）
   const dir = join(home, "sessions", "someone-elses");
-  expect(existsSync(dir), "装配期就建了目录（观测库）").toBe(true);
+  await mkdir(dir, { recursive: true });
+  const agent = await createAgent({ provider, allowNetwork: false, workspace: "/repo", sessionId: "someone-elses" });
   await agent.stop();
   expect(existsSync(dir), "没持有过 lease 的实例不许删目录").toBe(true);
 });

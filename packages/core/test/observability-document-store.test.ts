@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeClock } from "../src/schedule/clock.ts";
 import { ObservationCorruptionError, runIndexDigest, InMemoryCanonicalObservationStore, type CommitBatchInput } from "../src/observability/store.ts";
-import { DocumentObservationReader, DocumentObservationStore, ObservationStoreMissingError, PATH_DIGEST_KEY_BYTES } from "../src/observability/document-store.ts";
+import { DocumentObservationExpiry, DocumentObservationReader, DocumentObservationStore, ObservationStoreMissingError, PATH_DIGEST_KEY_BYTES } from "../src/observability/document-store.ts";
+import { expireObservations } from "../src/observability/expiry.ts";
 import { DocumentEchoObservationReader } from "../src/observability/query.ts";
 import { ObservationSequencer, type ObservationSubscribeItem } from "../src/observability/sequencer.ts";
 import { encodeCanonical } from "../src/observability/normalize.ts";
@@ -14,9 +15,10 @@ import type { StorageDir } from "../src/storage/types.ts";
 import type { BoundaryObservationDraft, BoundedObservationDraft, RunAcceptedBodyV1 } from "../src/observability/draft.ts";
 import type { RunIndexEntryV1, RunObservationHeader } from "../src/observability/types.ts";
 
-// 观测的文档存储（2026-09-14 决策：docs/decisions/implemented/2026-09-14-observation-document-store.md）。
-// 与 in-memory 参考实现同一套裁决，外加文档才有的几件：提交点是批文件的 rename、派生文件落后时持锁补齐、
-// 过期按规则删 run 并回收批文件、回放跨过被删的批时交付 retention-gap、关闭之后读写都抛。
+// 观测的文档存储（决策：docs/decisions/implemented/2026-09-14-observation-document-store.md，
+// 过期改成独立函数见 docs/decisions/implemented/2026-09-14-observation-off-main-loop.md）。
+// 与 in-memory 参考实现同一套裁决，外加文档才有的几件：提交点是批文件的 rename、派生文件落后时下一次提交补上、
+// 过期只凭盘上事实删（已封口的 run、head 之前的批）、回放跨过被删的批时交付 retention-gap。
 
 const RT = "rt-doc";
 const temps: string[] = [];
@@ -82,11 +84,11 @@ function batch(seqs: readonly number[], over: Partial<CommitBatchInput> = {}, ru
   };
 }
 
-/** 包一层：按路径前缀让写失败，模拟停在提交的某一步。 */
-function failingWrites(inner: StorageDir, prefix: string): StorageDir {
+/** 包一层：按路径前缀让写失败，模拟停在提交的某一步。`healed.value = true` 之后恢复。 */
+function failingWrites(inner: StorageDir, prefix: string, healed = { value: false }): StorageDir {
   return {
     read: (p) => inner.read(p),
-    write: (p, c) => (p.startsWith(prefix) ? Promise.reject(new Error(`disk gone: ${p}`)) : inner.write(p, c)),
+    write: (p, c) => (!healed.value && p.startsWith(prefix) ? Promise.reject(new Error(`disk gone: ${p}`)) : inner.write(p, c)),
     remove: (p) => inner.remove(p),
     list: (p) => inner.list(p),
     ...(inner.lock === undefined ? {} : { lock: (n: string, o?: { timeoutMs?: number }) => inner.lock!(n, o) }),
@@ -106,15 +108,6 @@ describe("open 与 key", () => {
 
     const err = await DocumentEchoObservationReader.open({ stateRoot: await tmp() }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ObservationStoreMissingError);
-  });
-
-  test("关闭之后读写都抛：收摊后迟到的事实不许再落盘", async () => {
-    const store = await open();
-    await store.commitBatchIfAbsent(batch([1]));
-    await store.close();
-    await store.close(); // 幂等
-    await expect(store.commitBatchIfAbsent(batch([2], { expectedCommittedPrefix: 1 }))).rejects.toThrow("已关闭");
-    await expect(store.readCommittedPrefix(RT)).rejects.toThrow("已关闭");
   });
 });
 
@@ -195,17 +188,19 @@ describe("提交点", () => {
     expect(await reader.readRunIndex("r1")).toBeNull();
   });
 
-  test("批文件写成、派生文件写不成：这批照样 committed；下一个进程持锁补齐后 runs/ 完整", async () => {
+  test("批文件写成、派生文件写不成：这批照样 committed，head 不越过它；下一次提交把落后的派生文件补上", async () => {
     const inner = new InMemoryDir();
-    const first = await open(failingWrites(inner, "observability/runs/"));
+    const healed = { value: false };
+    const store = await open(failingWrites(inner, "observability/runs/", healed));
     const idx = { ...index("r1", 1), lastSeq: 2 };
-    expect(await first.commitBatchIfAbsent(batch([1, 2], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: idx }] }, "r1"))).toBe("committed");
+    expect(await store.commitBatchIfAbsent(batch([1, 2], { runIndexMutations: [{ runId: "r1", expectedRunIndexDigest: null, nextRunIndex: idx }] }, "r1"))).toBe("committed");
     const reader = new DocumentObservationReader(inner, "(test)");
     expect(await reader.readCommittedPrefix(RT)).toBe(2); // 批文件在：已提交
     expect(await reader.readRunIndex("r1")).toBeNull(); // 派生文件落后
+    expect(await inner.read("observability/heads/rt-doc.json")).toBeNull(); // runs/ 没写成，head 不往前走（过期靠这条顺序）
 
-    const next = await open(inner);
-    await next.repairDerived();
+    healed.value = true;
+    await store.commitBatchIfAbsent(batch([3], { expectedCommittedPrefix: 2 }));
     expect(await reader.readRunIndex("r1")).toEqual(idx);
     expect((await reader.readRunRecords(RT, "r1", 1, 2)).length).toBe(2);
   });
@@ -231,40 +226,43 @@ describe("读面", () => {
   });
 });
 
-describe("过期", () => {
+describe("过期：只凭盘上的事实删", () => {
   const MUT = (e: RunIndexEntryV1, prev?: RunIndexEntryV1) => ({ runId: e.runId, expectedRunIndexDigest: prev === undefined ? null : runIndexDigest(prev), nextRunIndex: e });
 
-  /** 三批：A 只有 r1；B 混着 r1 与 r2；C 只有 r2。 */
-  async function threeBatches(store: DocumentObservationStore): Promise<void> {
+  /** 三批：A 只有 r1；B 混着 r1（在这里封口）与 r2；C 只有 r2（在这里封口）。 */
+  async function threeBatches(store: DocumentObservationStore, closeR2 = true): Promise<void> {
     const r1 = index("r1", 1);
     const r2 = index("r2", 4, 2_000);
     await store.commitBatchIfAbsent(batch([1, 2], { runIndexMutations: [MUT({ ...r1, lastSeq: 2 })] }, "r1"));
-    await store.commitBatchIfAbsent(batch([3, 4], { runIndexMutations: [MUT({ ...r1, lastSeq: 3 }, { ...r1, lastSeq: 2 }), MUT(r2)] }, ["r1", "r2"]));
-    await store.commitBatchIfAbsent(batch([5], { runIndexMutations: [MUT({ ...r2, lastSeq: 5 }, r2)] }, "r2"));
+    await store.commitBatchIfAbsent(batch([3, 4], { runIndexMutations: [MUT({ ...r1, lastSeq: 3, terminalRecordId: `${RT}:3` }, { ...r1, lastSeq: 2 }), MUT(r2)] }, ["r1", "r2"]));
+    await store.commitBatchIfAbsent(batch([5], { runIndexMutations: [MUT({ ...r2, lastSeq: 5, ...(closeR2 ? { terminalRecordId: `${RT}:5` } : {}) }, r2)] }, "r2"));
   }
 
-  test("删一个 run：getRun 不再有、只含它的批文件回收、与别的 run 共用的留着；再删另一个，剩下的一起回收", async () => {
+  test("删一个已封口的 run：getRun 不再有、只含它的批文件回收、与别的 run 共用的留着；再删另一个，剩下的一起回收", async () => {
     const inner = new InMemoryDir();
     const store = await open(inner);
     await threeBatches(store);
+    const expiry = new DocumentObservationExpiry(inner, "(test)");
     const batches = async () => (await inner.list("observability/batches/")).filter((p) => p.endsWith(".json")).map((p) => p.split("/").pop());
 
-    expect(await store.expire({ runs: ["r1"] }, () => false)).toEqual({ removedRuns: ["r1"], refusedRuns: [], removedBatches: 1 });
+    expect(await expiry.remove({ runs: ["r1"] })).toEqual({ removedRuns: ["r1"], openRuns: [], removedBatches: 1 });
     expect(await store.readRunIndex("r1")).toBeNull();
     expect(await batches()).toEqual(["000000000004.json", "000000000005.json"]);
     expect((await store.readRunRecords(RT, "r2", 4, 5)).length).toBe(2);
 
-    expect(await store.expire({ runs: ["r2"] }, () => false)).toEqual({ removedRuns: ["r2"], refusedRuns: [], removedBatches: 2 });
+    expect(await expiry.remove({ runs: ["r2"] })).toEqual({ removedRuns: ["r2"], openRuns: [], removedBatches: 2 });
     expect(await batches()).toEqual([]);
     expect(await store.readCommittedPrefix(RT)).toBe(5); // head 不回退
   });
 
-  test("还在跟踪的 run 拒删；不给 run 也不给 activityBefore 时什么都不动", async () => {
-    const store = await open();
-    await threeBatches(store);
-    expect(await store.expire({ runs: ["r2"] }, (id) => id === "r2")).toEqual({ removedRuns: [], refusedRuns: ["r2"], removedBatches: 0 });
+  test("盘上还没封口的 run 不删（列进 openRuns）；不给 run 也不给 activityBefore 时什么都不动", async () => {
+    const inner = new InMemoryDir();
+    const store = await open(inner);
+    await threeBatches(store, false);
+    const expiry = new DocumentObservationExpiry(inner, "(test)");
+    expect(await expiry.remove({ runs: ["r2", "nope"] })).toEqual({ removedRuns: [], openRuns: ["r2"], removedBatches: 0 });
     expect(await store.readRunIndex("r2")).not.toBeNull();
-    expect(await store.expire({}, () => false)).toEqual({ removedRuns: [], refusedRuns: [], removedBatches: 0 });
+    expect(await expiry.remove({})).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0 });
     expect(await store.countRecords()).toBe(5);
   });
 
@@ -273,18 +271,54 @@ describe("过期", () => {
     const store = await open(inner);
     await store.commitBatchIfAbsent(batch([1], {}, undefined, () => ({ observedAt: 500 })));
     await store.commitBatchIfAbsent(batch([2], {}, undefined, () => ({ observedAt: 2_000 })));
-    expect((await store.expire({ runs: [] }, () => false)).removedBatches).toBe(0);
-    expect((await store.expire({ activityBefore: 1_000 }, () => false)).removedBatches).toBe(1);
+    const expiry = new DocumentObservationExpiry(inner, "(test)");
+    expect((await expiry.remove({ runs: [] })).removedBatches).toBe(0);
+    expect((await expiry.remove({ activityBefore: 1_000 })).removedBatches).toBe(1);
     expect((await store.readActivity(10)).length).toBe(1);
   });
 
+  test("head 之后的批（它那一批的 runs/ 还没写成）不回收，哪怕里面的记录都够老", async () => {
+    const inner = new InMemoryDir();
+    const store = await open(failingWrites(inner, "observability/runs/"));
+    const idx = { ...index("r1", 1), terminalRecordId: `${RT}:1` };
+    await store.commitBatchIfAbsent(batch([1], { runIndexMutations: [MUT(idx)] }, "r1"));
+    await store.commitBatchIfAbsent(batch([2], { expectedCommittedPrefix: 1 }, undefined, () => ({ observedAt: 1 })));
+    const expiry = new DocumentObservationExpiry(inner, "(test)");
+    // runs/r1.json 从没写成：盘上看 r1 不在，但 head 没越过这两批——写者可能正要写，不能动
+    expect(await expiry.remove({ activityBefore: 10_000 })).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0 });
+    expect(await store.countRecords()).toBe(2);
+  });
+
   test("回放页如实带出被删的 seq 区间（exclusive）：批与批接不上的那一段", async () => {
-    const store = await open();
+    const inner = new InMemoryDir();
+    const store = await open(inner);
     await threeBatches(store);
-    await store.expire({ runs: ["r1"] }, () => false); // 回收的是 seq 1..2 那一批
+    await new DocumentObservationExpiry(inner, "(test)").remove({ runs: ["r1"] }); // 回收的是 seq 1..2 那一批
     const page = await store.readRecordsAfter(RT, 0, 10);
     expect(page.removed).toEqual([{ afterSeq: 0, beforeSeq: 3 }]);
     expect(page.records.length).toBe(3);
+  });
+
+  test("expireObservations：规则拿到全部 run 的 header（新的在前）与 now，按它的决定删；状态根目录与注入存储两种给法", async () => {
+    const inner = new InMemoryDir();
+    await threeBatches(await open(inner));
+    const seen: { runs: string[]; now: number }[] = [];
+    const result = await expireObservations({
+      store: inner,
+      now: 7,
+      rule: (runs, now) => {
+        seen.push({ runs: runs.map((h) => h.runId), now });
+        return { runs: runs.slice(1).map((h) => h.runId) }; // 留最新的一个
+      },
+    });
+    expect(seen).toEqual([{ runs: ["r2", "r1"], now: 7 }]);
+    expect(result).toEqual({ removedRuns: ["r1"], openRuns: [], removedBatches: 1 });
+
+    const root = await tmp();
+    await threeBatches(await open(new FileDir(root)));
+    expect((await expireObservations({ stateRoot: root, rule: () => ({ runs: ["r1", "r2"] }) })).removedBatches).toBe(3);
+    // 没有观测目录的状态根：规则拿到空表，什么都不删
+    expect(await expireObservations({ stateRoot: await tmp(), rule: (runs) => ({ runs: runs.map((h) => h.runId) }) })).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0 });
   });
 });
 
@@ -319,17 +353,15 @@ describe("Sequencer 之下", () => {
     await seq.flushPending();
   }
 
-  test("accepted → bounded → started → closed：RunIndex 终态在文档里，run 的记录能按 run 取回；跟踪中的 run 封口落盘后才不再跟踪", async () => {
+  test("accepted → bounded → started → closed：RunIndex 终态在文档里，run 的记录能按 run 取回", async () => {
     const store = await open();
     const seq = new ObservationSequencer({ runtimeId: RT, runtimeGeneration: "g", capturePolicy: "metadata", store, clock: new FakeClock(1_000) });
     await seq.appendBoundary(boundary("run.accepted", accepted("r1"), "r1"));
-    expect(seq.isTrackingRun("r1")).toBe(true);
     seq.offer(bounded({ n: 1 }, "r1"));
     seq.offer(bounded({ n: 2 }, "r1"));
     await seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, "r1"));
     await seq.appendBoundary(boundary("run.closed", { outcome: { status: "completed" }, finalSnapshot: null }, "r1"));
     await seq.flushPending();
-    expect(seq.isTrackingRun("r1")).toBe(false);
 
     const idx = await store.readRunIndex("r1");
     expect(idx?.header.status).toBe("completed");
@@ -340,11 +372,12 @@ describe("Sequencer 之下", () => {
   });
 
   test("订阅回放早于内存窗口、跨过被过期删掉的 run：交付 retention-gap，之后的记录照常到", async () => {
-    const store = await open();
+    const inner = new InMemoryDir();
+    const store = await open(inner);
     const seq = new ObservationSequencer({ runtimeId: RT, runtimeGeneration: "g", capturePolicy: "metadata", store, clock: new FakeClock(1_000), limits: { replayWindowRecords: 1 } });
     await oneRun(seq, "r1"); // seq 1..4
     await oneRun(seq, "r2"); // seq 5..8
-    await store.expire({ runs: ["r1"] }, () => false);
+    await new DocumentObservationExpiry(inner, "(test)").remove({ runs: ["r1"] });
 
     const items: ObservationSubscribeItem[] = [];
     await seq.subscribe({ afterSeq: 0, sinkId: "late", listener: (i) => void items.push(i) });

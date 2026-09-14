@@ -160,8 +160,8 @@ export type Echo = Readonly<{
    */
   start(options?: { activation?: "immediate" | "deferred" }): Promise<void>;
   /**
-   * 完整 Runtime 的一次 user run（OR5）：`agent.prompt()` 加上观测三元组。
-   * 观测层永远拦不住 run：store 写不动时 run 照跑，只是 `observationPersistence` 报 `degraded`（2026-09-03 用户拍板）。
+   * 完整 Runtime 的一次 user run（OR5）：`agent.prompt()` 加上这次 run 在观测里的引用。
+   * 观测不在 run 的路径上：`send()` 不等观测写完，写没写成事后用 `observations` 读（2026-09-14）。
    */
   send(input: string | AgentMessage): Promise<EchoRunResult>;
   /** live 查询面：`getRun(result.runId)` → `renderRunObservation()`。只有 `createEcho()` 出来的 Runtime 承诺 canonical persistence。 */
@@ -893,20 +893,10 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       }
     };
 
-    /**
-     * `send()` = user source 的调用方适配器：outcome 来自 loop，观测三元组来自 admission 已 COMMIT 的 RunIndex。
-     * `observationPersistence` 是**当前 Runtime** 的投影：terminal 已进 index 才 stored；尾写失败磁盘仍 running → degraded。
-     */
+    /** `send()` = user source 的调用方适配器：outcome 来自 loop，观测只给引用（不等观测线程）。 */
     const send = async (input: string | AgentMessage): Promise<EchoRunResult> => {
       const result = await agent.prompt(input);
-      const index = observation.runIndexOf(result.runId);
-      return {
-        runId: result.runId,
-        outcome: result.outcome,
-        observation: { runtimeId: observation.runtimeId, runId: result.runId },
-        observationIntegrity: index?.header.integrity ?? "partial",
-        observationPersistence: observation.persistenceOf(result.runId),
-      };
+      return { runId: result.runId, outcome: result.outcome, observation: { runtimeId: observation.runtimeId, runId: result.runId } };
     };
 
     return Object.freeze({

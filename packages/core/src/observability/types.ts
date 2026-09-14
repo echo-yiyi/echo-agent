@@ -65,7 +65,7 @@ export type ObservationOwner =
   | Readonly<{ status: "unknown"; reason: string }>
   | Readonly<{ status: "not-applicable" }>;
 
-/** 两条 lane：boundary 同步等 COMMIT（run 边界、gap），bounded 进有界 ring 批量提交（高频事实）。 */
+/** 两条 lane：boundary 可以等到 COMMIT（run 边界、gap），bounded 进有界 ring 批量提交（高频事实）。 */
 export type ObservationLane = "boundary" | "bounded";
 /** 四种原始信号加 health。 */
 export type ObservationRecordKind = "event" | "span_start" | "span_end" | "snapshot" | "health";
@@ -469,16 +469,14 @@ export type ObservationHealth = Readonly<{
 /* ══════════════════ 用户取得与渲染的公共面 ══════════════════ */
 
 /**
- * 完整 Runtime `send()` 的返回（OR5）：业务 outcome 与观测三元组正交——
- * `observationIntegrity` 来自 RunIndex（canonical gap 派生），`observationPersistence` 是**当前 Runtime** 对这次
- * terminal COMMIT 的投影（stored = 已 COMMIT 且 read-back 可见；degraded = 尾写失败，磁盘 index 仍 running）。
+ * 完整 Runtime `send()` 的返回：业务 outcome，与这次 run 在观测里的引用。
+ * **不带观测写没写成**：`send()` 不等观测线程（2026-09-14），写成与否要事后读——`echo.observations.getRun(runId)`
+ * 的 `integrity` / `status`，或 `snapshot()` 的 persistence health。
  */
 export type EchoRunResult = Readonly<{
   runId: string;
   outcome: AgentOutcome;
   observation: RunObservationRef;
-  observationIntegrity: ObservationIntegrity;
-  observationPersistence: "stored" | "degraded";
 }>;
 
 /** submission 级观测（Inbox / Extension source，O2b）；O3a 的 `getSubmission()` 恒 null。 */
@@ -536,10 +534,10 @@ export interface EchoObservations {
   snapshot(): Promise<EchoObservationSnapshot>;
   subscribe(options: ObservationSubscribeOptions): Promise<() => void>;
   /**
-   * 现在就按 `observation.expiry` 规则过期一次。core 自己也会在启动拿到 lease 之后、每个 run 封口之后各调一次；
-   * 这个入口给要自己挑时机的使用方。没给规则、或没持 lease（还没 start / 已经 stop / 丢锁）时是空操作。不抛：失败进诊断。
+   * 等观测线程把此刻之前交出去的事实全部写完（`stop()` 之后调，等的是收摊那一段）。读方法自己会先等这一步；
+   * 要在 `stop()` 之后删目录、搬目录、或让别的进程读之前确认写完，调它。永不 reject。
    */
-  expire(): Promise<void>;
+  flush(): Promise<void>;
 }
 
 /** 离线 reader（observe CLI 的唯一入口）：read-only 连接，不取 StateLock、不起 Runtime；用完必须 `close()`。 */

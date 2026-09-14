@@ -102,6 +102,7 @@ test("只有旧格式观测库（observations.sqlite）的会话：跳过并说�
   await echo.send("hi");
   const good = echo.agent.state.sessionId!;
   await echo.stop();
+  await echo.observations.flush(); // stop 不等观测写完
   const oldRoot = join(dir, "old-session");
   mkdirSync(join(oldRoot, "observability"), { recursive: true });
   const meta = JSON.parse(readFileSync(join(dir, good, "meta.json"), "utf8")) as Record<string, unknown>;
@@ -124,6 +125,7 @@ test("一段的观测读不了：health 跳过它并报原因，其余会话照�
   await echo.send("hi");
   const good = echo.agent.state.sessionId!;
   await echo.stop();
+  await echo.observations.flush();
   // 一段登记在案（meta 照抄好的那段、只换 id）、但观测文档是一坨坏字节的会话
   const badRoot = join(dir, "bad-session");
   mkdirSync(join(badRoot, "observability"), { recursive: true });
@@ -144,7 +146,7 @@ test("一段的观测读不了：health 跳过它并报原因，其余会话照�
 test("last / show / export / health：跑一轮落盘后都读得到；stop 之后也读得到", async () => {
   const echo = await echoAt([textTurn("你好")]);
   const result = await echo.send("hi");
-  expect(result.observationPersistence).toBe("stored");
+  await echo.observations.flush(); // 观测在观测线程里写，send 不等它
   const sid = echo.agent.state.sessionId!;
 
   // 活 writer 旁边读（agent 还没 stop）。**不点名也行**：meta 在 start() 那一刻就写了（2026-09-04），
@@ -177,6 +179,7 @@ test("last / show / export / health：跑一轮落盘后都读得到；stop 之�
   expect(missing.err.text).toContain("没有这条 run");
 
   await echo.stop();
+  await echo.observations.flush();
   // stop 之后不点名也读得到：**缺省看最近更新的那一段**，落盘已经 settle
   const after = io();
   expect(await runObserve(["show", result.runId, "--state-dir", dir], "echo-agent", after)).toBe(0);
@@ -188,8 +191,10 @@ test("不点名 --session：show 按 run-id 跨会话找到，last 是全部会�
   const r1 = await first.send("1");
   const id1 = first.agent.state.sessionId!;
   await first.stop();
+  await first.observations.flush();
   const second = await echoAt([textTurn("二")]);
   const r2 = await second.send("2");
+  await second.observations.flush();
   const id2 = second.agent.state.sessionId!;
   expect(id1).not.toBe(id2);
 
@@ -214,6 +219,7 @@ test("main：`observe` 在一切启动逻辑之前分走——不装配、不取
   const echo = await echoAt([textTurn("一句")]);
   const r = await echo.send("x");
   await echo.stop();
+  await echo.observations.flush();
   // 锁目录在 stop() 放锁之后仍留着（当前代不删）；observe 若取过锁，里面会多出一代认领
   const lockDir = join(dir, echo.agent.state.sessionId!, ".lock");
   const before = readdirSync(lockDir).sort();
@@ -224,7 +230,7 @@ test("main：`observe` 在一切启动逻辑之前分走——不装配、不取
   expect(await mainFor(ECHO_AGENT, terminalShell)(["observe", "bogus"], false)).toBe(2);
 });
 
-test("管道形态：每轮结束在 err 打 `[run] <run-id> …`，正文不受影响", async () => {
+test("管道形态：每轮结束在 err 打 `[run] <run-id>`，正文不受影响", async () => {
   const echo = await createEcho({ provider: scripted([textTurn("正文")]), sessionsRoot: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [] });
   const out = sink();
   const err = sink();
@@ -232,10 +238,10 @@ test("管道形态：每轮结束在 err 打 `[run] <run-id> …`，正文不受
   expect(out.text).toContain("正文");
   expect(out.text).not.toContain("[run]");
   const line = err.text.split("\n").find((l) => l.startsWith("[run] run:"));
-  expect(line).toBeDefined();
-  expect(line).toContain("· observation complete · stored");
-  // 打出来的 runId 拿去 observe show 就能看
-  const runId = line!.slice("[run] ".length).split(" ")[0]!;
+  // 只打 runId：观测写没写成 send 不知道（它不等观测线程），拿 runId 去 observe 看
+  expect(line).toMatch(/^\[run\] run:\S+$/);
+  const runId = line!.slice("[run] ".length);
+  await echo.observations.flush();
   const o = io();
   expect(await runObserve(["show", runId, "--state-dir", dir], "echo-agent", o)).toBe(0);
 });

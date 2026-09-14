@@ -19,6 +19,7 @@ import { renderMemorySystem } from "../src/memory/compose.ts";
 import { indexedMemory, residentMemory } from "../src/memory/types.ts";
 import { memoryScopeTable } from "../src/memory/scope.ts";
 import { memoryFactDescriptor, type MemoryFact } from "../src/memory/observe.ts";
+import { applyProjectionDigests } from "../src/observability/thread-host.ts";
 import { createTasks, linkTasks, removeTask, saveTasks, unlinkTasks, updateTask, type TaskMap } from "../src/task/harness.ts";
 import { attachTaskObserver, taskFactDescriptor, type TaskFact } from "../src/task/observe.ts";
 import { addSchedule, cancelSchedule, createAgentSchedule, startSchedule, tickSchedule } from "../src/schedule/harness.ts";
@@ -182,27 +183,33 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
   });
 
   test("descriptor：metadata 只有 pathDigest（HMAC）与 reasonDigest，无明文 path / message；content 才有；off 不投影；rename 有 from/to digest", () => {
-    const d = memoryFactDescriptor({ pathDigestKey: "k".repeat(32) });
+    const d = memoryFactDescriptor;
     const fact: MemoryFact = { kind: "mutation", operation: "rename", outcome: "rejected", path: "user/memory/a.md", toPath: "user/memory/b.md", partition: "memory", mode: "indexed", reasonCode: "target_exists", message: "Target 'memory/b.md' already exists", occurredAt: 1 };
     const meta = d.project(fact, "metadata")!;
     expect(meta.name).toBe("memory.mutation.rejected");
     expect(meta.attributes).toEqual({ operation: "rename", outcome: "rejected", partition: "memory", mode: "indexed", reasonCode: "target_exists" });
-    const body = meta.body as Record<string, unknown>;
+    // 投影只声明要算哪几个摘要（原文在 digests 里，只过一次线程）；body 本身没有明文
+    expect(JSON.stringify(meta.body)).not.toContain("user/memory/a.md");
+    expect(JSON.stringify(meta.body)).not.toContain("already exists");
+    // 观测线程按声明算：key 在那边
+    const key = new TextEncoder().encode("k".repeat(32));
+    const body = applyProjectionDigests(meta.body, meta.digests!, key);
     expect(typeof body.fromPathDigest).toBe("string");
     expect(typeof body.toPathDigest).toBe("string");
     expect(body.fromPathDigest).not.toBe(body.toPathDigest);
-    expect(JSON.stringify(meta)).not.toContain("user/memory/a.md");
-    expect(JSON.stringify(meta)).not.toContain("already exists");
     expect(typeof body.reasonDigest).toBe("string");
+    expect(JSON.stringify(body)).not.toContain("user/memory/a.md");
+    expect(JSON.stringify(body)).not.toContain("already exists");
     const content = d.project(fact, "content")!.body as Record<string, unknown>;
     expect(content.path).toBe("user/memory/a.md");
     expect(content.message).toContain("already exists");
     expect(d.project(fact, "off")).toBeNull();
-    // 同一 key 同一 path → 同一 digest（跨 run 可关联）；不同 key → 不同 digest
-    const again = memoryFactDescriptor({ pathDigestKey: "k".repeat(32) }).project(fact, "metadata")!.body as Record<string, unknown>;
+    // 同一 key 同一 path → 同一 digest（跨 run 可关联）；不同 key → 不同 digest；路径摘要缺 key 不许退回无 key 的哈希
+    const again = applyProjectionDigests(d.project(fact, "metadata")!.body, meta.digests!, key);
     expect(again.fromPathDigest).toBe(body.fromPathDigest);
-    const other = memoryFactDescriptor({ pathDigestKey: "z".repeat(32) }).project(fact, "metadata")!.body as Record<string, unknown>;
+    const other = applyProjectionDigests(meta.body, meta.digests!, new TextEncoder().encode("z".repeat(32)));
     expect(other.fromPathDigest).not.toBe(body.fromPathDigest);
+    expect(() => applyProjectionDigests(meta.body, meta.digests!, undefined)).toThrow();
   });
 });
 
@@ -245,7 +252,9 @@ describe("Task：state commit 与 store settle 两种真相分开", () => {
     const p = taskFactDescriptor.project(sink.facts.at(-1)!, "metadata")!;
     expect(p.name).toBe("task.store.failed");
     expect(JSON.stringify(p.body)).not.toContain("disk full");
-    expect((p.body as Record<string, unknown>).reasonDigest).toBeDefined();
+    // 摘要在观测线程里算：投影只声明，算出来的 body 才有 reasonDigest
+    expect(p.digests).toEqual({ reasonDigest: { text: "disk full" } });
+    expect(typeof applyProjectionDigests(p.body, p.digests!, undefined).reasonDigest).toBe("string");
   });
 });
 

@@ -399,25 +399,25 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   );
 
   test(
-    "Node：装 tarball → createEcho 完整装配 → send → echo.observations 与离线 reader 都读得回（观测是状态根里的文档，不靠 bun:sqlite）",
+    "Node：装 tarball → createEcho 完整装配 → send → echo.observations 读得回；stop 不等观测，进程写完才退，下一个进程离线读得到",
     () => {
       const { consumer, cleanup } = packAndInstall();
       try {
-        // 2026-09-14 观测改文档存储的验收之一：此前 createEcho 在 Node 下起不来（观测库走 bun:sqlite），
-        // 只有 new Agent 那条能跑。现在完整装配（lease、会话、观测写入与读回）都得在 Node 上成立。
+        // 观测改文档存储之后 createEcho 能在 Node 下起来（此前观测库走 bun:sqlite）；2026-09-14 观测挪进观测线程：
+        // 线程入口要跟着 dist 产物走（observation-worker.js），进程要等它写完才退出、而 stop() 不等。
         writeFileSync(
           join(consumer, "echo.mjs"),
           [
             "import { mkdtempSync } from \"node:fs\";",
             "import { tmpdir } from \"node:os\";",
             "import { join } from \"node:path\";",
-            "import { createEcho, createProvider, createProviderStreams, openObservationReader } from \"@echo-agent/core\";",
+            "import { createEcho, createProvider, createProviderStreams } from \"@echo-agent/core\";",
             "import { scriptedDialect, textTurn } from \"@echo-agent/core/testing\";",
             "",
             "process.env.ECHO_HOME = mkdtempSync(join(tmpdir(), \"echo-dist-home-\"));",
-            "const stateDir = join(mkdtempSync(join(tmpdir(), \"echo-dist-state-\")), \"state\");",
+            "const stateDir = process.argv[2];",
             "const echo = await createEcho({",
-            "  provider: createProvider({ id: \"s\", auth: { apiKey: { resolve: async () => ({ apiKey: \"x\" }) } }, models: [{ id: \"only\", api: \"fake\" }], api: createProviderStreams(scriptedDialect([textTurn(\"hi\")])) }),",
+            "  provider: createProvider({ id: \"s\", auth: { apiKey: { resolve: async () => ({ apiKey: \"x\" }) } }, models: [{ id: \"only\", api: \"fake\" }], api: createProviderStreams(scriptedDialect([textTurn(\"hi\"), textTurn(\"again\")])) }),",
             "  stateDir,",
             "  allowNetwork: false,",
             "  withoutMemory: true,",
@@ -426,18 +426,33 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
             "await echo.agent.start();",
             "const r = await echo.send(\"x\");",
             "const live = await echo.observations.getRun(r.runId);",
+            "const last = await echo.send(\"y\");",
+            "// 不 flush：stop 不等观测写完，进程要等观测线程写完才退",
             "await echo.stop();",
-            "const reader = await openObservationReader({ stateRoot: stateDir });",
-            "const offline = await reader.getRun(r.runId);",
-            "await reader.close();",
-            "console.log(JSON.stringify({ outcome: r.outcome.kind, persistence: r.observationPersistence, live: live.kind, offline: offline.kind }));",
+            "console.log(JSON.stringify({ outcome: r.outcome.kind, live: live.kind === \"found\" ? live.observation.persistence : live.kind, last: last.runId }));",
           ].join("\n"),
         );
+        writeFileSync(
+          join(consumer, "read.mjs"),
+          [
+            "import { openObservationReader } from \"@echo-agent/core\";",
+            "const reader = await openObservationReader({ stateRoot: process.argv[2] });",
+            "const found = await reader.getRun(process.argv[3]);",
+            "await reader.close();",
+            "console.log(JSON.stringify({ offline: found.kind === \"found\" ? found.observation.status : found.kind }));",
+          ].join("\n"),
+        );
+        const stateDir = join(consumer, "state");
 
-        const run = sh(["node", "echo.mjs"], consumer);
+        const run = sh(["node", "echo.mjs", stateDir], consumer);
         expect(run.ok, `Node 下 createEcho 跑失败：\n${run.out}`).toBe(true);
-        const line = run.out.split("\n").filter(Boolean).at(-1) ?? "{}";
-        expect(JSON.parse(line)).toEqual({ outcome: "completed", persistence: "stored", live: "found", offline: "found" });
+        const line = JSON.parse(run.out.split("\n").filter(Boolean).at(-1) ?? "{}") as { outcome: string; live: string; last: string };
+        expect({ outcome: line.outcome, live: line.live }).toEqual({ outcome: "completed", live: "stored" });
+
+        // 最后一个 run 在 stop 之前才封口、没人等它：它出现在盘上，说明进程是等观测线程写完才退的
+        const read = sh(["node", "read.mjs", stateDir, line.last], consumer);
+        expect(read.ok, `离线读失败：\n${read.out}`).toBe(true);
+        expect(JSON.parse(read.out.split("\n").filter(Boolean).at(-1) ?? "{}")).toEqual({ offline: "completed" });
       } finally {
         cleanup();
       }

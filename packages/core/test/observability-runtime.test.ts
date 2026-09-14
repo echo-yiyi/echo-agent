@@ -12,25 +12,23 @@ import type { Provider } from "../src/provider/types.ts";
 import { renderRunObservation, buildRunObservationViewModel } from "../src/observability/render.ts";
 import { RUN_ASSEMBLY_RECORD } from "../src/observability/draft.ts";
 import { ObservationRuntime } from "../src/observability/runtime.ts";
-import { observationHostOf } from "../src/observability/host-wiring.ts";
-import { DocumentObservationStore } from "../src/observability/document-store.ts";
+import { expireObservations, type ObservationExpiryRule } from "../src/observability/expiry.ts";
+import type { CapabilityFactDescriptor } from "../src/observability/fact-sink.ts";
+import { DocumentObservationReader } from "../src/observability/document-store.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import type { StorageDir } from "../src/storage/types.ts";
-import type { ObservationExpiryRule } from "../src/observability/runtime.ts";
-import { sealAgentAssemblyObservation } from "../src/observability/assembly.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
-import type { BoundedObservationDraft } from "../src/observability/draft.ts";
 import type { RunModelBinding } from "../src/admission/types.ts";
 import type { EchoObservableState, RunObservation } from "../src/observability/types.ts";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 
 // **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
 // 不设它就会读到开发机上真的 `~/.echo/skills`——实测过 skill 池莫名多出一条。
 process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
 // O3a 的端到端判据：**committed send → getRun → render 出非空稳定文本**。
-// 真 createEcho（真 FileDir + 真文件锁 + 真观测文档），scripted Provider + 进程内 builtin test Tool；
+// 真 createEcho（真 FileDir + 真文件锁 + 真观测线程 + 真观测文档），scripted Provider + 进程内 builtin test Tool；
 // completed / error / abort 三条路径都能按 runId 取到已 COMMIT 的 record 并渲染；Tool 抛错仍配对；压小 ring 产生
 // canonical gap 时 integrity=partial 且 renderer 显示；离线 reader 在活 writer 旁边读到同一份。
 
@@ -80,7 +78,6 @@ async function echoWith(opts: {
   withMemory?: boolean;
   capture?: "off" | "metadata" | "content";
   observationStore?: StorageDir;
-  expiry?: ObservationExpiryRule;
   start?: boolean;
   sessionId?: string;
 }): Promise<Echo> {
@@ -95,7 +92,6 @@ async function echoWith(opts: {
     observation: {
       ...(opts.capture === undefined ? {} : { capture: opts.capture }),
       ...(opts.observationStore === undefined ? {} : { store: opts.observationStore }),
-      ...(opts.expiry === undefined ? {} : { expiry: opts.expiry }),
     },
   });
   running.push(echo);
@@ -116,8 +112,8 @@ describe("send → getRun → render（completed）", () => {
     expect(result.outcome.kind).toBe("completed");
     expect(result.runId).toMatch(/^run:/);
     expect(result.observation).toEqual({ runtimeId: expect.stringMatching(/^rt:/), runId: result.runId });
-    expect(result.observationIntegrity).toBe("complete");
-    expect(result.observationPersistence).toBe("stored");
+    // send() 只给引用，不带观测写没写成（它不等观测线程）：写成与否读回来看
+    expect(Object.keys(result).sort()).toEqual(["observation", "outcome", "runId"]);
 
     const lookup = await echo.observations.getRun(result.runId);
     expect(lookup.kind).toBe("found");
@@ -336,11 +332,12 @@ describe("send → getRun → render（completed）", () => {
   });
 
 
-  test("stop 之后库已关；reader 仍能读；没记录过的 state root 打开 reader 是明确的 missing 错误", async () => {
+  test("stop() 不等观测写完；observations.flush() 之后离线 reader 读得到；没记录过的 state root 打开 reader 是明确的 missing 错误", async () => {
     const stateDir = join(await tmp(), "state");
     const echo = await echoWith({ stateDir, turns: [textTurn("one")] });
     const r = await echo.send("a");
     await echo.stop();
+    await echo.observations.flush(); // 等的是收摊那一段：观测线程写完手上的
     const reader = await openObservationReader({ stateRoot: stateDir });
     const lookup = await reader.getRun(r.runId);
     expect(lookup.kind).toBe("found");
@@ -383,6 +380,7 @@ describe("send → getRun → render（completed）", () => {
     const echo = await echoWith({ stateDir, turns: [textTurn("one")] });
     await echo.send("a");
     await echo.stop();
+    await echo.observations.flush();
     const reader = await openObservationReader({ stateRoot: stateDir });
     try {
       // recentActivity 只读 run 之外的记录，最新在前
@@ -391,7 +389,7 @@ describe("send → getRun → render（completed）", () => {
         { from: "new", to: "starting" },
         { from: "starting", to: "restored", restoredReason: "deferred-start" },
         { from: "restored", to: "running" },
-        // 写入端是 stop 流程里被关掉的东西之一，`stopping → stopped` 在它关掉之后才成立
+        // 观测是 stop 流程里被告知收摊的东西之一，`stopping → stopped` 在那之后才成立，观测线程已经不收它
         { from: "running", to: "stopping" },
       ]);
       for (const e of phases) expect(e.instrumentation.name).toBe("echo.agent");
@@ -407,9 +405,9 @@ describe("error / abort / Tool 抛错", () => {
     const echo = await echoWith({ stateDir, turns: [errorTurn("boom", "provider exploded: secret=abc", false)] });
     const result = await echo.send("x");
     expect(result.outcome.kind).toBe("error");
-    expect(result.observationPersistence).toBe("stored");
     const lookup = await echo.observations.getRun(result.runId);
     if (lookup.kind !== "found") throw new Error(`expected found, got ${lookup.kind}`);
+    expect(lookup.observation.persistence).toBe("stored");
     expect(lookup.observation.status).toBe("error");
     expect(lookup.observation.outcome?.status).toBe("error");
     expect(lookup.observation.outcome?.error?.code).toBe("boom");
@@ -461,33 +459,23 @@ describe("error / abort / Tool 抛错", () => {
 });
 
 describe("canonical gap（硬门 4）", () => {
-  function bounded(rt: ObservationRuntime, runId: string, n: number): BoundedObservationDraft {
-    return {
-      lane: "bounded",
-      occurredAt: 1_000 + n,
-      kind: "event",
-      name: "test.event",
-      scope: { runtimeId: rt.runtimeId, runId },
-      correlation: {},
-      generation: { runtime: rt.runtimeGeneration },
-      owner: { status: "not-applicable" },
-      instrumentation: { name: "test", version: "1" },
-      attributes: {},
-      body: { n },
-    } as BoundedObservationDraft;
-  }
+  /** 测试用探针：每个事实一条 run 内记录。 */
+  const numbered: CapabilityFactDescriptor<number> = {
+    instrumentation: { name: "test", version: "1" },
+    project: (n) => ({ kind: "event", name: "test.event", occurredAt: 1_000 + n, scope: { runId: "run:gap" }, attributes: {}, body: { n } }),
+  };
 
   test("人为压小 ring → observation.gap；index integrity=partial；renderer 显示 gap；run.closed 仍 stored", async () => {
     const stateDir = join(await tmp(), "state");
-    const store = await DocumentObservationStore.open({ dir: new FileDir(stateDir), path: stateDir });
     const clock = new FakeClock(1_000);
     const rt = new ObservationRuntime({
       runtimeId: "rt:gap",
       runtimeGeneration: "boot",
       capturePolicy: "metadata",
-      store,
+      store: new FileDir(stateDir),
+      storePath: stateDir,
       clock,
-      assembly: sealAgentAssemblyObservation([]),
+      assembly: [],
       limits: { ringCapacity: 2, maxBatchDelayMs: 60_000 },
     });
     const binding: RunModelBinding = {
@@ -505,11 +493,16 @@ describe("canonical gap（硬门 4）", () => {
     };
     const identity = { agentId: "a", agentInstanceId: "a#1", sessionId: null };
     try {
+      const sink = rt.capabilitySink(numbered, { status: "not-applicable" });
       rt.acceptRun({ runId: "run:gap", source: { kind: "user" }, ...identity, modelBinding: binding });
-      rt.startRun("run:gap", identity, "permit-executor");
-      // ring 容量 2，delayed flush 不会触发：第三条起溢出 → canonical gap（boundary lane）
-      for (let i = 0; i < 5; i++) rt.sequencer.offer(bounded(rt, "run:gap", i));
-      await rt.closeRun({ runId: "run:gap", outcome: { kind: "completed" }, finalState: null }, identity);
+      rt.startRun("run:gap", identity, "permit-executor", {
+        runtime: { phase: "ready", generation: "boot", activeEntryCount: 0 },
+        agent: { status: "generating", activeRunId: "run:gap", activeTurnId: null, iteration: 0, messageCount: 1 } as never,
+        capabilities: [],
+      });
+      // ring 容量 2，delayed flush 不会触发：不管边界那几次提交落在哪一拍，20 条里总有溢出 → canonical gap（boundary lane）
+      for (let i = 0; i < 20; i++) sink.offer(i);
+      rt.closeRun({ runId: "run:gap", outcome: { kind: "completed" }, finalState: null }, identity);
 
       const lookup = await rt.observations.getRun("run:gap");
       if (lookup.kind !== "found") throw new Error(`expected found, got ${lookup.kind}`);
@@ -518,73 +511,93 @@ describe("canonical gap（硬门 4）", () => {
       expect(o.persistence).toBe("stored");
       expect(o.status).toBe("completed");
       expect(o.gaps.length).toBeGreaterThanOrEqual(1);
-      expect(o.gaps[0]?.reason).toBe("buffer_overflow");
+      expect(o.gaps.every((g) => g.reason === "buffer_overflow")).toBe(true);
       expect(o.summary.canonicalGapCount).toBe(o.gaps.length);
       const text = renderRunObservation(o, { format: "text" }).content;
       expect(text).toContain("observation partial");
       expect(text).toContain("buffer_overflow(");
       expect(text).toContain("observation.gap");
-      expect(rt.persistenceOf("run:gap")).toBe("stored");
-      expect(rt.sequencer.persistenceState.status).toBe("healthy");
+      expect((await rt.observations.snapshot()).health.persistence.status).toBe("healthy");
     } finally {
       await rt.dispose();
     }
   });
 });
 
-describe("过期规则归产品，core 按时点执行（2026-09-14）", () => {
-  async function until(cond: () => Promise<boolean>, ms = 3_000): Promise<boolean> {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-      if (await cond()) return true;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    return cond();
-  }
-
-  test("每个 run 封口之后执行一次：规则「只留最近一条」→ 跑三轮只剩最后一条，前两条 getRun 是 unknown", async () => {
-    const stateDir = join(await tmp(), "state");
-    const keepNewest: ObservationExpiryRule = (runs) => ({ runs: runs.slice(1).map((h) => h.runId) });
-    const echo = await echoWith({ stateDir, turns: [textTurn("one"), textTurn("two"), textTurn("three")], expiry: keepNewest });
-    const a = await echo.send("a");
-    const b = await echo.send("b");
-    const c = await echo.send("c");
-    expect(await until(async () => (await echo.observations.listRuns()).items.length === 1)).toBe(true);
-    expect((await echo.observations.listRuns()).items.map((h) => h.runId)).toEqual([c.runId]);
-    expect((await echo.observations.getRun(a.runId)).kind).toBe("unknown");
-    expect((await echo.observations.getRun(b.runId)).kind).toBe("unknown");
-    expect((await echo.observations.getRun(c.runId)).kind).toBe("found");
-  });
-
-  test("重启拿到 lease 之后执行一次，不等新 run；没 start 之前 expire() 是空操作；不给规则一条不删", async () => {
+describe("过期归产品：agent 里没有过期，产品自己调 expireObservations（2026-09-14）", () => {
+  test("跑完、停下、再起都一条不删；产品在活着的 agent 旁边按规则删，删的是盘上已封口的 run", async () => {
     const stateDir = join(await tmp(), "state");
     const first = await echoWith({ stateDir, turns: [textTurn("one"), textTurn("two")] });
-    await first.send("a");
-    await first.send("b");
+    const a = await first.send("a");
+    const b = await first.send("b");
     const sessionId = first.agent.state.sessionId!;
-    await first.observations.expire(); // 没给规则：空操作
-    expect((await first.observations.listRuns()).items.length).toBe(2);
     await first.stop();
+    await first.observations.flush();
 
-    let calls = 0;
-    const dropAll: ObservationExpiryRule = (runs) => {
-      calls += 1;
-      return { runs: runs.map((h) => h.runId) };
-    };
-    const second = await echoWith({ stateDir, turns: [], expiry: dropAll, start: false, sessionId });
-    await second.observations.expire(); // 还没持 lease
-    expect(calls).toBe(0);
-    expect((await second.observations.listRuns()).items.length).toBe(2);
-    await second.agent.start();
-    expect(await until(async () => (await second.observations.listRuns()).items.length === 0)).toBe(true);
-    expect(calls).toBeGreaterThan(0);
+    const second = await echoWith({ stateDir, turns: [textTurn("three"), textTurn("four")], sessionId });
+    const c = await second.send("c");
+    expect((await second.observations.listRuns()).items.map((h) => h.runId).sort()).toEqual([a.runId, b.runId, c.runId].sort());
+
+    const keepNewest: ObservationExpiryRule = (runs) => ({ runs: runs.slice(1).map((h) => h.runId) });
+    const result = await expireObservations({ stateRoot: stateDir, rule: keepNewest });
+    expect([...result.removedRuns].sort()).toEqual([a.runId, b.runId].sort());
+    expect((await second.observations.listRuns()).items.map((h) => h.runId)).toEqual([c.runId]);
+    expect((await second.observations.getRun(a.runId)).kind).toBe("unknown");
+    // 活着的 agent 照常跑、照常记
+    const d = await second.send("d");
+    expect(d.outcome.kind).toBe("completed");
   });
 });
 
-describe("观测层坏了不影响 agent 主线（2026-09-03 拍板：放弃 fail-closed admission）", () => {
-  test("观测存储写不动：send 照常 completed、persistence 报 degraded；下一次 send 也照跑；stop 不抛", async () => {
+describe("观测不在主流程上（2026-09-14 硬规矩）", () => {
+  /** 一个可以卡住的存储：卡着的时候读、写、列一律不返回，`release()` 之后放行。 */
+  function stallable(inner: StorageDir): { dir: StorageDir; release: () => void } {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const later = <T>(fn: () => Promise<T>): Promise<T> => gate.then(fn);
+    return {
+      dir: {
+        read: (p) => later(() => inner.read(p)),
+        write: (p, c) => later(() => inner.write(p, c)),
+        remove: (p) => later(() => inner.remove(p)),
+        list: (p) => later(() => inner.list(p)),
+      },
+      release,
+    };
+  }
+
+  test("观测存储完全卡住：createEcho、start、send、stop 都不等它；放行之后该写的照样写进去", async () => {
     const stateDir = join(await tmp(), "state");
-    // 模拟存储坏掉：开库（读或建 key）照常，之后每次写批文件都抛，writer 会 seal
+    const inner = new InMemoryDir();
+    const stall = stallable(inner);
+    try {
+      const t0 = performance.now();
+      const echo = await echoWith({ stateDir, turns: [toolTurn("c1", "ping", {}), textTurn("done"), textTurn("again")], observationStore: stall.dir });
+      const a = await echo.send("a");
+      const b = await echo.send("b");
+      await echo.stop();
+      const elapsed = performance.now() - t0;
+      expect(a.outcome.kind).toBe("completed");
+      expect(b.outcome.kind).toBe("completed");
+      // 此前 admission 要等 run.closed 落盘（最多 500ms）才放行下一个 run：两次 send 至少 1s。现在什么都不等
+      expect(elapsed).toBeLessThan(900);
+      expect(await inner.list("observability/")).toEqual([]); // 卡着：一个字都还没写
+
+      stall.release();
+      await echo.observations.flush();
+      const reader = new DocumentObservationReader(inner, "(test)");
+      expect((await reader.readRunIndex(a.runId))?.header.status).toBe("completed");
+      expect((await reader.readRunIndex(b.runId))?.header.status).toBe("completed");
+    } finally {
+      stall.release();
+    }
+  });
+
+  test("观测存储写不动：send 照常 completed，下一次 send 也照跑，stop 不抛；写不动只进 persistence health", async () => {
+    const stateDir = join(await tmp(), "state");
+    // 模拟存储坏掉：建 key 照常，之后每次写批文件都抛，writer 会 seal
     const inner = new InMemoryDir();
     const broken: StorageDir = {
       read: (p) => inner.read(p),
@@ -593,26 +606,58 @@ describe("观测层坏了不影响 agent 主线（2026-09-03 拍板：放弃 fai
       list: (p) => inner.list(p),
     };
     const echo = await echoWith({ stateDir, turns: [textTurn("one"), textTurn("two")], observationStore: broken });
-    const rt = observationHostOf(echo.agent)!.runtime;
 
     const a = await echo.send("a");
     expect(a.outcome.kind).toBe("completed");
-    expect(a.observationPersistence).toBe("degraded");
-    expect(a.observationIntegrity).toBe("partial");
-    expect(rt.sequencer.persistenceState.status).not.toBe("healthy");
+    expect((await echo.observations.snapshot()).health.persistence.status).not.toBe("healthy");
 
-    // 修复前：run.accepted 落不下去 → admission 拒绝 → send() 抛 ObservationStoreUnavailableError
     const b = await echo.send("b");
     expect(b.outcome.kind).toBe("completed");
-    expect(b.observationPersistence).toBe("degraded");
     expect(echo.agent.messages.filter((m) => m.role === "assistant").length).toBe(2);
     await echo.stop();
   });
+
+  test("进程在观测线程写完之后才退出，stop 不等；process.on(\"exit\") 照常运行", async () => {
+    const dir = await tmp();
+    const stateDir = join(dir, "state");
+    const marker = join(dir, "exit-marker");
+    const script = [
+      `import { appendFileSync, mkdtempSync } from "node:fs";`,
+      `import { join } from "node:path";`,
+      `import { tmpdir } from "node:os";`,
+      `import { createEcho } from ${JSON.stringify(join(import.meta.dir, "../src/create-echo.ts"))};`,
+      `import { createProvider } from ${JSON.stringify(join(import.meta.dir, "../src/provider/models.ts"))};`,
+      `import { createProviderStreams } from ${JSON.stringify(join(import.meta.dir, "../src/provider/dialect.ts"))};`,
+      `import { scriptedDialect, textTurn } from ${JSON.stringify(join(import.meta.dir, "../src/testing.ts"))};`,
+      `process.env.ECHO_HOME = mkdtempSync(join(tmpdir(), "echo-exit-home-"));`,
+      `process.on("exit", () => appendFileSync(${JSON.stringify(marker)}, "exit\\n"));`,
+      `const provider = createProvider({ id: "s", auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } }, models: [{ id: "only", api: "fake" }], api: createProviderStreams(scriptedDialect([textTurn("hi")])) });`,
+      `const echo = await createEcho({ provider, stateDir: ${JSON.stringify(stateDir)}, allowNetwork: false, withoutMemory: true, extensionDirs: [] });`,
+      `await echo.agent.start();`,
+      `const r = await echo.send("x");`,
+      `await echo.stop();`,
+      `console.log(r.runId);`,
+    ].join("\n");
+    const file = join(dir, "child.ts");
+    await Bun.write(file, script);
+    const child = Bun.spawn(["bun", file], { stdout: "pipe", stderr: "pipe" });
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    expect(code, err).toBe(0);
+    const runId = out.trim().split("\n").at(-1)!;
+    const reader = await openObservationReader({ stateRoot: stateDir });
+    try {
+      const lookup = await reader.getRun(runId);
+      expect(lookup.kind === "found" && lookup.observation.status).toBe("completed");
+    } finally {
+      await reader.close();
+    }
+    expect(existsSync(marker) && readFileSync(marker, "utf8")).toBe("exit\n");
+  }, 60_000);
 });
 
 // 投影的单测证明不了「读得回来」：思考还要穿过 canonical 编码、观测文档、reader 与视图模型。
 // 这条走的正是面板读的那条路（buildRunObservationViewModel）。
-describe("思考穿过整条链路：canonical → SQLite → reader → 视图模型", () => {
+describe("思考穿过整条链路：canonical → 观测文档 → reader → 视图模型", () => {
   /** 一轮「先想、再答」：thinking 与 text 两块都进 done 的 message——preserved thinking 就是这个形状。 */
   const thinkTurn: ScriptedTurn = [
     { type: "start" },

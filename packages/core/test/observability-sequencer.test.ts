@@ -6,12 +6,14 @@ import {
   DEFAULT_SEQUENCER_LIMITS,
   MAX_CLOSED_SINK_TOMBSTONES,
   MAX_SINK_GAPS,
+  type ObservationIngest,
   type ObservationSequencerOptions,
   type ObservationSubscribeItem,
   type ObservationSubscribeListener,
 } from "../src/observability/sequencer.ts";
 import { ObservationEncodingError } from "../src/observability/normalize.ts";
-import { factSinkToIngest } from "../src/observability/fact-sink.ts";
+import { factSinkToThread, type CapabilityFactDescriptor, type CapabilityFactSink, type ObservationFactScope } from "../src/observability/fact-sink.ts";
+import { factIngestContext, freezeSinkIdentity, ingestFact, ingestFactFailure } from "../src/observability/thread-host.ts";
 import { ObservationIdentityError } from "../src/observability/identity.ts";
 import { OBSERVATION_IDENTITY_LIMITS } from "../src/observability/types.ts";
 import type { BoundaryObservationDraft, BoundedObservationDraft, RunAcceptedBodyV1 } from "../src/observability/draft.ts";
@@ -19,14 +21,42 @@ import type { Diagnostic } from "../src/errors.ts";
 import type {
   CapabilityObservationSummary,
   EchoObservableState,
+  ObservationCapturePolicy,
   ObservationEnvelope,
   ObservationGap,
+  ObservationOwner,
   ObservationSnapshot,
   RunClosedBodyInput,
   RunClosedBodyV1,
   RunIndexEntryV1,
   SinkDeliveryGap,
 } from "../src/observability/types.ts";
+
+/**
+ * 测试里的探针：主线程那一半（`factSinkToThread`：scope 供给 + 投影）直接接观测线程那一半（`ingestFact`：物化 + 摘要 + offer），
+ * 只省掉线程之间那一跳（结构化拷贝由 createEcho 的端到端测试覆盖）。身份在构造期冻结，与 `ObservationRuntime.capabilitySink` 同一个函数。
+ */
+function sinkInto<T>(
+  seq: ObservationIngest,
+  descriptor: CapabilityFactDescriptor<T>,
+  opts: { runtimeId?: string; runtimeGeneration?: string; capturePolicy?: ObservationCapturePolicy; owner?: ObservationOwner; scope?: () => ObservationFactScope; report?: (d: Diagnostic) => void } = {},
+): CapabilityFactSink<T> {
+  const ctx = factIngestContext({
+    runtimeId: opts.runtimeId ?? "rt",
+    runtimeGeneration: opts.runtimeGeneration ?? "g",
+    sink: freezeSinkIdentity(opts.owner ?? { status: "not-applicable" }, descriptor.instrumentation),
+    report: opts.report ?? (() => {}),
+  });
+  return factSinkToThread(descriptor, {
+    capturePolicy: opts.capturePolicy ?? "metadata",
+    now: () => 0,
+    ...(opts.scope === undefined ? {} : { scope: opts.scope }),
+    handoff: {
+      fact: (_at, scope, projection) => ingestFact(seq, ctx, { scope, projection }),
+      failed: (_at, runId, why, error) => ingestFactFailure(seq, ctx, runId, why, error),
+    },
+  });
+}
 
 // Sequencer 契约。全部用 FakeClock + in-memory 参考 store：零 sleep、零真盘。
 
@@ -65,24 +95,6 @@ function harness(limits: Partial<ObservationSequencerOptions["limits"]> = {}): H
     },
   };
 }
-
-test("markLeaseLost()：进 lost-lease 终态——不 flush、之后 offer 丢弃、flushPending 直接返回、幂等（review 2026-09-07）", async () => {
-  // 下游对 lost-lease 的判断早就写好了，此前只是没有入口：丢锁后 stop() 照样 flush 进已经归别人的状态根
-  const h = harness();
-  h.seq.offer(bounded({ a: 1 }));
-  await h.flush();
-  const committed = h.store.commitCount;
-  h.seq.offer(bounded({ a: 2 })); // ring 里有没写完的
-  h.seq.markLeaseLost(new Error("租约过期"));
-  expect(h.seq.persistenceState.status).toBe("lost-lease");
-  await h.seq.flushPending(); // 状态根已经不归本进程：不 flush
-  h.seq.offer(bounded({ a: 3 })); // 之后的 offer 丢弃
-  await h.flush();
-  expect(h.store.commitCount).toBe(committed);
-  h.seq.markLeaseLost(new Error("再来一次")); // 幂等
-  expect(h.seq.persistenceState.status).toBe("lost-lease");
-  expect(h.diags.filter((d) => d.code === "observation_writer_lost_lease")).toHaveLength(1);
-});
 
 /** 等异步回放（store 读是 Promise，不走 FakeClock）交付到位；最多等 `ticks` 个宏任务。 */
 async function settle(done: () => boolean, ticks = 50): Promise<void> {
@@ -963,20 +975,20 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
   test("sealed 后反复 projection failure：走真实 fact-sink，reservedSeq / gapCount 一个都不动", async () => {
     // 修复前实测：before=1 → after=201、slots=201、gaps=100，而那些 gap 永远提交不了。
     // 判据用 **reservedSeq**（committedSeq 量不到预留，上一版拿它冒充是错的），
-    // 并且走**真实 `factSinkToIngest`**，不是直接戳 Sequencer 的内部入口。
+    // 并且走**真实的探针两半**（`factSinkToThread` + `ingestFact`），不是直接戳 Sequencer 的内部入口。
     const h = await sealedHarness();
     const before = h.seq.health();
     const reservedBefore = h.seq.reservedSeq;
     const sinkDiags: Diagnostic[] = [];
-    const sink = factSinkToIngest(
+    const sink = sinkInto(
+      h.seq,
       {
         instrumentation: { name: "t", version: "1" },
         project: () => {
           throw new Error("projection boom");
         },
       },
-      h.seq,
-      { runtimeId: RT, runtimeGeneration: "gen-1", capturePolicy: "metadata", owner: { status: "not-applicable" }, report: (d) => sinkDiags.push(d) },
+      { runtimeId: RT, runtimeGeneration: "gen-1", report: (d) => sinkDiags.push(d) },
     );
     for (let i = 0; i < 100; i++) sink.offer({});
     expect(h.seq.reservedSeq).toBe(reservedBefore);
@@ -989,15 +1001,15 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
 
   test("terminal 之前同一个真实 fact-sink 仍然逐条开 gap", async () => {
     const h = harness();
-    const sink = factSinkToIngest(
+    const sink = sinkInto(
+      h.seq,
       {
         instrumentation: { name: "t", version: "1" },
         project: () => {
           throw new Error("projection boom");
         },
       },
-      h.seq,
-      { runtimeId: RT, runtimeGeneration: "gen-1", capturePolicy: "metadata", owner: { status: "not-applicable" } },
+      { runtimeId: RT, runtimeGeneration: "gen-1" },
     );
     sink.offer({});
     sink.offer({});

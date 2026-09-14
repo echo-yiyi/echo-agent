@@ -5,16 +5,15 @@ import { join } from "node:path";
 import { FakeClock } from "../src/schedule/clock.ts";
 import { AGENT_ENTRY_ID, ObservationRuntime, builtinOwner } from "../src/observability/runtime.ts";
 import { loopFactDescriptor, type LoopFact, type LoopFactBody } from "../src/loop/observe.ts";
-import { DocumentObservationStore } from "../src/observability/document-store.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
-import { sealAgentAssemblyObservation } from "../src/observability/assembly.ts";
 import { buildRunObservationViewModel, renderRunObservation } from "../src/observability/render.ts";
 import type { RunModelBinding } from "../src/admission/types.ts";
 import type { AssistantMessage } from "../src/messages.ts";
 import type { RunObservation } from "../src/observability/types.ts";
+import type { ObservableStateInput } from "../src/observability/worker-protocol.ts";
 
 // renderer golden（硬门 3）：锁层级、相对顺序与 redaction，不锁 wall clock / 随机 ID——
-// 所以 fixture 用 FakeClock + 固定 runId / runtimeId，经**真实** ObservationRuntime + SQLite 走一遍再渲染。
+// 所以 fixture 用 FakeClock + 固定 runId / runtimeId，经**真实** ObservationRuntime + 观测线程 + 文档存储走一遍再渲染。
 // 快照文件在 __snapshots__/；改了渲染结构要 `bun test --update-snapshots` 并在 review 里说明为什么。
 
 const temps: string[] = [];
@@ -80,18 +79,23 @@ function script(): readonly LoopFact[] {
 async function fixtureRun(): Promise<RunObservation> {
   const dir = await mkdtemp(join(tmpdir(), "echo-obs-render-"));
   temps.push(dir);
-  const store = await DocumentObservationStore.open({ dir: new FileDir(dir), path: dir });
   const clock = new FakeClock(1_000);
   const rt = new ObservationRuntime({
     runtimeId: "rt:fixed",
     runtimeGeneration: "boot",
     capturePolicy: "metadata",
-    store,
+    store: new FileDir(dir),
+    storePath: dir,
     clock,
-    assembly: sealAgentAssemblyObservation([
+    assembly: [
       { slot: "store", entryId: "echo:persistence-local", entryGeneration: "builtin", safeConfig: { kind: "file" } },
       { slot: "memory", entryId: "echo:memory", entryGeneration: "builtin", safeConfig: {} },
-    ]),
+    ],
+  });
+  const state = (activeTurnId: string | null, iteration: number, messageCount: number): ObservableStateInput => ({
+    runtime: { phase: "ready", generation: "boot", activeEntryCount: 0 },
+    agent: { status: "generating", activeRunId: "run:fixed", activeTurnId, iteration, messageCount } as ObservableStateInput["agent"],
+    capabilities: [],
   });
   try {
     let turnId: string | null = null;
@@ -99,7 +103,7 @@ async function fixtureRun(): Promise<RunObservation> {
     const sink = rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => ({ ...identity }));
     rt.acceptRun({ runId: "run:fixed", source: { kind: "user" }, ...identity, modelBinding: binding });
     clock.advance(1);
-    rt.startRun("run:fixed", identity, "permit-executor");
+    rt.startRun("run:fixed", identity, "permit-executor", state(null, 0, 1));
     for (const f of script()) {
       // 与循环里的探针同一规则：turn 里的节点带上本 turn 的 id（turn_ended 仍在 turn 里，之后清掉）
       if (f.kind === "turn_started") turnId = f.turnId;
@@ -107,19 +111,7 @@ async function fixtureRun(): Promise<RunObservation> {
       if (f.kind === "turn_ended") turnId = null;
     }
     clock.advance(130);
-    await rt.closeRun(
-      {
-        runId: "run:fixed",
-        outcome: { kind: "completed" },
-        finalState: {
-          runtime: { phase: "ready", status: "ready", observationPersistence: "healthy", generation: "boot", activeEntryCount: 0 },
-          agent: { status: "generating", activeRunId: "run:fixed", activeTurnId: "run:fixed/1#2", iteration: 2, messageCount: 5 },
-          capabilities: [],
-          omittedCapabilitySummaryCount: 0,
-        },
-      },
-      identity,
-    );
+    rt.closeRun({ runId: "run:fixed", outcome: { kind: "completed" }, finalState: state("run:fixed/1#2", 2, 5) }, identity);
     const lookup = await rt.observations.getRun("run:fixed");
     if (lookup.kind !== "found") throw new Error(`expected found, got ${lookup.kind}`);
     return lookup.observation;
@@ -156,6 +148,7 @@ describe("renderRunObservation", () => {
       ["run.accepted", 0],
       ["run.assembly", 0],
       ["run.started", 0],
+      ["agent.state", 1], // run 开头的状态快照：startRun 带着，观测线程紧跟 run.started 记
       ["agent.loop.started", 1],
       ["reply.execute", 1],
       ["turn.execute", 2],

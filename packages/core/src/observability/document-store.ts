@@ -8,11 +8,11 @@
 //
 // 与 Sequencer 的契约（store.ts 头注）逐条落在文件上：一批几个 run 的记录与 RunIndex 在同一个批文件里，一次 rename 同时可见；
 // 批文件已存在且逐字相同 = `already-committed-same`，不同 = corruption；head 与 RunIndex 的 CAS 对的是本实例内存里的值
-// （状态根只有一个写者：lease；新进程的 runtimeId 是新的，写入只进自己的 `batches/<runtimeId>/`）。派生文件写失败不影响已提交，
-// 留到下一次提交或持锁后的补齐再写。
+// （每个进程的 runtimeId 是新的，写入只进自己的 `batches/<runtimeId>/`、自己 run 的 `runs/`、自己的 `heads/`，与别的进程不相交）。
+// 派生文件写失败不影响已提交，留到下一次提交再写；进程在两者之间退出，那几个 run 就列不出来——观测不做崩溃恢复。
+// **派生文件的写入顺序是约定**：先 `runs/`、后 `heads/`。head 走到哪，那之前每一批的 `runs/` 就都写成了——过期（expiry.ts）靠它判断批文件能不能删。
 //
-// 写（提交、补齐派生文件、过期）排同一条队，互不交错；读不排队，只读 rename 完成的文件——跨进程读（面板）看不到半截，
-// `runs/` 最多落后正在写派生文件的那一批。
+// 写入端只在观测线程里用（thread-host.ts），读面主线程与离线 reader 共用。写排一条队；读不排队，只读 rename 完成的文件。
 
 import { join } from "node:path";
 import { ObservationCorruptionError, runIndexDigest, type CanonicalObservationStore, type CommitBatchInput, type CommitBatchResult, type ReplayPage } from "./store.ts";
@@ -78,12 +78,6 @@ type ObservationBatchFileV1 = Readonly<{
 }>;
 
 type HeadFileV1 = Readonly<{ schemaVersion: 1; runtimeId: string; committedPrefix: number }>;
-
-/** 过期的结果：删掉的 run、因为还开着而拒删的 run、回收的批文件数。 */
-export type ObservationExpiryOutcome = Readonly<{ removedRuns: readonly string[]; refusedRuns: readonly string[]; removedBatches: number }>;
-
-/** 过期要执行的内容（规则的返回值，见 runtime.ts 的 `ObservationExpiryDecision`）。 */
-export type ObservationExpiryInput = Readonly<{ runs?: readonly string[]; activityBefore?: number }>;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -335,7 +329,7 @@ export class DocumentObservationReader {
 }
 
 /**
- * 写入端：Sequencer 之下的唯一持久层（`CanonicalObservationStore`），外加持锁之后的补齐派生文件与过期。
+ * 写入端：Sequencer 之下的唯一持久层（`CanonicalObservationStore`）。
  * 不关底下的 `StorageDir`：它是状态根的存储（或调用方注入的），dispose owner 不在这里。
  */
 export class DocumentObservationStore extends DocumentObservationReader implements CanonicalObservationStore {
@@ -343,24 +337,22 @@ export class DocumentObservationStore extends DocumentObservationReader implemen
   private readonly heads = new Map<string, number>();
   /** 本实例提交过的 RunIndex（CAS 对的是它）。 */
   private readonly index = new Map<string, RunIndexEntryV1>();
-  /** 批文件已写、派生文件还没写成的：下一次提交或补齐时再写。 */
+  /** 批文件已写、派生文件还没写成的：下一次提交时再写。 */
   private readonly pendingRuns = new Set<string>();
   private readonly pendingHeads = new Set<string>();
-  /** 写操作的队：提交、补齐、过期一条一条来。 */
+  /** 写操作的队：提交一条一条来。 */
   private queue: Promise<unknown> = Promise.resolve();
 
   private constructor(
     dir: StorageDir,
     path: string,
     private readonly pathDigestKey: Uint8Array,
-    private readonly gate: { closed: boolean },
   ) {
     super(dir, path);
   }
 
   /**
-   * 读或建 `key.json`，其余什么都不写——装配期还没拿 lease，只做不和别的写者冲突的事。
-   * 建 key 在 `StorageDir.lock` 下读、没有才写（字节面没有锁原语时只能进程内串行）。
+   * 读或建 `key.json`，其余什么都不写。建 key 在 `StorageDir.lock` 下读、没有才写（字节面没有锁原语时只能进程内串行）。
    */
   static async open(opts: Readonly<{ dir: StorageDir; path: string }>): Promise<DocumentObservationStore> {
     let key: Uint8Array;
@@ -370,10 +362,7 @@ export class DocumentObservationStore extends DocumentObservationReader implemen
       if (e instanceof ObservationCorruptionError) throw e;
       throw new ObservationStoreOpenError(`open observation store failed: ${opts.path}`, { cause: e });
     }
-    // 关闭之后读写一律抛（与 SQLite 关库后同一个样子）：收摊时观测排在最前面关，之后还到达的事实不许再落盘——
-    // 否则空会话目录刚被清掉，又被迟到的批文件重新建出来（实测）
-    const gate = { closed: false };
-    return new DocumentObservationStore(closedAfter(opts.dir, gate), opts.path, key, gate);
+    return new DocumentObservationStore(opts.dir, opts.path, key);
   }
 
   /** 本状态根的记忆路径 HMAC key。只供写入端的 projection，永不进 envelope / reader / export。 */
@@ -385,62 +374,9 @@ export class DocumentObservationStore extends DocumentObservationReader implemen
     return this.enqueue(() => this.commit(input));
   }
 
-  /** 把以前的进程在「批文件已写、派生文件没写」时停下的那一段补齐。只在持锁之后调。 */
-  repairDerived(): Promise<void> {
-    return this.enqueue(async () => {
-      await this.flushPendingDerived();
-      for (const runtimeId of await this.runtimeIds()) {
-        if (this.heads.has(runtimeId)) continue; // 本实例写的：派生文件由提交路径管
-        const head = await this.readHeadFile(runtimeId);
-        let replayed = head;
-        for (const b of await this.batchesOf(runtimeId)) {
-          if (b.nextPrefix <= head) continue;
-          const batch = await this.readBatch(b.path);
-          if (batch === null) continue;
-          for (const entry of batch.runIndex) await this.dir.write(runPath(entry.runId), JSON.stringify(entry));
-          replayed = batch.nextCommittedPrefix;
-        }
-        if (replayed > head) await this.writeHead(runtimeId, replayed);
-      }
-    });
-  }
-
-  /**
-   * 执行一次过期（规则已经算好返回值）。只在持锁之后调。
-   * `isOpenRun`：Sequencer 还在跟踪的 run——拒删。批文件里出现过的 run 全删了、run 之外的记录都早于 `activityBefore` 才回收。
-   */
-  expire(input: ObservationExpiryInput, isOpenRun: (runId: string) => boolean): Promise<ObservationExpiryOutcome> {
-    return this.enqueue(async () => {
-      const removedRuns: string[] = [];
-      const refusedRuns: string[] = [];
-      for (const runId of new Set(input.runs ?? [])) {
-        if (isOpenRun(runId)) {
-          refusedRuns.push(runId);
-          continue;
-        }
-        if (await this.dir.remove(runPath(runId))) removedRuns.push(runId);
-        this.index.delete(runId);
-        this.pendingRuns.delete(runId);
-      }
-      if (removedRuns.length === 0 && input.activityBefore === undefined) return { removedRuns, refusedRuns, removedBatches: 0 };
-      const live = new Set((await this.readAllRunIndex()).map((e) => e.runId));
-      for (const id of this.index.keys()) live.add(id); // 派生文件还没写成的也算活着
-      let removedBatches = 0;
-      for (const runtimeId of await this.runtimeIds()) {
-        for (const b of await this.batchesOf(runtimeId)) {
-          const batch = await this.readBatch(b.path);
-          if (batch === null || !collectable(batch, live, isOpenRun, input.activityBefore)) continue;
-          if (await this.dir.remove(b.path)) removedBatches += 1;
-        }
-      }
-      return { removedRuns, refusedRuns, removedBatches };
-    });
-  }
-
-  /** 等队里的写全部做完，之后读写一律抛「已关闭」。不关底下的 `StorageDir`（dispose owner 不在这里）。幂等。 */
+  /** 等队里的写全部做完。不关底下的 `StorageDir`（dispose owner 不在这里）。幂等。 */
   async close(): Promise<void> {
     await this.queue.catch(() => {});
-    this.gate.closed = true;
   }
 
   private enqueue<T>(work: () => Promise<T>): Promise<T> {
@@ -471,7 +407,7 @@ export class DocumentObservationStore extends DocumentObservationReader implemen
       if (curDigest !== m.expectedRunIndexDigest) {
         throw new ObservationCorruptionError(`RunIndex(${m.runId}) digest 漂移：期望 ${String(m.expectedRunIndexDigest)}，实际 ${String(curDigest)}`);
       }
-      // RunIndex 引用的记录必须真的在：要么就在这一批里，要么上一版已经引用过它（与 SQLite 的外键同一条不变量）
+      // RunIndex 引用的记录必须真的在：要么就在这一批里，要么上一版已经引用过它（外键式的不变量）
       for (const field of ["acceptedRecordId", "startedRecordId", "terminalRecordId"] as const) {
         const id = m.nextRunIndex[field];
         if (id !== undefined && !inBatch.has(id) && cur?.[field] !== id) {
@@ -525,17 +461,65 @@ export class DocumentObservationStore extends DocumentObservationReader implemen
   }
 }
 
-/** 写入端关闭之后，底下的存储读写列删都抛。 */
-function closedAfter(dir: StorageDir, gate: Readonly<{ closed: boolean }>): StorageDir {
-  const check = (): void => {
-    if (gate.closed) throw new Error("observation store 已关闭");
-  };
-  return {
-    read: async (p) => (check(), dir.read(p)),
-    write: async (p, c) => (check(), dir.write(p, c)),
-    remove: async (p) => (check(), dir.remove(p)),
-    list: async (p) => (check(), dir.list(p)),
-  };
+/** 过期执行的结果。 */
+export type ObservationExpiryResult = Readonly<{
+  /** 删掉了 RunIndex 的 run。 */
+  removedRuns: readonly string[];
+  /** 规则点名了、但盘上还没封口（RunIndex 没有终态记录）的 run：没删。 */
+  openRuns: readonly string[];
+  /** 回收的批文件数。 */
+  removedBatches: number;
+}>;
+
+/**
+ * 过期的执行面（`expiry.ts` 的 `expireObservations()` 用）：按已经算好的决定删文件。
+ * 不取锁、不需要写入端配合，活着的写者旁边做也安全，因为只凭盘上的事实判断：
+ *   · run：只删盘上已封口的（RunIndex 有 `terminalRecordId`）——封口之后写者不再写这个 run 的任何文件；
+ *   · 批文件：只删 `nextCommittedPrefix ≤ head` 的（它那一批的 `runs/` 已经写成，见头注的派生文件顺序），
+ *     且里面出现过的 run 都已不在 `runs/`、run 之外的记录都早于 `activityBefore`（不给就不删带这类记录的批）。
+ */
+export class DocumentObservationExpiry extends DocumentObservationReader {
+  async remove(decision: Readonly<{ runs?: readonly string[]; activityBefore?: number }>): Promise<ObservationExpiryResult> {
+    const removedRuns: string[] = [];
+    const openRuns: string[] = [];
+    for (const runId of new Set(decision.runs ?? [])) {
+      const entry = await this.readRunIndex(runId);
+      if (entry === null) continue;
+      if (entry.terminalRecordId === undefined) {
+        openRuns.push(runId);
+        continue;
+      }
+      if (await this.dir.remove(runPath(runId))) removedRuns.push(runId);
+    }
+    if (removedRuns.length === 0 && decision.activityBefore === undefined) return { removedRuns, openRuns, removedBatches: 0 };
+    const live = new Set((await this.readAllRunIndex()).map((e) => e.runId));
+    let removedBatches = 0;
+    for (const runtimeId of await this.runtimeIds()) {
+      const head = await this.readHeadFile(runtimeId);
+      for (const b of await this.batchesOf(runtimeId)) {
+        if (b.nextPrefix > head) break;
+        const batch = await this.readBatch(b.path);
+        if (batch === null || !collectable(batch, live, decision.activityBefore)) continue;
+        if (await this.dir.remove(b.path)) removedBatches += 1;
+      }
+    }
+    return { removedRuns, openRuns, removedBatches };
+  }
+}
+
+/** 批文件能不能回收：出现过的 run 都已不在 `runs/`，run 之外的记录都早于 `activityBefore`。 */
+function collectable(batch: ObservationBatchFileV1, live: ReadonlySet<string>, activityBefore: number | undefined): boolean {
+  for (const entry of batch.runIndex) if (live.has(entry.runId)) return false;
+  for (const r of batch.records) {
+    if (r.runId !== undefined) {
+      if (live.has(r.runId)) return false;
+      continue;
+    }
+    if (activityBefore === undefined) return false;
+    const env = parseJson(r.envelope, `batch ${batch.nextCommittedPrefix} seq ${r.seq}`) as { observedAt?: unknown };
+    if (typeof env.observedAt !== "number" || env.observedAt >= activityBefore) return false;
+  }
+  return true;
 }
 
 function serializeBatch(input: CommitBatchInput): string {
@@ -553,21 +537,6 @@ function serializeBatch(input: CommitBatchInput): string {
     runIndex: input.runIndexMutations.map((m) => m.nextRunIndex),
   };
   return JSON.stringify(batch);
-}
-
-/** 批文件能不能回收：出现过的 run 都不在了（也不在跟踪中），run 之外的记录都早于 `activityBefore`。 */
-function collectable(batch: ObservationBatchFileV1, live: ReadonlySet<string>, isOpenRun: (runId: string) => boolean, activityBefore: number | undefined): boolean {
-  for (const r of batch.records) {
-    if (r.runId !== undefined) {
-      if (live.has(r.runId) || isOpenRun(r.runId)) return false;
-      continue;
-    }
-    if (activityBefore === undefined) return false;
-    const env = parseJson(r.envelope, `batch ${batch.nextCommittedPrefix} seq ${r.seq}`) as { observedAt?: unknown };
-    if (typeof env.observedAt !== "number" || env.observedAt >= activityBefore) return false;
-  }
-  for (const entry of batch.runIndex) if (live.has(entry.runId) || isOpenRun(entry.runId)) return false;
-  return true;
 }
 
 async function readKey(dir: StorageDir): Promise<Uint8Array | null> {

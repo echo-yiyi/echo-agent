@@ -12,7 +12,6 @@
 
 import type { AgentMessage } from "../messages.ts";
 import type { CapabilityFactDescriptor, ObservationFactProjection } from "../observability/fact-sink.ts";
-import { sha256Hex } from "../observability/hash.ts";
 import { takePrefix } from "../observability/projection.ts";
 import { projectionEncodingLimits } from "../observability/normalize.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
@@ -144,8 +143,9 @@ export const inboxFactDescriptor: CapabilityFactDescriptor<InboxFact> = {
         ...(fact.errorDigest === undefined ? {} : { errorDigest: fact.errorDigest }),
         ...(fact.reservationId === undefined ? {} : { reservationId: fact.reservationId }),
         ...(fact.runId === undefined ? {} : { runId: fact.runId }),
-        ...(fact.message === undefined ? {} : content ? { message: fact.message } : { messageDigest: sha256Hex(fact.message) }),
+        ...(fact.message !== undefined && content ? { message: fact.message } : {}),
       },
+      ...(fact.message !== undefined && !content ? { digests: { messageDigest: { text: fact.message } } } : {}),
     };
   },
 };

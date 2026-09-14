@@ -71,7 +71,7 @@ MiniMax adapter 目前有 fixture 覆盖，但还没有用真实服务验证。
 
 ## 看一次 run 做了什么
 
-每次 run 都会把自己以文档的形式记进会话状态根下的 `observability/`：run 的起止、回应 / 轮 / 尝试的嵌套、每一次模型生成与工具调用，以及它们背后的能力事实（记忆、任务、闹钟、收件）。记多少由 `--observe <档>` 决定。除非产品设了过期规则（`createEcho()` 的 `observation.expiry`），否则一条都不删；`echo-agent` 没有设。
+每次 run 都会把自己以文档的形式记进会话状态根下的 `observability/`：run 的起止、回应 / 轮 / 尝试的嵌套、每一次模型生成与工具调用，以及它们背后的能力事实（记忆、任务、闹钟、收件）。记多少由 `--observe <档>` 决定。除非产品调用 `expireObservations()`，否则一条都不删；`echo-agent` 没有调用。
 
 | 档位 | 落盘的内容 |
 |---|---|
@@ -123,7 +123,7 @@ try {
 
 `createEcho()` 是装配 runtime 的唯一一处，所以自定义 host 从这里起步。要给运行中的 agent 加工具、prompt 段、压缩阶段或 hook，就写一条 extension：它声明自己注入什么、提供什么，生命周期归 host 管，卸载时不留残骸。壳也是一条 extension，只是它注入的是 `AgentRuntime` 这个 service 并把它渲染出来。`Agent` 类正在收进内部：已拍板、尚未实现（`docs/decisions/proposed/2026-09-07-agent-class-internal.md`），所以今天它仍然导出，但不是受支持的入口——它有相当一部分是为承载 host 专用接线而存在的，第三方需要的一切都在 extension API 上。
 
-`echo.send()` 在返回结果的同时给出 run id，`echo.observations` 读的是 `observe` 子命令读的同一份账本——`getRun()`、`lastRun()`、`listRuns()`、`snapshot()` 与 `subscribe()`。采集档用 `createEcho({ observation: { capture: "content" } })` 设。想在不起 runtime 的情况下读一个状态根，用 `openObservationReader({ stateRoot })` 开一个不取锁的只读连接，用完关掉。观测永远拦不住 run：数据库写不动时 run 照跑，只是结果里的 `observationPersistence` 报 `degraded`。
+`echo.send()` 在返回结果的同时给出 run id，`echo.observations` 读的是 `observe` 子命令读的同一份账本——`getRun()`、`lastRun()`、`listRuns()`、`snapshot()` 与 `subscribe()`。采集档用 `createEcho({ observation: { capture: "content" } })` 设。想在不起 runtime 的情况下读一个状态根，用 `openObservationReader({ stateRoot })` 开一个不取锁的只读连接，用完关掉。观测永远不拖住 agent：记录在单独的观测线程上编码、写盘，所以 `send()` 与 `stop()` 不等它们就返回，记录写不进去的 run 也照样完成。`stop()` 之后要搬走或删掉状态根，先 await `echo.observations.flush()`。记录留多久由产品决定：想清理时调用 `expireObservations({ stateRoot, rule })`。
 
 ## Packages
 

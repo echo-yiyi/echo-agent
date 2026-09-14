@@ -59,8 +59,10 @@ test("/api/runs 顺带给会话摘要：产品名与 workspace 按 sessionId 反
   const a = await coding.send("x");
   const codingId = coding.agent.state.sessionId!;
   await coding.stop();
+  await coding.observations.flush(); // 观测在观测线程里写，send / stop 都不等它
   const general = await echoAt([textTurn("agent 说")], { product: "echo-agent", workspace: "/tmp/ws-general" });
   await general.send("y");
+  await general.observations.flush();
   const generalId = general.agent.state.sessionId!;
 
   const reader = new SessionObservationReaders({ sessionsRoot: dir, sessionId: codingId });
@@ -94,6 +96,7 @@ test("content 档：/api/runs/<id> 的时间线带工具 params 与结果正文�
   };
   const echo = await echoAt([toolTurn("c1", "grep", { pattern: "observationTap" }), textTurn("没搜到。")], { observation: { capture: "content" }, agent: { tools: [grep] } });
   const r = await echo.send("搜一下");
+  await echo.observations.flush();
   const reader = new SessionObservationReaders({ sessionsRoot: dir });
   const server = startObserveServer({ readers: reader, port: 0 });
   try {
@@ -133,14 +136,17 @@ async function waitForInboxRun(echo: Echo): Promise<string> {
 test("跨 session：/api/runs 合并各段、/api/runs/<id> 不必知道在哪一段、/api/health 每段一块、/api/activity 有收件与 ack 且带 sessionId", async () => {
   const a = await echoAt([textTurn("A 说")], { product: "echo-coding", workspace: "/tmp/ws-a" });
   const ra = await a.send("a");
+  await a.observations.flush();
   const aId = a.agent.state.sessionId!;
   const b = await echoAt([textTurn("B 说"), textTurn("B 收到")], { product: "echo-agent", workspace: "/tmp/ws-b" });
   const rb = await b.send("b");
+  await b.observations.flush();
   const bId = b.agent.state.sessionId!;
   // A 给 B 发一句：与 session_send 同一条路（进 B 的 inbox 账本），B 消费成一条 inbox run
   await b.agent.ingress.deliverDurable({ message: environmentMessage("A 找你", "session", `${aId}:m1`), dedupeKey: `session:${aId}:m1` });
   await b.agent.consumeInbox();
   const inboxRun = await waitForInboxRun(b);
+  await b.observations.flush(); // ack 那条在 run 封口之后才记
 
   const readers = new SessionObservationReaders({ sessionsRoot: dir });
   const server = startObserveServer({ readers, port: 0 });
@@ -362,6 +368,7 @@ test("serve：Host / Origin 不是自己绑的地址 → 403（DNS rebinding 防
 test("serve：/ 出页面，/api/runs、/api/runs/<id>、/api/health 出 reader 的真数据；未知 run 404；能停", async () => {
   const echo = await echoAt([textTurn("你好")]);
   const r = await echo.send("hi");
+  await echo.observations.flush();
   const stateRoot = join(dir, echo.agent.state.sessionId!); // 观测库一段一份
   const reader = new SessionObservationReaders({ sessionsRoot: dir });
   const server = startObserveServer({ readers: reader, port: 0 });
@@ -401,6 +408,7 @@ test("serve：/ 出页面，/api/runs、/api/runs/<id>、/api/health 出 reader 
 test("runObserve serve：打印 URL；signal abort 后关服务、关 reader，退出码 0", async () => {
   const echo = await echoAt([textTurn("一句")]);
   await echo.send("x");
+  await echo.observations.flush();
   const controller = new AbortController();
   const out = sink();
   const err = sink();

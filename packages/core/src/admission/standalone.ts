@@ -38,16 +38,16 @@ export type AdmissionDeps = Readonly<{
   /** runId 生成（缺省 `run:<uuid>`）。 */
   runId?(source: RunSource): string;
   /**
-   * run 边界（Host-internal，非 throwing）：
-   *   · `accepted` 在 binding 冻结之后、execute 之前**同步**调一次：只预留记录，不等落盘、不返回裁决——
-   *     admission 永远不因观测层的状态拒 run 或等 run（2026-09-03 用户拍板，放弃 fail-closed）；
-   *   · `closed` 在 result 形成之后、ticket 结算之前 await（Host 侧有界等待）——terminal record 先 COMMIT（或明确失败 /
-   *     到期降级）再放行下一份 permit。
-   * 两个都由 Host 保证不抛；这里再兜一层，观测层的异常不改变业务结算。
+   * run 边界（Host-internal，同步、非 throwing）：
+   *   · `accepted` 在 binding 冻结之后、execute 之前调一次；
+   *   · `closed` 在 result 形成之后、ticket 结算之前调一次。
+   * 两个都是交给观测线程就返回：admission 永远不因观测层拒 run、等 run（2026-09-03 放弃 fail-closed；
+   * 2026-09-14 连封口也不等，决策 docs/decisions/implemented/2026-09-14-observation-off-main-loop.md）。
+   * Host 保证不抛；这里再兜一层，观测层的异常不改变业务结算。
    */
   observe?: Readonly<{
     accepted(input: { runId: string; source: RunSource; purpose: "foreground"; modelBinding: RunModelBinding }): void;
-    closed(input: { runId: string; result: AgentAdmissionResult }): Promise<void>;
+    closed(input: { runId: string; result: AgentAdmissionResult }): void;
   }>;
 }>;
 
@@ -197,10 +197,10 @@ export class StandaloneRunAdmission implements AgentAdmissionPort {
         }
         result = { kind: "callback-error", runId, result: normalized, error: toAgentError(failure.error, aborted) };
       }
-      // 封口：terminal record 先落（或明确失败 / 到期降级）再结算 ticket、再放行下一份 permit
+      // 封口：交给观测层就结算 ticket、放行下一份 permit
       if (result !== null && this.deps.observe !== undefined) {
         try {
-          await this.deps.observe.closed({ runId, result });
+          this.deps.observe.closed({ runId, result });
         } catch {
           // Host 保证不抛；真抛了也不能改变业务结算
         }

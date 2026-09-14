@@ -3,13 +3,13 @@
 > 状态：已实现并在用（本文写的是**现状**，不是目标形态）；公开面尚未拍板，见「待拍板」<br>
 > 读者：要读观测记录排查问题、给观测加事实、或把观测接到别处的人<br>
 > 假设已读：[Run Loop 的四层](run-loop-layers.md)（run / reply / turn / attempt 的定义，本文直接用）、[会话就是状态根](sessions.md)（观测库住在哪一层）<br>
-> 决策记录（本文只指向，论证在记录里）：[观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)（B 已拍、未实现）、[观测的默认存储改成状态根里的文档，过期规则归产品](../decisions/implemented/2026-09-14-observation-document-store.md)
+> 决策记录（本文只指向，论证在记录里）：[观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)（B 已拍、未实现）、[观测的默认存储改成状态根里的文档，过期规则归产品](../decisions/implemented/2026-09-14-observation-document-store.md)（部分被下一条推翻）、[观测不进主流程](../decisions/implemented/2026-09-14-observation-off-main-loop.md)
 
 ## 导读
 
 **解决什么。** agent 跑完一次，除了终端上滚过去的字，什么都不剩。会话目录里的 `entries/` 是**功能用的回放队列**（模型要求原样带回上一轮的 reasoning，所以它必须留），不是给人读的历史：它没有时间、没有耗时、没有嵌套、没有失败原因，也不记「这次 run 装配了哪些 extension、绑了哪个模型」。想回答「这次为什么慢」「哪一步失败了」「模型到底想了什么」，没有第二个地方可查。观测层就是那个地方：**它是这个仓里唯一为「读」而存在的记录**。
 
-**最终形态。** 每次 run 把自己写进会话状态根下的一组观测文档（§5）。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的纪律：观测拦不住 agent**——写不动就降级并如实报出来，绝不让 run 等、绝不拒 run、绝不把异常抛进 Agent 控制流；写盘全是异步文件操作，磁盘卡住也占不住 agent 所在的事件循环（§5）。留多久由产品的过期规则定，core 不内置任何规则（§5）。
+**最终形态。** 每次 run 把自己写进会话状态根下的一组观测文档（§5）。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的硬规矩：观测的任何功能都不出现在主机制、主循环里**（2026-09-14，[记录](../decisions/implemented/2026-09-14-observation-off-main-loop.md)）——探针在节点上只取一次字段交给进程里的**观测线程**，编码、摘要、seq、落盘都在那边；admission、装配、`start` / `stop`、lease、run 生命周期都不为观测等待、不为观测计算、不因观测多一种失败（§5）。留多久由产品自己调 `expireObservations()` 决定，agent 里没有过期代码（§5）。
 
 **Non-Goals（已决，不做）。**
 
@@ -17,7 +17,7 @@
 - **观测不判断进程死活**（2026-09-06 拍板）。观测只记别人做过的决定；没封口的 run 只说「未收尾」，不由观测推断它是崩了还是还在跑。`RunObservationStatus` 里的 `interrupted` 今天没有任何写者——将来若有管进程的那一层做了接管决定，由它把决定当事实交给观测记。会话死活另有其人，见[会话存活探针](../decisions/implemented/2026-09-09-session-alive-pid-probe.md)。
 - **不脱敏。** `content` 档把模型文本、思考、工具参数与结果**明文**写进盘上的观测文档。`redact.ts` 只处理第三方异常对象（stack 只留 digest），不是内容脱敏层。谁开这一档，谁承担盘上有明文这件事。
 - **不做 crash recovery**（列在「欠账」§8，不是本文要设计的东西）。
-- **不内置清理规则。** 留多久、留多少归产品：`observation.expiry` 不给就一条不删（§5）。旧格式的 `observations.sqlite` 不迁移、不读（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)）。
+- **不在 agent 的任何流程里清理，也不内置清理规则。** 留多久、留多少归产品：产品不调 `expireObservations()` 就一条不删；core 不在启动、run 封口、lease 的任何一步上跑它（§5）。旧格式的 `observations.sqlite` 不迁移、不读（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)）。
 - **语义层的 canonical store 不是用户可换的端口**，只开字节面：`observation.store?: StorageDir` 决定文档放在哪（内存 / 别处），格式与提交语义仍是 core 的（§5）。in-memory 的 `CanonicalObservationStore` 只供参考一致性测试。「换成另一种数据库」的注入等真有使用方再拍（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)决定 4）。
 - 面板长什么样归 UI，本文只说它读什么。
 
@@ -26,9 +26,10 @@
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
 - `bun test packages/core/test/observability-sequencer.test.ts` —— lane 语义、seq 预留与 hole/gap 配对、prefix barrier、CAS、run 边界 body 的封闭校验（含子循环来源与 `startedBy`）。
-- `bun test packages/core/test/observability-document-store.test.ts` —— 文档存储：与 in-memory 参考实现同一套提交裁决、提交点在 rename 前后停下时读面与补齐、过期删 run 与回收批文件、回放跨过被删的批时交付 `retention-gap`、关闭之后读写都抛。
-- `bun test packages/core/test/observability-projection.test.ts` —— 循环 / 压缩 / Agent 自身事实的逐 kind 固定投影、三档的字段差异、投影抛错留 hole + gap、投影自身在同步预算内。
-- `bun test packages/core/test/observability-runtime.test.ts` —— 真实 `createEcho → send → 观测文档 → reader` 链路（过期规则在持锁启动后与每个 run 封口后执行也在这里）：脚本化 run 的整段记录**逐项**比对执行顺序、run 开头与结尾两份同形的状态快照、run 之外的相位迁移、前台 / 后台子 agent 各是自己的 run 并链回派出它的工具调用。
+- `bun test packages/core/test/observability-document-store.test.ts` —— 文档存储：与 in-memory 参考实现同一套提交裁决、提交点在 rename 前后停下时读面、派生文件落后时下一次提交补上且 head 不越过、过期只凭盘上事实删（已封口的 run、head 之前的批）、回放跨过被删的批时交付 `retention-gap`。
+- `bun test packages/core/test/observability-projection.test.ts` —— 循环 / 压缩 / Agent 自身事实的逐 kind 固定投影、三档的字段差异、投影抛错留 hole + gap、投影自身在同步预算内（探针两半直连，只省掉线程那一跳）。
+- `bun test packages/core/test/observability-runtime.test.ts` —— 真实 `createEcho → send → 观测线程 → 观测文档 → reader` 链路：脚本化 run 的整段记录**逐项**比对执行顺序、run 开头与结尾两份同形的状态快照、run 之外的相位迁移、前台 / 后台子 agent 各是自己的 run 并链回派出它的工具调用；**观测存储完全卡住时 `createEcho` / `send` / `stop` 都不等**、进程等观测线程写完才退且 exit 监听照常运行、产品在活着的 agent 旁边调 `expireObservations()`。
+- `bun test test/distribution-gate.test.ts` —— Node 从 dist 起观测线程：`stop()` 不等，下一个进程读得到最后一个 run。
 - `bun test packages/core/test/observability-decisions.test.ts` —— 决定点：工具被拦的原因、等人审批的 span、每轮工作集、装备变更。
 - `bun test packages/core/test/extension-observe.test.ts` —— extension 一代装上 / prepare 被拒 / apply 失败 / 卸下 / 卸载被拒。
 - `bun test packages/core/test/observability-capture.test.ts` `observability-capabilities.test.ts` —— 三档的采集差异、各能力模块的事实。
@@ -48,6 +49,7 @@
 | **缺口**（gap） | 一段 seq 明确地没有记录，且这件事本身被记下来 | 数据丢了但没人知道 |
 | **档**（capture policy） | `off` / `metadata` / `content` 三选一，决定记多少（§4） | 日志级别（它不筛「重要性」，只筛「正文进不进」） |
 | **runtime** | 一个进程里的一份 canonical writer，`runtimeId` 是它的身份 | 一个 agent；一段会话 |
+| **观测线程** | 进程里的一条 Worker 线程，所有 runtime 共用：Sequencer、摘要、写文件都在它上面（§5） | 每个 agent 一条；子进程 |
 
 ## 2. 一条记录长什么样
 
@@ -74,11 +76,11 @@
 | | `offer()`（bounded） | `appendBoundary()`（boundary） |
 |---|---|---|
 | 谁走 | 各执行节点的探针（§7） | run 的三条边界 + `run.assembly` |
-| 同步性 | **同步、永不抛、没有 Promise** | 可等待 |
+| 同步性 | **同步、永不抛、没有 Promise** | 返回 Promise；**主线程上没人等它**，只有观测线程里的读（flush）等 |
 | 满了 / 编码失败 | 该 seq 当场成 **hole**，并在任何后续 producer 拿到 seq 之前预留下一个 seq 写一条 gap | 拒绝，调用方按 §5 降级 |
 | 顺序保证 | 由**预留 seq**决定，不由落盘决定 | prefix barrier：worker 先把 `< B` 的全部记录 / 缺口排空，在含 B 及其 RunIndex 变更的同一事务提交并 read-back 到 `committedPrefix >= B` 才 resolve |
 
-**为什么 bounded lane 不能抛、也不能等**：它被内建能力在自己的决策点直接调（`sink.offer(fact)`，[fact-sink.ts](../../packages/core/src/observability/fact-sink.ts#symbol=factSinkToIngest)）。那些点在 agent 主线上，一次异常或一次 await 就会把观测变成主线的一部分。
+**为什么探针不能抛、也不能等**：它被内建能力在自己的决策点直接调（`sink.offer(fact)`，[fact-sink.ts](../../packages/core/src/observability/fact-sink.ts#symbol=factSinkToThread)）。那些点在 agent 主线上，一次异常或一次 await 就会把观测变成主线的一部分。所以探针在主线程上只读 scope、投影、交出去；Sequencer 的两条 lane 都在观测线程里（[thread-host.ts](../../packages/core/src/observability/thread-host.ts#symbol=ingestFact)）。
 
 **缺口不是丢数据，是把「这里丢了」记下来。** `committed prefix` 只越过两类位置：已提交的记录，或被后续 gap 精确覆盖的 hole。缺口原因是封闭集合（`ObservationGapReason`）：`buffer_overflow` `encoding_error` `capture_limit` `store_failure` `canonical_flush_timeout` `lease_lost` `retention`——最后一个今天没有写者，见 §8。
 
@@ -100,13 +102,15 @@
 2. **单条记录有预算**：超过就成 `capture_limit` 缺口。正文在投影时先按字节预算截断并标 `textTruncated` / `thinkingTruncated`，思考与回答**各有份额**——思考封顶在正文预算的一半，回答拿剩下的，两边合计不超总预算。原因写在 [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=MAX_PROJECTED_THINKING_BYTES) 的注释里：另开一份等量预算会让 body 翻倍、整条记录穿不过 Sequencer 被丢掉，那是丢更多事实。
 3. **`content` 档下流式增量逐条成记录**（`model.generate.delta`、`tool.execute.progress`）。库因此涨得快得多——清不清、清多少由产品的过期规则定（§5）。
 
-## 5. 观测拦不住 agent
+## 5. 观测不在主流程上
 
-2026-09-03 拍板放弃 fail-closed admission。今天的语义（[runtime.ts](../../packages/core/src/observability/runtime.ts#symbol=ObservationRuntime) 头注）：
+2026-09-03 放弃 fail-closed admission；2026-09-14 定成硬规矩：**观测的任何功能都不出现在主机制、主循环里**（[记录](../decisions/implemented/2026-09-14-observation-off-main-loop.md)）。今天的语义（[runtime.ts](../../packages/core/src/observability/runtime.ts#symbol=ObservationRuntime) 头注）：
 
-- `run.accepted` / `run.assembly` / `run.started` **只同步预留 seq**，提交是 fire-and-forget。落不下去只降级 persistence + 发诊断，**永不拒 run、永不让 run 等**。
-- `run.closed` 仍等它 COMMIT——它在 run 的活干完之后，`send()` 靠它如实报 `observationPersistence`。等待**有界**（`boundaryDeadlineMs`，`createAgent` 定为 500ms），到期即降级返回。
-- `ObservationRuntime` 每个公开方法都不抛。
+- 主线程上的 [`ObservationRuntime`](../../packages/core/src/observability/runtime.ts#symbol=ObservationRuntime) 只**交东西出去**：探针的投影、run 三条边界的输入、Agent 此刻的状态原始值。每个方法同步返回、不抛、不等。admission 不等 `run.closed`，`createEcho()` 不碰观测存储，`stop()` 不等写完，观测不挂 lease。
+- **观测线程**（[thread-host.ts](../../packages/core/src/observability/thread-host.ts#symbol=ObservationThreadHost)，入口 `observation-worker.ts`）：进程里一条，所有 runtime 共用；每个 runtime 一份 Sequencer + 写入端，消息按到达顺序处理（就是探针被调的顺序）。原来在节点上做的——scope 物化、normalize、run 边界与装配快照的构造、各种摘要（能力状态、模型绑定、错误原文、记忆路径 HMAC）——都在这里。descriptor 要摘要时在投影里声明 `digests`，由观测线程算。
+- **主线程上还剩的**：descriptor 的有界投影、读一次 scope 供给、一次 `postMessage`；以及替观测线程执行它要的存储操作（注入的 `StorageDir` 是主线程上的对象，过不了线程；只转发异步调用）。
+- **写不动**只降级 persistence + 发诊断（诊断经主线程交回 Agent 的诊断通道），**永不拒 run、永不让 run 等**。
+- **进程退出**：交出工作消息时线程 `ref`，线程报「处理到最后一条、手上没有要写的」时 `unref`——`stop()` 不等，进程等观测写完才退。线程从不 `terminate`（Bun 实测 terminate 后进程的 exit 监听不再运行）。要在 `stop()` 之后删 / 搬状态根的调用方先 `await echo.observations.flush()`。
 
 **存在哪：状态根里的文档**（[决策](../decisions/implemented/2026-09-14-observation-document-store.md)）。写入端是 [`DocumentObservationStore`](../../packages/core/src/observability/document-store.ts#symbol=DocumentObservationStore)，经 `StorageDir`（缺省是状态根的存储，`observation.store` 可换）写在 `observability/` 下：
 
@@ -117,23 +121,23 @@
 | `heads/<runtimeId>.json` | 这个 runtime 提交到哪——派生 |
 | `key.json` | 记忆路径的 HMAC key，首建写一次、永不改写，读面不读 |
 
-Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个批文件里，一次 rename 同时可见；批文件已存在且逐字相同是幂等重提，不同是 corruption；head 与 RunIndex 的 CAS 对的是写入端内存里的值（状态根只有一个写者，新进程的 runtimeId 是新的）。写入是异步文件操作——主线程上没有同步磁盘调用，磁盘卡住时 `run.closed` 的 500ms 有界等待照样生效。
+Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个批文件里，一次 rename 同时可见；批文件已存在且逐字相同是幂等重提，不同是 corruption；head 与 RunIndex 的 CAS 对的是写入端内存里的值（每个进程的 runtimeId 是新的，只写自己的批文件、自己 run 的 `runs/`、自己的 `heads/`，与别的进程不相交，所以不需要 lease）。派生文件的写入顺序是约定：**先 `runs/`、后 `heads/`**——过期靠它判断批文件能不能删。
 
-**持锁之后才碰别人留下的东西**。装配期只读或建 `key.json`、只写本 runtime 自己的批文件；`Agent.start()` 拿到 lease 后（lease 生命周期端口的 `afterLeaseAcquired`）在后台先补齐以前进程没写完的派生文件、再按规则过期一次。交还 lease 或丢锁前停下。写入端关闭之后读写一律抛——收摊时观测排在最前面关，迟到的事实不许再把刚清掉的空会话目录建回来。
+**什么时候开始写**：runtime 第一次有 `run.accepted` 或第一次被读才打开写入端（读或建 `key.json`）；之前事实只进 ring（有界，满了记缺口）。收摊时从没开始写的 runtime 直接丢：一句话都没说过的会话，状态根会被整个删掉，不能有迟到的文件把目录建回来（删之前主线程先同步关掉这个 runtime 的存储闸）。派生文件没写成时下一次提交补上；进程在两者之间退出，那几个 run 就列不出来——不做崩溃恢复。
 
-**过期：规则归产品，机制归 core**。产品给 `observation.expiry(runs, now)`，返回 `{ runs?, activityBefore? }`；不给 = 永不删。core 在持锁启动后、每个 run 的 `run.closed` 落盘后各执行一次，另有 `echo.observations.expire()`（没持 lease 时空操作）。执行语义：
+**过期：产品自己调，agent 里没有**。[`expireObservations({ stateRoot | store, rule, now? })`](../../packages/core/src/observability/expiry.ts#symbol=expireObservations)：规则拿到全部 run 的 header（新的在前）与此刻，返回 `{ runs?, activityBefore? }`。什么时候、在哪儿调归产品（定时器、另起进程、空闲时）；不调就一条不删。执行只凭**盘上的事实**，不取锁、不问写入端，所以能在活着的 agent 旁边调：
 
-- 删 `runs/<runId>.json`，这个 run 的 `getRun()` 立刻是 `unknown`；Sequencer 还在跟踪的 run（封口还没落盘）拒删并报诊断，以前进程留下的没封口的删不删由规则定——观测不判断死活。
-- 批文件里出现过的 run 都删了、run 之外的记录都早于 `activityBefore`，才回收这个批文件。
+- 只删盘上**已封口**的 run（RunIndex 有终态记录）：封口之后写者不再写这个 run 的任何文件。没封口的列进结果的 `openRuns`。删了之后 `getRun()` 是 `unknown`。
+- 批文件只在 `nextCommittedPrefix ≤ head`、里面出现过的 run 都已不在 `runs/`、run 之外的记录都早于 `activityBefore` 时回收。
 - 订阅回放跨过被删的批，交付 `retention-gap`（传输通知，不进 journal、不改 integrity）。
 
-于是调用方拿到的是三个可读的信号，而不是一次异常：
+**`send()` 不带观测状态**：它只返回 `runId`、`outcome` 与观测引用。写没写成事后读，调用方拿到的是三个可读的信号，而不是一次异常：
 
-| 信号 | 含义 |
-|---|---|
-| `observationPersistence` | `healthy` / `degraded` / `recovering` / sealed。**当前 runtime 的投影**：terminal 已进 index 才 `stored` |
-| `observationIntegrity` | `complete` / `partial`——`partial` 表示这条 run 的记录里有缺口 |
-| `RunObservationStatus` | run 的业务终态：`running` / `completed` / `aborted` / `error`（`interrupted` 无写者） |
+| 信号 | 在哪读 | 含义 |
+|---|---|---|
+| `persistence` | `getRun()` 的 header；`snapshot().health.persistence` | header 上 `stored` / `degraded`：终态已进 index 才 `stored`。health 上是写入端此刻的 `healthy` / `degraded` / `recovering` / sealed |
+| `integrity` | `getRun()` 的 header | `complete` / `partial`——`partial` 表示这条 run 的记录里有缺口 |
+| `status` | `getRun()` 的 header | run 的业务终态：`running` / `completed` / `aborted` / `error`（`interrupted` 无写者） |
 
 **corruption 是唯一 fail-loud 的一类**：同一个批文件内容不同、committed prefix 或 RunIndex digest 的 CAS 不符、RunIndex 引用了不存在的记录、文档不是它该是的形状——store 立即抛，writer 被 seal，reader 不「修复」。这不是可降级的错误，是账本不再可信。
 
@@ -144,8 +148,8 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 | 入口 | 形状 | 取锁 | 用途 |
 |---|---|---|---|
 | `observe` 子命令 | `last` / `show <run-id>` / `export` / `health` / `serve` | **不取** | 命令行排查；`serve` 是本地只读面板 |
-| `echo.observations` | `EchoObservations`：`getRun` `lastRun` `listRuns` `snapshot` `subscribe` `expire` | 已在 runtime 内 | 宿主自己读 / 订阅 / 按规则过期一次 |
-| `openObservationReader({ stateRoot })` | `EchoObservationReader`：同上去掉 `subscribe` 与 `expire`，多一个 `close()` | **不取** | 离线读一个状态根 |
+| `echo.observations` | `EchoObservations`：`getRun` `lastRun` `listRuns` `snapshot` `subscribe` `flush` | 已在 runtime 内 | 宿主自己读 / 订阅；读之前先等观测线程写完此刻之前交出去的 |
+| `openObservationReader({ stateRoot })` | `EchoObservationReader`：同上去掉 `subscribe` 与 `flush`，多一个 `close()` | **不取** | 离线读一个状态根 |
 
 两条性质值得单说：
 
@@ -166,7 +170,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 |---|---|---|
 | 循环 | [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=loopFactDescriptor) | run / reply / turn / attempt 四层（turn 开头带本轮冻结的工具工作集）、模型生成与流式增量、工具执行与进展、重试、用量、**工具被拦**（`tool.rejected`）、**等人审批**（`permission.wait` span） |
 | 压缩 | [compaction/observe.ts](../../packages/core/src/compaction/observe.ts#symbol=compactionFactDescriptor) | 一次压缩的起止、**压缩失败**（某个阶段抛错被跳过，或整条流水线没有一段改动上下文） |
-| Agent 自身 | [agent-observe.ts](../../packages/core/src/agent-observe.ts#symbol=agentFactDescriptor) | **生命周期相位**迁移、**装备变更**（模型 / 思考档）、队列长度、资源注册与卸载、**run 开头的整体状态**（`agent.state`） |
+| Agent 自身 | [agent-observe.ts](../../packages/core/src/agent-observe.ts#symbol=agentFactDescriptor) | **生命周期相位**迁移、**装备变更**（模型 / 思考档）、队列长度、资源注册与卸载。**run 开头的整体状态**（`agent.state`）随 `run.started` 一起交出，由观测线程记 |
 | extension | [extension/observe.ts](../../packages/core/src/extension/observe.ts#symbol=extensionFactDescriptor) | 一代装上（每个 extension 提供了什么、依赖的服务实际连到了谁）/ 没装上（prepare 被拒或 apply 抛错并回滚）/ 卸下 / 卸载被拒 |
 | 记忆 | `memory/observe.ts` | 回忆、写入、提取 |
 | 任务 | `task/observe.ts` | 状态变更、落盘 |
@@ -179,12 +183,12 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 - **决定点。** 工具在执行之前被拦下的调用**不发 `tool.execute`**，所以每个拦截分支各记一条 `tool.rejected`：`stage`（lookup / arguments / preToolUse / permission / postToolUse）、`cause`、`decidedBy`。词汇沿用 `LifecycleEvent` 里已有的。只有真正进了 ask 才有 `permission.wait`，结束探针在裁决落下的那一刻记，span 时长就是等人的时间。原因文本可能来自 hook 或人工输入，只在 `content` 档进 body。
 - **整体运行状态。** run 开头（`agent.state` 快照）与结尾（`run.closed` 里的 `finalSnapshot`）各一份，**同形、同一个校验器**（[terminal.ts](../../packages/core/src/observability/terminal.ts#symbol=materializeObservableState)）：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数摘要（`echo:tasks` / `echo:scheduler` / `echo:agent` 的收件箱）。模型与绑定不重复记——它们在 `run.assembly`。校验是**白名单重建**：只有逐个校验过的字段进副本，加字段必须同时扩白名单，否则会在封口时被静默剥掉。
-- **生命周期相位。** `Agent` 里所有相位写入都经 [`Agent.setPhase`](../../packages/core/src/agent.ts#symbol=Agent.setPhase)，节点就是它；丢锁那一拍也在这里当场记——这是 Agent 自己做的迁移，不是观测推断死活。**`stopping → stopped` 进不了账本**：观测写入端是 stop 流程里被关掉的东西之一（排在 root store 关闭与空会话目录清理之前，这个顺序不能动），`stopped` 在它之后才成立。一次正常收摊的最后一拍相位是 `running → stopping`。
+- **生命周期相位。** `Agent` 里所有相位写入都经 [`Agent.setPhase`](../../packages/core/src/agent.ts#symbol=Agent.setPhase)，节点就是它；丢锁那一拍也在这里当场记——这是 Agent 自己做的迁移，不是观测推断死活。**`stopping → stopped` 进不了账本**：stop 流程里观测被告知收摊（不等），`stopped` 在那之后才成立，观测线程已经不收这个 runtime 的事实。一次正常收摊的最后一拍相位是 `running → stopping`。
 - **extension。** 按**代**记，不按 Fiber 记：装载是全有或全无的事务。发生在任何 run 之外，进「运行时活动」。
 - **子循环。** 记忆整理（dream）、记忆提取、子 agent 跑的是同一个循环（[`Agent.runSubagent`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)），**每次调用在账本里是一个 run**，不经 admission：
   - **身份跟着循环走，不从 Agent 身上补。** 循环与压缩的每条事实自带发出它的那个循环实例的 `runId`，turn 里的再带 `turnId`（[`loopProbeFor`](../../packages/core/src/loop/observe.ts#symbol=loopProbeFor)）；Agent 的 scope 供给只给「是哪个 agent、哪段会话」。同一个 Agent 里可能同时跑着几个循环实例——后台子 agent 在父 run 封口之后才跑、前台子 agent 嵌在父的一次工具调用里——Agent 的当前 run / 开着的 turn 只对主循环成立。所以子循环与主循环用同一组探针，没有专门的观测代码。
   - **来源链回派出它的 run。** `source` 是 [`SubloopRunSource`](../../packages/core/src/observability/types.ts#symbol=SubloopRunSource)：dream / extract 带 `parentRunId`；subagent 另带 `parentToolCallId`（派出它的那次工具调用）与 `background`。admission 的 `RunSource` 不动——header 上的类型是两者的并集 `ObservedRunSource`。runId 是 `<kind>-<uuid>`，前台子 agent 不再借父 run 的 runId，turnId 与权限 tombstone 都不再撞。
-  - **边界与主循环同一套**，两处不同：`run.started` 的 `startedBy` 是 `subloop`；`run.closed` 不等 COMMIT（主循环等它是为了 `send()` 如实报 persistence，子循环没有这样的读者），失败进诊断。
+  - **边界与主循环同一套**，只有一处不同：`run.started` 的 `startedBy` 是 `subloop`。
   - **状态快照照拍**，`state.agent.activeRunId` 记 Agent 此刻开着的 admission run——子循环里是派出它的那个，或者没有。run 开头的 `agent.state` 自带 `runId`，同样不从 Agent 身上补。
   - 面板：子循环的行调暗、「跟随最新」跳过它们；子 agent 的那次工具调用能跳到子 run，子 run 的概览能跳回父 run。
 
@@ -194,11 +198,13 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 按「会不会随时间恶化」排：
 
-1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；写入端降级（seal）之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
-2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性——没给过期规则的会话会越来越慢。这是唯一会随时间恶化的一条，控制它的是产品的过期规则。
-3. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
-4. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
-5. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
-6. **记忆的能力摘要没接。** 状态快照的能力摘要跑在同步封口路径上，记忆的状态在盘上要异步读。
-7. **`sourceSeq` 没有生产者。** 它原本是转手 `AgentEvent` 时带的事件 seq；观测改成插桩之后没有任何记录再带它。envelope 上这个可选字段留在已发布的公开类型里没删。
-8. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。
+1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端降级（seal）之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
+2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性——产品不调 `expireObservations()` 的会话会越来越慢。这是唯一会随时间恶化的一条，控制它的是产品的过期。
+3. **观测存储永远卡住时进程退不出**：进程等观测线程写完才退，没有超时（与会话存储卡住同一个处境）。
+4. **`lost-lease` 与 `lease_lost` 不再有入口**：观测不挂 lease 之后，`ObservationPersistenceStatus` 的 `lost-lease` 与缺口原因 `lease_lost` 没有写者，类型还在公开面上。
+5. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
+6. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
+7. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
+8. **记忆的能力摘要没接。** 状态快照在节点上只收同步可读的值，记忆的状态在盘上要异步读。
+9. **`sourceSeq` 没有生产者。** 它原本是转手 `AgentEvent` 时带的事件 seq；观测改成插桩之后没有任何记录再带它。envelope 上这个可选字段留在已发布的公开类型里没删。
+10. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。

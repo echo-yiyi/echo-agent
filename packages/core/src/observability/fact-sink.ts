@@ -1,20 +1,17 @@
-// CapabilityFactSink：没有统一 AgentEvent 的内建 Capability（Memory / Task / Schedule …）在自己的
+// CapabilityFactSink：执行节点上的探针。内建能力（Memory / Task / Schedule …）、循环、压缩、Agent 自身在自己的
 // 唯一 decision / commit / settle 点调 `sink.offer(fact)`。
 //
 //   · 每个 Capability 自己拥有窄 fact union 与 descriptor（descriptor 与语义 owner 共址，不住中央 switch）；
-//   · sink 是 module-local、同步、**永不抛**；Capability 不 import Sequencer，也不知道 tap 长什么样；
-//   · 完整 Runtime 注入的 adapter 转成 `ObservationIngest.offer()`；没注入时是 no-op。
+//   · sink 同步、**永不抛**、没有 Promise；Capability 不 import 观测线程，也不知道它长什么样；
+//   · **探针在主线程上只做三件事**：读一次 scope 供给、按 policy 投影（descriptor 的有界取字段，不算摘要）、交给观测线程。
+//     normalize、摘要、seq、落盘全在观测线程（thread-host.ts）；主循环不为观测等任何东西
+//     （决策：docs/decisions/implemented/2026-09-14-observation-off-main-loop.md）。
 //
 // 它不是 public AgentEvent、不是 Extension ABI、不是第二套状态机。
 
-import type { Diagnostic } from "../errors.ts";
-import type { BoundedObservationDraft } from "./draft.ts";
-import { redactedLabel } from "./redact.ts";
-import { assertIdentifier, freezeInstrumentation, freezeOwner, materializeScope, type ScopeMaterialization } from "./identity.ts";
-import type { ObservationIngest, ProjectionFailureOutcome } from "./sequencer.ts";
-import type { ObservationCapturePolicy, ObservationOwner, ObservationRecordKind } from "./types.ts";
+import type { ObservationCapturePolicy, ObservationRecordKind } from "./types.ts";
 
-/** descriptor 投影出的 scope：envelope scope 的子集（`runtimeId` 由 Sequencer 盖，不由 producer 给）。 */
+/** descriptor 投影出的 scope：envelope scope 的子集（`runtimeId` 由观测线程盖，不由 producer 给）。 */
 export type ObservationFactScope = Readonly<{
   agentId?: string;
   agentInstanceId?: string;
@@ -26,8 +23,8 @@ export type ObservationFactScope = Readonly<{
 }>;
 
 /**
- * descriptor 的产出：**body 尚未 normalize**——原 body 交给 Sequencer 做唯一一次 `normalizeObservationValue()`
- * （失败 → hole + gap）。identity 字段（name / scope / subject）同样由 Sequencer 再物化一次。
+ * descriptor 的产出：**body 尚未 normalize**——原 body 交给观测线程里的 Sequencer 做唯一一次 normalize
+ * （失败 → hole + gap）。identity 字段（name / scope / subject）同样由它再物化一次。
  */
 export type ObservationFactProjection = Readonly<{
   kind: ObservationRecordKind;
@@ -38,6 +35,11 @@ export type ObservationFactProjection = Readonly<{
   attributes: Readonly<Record<string, string | number | boolean>>;
   body: unknown;
   subject?: Readonly<{ kind: string; id: string }>;
+  /**
+   * 要在观测线程里算的摘要：`body[字段] = SHA-256(text)` 的十六进制；`keyed: true` 用这个状态根的路径摘要 key 做 HMAC-SHA256。
+   * 摘要是观测自己的活，不在节点上算；原文只在进程内过一次线程，不进记录。有它时 `body` 必须是普通对象。
+   */
+  digests?: Readonly<Record<string, Readonly<{ text: string; keyed?: true }>>>;
 }>;
 
 export interface CapabilityFactSink<T> {
@@ -51,158 +53,82 @@ export type CapabilityFactDescriptor<T> = Readonly<{
   project(fact: T, policy: ObservationCapturePolicy): ObservationFactProjection | null;
 }>;
 
-/** 可注入的 reporter 抛错会直接击穿 `offer()` 的 no-throw 契约（review 实测），构造时就包掉。 */
-function safeReporter(report: ((d: Diagnostic) => void) | undefined): (d: Diagnostic) => void {
-  if (report === undefined) return () => {};
-  let disabled = false;
-  return (d) => {
-    if (disabled) return;
-    try {
-      // **只挡同步 throw 是不够的**（2026-08-27 review P0）：`(d) => void` 同样放行 `async` reporter，
-      // 它 reject 时是进程级 unhandled rejection——观测故障又一次击穿主流程。
-      const r: unknown = report(d);
-      if (typeof r === "object" && r !== null && typeof (r as { then?: unknown }).then === "function") {
-        // **吞掉 rejection 还不够，得停用它**（同轮 review P1）：只吞不停的话，每条诊断仍会调一次违规
-        // reporter——实测 10,000 条诊断 = 10,000 次调用 + 10,000 个 pending Promise，诊断通道自己成了
-        // 资源放大器。与 tap 同一处置：接口要求同步，返回 thenable 即停用。
-        disabled = true;
-        Promise.resolve(r as PromiseLike<unknown>).then(
-          () => {},
-          () => {},
-        );
-      }
-    } catch {
-      // 诊断通道自己坏了，没有第二条诊断通道可报——只能吞
-    }
-  };
-}
-
-/**
- * **供给自己抛错 ≠ 没有 scope**：前者说明这条事实的 run 归属不可知，必须走失败路径；
- * 后者（没配 scope 供给）才是合法的空 scope。两者原来被同一个 `?? {}` 抹平了（review P1）。
- */
-function suppliedScope(supply: FactSinkOptions["scope"]): ScopeMaterialization {
-  if (supply === undefined) return materializeScope(undefined); // 没配供给 = 合法空 scope
-  let raw: unknown;
-  try {
-    raw = supply();
-  } catch (e) {
-    return { ok: false, violation: `scope 供给抛错 ${redactedLabel(e)}` };
-  }
-  // **供给返回 null/undefined 也是失败**：上一版把它转交给 `materializeScope(undefined)`，
-  // 于是又落回「没配供给」那条合法路径——实测 records=["fine"]、gaps=0、diags=[]，
-  // 和上面那句注释直接打架（review P1）。要表达「这条事实确实没有 scope」，供给必须显式返回 `{}`。
-  if (raw === undefined || raw === null) {
-    return { ok: false, violation: `scope 供给返回 ${raw === null ? "null" : "undefined"}（没有 scope 请显式返回 {}）` };
-  }
-  return materializeScope(raw);
-}
-
 const NOOP: CapabilityFactSink<unknown> = Object.freeze({ offer(): void {} });
 
 export function noopFactSink<T>(): CapabilityFactSink<T> {
   return NOOP as CapabilityFactSink<T>;
 }
 
-export type FactSinkOptions = Readonly<{
-  report?: (d: Diagnostic) => void;
-  /** 调用时刻补的 scope（agentId / sessionId / runId …）；descriptor 自带的 scope 字段优先。 */
-  scope?: () => ObservationFactScope;
+/** 探针把东西交给观测线程的那一步（thread.ts 的 runtime 连接实现它）。两个方法都同步、永不抛。 */
+export type FactHandoff = Readonly<{
+  /** 交出一条投影。过不了线程（比如 body 里有函数）时自己转成 `failed`。 */
+  fact(at: number, scope: unknown, projection: ObservationFactProjection): void;
+  /** 探针在这一侧就失败了：观测线程补 hole + gap 与诊断。`error` 是抛出物的原文，只在观测线程里做成脱敏标签。 */
+  failed(at: number, runId: string | undefined, why: string, error?: string): void;
 }>;
 
-export type IngestFactSinkContext = Readonly<{
-  runtimeId: string;
-  runtimeGeneration: string;
+export type ThreadFactSinkContext = Readonly<{
   capturePolicy: ObservationCapturePolicy;
-  owner: ObservationOwner;
-}> &
-  FactSinkOptions;
+  /** 事实到达的时刻（记录的 observedAt）。 */
+  now: () => number;
+  /** 调用时刻补的 scope（agentId / sessionId / runId …）；descriptor 自带的 scope 字段优先。不给 = 合法的空 scope。 */
+  scope?: () => ObservationFactScope;
+  handoff: FactHandoff;
+}>;
+
+/** 抛出物的原文，只读 name / message，永不抛。脱敏在观测线程里做。 */
+export function thrownText(e: unknown): string {
+  try {
+    if (e instanceof Error) return `${String(e.name)}: ${String(e.message)}`;
+  } catch {
+    // Proxy 的 getPrototypeOf / getter 能让判断本身抛
+  }
+  return typeof e === "string" ? e : "non-error thrown";
+}
+
+/** 从 scope 供给的返回值里 total 地取 runId：失败路径给 gap 挂归属用。 */
+function runIdOf(raw: unknown): string | undefined {
+  try {
+    const id = (raw as { runId?: unknown } | undefined)?.runId;
+    return typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
- * descriptor → `ObservationIngest.offer()`（bounded lane）。body 原样交给 Sequencer normalize。
- * instrumentation / owner / runtime 身份在构造期**冻结副本**并校长度：只校验不复制的话，adapter 构造完
- * 把 `instrumentation.name` 改成 9,000 字节，之后每条事实都成 gap（review 实测）。
+ * descriptor → 观测线程。scope 供给**在 project 之前**读一次：project 抛错时那条 gap 也得挂在正确的 runId 上。
+ * **供给自己抛错 ≠ 没有 scope**：前者这条事实的 run 归属不可知，必须走失败路径；供给返回 null / undefined 同样是失败——
+ * 要表达「确实没有 scope」，供给必须显式返回 `{}`。
  */
-export function factSinkToIngest<T>(descriptor: CapabilityFactDescriptor<T>, ingest: ObservationIngest, ctx: IngestFactSinkContext): CapabilityFactSink<T> {
-  // 同上：构造期冻结副本，之后不再读 descriptor / ctx
-  const instrumentation = freezeInstrumentation(descriptor.instrumentation, "descriptor.instrumentation");
-  const runtimeId = ctx.runtimeId;
-  const runtimeGeneration = ctx.runtimeGeneration;
-  assertIdentifier(runtimeId, "runtimeId");
-  assertIdentifier(runtimeGeneration, "runtimeGeneration");
-  const owner = freezeOwner(ctx.owner, "owner");
-  const capturePolicy = ctx.capturePolicy;
+export function factSinkToThread<T>(descriptor: CapabilityFactDescriptor<T>, ctx: ThreadFactSinkContext): CapabilityFactSink<T> {
   const project = descriptor.project;
-  const report = safeReporter(ctx.report);
-  /**
-   * canonical 路径的失败出口：**先占失败身份 + 挂 safe gap，再报诊断**。
-   * 顺序要紧——诊断报完才预留的话，报诊断途中任何抛错都会让这个洞彻底消失。
-   */
-  // writer terminal 之后每条失败都报一次的话，100 次失败 = 100 条诊断（review 实测 101 条），
-  // 诊断通道自己成了新的无界增长面。terminal 是**持续状态**不是逐条事件，只报第一次。
-  let terminalReported = false;
-  const openGap = (runId: string | undefined, why: string): void => {
-    let outcome: ProjectionFailureOutcome = "writer-unavailable";
-    try {
-      outcome = ingest.reserveProjectionFailureGap({ runId });
-    } catch (inner) {
-      // Sequencer 内部 bug：没有第二条 canonical 通道可用，只能升一条诊断
-      report({ code: "observation_sequencer_internal", message: `${instrumentation.name}：gap 预留失败 ${redactedLabel(inner)}` });
-    }
-    if (outcome !== "gap-reserved") {
-      // writer 已 terminal：canonical 那条路不存在了，诊断如实说明「这条只剩 live 证据」，
-      // 不能让读者以为账本上仍有洞可查（review P1）。只报第一次。
-      if (terminalReported) return;
-      terminalReported = true;
-      report({
-        code: "observation_fact_dropped",
-        message: `${instrumentation.name}：${why}（writer 已 terminal，此后的失败只有 live 证据、无 canonical gap；只报第一次）`,
-      });
-      return;
-    }
-    report({ code: "observation_fact_dropped", message: `${instrumentation.name}：${why}` });
-  };
+  const { capturePolicy, now, scope: supply, handoff } = ctx;
   return {
     offer(fact: T): void {
-      // scope 供给**在 project 之前**读一次并**物化成稳定快照**：project 抛错时那条 gap 也得挂在
-      // 正确的 runId 上，否则 run 级的记录数对账仍然看不见这个洞（review P1 第一轮）。
-      // 物化失败**不当作「没有 scope」**——run 归属不可知的事实不能冒充 runtime-scoped 正常记录
-      // （review P1 第二轮实测：gaps=0、diags=[]，原 run 仍显示 complete）。
-      const s = suppliedScope(ctx.scope);
-      let gapRunId = s.ok ? s.scope.runId : s.runId;
-      if (!s.ok) {
-        openGap(gapRunId, `scope 物化失败：${s.violation}`);
+      const at = now();
+      let raw: unknown;
+      if (supply !== undefined) {
+        try {
+          raw = supply();
+        } catch (e) {
+          handoff.failed(at, undefined, "scope 供给抛错 ", thrownText(e));
+          return;
+        }
+        if (raw === undefined || raw === null) {
+          handoff.failed(at, undefined, `scope 供给返回 ${raw === null ? "null" : "undefined"}（没有 scope 请显式返回 {}）`);
+          return;
+        }
+      }
+      let p: ObservationFactProjection | null;
+      try {
+        p = project(fact, capturePolicy);
+      } catch (e) {
+        handoff.failed(at, runIdOf(raw), "", thrownText(e));
         return;
       }
-      const callScope = s.scope;
-      try {
-        const p = project(fact, capturePolicy);
-        if (p === null) return;
-        const kind = p.kind;
-        const occurredAt = p.occurredAt;
-        const sourceSeq = p.sourceSeq;
-        const scope = { ...callScope, ...p.scope, runtimeId };
-        if (typeof scope.runId === "string") gapRunId = scope.runId;
-        const draft: BoundedObservationDraft<unknown> = {
-          lane: "bounded",
-          occurredAt,
-          ...(sourceSeq === undefined ? {} : { sourceSeq }),
-          kind,
-          name: p.name,
-          scope,
-          correlation: {},
-          generation: { runtime: runtimeGeneration },
-          owner,
-          instrumentation,
-          attributes: p.attributes,
-          body: p.body,
-          ...(p.subject === undefined ? {} : { subject: p.subject }),
-        };
-        // draft 里的 identity 由 Sequencer 再物化一次（它才是 canonical 的 owner）；这里不重复校验。
-        ingest.offer(draft);
-      } catch (e) {
-        openGap(gapRunId, redactedLabel(e));
-      }
+      if (p === null) return;
+      handoff.fact(at, raw, p);
     },
   };
 }

@@ -1,12 +1,13 @@
 // 查询面（O3a）：live `EchoObservations` 与离线 `EchoObservationReader`。
 //
 // 两者共用同一套「先读 RunIndex、再按 `firstSeq..lastSeq` 取 records、再物化」的路径；差别只在
-// live 面还能给 Sequencer 的 health / subscribe 与过期入口。读的都是状态根里 rename 完成的文档（document-store.ts）。
+// live 面读之前先等观测线程写完（`flush`），还能给观测线程里 Sequencer 的 health / subscribe。
+// 读的都是存储上 rename 完成的文档（document-store.ts），读在调用方的线程上做，不经过观测线程。
 //
 // 不做的：跨进程 interrupted recovery、离线 reader 的 runtime health 快照（health 不落盘，`snapshot()` fail-loud 而不是编一个）。
 
 import { decodeObservationEnvelope, materializeRunObservation } from "./materialize.ts";
-import type { ObservationSequencer } from "./sequencer.ts";
+import type { ThreadHealth } from "./worker-protocol.ts";
 import { DocumentObservationReader, ObservationStoreMissingError, hasObservationStore, observationStorePath } from "./document-store.ts";
 import { FileDir } from "../storage/file-dir.ts";
 import type { ObservationEnvelope } from "./types.ts";
@@ -103,21 +104,27 @@ async function lastRun(store: ObservationReadPort): Promise<RunLookupResult> {
   }
 }
 
-/** live：由 `createAgent()` 里的 ObservationRuntime 提供 Sequencer 与（同进程）store。 */
+/** live：由 `createAgent()` 里的 ObservationRuntime 提供（读面 + 观测线程的 flush / health / subscribe）。 */
 export class LiveEchoObservations implements EchoObservations {
   constructor(
     private readonly deps: Readonly<{
       runtimeId: string;
-      sequencer: ObservationSequencer;
-      store: ObservationReadPort;
+      reader: ObservationReadPort;
       clock: Readonly<{ now(): number }>;
       phase: () => RuntimePhase;
-      expire: () => Promise<void>;
+      flush: () => Promise<void>;
+      health: () => Promise<ThreadHealth>;
+      subscribe: (options: ObservationSubscribeOptions) => Promise<() => void>;
     }>,
   ) {}
 
-  getRun(runId: string): Promise<RunLookupResult> {
-    return lookupRun(this.deps.store, runId);
+  flush(): Promise<void> {
+    return this.deps.flush();
+  }
+
+  async getRun(runId: string): Promise<RunLookupResult> {
+    await this.deps.flush();
+    return lookupRun(this.deps.reader, runId);
   }
 
   /** O3a 没有 submission 账本（那是 O2b 的 Inbox / Extension source）：一律 null。 */
@@ -125,25 +132,28 @@ export class LiveEchoObservations implements EchoObservations {
     return null;
   }
 
-  lastRun(): Promise<RunLookupResult> {
-    return lastRun(this.deps.store);
+  async lastRun(): Promise<RunLookupResult> {
+    await this.deps.flush();
+    return lastRun(this.deps.reader);
   }
 
-  listRuns(options?: ListRunsOptions): Promise<RunObservationPage> {
-    return listRuns(this.deps.store, options);
+  async listRuns(options?: ListRunsOptions): Promise<RunObservationPage> {
+    await this.deps.flush();
+    return listRuns(this.deps.reader, options);
   }
 
   async snapshot(): Promise<EchoObservationSnapshot> {
-    const health = this.deps.sequencer.health();
+    await this.deps.flush();
+    const { health, committedSeq } = await this.deps.health();
     const phase = this.deps.phase();
     // 只查 running 的 index 行会需要一个 status 索引；O3a 单 permit，activeRuns 至多一条，从最近几条里挑
-    const recent = await this.deps.store.listRunIndex({ limit: 8 });
+    const recent = await this.deps.reader.listRunIndex({ limit: 8 });
     return {
       schemaVersion: 1,
       runtimeId: this.deps.runtimeId,
       phase,
       status: phase === "ready" && health.persistence.status !== "healthy" ? "degraded" : phase,
-      throughSeq: this.deps.sequencer.committedSeq,
+      throughSeq: committedSeq,
       at: this.deps.clock.now(),
       health,
       activeRuns: recent.filter((e) => e.runtimeId === this.deps.runtimeId && e.header.status === "running").map((e) => e.header),
@@ -151,17 +161,9 @@ export class LiveEchoObservations implements EchoObservations {
     };
   }
 
-  expire(): Promise<void> {
-    return this.deps.expire();
-  }
-
-  async subscribe(options: ObservationSubscribeOptions): Promise<() => void> {
-    // 交付 committed prefix 之后的 envelope、本 sink 自己的 SinkDeliveryGap，回放跨过被过期删掉的批时交付 ObservationReplayGap
-    return this.deps.sequencer.subscribe({
-      afterSeq: options.afterSeq,
-      listener: options.listener,
-      ...(options.runId === undefined ? {} : { runId: options.runId }),
-    });
+  /** 交付 committed prefix 之后的 envelope、本 sink 自己的 SinkDeliveryGap，回放跨过被过期删掉的批时交付 ObservationReplayGap。 */
+  subscribe(options: ObservationSubscribeOptions): Promise<() => void> {
+    return this.deps.subscribe(options);
   }
 }
 

@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 341（value 120 · type 201 · both 20）
+符号 343（value 121 · type 203 · both 19）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -253,19 +253,21 @@ value  userMessage
 type   UserMessage
 
 -- src/observability/document-store.ts (3) --
+type   ObservationExpiryResult
 both   ObservationStoreMissingError
-both   ObservationStoreOpenError
 value  observationStorePath
+
+-- src/observability/expiry.ts (4) --
+value  expireObservations
+type   ExpireObservationsOptions
+type   ObservationExpiryDecision
+type   ObservationExpiryRule
 
 -- src/observability/query.ts (4) --
 both   DocumentEchoObservationReader
 both   ObservationCursorError
 both   ObservationNotPersistedError
 value  openObservationReader
-
--- src/observability/runtime.ts (2) --
-type   ObservationExpiryDecision
-type   ObservationExpiryRule
 
 -- src/observability/store.ts (1) --
 both   ObservationCorruptionError

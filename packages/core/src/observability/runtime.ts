@@ -1,51 +1,31 @@
-// ObservationRuntime（O3a）：完整 Runtime 里 canonical writer 的宿主——
-// 持有唯一的 Sequencer 与观测写入端（状态根里的文档，见 document-store.ts），是 run 三条边界（`run.accepted / run.started / run.closed`）的**唯一 emission owner**，
-// 并按 `capabilitySink(descriptor, owner)` 给各执行节点发探针（循环、压缩、Agent 自身、各能力模块）。
+// ObservationRuntime：完整 Runtime 在主线程上的观测入口。它只**交东西出去**——探针的投影、run 三条边界
+// （`run.accepted / run.started / run.closed`）的输入、Agent 此刻的状态——交给进程里那条观测线程（thread.ts）；
+// 编码、摘要、seq、落盘都在那边（thread-host.ts）。
 // **不订阅、不转发 AgentEvent**：那是给壳的事件协议，观测是插桩（`docs/design/observability.md`）。
 //
-// 失败语义（2026-09-03 用户拍板：**观测不得影响 agent 主线**，放弃 fail-closed admission）：
-//   · `run.accepted` / `run.assembly` / `run.started` 只**同步预留 seq**（顺序由预留决定，不由落盘决定），提交是
-//     fire-and-forget；落不下去只降级 persistence + 诊断，**永远不拒 run、不让 run 等**；
-//   · `run.closed` 仍等它 COMMIT——它在 run 的活干完之后，`send()` 靠它如实报 `observationPersistence`；等待有界
-//     （`boundaryDeadlineMs`），到期即降级返回；
-//   · 观测层任何异常都不进 Agent 控制流——这里每个公开方法都不抛。
-//
-// 过期规则归产品（`expiry`），这里只执行：持锁之后（`activate()`）先补齐以前进程没写完的派生文件、再过期一次；
-// 之后每个 run 封口落盘再过期一次；`observations.expire()` 随时可调。都在后台跑、撞在一起时合并，交还 lease 或丢锁前停下。
+// 硬规矩（2026-09-14 用户拍板，决策：docs/decisions/implemented/2026-09-14-observation-off-main-loop.md）：
+// **观测的任何功能都不出现在主机制、主循环里**——admission 不等 run.closed、`createEcho()` 不等打开存储、`stop()` 不等写完、
+// 不挂 lease、不在任何流程节点上过期。这里每个方法都同步返回、不抛、不等观测线程；观测线程坏了只进诊断。
+// 过期是产品自己调的独立函数（expiry.ts），agent 里没有。
 //
 // 由 `createAgent()` 构造并经 `attachObservationHost()` 挂到 Agent 上；低层 `new Agent()` 没有它。
 
 import type { Clock } from "../schedule/clock.ts";
 import type { Diagnostic } from "../errors.ts";
-import type { AgentEvent, AgentOutcome } from "../events.ts";
+import type { AgentOutcome } from "../events.ts";
 import type { RunModelBinding } from "../admission/types.ts";
 import type { Model } from "../provider/types.ts";
+import type { StorageDir } from "../storage/types.ts";
 import { BUILTIN_GENERATION } from "../extension/builtin.ts";
-import { snapshotRunModelBinding } from "./assembly.ts";
-import { RUN_ASSEMBLY_RECORD, type BoundaryObservationDraft, type RunAcceptedBodyV1, type RunAssemblyBodyV1, type RunObservationHeaderSeed, type RunStartedBodyV1 } from "./draft.ts";
+import type { BuiltinSlotContribution } from "./assembly.ts";
+import { DocumentObservationReader } from "./document-store.ts";
+import { factSinkToThread, thrownText, type CapabilityFactDescriptor, type CapabilityFactSink } from "./fact-sink.ts";
+import { freezeInstrumentation, freezeOwner } from "./identity.ts";
 import { LiveEchoObservations } from "./query.ts";
-import { factSinkToIngest, type CapabilityFactDescriptor, type CapabilityFactSink } from "./fact-sink.ts";
-import { sha256Hex } from "./hash.ts";
-import { redactedLabel } from "./redact.ts";
-import { ObservationSequencer, type SequencerLimits } from "./sequencer.ts";
-import type { DocumentObservationStore } from "./document-store.ts";
-import type {
-  AgentAssemblyObservationSnapshot,
-  EchoObservableState,
-  ObservationCapturePolicy,
-  ObservationOwner,
-  ObservationRecordKind,
-  ObservedRunSource,
-  RunClosedBodyInput,
-  RunClosedOutcomeObservation,
-  RunIndexEntryV1,
-  RunObservationHeader,
-  RuntimePhase,
-} from "./types.ts";
-import { OBSERVATION_BOUNDARY_LIMITS as BOUNDARY_LIMITS } from "./types.ts";
-
-/** run 边界与装配快照记录的 instrumentation：admission 这条路，与 AgentEvent tap（`echo.agent-event`）分开。 */
-export const RUN_ADMISSION_INSTRUMENTATION = { name: "echo.run-admission", version: "1" } as const;
+import type { SequencerLimits } from "./sequencer.ts";
+import { ObservationThread } from "./thread.ts";
+import type { ObservationCapturePolicy, ObservationOwner, ObservedRunSource, RuntimePhase } from "./types.ts";
+import type { ObservableStateInput, ObservationWork, RunIdentity, RunOutcomeData } from "./worker-protocol.ts";
 
 /** builtin Entry 的 owner（OR13 known）。按需构造而不是模块顶层常量：避免与 extension/builtin.ts 的环状 import 在求值期撞 TDZ。 */
 export function builtinOwner(entryId: string): ObservationOwner {
@@ -59,28 +39,19 @@ export const MEMORY_ENTRY_ID = "echo:memory";
 export const TASKS_ENTRY_ID = "echo:tasks";
 export const SCHEDULER_ENTRY_ID = "echo:scheduler";
 
-/** 过期规则的返回值：要删的 run，与 run 之外记录的回收线。都不给 = 这一次什么都不删。 */
-export type ObservationExpiryDecision = Readonly<{
-  /** 要删掉的 run。当前进程还在跟踪的 run 拒删（报诊断）。 */
-  runs?: readonly string[];
-  /** 早于这个时刻（毫秒时间戳，比记录的 observedAt）的 run 之外记录可以回收。不给 = run 之外的记录不删。 */
-  activityBefore?: number;
-}>;
-
-/** 产品给的过期规则：拿到全部 run 的 header（按 acceptedAt 倒序）与此刻，返回要删什么。不给规则 = 永不删。 */
-export type ObservationExpiryRule = (runs: readonly RunObservationHeader[], now: number) => ObservationExpiryDecision;
-
 export type ObservationRuntimeOptions = Readonly<{
   runtimeId: string;
   /** RuntimeGeneration；O3a 只有 boot 一代。 */
   runtimeGeneration: string;
   capturePolicy: ObservationCapturePolicy;
-  store: DocumentObservationStore;
+  /** 观测文档所在的存储：状态根的，或 `observation.store` 注入的。 */
+  store: StorageDir;
+  /** 给人看的位置（诊断用）。 */
+  storePath: string;
+  /** 事实到达的时刻（记录的 observedAt）从这里取。 */
   clock: Clock;
-  /** 过期规则（产品给）。不给 = 永不删。 */
-  expiry?: ObservationExpiryRule;
-  /** `createAgent()` 封口的 builtin 槽快照；每个 run 的 `run.assembly` 记录引用它。 */
-  assembly: AgentAssemblyObservationSnapshot;
+  /** `createAgent()` 直接构造的 builtin 槽；观测线程据此封 AgentAssembly 快照，每个 run 的 `run.assembly` 记录引用它。 */
+  assembly: readonly BuiltinSlotContribution[];
   limits?: Partial<SequencerLimits>;
 }>;
 
@@ -96,30 +67,20 @@ export type RunAcceptInput = Readonly<{
 export type RunCloseInput = Readonly<{
   runId: string;
   outcome: AgentOutcome;
-  /** finalizer 冻结的可观测状态；`capturePolicy:"off"` 时调用方给 null（不投影）。 */
-  finalState: EchoObservableState | null;
+  /** finalizer 冻结时 Agent 的状态；观测线程补摘要。 */
+  finalState: ObservableStateInput | null;
 }>;
 
 export type ObservationScopeSupplier = () => Readonly<Record<string, string>>;
 
-/** `finishReason` 等安全串的构造上限（UTF-8 ≤ maxSafeStringBytes）；超出按 code unit 截断并标记。 */
-function clipSafeString(s: string): string {
-  const max = BOUNDARY_LIMITS.maxSafeStringBytes;
-  if (new TextEncoder().encode(s).byteLength <= max) return s;
-  let out = s;
-  while (out.length > 0 && new TextEncoder().encode(`${out}…`).byteLength > max) out = out.slice(0, -1);
-  return `${out}…`;
-}
-
-/** `AgentOutcome` → 有界的 terminal outcome：正文 / message 不进 boundary，只留 code + digest。 */
-export function toRunClosedOutcome(outcome: AgentOutcome): RunClosedOutcomeObservation {
+function outcomeData(outcome: AgentOutcome): RunOutcomeData {
   switch (outcome.kind) {
     case "completed":
-      return { status: "completed" };
+      return { kind: "completed" };
     case "aborted":
-      return outcome.reason === undefined ? { status: "aborted" } : { status: "aborted", finishReason: clipSafeString(outcome.reason) };
+      return outcome.reason === undefined ? { kind: "aborted" } : { kind: "aborted", reason: outcome.reason };
     case "error":
-      return { status: "error", errorCode: clipSafeString(outcome.error.code), errorDigest: sha256Hex(outcome.error.message) };
+      return { kind: "error", code: outcome.error.code, message: outcome.error.message };
   }
 }
 
@@ -127,52 +88,40 @@ export class ObservationRuntime {
   readonly runtimeId: string;
   readonly runtimeGeneration: string;
   readonly capturePolicy: ObservationCapturePolicy;
-  readonly assembly: AgentAssemblyObservationSnapshot;
-  readonly store: DocumentObservationStore;
-  readonly sequencer: ObservationSequencer;
-  /** live 查询面（`echo.observations`）：同一个 Sequencer + 同一个写入端的只读查询。 */
+  /** live 查询面（`echo.observations`）：读之前等观测线程写完，再读同一个存储上的文档。 */
   readonly observations: LiveEchoObservations;
   private readonly clock: Clock;
-  /** 随库首建、永不改写；库关了之后挂 sink（stop 后再 start 的拒绝路径）也不能再去读它。 */
-  private readonly pathDigestKeyBytes: Uint8Array;
+  private readonly thread: ObservationThread;
   private report: (d: Diagnostic) => void = () => {};
   private scopeSupplier: ObservationScopeSupplier = () => ({});
   private phase: RuntimePhase = "ready";
-  private disposing: Promise<void> | undefined;
-  private readonly expiry: ObservationExpiryRule | undefined;
-  /** 持着 lease：补齐与过期只在这期间做。 */
-  private active = false;
-  /** 在跑的补齐 / 过期；撞上时记一笔跑完再来一次。 */
-  private maintenance: Promise<void> | null = null;
-  private maintenanceAgain = false;
-  private repairPending = false;
+  /** 已在观测线程里登记的探针身份 → 编号。 */
+  private readonly sinks = new Map<string, number>();
+  private handoffFailureReported = false;
 
   constructor(opts: ObservationRuntimeOptions) {
     this.runtimeId = opts.runtimeId;
     this.runtimeGeneration = opts.runtimeGeneration;
     this.capturePolicy = opts.capturePolicy;
-    this.assembly = opts.assembly;
-    this.store = opts.store;
     this.clock = opts.clock;
-    this.expiry = opts.expiry;
-    this.pathDigestKeyBytes = opts.store.readPathDigestKey();
-    this.sequencer = new ObservationSequencer({
-      runtimeId: opts.runtimeId,
+    this.thread = ObservationThread.get();
+    this.thread.open(opts.runtimeId, opts.store, (d) => this.report(d), {
       runtimeGeneration: opts.runtimeGeneration,
       capturePolicy: opts.capturePolicy,
-      store: opts.store,
-      clock: opts.clock,
+      storePath: opts.storePath,
+      boundaryOwner: builtinOwner(AGENT_ENTRY_ID),
+      assembly: opts.assembly,
       ...(opts.limits === undefined ? {} : { limits: opts.limits }),
-      // Sequencer 构造在 Agent 之前：诊断先经这层代理，Agent 起来后 `attachDiagnostics` 换目标
-      report: (d) => this.report(d),
     });
+    const rt = opts.runtimeId;
     this.observations = new LiveEchoObservations({
-      runtimeId: opts.runtimeId,
-      sequencer: this.sequencer,
-      store: opts.store,
+      runtimeId: rt,
+      reader: new DocumentObservationReader(opts.store, opts.storePath),
       clock: opts.clock,
       phase: () => this.phase,
-      expire: () => this.expireNow(),
+      flush: () => this.thread.flush(rt),
+      health: () => this.thread.health(rt),
+      subscribe: (options) => this.thread.subscribe(rt, options),
     });
   }
 
@@ -185,225 +134,115 @@ export class ObservationRuntime {
     return this.phase;
   }
 
-  /** 当前 Runtime 对某 run 的 persistence 投影：终态已 COMMIT 进 RunIndex 才是 stored，否则 degraded。 */
-  persistenceOf(runId: string): "stored" | "degraded" {
-    const idx = this.sequencer.committedRunIndex(runId);
-    return idx !== undefined && idx.terminalRecordId !== undefined ? "stored" : "degraded";
-  }
-
-  runIndexOf(runId: string): RunIndexEntryV1 | undefined {
-    return this.sequencer.committedRunIndex(runId);
-  }
-
   /**
    * Agent 把「此刻的 run / turn 归属」供给挂进来（`observationScope()`）：所有 sink 在事实到达时刻读一次它。
-   * 没挂之前供给返回 `{}`（runtime-scoped）——供给必须返回对象，返回 undefined 会被 sink 判成归属不可知而开 gap。
+   * 没挂之前供给返回 `{}`（runtime-scoped）——供给必须返回对象，返回 undefined 会被判成归属不可知而开 gap。
    */
   bindScope(supplier: ObservationScopeSupplier): void {
     this.scopeSupplier = supplier;
   }
 
-  /** 本 state root 的 Memory path HMAC key：只给 writer 侧的 descriptor，永不进 envelope。构造期读一次，之后不碰库。 */
-  get pathDigestKey(): Uint8Array {
-    return this.pathDigestKeyBytes;
+  /** 等观测线程把此刻之前交出去的全部写完（`echo.observations.flush()`）。永不 reject。 */
+  flush(): Promise<void> {
+    return this.thread.flush(this.runtimeId);
   }
 
   /**
-   * 一个执行节点上的探针（循环 / 压缩 / Agent 自身 / Memory / Task / Schedule …）：descriptor 归语义 owner，
-   * 这里只把它转成 `ObservationIngest.offer()`，identity / owner / runtime 身份在构造期钉住。
+   * 一个执行节点上的探针：descriptor 归语义 owner。instrumentation / owner 在构造期**冻结副本**并校长度——
+   * 只校验不复制的话，构造完把 `instrumentation.name` 改成 9,000 字节，之后每条事实都成 gap（review 实测）。
    * `scope` 缺省用 `bindScope()` 挂上的供给（runId / turnId 只有 Agent 知道）；descriptor 自己投影的 scope 优先。
    */
   capabilitySink<T>(descriptor: CapabilityFactDescriptor<T>, owner: ObservationOwner, scope?: ObservationScopeSupplier): CapabilityFactSink<T> {
-    return factSinkToIngest(descriptor, this.sequencer, {
-      runtimeId: this.runtimeId,
-      runtimeGeneration: this.runtimeGeneration,
+    const instrumentation = freezeInstrumentation(descriptor.instrumentation, "descriptor.instrumentation");
+    const frozenOwner = freezeOwner(owner, "owner");
+    const rt = this.runtimeId;
+    // 同一身份（instrumentation + owner）在观测线程里只登记一次：子循环每次都新建记忆探针，不能让那边的表一直涨
+    const identity = JSON.stringify([instrumentation.name, instrumentation.version, frozenOwner]);
+    let sink = this.sinks.get(identity);
+    if (sink === undefined) {
+      sink = this.sinks.size + 1;
+      this.sinks.set(identity, sink);
+      this.post({ t: "sink", rt, sink, owner: frozenOwner, instrumentation });
+    }
+    const id = sink;
+    return factSinkToThread(descriptor, {
       capturePolicy: this.capturePolicy,
-      owner,
-      report: (d) => this.report(d),
+      now: () => this.clock.now(),
       scope: scope ?? (() => this.scopeSupplier()),
+      handoff: {
+        fact: (at, raw, projection) => {
+          try {
+            this.thread.post({ t: "fact", rt, sink: id, at, ...(raw === undefined ? {} : { scope: raw }), projection });
+          } catch (e) {
+            // 投影里有过不了线程的值（函数、symbol …）：留 hole + gap，不静默丢
+            this.post({ t: "fact-failed", rt, sink: id, at, why: "投影过不了线程 ", error: thrownText(e) });
+          }
+        },
+        failed: (at, runId, why, error) => {
+          this.post({ t: "fact-failed", rt, sink: id, at, ...(runId === undefined ? {} : { runId }), why, ...(error === undefined ? {} : { error }) });
+        },
+      },
     });
   }
 
-  /* ───────── run 三条边界（唯一 emission owner） ───────── */
+  /* ───────── run 三条边界（交给观测线程，不等） ───────── */
 
-  /**
-   * admission 颁发 permit 时：`run.accepted`（RunIndex 种子）与紧跟的 `run.assembly` 快照都只同步预留 seq，
-   * 提交不等——admission 不因观测层的任何状态拒 run 或等 run。`appendBoundary()` 的预留、RunIndex 登记都在
-   * 同步段，所以不等也保序；落不下去的结果只进诊断与 persistence health。
-   */
+  /** admission 颁发 permit 时。 */
   acceptRun(input: RunAcceptInput): void {
-    const acceptedAt = this.clock.now();
-    const header: RunObservationHeaderSeed = {
+    const model = input.modelBinding.model as Model;
+    this.post({
+      t: "run-accepted",
+      rt: this.runtimeId,
+      at: this.clock.now(),
       runId: input.runId,
       source: input.source,
-      runtimeId: this.runtimeId,
-      agentId: input.agentId,
-      agentInstanceId: input.agentInstanceId,
-      sessionId: input.sessionId,
-      runtimeGeneration: this.runtimeGeneration,
-      capturePolicy: this.capturePolicy,
-      acceptedAt,
-    };
-    const body: RunAcceptedBodyV1 = { header };
-    const scope = this.runScope(input.runId, input);
-    this.fireBoundary(input.runId, "run.accepted", this.boundary("run.accepted", "event", scope, acceptedAt, body));
-    const assembly: RunAssemblyBodyV1 = {
-      agentAssembly: this.assembly,
-      // RunModelSnapshot 与 `Model` 的数据字段同形（api / params / thinkingLevelMap / capabilities / cost），digest 同一把尺
-      modelBinding: snapshotRunModelBinding(input.modelBinding.model as unknown as Model, input.modelBinding.catalogRevision),
-    };
-    this.fireBoundary(input.runId, RUN_ASSEMBLY_RECORD, this.boundary(RUN_ASSEMBLY_RECORD, "snapshot", scope, acceptedAt, assembly));
-  }
-
-  /** 真正进入 loop 的那一拍（permit executor，或派出隔离子循环的 Agent）。同样只预留、不等（started 失败本来就不取消 run）。 */
-  startRun(runId: string, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>, startedBy: RunStartedBodyV1["startedBy"]): void {
-    const body: RunStartedBodyV1 = { startedBy };
-    this.fireBoundary(runId, "run.started", this.boundary("run.started", "event", this.runScope(runId, identity), this.clock.now(), body));
-  }
-
-  /**
-   * 预留即返回、提交不等的 boundary。`appendBoundary()` 的同步段做完 lifecycle 检查 / seq 预留 / RunIndex 登记才返回
-   * Promise，所以顺序已定；这里只负责把 rejection 接住变成诊断——否则是进程级 unhandled rejection。
-   */
-  private fireBoundary(runId: string, name: string, draft: BoundaryObservationDraft<unknown>): void {
-    let pending: Promise<unknown>;
-    try {
-      pending = this.sequencer.appendBoundary(draft);
-    } catch (e) {
-      this.report({ code: "observation_boundary_failed", message: `run ${runId}：${name} 预留失败（run 照跑）：${redactedLabel(e)}` });
-      return;
-    }
-    pending.then(
-      () => {},
-      (e: unknown) => this.report({ code: "observation_boundary_failed", message: `run ${runId}：${name} 落不下去（run 照跑，persistence 降级）：${redactedLabel(e)}` }),
-    );
-  }
-
-  /**
-   * permit finalizer：业务 outcome 已冻结之后封口。body 只有有界 outcome 与可选 finalSnapshot；
-   * capture gap 的 count / digest 由 Sequencer 从自己的账本填（`RunClosedBodyV1`）。
-   * 这一条**等 COMMIT**（有界：`boundaryDeadlineMs`）——它在 run 的活干完之后，`send()` 靠它如实报 persistence；
-   * 到期 / 失败 = 该 run persistence degraded，outcome 不变。
-   */
-  async closeRun(input: RunCloseInput, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>): Promise<void> {
-    const now = this.clock.now();
-    const body: RunClosedBodyInput = {
-      outcome: toRunClosedOutcome(input.outcome),
-      finalSnapshot: this.capturePolicy === "off" || input.finalState === null ? null : { throughSeq: this.sequencer.committedSeq, at: now, state: input.finalState },
-    };
-    try {
-      await this.sequencer.appendBoundary(this.boundary("run.closed", "event", this.runScope(input.runId, identity), now, body));
-    } catch (e) {
-      this.report({ code: "observation_boundary_failed", message: `run ${input.runId}：run.closed 落不下去（outcome 不变，persistence degraded）：${redactedLabel(e)}` });
-      return;
-    }
-    // 封口落盘了：按规则过期一次（后台，不让 send() 等）
-    if (this.expiry !== undefined) void this.expireNow();
-  }
-
-  /**
-   * 拿到 lease 之后（lease 生命周期端口的 `afterLeaseAcquired`）：从此可以碰别的进程留下的东西。
-   * 立即返回，活放后台：先补齐以前进程没写完的派生文件，再按规则过期一次。
-   */
-  activate(): void {
-    this.active = true;
-    this.repairPending = true;
-    void this.runMaintenance();
-  }
-
-  /** 交还 lease 或丢锁之前：不再开始新的补齐 / 过期，等在跑的那一次做完（丢锁时调用方不必等）。 */
-  async deactivate(): Promise<void> {
-    this.active = false;
-    this.maintenanceAgain = false;
-    await this.maintenance;
-  }
-
-  /** 按规则过期一次。没规则、没持 lease 时是空操作；撞上在跑的就记一笔跑完再来。不抛。 */
-  expireNow(): Promise<void> {
-    if (this.expiry === undefined || !this.active) return Promise.resolve();
-    return this.runMaintenance();
-  }
-
-  private runMaintenance(): Promise<void> {
-    if (this.maintenance !== null) {
-      this.maintenanceAgain = true;
-      return this.maintenance;
-    }
-    const work = (async () => {
-      do {
-        this.maintenanceAgain = false;
-        if (!this.active) return;
-        if (this.repairPending) {
-          this.repairPending = false;
-          try {
-            await this.store.repairDerived();
-          } catch (e) {
-            this.report({ code: "observation_repair_failed", message: `补齐观测派生文件失败：${redactedLabel(e)}` });
-          }
-        }
-        if (this.active && this.expiry !== undefined) await this.expireOnce(this.expiry);
-      } while (this.maintenanceAgain && this.active);
-    })().finally(() => {
-      this.maintenance = null;
+      identity: { agentId: input.agentId, agentInstanceId: input.agentInstanceId, sessionId: input.sessionId },
+      model: {
+        provider: model.provider,
+        id: model.id,
+        api: model.api,
+        params: model.params,
+        thinkingLevelMap: model.thinkingLevelMap,
+        capabilities: model.capabilities,
+        cost: model.cost,
+        catalogRevision: input.modelBinding.catalogRevision,
+      },
     });
-    this.maintenance = work;
-    return work;
   }
 
-  private async expireOnce(rule: ObservationExpiryRule): Promise<void> {
-    try {
-      const headers = (await this.store.readAllRunIndex()).map((e) => e.header);
-      const decision = rule(headers, this.clock.now());
-      if (!this.active) return;
-      const outcome = await this.store.expire(decision, (runId) => this.sequencer.isTrackingRun(runId));
-      if (outcome.refusedRuns.length > 0) {
-        this.report({ code: "observation_expiry_refused", message: `过期规则点名了还在跑的 run，不删：${outcome.refusedRuns.join(", ")}` });
-      }
-    } catch (e) {
-      this.report({ code: "observation_expiry_failed", message: `观测过期失败：${redactedLabel(e)}` });
-    }
+  /** 真正进入 loop 的那一拍（permit executor，或派出隔离子循环的 Agent），带 run 开头的状态。 */
+  startRun(runId: string, identity: RunIdentity, startedBy: "permit-executor" | "subloop", state: ObservableStateInput): void {
+    this.post({ t: "run-started", rt: this.runtimeId, at: this.clock.now(), runId, identity, startedBy, state });
   }
 
-  /** 收摊：停下补齐 / 过期，把 ring 里的尾巴写完，再等写入端的队排空。single-flight。 */
+  /** permit finalizer：业务 outcome 已冻结之后封口。 */
+  closeRun(input: RunCloseInput, identity: RunIdentity): void {
+    this.post({ t: "run-closed", rt: this.runtimeId, at: this.clock.now(), runId: input.runId, identity, outcome: outcomeData(input.outcome), finalState: input.finalState });
+  }
+
+  /** 收摊：告诉观测线程写完手上的就收，**不等**。进程会等观测线程写完才退出（thread.ts 头注）。 */
   dispose(): Promise<void> {
-    return (this.disposing ??= (async () => {
-      this.phase = "disposing";
-      try {
-        await this.deactivate();
-        await this.sequencer.flushPending();
-      } finally {
-        try {
-          await this.store.close();
-        } finally {
-          this.phase = "disposed";
-        }
-      }
-    })());
+    if (this.phase !== "disposed") {
+      this.phase = "disposed";
+      this.thread.close(this.runtimeId);
+    }
+    return Promise.resolve();
   }
 
-  private runScope(runId: string, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>): Readonly<Record<string, string>> {
-    return {
-      runtimeId: this.runtimeId,
-      runId,
-      agentId: identity.agentId,
-      agentInstanceId: identity.agentInstanceId,
-      ...(identity.sessionId === null ? {} : { sessionId: identity.sessionId }),
-    };
+  /** 状态根要被整个删掉：此刻起不再为它写任何文件，观测线程直接丢掉手上的。 */
+  discard(): void {
+    this.phase = "disposed";
+    this.thread.discard(this.runtimeId);
   }
 
-  private boundary<T>(name: string, kind: ObservationRecordKind, scope: Readonly<Record<string, string>>, occurredAt: number, body: T): BoundaryObservationDraft<T> {
-    return {
-      lane: "boundary",
-      occurredAt,
-      kind,
-      name,
-      scope: scope as BoundaryObservationDraft["scope"],
-      correlation: {},
-      generation: { runtime: this.runtimeGeneration, agentAssembly: this.assembly.digest },
-      owner: builtinOwner(AGENT_ENTRY_ID),
-      instrumentation: RUN_ADMISSION_INSTRUMENTATION,
-      attributes: {},
-      body,
-    };
+  /** 交出去的消息过不了线程：是这边构造的数据有问题（bug），报一次诊断。 */
+  private post(work: ObservationWork): void {
+    try {
+      this.thread.post(work);
+    } catch (e) {
+      if (this.handoffFailureReported) return;
+      this.handoffFailureReported = true;
+      this.report({ code: "observation_handoff_failed", message: `交给观测线程的 ${work.t} 过不了线程（只报第一次）：${thrownText(e)}` });
+    }
   }
 }

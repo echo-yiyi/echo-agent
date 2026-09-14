@@ -1,6 +1,6 @@
 # 观测的默认存储改成状态根里的文档，过期规则归产品
 
-> 状态:implemented · 提出 2026-09-14 · 方向拍板 2026-09-14（口头：「默认实现不应该用 sqlite，默认用文档 + 文档过期策略」「清理应该是使用方或产品方定义的，我们只建机制」；旧库「不迁移，我们现在用户并不多」）· 细节拍板 2026-09-14（原「待拍板」四条全部按推荐：「可以，都按照推荐来做」）· 合入 2026-09-14 · 推翻 [观测的公开线](../proposed/2026-09-07-observation-public-face.md) 第 3 条里「SQLite 作为缺省不翻（2026-09-01 拍板）」
+> 状态:implemented · 提出 2026-09-14 · 方向拍板 2026-09-14（口头：「默认实现不应该用 sqlite，默认用文档 + 文档过期策略」「清理应该是使用方或产品方定义的，我们只建机制」；旧库「不迁移，我们现在用户并不多」）· 细节拍板 2026-09-14（原「待拍板」四条全部按推荐：「可以，都按照推荐来做」）· 合入 2026-09-14 · 推翻 [观测的公开线](../proposed/2026-09-07-observation-public-face.md) 第 3 条里「SQLite 作为缺省不翻（2026-09-01 拍板）」· **部分被推翻（2026-09-14）**：「开库与持锁之后」、过期的执行时机（细节决定 1）、`observation.expiry` / `echo.observations.expire()`、`afterLeaseAcquired` 接线，见 [观测不进主流程](2026-09-14-observation-off-main-loop.md)；文档存储本身（目录、提交点、读面、只开字节面）仍然有效
 
 **给谁看**：改观测存储、读面（`echo.observations` / `openObservationReader()` / `observe` 面板）的人，和要给观测定清理规则的产品作者。假设已读 [观测：一次 run 留下的账本](../../design/observability.md) 的 §2（envelope）、§3（两条 lane 与 committed prefix）、§6（读面）。
 
@@ -72,6 +72,8 @@ read-after-error：批文件存在且逐字相同 → committed；不存在且 h
 
 ### 开库与持锁之后
 
+> **已推翻（2026-09-14）**：观测不再挂 lease，也不补齐派生文件；打开存储、建 key 在观测线程里，第一次有 run 时才做。见 [观测不进主流程](2026-09-14-observation-off-main-loop.md)。
+
 装配期（`createAgent`，还没拿 lease）只做两件不和别的写者冲突的事：读或建 `key.json`（在 `StorageDir.lock` 下读、没有才写，建一次后永不改写）；新 runtime 的写入只进自己的 `batches/<runtimeId>/` 与 `heads/<runtimeId>.json`，runtimeId 每个进程唯一——启动前就发生的事实（extension 装载、相位）照常落盘，与 SQLite 时一样不经写入闸。
 
 **拿到 lease 之后**（`Agent.start()` 装上写入闸的那一步，经 lease 生命周期端口新增的 `afterLeaseAcquired` 通知装配层）才碰别的 runtime 留下的东西，而且不阻塞启动：
@@ -96,6 +98,8 @@ read-after-error：批文件存在且逐字相同 → committed；不存在且 h
 **跨进程读**（面板读正在跑的会话）：只读 rename 完成的文件，看不到半截；`runs/` 最多落后正在写派生文件的那一批，读到的是稍旧但自洽的状态。`SessionObservationReaders` 按 `observability/` 目录是否存在发现会话。
 
 ### 过期：规则归产品，机制归 core
+
+> **执行方式已推翻（2026-09-14）**：没有 `observation.expiry`、没有 `expire()`，core 不在任何时点调规则；产品自己调 `expireObservations()`，删不删只凭盘上事实（已封口的 run、head 之前的批）。见 [观测不进主流程](2026-09-14-observation-off-main-loop.md)。
 
 ```ts
 import type { ObservationCapturePolicy, RunObservationHeader, StorageDir } from "@echo-agent/core";
@@ -144,7 +148,7 @@ core 按返回值执行：
 
 ## 细节决定（2026-09-14，原「待拍板」四条全部按推荐）
 
-1. **过期的执行时机**：core 在启动拿到 lease 之后、每个 run 的 `run.closed` 提交之后各调一次规则；另给 `echo.observations.expire()`。没选「只给 `expire()`、时机全归使用方」：那样每个产品都得自己挂时机，忘了库就一直涨。
+1. ~~**过期的执行时机**：core 在启动拿到 lease 之后、每个 run 的 `run.closed` 提交之后各调一次规则；另给 `echo.observations.expire()`。没选「只给 `expire()`、时机全归使用方」：那样每个产品都得自己挂时机，忘了库就一直涨。~~ —— **2026-09-14 推翻**：挂在 run 生命周期上等于让主流程为观测的维护干活；时机全归产品，见 [观测不进主流程](2026-09-14-observation-off-main-loop.md)。
 2. **删掉 `pruned` 读面状态**：粒度是 run 之后「留概要、删正文」没有落点。`RunLookupResult` 的 `pruned` 分支与 `RunIndexEntryV1.bodyState` / `prunedAt` 同一次改动里删，读面与面板对它的处理一起删。
 3. **run 之外的记录**（extension 装卸、收件、相位变更…）：规则的返回值带 `activityBefore`，早于它的可回收；不给 = 不删。没选「跟随批文件连带删」：run 之外的记录与 run 的寿命无关。
 4. **可注入的层**：只开字节面 `observation.store?: StorageDir`。「换成另一种数据库」要的是语义层（`CanonicalObservationStore`）注入，与公开线第 2 条「store 接口留在内部」互相顶着，等真有这样的使用方再拍。

@@ -7,7 +7,6 @@
 // 公开签名一个不改。
 
 import type { CapabilityFactDescriptor, CapabilityFactSink, ObservationFactProjection } from "../observability/fact-sink.ts";
-import { sha256Hex } from "../observability/hash.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
 import type { TaskItem } from "./types.ts";
 
@@ -71,8 +70,9 @@ export const taskFactDescriptor: CapabilityFactDescriptor<TaskFact> = {
       body: {
         count: fact.count,
         ...(fact.bytes === undefined ? {} : { bytes: fact.bytes }),
-        ...(fact.message === undefined ? {} : policy === "content" ? { message: fact.message } : { reasonDigest: sha256Hex(fact.message) }),
+        ...(fact.message !== undefined && policy === "content" ? { message: fact.message } : {}),
       },
+      ...(fact.message !== undefined && policy !== "content" ? { digests: { reasonDigest: { text: fact.message } } } : {}),
     };
   },
 };

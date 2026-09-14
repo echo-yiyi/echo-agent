@@ -11,7 +11,6 @@ import { InMemoryStateLock } from "../src/storage/lock.ts";
 import { scriptedStreamFn, textTurn } from "../src/testing.ts";
 import { adoptStorageView, createStateWriteGate, StateWriteDenied, type LeaseIdentity, type StateWriteGate } from "../src/state/write-gate.ts";
 import { attachStateHost } from "../src/state/host-wiring.ts";
-import type { StateLeaseLifecycle } from "../src/state/lease-lifecycle.ts";
 import { SessionService } from "../src/session/service.ts";
 import type { StateLock } from "../src/storage/lock.ts";
 import type { StorageDir } from "../src/storage/types.ts";
@@ -108,7 +107,6 @@ test("四条 enforced lane 逐条验：只有自己那条开着才放行，别�
 function hostedAgent(input: {
   raw: StorageDir;
   lock: StateLock;
-  lifecycle?: StateLeaseLifecycle;
   sessionService?: SessionService;
 }): { agent: Agent; gate: StateWriteGate; view: StorageDir } {
   const gate = createStateWriteGate();
@@ -122,33 +120,23 @@ function hostedAgent(input: {
     stateLock: input.lock,
     ...(input.sessionService !== undefined ? { sessionService: input.sessionService } : {}),
   });
-  attachStateHost(agent, { gate, ...(input.lifecycle !== undefined ? { leaseLifecycle: input.lifecycle } : {}) });
+  attachStateHost(agent, { gate });
   return { agent, gate, view };
 }
 
-test("stop()：真 view 在 stop 之前写得进、之后写不进；beforeLeaseRelease(stop) 时 cell 仍 installed，revoke 在 release 之前", async () => {
+test("stop()：真 view 在 stop 之前写得进、之后写不进；revoke 在 release 之前", async () => {
   const raw = new InMemoryDir();
   const order: string[] = [];
-  const cellDuringFence: string[] = [];
   let gateRef: StateWriteGate | undefined;
   const lock: StateLock = {
     acquire: async () => ({
       release: async () => {
-        order.push("release");
+        order.push(`release:${gateRef!.cell.state()}`); // release 那一刻 cell 已经 revoke
       },
       lost: new Promise<Error>(() => {}),
     }),
   };
-  const lifecycle: StateLeaseLifecycle = {
-    beforeLeaseRelease: async (input) => {
-      order.push(`beforeLeaseRelease:${input.reason}`);
-      cellDuringFence.push(gateRef!.cell.state()); // Host 的 writer 要在这时还写得动
-    },
-    onLeaseLost: async () => {
-      order.push("onLeaseLost");
-    },
-  };
-  const { agent, gate, view } = hostedAgent({ raw, lock, lifecycle });
+  const { agent, gate, view } = hostedAgent({ raw, lock });
   gateRef = gate;
   await agent.start();
 
@@ -157,8 +145,7 @@ test("stop()：真 view 在 stop 之前写得进、之后写不进；beforeLease
   expect(gate.cell.state()).toBe("installed");
 
   await agent.stop();
-  expect(order).toEqual(["beforeLeaseRelease:stop", "release"]);
-  expect(cellDuringFence).toEqual(["installed"]);
+  expect(order).toEqual(["release:revoked"]);
   expect(gate.cell.state()).toBe("revoked");
   // **删掉 gate.revoke() 这条就会红**：租约已经还回去，view 却还写得进状态根
   await expect(view.write("probe.json", "停了还写")).rejects.toBeInstanceOf(StateWriteDenied);
@@ -205,40 +192,15 @@ test("**P0**：install 之后启动失败 → 先 revoke 再 release；旧 view 
   await fresh.agent.stop();
 });
 
-test("从没 start() 过就 stop()：不调正常释放 fence（没有合法租约可释放）", async () => {
-  const calls: string[] = [];
-  const lifecycle: StateLeaseLifecycle = {
-    beforeLeaseRelease: async () => {
-      calls.push("beforeLeaseRelease");
-    },
-    onLeaseLost: async () => {
-      calls.push("onLeaseLost");
-    },
-  };
-  const { agent } = hostedAgent({ raw: new InMemoryDir(), lock: new InMemoryStateLock(), lifecycle });
-  await agent.stop();
-  expect(calls).toEqual([]);
-});
-
-test("丢锁之后再 stop()：只做 loss-safe 清理，**不再调 beforeLeaseRelease**；onLeaseLost 恰好一次", async () => {
+test("丢锁之后再 stop()：只做 loss-safe 清理，stop 照样 resolve、一个字都不再写", async () => {
   const raw = new InMemoryDir();
-  const calls: string[] = [];
   const lock = new InMemoryStateLock();
-  const lifecycle: StateLeaseLifecycle = {
-    beforeLeaseRelease: async () => {
-      calls.push("beforeLeaseRelease");
-    },
-    onLeaseLost: async () => {
-      calls.push("onLeaseLost");
-    },
-  };
-  const { agent, gate, view } = hostedAgent({ raw, lock, lifecycle });
+  const { agent, gate, view } = hostedAgent({ raw, lock });
   await agent.start();
   await view.write("before.json", "还持有的时候");
 
   lock.simulateLost("租约过期");
   await new Promise((r) => setTimeout(r, 10));
-  expect(calls).toEqual(["onLeaseLost"]);
   expect(gate.cell.state()).toBe("revoked");
   // loss fence 不补 flush：从丢锁那一刻起 view 一律拒写
   await expect(view.write("after.json", "丢锁之后")).rejects.toBeInstanceOf(StateWriteDenied);
@@ -246,8 +208,6 @@ test("丢锁之后再 stop()：只做 loss-safe 清理，**不再调 beforeLease
   // 丢锁之后的 stop() 必须 resolve：loss-safe 清理不该再碰状态根，也就没有会被闸拒掉的写
   //（此前这里 `.catch(() => undefined)` 把「撤 meta 被闸拒、stop() reject」整个吞掉了，review 2026-09-07）
   await agent.stop();
-  // 上一版无条件调用：丢锁之后又走一次正常释放 fence（那条 fence 的前提是「还持有合法租约」）
-  expect(calls).toEqual(["onLeaseLost"]);
   expect(await raw.read("after.json")).toBeNull();
 });
 

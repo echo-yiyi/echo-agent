@@ -6,7 +6,6 @@
 // 这些多发生在 run 之外：没有 runId 就是 runtime activity，经 snapshot → subscribe 取得。
 
 import type { CapabilityFactDescriptor, ObservationFactProjection } from "../observability/fact-sink.ts";
-import { sha256Hex } from "../observability/hash.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
 import type { Schedule } from "./types.ts";
 
@@ -44,8 +43,9 @@ export const scheduleFactDescriptor: CapabilityFactDescriptor<ScheduleFact> = {
         ...(fact.scheduleKind === undefined ? {} : { scheduleKind: fact.scheduleKind }),
         ...(fact.via === undefined ? {} : { via: fact.via }),
         ...(fact.reason === undefined ? {} : { reason: fact.reason }),
-        ...(fact.message === undefined ? {} : policy === "content" ? { message: fact.message } : { reasonDigest: sha256Hex(fact.message) }),
+        ...(fact.message !== undefined && policy === "content" ? { message: fact.message } : {}),
       },
+      ...(fact.message !== undefined && policy !== "content" ? { digests: { reasonDigest: { text: fact.message } } } : {}),
     };
   },
 };

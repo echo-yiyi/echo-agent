@@ -398,14 +398,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     return this.recentCommitted;
   }
 
-  /**
-   * 这个 run 还在不在跟踪中：`run.accepted` 已预留、`run.closed` 还没落盘。过期拒删的判据用它而不是 `isRunOpen`——
-   * 封口已预留、还没落盘的那一段 `isRunOpen` 已经是 false，这时删掉概要，随后那批提交会把它写回来。
-   */
-  isTrackingRun(runId: string): boolean {
-    return this.runBoundaries.has(runId);
-  }
-
   committedRunIndex(runId: string): RunIndexEntryV1 | undefined {
     return this.runIndexCache.get(runId) ?? this.closedRuns.get(runId);
   }
@@ -450,7 +442,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
 
   /**
    * 收摊前排空：把 ring 里还没到批量阈值的 candidate 立刻提交，等到 flush 全部 settle。
-   * 不是 close——writer 状态不变，之后仍可 offer；只是 Runtime 关 SQLite 之前必须先把尾巴写完。
+   * 不是 close——writer 状态不变，之后仍可 offer；只是收摊关写入端之前必须先把尾巴写完。
    * writer 已 terminal 时直接返回（没有可提交的东西，也不再有定时器）。
    */
   async flushPending(): Promise<void> {
@@ -1465,16 +1457,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
 
   private seal(cause: Error): void {
     this.terminate("sealed", cause);
-  }
-
-  /**
-   * 丢锁 / 交还之后的封口——`StateLeaseLifecycle.onLeaseLost` 接到这里（review 2026-09-07）。
-   * 状态根已经不归本进程：**不 flush**，ring 里没写完的留在内存；之后的 offer / boundary 一律经
-   * `unavailable()` 丢弃。幂等：已经 terminal 就什么都不做。
-   * 下游对 `lost-lease` 的判断（`flushPending` / `unavailable` / health）早就写好了，此前只是没有入口。
-   */
-  markLeaseLost(cause: Error): void {
-    this.terminate("lost-lease", cause);
   }
 
   private terminate(status: "sealed" | "lost-lease", cause: Error): void {
