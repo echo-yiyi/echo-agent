@@ -16,11 +16,13 @@ import { systemClock, type Clock } from "./clock.ts";
 import type { StorageDir } from "../storage/types.ts";
 import type { CapabilityFactSink } from "../observability/fact-sink.ts";
 import type { ScheduleFact } from "./observe.ts";
-import { cronMatches, latestMatchBefore, validateCron } from "./cron.ts";
+import { latestMatchBefore, nextMatchAfter, validateCron } from "./cron.ts";
 import {
+  CRON_GRACE_MS,
   DEFAULT_SCHEDULE_LIMITS,
   ONESHOT_GRACE_MS,
   graceMs,
+  type CronSchedule,
   type Schedule,
   type ScheduleEntry,
 } from "./types.ts";
@@ -130,11 +132,11 @@ export async function listSchedules(ctx: AgentSchedule): Promise<readonly Schedu
 
 /**
  * 步进一次:逐条判到期 → 投递 → 簿记落盘。
- * 单条异常不杀整个 tick(逐条 try + report);同一分钟不重复触发(lastFiredAt 的分钟标记)。
+ * 单条异常不杀整个 tick(逐条 try + report);cron 同一次匹配只投一次(游标,见 cronDue)。
  */
 export async function tickSchedule(ctx: AgentSchedule, at?: number): Promise<void> {
   // **不许重入**：`deliver` 变成可等之后，一拍还没走完（还卡在投递上）时下一拍就来了，
-  // 那时 `lastFiredAt` 还没更新，`isDue` 又判真——同一条会投两次（实测 FakeClock 下必现）。
+  // 那时 `lastFiredAt` 还没更新，`dueMark` 又判到期——同一条会投两次（实测 FakeClock 下必现）。
   // 跳过本拍是对的：条目还在，簿记也没动，下一拍照样判到期。
   const inFlight = ticking.get(ctx);
   if (inFlight !== undefined) return;
@@ -169,7 +171,13 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
   const fired: Schedule[] = [];
   for (const entry of [...ctx.entries.values()]) {
     try {
-      if (!isDue(entry, now)) continue;
+      const due = dueMark(entry, now);
+      if (due === null) continue;
+      if (due === "missed") {
+        skipMissedCron(ctx, entry, now, "tick");
+        dirty = true;
+        continue;
+      }
       // **等接受成功再簿记**：投递抛错时下面几行不执行，条目原样留着，下一 tick 重来。
       await ctx.deliver?.(environmentMessage(renderFire(entry.schedule), SCHEDULE_KIND, entry.schedule.id));
       // deliver 返回 = 投递被接受：这是 delivered 的唯一 emission point
@@ -182,7 +190,7 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
       if (entry.schedule.kind === "at") {
         ctx.entries.delete(entry.schedule.id); // 一次性:触发即删
       } else {
-        ctx.entries.set(entry.schedule.id, { ...current, lastFiredAt: now });
+        ctx.entries.set(entry.schedule.id, { ...current, lastFiredAt: due });
       }
       dirty = true;
     } catch (e) {
@@ -243,7 +251,7 @@ export async function disposeSchedule(ctx: AgentSchedule): Promise<void> {
 
 /* ───────────── 私有 ───────────── */
 
-/** 补跑:错过不超过窗口的补一次;超过的不补,但把 every 的基线对齐到 now(否则 tick 会立即触发追欠账)。 */
+/** 补跑:错过不超过窗口的补一次;超过的不补,every 的基线对齐到 now(否则 tick 会立即触发追欠账),cron 的游标跳到 now。 */
 async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
   await ensureLoaded(ctx);
   let dirty = false;
@@ -268,17 +276,19 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
           observe(ctx, { kind: "missed", id: s.id, scheduleKind: s.kind, via: "catch-up", reason: "skipped-backlog" }, now);
           dirty = true;
         }
-        continue; // 窗口内的交给首次 tick(isDue 为真)正常触发
+        continue; // 窗口内的交给首次 tick(dueMark 判到期)正常触发
       }
-      // cron:往回找最近匹配分钟;错过且在 2h 扫描窗内 → 补一次
-      const missed = latestMatchBefore(s.cron, now);
-      // 从没触发过的看 createdAt：诞生之前的那一次不是欠账（review 2026-09-07：此前 09:30 建的「每天 09:00」重启就补投一次）
-      if (missed !== null && (entry.lastFiredAt ?? s.createdAt) < missed && now - missed >= 60_000) {
+      // cron:与 tick 同一个判据(游标之后欠着的那次),见 cronDue
+      const due = cronDue(entry, s, now);
+      if (due === "missed") {
+        skipMissedCron(ctx, entry, now, "catch-up");
+        dirty = true;
+      } else if (due !== null) {
         // 补跑同样：接受成功才记 fired，否则下次启动还会补
         await ctx.deliver?.(environmentMessage(renderFire(s), SCHEDULE_KIND, s.id));
         observe(ctx, { kind: "delivered", id: s.id, scheduleKind: s.kind, via: "catch-up" }, now);
         fired.push(s);
-        ctx.entries.set(s.id, { ...entry, lastFiredAt: now });
+        ctx.entries.set(s.id, { ...entry, lastFiredAt: due });
         dirty = true;
       }
     } catch (e) {
@@ -326,20 +336,49 @@ function requireDeliver(ctx: AgentSchedule): void {
 
 /* ───────────── 到期判定(纯逻辑) ───────────── */
 
-function isDue(entry: ScheduleEntry, now: number): boolean {
+/**
+ * 这一拍要不要投。null = 没到期;"missed" = cron 欠着的那次已超宽限;数字 = 该投,且投递被接受后
+ * `lastFiredAt` 记成这个值(cron 是应发生时刻,every 是投递时刻,at 触发即删不用它)。
+ */
+function dueMark(entry: ScheduleEntry, now: number): number | "missed" | null {
   const s = entry.schedule;
   switch (s.kind) {
     case "at":
-      return entry.lastFiredAt === null && now >= s.at;
+      return entry.lastFiredAt === null && now >= s.at ? now : null;
     case "every":
-      return now >= (entry.lastFiredAt ?? s.createdAt) + s.everyMs;
-    case "cron": {
-      if (!cronMatches(s.cron, new Date(now))) return false;
-      // 同一分钟不重复:上次触发落在同一分钟就不再触发
-      const marker = Math.floor(now / 60_000);
-      return entry.lastFiredAt === null || Math.floor(entry.lastFiredAt / 60_000) !== marker;
-    }
+      return now >= (entry.lastFiredAt ?? s.createdAt) + s.everyMs ? now : null;
+    case "cron":
+      return cronDue(entry, s, now);
   }
+}
+
+/** 每条条目游标之后的下一次匹配。条目对象每次簿记都整条替换,所以按对象缓存读不到旧游标;每拍只做一次 Map 查找。 */
+const nextCronOccurrence = new WeakMap<ScheduleEntry, number | null>();
+
+/**
+ * cron 欠不欠一次、投哪一次。
+ *
+ * 游标 = `lastFiredAt`(上次被接受的那次应发生时刻);从没投过就是 `createdAt`,诞生那一分钟本身算数,之前的不算。
+ * 游标之后第一个匹配已经到点 = 欠着一次:
+ *   - 宽限窗(CRON_GRACE_MS)内有匹配 → 投窗内最近的那次;更早的并进这一次(与 inbox 按 incarnation 去重同一口径)。
+ *   - 窗内一次都没有 → "missed"。
+ * **不看「现在是不是匹配的那一分钟」**:投递失败撑过那一分钟,这次仍然欠着,下一拍接着投,直到接受或超宽限。
+ */
+function cronDue(entry: ScheduleEntry, s: CronSchedule, now: number): number | "missed" | null {
+  let next = nextCronOccurrence.get(entry);
+  if (next === undefined) {
+    next = nextMatchAfter(s.cron, entry.lastFiredAt ?? s.createdAt - 1);
+    nextCronOccurrence.set(entry, next);
+  }
+  if (next === null || next > now) return null;
+  return latestMatchBefore(s.cron, now, CRON_GRACE_MS / 60_000) ?? "missed";
+}
+
+/** cron 超宽限:不投,游标跳到 now(之前的匹配全部作废),留一条 missed。调用方负责落盘。 */
+function skipMissedCron(ctx: AgentSchedule, entry: ScheduleEntry, now: number, via: "tick" | "catch-up"): void {
+  const s = entry.schedule;
+  ctx.entries.set(s.id, { ...entry, lastFiredAt: now });
+  observe(ctx, { kind: "missed", id: s.id, scheduleKind: s.kind, via, reason: "skipped-backlog" }, now);
 }
 
 function renderFire(s: Schedule): string {

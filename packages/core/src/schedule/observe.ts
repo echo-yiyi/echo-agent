@@ -2,7 +2,7 @@
 //   · created / cancelled：`add / cancel` 的 `save()` settle 之后；
 //   · delivered：`tickSchedule` / `catchUp` 的 deliver callback 返回之后（投递被接受才算）；
 //   · bookkeeping-failed：投递之后簿记 `save()` 抛错；
-//   · missed：补跑判定错过（超窗的一次性任务被删、every 跳过欠账对齐到下次）。
+//   · missed：补跑判定错过（超窗的一次性任务被删、every 跳过欠账对齐到下次）；cron 欠着的那次超宽限（tick 与补跑都会发）。
 // 这些多发生在 run 之外：没有 runId 就是 runtime activity，经 snapshot → subscribe 取得。
 
 import type { CapabilityFactDescriptor, ObservationFactProjection } from "../observability/fact-sink.ts";

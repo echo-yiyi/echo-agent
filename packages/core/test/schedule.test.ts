@@ -26,7 +26,8 @@ import type { Diagnostic } from "../src/errors.ts";
 import type { ScheduleDeps } from "../src/schedule/harness.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
-import { cronMatches, validateCron } from "../src/schedule/cron.ts";
+import { cronMatches, nextMatchAfter, validateCron } from "../src/schedule/cron.ts";
+import type { ScheduleFact } from "../src/schedule/observe.ts";
 import {
   createAgentSchedule, addSchedule, cancelSchedule, listSchedules, tickSchedule,
   startSchedule, stopSchedule, disposeSchedule, SCHEDULE_FILE, type AgentSchedule,
@@ -81,6 +82,27 @@ describe("cron 子集", () => {
     expect(cronMatches("0 0 1 */3 *", at("2026-03-01T00:00:00"))).toBe(false);
     expect(cronMatches("0 0 1 */3 *", at("2026-04-01T00:00:00"))).toBe(true);
     expect(cronMatches("0 0 1/2 * *", at("2026-08-31T00:00:00"))).toBe(true); // 裸 N/S 的上界是字段上界
+  });
+
+  test("nextMatchAfter 按字段跳的结果与逐分钟扫描一致;永不命中的表达式返回 null", () => {
+    const bruteNext = (expr: string, after: number, days: number): number | null => {
+      const start = Math.floor(after / 60_000) * 60_000 + 60_000;
+      for (let t = start; t <= start + days * 86_400_000; t += 60_000) if (cronMatches(expr, new Date(t))) return t;
+      return null;
+    };
+    const exprs = ["* * * * *", "0 9 * * *", "*/15 * * * *", "0 9 * * 1-5", "0 9 1 * 3", "0 0 */2 * *", "30 23 31 * *", "5,35 */6 * 1-3,8 0"];
+    const afters = ["2026-08-05T09:00:00", "2026-08-05T09:00:30", "2026-08-31T23:59:59", "2026-12-31T23:30:00"].map((s) => Date.parse(s));
+    for (const expr of exprs) {
+      for (const after of afters) {
+        const fast = nextMatchAfter(expr, after);
+        const brute = bruteNext(expr, after, 60);
+        // 扫描窗内没有:只能断言跳出来的结果也在窗外
+        if (brute === null) expect([expr, after, fast === null || fast > after + 60 * 86_400_000]).toEqual([expr, after, true]);
+        else expect([expr, after, fast]).toEqual([expr, after, brute]);
+      }
+    }
+    expect(nextMatchAfter("0 0 29 2 *", Date.parse("2026-08-05T09:00:00"))).toBe(Date.parse("2028-02-29T00:00:00"));
+    expect(nextMatchAfter("0 0 30 2 *", Date.parse("2026-08-05T09:00:00"))).toBeNull();
   });
 
   test("校验:坏表达式给人话拒因", () => {
@@ -182,6 +204,53 @@ describe("tick", () => {
     expect(reports.some((r) => r.code === "schedule_fire_failed")).toBe(true);
   });
 
+  test("cron 投递失败撑过匹配的那一分钟:恢复后接着投、只投一次,游标记应发生时刻", async () => {
+    // 此前 cron 每拍只问「现在是不是 09:00 这一分钟」:09:00 整分钟都投不进去,09:01 起就不再尝试,今天这次静默丢失
+    const { h, delivered } = harness();
+    let accepting = false;
+    Object.assign(h, {
+      deliver: (m: AgentMessage) => {
+        if (!accepting) throw new Error("inbox 拒收:stopping");
+        delivered.push(m);
+      },
+    });
+    const at = (s: string) => Date.parse(`2026-08-05T${s}`);
+    await addSchedule(h, sched({ kind: "cron", cron: "0 9 * * *", createdAt: at("08:00:00") } as never, "daily"), at("08:00:00"));
+    await tickSchedule(h, at("09:00:10"));
+    await tickSchedule(h, at("09:00:50"));
+    expect(delivered.length).toBe(0);
+    accepting = true;
+    await tickSchedule(h, at("09:01:30"));
+    expect(delivered.length).toBe(1);
+    expect((await listSchedules(h))[0]!.lastFiredAt).toBe(at("09:00:00"));
+    await tickSchedule(h, at("09:02:00"));
+    expect(delivered.length).toBe(1);
+  });
+
+  test("cron 欠着的那次超过宽限仍投不进去:不投、游标跳到 now、发 missed(tick),下一次照常", async () => {
+    const { h, delivered } = harness();
+    const facts: ScheduleFact[] = [];
+    let accepting = false;
+    Object.assign(h, {
+      deliver: (m: AgentMessage) => {
+        if (!accepting) throw new Error("inbox 拒收:stopping");
+        delivered.push(m);
+      },
+      observe: { offer: (f: ScheduleFact) => void facts.push(f) },
+    });
+    const at = (s: string) => Date.parse(`2026-08-05T${s}`);
+    await addSchedule(h, sched({ kind: "cron", cron: "0 9 * * *", createdAt: at("08:00:00") } as never, "daily"), at("08:00:00"));
+    await tickSchedule(h, at("10:59:30")); // 距 09:00 不到 2h:还欠着,继续试
+    expect(facts.some((f) => f.kind === "missed")).toBe(false);
+    accepting = true;
+    await tickSchedule(h, at("11:00:30")); // 超宽限:恢复了也不补这一次
+    expect(delivered.length).toBe(0);
+    expect(facts.at(-1)).toMatchObject({ kind: "missed", id: "daily", scheduleKind: "cron", via: "tick", reason: "skipped-backlog" });
+    expect((await listSchedules(h))[0]!.lastFiredAt).toBe(at("11:00:30"));
+    await tickSchedule(h, Date.parse("2026-08-06T09:00:05"));
+    expect(delivered.length).toBe(1);
+  });
+
   test("没有 deliver 就 tick = 装配错误,fail-loud（到期了没人收）", async () => {
     const h = createAgentSchedule(new InMemoryDir());
     await expect(tickSchedule(h)).rejects.toThrow("没有 deliver");
@@ -251,6 +320,26 @@ describe("重启接续(同一 dir 建新 harness)", () => {
     await startSchedule(d.h, Date.parse("2026-08-05T09:40:00"));
     stopSchedule(d.h);
     expect(d.delivered.length).toBe(1);
+  });
+
+  test("cron 停机超过宽限:补跑不投、发 missed(catch-up),此前没有任何痕迹", async () => {
+    const dir = new InMemoryDir();
+    const a = harness(dir);
+    await addSchedule(a.h, sched({ kind: "cron", cron: "0 9 * * *", createdAt: Date.parse("2026-08-05T08:00:00") } as never, "daily"));
+    const b = harness(dir);
+    const facts: ScheduleFact[] = [];
+    b.h.observe = { offer: (f) => void facts.push(f) };
+    await startSchedule(b.h, Date.parse("2026-08-05T12:00:00"));
+    stopSchedule(b.h);
+    expect(b.delivered.length).toBe(0);
+    expect(facts).toMatchObject([{ kind: "missed", id: "daily", via: "catch-up", reason: "skipped-backlog" }]);
+    // 游标已落盘:再重启一次不会重复报
+    const c = harness(dir);
+    const again: ScheduleFact[] = [];
+    c.h.observe = { offer: (f) => void again.push(f) };
+    await startSchedule(c.h, Date.parse("2026-08-05T12:05:00"));
+    stopSchedule(c.h);
+    expect(again).toEqual([]);
   });
 
   test("坏档逐条丢弃,不拖垮启动", async () => {

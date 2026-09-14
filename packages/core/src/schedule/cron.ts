@@ -34,12 +34,40 @@ export function cronMatches(expr: string, d: Date): boolean {
   const h = fieldMatches(hour, d.getHours(), 1);
   const monthOk = fieldMatches(month, d.getMonth() + 1, 3);
   if (!(m && h && monthOk)) return false;
+  return dayMatches(dom, dow, d);
+}
 
+/**
+ * 严格晚于 `after` 的第一个匹配分钟起点（本地时区）；往后 `maxYears` 年仍没有返回 null（`0 0 30 2 *` 这类永不命中的表达式）。
+ *
+ * 按字段跳而不是逐分钟扫：月不对跳到下月 1 日、日不对跳到次日 0 点、时不对跳到下个整点。
+ * 「每年 2 月 29 日」这种最坏情况也只走几千步，调度器每拍都要问「下一次在哪」，逐分钟扫扛不住。
+ */
+export function nextMatchAfter(expr: string, after: number, maxYears = 5): number | null {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [minute, hour, dom, month, dow] = fields as [string, string, string, string, string];
+  let d = new Date(Math.floor(after / 60_000) * 60_000 + 60_000);
+  const limit = new Date(d.getTime());
+  limit.setFullYear(limit.getFullYear() + maxYears);
+  while (d.getTime() <= limit.getTime()) {
+    let next: Date;
+    if (!fieldMatches(month, d.getMonth() + 1, 3)) next = new Date(d.getFullYear(), d.getMonth() + 1, 1, 0, 0);
+    else if (!dayMatches(dom, dow, d)) next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0);
+    else if (!fieldMatches(hour, d.getHours(), 1)) next = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() + 1, 0);
+    else if (!fieldMatches(minute, d.getMinutes(), 0)) next = new Date(d.getTime() + 60_000);
+    else return d.getTime();
+    // 夏令时回拨那一小时里，按本地字段构造出的时刻可能不晚于当前：退化成逐分钟前进，保证不原地打转
+    d = next.getTime() > d.getTime() ? next : new Date(d.getTime() + 60_000);
+  }
+  return null;
+}
+
+/** 日与星期:都不约束 → 过;只约束一边 → 看那边;都约束 → OR(标准语义,两家一致) */
+function dayMatches(dom: string, dow: string, d: Date): boolean {
   const domOk = fieldMatches(dom, d.getDate(), 2);
   const dowVal = d.getDay(); // 0 = 周日
   const dowOk = fieldMatches(dow, dowVal, 4) || (dowVal === 0 && fieldMatches(dow, 7, 4));
-
-  // 日与星期:都不约束 → 过;只约束一边 → 看那边;都约束 → OR(标准语义,两家一致)
   if (dom === "*" && dow === "*") return true;
   if (dom === "*") return dowOk;
   if (dow === "*") return domOk;

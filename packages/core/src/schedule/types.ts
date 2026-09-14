@@ -23,7 +23,15 @@ export type CronSchedule = ScheduleBase & { readonly kind: "cron"; readonly cron
 
 export type Schedule = OneShotSchedule | IntervalSchedule | CronSchedule;
 
-/** 盘上的一条 = 定义 + 触发簿记。lastFiredAt 落盘:重启后的补跑窗口和下次到期都从它算。 */
+/**
+ * 盘上的一条 = 定义 + 触发簿记。lastFiredAt 落盘:重启后的补跑窗口和下次到期都从它算。
+ *
+ * 含义按 kind 分:
+ *   - cron:上次**被 inbox 接受**的那次**应发生时刻**(匹配分钟的起点),不是投递时刻。它是游标:
+ *     游标之后还有已到点的匹配 = 欠着一次,投递失败撑过匹配的那一分钟也照样欠着。
+ *   - every:上次被接受时的投递时刻,下个周期从它起算。
+ *   - at:触发即删,不用它。
+ */
 export type ScheduleEntry = {
   readonly schedule: Schedule;
   readonly lastFiredAt: number | null;
@@ -39,6 +47,12 @@ export const DEFAULT_SCHEDULE_LIMITS = {
 export function graceMs(periodMs: number): number {
   return Math.max(120_000, Math.min(Math.floor(periodMs / 2), 7_200_000));
 }
+
+/**
+ * cron 的宽限:欠着的那次最近一个匹配已经过去这么久还没投进去,就算错过、游标跳到现在。
+ * 与 graceMs 的上钳位同值;cron 的周期不是常数,不按周期推算。
+ */
+export const CRON_GRACE_MS = 7_200_000;
 
 /** 一次性任务的宽限:「5 秒后执行」的创建流程本身可能花掉几秒。 */
 export const ONESHOT_GRACE_MS = 120_000;
