@@ -123,26 +123,29 @@ export class ExtensionHost {
    * 误拒；并发 mount 同一 generation 则由串行本身保证只有第一个成功（上一版两个都越过 has()，Effect 泄漏，实测）。
    */
   mount(generation: string, entries: readonly ExtensionEntry[]): Promise<void> {
-    return this.serialize(async () => {
-      try {
-        await this.doMount(generation, entries);
-      } catch (e) {
-        // PREPARE 与 LOADING 的失败都走到这：前者还没加载任何 Entry，后者是某个 Entry 的 apply / Effect start 失败并已回滚
-        const failed = e instanceof ExtensionMountError;
-        probeExtension(this.observe, {
-          kind: "generation_mount_failed",
-          generation,
-          entryIds: entries.map((x) => x.entryId),
-          stage: failed ? "apply" : "prepare",
-          ...(failed ? { failedEntryId: e.entryId } : {}),
-          error: failed ? e.cause : e,
-          unwindErrors: failed ? e.unwindErrors.length : 0,
-        });
-        throw e;
-      }
-      const g = this.generations.get(generation);
-      if (g !== undefined) probeExtension(this.observe, { kind: "generation_mounted", generation, fibers: g.fibers.map(fiberFact) });
-    });
+    return this.serialize(() => this.mountObserved(generation, entries));
+  }
+
+  /** `doMount` 加观测：装上 / 没装上各记一条。`mount()` 与 `replace()` 里的装新、装回都走这里——换代在账本里不能是空白。 */
+  private async mountObserved(generation: string, entries: readonly ExtensionEntry[]): Promise<void> {
+    try {
+      await this.doMount(generation, entries);
+    } catch (e) {
+      // PREPARE 与 LOADING 的失败都走到这：前者还没加载任何 Entry，后者是某个 Entry 的 apply / Effect start 失败并已回滚
+      const failed = e instanceof ExtensionMountError;
+      probeExtension(this.observe, {
+        kind: "generation_mount_failed",
+        generation,
+        entryIds: entries.map((x) => x.entryId),
+        stage: failed ? "apply" : "prepare",
+        ...(failed ? { failedEntryId: e.entryId } : {}),
+        error: failed ? e.cause : e,
+        unwindErrors: failed ? e.unwindErrors.length : 0,
+      });
+      throw e;
+    }
+    const g = this.generations.get(generation);
+    if (g !== undefined) probeExtension(this.observe, { kind: "generation_mounted", generation, fibers: g.fibers.map(fiberFact) });
   }
 
   /**
@@ -286,6 +289,13 @@ export class ExtensionHost {
     if (next !== null && this.generations.has(next.generation)) throw new ExtensionAbiError(`generation '${next.generation}' 已经 mount 过，不能拿它当新的一代`);
     if (!(safePoint in RELOAD_BOUNDARY_RANK)) throw new ExtensionAbiError(`safePoint 必须是 turn | run | agent | process，收到 ${String(safePoint)}`);
 
+    const entryIds = g.fibers.map((f) => f.entryId);
+    // 拒绝也进账本（与 `unmount()` 被拒同一条事实）：事后复盘「为什么 /reload 没换上」要看得到是谁挡的
+    const refuse = (reason: string): ReplaceResult => {
+      probeExtension(this.observe, { kind: "generation_unmount_refused", generation: old, entryIds, error: new ExtensionAbiError(reason) });
+      return { kind: "refused", reason };
+    };
+
     /* ── 能不能换：两条都在改任何状态之前判，refused 时 Host 零变化 ── */
     const tooStrong = g.fibers.filter((f) => RELOAD_BOUNDARY_RANK[f.reload] > RELOAD_BOUNDARY_RANK[safePoint]);
     if (tooStrong.length > 0) {
@@ -293,24 +303,25 @@ export class ExtensionHost {
       const who = tooStrong.map((f) => `${f.label} ${f.definition.reload === undefined ? "没声明 reload（缺省 'agent'）" : `声明 reload '${f.reload}'`}`).join("；");
       const how = tooStrong.some((f) => f.reload === "process") ? "重启进程" : "重启 Agent";
       const hint = tooStrong.some((f) => f.definition.reload === undefined) ? `；能在两次 run 之间换的扩展请在 defineExtension 里声明 reload: "run"` : "";
-      return { kind: "refused", reason: `${who}——比当前安全点 '${safePoint}' 强，要换只能${how}${hint}` };
+      return refuse(`${who}——比当前安全点 '${safePoint}' 强，要换只能${how}${hint}`);
     }
     const dependents = this.dependentsOf(g);
     if (dependents.length > 0) {
-      return { kind: "refused", reason: `别的 generation 还有 consumer 绑在它的 provider 上（连带重装不在这一版，先卸 consumer）：${dependents.join("；")}` };
+      return refuse(`别的 generation 还有 consumer 绑在它的 provider 上（连带重装不在这一版，先卸 consumer）：${dependents.join("；")}`);
     }
 
     /* ── 卸旧：disposer 的错收着，不中断——卸都卸了，剩下的只有往前走 ── */
     const unwindErrors = await this.retire(g);
+    probeExtension(this.observe, { kind: "generation_unmounted", generation: old, entryIds, cleanupErrors: unwindErrors.length });
     if (next === null) return { kind: "replaced", unwindErrors };
 
-    /* ── 装新；装不上就把旧的按原 entries 装回去 ── */
+    /* ── 装新；装不上就把旧的按原 entries 装回去。两次装都经 mountObserved：装上 / 没装上各一条事实 ── */
     try {
-      await this.doMount(next.generation, next.entries);
+      await this.mountObserved(next.generation, next.entries);
       return { kind: "replaced", unwindErrors };
     } catch (error) {
       try {
-        await this.doMount(old, g.entries);
+        await this.mountObserved(old, g.entries);
         return { kind: "rolled_back", error, unwindErrors };
       } catch (rollbackError) {
         return { kind: "lost", error, rollbackError, unwindErrors };

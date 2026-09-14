@@ -107,6 +107,57 @@ test("卸载被拒（别的代还有 consumer 绑在它的 provider 上）：记
   expect(projectExtensionFact(refused, "metadata")!.name).toBe("extension.generation.unmount_refused");
 });
 
+/* ── 换代事务 replace()（热部署，2026-09-14）：卸旧、装新、装回、被拒，每一步都是账本里已有的那几种事实 ── */
+
+const swappable = (tag: string, failApply = false) =>
+  defineExtension({
+    name: `demo-swappable-${tag}`,
+    hostAbiVersion: 1,
+    reload: "run",
+    apply() {
+      if (failApply) throw new Error(`${tag} 装不上`);
+    },
+  });
+
+test("replace 换成功：记 unmounted（旧代）+ mounted（新代），顺序就是先卸后装", async () => {
+  const { host, facts } = recorder();
+  const h = host();
+  await h.mount("g1", [entry("hot", swappable("v1"))]);
+  const r = await h.replace("g1", { generation: "g2", entries: [entry("hot", swappable("v2"))] }, { safePoint: "run" });
+  expect(r.kind).toBe("replaced");
+  expect(facts.map((f) => `${f.kind}:${f.generation}`)).toEqual(["generation_mounted:g1", "generation_unmounted:g1", "generation_mounted:g2"]);
+});
+
+test("replace 新的装不上：记 unmounted（旧）+ mount_failed（新，指明 Entry）+ mounted（旧装回来）", async () => {
+  const { host, facts } = recorder();
+  const h = host();
+  await h.mount("g1", [entry("hot", swappable("v1"))]);
+  const r = await h.replace("g1", { generation: "g2", entries: [entry("hot", swappable("v2", true))] }, { safePoint: "run" });
+  expect(r.kind).toBe("rolled_back");
+  expect(facts.map((f) => `${f.kind}:${f.generation}`)).toEqual([
+    "generation_mounted:g1",
+    "generation_unmounted:g1",
+    "generation_mount_failed:g2",
+    "generation_mounted:g1",
+  ]);
+  expect(facts[2]).toMatchObject({ kind: "generation_mount_failed", stage: "apply", failedEntryId: "hot" });
+});
+
+test("replace 被拒（声明的 reload 比安全点强）：记 unmount_refused，Host 零变化；只卸（next 为 null）记 unmounted", async () => {
+  const { host, facts } = recorder();
+  const h = host();
+  await h.mount("g1", [entry("provider", provider)]); // reload 缺省 agent
+  const refused = await h.replace("g1", { generation: "g2", entries: [entry("provider", provider)] }, { safePoint: "run" });
+  expect(refused.kind).toBe("refused");
+  expect(facts.map((f) => f.kind)).toEqual(["generation_mounted", "generation_unmount_refused"]);
+  expect(facts[1]).toMatchObject({ kind: "generation_unmount_refused", generation: "g1", entryIds: ["provider"] });
+  expect(h.mountedGenerations).toEqual(["g1"]);
+
+  await h.mount("g3", [entry("hot", swappable("v1"))]);
+  expect((await h.replace("g3", null, { safePoint: "run" })).kind).toBe("replaced");
+  expect(facts.at(-1)).toMatchObject({ kind: "generation_unmounted", generation: "g3", entryIds: ["hot"], cleanupErrors: 0 });
+});
+
 test("没给探针的 Host 照常工作（低层用法）", async () => {
   const h = new ExtensionHost();
   await h.mount("g1", [entry("provider", provider)]);
