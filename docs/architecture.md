@@ -48,7 +48,7 @@
 
 工具对象在 `Agent` 构造函数里造好（含持久化与租约包装），由 `builtinEntriesFor()` 变成 entry 交给 Host 注册——**注册与第三方同一条路、同一本所有权账本**，`echo.extensions` 因此列得出内建。`Agent` 不瘦，这是设计选择不是问题。
 
-上表只列有 core 侧机制与状态的五件。内建 extension 不止这些：`echo:agent`（壳协议，§5）、`echo:compaction`（缺省阶梯）、`echo:tool-search` / `echo:ask` / `echo:subagent`（只有工具与 prompt 段，没有恢复期状态）走同一条注册路，缺省装配下 `echo.extensions` 列出九条（`packages/core/src/extension/builtin.ts`）。
+上表只列有 core 侧机制与状态的五件。内建 extension 不止这些：`echo:agent`（壳协议，§5）、`echo:compaction`（缺省阶梯）、`echo:tool-search` / `echo:ask` / `echo:subagent`（只有工具，没有 prompt 段与恢复期状态）走同一条注册路，缺省装配下 `echo.extensions` 列出九条（`packages/core/src/extension/builtin.ts`）。
 
 ## 5. 扩展从哪进
 

@@ -88,7 +88,7 @@ import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.t
 import { activeTools, effectiveRestriction, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap, type ToolRestrictions } from "./tools/harness.ts";
 import { makeToolSearchTool, TOOL_SEARCH_NAME } from "./tools/tool-search.ts";
 import { makeAskUserTool } from "./question/tool.ts";
-import { makeSubagentTool, SUBAGENT_NAME, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
+import { makeSubagentTool, makeReceiptBook, renderReceiptLine, finalStatusOf, SUBAGENT_NAME, REPORT_NAME, type Receipt, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
 import type { Diagnostic } from "./errors.ts";
 import type { StorageDir } from "./storage/types.ts";
 import type { ResourceChange } from "./events.ts";
@@ -871,14 +871,11 @@ export class Agent {
           ? { tools: [makeAskUserTool({ ask: (input, signal) => this.askQuestion(input, signal) })] }
           : undefined,
       // 委派 `subagent`（2026-09-06）：常驻；子 agent 的 prompt / system / 工具集由模型在调用时决定，
-      // 机制是 `runSubagent`（与 Dream 同一段隔离循环）
+      // 机制是 `runSubagent`（与 Dream 同一段隔离循环）。fresh / fork 两种模式与回执工具见 `subagent/tool.ts`（2026-09-14）
       subagent: {
         tools: [
           makeSubagentTool({
-            // 可委派的 = 父此刻的工作集：没被禁用、且过了角色收紧（review 2026-09-07：此前是整个池，被禁的也能派）
-            // 可委派的 = 父此刻菜单上的，去掉两件不能交出去的：subagent（只扇一层）与 tool_search（它闭包着父的 loadedTools，
-            // 子调它等于替父取 schema——正是「没取过的延迟工具不许委派」要挡的事；review 2026-09-09）
-            availableTools: () => visibleTools(this.tools, this.loadedTools, this.restriction()).map((t) => t.name).filter((n) => n !== SUBAGENT_NAME && n !== TOOL_SEARCH_NAME),
+            availableTools: () => this.delegableTools().map((t) => t.name),
             runForeground: (spec, ctx) => this.spawnSubagentForeground(spec, ctx),
             runBackground: (spec, label, toolCallId) => this.spawnSubagentBackground(spec, label, toolCallId),
           }),
@@ -2877,7 +2874,8 @@ export class Agent {
   /**
    * 隔离的子循环（2026-09-06 从 Dream 抽出，Dream 与 `subagent` 工具都走这里）：**独立 context**（主 transcript
    * 一字不动）、只给指定的工具、同一份模型绑定、不吃前台的 steer / followUp。事件去向由调用方给的 `emit` 决定。
-   * `turnInjections`：Dream 沿用父的每轮注入（激活 skill、任务清单），委派的子 agent 不要——它看不到这场对话。
+   * `turnInjections`：Dream 沿用父的每轮注入（激活 skill、任务清单），fresh 的子 agent 不要——它看不到这场对话；
+   * fork 的子 agent 照父的来。`seed`：任务之前先摆的消息（fork 用它带父的 working context），缺省空白。
    *
    * **每次调用是 journal 里的一个 run**（不经 admission）：自己的 runId、`source` 链回派出它的 run，边界三拍与主循环同一套；
    * 循环里的每条事实自带这个 runId（`loop/observe.ts`），所以与主循环共用同一组探针、不需要任何专门的观测代码。
@@ -2891,6 +2889,7 @@ export class Agent {
       source: SubloopRunSource;
       maxIterations?: number;
       turnInjections: "inherit" | "none";
+      seed?: readonly AgentMessage[];
     },
     scope: AgentAdmissionExecuteScope,
     signal: AbortSignal,
@@ -2906,7 +2905,7 @@ export class Agent {
     try {
       const result = await runAgentLoop(
         [userMessage(spec.prompt)],
-        { systemPrompt: spec.systemPrompt, messages: [], compaction: EMPTY_COMPACTION },
+        { systemPrompt: spec.systemPrompt, messages: [...(spec.seed ?? [])], compaction: EMPTY_COMPACTION },
         {
           ...base,
           runId,
@@ -2942,81 +2941,127 @@ export class Agent {
     }
   }
 
-  /** 模型点名的工具 → 父池里的实例。不认识的名字整组判红（不静默少给），`subagent` 自己不给（只扇一层）。 */
+  /**
+   * 父此刻能交给子 agent 的工具 = 菜单上的（没被禁用、过了角色收紧、延迟的已取过 schema），去掉三类不能交出去的：
+   * `subagent`（只扇一层）；`tool_search`（它闭包着父的 loadedTools，子调它等于替父取 schema——正是「没取过的延迟工具
+   * 不许委派」要挡的事；review 2026-09-09）；标了 `delegable: false` 的（子拿的是父池里同一个实例，调一次就改父的常驻状态；
+   * 2026-09-14 拍板）。fresh 模式从这里点名，fork 模式整套继承。
+   */
+  private delegableTools(): AgentTool[] {
+    return visibleTools(this.tools, this.loadedTools, this.restriction()).filter((t) => t.name !== SUBAGENT_NAME && t.name !== TOOL_SEARCH_NAME && t.delegable !== false);
+  }
+
+  /** 模型点名的工具 → 父池里的实例。不认识的名字整组判红（不静默少给）；不可委派的同一句话里报明原因。 */
   private subagentTools(names: readonly string[]): AgentTool[] | string {
     const out: AgentTool[] = [];
     const missing: string[] = [];
     for (const n of names) {
       // 与父自己执行时同一份判据（禁用、角色收紧、延迟未取）：父没 `tool_search` 过的延迟工具也不能委派——
-      // 父自己都不知道它的 schema，子拿到的就是一件父没见过的工具（2026-09-09 拍板）
-      const r = n === SUBAGENT_NAME || n === TOOL_SEARCH_NAME ? undefined : resolveTool(this.tools, n, this.loadedTools, this.restriction());
+      // 父自己都不知道它的 schema，子拿到的就是一件父没见过的工具（2026-09-09 拍板）。`report` 由子循环自己造，不从父池拿
+      const r = n === SUBAGENT_NAME || n === TOOL_SEARCH_NAME || n === REPORT_NAME ? undefined : resolveTool(this.tools, n, this.loadedTools, this.restriction());
       if (r === undefined || !r.ok) missing.push(r !== undefined && !r.ok && r.reason !== "not_found" ? `${n} (${r.message})` : n);
+      else if (r.tool.delegable === false) missing.push(`${n} (not delegable: it changes this agent's own state)`);
       else out.push(r.tool);
     }
     return missing.length > 0 ? `Unknown tools: ${missing.join(", ")}` : out;
   }
 
-  /** 前台委派：嵌在父 run 的这次工具执行里跑到完；父的 abort 一路级联进来（用的是工具拿到的 signal）。 */
+  /**
+   * 模型给的 spec → 子循环的入参（同步的那部分）。fresh：点名的工具、模型给的 system、空白种子、不带每轮注入。
+   * fork：父此刻可委派的整套工具、父的 system（跑之前再装配，见 `subagentSystem`）、父的 working context 截到最后一条
+   * assistant 之前（那条正是派出它的这一轮：tool_use 还没有结果，不该让子看见半截；同批的兄弟结果也一并截掉）、每轮注入照父的来。
+   * 种子在派出那一刻定格：后台子 agent 跑起来之后父的 transcript 还在长，子看到的是派它时的那份。
+   */
+  private prepareSubagent(spec: SubagentSpec): { ok: true; system: SubagentSystem; tools: AgentTool[]; seed: AgentMessage[]; turnInjections: "inherit" | "none" } | { ok: false; message: string } {
+    if (spec.mode === "fresh") {
+      const tools = this.subagentTools(spec.tools);
+      if (typeof tools === "string") return { ok: false, message: tools };
+      return { ok: true, system: { kind: "given", prompt: spec.systemPrompt }, tools, seed: [], turnInjections: "none" };
+    }
+    const view = buildWorkingMessages(this._state.messages, this._state.compaction);
+    let cut = view.length;
+    for (let i = view.length - 1; i >= 0; i--) {
+      if (view[i]!.role === "assistant") {
+        cut = i;
+        break;
+      }
+    }
+    return { ok: true, system: { kind: "parent" }, tools: this.delegableTools(), seed: view.slice(0, cut), turnInjections: "inherit" };
+  }
+
+  /** fork 的 system = 父这次 run 的那份装配（同一批段、同一个冻结的模型），前缀与父一样，厂商缓存能接着用。 */
+  private subagentSystem(system: SubagentSystem, scope: AgentAdmissionExecuteScope): Promise<string | null> {
+    return system.kind === "given" ? Promise.resolve(system.prompt) : this.assemblePrompt(scope.modelBinding.model);
+  }
+
+  /** 前台委派：嵌在父 run 的这次工具执行里跑到完；父的 abort 一路级联进来（用的是工具拿到的 signal）。回执逐条推进度。 */
   private async spawnSubagentForeground(spec: SubagentSpec, ctx: { toolCallId: string; signal?: AbortSignal; onProgress?: (text: string) => void }): Promise<SubagentOutcome> {
     const scope = this.activeScope;
-    if (scope === undefined) return { kind: "error", message: "a subagent can only be spawned from inside a run" };
-    const tools = this.subagentTools(spec.tools);
-    if (typeof tools === "string") return { kind: "error", message: tools };
+    if (scope === undefined) return { kind: "error", message: "a subagent can only be spawned from inside a run", receipts: [] };
+    const prepared = this.prepareSubagent(spec);
+    if (!prepared.ok) return { kind: "error", message: prepared.message, receipts: [] };
+    const progress = subagentProgress(ctx.onProgress);
+    const book = makeReceiptBook((r) => progress.note(`\n[report ${renderReceiptLine(r)}]\n`));
     const result = await this.runSubagent(
       {
         prompt: spec.prompt,
-        systemPrompt: spec.systemPrompt,
-        tools,
+        systemPrompt: await this.subagentSystem(prepared.system, scope),
+        tools: [...prepared.tools, book.tool],
+        seed: prepared.seed,
         source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: ctx.toolCallId, background: false },
-        turnInjections: "none",
+        turnInjections: prepared.turnInjections,
         ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
       },
       scope,
       ctx.signal ?? scope.signal,
-      subagentProgress(ctx.onProgress),
+      progress.emit,
     );
-    return subagentOutcome(result);
+    return subagentOutcome(result, [...book.receipts]);
   }
 
   /**
    * 后台委派：后台队列上 kind "subagent" 的任务（`BackgroundTask.kind` 预留的那个）。模型绑定在派出那一刻捕获，
-   * 父 run 结束后子 agent 照跑；随 agent 收摊（`killAllBackground` 抹 signal）。结束时最后一条回复投 inbox。
+   * 父 run 结束后子 agent 照跑；随 agent 收摊（`killAllBackground` 抹 signal）。
+   * 每条回执当场投一条环境消息进 inbox（2026-09-14 拍板：允许多次提交，父空闲时每条都会唤醒一轮，不另加节流），
+   * 结束再投一条收尾（终态与条数；没交过回执才带末条正文）。
    */
   private spawnSubagentBackground(spec: SubagentSpec, label: string, toolCallId: string): { ok: true; id: string } | { ok: false; message: string } {
     const scope = this.activeScope;
     if (scope === undefined) return { ok: false, message: "a subagent can only be spawned from inside a run" };
-    const tools = this.subagentTools(spec.tools);
-    if (typeof tools === "string") return { ok: false, message: tools };
-    let final: SubagentOutcome = { kind: "aborted" };
+    const prepared = this.prepareSubagent(spec);
+    if (!prepared.ok) return { ok: false, message: prepared.message };
+    let final: SubagentOutcome = { kind: "aborted", receipts: [] };
+    let taskId = "";
+    let write: (chunk: string) => void = () => {};
+    const book = makeReceiptBook((r) => {
+      write(`\n[report ${renderReceiptLine(r)}]\n`);
+      // ref 带 seq：inbox 按 source + ref 去重，每条回执各是一条；收尾那条用裸 task id
+      this.deliver(environmentMessage(`Subagent ${taskId} (${label}) receipt ${renderReceiptLine(r)}`, BACKGROUND_KIND, `${taskId}#${r.seq}`));
+    });
     const started = startBackground(this.background, {
       kind: "subagent",
       label,
       run: async (bg) => {
+        write = (chunk) => bg.write(chunk);
         const result = await this.runSubagent(
           {
             prompt: spec.prompt,
-            systemPrompt: spec.systemPrompt,
-            tools,
+            systemPrompt: await this.subagentSystem(prepared.system, scope),
+            tools: [...prepared.tools, book.tool],
+            seed: prepared.seed,
             source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: toolCallId, background: true },
-            turnInjections: "none",
+            turnInjections: prepared.turnInjections,
             ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
           },
           scope,
           bg.signal,
-          subagentProgress((text) => bg.write(text), true),
+          subagentProgress((text) => bg.write(text), true).emit,
         );
-        final = subagentOutcome(result);
+        final = subagentOutcome(result, [...book.receipts]);
         if (final.kind === "error") throw new Error(final.message);
         if (final.kind === "aborted") throw new Error("aborted");
       },
-      onEnd: (task) =>
-        environmentMessage(
-          final.kind === "completed"
-            ? `Subagent ${task.id} (${label}) finished. Its reply:\n${final.text === "" ? "(no reply)" : final.text}`
-            : `Subagent ${task.id} (${label}) ${task.status}${task.error === null ? "" : `: ${task.error}`}`,
-          BACKGROUND_KIND,
-          task.id,
-        ),
+      onEnd: (task) => environmentMessage(subagentEndNotice(task, label, final), BACKGROUND_KIND, task.id),
     });
     if (!started.ok) {
       return {
@@ -3027,6 +3072,8 @@ export class Agent {
             : `The background queue is full (${started.tasks}/${started.max})`,
       };
     }
+    // run 在 startBackground 里同步起步，但第一条回执最早也在第一次模型回复之后：那时这个 id 早就赋上了
+    taskId = started.task.id;
     return { ok: true, id: started.task.id };
   }
 
@@ -3722,21 +3769,39 @@ function validatePermissionPolicy(policy: PermissionPolicy | undefined): Permiss
   return policy;
 }
 
-/** 子循环的结果 → 工具看到的结果：完成时带最后一条回复的正文。 */
-function subagentOutcome(result: LoopResult): SubagentOutcome {
-  if (result.outcome.kind === "aborted") return { kind: "aborted" };
-  if (result.outcome.kind === "error") return { kind: "error", message: result.outcome.error.message };
+/** 子 agent 的 system 从哪来：fresh 是模型给的那段（可为 null）；fork 是父这次 run 的装配（跑之前现装）。 */
+type SubagentSystem = { kind: "given"; prompt: string | null } | { kind: "parent" };
+
+/** 子循环的结果 → 工具看到的结果：完成时带最后一条回复的正文；三种结局都带上已交的回执。 */
+function subagentOutcome(result: LoopResult, receipts: readonly Receipt[]): SubagentOutcome {
+  if (result.outcome.kind === "aborted") return { kind: "aborted", receipts };
+  if (result.outcome.kind === "error") return { kind: "error", message: result.outcome.error.message, receipts };
   const assistant = result.messages.filter((m) => m.role === "assistant");
   const last = assistant[assistant.length - 1];
-  return { kind: "completed", text: last === undefined ? "" : textOf(last).trim(), assistantMessages: assistant.length };
+  return { kind: "completed", text: last === undefined ? "" : textOf(last).trim(), assistantMessages: assistant.length, receipts };
+}
+
+/** 后台子 agent 的收尾通知：回执已经逐条投过，这里只报终态与条数；没交过回执才带末条正文。 */
+function subagentEndNotice(task: { id: string; status: string; error: string | null }, label: string, final: SubagentOutcome): string {
+  const head = `Subagent ${task.id} (${label})`;
+  const n = final.receipts.length;
+  const status = finalStatusOf(final.receipts);
+  if (final.kind === "completed") {
+    if (n === 0) return `${head} finished without a receipt. Its reply:\n${final.text === "" ? "(no reply)" : final.text}`;
+    let text = `${head} finished: ${n} receipt(s), final status ${status}.`;
+    if (status === "working") text += `\nIt ended without a closing receipt.${final.text === "" ? "" : `\nIts last reply:\n${final.text}`}`;
+    return text;
+  }
+  const tail = n === 0 ? "" : ` (${n} receipt(s) were delivered before it stopped; last status ${status})`;
+  return `${head} ${task.status}${task.error === null ? "" : `: ${task.error}`}${tail}`;
 }
 
 /**
- * 子循环的事件 → 一条文字进度：文字增量原样、工具调用一行标记。`delta` 为真时每次只给增量（后台缓冲自己累加），
- * 否则给累计的尾巴（前台 `onUpdate` 要的是「现在看到的样子」）。
+ * 子循环的事件 → 一条文字进度：文字增量原样、工具调用一行标记；`note()` 让调用方自己塞一行（回执）。
+ * `delta` 为真时每次只给增量（后台缓冲自己累加），否则给累计的尾巴（前台 `onUpdate` 要的是「现在看到的样子」）。
  */
-function subagentProgress(sink: ((text: string) => void) | undefined, delta = false): Emit {
-  if (sink === undefined) return async () => {};
+function subagentProgress(sink: ((text: string) => void) | undefined, delta = false): { emit: Emit; note(text: string): void } {
+  if (sink === undefined) return { emit: async () => {}, note: () => {} };
   let acc = "";
   const push = (chunk: string): void => {
     if (delta) {
@@ -3746,9 +3811,12 @@ function subagentProgress(sink: ((text: string) => void) | undefined, delta = fa
     acc = (acc + chunk).slice(-2000);
     sink(acc);
   };
-  return async (e) => {
-    if (e.type === "message_update" && e.delta.type === "text_delta") push(e.delta.text);
-    else if (e.type === "tool_execution_start") push(`\n[${e.toolName}]\n`);
+  return {
+    note: push,
+    emit: async (e) => {
+      if (e.type === "message_update" && e.delta.type === "text_delta") push(e.delta.text);
+      else if (e.type === "tool_execution_start") push(`\n[${e.toolName}]\n`);
+    },
   };
 }
 

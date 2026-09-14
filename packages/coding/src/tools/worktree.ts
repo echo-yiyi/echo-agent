@@ -70,6 +70,8 @@ function enterTool(deps: WorktreeDeps, state: WorktreeState): ModelTool<{ name?:
     kind: "model",
     name: "worktree_enter",
     label: "进 worktree",
+    // 切的是父 agent 的 workspace：子 agent 调一下父就跟着换了目录（2026-09-14 拍板：不可委派）
+    delegable: false,
     description:
       "Create a git worktree for this repository at .echo/worktrees/<name> on a new branch <name> (from the current HEAD) " +
       "and make it the workspace: from then on file tools, search and bash resolve paths there, while the original checkout " +
@@ -116,6 +118,7 @@ function exitTool(deps: WorktreeDeps, state: WorktreeState): ModelTool<{ remove?
     name: "worktree_exit",
     label: "出 worktree",
     deferred: true,
+    delegable: false,
     description:
       "Leave the worktree entered with worktree_enter: the workspace goes back to the main checkout. " +
       "With remove: true the worktree directory is deleted afterwards (git refuses while it has uncommitted changes); " +

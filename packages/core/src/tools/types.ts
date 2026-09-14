@@ -62,6 +62,13 @@ type ToolBase<TParams, TMeta> = {
    * 只读的查询类（读文件、搜索）才标。标了之后作者不能再假设批内的 hook 顺序或执行顺序。
    */
   readonly concurrent?: boolean;
+  /**
+   * 能不能交给子 agent（2026-09-14 用户拍板，缺省 undefined = 能；**只有显式 `false` 才挡**）。与上面两条同一条规矩：
+   * 状态住在工具身上。子 agent 拿的是父池里**同一个实例**，所以「调一次就改父的常驻状态」的工具不该交出去——
+   * 切工作目录的 `worktree_enter` / `worktree_exit` 就是这一类：子调一下，父的 workspace 跟着换了。
+   * `subagent` 工具的可委派清单（fresh 模式点名、fork 模式整套继承）都看这个字段。
+   */
+  readonly delegable?: boolean;
   execute(params: TParams, ctx: ToolExecutionContext): Promise<AgentToolResult<TMeta>>;
 };
 

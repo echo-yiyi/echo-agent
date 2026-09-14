@@ -54,7 +54,7 @@ flowchart LR
 
 另有三条刻意不走主 Agent 装配器的调用路径，不能拿本文的 system 规则替它们背书：
 
-- `subagent` 的任务、system 与工具集由父模型在调用时给出，见 [`SubagentSpec`](../../packages/core/src/subagent/tool.ts#symbol=SubagentSpec) 与 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。
+- `subagent` 的任务、system 与工具集由父模型在调用时给出（fresh），或整套继承父这次 run 的装配（fork），见 [`SubagentSpec`](../../packages/core/src/subagent/tool.ts#symbol=SubagentSpec) 与 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。
 - compaction 的 collapse / summary 使用自己的固定 prompt，归压缩策略所有，见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages)。
 - Dream 复用隔离循环但 system 为 `null`；它的整理指令由 memory module 提供，见 [`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask)。
 
@@ -169,7 +169,7 @@ skill 的总预算在激活时拒绝超额，而不是渲染时静默丢掉已�
 
 另一个 interface 问题是 [`PromptSource`](../../packages/core/src/prompt/types.ts#symbol=PromptSource)：它从 `@echo-agent/core` 公开导出，但 `AgentOptions` 与 `AgentPromptRegistry` 都没有注册 source 的方法，生产代码只在 `Agent.promptSources()` 内部临时造两项。它给调用方增加了要理解的 surface，却没有提供任何 leverage；而唯一方法的名字还与 attempt 级调用事实不符。发布前应二选一：若动态注入是 extension seam，就建立有 owner、失败档位和 attempt 命名的 registry；若它只属于 core，删除公共导出并收成内部类型。当前没有第三种自洽状态。
 
-Dream 继承父 Agent 的 injections；委派的 subagent 明确关闭它们，因为子 agent 看不到父会话、拿到的是调用者单独给的 task / system / tools。接线见 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。
+Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它们，因为子 agent 看不到父会话、拿到的是调用者单独给的 task / system / tools；fork 模式与 Dream 一样继承。接线见 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。
 
 ## 7. 文本来源、预算与信任
 

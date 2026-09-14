@@ -59,7 +59,7 @@ _Avoid_：锁文件（那是它的实现）、mutex
 _Avoid_：抢占（那是对面的动作，不是这一方的属性）、后台实例
 
 **subagent**：
-同一容器内、由模型在调用时定形（指令、工具子集、预算）的一次性子循环：独立 transcript，没有状态根、lease 和 inbox，随父收摊。不是 session，只扇一层。
+同一容器内、由模型在调用时定形的一次性子循环：fresh 模式指令、工具子集、预算全由模型给，fork 模式整套继承父的 system、对话与工具。独立 transcript，没有状态根、lease 和 inbox，随父收摊；用 `report` 给父交回执（可多次，status 四档：working / done / blocked / failed，末条即终态）。不是 session，只扇一层。
 _Avoid_：子 session、子进程、委派会话
 
 **消息来源**：

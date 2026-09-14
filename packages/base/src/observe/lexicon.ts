@@ -26,7 +26,7 @@ export const RUN_SOURCE: Readonly<Record<string, Term>> = {
   user: { zh: "用户", en: "user", tone: "neutral", hint: "prompt / continue / 管道输入发起" },
   dream: { zh: "整理", en: "dream", tone: "info", hint: "agent 回到空闲后自动排的记忆整理：隔离子循环，不进主对话，链回排它的那次 run" },
   extract: { zh: "提取", en: "extract", tone: "info", hint: "每条回复收尾时排的记忆提取：隔离子循环，不进主对话，链回那次 run" },
-  subagent: { zh: "子 agent", en: "subagent", tone: "info", hint: "模型用 subagent 工具派出的隔离子循环：自己的上下文与工具，链回派出它的那次工具调用" },
+  subagent: { zh: "子 agent", en: "subagent", tone: "info", hint: "模型用 subagent 工具派出的隔离子循环：自己的 transcript（fresh 空白、fork 继承父的），链回派出它的那次工具调用" },
   inbox: { zh: "收件", en: "inbox", tone: "info", hint: "Schedule / 外部投递进 inbox 后由 agent 自行消费的一批" },
   extension: { zh: "扩展", en: "extension", tone: "info", hint: "Extension 提交的 run（O2b）" },
 };

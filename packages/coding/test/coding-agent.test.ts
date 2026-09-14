@@ -439,6 +439,9 @@ test("装配面:四类工具都在(fs/bash/搜索/任务清单);skill 目录空�
   // 2026-09-03：worktree_exit / web_fetch / web_search 是延迟工具——在池里、不在菜单上，经 tool_search 取过才上
   for (const n of ["worktree_exit", "web_fetch", "web_search"]) expect(echo.agent.tools.get(n)?.deferred).toBe(true);
   expect(echo.agent.tools.get("worktree_enter")?.deferred).toBeUndefined();
+  // 2026-09-14：切工作目录改的是父 agent 的状态——两件 worktree 工具都交不给子 agent
+  for (const n of ["worktree_enter", "worktree_exit"]) expect(echo.agent.tools.get(n)?.delegable).toBe(false);
+  expect(echo.agent.tools.get("bash")?.delegable).toBeUndefined();
   // **2026-08-31：skill 工具现在恒在**。原判据是「零 skill 别装——空可选集白占 token」，
   // 那是低层 `new Agent()` 不给 skillStore 时的行为。走 `createEcho()` 拿到的是完整 Runtime，
   // 它按状态根装了 skillStore ⇒ 支持**创建** skill ⇒ 两件工具都装（池空也装，因为 create 用得上）。
