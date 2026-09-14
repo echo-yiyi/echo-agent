@@ -25,7 +25,9 @@ import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import { loopFactDescriptor, probe } from "./loop/observe.ts";
 import { compactionFactDescriptor } from "./compaction/observe.ts";
 import { agentFactDescriptor, probeAgent, type AgentProbe } from "./agent-observe.ts";
-import type { EchoObservableState, RuntimePhase } from "./observability/types.ts";
+import { sha256Hex } from "./observability/hash.ts";
+import { canonicalJson } from "./observability/normalize.ts";
+import type { EchoObservableState, ObservationValue, RuntimePhase } from "./observability/types.ts";
 import { HookRuntime, type HookContext, type HookOrigin, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
@@ -3457,9 +3459,12 @@ export class Agent {
     this.observationRuntime()?.acceptRun({ runId: input.runId, source: input.source, ...this.observationIdentity(), modelBinding: input.modelBinding });
   }
 
-  /** executor 进入 loop 那一拍：同样只预留、不等。 */
+  /** executor 进入 loop 那一拍：同样只预留、不等。紧跟着拍一份 run 开头的状态，与结尾的 finalSnapshot 同形，一比就知道这个 run 改了什么。 */
   private observeRunStarted(runId: string): void {
-    this.observationRuntime()?.startRun(runId, this.observationIdentity());
+    const rt = this.observationRuntime();
+    if (rt === undefined) return;
+    rt.startRun(runId, this.observationIdentity());
+    probeAgent(this.agentProbe, { kind: "state_snapshot", moment: "run_started", state: this.observableState(rt, runId) });
   }
 
   /** permit finalizer：业务 outcome 已冻结（executed / callback-error 都是）；finalSnapshot 由本 Agent 此刻的状态投影。 */
@@ -3469,10 +3474,15 @@ export class Agent {
     await rt.closeRun({ runId: input.runId, outcome: input.result.result.outcome, finalState: this.observableState(rt, input.runId) }, this.observationIdentity());
   }
 
-  /** `EchoObservableState`：只放固定的低基数字段；Capability summary 随埋点进来（O3a 第二刀）。 */
+  /**
+   * `EchoObservableState`：run 开头（`observeRunStarted`）与结尾（`observeRunClosed`）两个节点各拍一份，同形。
+   * 只放低基数的事实：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数摘要。
+   * 工具 / skill 名单取 `state` getter 的派生视图——与模型菜单、`agent.state` 同一个口径，不另算一份。
+   */
   private observableState(rt: ObservationRuntime, runId: string): EchoObservableState {
     const phase = this.observationPhase();
     const persistence = rt.sequencer.persistenceState.status;
+    const s = this.state;
     return {
       runtime: {
         phase,
@@ -3482,15 +3492,43 @@ export class Agent {
         activeEntryCount: 0,
       },
       agent: {
-        status: this._state.status,
+        status: s.status,
         activeRunId: runId,
         activeTurnId: this.intake.activeTurnId,
-        iteration: this._state.iteration,
-        messageCount: this._state.messages.length,
+        iteration: s.iteration,
+        messageCount: s.messages.length,
+        thinkingLevel: s.thinkingLevel,
+        contextTokens: s.contextTokens,
+        retryCount: s.retryCount,
+        workspace: s.workspace,
+        tools: s.tools.map((t) => t.name),
+        activeSkills: s.activeSkills.map((k) => k.name),
       },
-      capabilities: [],
+      capabilities: this.capabilitySummaries(s.tasks),
       omittedCapabilitySummaryCount: 0,
     };
+  }
+
+  /**
+   * 各内建能力此刻的计数摘要，挂在**真实装上的 Entry id** 下（`echo:tasks` / `echo:scheduler`；收件箱没有独立 extension，
+   * 是 `echo:agent` 的一部分）。**只放同步可读的**：这里跑在同步封口路径上。记忆的状态在盘上要异步读，不接——
+   * 不给它一个假的 0。`stateDigest` 覆盖能判断「状态变没变」的最小表示（计数相同但哪件任务做完了变了，也看得出）；
+   * entry 的 `digest` 覆盖整条摘要。
+   */
+  private capabilitySummaries(tasks: TaskSnapshot): EchoObservableState["capabilities"] {
+    const out: EchoObservableState["capabilities"][number][] = [];
+    const add = (id: string, counters: Record<string, number>, stateRepr: ObservationValue): void => {
+      const summary = { schemaVersion: 1 as const, stateDigest: sha256Hex(canonicalJson(stateRepr)), counters, detailBytes: 0, detailTruncated: false };
+      out.push({ id, digest: sha256Hex(canonicalJson(summary)), summary });
+    };
+    add(AGENT_ENTRY_ID, { inboxPending: this.inbox.pendingCount }, { inboxPending: this.inbox.pendingCount });
+    add(
+      TASKS_ENTRY_ID,
+      { total: tasks.total, ...tasks.counts },
+      [...this.tasks.values()].map((t) => [t.id, t.status] as const).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+    );
+    if (this.schedule !== undefined) add(SCHEDULER_ENTRY_ID, { entries: this.schedule.entries.size }, [...this.schedule.entries.keys()].sort());
+    return out;
   }
 
   /** Agent 生命周期 phase → RuntimePhase 的固定投影。 */

@@ -606,6 +606,17 @@ function verbFor(name, attrs, body) {
   }
   if (name.startsWith("schedule.")) return { verb: LEX.records[name]?.zh ?? name, obj: attrs.scheduleId ?? "" };
   if (name === "task.state.committed") return { verb: "任务状态", obj: `${attrs.operation ?? ""} ×${attrs.count ?? 0}` };
+  // extension 装卸：哪一代、几个；失败时哪个 Entry 在哪个阶段
+  if (name === "extension.generation.mounted") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.generation ?? ""} · ${attrs.fibers ?? 0} 个` };
+  if (name === "extension.generation.mount_failed") {
+    return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.generation ?? ""} · ${attrs.stage === "prepare" ? "声明被拒" : `${attrs.failedEntryId ?? "?"} 抛错`}` };
+  }
+  if (name.startsWith("extension.generation.")) return { verb: LEX.records[name]?.zh ?? name, obj: attrs.generation ?? "" };
+  if (name === "agent.phase.changed") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.from ?? "?"} → ${attrs.to ?? "?"}${attrs.restoredReason ? `（${attrs.restoredReason}）` : ""}` };
+  if (name === "agent.equipment.changed") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.field ?? ""} ${attrs.from ?? "?"} → ${attrs.to ?? "?"}` };
+  if (name === "tool.rejected") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.toolName ?? "?"} · ${attrs.stage ?? ""} ${attrs.cause ?? ""}${attrs.decidedBy ? ` · ${attrs.decidedBy}` : ""}` };
+  if (name === "permission.wait") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.toolName ?? "?"}${attrs.decision ? ` · ${attrs.decision}` : ""}` };
+  if (name === "agent.state") return { verb: LEX.records[name]?.zh ?? name, obj: attrs.moment === "run_started" ? "run 开头" : (attrs.moment ?? "") };
   // 上层 agent 的领域事件：名字都叫 agent.custom_event，真正是哪件事在 customEventType 上（metadata 档 body 恒空，
   // 不把它摆出来的话一行里什么都没有——实测一条 run 里四行「自定义事件」谁也分不出）
   if (name === "agent.custom_event") return { verb: LEX.records[name]?.zh ?? name, obj: attrs.customEventType ?? "" };
@@ -739,6 +750,32 @@ function thinkingText(b) {
   if (typeof b.thinking !== "string" || b.thinking === "") return undefined;
   return b.thinkingTruncated ? `${b.thinking}\n…（摘要已按预算截断；完整思考在 model.generate.delta 的逐条记录里）` : b.thinking;
 }
+/* agent 整体状态（run 开头的 agent.state 与 run.closed 里的 finalSnapshot 同形）排成几行人读的字：装备、上下文、能力计数 */
+function stateText(st) {
+  if (st === null || typeof st !== "object" || st.agent === undefined) return undefined;
+  const a = st.agent;
+  const lines = [];
+  const head = [`状态 ${a.status}`, `第 ${a.iteration} 轮`, `${a.messageCount} 条消息`];
+  if (a.thinkingLevel !== undefined) head.push(`思考档 ${a.thinkingLevel}`);
+  if (a.contextTokens !== undefined) head.push(a.contextTokens === null ? "上下文 未知" : `上下文 ${a.contextTokens.toLocaleString()} tokens`);
+  if (a.retryCount !== undefined && a.retryCount > 0) head.push(`重试 ${a.retryCount}`);
+  lines.push(head.join(" · "));
+  if (a.workspace !== undefined) lines.push(`工作目录 ${a.workspace}`);
+  if (Array.isArray(a.tools)) lines.push(`工具（${a.tools.length}）${a.tools.join(", ")}`);
+  if (Array.isArray(a.activeSkills) && a.activeSkills.length > 0) lines.push(`skill（${a.activeSkills.length}）${a.activeSkills.join(", ")}`);
+  for (const c of Array.isArray(st.capabilities) ? st.capabilities : []) {
+    const counters = Object.entries(c.summary?.counters ?? {}).map(([k, v]) => `${k}=${v}`).join(" ");
+    lines.push(`${c.id}  ${counters}`);
+  }
+  if (st.omittedCapabilitySummaryCount > 0) lines.push(`（另有 ${st.omittedCapabilitySummaryCount} 个能力摘要超上限未记）`);
+  return lines.join("\n");
+}
+/* 一个装上的 extension：谁、提供了什么、依赖的服务实际连到了谁 */
+function fiberText(f) {
+  const provides = f.provides?.length > 0 ? ` · 提供 ${f.provides.join(", ")}` : "";
+  const injects = f.injects?.length > 0 ? ` · 依赖 ${f.injects.map((i) => `${i.service}←${i.provider ?? "无"}${i.required ? "" : "（可选）"}`).join(", ")}` : "";
+  return `${f.name}（${f.entryId}）${provides}${injects}`;
+}
 /* content 档的正文字段拆成段落（参数 / 结果 / 报错 / 思考 / 回复），并从原始 JSON 里拿掉，免得同一段正文出现两遍 */
 function contentSections(t, end) {
   const secs = [];
@@ -770,6 +807,15 @@ function contentSections(t, end) {
   } else if (t.name === "context.compact" && Array.isArray(fin.spans)) {
     const sums = fin.spans.filter((s) => typeof s.summary === "string");
     if (sums.length > 0) add("摘要", sums.map((s) => `[${s.from}–${s.to}]\n${s.summary}`).join("\n\n"), "end", "spans");
+  } else if (t.name === "agent.state") {
+    add("开头状态", stateText(start.state), "body", "state");
+  } else if (t.name === "run.closed") {
+    add("结尾状态", stateText(start.finalSnapshot?.state), "body", "finalSnapshot");
+  } else if (t.name === "extension.generation.mounted" && Array.isArray(start.fibers)) {
+    add("扩展", start.fibers.map(fiberText).join("\n"), "body", "fibers");
+  } else if (t.name === "extension.generation.mount_failed") {
+    add("失败", `${start.stage === "prepare" ? "声明 / 依赖图被拒（还没加载任何 Entry）" : `${start.failedEntryId ?? "?"} 的 apply 抛错，已回滚`} · ${start.errorName ?? ""}`, "body", "stage", "bad");
+    add("报错", start.errorMessage, "body", "errorMessage", "bad");
   }
   const strip = (obj, owner) => {
     if (obj === undefined || obj === null) return obj;
@@ -1135,12 +1181,14 @@ function renderActivity() {
     const attrs = t.attributes ?? {};
     const { verb, obj } = verbFor(t.name, attrs, t.body);
     const term = LEX.records[t.name];
-    const bad = t.name === "inbox.sealed" || t.name.endsWith(".failed") || t.name.endsWith("-failed");
-    const warn = !bad && (t.name.endsWith(".rejected") || t.name.endsWith(".released") || t.name.endsWith(".missed"));
+    const bad = t.name === "inbox.sealed" || t.name.endsWith(".failed") || t.name.endsWith("-failed") || t.name.endsWith("_failed");
+    const warn = !bad && (t.name.endsWith(".rejected") || t.name.endsWith(".released") || t.name.endsWith(".missed") || t.name.endsWith("_refused"));
     const runId = typeof attrs.runId === "string" ? attrs.runId : null;
+    // 活动区一行一条不展开：装上的 extension 清单（谁、提供什么、依赖连到谁）放进悬停说明里
+    const fibers = t.name === "extension.generation.mounted" && Array.isArray(t.body?.fibers) ? `\n\n${t.body.fibers.map(fiberText).join("\n")}` : "";
     const row = el("div", {
       class: `act${bad ? " tl--bad" : warn ? " tl--warn" : ""}`,
-      title: `${term?.hint ?? t.name}${runId ? `\n点开对应的 run：${runId}` : ""}`,
+      title: `${term?.hint ?? t.name}${fibers}${runId ? `\n点开对应的 run：${runId}` : ""}`,
     },
       el("span", { class: "t", text: fmtClock(t.occurredAt) }),
       el("span", { class: "what" }, el("span", { class: "verb", text: verb }), obj ? el("span", { class: "obj", text: obj }) : null),

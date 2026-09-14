@@ -18,7 +18,7 @@ import { sealAgentAssemblyObservation } from "../src/observability/assembly.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
 import type { BoundedObservationDraft } from "../src/observability/draft.ts";
 import type { RunModelBinding } from "../src/admission/types.ts";
-import type { RunObservation } from "../src/observability/types.ts";
+import type { EchoObservableState, RunObservation } from "../src/observability/types.ts";
 import { mkdtempSync } from "node:fs";
 
 // **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
@@ -136,7 +136,9 @@ describe("send → getRun → render（completed）", () => {
     // 观测不再骑在 AgentEvent 上：记录没有 sourceSeq，canonical seq 的顺序就是执行节点被走到的顺序。
     // 脚本化的 run 执行顺序是确定的，所以逐项比整段——不许被别的时刻（例如持久化完成的时刻）重排，也不许多一拍少一拍
     expect(o.records.some((r) => r.sourceSeq !== undefined)).toBe(false);
-    expect(n.slice(3, -1)).toEqual([
+    // run.started 之后紧跟 run 开头的整体状态快照，再进循环
+    expect(n[3]).toBe("snapshot:agent.state");
+    expect(n.slice(4, -1)).toEqual([
       "event:agent.loop.started",
       "span_start:reply.execute",
       "event:agent.message.appended", // 用户输入：在它引发的 turn 开始之前入账
@@ -258,6 +260,34 @@ describe("send → getRun → render（completed）", () => {
 
     const err = await openObservationReader({ stateRoot: join(await tmp(), "never") }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ObservationDatabaseMissingError);
+  });
+
+  test("整体运行状态：run 开头与结尾各一份同形快照——装备、上下文、工作目录、能力摘要；两份一比看得出 run 改了什么", async () => {
+    const stateDir = join(await tmp(), "state");
+    const echo = await echoWith({ stateDir, turns: [toolTurn("c1", "ping", {}), textTurn("done")] });
+    const result = await echo.send("跑一次");
+    const lookup = await echo.observations.getRun(result.runId);
+    if (lookup.kind !== "found") throw new Error("run 没读回来");
+    const o = lookup.observation;
+    const startRecord = o.records.find((r) => r.kind === "snapshot" && r.name === "agent.state");
+    expect(startRecord?.scope.runId).toBe(result.runId);
+    expect(startRecord?.attributes.moment).toBe("run_started");
+    const start = (startRecord!.body as { state: EchoObservableState }).state;
+    const end = o.finalSnapshot!.state;
+    for (const st of [start, end]) {
+      expect(st.agent.tools).toContain("ping");
+      expect(st.agent.thinkingLevel).toBe(echo.agent.thinkingLevel);
+      expect(typeof st.agent.workspace).toBe("string");
+      expect(st.agent.activeSkills).toEqual([]);
+      const ids = st.capabilities.map((c) => c.id);
+      expect(ids).toContain("echo:agent"); // 收件箱是 echo:agent 的一部分
+      expect(ids).toContain("echo:tasks");
+      expect([...ids].sort()).toEqual(ids); // 按 id 排序（terminal 的物化规则，两份同一个校验器）
+      for (const c of st.capabilities) expect(c.summary.stateDigest).toMatch(/^[0-9a-f]{64}$/);
+    }
+    // run 开头只有进来的消息，结尾多了模型回复与工具结果
+    expect(end.agent.messageCount).toBeGreaterThan(start.agent.messageCount);
+    await echo.stop();
   });
 
   test("生命周期相位在 Agent 自己迁移的节点上记下（run 之外）；stopped 进不了账本，最后一拍是 running→stopping", async () => {

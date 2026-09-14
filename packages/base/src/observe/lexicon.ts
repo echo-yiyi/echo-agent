@@ -146,6 +146,7 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "extension.generation.unmount_refused": { zh: "扩展卸载被拒", en: "extension.generation.unmount_refused", tone: "caution", hint: "别的代还有 consumer 绑在它的 provider 上，这一代原样留着" },
   "agent.phase.changed": { zh: "相位变化", en: "agent.phase.changed", tone: "neutral", hint: "Agent 实例的生命周期相位：new / starting / restored / running / pausing / stopping / lost" },
   "agent.equipment.changed": { zh: "装备变更", en: "agent.equipment.changed", tone: "neutral", hint: "idle 时换了模型或思考档，记变更前后的值" },
+  "agent.state": { zh: "整体状态", en: "agent.state", tone: "neutral", hint: "run 开头拍的状态快照：装备、上下文、工作目录、各能力计数；与 run.closed 里的结尾状态同形" },
   "tool.rejected": { zh: "工具被拦", en: "tool.rejected", tone: "caution", hint: "执行前（或 postToolUse 之后）被拦下：哪一步、什么原因、谁决定的" },
   "permission.wait": { zh: "等待审批", en: "permission.wait", tone: "neutral", hint: "从发起审批到人给出裁决的时长；策略直接裁决没有这一段" },
   "context.compact.failed": { zh: "压缩失败", en: "context.compact.failed", tone: "caution", hint: "某个压缩阶段抛错被跳过，或整条流水线没有一段改动上下文" },

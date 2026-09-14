@@ -231,6 +231,21 @@ export type EchoObservableState = Readonly<{
     activeTurnId: string | null;
     iteration: number;
     messageCount: number;
+    /*
+     * 以下是装备与上下文的事实，全部 optional：此前的记录没有它们；单个字段不合格时只丢这个字段，
+     * 不像上面的必需字段那样丢掉整份快照。模型与模型绑定不在这里——它们在 `run.assembly`，一件事实只有一个出处。
+     */
+    /** 这个 run 用的思考档（模型绑定快照里没有它）。 */
+    thinkingLevel?: string;
+    /** 当前送模上下文大约多大（token）；null = 还没有任何依据。 */
+    contextTokens?: number | null;
+    retryCount?: number;
+    /** 这段会话在哪个目录里干活。 */
+    workspace?: string;
+    /** 工具工作集：此刻摆给模型的工具名。 */
+    tools?: readonly string[];
+    /** 本轮在用的 skill 名。 */
+    activeSkills?: readonly string[];
   }>;
   capabilities: readonly Readonly<{
     id: string;

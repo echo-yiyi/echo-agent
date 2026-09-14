@@ -12,7 +12,8 @@
 import type { AgentLifecyclePhase, RestoredReason } from "./agent.ts";
 import type { ResourceChange } from "./events.ts";
 import type { CapabilityFactDescriptor, CapabilityFactSink, ObservationFactProjection } from "./observability/fact-sink.ts";
-import type { ObservationCapturePolicy } from "./observability/types.ts";
+import { materializeObservableState } from "./observability/terminal.ts";
+import type { EchoObservableState, ObservationCapturePolicy } from "./observability/types.ts";
 
 export const AGENT_INSTRUMENTATION = { name: "echo.agent", version: "1" } as const;
 
@@ -27,6 +28,11 @@ export type AgentFactBody =
    * `LifecycleEvent` 里声明过一个 `equipmentChanged`，但全仓没有任何地方发它——这里是观测自己的节点，不依赖它。
    */
   | { kind: "equipment_changed"; field: "model" | "thinkingLevel"; from: string; to: string }
+  /**
+   * run 开头的整体状态，与 `run.closed` 里的 finalSnapshot **同形、同一个校验器**（`terminal.ts#materializeObservableState`），
+   * 两份一比就知道这个 run 改了什么。结尾那份不从这里发——它是 run.closed 这条边界的一部分，唯一 owner 在 ObservationRuntime。
+   */
+  | { kind: "state_snapshot"; moment: "run_started"; state: EchoObservableState }
   | { kind: "queue_updated"; queue: "steering" | "followUp" | "inbox"; size: number }
   /** `ResourceChange` 自带一个 `kind`（tool / skill / mcp …），与本联合的判别字段同名，所以整个嵌进 `change`。 */
   | { kind: "resource_changed"; change: ResourceChange };
@@ -48,6 +54,18 @@ export function projectAgentFact(fact: AgentFact, policy: ObservationCapturePoli
       const attrs: Record<string, string> = { from: fact.from, to: fact.to };
       if (fact.restoredReason !== undefined) attrs.restoredReason = fact.restoredReason;
       return { ...base, kind: "event", name: "agent.phase.changed", scope: {}, attributes: attrs, body: { ...attrs } };
+    }
+    case "state_snapshot": {
+      // 物化不合法会抛：fact-sink 把投影抛错变成 hole + gap，不会静默丢
+      const state = materializeObservableState(fact.state);
+      return {
+        ...base,
+        kind: "snapshot",
+        name: "agent.state",
+        scope: {},
+        attributes: { moment: fact.moment, capabilities: state.capabilities.length },
+        body: { moment: fact.moment, state },
+      };
     }
     case "equipment_changed": {
       const attrs = { field: fact.field, from: fact.from, to: fact.to };

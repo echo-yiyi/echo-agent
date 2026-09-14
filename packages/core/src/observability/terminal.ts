@@ -198,6 +198,49 @@ function projectCapabilityEntry(c: unknown): CapabilityEntry | undefined {
   }
 }
 
+/** 名单上限：工具 / skill 名都是标识，正常几十个。超了这个字段不记——整份快照的字节预算另有兜底。 */
+const MAX_STATE_NAMES = 256;
+
+function projectNames(raw: unknown): readonly string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const n = raw.length; // 只读一次（与 capabilities 同一条 Proxy 纪律）
+  if (n > MAX_STATE_NAMES) return undefined;
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const s = takeIdentifier(i in raw ? raw[i] : undefined);
+    if (s === undefined) return undefined;
+    out.push(s);
+  }
+  return Object.freeze(out);
+}
+
+type AgentEquipment = Pick<EchoObservableState["agent"], "thinkingLevel" | "contextTokens" | "retryCount" | "workspace" | "tools" | "activeSkills">;
+
+/**
+ * agent 段的装备与上下文字段：全部 optional，**逐个**校验，不合格只丢这一个字段——它们由 Agent 自己按类型生成，
+ * 不合格只可能是 bug，不能因此连累必需字段一起丢掉整份快照。每个属性只读一次，读到的值就地校验再放进副本。
+ */
+function projectAgentEquipment(a: Record<string, unknown>): AgentEquipment {
+  const out: { -readonly [K in keyof AgentEquipment]: AgentEquipment[K] } = {};
+  const thinkingLevel = takeIdentifier(a.thinkingLevel);
+  if (thinkingLevel !== undefined) out.thinkingLevel = thinkingLevel;
+  const contextTokens = a.contextTokens;
+  if (contextTokens === null) out.contextTokens = null;
+  else {
+    const n = takeCount(contextTokens);
+    if (n !== undefined) out.contextTokens = n;
+  }
+  const retryCount = takeCount(a.retryCount);
+  if (retryCount !== undefined) out.retryCount = retryCount;
+  const workspace = takeIdentifier(a.workspace);
+  if (workspace !== undefined) out.workspace = workspace;
+  const tools = projectNames(a.tools);
+  if (tools !== undefined) out.tools = tools;
+  const activeSkills = projectNames(a.activeSkills);
+  if (activeSkills !== undefined) out.activeSkills = activeSkills;
+  return out;
+}
+
 /** runtime / agent 两块是可选投影的**必需结构**：任一不合法 → 整份 snapshot 丢掉（由调用方开 gap）。 */
 function projectObservableState(raw: unknown, kept: readonly CapabilityEntry[], omittedTotal: number): EchoObservableState | undefined {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -226,6 +269,7 @@ function projectObservableState(raw: unknown, kept: readonly CapabilityEntry[], 
   const activeTurnId = a.activeTurnId;
   if (activeRunId !== null && takeIdentifier(activeRunId) === undefined) return undefined;
   if (activeTurnId !== null && takeIdentifier(activeTurnId) === undefined) return undefined;
+  const equipment = projectAgentEquipment(a);
 
   return Object.freeze({
     runtime: Object.freeze({
@@ -241,6 +285,7 @@ function projectObservableState(raw: unknown, kept: readonly CapabilityEntry[], 
       activeTurnId: activeTurnId as string | null,
       iteration,
       messageCount,
+      ...equipment,
     }),
     capabilities: Object.freeze(kept),
     omittedCapabilitySummaryCount: omittedTotal,
@@ -260,7 +305,20 @@ function tryProjectSnapshot(
     const throughSeq = takeCount(snapshot.throughSeq);
     const at = takeCount(snapshot.at);
     if (throughSeq === undefined || at === undefined) return undefined;
-    const state = snapshot.state;
+    const projected = projectStateWithCapabilities(snapshot.state);
+    if (projected === undefined) return undefined;
+    return { snapshot: Object.freeze({ throughSeq, at, state: projected.state }), omitted: projected.omitted };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 整份 `EchoObservableState` 的物化：必需结构 + 能力摘要（逐条校验、排序、超上限省略并计数）。
+ * run 结尾的 finalSnapshot 与 run 开头的状态快照（`agent-observe.ts`）走同一个校验器——同形的事实只有一套规则。
+ */
+function projectStateWithCapabilities(state: unknown): Readonly<{ state: EchoObservableState; omitted: number }> | undefined {
+  try {
     if (state === null || typeof state !== "object") return undefined;
     const rawCaps = (state as { capabilities?: unknown }).capabilities;
     if (!Array.isArray(rawCaps)) return undefined;
@@ -290,10 +348,21 @@ function tryProjectSnapshot(
     }
     const projectedState = projectObservableState(state, kept, prior + omitted);
     if (projectedState === undefined) return undefined;
-    return { snapshot: Object.freeze({ throughSeq, at, state: projectedState }), omitted };
+    return { state: projectedState, omitted };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * run 开头那份状态快照的物化入口（`agent-observe.ts`）：规则与 run 结尾的 finalSnapshot 完全相同。
+ * 不合法**抛**——它走 bounded lane，fact-sink 会把投影抛错变成 hole + gap，不会静默丢。
+ */
+export function materializeObservableState(raw: unknown): EchoObservableState {
+  const projected = projectStateWithCapabilities(raw);
+  // 普通 Error 就够：投影抛任何错误，fact-sink 都按既定语义留 hole + gap（reason 归 encoding_error）
+  if (projected === undefined) throw new Error("agent state snapshot 结构不合法");
+  return projected.state;
 }
 
 export function preflightTerminalProjection(input: RunClosedBodyInput): TerminalProjection {
