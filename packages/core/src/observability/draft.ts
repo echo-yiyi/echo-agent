@@ -26,8 +26,11 @@ export type RunObservationHeaderSeed = Readonly<
 /** `run.accepted` 的 body：恰好 `{ header }`，Sequencer 据此建 RunIndex。 */
 export type RunAcceptedBodyV1 = Readonly<{ header: RunObservationHeaderSeed }>;
 
-/** `run.started` 没有额外事实：permit executor 真正进入 loop 的那一拍。 */
-export type RunStartedBodyV1 = Readonly<{ startedBy: "permit-executor" }>;
+/**
+ * `run.started`：真正进入 loop 的那一拍，只记是谁进的。`permit-executor` = admission 颁发的 run 由 permit executor 进入；
+ * `subloop` = 隔离子循环由派出它的 Agent 直接进入（不经 admission）。
+ */
+export type RunStartedBodyV1 = Readonly<{ startedBy: "permit-executor" | "subloop" }>;
 
 /** run 边界三事实的固定名字；其它 producer 不得重发（唯一 emission owner）。 */
 export const RUN_BOUNDARY_NAMES = ["run.accepted", "run.started", "run.closed"] as const;

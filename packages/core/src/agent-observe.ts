@@ -31,8 +31,9 @@ export type AgentFactBody =
   /**
    * run 开头的整体状态，与 `run.closed` 里的 finalSnapshot **同形、同一个校验器**（`terminal.ts#materializeObservableState`），
    * 两份一比就知道这个 run 改了什么。结尾那份不从这里发——它是 run.closed 这条边界的一部分，唯一 owner 在 ObservationRuntime。
+   * `runId` 由事实自带：隔离子循环的 run 开头时，Agent 自己可能正开着另一个 run 与 turn，不能从 Agent 身上补。
    */
-  | { kind: "state_snapshot"; moment: "run_started"; state: EchoObservableState }
+  | { kind: "state_snapshot"; moment: "run_started"; runId: string; state: EchoObservableState }
   | { kind: "queue_updated"; queue: "steering" | "followUp" | "inbox"; size: number }
   /** `ResourceChange` 自带一个 `kind`（tool / skill / mcp …），与本联合的判别字段同名，所以整个嵌进 `change`。 */
   | { kind: "resource_changed"; change: ResourceChange };
@@ -62,7 +63,7 @@ export function projectAgentFact(fact: AgentFact, policy: ObservationCapturePoli
         ...base,
         kind: "snapshot",
         name: "agent.state",
-        scope: {},
+        scope: { runId: fact.runId },
         attributes: { moment: fact.moment, capabilities: state.capabilities.length },
         body: { moment: fact.moment, state },
       };

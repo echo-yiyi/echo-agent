@@ -138,6 +138,18 @@ import type { RunSource } from "../admission/types.ts";
 import type { AgentOutcome } from "../events.ts";
 export type { RunSource };
 
+/**
+ * 不经 admission、由某个 run 派出的循环实例（隔离子循环）的来源，`parentRunId` 链回派出它的那个 run。
+ * 记忆整理（dream）与记忆提取（extract）挂在排它们的那次 run 上；子 agent（subagent）另带派出它的那次工具调用，
+ * `background` 为 true 时它在后台跑，可能在父 run 封口之后才结束。
+ */
+export type SubloopRunSource =
+  | Readonly<{ kind: "dream" | "extract"; parentRunId: string }>
+  | Readonly<{ kind: "subagent"; parentRunId: string; parentToolCallId: string; background: boolean }>;
+
+/** journal 里一个 run 的来源：admission 颁发的 run 是 `RunSource`，隔离子循环是 `SubloopRunSource`。 */
+export type ObservedRunSource = RunSource | SubloopRunSource;
+
 /* ══════════════════ RunObservation 家族 ══════════════════ */
 
 /** 采集档位（OR9）：off 只留身份骨架与安全 outcome；metadata 缺省；content 才带正文（需显式打开）。 */
@@ -302,7 +314,7 @@ export type RunObservationHeader = Readonly<{
   schemaVersion: 1;
   runId: string;
   submissionId?: string;
-  source: RunSource;
+  source: ObservedRunSource;
   runtimeId: string;
   agentId: string;
   agentInstanceId: string;
@@ -527,6 +539,7 @@ export type ObservationSubscribeOptions = Readonly<{
 export interface EchoObservations {
   getRun(runId: string): Promise<RunLookupResult>;
   getSubmission(submissionId: string): Promise<SubmissionObservation | null>;
+  /** 最近一次**顶层** run：隔离子循环（source 带 `parentRunId`）是某个 run 派出来的，不算「上一次」。 */
   lastRun(): Promise<RunLookupResult>;
   listRuns(options?: ListRunsOptions): Promise<RunObservationPage>;
   snapshot(): Promise<EchoObservationSnapshot>;
@@ -537,6 +550,7 @@ export interface EchoObservations {
 export interface EchoObservationReader {
   getRun(runId: string): Promise<RunLookupResult>;
   getSubmission(submissionId: string): Promise<SubmissionObservation | null>;
+  /** 最近一次**顶层** run：隔离子循环（source 带 `parentRunId`）是某个 run 派出来的，不算「上一次」。 */
   lastRun(): Promise<RunLookupResult>;
   listRuns(options?: ListRunsOptions): Promise<RunObservationPage>;
   snapshot(): Promise<EchoObservationSnapshot>;

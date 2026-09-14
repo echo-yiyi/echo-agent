@@ -88,9 +88,17 @@ async function listRuns(store: SqliteObservationReader, options: ListRunsOptions
   return { items: page.map((e) => e.header), nextCursor };
 }
 
+/** 最近一次顶层 run：按 `(acceptedAt, runId)` 倒序翻页，跳过隔离子循环（source 带 `parentRunId`）。 */
 async function lastRun(store: SqliteObservationReader): Promise<RunLookupResult> {
-  const [latest] = await store.listRunIndex({ limit: 1 });
-  return latest === undefined ? { kind: "unknown" } : lookupRun(store, latest.runId);
+  let after: RunIndexCursor | undefined;
+  for (;;) {
+    const entries = await store.listRunIndex({ limit: MAX_PAGE, ...(after === undefined ? {} : { after }) });
+    const top = entries.find((e) => !("parentRunId" in e.header.source));
+    if (top !== undefined) return lookupRun(store, top.runId);
+    const last = entries[entries.length - 1];
+    if (last === undefined || entries.length < MAX_PAGE) return { kind: "unknown" };
+    after = { acceptedAt: last.header.acceptedAt, runId: last.runId };
+  }
 }
 
 /** live：由 `createAgent()` 里的 ObservationRuntime 提供 Sequencer 与（同进程）store。 */

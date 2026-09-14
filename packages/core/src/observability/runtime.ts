@@ -15,7 +15,7 @@
 import type { Clock } from "../schedule/clock.ts";
 import type { Diagnostic } from "../errors.ts";
 import type { AgentEvent, AgentOutcome } from "../events.ts";
-import type { RunModelBinding, RunSource } from "../admission/types.ts";
+import type { RunModelBinding } from "../admission/types.ts";
 import type { Model } from "../provider/types.ts";
 import { BUILTIN_GENERATION } from "../extension/builtin.ts";
 import { snapshotRunModelBinding } from "./assembly.ts";
@@ -32,6 +32,7 @@ import type {
   ObservationCapturePolicy,
   ObservationOwner,
   ObservationRecordKind,
+  ObservedRunSource,
   RunClosedBodyInput,
   RunClosedOutcomeObservation,
   RunIndexEntryV1,
@@ -68,7 +69,7 @@ export type ObservationRuntimeOptions = Readonly<{
 
 export type RunAcceptInput = Readonly<{
   runId: string;
-  source: RunSource;
+  source: ObservedRunSource;
   agentId: string;
   agentInstanceId: string;
   sessionId: string | null;
@@ -228,9 +229,9 @@ export class ObservationRuntime {
     this.fireBoundary(input.runId, RUN_ASSEMBLY_RECORD, this.boundary(RUN_ASSEMBLY_RECORD, "snapshot", scope, acceptedAt, assembly));
   }
 
-  /** permit executor 真正进入 loop 的那一拍。同样只预留、不等（started 失败本来就不取消 run）。 */
-  startRun(runId: string, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>): void {
-    const body: RunStartedBodyV1 = { startedBy: "permit-executor" };
+  /** 真正进入 loop 的那一拍（permit executor，或派出隔离子循环的 Agent）。同样只预留、不等（started 失败本来就不取消 run）。 */
+  startRun(runId: string, identity: Readonly<{ agentId: string; agentInstanceId: string; sessionId: string | null }>, startedBy: RunStartedBodyV1["startedBy"]): void {
+    const body: RunStartedBodyV1 = { startedBy };
     this.fireBoundary(runId, "run.started", this.boundary("run.started", "event", this.runScope(runId, identity), this.clock.now(), body));
   }
 

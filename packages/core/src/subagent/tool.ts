@@ -27,10 +27,10 @@ export type SubagentOutcome =
 export type SubagentDeps = {
   /** 父池里能给子 agent 的工具名（不含 `subagent` 自己）。 */
   availableTools(): readonly string[];
-  /** 前台：在父 run 里嵌套跑到完。`onProgress` 收子 agent 的文字增量（进 tool_execution_update）。 */
-  runForeground(spec: SubagentSpec, ctx: { signal?: AbortSignal; onProgress?: (text: string) => void }): Promise<SubagentOutcome>;
-  /** 后台：起一个 kind "subagent" 的后台任务，结束时回复投 inbox。没有后台队列就不给。 */
-  runBackground?(spec: SubagentSpec, label: string): { ok: true; id: string } | { ok: false; message: string };
+  /** 前台：在父 run 的这次工具调用（`toolCallId`）里嵌套跑到完。`onProgress` 收子 agent 的文字增量（进 tool_execution_update）。 */
+  runForeground(spec: SubagentSpec, ctx: { toolCallId: string; signal?: AbortSignal; onProgress?: (text: string) => void }): Promise<SubagentOutcome>;
+  /** 后台：起一个 kind "subagent" 的后台任务，结束时回复投 inbox。`toolCallId` 是派出它的那次工具调用。没有后台队列就不给。 */
+  runBackground?(spec: SubagentSpec, label: string, toolCallId: string): { ok: true; id: string } | { ok: false; message: string };
 };
 
 type Params = { prompt: string; system?: string; tools: string[]; max_iterations?: number; background?: boolean };
@@ -81,12 +81,12 @@ export function makeSubagentTool(deps: SubagentDeps): ModelTool<Params> {
       };
       if (background === true) {
         if (deps.runBackground === undefined) return toolError("This agent has no background queue; background: true is not supported");
-        const r = deps.runBackground(spec, task.slice(0, 60));
+        const r = deps.runBackground(spec, task.slice(0, 60), ctx.toolCallId);
         return r.ok
           ? toolOk(`Started subagent ${r.id} in the background; its reply will be delivered to you when it ends`, { taskId: r.id })
           : toolError(r.message);
       }
-      const outcome = await deps.runForeground(spec, { ...(ctx.signal === undefined ? {} : { signal: ctx.signal }), ...(ctx.onUpdate === undefined ? {} : { onProgress: ctx.onUpdate.bind(ctx) }) });
+      const outcome = await deps.runForeground(spec, { toolCallId: ctx.toolCallId, ...(ctx.signal === undefined ? {} : { signal: ctx.signal }), ...(ctx.onUpdate === undefined ? {} : { onProgress: ctx.onUpdate.bind(ctx) }) });
       switch (outcome.kind) {
         case "completed":
           return toolOk(outcome.text === "" ? "(the subagent finished without a reply)" : outcome.text, { assistantMessages: outcome.assistantMessages });

@@ -98,7 +98,7 @@ async function fixtureRun(): Promise<RunObservation> {
     const sink = rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => ({ ...identity }));
     rt.acceptRun({ runId: "run:fixed", source: { kind: "user" }, ...identity, modelBinding: binding });
     clock.advance(1);
-    rt.startRun("run:fixed", identity);
+    rt.startRun("run:fixed", identity, "permit-executor");
     for (const f of script()) {
       // 与循环里的探针同一规则：turn 里的节点带上本 turn 的 id（turn_ended 仍在 turn 里，之后清掉）
       if (f.kind === "turn_started") turnId = f.turnId;

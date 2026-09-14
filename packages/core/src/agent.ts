@@ -27,7 +27,7 @@ import { compactionFactDescriptor } from "./compaction/observe.ts";
 import { agentFactDescriptor, probeAgent, type AgentProbe } from "./agent-observe.ts";
 import { sha256Hex } from "./observability/hash.ts";
 import { canonicalJson } from "./observability/normalize.ts";
-import type { EchoObservableState, ObservationValue, RuntimePhase } from "./observability/types.ts";
+import type { EchoObservableState, ObservationValue, RuntimePhase, SubloopRunSource } from "./observability/types.ts";
 import { HookRuntime, type HookContext, type HookOrigin, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
@@ -487,6 +487,8 @@ export class Agent {
   private loopProbes: LoopProbes | undefined;
   /** Agent 自身节点（队列、资源）的探针（`agent-observe.ts`），与 `observation` 同时解析。 */
   private agentProbe: AgentProbe | undefined;
+  /** run 开头的状态快照走这一根：快照自带 runId，scope 供给只给「是哪个 agent、哪段会话」（与循环探针同一条规矩）。 */
+  private agentStateProbe: AgentProbe | undefined;
 
   /** 持久记忆的操作面：`agent.memory?.shouldDream()`。undefined = 本 agent 没有记忆。 */
   readonly memory?: AgentMemories;
@@ -879,7 +881,7 @@ export class Agent {
             // 子调它等于替父取 schema——正是「没取过的延迟工具不许委派」要挡的事；review 2026-09-09）
             availableTools: () => visibleTools(this.tools, this.loadedTools, this.restriction()).map((t) => t.name).filter((n) => n !== SUBAGENT_NAME && n !== TOOL_SEARCH_NAME),
             runForeground: (spec, ctx) => this.spawnSubagentForeground(spec, ctx),
-            runBackground: (spec, label) => this.spawnSubagentBackground(spec, label),
+            runBackground: (spec, label, toolCallId) => this.spawnSubagentBackground(spec, label, toolCallId),
           }),
         ],
       },
@@ -2566,7 +2568,7 @@ export class Agent {
     this._state.lastError = null;
     try {
       // permit executor 进入 loop 的那一拍发 `run.started`——只预留不等，落不下去只降级
-      this.observeRunStarted(runId);
+      this.observeRunStarted(runId, "permit-executor");
       const result = await executor(scope, abortController.signal);
       this.terminalByRun.set(runId, result); // 终态已出：之后 callback 再抛，normalizer 复用它
       return result;
@@ -2777,19 +2779,21 @@ export class Agent {
     signal: AbortSignal,
   ): Promise<void> {
     if (transcript === "" || !this.memoryWorkAllowed || signal.aborted) return;
-    const runId = `extract-${crypto.randomUUID()}`;
     const table = memoryScopeTableOf(memory);
     const prompt = defaultExtractPrompt(listMemories(memory), table, transcript);
-    try {
-      await this.runSubagent(
-        { prompt, systemPrompt: null, tools: [memoryTool(memory)], runId, maxIterations: DEFAULT_EXTRACT_MAX_TURNS, turnInjections: "none" },
-        scope,
-        signal,
-        async () => {},
-      );
-    } finally {
-      this.permissions.closeRun(runId);
-    }
+    await this.runSubagent(
+      {
+        prompt,
+        systemPrompt: null,
+        tools: [memoryTool(memory)],
+        source: { kind: "extract", parentRunId: scope.runId },
+        maxIterations: DEFAULT_EXTRACT_MAX_TURNS,
+        turnInjections: "none",
+      },
+      scope,
+      signal,
+      async () => {},
+    );
   }
 
   /**
@@ -2814,20 +2818,14 @@ export class Agent {
           if (!(await shouldDream(memory, layer))) continue;
           // 门过了才上锁：dreamTask 有副作用（写 startedAt），不能放在判断之前
           const task = await dreamTask(memory, layer);
-          const runId = `dream-${crypto.randomUUID()}`;
-          let result: LoopResult;
-          try {
-            // 只给这一层的那把记忆工具。不是「过滤掉危险的」，是**只给这一件**，而且够不到别的层。
-            // **事件不外发**：整理的中间过程不该混进对外事件流。
-            result = await this.runSubagent(
-              { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, turnInjections: "inherit" },
-              scope,
-              signal,
-              async () => {},
-            );
-          } finally {
-            this.permissions.closeRun(runId);
-          }
+          // 只给这一层的那把记忆工具。不是「过滤掉危险的」，是**只给这一件**，而且够不到别的层。
+          // **事件不外发**：整理的中间过程不该混进对外事件流。
+          const result = await this.runSubagent(
+            { prompt: task.prompt, systemPrompt: null, tools: task.tools, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "inherit" },
+            scope,
+            signal,
+            async () => {},
+          );
           // **只有真的跑完才算数。** `runAgentLoop` 对失败不抛，它把结果放在 outcome 里；
           // 无条件 `markDreamed()` 会让一次失败的整理被记成成功、下一次要等满 24 小时（实测过）。
           // 被中断同理不提交：startedAt 会在 DREAM_LOCK_STALE_MS 后过期，下次重来。
@@ -2852,16 +2850,16 @@ export class Agent {
    * 一字不动）、只给指定的工具、同一份模型绑定、不吃前台的 steer / followUp。事件去向由调用方给的 `emit` 决定。
    * `turnInjections`：Dream 沿用父的每轮注入（激活 skill、任务清单），委派的子 agent 不要——它看不到这场对话。
    *
-   * **子循环暂不挂观测探针**，内部的 turn / 模型 / 工具不进 journal——不是忘了，是记录的归属还没定：
-   * 后台子 agent 在父 run 封口之后才跑，scope 供给给出的是「此刻在跑的那个 run」，事实会记进无关的 run；
-   * 同一批并发的两个前台子 agent 挂着同一个父 turn，span 配对键相同会互相配错；Dream / 提取的 runId 不在 RunIndex 里。
+   * **每次调用是 journal 里的一个 run**（不经 admission）：自己的 runId、`source` 链回派出它的 run，边界三拍与主循环同一套；
+   * 循环里的每条事实自带这个 runId（`loop/observe.ts`），所以与主循环共用同一组探针、不需要任何专门的观测代码。
+   * 权限 ask 的 tombstone 按这个 runId 留到循环跑完。
    */
-  private runSubagent(
+  private async runSubagent(
     spec: {
       prompt: string;
       systemPrompt: string | null;
       tools: readonly AgentTool[];
-      runId: string;
+      source: SubloopRunSource;
       maxIterations?: number;
       turnInjections: "inherit" | "none";
     },
@@ -2869,29 +2867,50 @@ export class Agent {
     signal: AbortSignal,
     emit: Emit,
   ): Promise<LoopResult> {
+    const runId = `${spec.source.kind}-${crypto.randomUUID()}`;
     const base = this.createLoopConfig(scope);
     const tools = [...spec.tools];
-    return runAgentLoop(
-      [userMessage(spec.prompt)],
-      { systemPrompt: spec.systemPrompt, messages: [], compaction: EMPTY_COMPACTION },
-      {
-        ...base,
-        runId: spec.runId,
-        maxIterations: spec.maxIterations ?? base.maxIterations,
-        getTools: () => tools,
-        knownToolNames: () => tools.map((t) => t.name),
-        resolveTool: (name) => {
-          const tool = tools.find((t) => t.name === name);
-          return tool === undefined ? { ok: false as const, reason: "not_found" as const } : { ok: true as const, tool };
+    const rt = this.observationRuntime();
+    rt?.acceptRun({ runId, source: spec.source, ...this.observationIdentity(), modelBinding: scope.modelBinding });
+    this.observeRunStarted(runId, "subloop");
+    let outcome: AgentOutcome | undefined;
+    try {
+      const result = await runAgentLoop(
+        [userMessage(spec.prompt)],
+        { systemPrompt: spec.systemPrompt, messages: [], compaction: EMPTY_COMPACTION },
+        {
+          ...base,
+          runId,
+          maxIterations: spec.maxIterations ?? base.maxIterations,
+          getTools: () => tools,
+          knownToolNames: () => tools.map((t) => t.name),
+          resolveTool: (name) => {
+            const tool = tools.find((t) => t.name === name);
+            return tool === undefined ? { ok: false as const, reason: "not_found" as const } : { ok: true as const, tool };
+          },
+          ...(spec.turnInjections === "none" ? { getTurnInjections: () => [] } : {}),
+          // 不吃 steering / followUp：那些是给前台 run 的（gate 只认前台 run）
+          intake: undefined,
         },
-        ...(spec.turnInjections === "none" ? { getTurnInjections: () => [] } : {}),
-        // 不吃 steering / followUp：那些是给前台 run 的（gate 只认前台 run）
-        intake: undefined,
-      },
-      emit,
-      signal,
-      scope.modelBinding.streamFunction,
-    );
+        emit,
+        signal,
+        scope.modelBinding.streamFunction,
+        this.loopProbesNow(),
+      );
+      outcome = result.outcome;
+      return result;
+    } catch (e) {
+      outcome = { kind: "error", error: { source: "internal", code: "internal", retryable: false, message: errText(e) } };
+      throw e;
+    } finally {
+      this.permissions.closeRun(runId);
+      // 封口不等 COMMIT：主循环等它是为了 `send()` 如实报 persistence，子循环没有这样的读者；顺序在同步段已定
+      if (rt !== undefined && outcome !== undefined) {
+        rt.closeRun({ runId, outcome, finalState: this.observableState(rt, this.admittedRunId()) }, this.observationIdentity()).catch((e: unknown) =>
+          this.reportDiagnostic({ code: "observation_boundary_failed", message: `run ${runId}：run.closed 没封上（子循环照常结束）：${errText(e)}` }),
+        );
+      }
+    }
   }
 
   /** 模型点名的工具 → 父池里的实例。不认识的名字整组判红（不静默少给），`subagent` 自己不给（只扇一层）。 */
@@ -2909,13 +2928,20 @@ export class Agent {
   }
 
   /** 前台委派：嵌在父 run 的这次工具执行里跑到完；父的 abort 一路级联进来（用的是工具拿到的 signal）。 */
-  private async spawnSubagentForeground(spec: SubagentSpec, ctx: { signal?: AbortSignal; onProgress?: (text: string) => void }): Promise<SubagentOutcome> {
+  private async spawnSubagentForeground(spec: SubagentSpec, ctx: { toolCallId: string; signal?: AbortSignal; onProgress?: (text: string) => void }): Promise<SubagentOutcome> {
     const scope = this.activeScope;
     if (scope === undefined) return { kind: "error", message: "a subagent can only be spawned from inside a run" };
     const tools = this.subagentTools(spec.tools);
     if (typeof tools === "string") return { kind: "error", message: tools };
     const result = await this.runSubagent(
-      { prompt: spec.prompt, systemPrompt: spec.systemPrompt, tools, runId: scope.runId, turnInjections: "none", ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }) },
+      {
+        prompt: spec.prompt,
+        systemPrompt: spec.systemPrompt,
+        tools,
+        source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: ctx.toolCallId, background: false },
+        turnInjections: "none",
+        ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
+      },
       scope,
       ctx.signal ?? scope.signal,
       subagentProgress(ctx.onProgress),
@@ -2927,29 +2953,30 @@ export class Agent {
    * 后台委派：后台队列上 kind "subagent" 的任务（`BackgroundTask.kind` 预留的那个）。模型绑定在派出那一刻捕获，
    * 父 run 结束后子 agent 照跑；随 agent 收摊（`killAllBackground` 抹 signal）。结束时最后一条回复投 inbox。
    */
-  private spawnSubagentBackground(spec: SubagentSpec, label: string): { ok: true; id: string } | { ok: false; message: string } {
+  private spawnSubagentBackground(spec: SubagentSpec, label: string, toolCallId: string): { ok: true; id: string } | { ok: false; message: string } {
     const scope = this.activeScope;
     if (scope === undefined) return { ok: false, message: "a subagent can only be spawned from inside a run" };
     const tools = this.subagentTools(spec.tools);
     if (typeof tools === "string") return { ok: false, message: tools };
-    // 后台的子循环是自己一段 run（父 run 早就封口了）：权限 ask 的 tombstone 按它自己的 runId 留到跑完
-    const runId = `subagent-${crypto.randomUUID()}`;
     let final: SubagentOutcome = { kind: "aborted" };
     const started = startBackground(this.background, {
       kind: "subagent",
       label,
       run: async (bg) => {
-        try {
-          const result = await this.runSubagent(
-            { prompt: spec.prompt, systemPrompt: spec.systemPrompt, tools, runId, turnInjections: "none", ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }) },
-            scope,
-            bg.signal,
-            subagentProgress((text) => bg.write(text), true),
-          );
-          final = subagentOutcome(result);
-        } finally {
-          this.permissions.closeRun(runId);
-        }
+        const result = await this.runSubagent(
+          {
+            prompt: spec.prompt,
+            systemPrompt: spec.systemPrompt,
+            tools,
+            source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: toolCallId, background: true },
+            turnInjections: "none",
+            ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
+          },
+          scope,
+          bg.signal,
+          subagentProgress((text) => bg.write(text), true),
+        );
+        final = subagentOutcome(result);
         if (final.kind === "error") throw new Error(final.message);
         if (final.kind === "aborted") throw new Error("aborted");
       },
@@ -3424,6 +3451,7 @@ export class Agent {
       compaction: rt.capabilitySink(compactionFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => this.observationIdentityScope()),
     };
     this.agentProbe = rt.capabilitySink(agentFactDescriptor, builtinOwner(AGENT_ENTRY_ID));
+    this.agentStateProbe = rt.capabilitySink(agentFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => this.observationIdentityScope());
     // 三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
     if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor({ pathDigestKey: rt.pathDigestKey }), builtinOwner(MEMORY_ENTRY_ID));
     attachTaskObserver(this.tasks, rt.capabilitySink(taskFactDescriptor, builtinOwner(TASKS_ENTRY_ID)));
@@ -3472,12 +3500,21 @@ export class Agent {
     this.observationRuntime()?.acceptRun({ runId: input.runId, source: input.source, ...this.observationIdentity(), modelBinding: input.modelBinding });
   }
 
-  /** executor 进入 loop 那一拍：同样只预留、不等。紧跟着拍一份 run 开头的状态，与结尾的 finalSnapshot 同形，一比就知道这个 run 改了什么。 */
-  private observeRunStarted(runId: string): void {
+  /**
+   * 进入 loop 的那一拍（permit executor，或派出隔离子循环的 Agent）：同样只预留、不等。紧跟着拍一份 run 开头的状态，
+   * 与结尾的 finalSnapshot 同形，一比就知道这个 run 改了什么。状态里的 `activeRunId` 是 Agent 此刻开着的 admission run——
+   * 主循环就是它自己，隔离子循环是派出它的那个（或者没有）。
+   */
+  private observeRunStarted(runId: string, startedBy: "permit-executor" | "subloop"): void {
     const rt = this.observationRuntime();
     if (rt === undefined) return;
-    rt.startRun(runId, this.observationIdentity());
-    probeAgent(this.agentProbe, { kind: "state_snapshot", moment: "run_started", state: this.observableState(rt, runId) });
+    rt.startRun(runId, this.observationIdentity(), startedBy);
+    probeAgent(this.agentStateProbe, { kind: "state_snapshot", moment: "run_started", runId, state: this.observableState(rt, this.admittedRunId()) });
+  }
+
+  /** Agent 此刻开着的 admission run（permit 期间），没有就是 null。 */
+  private admittedRunId(): string | null {
+    return this.activeRun !== undefined ? this.currentRunId : null;
   }
 
   /** permit finalizer：业务 outcome 已冻结（executed / callback-error 都是）；finalSnapshot 由本 Agent 此刻的状态投影。 */
@@ -3492,7 +3529,7 @@ export class Agent {
    * 只放低基数的事实：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数摘要。
    * 工具 / skill 名单取 `state` getter 的派生视图——与模型菜单、`agent.state` 同一个口径，不另算一份。
    */
-  private observableState(rt: ObservationRuntime, runId: string): EchoObservableState {
+  private observableState(rt: ObservationRuntime, activeRunId: string | null): EchoObservableState {
     const phase = this.observationPhase();
     const persistence = rt.sequencer.persistenceState.status;
     const s = this.state;
@@ -3506,7 +3543,7 @@ export class Agent {
       },
       agent: {
         status: s.status,
-        activeRunId: runId,
+        activeRunId,
         activeTurnId: this.intake.activeTurnId,
         iteration: s.iteration,
         messageCount: s.messages.length,

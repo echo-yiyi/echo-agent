@@ -1434,6 +1434,18 @@ describe("boundary body 是固定 schema，不是 producer 的自由字段区（
     expect(env.name).toBe("run.started");
   });
 
+  test("startedBy 只认 permit-executor 与 subloop：隔离子循环照常通过，别的取值判红并留痕", async () => {
+    const h = harness();
+    await accepted(h, "r3");
+    expect((await h.seq.appendBoundary(boundary("run.started", { startedBy: "subloop" }, "r3"))).name).toBe("run.started");
+    const bad = harness();
+    await accepted(bad, "r3");
+    const before = bad.seq.health().capture.canonicalGapCount;
+    await bad.seq.appendBoundary(boundary("run.started", { startedBy: "nope" }, "r3")).catch(() => {});
+    await bad.flush();
+    expect(bad.seq.health().capture.canonicalGapCount).toBe(before + 1);
+  });
+
   test("run.accepted body 必须恰好是 { header }：多一个键就判红并留痕", async () => {
     const h = harness();
     const before = h.seq.health().capture.canonicalGapCount;
@@ -1524,6 +1536,13 @@ describe("run.accepted 的 header 是逐字段 exact schema（2026-08-27 review 
       { ...acceptedBody("r4").header, source: { kind: "nope" } },
       { ...acceptedBody("r4").header, source: { kind: "user", extra: 1 } },
       { ...acceptedBody("r4").header, source: { kind: "extension", entryId: "e" } },
+      // 隔离子循环的来源：只有 dream / extract / subagent 能带父 run，字段齐全、不多不少
+      { ...acceptedBody("r4").header, source: { kind: "user", parentRunId: "p" } },
+      { ...acceptedBody("r4").header, source: { kind: "extract" } },
+      { ...acceptedBody("r4").header, source: { kind: "dream", parentRunId: "" } },
+      { ...acceptedBody("r4").header, source: { kind: "extract", parentRunId: "p", extra: 1 } },
+      { ...acceptedBody("r4").header, source: { kind: "subagent", parentRunId: "p", parentToolCallId: "c1" } },
+      { ...acceptedBody("r4").header, source: { kind: "subagent", parentRunId: "p", parentToolCallId: "c1", background: "no" } },
       { ...acceptedBody("r4").header, agentId: "" },
     ];
     for (const header of bad) {
@@ -1541,6 +1560,19 @@ describe("run.accepted 的 header 是逐字段 exact schema（2026-08-27 review 
     await h.flush();
     expect(env.name).toBe("run.accepted");
     expect(await h.store.readRunIndex("r5")).not.toBeNull();
+  });
+
+  test("隔离子循环的来源（带父 run 的 dream / extract / subagent）照常通过，RunIndex 里原样可查", async () => {
+    for (const source of [
+      { kind: "dream", parentRunId: "p" },
+      { kind: "extract", parentRunId: "p" },
+      { kind: "subagent", parentRunId: "p", parentToolCallId: "c1", background: false },
+    ] as const) {
+      const h = harness();
+      await h.seq.appendBoundary(boundary("run.accepted", { header: { ...acceptedBody("r6").header, source } }, "r6"));
+      await h.flush();
+      expect((await h.store.readRunIndex("r6"))?.header.source).toEqual(source);
+    }
   });
 });
 

@@ -977,7 +977,8 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       case "run.started": {
         const keys = keysOf(body);
         if (keys === undefined || keys.length !== 1 || keys[0] !== "startedBy") return "run.started body 必须恰好是 { startedBy }";
-        if ((body as Record<string, unknown>).startedBy !== "permit-executor") return "run.started body.startedBy 取值非法";
+        const startedBy = (body as Record<string, unknown>).startedBy;
+        if (startedBy !== "permit-executor" && startedBy !== "subloop") return "run.started body.startedBy 取值非法";
         return undefined;
       }
       case "run.closed": {
@@ -1037,8 +1038,18 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     if (!isRecord(source)) return "run.accepted body.header.source 必须是对象";
     const sourceKeys = Object.keys(source);
     const kind = source.kind;
-    if (kind === "user" || kind === "inbox" || kind === "dream") {
+    if (kind === "user" || kind === "inbox" || (kind === "dream" && !sourceKeys.includes("parentRunId"))) {
       if (sourceKeys.length !== 1) return "run.accepted body.header.source 含未登记字段";
+      return undefined;
+    }
+    if (kind === "dream" || kind === "extract" || kind === "subagent") {
+      // 隔离子循环（SubloopRunSource）：链回派出它的 run；子 agent 另带那次工具调用与是否后台
+      const fields = kind === "subagent" ? (["parentRunId", "parentToolCallId", "background"] as const) : (["parentRunId"] as const);
+      if (sourceKeys.length !== fields.length + 1 || !fields.every((k) => sourceKeys.includes(k))) return "run.accepted body.header.source 含未登记字段";
+      for (const k of fields) {
+        const v = source[k];
+        if (k === "background" ? typeof v !== "boolean" : typeof v !== "string" || v.length === 0) return `run.accepted body.header.source.${k} 取值非法`;
+      }
       return undefined;
     }
     if (kind === "extension") {

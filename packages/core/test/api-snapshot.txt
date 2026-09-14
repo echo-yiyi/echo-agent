@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 334（value 120 · type 194 · both 20）
+符号 336（value 120 · type 196 · both 20）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -261,16 +261,18 @@ both   ObservationStoreOpenError
 -- src/observability/store.ts (1) --
 both   ObservationCorruptionError
 
--- src/observability/types.ts (9) --
+-- src/observability/types.ts (11) --
 type   EchoObservationReader
 type   EchoObservations
 type   EchoRunResult
 type   ListRunsOptions
 type   ObservationCapturePolicy
+type   ObservedRunSource
 type   RunLookupResult
 type   RunObservation
 type   RunObservationHeader
 type   RunObservationPage
+type   SubloopRunSource
 
 -- src/permission/types.ts (11) --
 type   PermissionAnswer
@@ -578,7 +580,7 @@ type   McpHost
 type   McpServerSnapshot
 
 == 入口 "./observability" → src/observability/public.ts ==
-符号 76（value 15 · type 59 · both 2）
+符号 78（value 15 · type 61 · both 2）
 
 -- src/admission/types.ts (1) --
 type   RunSource
@@ -612,7 +614,7 @@ value  renderRunObservation
 both   ObservationCorruptionError
 both   ObservationStoreUnavailableError
 
--- src/observability/types.ts (56) --
+-- src/observability/types.ts (58) --
 type   ActiveEntrySnapshot
 type   AgentAssemblyObservationSnapshot
 type   AgentOutcomeObservation
@@ -648,6 +650,7 @@ type   ObservationScalar
 type   ObservationSnapshot
 type   ObservationSubscribeOptions
 type   ObservationValue
+type   ObservedRunSource
 type   RenderedRunObservation
 type   RenderRunObservationOptions
 type   RunClosedBodyInput
@@ -667,6 +670,7 @@ type   RunObservationViewModel
 type   RuntimePhase
 type   SinkDeliveryGap
 type   SinkHealth
+type   SubloopRunSource
 type   SubmissionObservation
 type   TurnWorksetObservation
 

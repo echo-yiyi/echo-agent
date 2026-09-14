@@ -228,23 +228,67 @@ describe("send → getRun → render（completed）", () => {
       await reader.close();
     }
   });
-  test("记忆的后台活不再是 admission run：用户那条照常可查，run 列表里只有它", async () => {
-    // **2026-09-08 翻向**：dream（与新加的提取）从 admission 挪进了各自的独立通道——
-    // 走 maintenance 许可的代价是提取会被连续对话整段抢掉。代价是它们不再产生 run 级观测；
-    // 记忆本身的动作仍然可查，那是 `memory.mutation.*` 那族事实（见 memory/observe.ts）。
+  test("前台子 agent 是自己的 run：链回派出它的工具调用，turn 挂在自己的 runId 下不与父撞；lastRun 仍是用户那条", async () => {
+    // 隔离子循环不进 admission（dream / 提取 / 子 agent 同一段 `runSubagent`），但在账本里各是一个 run
     const stateDir = join(await tmp(), "state");
-    const echo = await echoWith({ stateDir, turns: [textTurn("one")], withMemory: true });
+    const echo = await echoWith({
+      stateDir,
+      turns: [toolTurn("c1", "subagent", { prompt: "child task", tools: [] }), textTurn("child reply"), textTurn("parent done")],
+    });
     const user = await echo.send("a");
     expect(user.outcome.kind).toBe("completed");
 
-    // 给后台通道一点时间：就算它跑了，也不该出现在 run 列表里
-    await new Promise((r) => setTimeout(r, 50));
     const page = await echo.observations.listRuns({ limit: 5 });
-    expect(page.items.map((h) => h.source.kind)).toEqual(["user"]);
-    expect((await echo.observations.getRun(user.runId)).kind).toBe("found");
-    // 装了记忆这件事仍然在装配快照里看得见
-    const lookup = await echo.observations.getRun(user.runId);
-    expect(lookup.kind === "found" && lookup.observation.agentAssembly.slots.map((s) => s.slot).includes("memory")).toBe(true);
+    const child = page.items.find((h) => h.source.kind === "subagent");
+    expect(page.items.map((h) => h.runId).sort()).toEqual([child!.runId, user.runId].sort());
+    expect(child?.source).toEqual({ kind: "subagent", parentRunId: user.runId, parentToolCallId: "c1", background: false });
+    expect(child?.status).toBe("completed");
+    expect(child?.integrity).toBe("complete");
+
+    const childLookup = await echo.observations.getRun(child!.runId);
+    const parentLookup = await echo.observations.getRun(user.runId);
+    if (childLookup.kind !== "found" || parentLookup.kind !== "found") throw new Error("unreachable");
+    const c = childLookup.observation;
+    const p = parentLookup.observation;
+    expect(names(c)).toContain("span_start:model.generate");
+    expect(c.records.find((r) => r.name === "run.started")?.body).toEqual({ startedBy: "subloop" });
+    expect(p.records.find((r) => r.name === "run.started")?.body).toEqual({ startedBy: "permit-executor" });
+    // 子循环的每个 turn 都在自己的 runId 下；父 run 里一条都没有
+    const childTurns = c.records.flatMap((r) => (r.scope.turnId === undefined ? [] : [r.scope.turnId]));
+    expect(childTurns.length).toBeGreaterThan(0);
+    expect(childTurns.every((t) => t.startsWith(`${child!.runId}/`))).toBe(true);
+    expect(p.records.some((r) => r.scope.turnId?.startsWith(`${child!.runId}/`) === true)).toBe(false);
+    // 父 run 里那次派出它的工具调用
+    expect(p.records.some((r) => r.name === "tool.execute" && r.scope.toolCallId === "c1")).toBe(true);
+    // 子 run 开头的状态：Agent 此刻开着的 admission run 是父
+    const state = c.records.find((r) => r.name === "agent.state")?.body as { state: EchoObservableState } | undefined;
+    expect(state?.state.agent.activeRunId).toBe(user.runId);
+    expect(c.finalSnapshot).not.toBeNull();
+
+    const last = await echo.observations.lastRun();
+    expect(last.kind === "found" && last.observation.runId).toBe(user.runId);
+  });
+
+  test("后台子 agent 也是自己的 run：background 为 true，父 run 封口之后照样封口", async () => {
+    const stateDir = join(await tmp(), "state");
+    const echo = await echoWith({
+      stateDir,
+      // 父的第二轮与后台子 agent 的那一轮并发取脚本，谁拿到哪条不确定——都是纯文本，断言不看正文
+      turns: [toolTurn("c1", "subagent", { prompt: "child task", tools: [], background: true }), textTurn("t1"), textTurn("t2"), textTurn("t3"), textTurn("t4")],
+    });
+    const user = await echo.send("a");
+    expect(user.outcome.kind).toBe("completed");
+
+    let child: RunObservation["source"] | undefined;
+    let status: string | undefined;
+    for (let i = 0; i < 100 && status !== "completed"; i++) {
+      const h = (await echo.observations.listRuns({ limit: 10 })).items.find((x) => x.source.kind === "subagent");
+      child = h?.source;
+      status = h?.status;
+      if (status !== "completed") await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(status).toBe("completed");
+    expect(child).toEqual({ kind: "subagent", parentRunId: user.runId, parentToolCallId: "c1", background: true });
   });
 
 
@@ -418,7 +462,7 @@ describe("canonical gap（硬门 4）", () => {
     const identity = { agentId: "a", agentInstanceId: "a#1", sessionId: null };
     try {
       rt.acceptRun({ runId: "run:gap", source: { kind: "user" }, ...identity, modelBinding: binding });
-      rt.startRun("run:gap", identity);
+      rt.startRun("run:gap", identity, "permit-executor");
       // ring 容量 2，delayed flush 不会触发：第三条起溢出 → canonical gap（boundary lane）
       for (let i = 0; i < 5; i++) rt.sequencer.offer(bounded(rt, "run:gap", i));
       await rt.closeRun({ runId: "run:gap", outcome: { kind: "completed" }, finalState: null }, identity);
