@@ -42,7 +42,7 @@
 
 - `docs/docs.manifest.json` 只登记已经存在并明确纳入维护的文档；登记表示受门约束，不表示内容已经批准。计划中的文件放 issue，不放死链占位。
 - manifest 标为 bilingual 时，英文 `.md` 与中文 `.zh.md` 的章节、列表、表格和代码块保持同构，代码块逐字一致。
-- 人工确认两侧语义一致后才能更新 `.i18n.yaml`。哈希只证明确认后未改动，不证明翻译正确。
+- 两侧语义一致得到确认后才能更新 `.i18n.yaml`：要么人确认过，要么 [`.claude/skills/bilingual-docs/SKILL.md`](.claude/skills/bilingual-docs/SKILL.md) 里的独立回译核对通过、没有未解决的出入。哈希只证明确认后未改动，不证明翻译正确。
 - TypeScript 示例必须能独立编译；相对 Markdown 链接必须指向已经存在的目标。
 - 源码链接不用行号：声明写 `file.ts#symbol=Qualified.name`，测试写 `file.test.ts#test=<测试标题-slug>`。门只证明锚仍存在，不证明同一符号内部语义没有变化。
 

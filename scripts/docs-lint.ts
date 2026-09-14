@@ -20,7 +20,8 @@
 // ## 这些门**不能**证明什么(如实标注,别声称有守)
 //
 //   · pairing **只能证明两侧字节与上次按确认键时相同**,证明不了两侧在说同一件事。
-//     `--write-pairing <pair>` 是人按下的确认键;门记录这次按键,不评价按得对不对。
+//     `--write-pairing <pair>` 是确认键:人确认过,或 bilingual-docs skill 的独立回译核对通过之后才按;
+//     门记录这次按键,不评价按得对不对。
 //   · 结构签名只覆盖标题层级序列、列表容器与项数、表格行、代码块字节。
 //     **正文长度与标题含义都不进签名**——中文侧可以只有骨架没有肉而全绿。
 //   · code 只证明示例能编译,证明不了它示范的用法是对的。
@@ -573,7 +574,7 @@ const SWITCH_ZH = (en: string): string => `[English](${en}) | 中文`;
  * 双语三文件成组、两侧 blob hash 与记录一致、结构签名一致。
  *
  * **这道门证明的是「两侧字节与上次按确认键时相同」,不是「两侧在说同一件事」。**
- * 后者没有机器判据,归人审——所以重录必须点名(见 writePairing)。
+ * 后者没有机器判据,归人审或 bilingual-docs skill 的独立回译核对——所以重录必须点名(见 writePairing)。
  */
 export function checkPairing(m: Manifest): Violation[] {
   const v: Violation[] = [];

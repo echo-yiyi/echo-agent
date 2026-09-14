@@ -44,7 +44,7 @@ Registration and bilingual rules:
 
 - `docs/docs.manifest.json` registers only documents that already exist and are meant to be maintained. Registration means the document is subject to the gates; it does not mean the content has been approved. Planned files belong in issues, not in the manifest as dead placeholders.
 - When an entry is marked bilingual, the English `.md` and Chinese `.zh.md` keep the same sections, lists, tables, and code blocks, with code blocks byte-identical.
-- Update `.i18n.yaml` only after a human has confirmed the two sides say the same thing. The hash proves nothing changed after that confirmation; it does not prove the translation is right.
+- Update `.i18n.yaml` only after the two sides have been confirmed to say the same thing: either a human confirmed it, or the independent back-translation check in [`.claude/skills/bilingual-docs/SKILL.md`](.claude/skills/bilingual-docs/SKILL.md) passed with no open discrepancy. The hash proves nothing changed after that confirmation; it does not prove the translation is right.
 - TypeScript samples must compile standalone. Relative Markdown links must point at targets that already exist.
 - Source links do not use line numbers: write declarations as `file.ts#symbol=Qualified.name` and tests as `file.test.ts#test=<test-title-slug>`. The gate only proves the anchor still exists; it does not prove the semantics inside that symbol are unchanged.
 
