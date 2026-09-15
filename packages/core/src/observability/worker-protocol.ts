@@ -7,7 +7,6 @@
 //
 // 工作消息带递增的 `n`：观测线程空闲时回报处理到了哪一条，主线程据此决定线程要不要继续拖住进程退出（thread.ts）。
 
-import type { Diagnostic } from "../errors.ts";
 import type { BuiltinSlotContribution } from "./assembly.ts";
 import type { ObservationFactProjection } from "./fact-sink.ts";
 import type { ObservationSubscribeItem, SequencerLimits } from "./sequencer.ts";
@@ -112,7 +111,6 @@ export type FromObservationThread =
   | (Readonly<{ t: "storage"; id: number; rt: string }> & StorageOp)
   | Readonly<{ t: "reply"; id: number; ok: true; value: unknown }>
   | Readonly<{ t: "reply"; id: number; ok: false; error: SerializedError }>
-  | Readonly<{ t: "diagnostic"; rt: string; diagnostic: Diagnostic }>
   | Readonly<{ t: "item"; rt: string; sub: number; item: ObservationSubscribeItem }>
   /** 空闲了：编号不超过 `through` 的工作消息都处理完，手上没有要写的。 */
   | Readonly<{ t: "idle"; through: number }>

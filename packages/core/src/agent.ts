@@ -3538,7 +3538,6 @@ export class Agent {
     this.observationResolved = true;
     this.observation = wiring.runtime;
     const rt = wiring.runtime;
-    rt.attachDiagnostics((d) => this.reportDiagnostic(d));
     rt.bindScope(() => this.observationScope());
     this.loopProbes = {
       // 循环与压缩的事实自带 run / turn：scope 供给只给「是哪个 agent、哪段会话」，不从 Agent 身上补

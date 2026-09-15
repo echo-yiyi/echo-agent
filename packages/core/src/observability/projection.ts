@@ -15,8 +15,7 @@ import { OBSERVATION_SYNC_LIMITS } from "./types.ts";
  * 那个标记只在 `projectAgentEvent()` 的单测里成立，穿过 Sequencer 就是假的。
  *
  * 保留额留给 body 其余字段（stopReason / 计数 / usage / model）与 fact 框架（name / scope / attributes）。
- * **仍不是整条 body 的保证**：content 档的 `toolUseBlocks[].input` 大小不可预估，它超预算时整条照样被拒——
- * 那条走 O3a 的 attachment/blob。这里保证的是**正文本身不再是超预算的原因**。
+ * 结构化的载荷（工具参数、结果 metadata、进展、`toolUseBlocks[].input`）截不了半个，走 `fitPayload`：放得进才带。
  */
 const PROJECTED_BODY_RESERVE = 8 * 1024;
 export const MAX_PROJECTED_TEXT_BYTES = projectionEncodingLimits().maxBytes - PROJECTED_BODY_RESERVE;
@@ -68,6 +67,26 @@ export function takePrefix(s: string, room: number): Readonly<{ text: string; us
     i += width;
   }
   return i < s.length ? { text: s.slice(0, i), used: cost, truncated: true } : { text: s, used: cost, truncated: false };
+}
+
+/**
+ * content 档要原样带的结构化载荷：canonical 字节数不超过 `room` 就带，超了就不带（只标 omitted）。
+ * 结构化的值截不了半个；而带着一份注定超预算的值交给观测线程，主线程白做一次结构化拷贝，那边还是整条判成缺口（2026-09-14）。
+ * 编码按 `room` 封顶，超了立即停，不是 O(输入)；坏 shape 也只算放不进，不抛。
+ */
+export function fitPayload(value: unknown, room: number): Readonly<{ fits: boolean; bytes: number }> {
+  if (room <= 0) return { fits: false, bytes: 0 };
+  try {
+    const enc = encodeCanonical(value, {
+      maxBytes: room,
+      maxValueDepth: OBSERVATION_SYNC_LIMITS.maxValueDepth,
+      maxValueNodes: OBSERVATION_SYNC_LIMITS.maxValueNodes,
+      maxBlobChunkBytes: 0,
+    });
+    return { fits: true, bytes: enc.bytes.byteLength };
+  } catch {
+    return { fits: false, bytes: 0 };
+  }
 }
 
 /**

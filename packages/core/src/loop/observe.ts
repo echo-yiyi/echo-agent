@@ -20,7 +20,7 @@ import type { AgentOutcome, ProviderEvent } from "../events.ts";
 import type { AgentMessage, ContentBlock, Usage } from "../messages.ts";
 import type { AgentToolResult } from "../tools/types.ts";
 import type { CapabilityFactDescriptor, CapabilityFactSink, ObservationFactProjection } from "../observability/fact-sink.ts";
-import { MAX_PROJECTED_TEXT_BYTES, estimatePayloadBytes, takePrefix } from "../observability/projection.ts";
+import { MAX_PROJECTED_TEXT_BYTES, estimatePayloadBytes, fitPayload, takePrefix } from "../observability/projection.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
 import { turnNumberOf } from "./ids.ts";
 import type { AttemptResult, ReplySource, TurnCause } from "./types.ts";
@@ -154,7 +154,7 @@ type ContentSummary = {
   textTruncated: boolean;
   thinking: string;
   thinkingTruncated: boolean;
-  toolUseBlocks: { id: string; name: string; input: unknown }[];
+  toolUseBlocks: ({ id: string; name: string; input: unknown } | { id: string; name: string; inputOmitted: true })[];
 };
 
 function emptySummary(): ContentSummary {
@@ -195,6 +195,7 @@ function summarizeContent(blocks: readonly ContentBlock[] | undefined, collect: 
   out.blocksTruncated = scan < total;
   const parts: string[] = [];
   const thinkingParts: string[] = [];
+  const toolUses: Extract<ContentBlock, { type: "tool_use" }>[] = [];
   let taken = 0;
   let thinkingTaken = 0;
   for (let i = 0; i < scan; i++) {
@@ -234,12 +235,24 @@ function summarizeContent(blocks: readonly ContentBlock[] | undefined, collect: 
       if (r.truncated) out.thinkingTruncated = true;
     } else if (b.type === "tool_use") {
       out.toolUses += 1;
-      if (collect) out.toolUseBlocks.push({ id: b.id, name: b.name, input: b.input });
+      if (collect) toolUses.push(b);
     }
   }
   if (collect) {
     out.text = parts.join("");
     out.thinking = thinkingParts.join("");
+    // tool_use 的 input 分正文剩下的预算：放得进才带；第一个放不进之后的一律不带（不为每一块都试一遍编码）
+    let room = MAX_PROJECTED_TEXT_BYTES - taken - thinkingTaken;
+    for (const b of toolUses) {
+      const fit = room > 0 ? fitPayload(b.input, room) : { fits: false, bytes: 0 };
+      if (fit.fits) {
+        out.toolUseBlocks.push({ id: b.id, name: b.name, input: b.input });
+        room -= fit.bytes;
+      } else {
+        out.toolUseBlocks.push({ id: b.id, name: b.name, inputOmitted: true });
+        room = 0;
+      }
+    }
   }
   return out;
 }
@@ -428,7 +441,11 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
     case "tool_started": {
       const est = estimatePayloadBytes(fact.params);
       const body: Record<string, unknown> = { toolName: fact.toolName, argsBytes: est.payloadBytes, argsTruncated: est.payloadTruncated };
-      if (content) body.params = fact.params;
+      // 参数截不了半个：整份放得进正文预算才带，放不进只留上面的字节数
+      if (content) {
+        if (!est.payloadTruncated && est.payloadBytes <= MAX_PROJECTED_TEXT_BYTES) body.params = fact.params;
+        else body.paramsOmitted = true;
+      }
       return {
         ...base,
         kind: "span_start",
@@ -438,16 +455,27 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         body,
       };
     }
-    case "tool_progress":
+    case "tool_progress": {
       if (!content) return null;
+      const body: Record<string, unknown> = {};
+      if (typeof fact.partial === "string") {
+        const t = takePrefix(fact.partial, MAX_PROJECTED_TEXT_BYTES);
+        body.partial = t.text;
+        if (t.truncated) body.partialTruncated = true;
+      } else if (fitPayload(fact.partial, MAX_PROJECTED_TEXT_BYTES).fits) {
+        body.partial = fact.partial;
+      } else {
+        body.partialOmitted = true;
+      }
       return {
         ...base,
         kind: "event",
         name: "tool.execute.progress",
         scope: scopeOf(fact, { toolCallId: fact.toolCallId }),
         attributes: { toolCallId: fact.toolCallId },
-        body: { partial: fact.partial },
+        body,
       };
+    }
     case "tool_ended": {
       const r = fact.result;
       const body: Record<string, unknown> = {
@@ -458,8 +486,12 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
         hasMetadata: r.metadata !== null,
       };
       if (content) {
-        body.content = r.content;
-        body.metadata = r.metadata;
+        // 结果正文按正文预算截断；metadata 截不了半个，分剩下的预算，放不进就不带
+        const t = takePrefix(r.content, MAX_PROJECTED_TEXT_BYTES);
+        body.content = t.text;
+        if (t.truncated) body.resultTruncated = true;
+        if (r.metadata === null || fitPayload(r.metadata, MAX_PROJECTED_TEXT_BYTES - t.used).fits) body.metadata = r.metadata;
+        else body.metadataOmitted = true;
       }
       return {
         ...base,

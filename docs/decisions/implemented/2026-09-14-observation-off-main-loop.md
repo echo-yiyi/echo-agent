@@ -1,6 +1,6 @@
 # 观测不进主流程：编码与落盘挪进观测线程，过期是产品自己调的函数
 
-> 状态:implemented · 提出并拍板 2026-09-14（口头：「观测的所有功能不允许在主机制，主循环中出现！！！所有都不行！」「我要求的过期机制和 run 没有任何关系，属于后置机制」；下面决定里的四条「没问题！要改」）· 合入 2026-09-14 · 推翻 [观测的默认存储改成状态根里的文档](2026-09-14-observation-document-store.md) 的「开库与持锁之后」一节、「过期」一节的执行时机与细节决定 1、`afterLeaseAcquired` 接线
+> 状态:implemented · 提出并拍板 2026-09-14（口头：「观测的所有功能不允许在主机制，主循环中出现！！！所有都不行！」「我要求的过期机制和 run 没有任何关系，属于后置机制」；下面决定里的四条「没问题！要改」）· 合入 2026-09-14 · 补充 2026-09-14（审计之后拍板：观测出问题不往外报；存储卡死时进程不无限等，见「补充」）· 推翻 [观测的默认存储改成状态根里的文档](2026-09-14-observation-document-store.md) 的「开库与持锁之后」一节、「过期」一节的执行时机与细节决定 1、`afterLeaseAcquired` 接线
 
 **给谁看**：改观测（探针、Sequencer、文档存储、读面）的人，和要清理观测的产品作者。假设已读 [观测：一次 run 留下的账本](../../design/observability.md) §2–§6 与上面那条被部分推翻的记录。
 
@@ -75,11 +75,17 @@ type ExpireObservationsOptions = Readonly<{ rule: ObservationExpiryRule; now?: n
 - 公共面（API 快照重录）：`EchoRunResult.observationPersistence` / `observationIntegrity`、`EchoObservations.expire()`、`createEcho` / `createAgent` 的 `observation.expiry`、根入口的 `ObservationStoreOpenError`（它不再抛给任何公开调用方，只在观测线程里做成诊断）；加 `EchoObservations.flush()`、`expireObservations` 与 `ExpireObservationsOptions` / `ObservationExpiryDecision` / `ObservationExpiryResult` / `ObservationExpiryRule`。
 - `createAgent` 的 `OBSERVATION_BOUNDARY_DEADLINE_MS`（没人等边界了，Sequencer 用缺省 5s 只作健康判定）。
 
+### 补充（2026-09-14，审计之后）
+
+- **观测出问题不往外报**：原来观测线程的诊断经主线程交回 Agent 的诊断通道，变成 `kind: "error"` 通知——会跑用户配的 notification hook，TUI 每条往对话里加一行（content 档 200 轮实测来了 201 条）。拍板：观测本身就是日志，它坏了再发通知或打日志没有意义。诊断消息整个撤掉；丢掉的事实照旧留 hole + gap，写入端的状态在 `snapshot().health` 里。
+- **存储卡死时不无限等**：原来只要有一个存储调用没回来，观测线程就不报空闲、一直拖住进程。实测只卡观测写、会话存储正常时进程照样退不出——下面 Non-Goals 原来那条「与会话存储卡住同一个处境」的类比不成立：会话存储卡住时 `stop()` 本身卡着，看得见；观测卡住时 `stop()` 已经返回，进程却不退。改成：线程拖着进程期间连续 `STALL_MS`（5 秒）没有进展（没收到线程的消息、也没有存储操作做完），就放开进程，没写完的观测随进程丢。
+- **content 档的工具载荷在投影时收进预算**：原来工具结果、参数原样交出去，线程那头超过 64 KB 整条判成缺口——主线程为一份注定丢掉的数据做了一次完整结构化拷贝。现在正文截断、结构化载荷放不进就不带（设计文档 §4）。
+- **起线程同步抛错不再让 `createEcho()` 失败**：这个进程的观测不记，装配照常。
+
 ## Non-Goals
 
 - **不做崩溃恢复**：进程在批文件写成、派生文件没写成之间退出，那几个 run 列不出来；它们的批也永远在 head 之后，过期不回收。
 - **core 不给过期挑时机、不给缺省规则。**
-- **不给观测线程卡死做超时**：存储永远卡住时，进程在观测写完之前退不出——与会话存储卡住同一个处境。
 - **不把存储 IO 搬进观测线程**：注入的 `StorageDir` 过不了线程，而默认的 `FileDir` 在 worker 里也和主线程共用 IO 线程池。
 
 ## 验收
@@ -88,6 +94,7 @@ type ExpireObservationsOptions = Readonly<{ rule: ObservationExpiryRule; now?: n
 - [进程等观测写完才退](../../../packages/core/test/observability-runtime.test.ts#test=进程在观测线程写完之后才退出stop-不等processonexit-照常运行)：子进程 `send → stop` 后不 flush 直接退出，下一个读者读得到那个 run，exit 监听运行。
 - [Node 下同样成立](../../../test/distribution-gate.test.ts#test=node装-tarball-createecho-完整装配-send-echoobservations-读得回stop-不等观测进程写完才退下一个进程离线读得到)：Node 从 dist 起观测线程，最后一个 run 在 `stop()` 之前才封口，下一个 Node 进程离线读得到。
 - 过期只凭盘上事实：[没封口不删](../../../packages/core/test/observability-document-store.test.ts#test=盘上还没封口的-run-不删列进-openruns不给-run-也不给-activitybefore-时什么都不动)、[head 之后的批不动](../../../packages/core/test/observability-document-store.test.ts#test=head-之后的批它那一批的-runs-还没写成不回收哪怕里面的记录都够老)、[两种给法](../../../packages/core/test/observability-document-store.test.ts#test=expireobservations规则拿到全部-run-的-header新的在前与-now按它的决定删状态根目录与注入存储两种给法)、[活着的 agent 旁边删](../../../packages/core/test/observability-runtime.test.ts#test=跑完停下再起都一条不删产品在活着的-agent-旁边按规则删删的是盘上已封口的-run)。
+- 补充的三条：[观测丢数据不往外报](../../../packages/core/test/observability-runtime.test.ts#test=观测丢数据不往外报content-档的大工具结果截断照记存储写不动也不发任何通知2026-09-14观测本身就是日志)（存储写不动时不发任何通知、content 档大工具结果截断照记不成缺口）、[存储卡死最多再等 STALL_MS](../../../packages/core/test/observability-runtime.test.ts#test=观测存储卡死进程最多再等-stallms-就退出没写完的观测放弃exit-监听照常运行)、[起线程抛错装配照常](../../../packages/core/test/observability-runtime.test.ts#test=起观测线程同步抛错createechosendstop-照常这个进程不记观测)；投影侧 [工具结果截断](../../../packages/core/test/observability-projection.test.ts#test=工具结果正文截到预算内并标-resulttruncated放不进的-metadata-不带标-metadataomitted穿过-sequencer-是记录不是缺口) 与 [结构化载荷放不进就不带](../../../packages/core/test/observability-projection.test.ts#test=工具参数进展tooluse-的-input结构化的放不进就不带标-omitted字符串进展截断)。
 - `git grep -n -E "leaseLifecycle|afterLeaseAcquired|observation\.expiry|observations\.expire\(|observationIntegrity|persistenceOf" -- 'packages/*/src'` 为空（`EchoObservableState.runtime.observationPersistence` 是状态快照里的字段，由观测线程填，不在此列）。
 - 反证见合入提交信息。
 

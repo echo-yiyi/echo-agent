@@ -374,6 +374,61 @@ describe("descriptor.project 抛错：canonical 路径必须留 hole + gap（202
   });
 });
 
+describe("content 档的工具载荷在投影时就按预算收（2026-09-14）：注定超预算的整份不交给观测线程", () => {
+  const big = "x".repeat(200_000);
+  const bigObject = { rows: Array.from({ length: 4_000 }, (_, i) => ({ i, text: "y".repeat(20) })) };
+
+  test("工具结果：正文截到预算内并标 resultTruncated，放不进的 metadata 不带、标 metadataOmitted；穿过 Sequencer 是记录不是缺口", async () => {
+    const end = fact(1, { kind: "tool_ended", toolCallId: "c1", toolName: "echo", result: { content: big, isError: false, metadata: bigObject } });
+    const body = projectLoopFact(end, "content")!.body as Record<string, unknown>;
+    expect((body.content as string).length).toBeLessThanOrEqual(MAX_PROJECTED_TEXT_BYTES);
+    expect(body.resultTruncated).toBe(true);
+    expect(body.metadata).toBeUndefined();
+    expect(body.metadataOmitted).toBe(true);
+    expect(body.resultChars).toBe(200_000); // 原始尺寸照记
+    // 小的照原样
+    const small = projectLoopFact(fact(2, { kind: "tool_ended", toolCallId: "c2", toolName: "echo", result: { content: "ok", isError: false, metadata: { k: 1 } } }), "content")!.body as Record<string, unknown>;
+    expect([small.content, small.metadata, small.resultTruncated, small.metadataOmitted]).toEqual(["ok", { k: 1 }, undefined, undefined]);
+
+    const { seq, clock } = sequencerWith("content");
+    await establishRun(seq, "run:t", "rt", "g", "content");
+    sinkInto(seq, loopFactDescriptor, { capturePolicy: "content" }).offer(end);
+    clock.advance(1_000);
+    await seq.idle();
+    expect(seq.committedRecords().map((r) => r.name)).toEqual(["run.accepted", "tool.execute"]);
+  });
+
+  test("工具参数、进展、tool_use 的 input：结构化的放不进就不带（标 omitted），字符串进展截断", () => {
+    const start = projectLoopFact(fact(1, { kind: "tool_started", toolCallId: "c1", toolName: "echo", params: { text: big } }), "content")!.body as Record<string, unknown>;
+    expect([start.params, start.paramsOmitted, start.argsTruncated]).toEqual([undefined, true, true]);
+
+    const textProgress = projectLoopFact(fact(2, { kind: "tool_progress", toolCallId: "c1", partial: big }), "content")!.body as Record<string, unknown>;
+    expect((textProgress.partial as string).length).toBeLessThanOrEqual(MAX_PROJECTED_TEXT_BYTES);
+    expect(textProgress.partialTruncated).toBe(true);
+    const objectProgress = projectLoopFact(fact(3, { kind: "tool_progress", toolCallId: "c1", partial: bigObject }), "content")!.body as Record<string, unknown>;
+    expect([objectProgress.partial, objectProgress.partialOmitted]).toEqual([undefined, true]);
+
+    const message = {
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: "a", name: "t", input: { q: 1 } },
+        { type: "tool_use", id: "b", name: "t", input: { text: big } },
+        { type: "tool_use", id: "c", name: "t", input: { q: 3 } },
+      ],
+      stopReason: "tool_use",
+      usage: null,
+      at: 1,
+    };
+    const generate = projectLoopFact(fact(4, { kind: "message_committed", message: message as never }), "content")!.body as Record<string, unknown>;
+    // 第一个放不进之后的一律不带：不为每一块都试一遍编码
+    expect(generate.toolUseBlocks).toEqual([
+      { id: "a", name: "t", input: { q: 1 } },
+      { id: "b", name: "t", inputOmitted: true },
+      { id: "c", name: "t", inputOmitted: true },
+    ]);
+  });
+});
+
 describe("循环事实的投影自己也在同步预算内（2026-08-27 review P1）", () => {
   /** 只暴露 length 与下标的 content：数一数投影到底碰了多少个 block。 */
   function countingBlocks(total: number, make: (i: number) => unknown): { blocks: never; reads: () => number } {

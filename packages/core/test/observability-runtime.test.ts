@@ -12,6 +12,8 @@ import type { Provider } from "../src/provider/types.ts";
 import { renderRunObservation, buildRunObservationViewModel } from "../src/observability/render.ts";
 import { RUN_ASSEMBLY_RECORD } from "../src/observability/draft.ts";
 import { ObservationRuntime } from "../src/observability/runtime.ts";
+import { STALL_MS } from "../src/observability/thread.ts";
+import type { LifecycleEvent } from "../src/events.ts";
 import { expireObservations, type ObservationExpiryRule } from "../src/observability/expiry.ts";
 import type { CapabilityFactDescriptor } from "../src/observability/fact-sink.ts";
 import { DocumentObservationReader } from "../src/observability/document-store.ts";
@@ -594,6 +596,82 @@ describe("观测不在主流程上（2026-09-14 硬规矩）", () => {
       stall.release();
     }
   });
+
+  test("观测丢数据不往外报：content 档的大工具结果截断照记，存储写不动也不发任何通知（2026-09-14：观测本身就是日志）", async () => {
+    const huge: ModelTool = { ...pingTool(async () => toolOk("x".repeat(200_000))), name: "huge", label: "huge" };
+    const echo = await echoWith({ stateDir: join(await tmp(), "state"), turns: [toolTurn("c1", "huge", {}), textTurn("done")], tool: huge, capture: "content" });
+    const notices: string[] = [];
+    echo.agent.subscribeLifecycle((e: LifecycleEvent) => {
+      if (e.type === "notification") notices.push(e.message);
+    });
+    const r = await echo.send("跑");
+    const lookup = await echo.observations.getRun(r.runId);
+    if (lookup.kind !== "found") throw new Error("run 没读回来");
+    const end = lookup.observation.records.find((x) => x.kind === "span_end" && x.name === "tool.execute");
+    expect((end?.body as { resultTruncated?: boolean } | undefined)?.resultTruncated).toBe(true);
+    expect(lookup.observation.gaps).toEqual([]);
+
+    const inner = new InMemoryDir();
+    const broken: StorageDir = {
+      read: (p) => inner.read(p),
+      write: (p, c) => (p.startsWith("observability/batches/") ? Promise.reject(new Error("disk gone")) : inner.write(p, c)),
+      remove: (p) => inner.remove(p),
+      list: (p) => inner.list(p),
+    };
+    const second = await echoWith({ stateDir: join(await tmp(), "state"), turns: [textTurn("one")], observationStore: broken });
+    second.agent.subscribeLifecycle((e: LifecycleEvent) => {
+      if (e.type === "notification") notices.push(e.message);
+    });
+    await second.send("a");
+    expect((await second.observations.snapshot()).health.persistence.status).not.toBe("healthy"); // 写不动只在健康状态里
+    expect(notices).toEqual([]);
+  });
+
+  test("观测存储卡死：进程最多再等 STALL_MS 就退出，没写完的观测放弃，exit 监听照常运行", async () => {
+    const dir = await tmp();
+    const marker = join(dir, "exit-marker");
+    const script = [
+      `import { appendFileSync, mkdtempSync } from "node:fs";`,
+      `import { join } from "node:path";`,
+      `import { tmpdir } from "node:os";`,
+      `import { createEcho } from ${JSON.stringify(join(import.meta.dir, "../src/create-echo.ts"))};`,
+      `import { createProvider } from ${JSON.stringify(join(import.meta.dir, "../src/provider/models.ts"))};`,
+      `import { createProviderStreams } from ${JSON.stringify(join(import.meta.dir, "../src/provider/dialect.ts"))};`,
+      `import { scriptedDialect, textTurn } from ${JSON.stringify(join(import.meta.dir, "../src/testing.ts"))};`,
+      `import { InMemoryDir } from ${JSON.stringify(join(import.meta.dir, "../src/storage/in-memory-dir.ts"))};`,
+      `process.env.ECHO_HOME = mkdtempSync(join(tmpdir(), "echo-stall-home-"));`,
+      `process.on("exit", () => appendFileSync(${JSON.stringify(marker)}, "exit\\n"));`,
+      `const inner = new InMemoryDir();`,
+      `const never = new Promise(() => {});`,
+      `const stuck = { read: (p) => inner.read(p), write: (p) => never, remove: (p) => inner.remove(p), list: (p) => inner.list(p) };`,
+      `const provider = createProvider({ id: "s", auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } }, models: [{ id: "only", api: "fake" }], api: createProviderStreams(scriptedDialect([textTurn("hi")])) });`,
+      `const echo = await createEcho({ provider, stateDir: ${JSON.stringify(join(dir, "state"))}, allowNetwork: false, withoutMemory: true, extensionDirs: [], observation: { store: stuck } });`,
+      `await echo.agent.start();`,
+      `const r = await echo.send("x");`,
+      `await echo.stop();`,
+      `console.log(r.outcome.kind);`,
+    ].join("\n");
+    const file = join(dir, "child.ts");
+    await Bun.write(file, script);
+    const t0 = performance.now();
+    const child = Bun.spawn(["bun", file], { stdout: "pipe", stderr: "pipe" });
+    const killer = setTimeout(() => child.kill(), STALL_MS + 20_000);
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    clearTimeout(killer);
+    const elapsed = performance.now() - t0;
+    expect(code, err).toBe(0);
+    expect(out.trim().split("\n").at(-1)).toBe("completed");
+    expect(elapsed).toBeLessThan(STALL_MS + 10_000);
+    expect(existsSync(marker) && readFileSync(marker, "utf8")).toBe("exit\n");
+  }, 60_000);
+
+  test("起观测线程同步抛错：createEcho、send、stop 照常，这个进程不记观测", async () => {
+    // mock.module 会留在整个测试进程里，放进子进程跑（fixtures/observation-worker-unavailable.ts）
+    const child = Bun.spawn(["bun", "test", join(import.meta.dir, "fixtures/observation-worker-unavailable.ts")], { stdout: "pipe", stderr: "pipe" });
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    expect(code, out + err).toBe(0);
+    expect(out + err).toContain("1 pass");
+  }, 60_000);
 
   test("观测存储写不动：send 照常 completed，下一次 send 也照跑，stop 不抛；写不动只进 persistence health", async () => {
     const stateDir = join(await tmp(), "state");

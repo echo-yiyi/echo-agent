@@ -11,6 +11,9 @@
 // 在那之前事实只进 Sequencer 的 ring（有界，满了记缺口）。收摊时还没开始写的 runtime 直接丢掉：一句话都没说过的会话，
 // 状态根会被整个删掉（create-agent.ts 的 `removeIfEmptySession`），不能有迟到的文件把目录重新建出来。
 //
+// **出了问题不往外报**：观测本身就是日志，它坏了再发诊断没有意义（2026-09-14 拍板）。丢掉的事实照旧留 hole + gap，
+// 写入端的状态在 Sequencer 的 health 里（`snapshot()`），此外什么都不发。
+//
 // 本文件不 import `node:` 模块，逻辑可以同线程直接跑；线程入口只是把消息接进来。
 
 import type { Diagnostic } from "../errors.ts";
@@ -281,7 +284,7 @@ class ThreadRuntime {
     private readonly open: OpenWork,
   ) {
     this.storage = new ThreadStorage(host, runtimeId, open.storageLock);
-    this.stateSnapshot = factIngestContext({ runtimeId, runtimeGeneration: open.runtimeGeneration, sink: freezeSinkIdentity(open.boundaryOwner, AGENT_INSTRUMENTATION), report: (d) => this.report(d) });
+    this.stateSnapshot = factIngestContext({ runtimeId, runtimeGeneration: open.runtimeGeneration, sink: freezeSinkIdentity(open.boundaryOwner, AGENT_INSTRUMENTATION), report: () => {} });
     this.assembly = sealAgentAssemblyObservation(open.assembly);
     this.writerReady = new Promise((resolve, reject) => {
       this.resolveWriter = resolve;
@@ -303,7 +306,6 @@ class ThreadRuntime {
         },
       },
       ...(open.limits === undefined ? {} : { limits: open.limits }),
-      report: (d) => this.report(d),
     });
   }
 
@@ -318,15 +320,12 @@ class ThreadRuntime {
     this.pending += 1;
     this.chain = this.chain
       .then(() => this.handle(work))
-      .catch((e: unknown) => this.report({ code: "observation_sequencer_internal", message: `观测线程处理 ${work.t} 失败：${redactedLabel(e)}` }))
+      // 观测线程自己的意外：这条消息的事实不记，接着处理下一条
+      .catch(() => {})
       .finally(() => {
         this.pending -= 1;
         this.host.scheduleIdleCheck();
       });
-  }
-
-  private report(d: Diagnostic): void {
-    if (!this.done) this.host.send({ t: "diagnostic", rt: this.runtimeId, diagnostic: d });
   }
 
   private async handle(work: ObservationWork): Promise<void> {
@@ -342,7 +341,7 @@ class ThreadRuntime {
       case "sink":
         this.sinks.set(
           work.sink,
-          factIngestContext({ runtimeId: this.runtimeId, runtimeGeneration: this.open.runtimeGeneration, sink: freezeSinkIdentity(work.owner, work.instrumentation), report: (d) => this.report(d) }),
+          factIngestContext({ runtimeId: this.runtimeId, runtimeGeneration: this.open.runtimeGeneration, sink: freezeSinkIdentity(work.owner, work.instrumentation), report: () => {} }),
         );
         return;
       case "fact":
@@ -432,8 +431,8 @@ class ThreadRuntime {
         return store;
       },
       (e: unknown) => {
+        // 打不开：之后的提交都失败，Sequencer 降级 / 封口，health 里看得到
         const err = e instanceof Error ? e : new Error(String(e));
-        this.report({ code: "observation_store_open_failed", message: `观测写入端打不开（${this.open.storePath}）：${redactedLabel(err)}` });
         this.rejectWriter(err);
         throw err;
       },
@@ -454,10 +453,7 @@ class ThreadRuntime {
 
   private async onFact(work: Extract<ObservationWork, { t: "fact" }>): Promise<void> {
     const ctx = this.sinks.get(work.sink);
-    if (ctx === undefined) {
-      this.report({ code: "observation_sequencer_internal", message: `未登记的探针 ${work.sink}` });
-      return;
-    }
+    if (ctx === undefined) return; // 没登记的探针：主线程那边的 bug，这条不记
     // 记忆路径的 HMAC 要这个状态根的 key：key 在写入端里，要它就得开始写（这类事实只在 run 里出现，run.accepted 时已经开始了）
     let pathDigestKey: Uint8Array | undefined;
     const digests = work.projection.digests;
@@ -488,24 +484,23 @@ class ThreadRuntime {
     };
     const scope = this.runScope(work.runId, work.identity);
     const accepted: RunAcceptedBodyV1 = { header };
-    this.fireBoundary(work.runId, "run.accepted", this.boundary("run.accepted", "event", scope, work.at, accepted));
+    this.fireBoundary(this.boundary("run.accepted", "event", scope, work.at, accepted));
     let assembly: RunAssemblyBodyV1;
     try {
       const m = work.model;
       const model = { provider: m.provider, id: m.id, api: m.api, params: m.params, thinkingLevelMap: m.thinkingLevelMap, capabilities: m.capabilities, cost: m.cost } as unknown as Model;
       // RunModelSnapshot 与 `Model` 的数据字段同形（api / params / thinkingLevelMap / capabilities / cost），digest 同一把尺
       assembly = { agentAssembly: this.assembly, modelBinding: snapshotRunModelBinding(model, m.catalogRevision) };
-    } catch (e) {
-      this.report({ code: "observation_boundary_failed", message: `run ${work.runId}：${RUN_ASSEMBLY_RECORD} 构造失败（run 照跑）：${redactedLabel(e)}` });
-      return;
+    } catch {
+      return; // 模型绑定编码不了：这个 run 没有装配快照
     }
-    this.fireBoundary(work.runId, RUN_ASSEMBLY_RECORD, this.boundary(RUN_ASSEMBLY_RECORD, "snapshot", scope, work.at, assembly));
+    this.fireBoundary(this.boundary(RUN_ASSEMBLY_RECORD, "snapshot", scope, work.at, assembly));
   }
 
   /** 真正进入 loop 的那一拍，紧跟着 run 开头的状态（与结尾的 finalSnapshot 同形、同一个校验器，一比就知道这个 run 改了什么）。 */
   private onRunStarted(work: Extract<ObservationWork, { t: "run-started" }>): void {
     const started: RunStartedBodyV1 = { startedBy: work.startedBy };
-    this.fireBoundary(work.runId, "run.started", this.boundary("run.started", "event", this.runScope(work.runId, work.identity), work.at, started));
+    this.fireBoundary(this.boundary("run.started", "event", this.runScope(work.runId, work.identity), work.at, started));
     if (this.open.capturePolicy === "off") return;
     const scope = { ...this.identityScope(work.identity), runId: work.runId, runtimeId: this.runtimeId };
     try {
@@ -539,30 +534,23 @@ class ThreadRuntime {
             ? null
             : { throughSeq: this.sequencer.committedSeq, at: work.at, state: completeObservableState(work.finalState, this.sequencer.persistenceState.status) },
       };
-    } catch (e) {
+    } catch {
       // 状态摘要算不出来（状态里有编码不了的值）：outcome 照封，快照不要
-      this.report({ code: "observation_boundary_failed", message: `run ${work.runId}：finalSnapshot 构造失败，只封 outcome：${redactedLabel(e)}` });
       body = { outcome: toRunClosedOutcome(work.outcome), finalSnapshot: null };
     }
-    this.fireBoundary(work.runId, "run.closed", this.boundary("run.closed", "event", this.runScope(work.runId, work.identity), work.at, body));
+    this.fireBoundary(this.boundary("run.closed", "event", this.runScope(work.runId, work.identity), work.at, body));
   }
 
   /**
    * 提交不等的 boundary。`appendBoundary()` 的同步段做完 lifecycle 检查 / seq 预留 / RunIndex 登记才返回 Promise，
-   * 所以顺序已定；这里只负责把 rejection 接住变成诊断。
+   * 所以顺序已定；落不下去的结果只在 Sequencer 的 health 里，这里接住 rejection 不让它成为 unhandled。
    */
-  private fireBoundary(runId: string, name: string, draft: BoundaryObservationDraft<unknown>): void {
-    let pending: Promise<unknown>;
+  private fireBoundary(draft: BoundaryObservationDraft<unknown>): void {
     try {
-      pending = this.sequencer.appendBoundary(draft);
-    } catch (e) {
-      this.report({ code: "observation_boundary_failed", message: `run ${runId}：${name} 预留失败（run 照跑）：${redactedLabel(e)}` });
-      return;
+      this.sequencer.appendBoundary(draft).catch(() => {});
+    } catch {
+      // 预留失败（lifecycle 不合法等）：这条边界不记
     }
-    pending.then(
-      () => {},
-      (e: unknown) => this.report({ code: "observation_boundary_failed", message: `run ${runId}：${name} 落不下去：${redactedLabel(e)}` }),
-    );
   }
 
   private identityScope(identity: RunIdentity): Readonly<Record<string, string>> {
@@ -625,8 +613,8 @@ export class ObservationThreadHost {
       if (!this.runtimes.has(message.rt)) {
         try {
           this.runtimes.set(message.rt, new ThreadRuntime(this, message.rt, message));
-        } catch (e) {
-          this.send({ t: "diagnostic", rt: message.rt, diagnostic: { code: "observation_runtime_invalid", message: `观测 runtime 起不来（这个 agent 不记观测）：${redactedLabel(e)}` } });
+        } catch {
+          // 起不来（装配快照编码不了）：这个 agent 不记观测
           this.send({ t: "closed", rt: message.rt });
         }
       }

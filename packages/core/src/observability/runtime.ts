@@ -5,13 +5,13 @@
 //
 // 硬规矩（2026-09-14 用户拍板，决策：docs/decisions/implemented/2026-09-14-observation-off-main-loop.md）：
 // **观测的任何功能都不出现在主机制、主循环里**——admission 不等 run.closed、`createEcho()` 不等打开存储、`stop()` 不等写完、
-// 不挂 lease、不在任何流程节点上过期。这里每个方法都同步返回、不抛、不等观测线程；观测线程坏了只进诊断。
+// 不挂 lease、不在任何流程节点上过期。这里每个方法都同步返回、不抛、不等观测线程。
+// **观测出问题不往外报**：不进 agent 的诊断 / 通知通道，也不打日志——观测本身就是日志（2026-09-14 拍板）。
 // 过期是产品自己调的独立函数（expiry.ts），agent 里没有。
 //
 // 由 `createAgent()` 构造并经 `attachObservationHost()` 挂到 Agent 上；低层 `new Agent()` 没有它。
 
 import type { Clock } from "../schedule/clock.ts";
-import type { Diagnostic } from "../errors.ts";
 import type { AgentOutcome } from "../events.ts";
 import type { RunModelBinding } from "../admission/types.ts";
 import type { Model } from "../provider/types.ts";
@@ -92,12 +92,10 @@ export class ObservationRuntime {
   readonly observations: LiveEchoObservations;
   private readonly clock: Clock;
   private readonly thread: ObservationThread;
-  private report: (d: Diagnostic) => void = () => {};
   private scopeSupplier: ObservationScopeSupplier = () => ({});
   private phase: RuntimePhase = "ready";
   /** 已在观测线程里登记的探针身份 → 编号。 */
   private readonly sinks = new Map<string, number>();
-  private handoffFailureReported = false;
 
   constructor(opts: ObservationRuntimeOptions) {
     this.runtimeId = opts.runtimeId;
@@ -105,7 +103,7 @@ export class ObservationRuntime {
     this.capturePolicy = opts.capturePolicy;
     this.clock = opts.clock;
     this.thread = ObservationThread.get();
-    this.thread.open(opts.runtimeId, opts.store, (d) => this.report(d), {
+    this.thread.open(opts.runtimeId, opts.store, {
       runtimeGeneration: opts.runtimeGeneration,
       capturePolicy: opts.capturePolicy,
       storePath: opts.storePath,
@@ -123,11 +121,6 @@ export class ObservationRuntime {
       health: () => this.thread.health(rt),
       subscribe: (options) => this.thread.subscribe(rt, options),
     });
-  }
-
-  /** Agent 拉：观测层的诊断走 Agent 的诊断通道（与 InboxStore.attachDiagnostics 同款）。 */
-  attachDiagnostics(report: (d: Diagnostic) => void): void {
-    this.report = report;
   }
 
   get runtimePhase(): RuntimePhase {
@@ -235,14 +228,12 @@ export class ObservationRuntime {
     this.thread.discard(this.runtimeId);
   }
 
-  /** 交出去的消息过不了线程：是这边构造的数据有问题（bug），报一次诊断。 */
+  /** 交出去的消息过不了线程：是这边构造的数据有问题，这条不记（不往外报）。 */
   private post(work: ObservationWork): void {
     try {
       this.thread.post(work);
-    } catch (e) {
-      if (this.handoffFailureReported) return;
-      this.handoffFailureReported = true;
-      this.report({ code: "observation_handoff_failed", message: `交给观测线程的 ${work.t} 过不了线程（只报第一次）：${thrownText(e)}` });
+    } catch {
+      // 不记
     }
   }
 }
