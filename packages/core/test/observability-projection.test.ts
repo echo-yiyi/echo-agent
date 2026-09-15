@@ -5,11 +5,10 @@ import { MAX_PROJECTED_TEXT_BYTES, estimatePayloadBytes } from "../src/observabi
 import { projectCompactionFact } from "../src/compaction/observe.ts";
 import { projectAgentFact } from "../src/agent-observe.ts";
 import { factSinkToThread, noopFactSink, type CapabilityFactDescriptor, type CapabilityFactSink, type ObservationFactScope } from "../src/observability/fact-sink.ts";
-import { factIngestContext, freezeSinkIdentity, ingestFact, ingestFactFailure } from "../src/observability/thread-host.ts";
+import { freezeSinkIdentity, ingestFact, ingestFactFailure } from "../src/observability/thread-host.ts";
 import { InMemoryCanonicalObservationStore } from "../src/observability/store.ts";
 import { ObservationIdentityError } from "../src/observability/identity.ts";
 import { ObservationSequencer, type ObservationIngest } from "../src/observability/sequencer.ts";
-import type { Diagnostic } from "../src/errors.ts";
 import { OBSERVATION_SYNC_LIMITS, type ObservationCapturePolicy, type ObservationOwner, type ObservationRecordKind } from "../src/observability/types.ts";
 
 // 执行节点上的事实投影（循环 / 压缩 / Agent 自身），以及 descriptor → Sequencer 这条
@@ -28,21 +27,20 @@ const fact = (n: number, body: { kind: LoopFactBody["kind"] } & Record<string, u
 function sinkInto<T>(
   seq: ObservationIngest,
   descriptor: CapabilityFactDescriptor<T>,
-  opts: { runtimeId?: string; runtimeGeneration?: string; capturePolicy?: ObservationCapturePolicy; owner?: ObservationOwner; scope?: () => ObservationFactScope; report?: (d: Diagnostic) => void } = {},
+  opts: { runtimeId?: string; runtimeGeneration?: string; capturePolicy?: ObservationCapturePolicy; owner?: ObservationOwner; scope?: () => ObservationFactScope } = {},
 ): CapabilityFactSink<T> {
-  const ctx = factIngestContext({
+  const ctx = {
     runtimeId: opts.runtimeId ?? "rt",
     runtimeGeneration: opts.runtimeGeneration ?? "g",
     sink: freezeSinkIdentity(opts.owner ?? { status: "not-applicable" }, descriptor.instrumentation),
-    report: opts.report ?? (() => {}),
-  });
+  };
   return factSinkToThread(descriptor, {
     capturePolicy: opts.capturePolicy ?? "metadata",
     now: () => 0,
     ...(opts.scope === undefined ? {} : { scope: opts.scope }),
     handoff: {
       fact: (_at, scope, projection) => ingestFact(seq, ctx, { scope, projection }),
-      failed: (_at, runId, why, error) => ingestFactFailure(seq, ctx, runId, why, error),
+      failed: (_at, runId) => ingestFactFailure(seq, runId),
     },
   });
 }
@@ -264,22 +262,6 @@ describe("descriptor → Sequencer：身份在构造期钉住，超预算 / 坏�
     expect(seq.committedRecords()[0]?.subject).toEqual({ kind: "memory", id: "people/alice" });
   });
 
-  test("fact sink 的 reporter 抛错击穿不了 offer() 的 no-throw", () => {
-    const bad: CapabilityFactDescriptor<unknown> = {
-      instrumentation: { name: "t", version: "1" },
-      project: () => {
-        throw new Error("projection boom");
-      },
-    };
-    const { seq } = sequencerWith();
-    const sink = sinkInto(seq, bad, {
-      report: () => {
-        throw new Error("reporter boom");
-      },
-    });
-    expect(() => sink.offer({})).not.toThrow();
-  });
-
   test("noop sink 永不抛；descriptor 的 name / attributes / body / instrumentation / owner 原样进 canonical record", async () => {
     type Fact = { op: "write"; path: string; chars: number };
     const descriptor: CapabilityFactDescriptor<Fact> = {
@@ -319,23 +301,18 @@ describe("descriptor.project 抛错：canonical 路径必须留 hole + gap（202
     },
   });
 
-  async function offerThrough(scope?: () => { runId?: string }, establish?: string): Promise<{ seq: ObservationSequencer; diags: string[] }> {
+  async function offerThrough(scope?: () => { runId?: string }, establish?: string): Promise<{ seq: ObservationSequencer }> {
     const { seq, clock } = sequencerWith();
     if (establish !== undefined) await establishRun(seq, establish);
-    const diags: string[] = [];
-    sinkInto(seq, boom(), {
-      report: (d) => diags.push(d.code),
-      ...(scope === undefined ? {} : { scope }),
-    }).offer({});
+    sinkInto(seq, boom(), scope === undefined ? {} : { scope }).offer({});
     clock.advance(1_000);
     await seq.idle();
-    return { seq, diags };
+    return { seq };
   }
 
   test("review 复现：投影抛错不再只剩一条诊断，committed 里有 observation.gap", async () => {
-    const { seq, diags } = await offerThrough();
+    const { seq } = await offerThrough();
     // 修复前实测：diagnostics=["observation_fact_dropped"]、committed=0、canonicalGapCount=0
-    expect(diags).toEqual(["observation_fact_dropped"]);
     expect(seq.health().capture.canonicalGapCount).toBe(1);
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["observation.gap"]);
   });
@@ -356,10 +333,9 @@ describe("descriptor.project 抛错：canonical 路径必须留 hole + gap（202
   });
 
   test("scope 供给自己抛错也不吞掉 gap，只是没有 runId", async () => {
-    const { seq, diags } = await offerThrough(() => {
+    const { seq } = await offerThrough(() => {
       throw new Error("scope boom");
     });
-    expect(diags).toEqual(["observation_fact_dropped"]);
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["observation.gap"]);
     expect(seq.committedRecords()[0]?.scope.runId).toBeUndefined();
   });
@@ -522,14 +498,10 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
     project: () => ({ kind: "event", name: "fine", occurredAt: 1, scope: {}, attributes: {}, body: { ok: 1 } }),
   };
 
-  async function offerWithScope(scope: () => never | object, establish?: string): Promise<{ seq: ObservationSequencer; diags: string[]; threw: boolean }> {
+  async function offerWithScope(scope: () => never | object, establish?: string): Promise<{ seq: ObservationSequencer; threw: boolean }> {
     const { seq, clock } = sequencerWith();
     if (establish !== undefined) await establishRun(seq, establish);
-    const diags: string[] = [];
-    const sink = sinkInto(seq, okDescriptor, {
-      report: (d) => diags.push(d.code),
-      scope: scope as () => Record<string, string>,
-    });
+    const sink = sinkInto(seq, okDescriptor, { scope: scope as () => Record<string, string> });
     let threw = false;
     try {
       sink.offer({});
@@ -538,16 +510,15 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
     }
     clock.advance(1_000);
     await seq.idle();
-    return { seq, diags, threw };
+    return { seq, threw };
   }
 
   test("review 复现①：scope() 抛错不再被当成 `{}` 正常记成 runtime-scoped，而是开 gap", async () => {
     // 修复前实测：gaps=0、diags=[]，事实照记，原 run 仍可能显示 complete
-    const { seq, diags, threw } = await offerWithScope(() => {
+    const { seq, threw } = await offerWithScope(() => {
       throw new Error("scope boom");
     });
     expect(threw).toBe(false);
-    expect(diags).toEqual(["observation_fact_dropped"]);
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["observation.gap"]);
     expect(seq.health().capture.canonicalGapCount).toBe(1);
   });
@@ -566,10 +537,9 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
         },
       },
     );
-    const { seq, diags, threw } = await offerWithScope(() => hostile, "r1");
+    const { seq, threw } = await offerWithScope(() => hostile, "r1");
     expect(threw).toBe(false);
     expect(getCalls).toBe(0);
-    expect(diags).toEqual([]);
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["run.accepted", "fine"]);
     expect(seq.committedRecords().find((r) => r.name === "fine")?.scope.runId).toBe("r1");
   });
@@ -583,9 +553,8 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
         },
       },
     );
-    const { seq, diags, threw } = await offerWithScope(() => hostile);
+    const { seq, threw } = await offerWithScope(() => hostile);
     expect(threw).toBe(false);
-    expect(diags).toEqual(["observation_fact_dropped"]);
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["observation.gap"]);
     expect(seq.committedRecords()[0]?.scope.runId).toBeUndefined(); // 连键集都读不出来才退成 runtime-scoped
   });
@@ -593,13 +562,11 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
   test("review 复现③：scope() 返回 null / undefined 也是失败，不再落回「没配供给」那条合法路径", async () => {
     // 修复前实测：records=["fine"]、gaps=0、diags=[]——和「只有没配供给才是合法空 scope」这句注释打架
     for (const empty of [null, undefined]) {
-      const { seq, diags } = await offerWithScope(() => empty as unknown as Record<string, string>);
-      expect(diags).toEqual(["observation_fact_dropped"]);
+      const { seq } = await offerWithScope(() => empty as unknown as Record<string, string>);
       expect(seq.committedRecords().map((r) => r.name)).toEqual(["observation.gap"]);
     }
     // 要表达「这条事实确实没有 scope」，供给必须显式返回 {}
-    const { seq, diags } = await offerWithScope(() => ({}));
-    expect(diags).toEqual([]);
+    const { seq } = await offerWithScope(() => ({}));
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["fine"]);
   });
 
@@ -643,8 +610,7 @@ describe("scope 供给失败不许静默丢 run 归属（2026-08-27 review P1）
   });
 
   test("正常 scope 仍照走，不产生 gap", async () => {
-    const { seq, diags } = await offerWithScope(() => ({ runId: "run-1", sessionId: "s1" }), "run-1");
-    expect(diags).toEqual([]);
+    const { seq } = await offerWithScope(() => ({ runId: "run-1", sessionId: "s1" }), "run-1");
     expect(seq.committedRecords().map((r) => r.name)).toEqual(["run.accepted", "fine"]);
     expect(seq.committedRecords().find((r) => r.name === "fine")?.scope.runId).toBe("run-1");
   });
@@ -737,35 +703,6 @@ describe("代理区必须成对看（2026-08-27 review P1）", () => {
     // 每两个 code unit 花 6 + 1 = 7 字节
     expect(text.length).toBe(Math.floor(MAX_PROJECTED_TEXT_BYTES / 7) * 2);
     expect(await throughSequencer(assistantText(100_000, "\ud800a"))).toBe(true);
-  });
-});
-
-describe("async reporter 不许击穿主流程（2026-08-27 review P0）", () => {
-  test("fact sink 的 reporter 返回 reject 的 Promise：零 unhandled rejection，且 gap 照开", async () => {
-    let unhandled = 0;
-    const on = (): void => {
-      unhandled += 1;
-    };
-    process.on("unhandledRejection", on);
-    const { seq, clock } = sequencerWith();
-    const sink = sinkInto(
-      seq,
-      {
-        instrumentation: { name: "t", version: "1" },
-        project: () => {
-          throw new Error("projection boom");
-        },
-      },
-      { report: (() => Promise.reject(new Error("reporter down"))) as unknown as (d: Diagnostic) => void },
-    );
-    sink.offer({});
-    sink.offer({});
-    clock.advance(1_000);
-    await seq.idle();
-    await new Promise((r) => setTimeout(r, 20));
-    process.off("unhandledRejection", on);
-    expect(unhandled).toBe(0);
-    expect(seq.health().capture.canonicalGapCount).toBe(2);
   });
 });
 

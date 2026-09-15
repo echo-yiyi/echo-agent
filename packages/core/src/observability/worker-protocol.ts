@@ -73,8 +73,8 @@ export type ObservationWork =
   | Readonly<{ t: "sink"; rt: string; sink: number; owner: ObservationOwner; instrumentation: Readonly<{ name: string; version: string }> }>
   /** `scope`：节点上 scope 供给此刻的返回值；没配供给时不带。 */
   | Readonly<{ t: "fact"; rt: string; sink: number; at: number; scope?: unknown; projection: ObservationFactProjection }>
-  /** 探针在主线程这一侧就失败了（scope 供给 / 投影抛错、投影过不了线程）：观测线程补 hole + gap 与诊断。 */
-  | Readonly<{ t: "fact-failed"; rt: string; sink: number; at: number; runId?: string; why: string; error?: string }>
+  /** 探针在主线程这一侧就失败了（scope 供给 / 投影抛错、投影过不了线程）：观测线程补 hole + gap。 */
+  | Readonly<{ t: "fact-failed"; rt: string; sink: number; at: number; runId?: string }>
   | Readonly<{ t: "run-accepted"; rt: string; at: number; runId: string; source: ObservedRunSource; identity: RunIdentity; model: RunModelData }>
   | Readonly<{ t: "run-started"; rt: string; at: number; runId: string; identity: RunIdentity; startedBy: "permit-executor" | "subloop"; state: ObservableStateInput }>
   | Readonly<{ t: "run-closed"; rt: string; at: number; runId: string; identity: RunIdentity; outcome: RunOutcomeData; finalState: ObservableStateInput | null }>

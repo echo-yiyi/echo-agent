@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { FakeClock } from "../src/schedule/clock.ts";
-import { InMemoryCanonicalObservationStore, ObservationCorruptionError, ObservationStoreUnavailableError, runIndexDigest } from "../src/observability/store.ts";
+import { InMemoryCanonicalObservationStore, ObservationCorruptionError, runIndexDigest } from "../src/observability/store.ts";
 import {
   ObservationSequencer,
   DEFAULT_SEQUENCER_LIMITS,
@@ -11,13 +11,11 @@ import {
   type ObservationSubscribeItem,
   type ObservationSubscribeListener,
 } from "../src/observability/sequencer.ts";
-import { ObservationEncodingError } from "../src/observability/normalize.ts";
 import { factSinkToThread, type CapabilityFactDescriptor, type CapabilityFactSink, type ObservationFactScope } from "../src/observability/fact-sink.ts";
-import { factIngestContext, freezeSinkIdentity, ingestFact, ingestFactFailure } from "../src/observability/thread-host.ts";
+import { freezeSinkIdentity, ingestFact, ingestFactFailure } from "../src/observability/thread-host.ts";
 import { ObservationIdentityError } from "../src/observability/identity.ts";
 import { OBSERVATION_IDENTITY_LIMITS } from "../src/observability/types.ts";
 import type { BoundaryObservationDraft, BoundedObservationDraft, RunAcceptedBodyV1 } from "../src/observability/draft.ts";
-import type { Diagnostic } from "../src/errors.ts";
 import type {
   CapabilityObservationSummary,
   EchoObservableState,
@@ -39,21 +37,20 @@ import type {
 function sinkInto<T>(
   seq: ObservationIngest,
   descriptor: CapabilityFactDescriptor<T>,
-  opts: { runtimeId?: string; runtimeGeneration?: string; capturePolicy?: ObservationCapturePolicy; owner?: ObservationOwner; scope?: () => ObservationFactScope; report?: (d: Diagnostic) => void } = {},
+  opts: { runtimeId?: string; runtimeGeneration?: string; capturePolicy?: ObservationCapturePolicy; owner?: ObservationOwner; scope?: () => ObservationFactScope } = {},
 ): CapabilityFactSink<T> {
-  const ctx = factIngestContext({
+  const ctx = {
     runtimeId: opts.runtimeId ?? "rt",
     runtimeGeneration: opts.runtimeGeneration ?? "g",
     sink: freezeSinkIdentity(opts.owner ?? { status: "not-applicable" }, descriptor.instrumentation),
-    report: opts.report ?? (() => {}),
-  });
+  };
   return factSinkToThread(descriptor, {
     capturePolicy: opts.capturePolicy ?? "metadata",
     now: () => 0,
     ...(opts.scope === undefined ? {} : { scope: opts.scope }),
     handoff: {
       fact: (_at, scope, projection) => ingestFact(seq, ctx, { scope, projection }),
-      failed: (_at, runId, why, error) => ingestFactFailure(seq, ctx, runId, why, error),
+      failed: (_at, runId) => ingestFactFailure(seq, runId),
     },
   });
 }
@@ -66,14 +63,12 @@ type Harness = {
   clock: FakeClock;
   store: InMemoryCanonicalObservationStore;
   seq: ObservationSequencer;
-  diags: Diagnostic[];
   flush: () => Promise<void>;
 };
 
 function harness(limits: Partial<ObservationSequencerOptions["limits"]> = {}): Harness {
   const clock = new FakeClock(1_000);
   const store = new InMemoryCanonicalObservationStore();
-  const diags: Diagnostic[] = [];
   const seq = new ObservationSequencer({
     runtimeId: RT,
     runtimeGeneration: "gen-1",
@@ -81,14 +76,12 @@ function harness(limits: Partial<ObservationSequencerOptions["limits"]> = {}): H
     store,
     clock,
     limits,
-    report: (d) => diags.push(d),
   });
   const delay = limits?.maxBatchDelayMs ?? DEFAULT_SEQUENCER_LIMITS.maxBatchDelayMs;
   return {
     clock,
     store,
     seq,
-    diags,
     flush: async () => {
       clock.advance(delay);
       await seq.idle();
@@ -155,8 +148,35 @@ function closedBody(status: "completed" | "aborted" | "error" = "completed"): Ru
   return { outcome: { status }, finalSnapshot: null };
 }
 
+/**
+ * `appendBoundary()` 同步返回、不交出结果，这里从 Sequencer 的状态读出这一条的裁决：没预留 seq = 被拒；
+ * 预留了就只等它自己安排的提交（不拨 clock、不强制排空）——落在它 seq 上的是这条 = 提交了。
+ * 没提交的再强制排空一次：那个 seq 上是 gap = 成了 hole（hole + gap 走攒批，不是立刻提交）。
+ */
+type Appended = { kind: "rejected" } | { kind: "hole" } | { kind: "committed"; env: ObservationEnvelope } | { kind: "not-committed" };
+
+async function append(h: Harness, draft: BoundaryObservationDraft): Promise<Appended> {
+  const before = h.seq.reservedSeq;
+  h.seq.appendBoundary(draft);
+  const seq = h.seq.reservedSeq;
+  if (seq === before) return { kind: "rejected" };
+  // 超 batch 上限的 boundary 要 flush 循环推几批；writer 进了 terminal 就不会再有进展
+  for (let i = 0; i < 64 && h.seq.committedSeq < seq; i++) await h.seq.idle();
+  const env = h.seq.committedRecords().find((r) => r.seq === seq);
+  if (env !== undefined && env.name !== "observation.gap") return { kind: "committed", env };
+  await h.seq.flushPending();
+  return h.seq.committedRecords().find((r) => r.seq === seq)?.name === "observation.gap" ? { kind: "hole" } : { kind: "not-committed" };
+}
+
+/** 必须提交成功的 boundary：返回它的 envelope。 */
+async function commit(h: Harness, draft: BoundaryObservationDraft): Promise<ObservationEnvelope> {
+  const r = await append(h, draft);
+  if (r.kind !== "committed") throw new Error(`boundary ${r.kind}`);
+  return r.env;
+}
+
 async function acceptRun(h: Harness, runId: string): Promise<ObservationEnvelope> {
-  return h.seq.appendBoundary(boundary("run.accepted", acceptedBody(runId), runId));
+  return commit(h, boundary("run.accepted", acceptedBody(runId), runId));
 }
 
 describe("bounded lane：seq / identity / batch", () => {
@@ -199,11 +219,11 @@ describe("bounded lane：seq / identity / batch", () => {
 });
 
 describe("boundary lane：drain barrier", () => {
-  test("appendBoundary 把 <B 的 bounded 尾巴与 B 同一事务提交，resolve 时 prefix >= B", async () => {
+  test("appendBoundary 不等攒批：<B 的 bounded 尾巴与 B 同一事务立刻提交，不拨 clock", async () => {
     const h = harness();
     h.seq.offer(bounded({ a: 1 }));
     h.seq.offer(bounded({ a: 2 }));
-    const env = await h.seq.appendBoundary(boundary("checkpoint", { ok: true }));
+    const env = await commit(h, boundary("checkpoint", { ok: true }));
     expect(env.seq).toBe(3);
     expect(env.lane).toBe("boundary");
     expect(h.seq.committedSeq).toBe(3);
@@ -215,23 +235,13 @@ describe("boundary lane：drain barrier", () => {
     const seen: number[] = [];
     h.seq.subscribe({ afterSeq: 0, listener: (i) => "recordId" in i && seen.push(i.seq) });
     h.seq.offer(bounded({ a: 1 }));
-    const p = h.seq.appendBoundary(boundary("checkpoint", { ok: true }));
+    h.seq.appendBoundary(boundary("checkpoint", { ok: true }));
     h.seq.offer(bounded({ a: 3 }));
-    await p;
     await h.flush();
     await Promise.resolve();
     expect(seen).toEqual([1, 2, 3]);
   });
 
-  test("boundary 超过 deadline 未 durable → reject canonical_flush_timeout，persistence degraded", async () => {
-    const h = harness({ boundaryDeadlineMs: 500 });
-    h.store.failpoint = () => "hang";
-    const p = h.seq.appendBoundary(boundary("checkpoint", { ok: true }));
-    h.clock.advance(500);
-    await expect(p).rejects.toBeInstanceOf(ObservationStoreUnavailableError);
-    expect(h.seq.persistenceState.status).toBe("degraded");
-    expect(h.diags.some((d) => d.code === "observation_flush_timeout")).toBe(true);
-  });
 });
 
 describe("hole 与 CanonicalObservationGap", () => {
@@ -281,7 +291,6 @@ describe("hole 与 CanonicalObservationGap", () => {
     expect(recs.map((r) => r.seq)).toEqual([1, 2, 1001]);
     expect(h.seq.committedSeq).toBe(1001);
     expect(h.seq.health().capture.canonicalGapCount).toBe(1);
-    expect(h.diags.filter((d) => d.code === "observation_hole")).toHaveLength(1); // 一段区间一条诊断
   });
 
   test("溢出区间由下一次别的预留收口：gap 落在区间末尾、在那条记录之前；不同 run 的溢出分开记，run-scoped 的把 index 置 partial", async () => {
@@ -292,7 +301,7 @@ describe("hole 与 CanonicalObservationGap", () => {
     h.seq.offer(bounded({ drop: 1 }, { scope: { runtimeId: RT, runId: run } })); // seq 3：run-scoped 溢出
     h.seq.offer(bounded({ drop: 2 }, { scope: { runtimeId: RT, runId: run } })); // seq 4：同一区间
     h.seq.offer(bounded({ drop: 3 })); // seq 5：runtime-scoped → 上一段收口？不：不同归属先收口再开新段 → 收口 gap 占 5，这条 hole 是 6
-    const closed = await h.seq.appendBoundary(boundary("run.closed", closedBody(), run)); // 收口第二段：gap 7，run.closed 8
+    const closed = await commit(h, boundary("run.closed", closedBody(), run)); // 收口第二段：gap 7，run.closed 8
     const recs = h.seq.committedRecords();
     const gaps = recs.filter((r) => r.name === "observation.gap").map((r) => ({ seq: r.seq, runId: r.scope.runId, body: r.body as ObservationGap }));
     expect(gaps).toEqual([
@@ -313,7 +322,7 @@ describe("hole 与 CanonicalObservationGap", () => {
     h.seq.offer(bounded({ keep: 1 }, { scope: { runtimeId: RT, runId: run } })); // 2：占满
     h.seq.offer(bounded({ drop: 1 }, { scope: { runtimeId: RT, runId: run } })); // 3：溢出
     h.seq.offer(bounded({ drop: 2 }, { scope: { runtimeId: RT, runId: run } })); // 4：同一区间
-    const closed = await h.seq.appendBoundary(boundary("run.closed", closedBody(), run)); // 收口 gap 5，run.closed 6
+    const closed = await commit(h, boundary("run.closed", closedBody(), run)); // 收口 gap 5，run.closed 6
     expect(closed.seq).toBe(6);
     const body = closed.body as { captureGapCountBeforeClose?: number; captureGapDigest?: string };
     expect(body.captureGapCountBeforeClose).toBe(1); // 此前 sealCaptureState 在 reserve() 之前算，区间还没滚进 runGaps → 0
@@ -341,7 +350,7 @@ describe("hole 与 CanonicalObservationGap", () => {
     await acceptRun(h, run);
     const { omittedSeq, gapSeq } = h.seq.reserveOptionalProjectionGap({ runId: run, subjectId: "run.final_snapshot", reason: "capture_limit" });
     expect(gapSeq).toBe(omittedSeq + 1);
-    const closed = await h.seq.appendBoundary(boundary("run.closed", closedBody(), run));
+    const closed = await commit(h, boundary("run.closed", closedBody(), run));
     expect(closed.seq).toBe(gapSeq + 1);
     const gap = h.seq.committedRecords().find((r) => r.seq === gapSeq)!;
     expect(gap.subject).toEqual({ kind: "capture", id: "run.final_snapshot" });
@@ -365,7 +374,7 @@ describe("run 边界：唯一 emission 与 RunIndex 物化", () => {
     expect(idx.firstSeq).toBe(1);
 
     h.clock.advance(5);
-    const started = await h.seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, run, { occurredAt: 1_005 }));
+    const started = await commit(h, boundary("run.started", { startedBy: "permit-executor" }, run, { occurredAt: 1_005 }));
     idx = h.seq.committedRunIndex(run)!;
     expect(idx.startedRecordId).toBe(started.recordId);
     expect(idx.header.startedAt).toBe(1_005);
@@ -374,7 +383,7 @@ describe("run 边界：唯一 emission 与 RunIndex 物化", () => {
     await h.flush();
     expect(h.seq.committedRunIndex(run)!.lastSeq).toBe(3);
 
-    const closed = await h.seq.appendBoundary(boundary("run.closed", closedBody("error"), run, { occurredAt: 1_050 }));
+    const closed = await commit(h, boundary("run.closed", closedBody("error"), run, { occurredAt: 1_050 }));
     idx = h.seq.committedRunIndex(run)!;
     expect(idx.terminalRecordId).toBe(closed.recordId);
     expect(idx.header.status).toBe("error");
@@ -390,12 +399,11 @@ describe("run 边界：唯一 emission 与 RunIndex 物化", () => {
     const run = "run-4";
     await acceptRun(h, run);
     const before = h.seq.reservedSeq;
-    await expect(acceptRun(h, run)).rejects.toThrow(/已发过/);
+    expect((await append(h, boundary("run.accepted", acceptedBody(run), run))).kind).toBe("rejected");
     expect(h.seq.reservedSeq).toBe(before);
-    await expect(h.seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, "never-accepted"))).rejects.toThrow(/尚未发/);
-    await expect(h.seq.appendBoundary(boundary("run.closed", closedBody(), run))).resolves.toBeDefined();
-    await expect(h.seq.appendBoundary(boundary("run.closed", closedBody(), run))).rejects.toThrow(/已发过/);
-    expect(h.diags.filter((d) => d.code === "observation_boundary_rejected")).toHaveLength(3);
+    expect((await append(h, boundary("run.started", { startedBy: "permit-executor" }, "never-accepted"))).kind).toBe("rejected");
+    expect((await append(h, boundary("run.closed", closedBody(), run))).kind).toBe("committed");
+    expect((await append(h, boundary("run.closed", closedBody(), run))).kind).toBe("rejected");
   });
 
   test("封口后 per-run 状态有界：最近 256 段的 index 还在缓存里、更老的只在 store；老 run 重发 accepted 由 store 的 CAS 判红（2026-09-09，#46）", async () => {
@@ -403,7 +411,7 @@ describe("run 边界：唯一 emission 与 RunIndex 物化", () => {
     for (let i = 1; i <= 300; i++) {
       const run = `run-${i}`;
       await acceptRun(h, run);
-      await h.seq.appendBoundary(boundary("run.closed", closedBody(), run));
+      await commit(h, boundary("run.closed", closedBody(), run));
     }
     expect(h.seq.committedRunIndex("run-300")?.header.status).toBe("completed");
     expect(h.seq.committedRunIndex("run-45")?.header.status).toBe("completed"); // 300-256+1 = 45 是最老还在缓存里的
@@ -411,18 +419,18 @@ describe("run 边界：唯一 emission 与 RunIndex 物化", () => {
     expect((await h.store.readRunIndex("run-44"))?.header.status).toBe("completed"); // store 里还在
     // 还在缓存里的：同步拒，不消耗 seq
     const before = h.seq.reservedSeq;
-    await expect(acceptRun(h, "run-300")).rejects.toThrow(/已发过/);
+    expect((await append(h, boundary("run.accepted", acceptedBody("run-300"), "run-300"))).kind).toBe("rejected");
     expect(h.seq.reservedSeq).toBe(before);
     // 出了缓存的：生命周期判据放它过，commit 时 RunIndex CAS（期望不存在、实际存在）判红——writer 封口，这是 bug 不是运行态
-    await expect(acceptRun(h, "run-44")).rejects.toThrow();
+    expect((await append(h, boundary("run.accepted", acceptedBody("run-44"), "run-44"))).kind).toBe("not-committed");
     expect(h.seq.persistenceState.status).toBe("sealed");
-    // 封口后的 record 一律 gap（边界登记已删，与从前一样）
-    expect(h.diags.some((d) => d.code === "observation_writer_sealed" || /sealed|封/.test(d.message))).toBe(true);
   });
 
-  test("run.accepted 的 body.header.runId 必须与 scope 一致", async () => {
+  test("run.accepted 的 body.header.runId 必须与 scope 一致：不一致成 hole，不建 RunIndex", async () => {
     const h = harness();
-    await expect(h.seq.appendBoundary(boundary("run.accepted", acceptedBody("other"), "run-5"))).rejects.toThrow(/不一致/);
+    expect((await append(h, boundary("run.accepted", acceptedBody("other"), "run-5"))).kind).toBe("hole");
+    expect(h.seq.committedRunIndex("run-5")).toBeUndefined();
+    expect(h.seq.committedRunIndex("other")).toBeUndefined();
   });
 });
 
@@ -432,24 +440,23 @@ describe("store 失败裁决", () => {
     let calls = 0;
     h.store.failpoint = () => (++calls === 1 ? "throw" : undefined);
     h.seq.offer(bounded({ a: 1 }));
-    const env = await h.seq.appendBoundary(boundary("checkpoint", { ok: 1 }));
+    const env = await commit(h, boundary("checkpoint", { ok: 1 }));
     expect(env.seq).toBe(2);
     expect(h.store.commitCount).toBe(1);
-    expect(h.diags.some((d) => d.code === "observation_commit_retry")).toBe(true);
     expect(h.seq.persistenceState.status).toBe("healthy");
   });
 
-  test("commit-unknown（写成功但抛错）→ read-after-error 判 committed，barrier 照常 resolve、不重复颁发", async () => {
+  test("commit-unknown（写成功但抛错）→ read-after-error 判 committed，boundary 照常落盘、不重复颁发", async () => {
     const h = harness();
     let calls = 0;
     h.store.failpoint = () => (++calls === 1 ? "unknown" : undefined);
-    const env = await h.seq.appendBoundary(boundary("checkpoint", { ok: 1 }));
+    const env = await commit(h, boundary("checkpoint", { ok: 1 }));
     expect(env.seq).toBe(1);
     expect(h.store.commitCount).toBe(1);
     expect(h.seq.committedSeq).toBe(1);
   });
 
-  test("corruption（同 ID 不同 bytes）→ 立即 sealed；之后 appendBoundary 拒、offer 静默丢并报一次诊断", async () => {
+  test("corruption（同 ID 不同 bytes）→ 立即 sealed；之后 appendBoundary 与 offer 都不再预留", async () => {
     const h = harness();
     h.seq.offer(bounded({ a: 1 }));
     await h.flush();
@@ -457,18 +464,19 @@ describe("store 失败裁决", () => {
     h.store.failpoint = () => {
       throw new ObservationCorruptionError("injected");
     };
-    await expect(h.seq.appendBoundary(boundary("checkpoint", { ok: 1 }))).rejects.toBeInstanceOf(ObservationStoreUnavailableError);
+    expect((await append(h, boundary("checkpoint", { ok: 1 }))).kind).toBe("not-committed");
     expect(h.seq.persistenceState.status).toBe("sealed");
-    await expect(h.seq.appendBoundary(boundary("checkpoint", { ok: 2 }))).rejects.toBeInstanceOf(ObservationStoreUnavailableError);
+    const reserved = h.seq.reservedSeq;
+    expect((await append(h, boundary("checkpoint", { ok: 2 }))).kind).toBe("rejected");
     expect(() => h.seq.offer(bounded({ a: 2 }))).not.toThrow();
     expect(() => h.seq.offer(bounded({ a: 3 }))).not.toThrow();
-    expect(h.diags.filter((d) => d.code === "observation_offer_dropped")).toHaveLength(1);
+    expect(h.seq.reservedSeq).toBe(reserved);
   });
 
-  test("重试耗尽（一直明确未落）→ sealed，barrier reject", async () => {
+  test("重试耗尽（一直明确未落）→ sealed，boundary 落不下去", async () => {
     const h = harness({ maxCommitAttempts: 2 });
     h.store.failpoint = () => "throw";
-    await expect(h.seq.appendBoundary(boundary("checkpoint", { ok: 1 }))).rejects.toBeInstanceOf(ObservationStoreUnavailableError);
+    expect((await append(h, boundary("checkpoint", { ok: 1 }))).kind).toBe("not-committed");
     expect(h.seq.persistenceState.status).toBe("sealed");
   });
 });
@@ -518,7 +526,7 @@ describe("live 扇出", () => {
     expect(sink.gaps).toHaveLength(0);
   });
 
-  test("回放读 store 失败：该 sink 出 replay_unavailable gap 并降级，live 照常；canonical 与诊断都如实", async () => {
+  test("回放读 store 失败：该 sink 出 replay_unavailable gap 并降级，live 照常；canonical 如实", async () => {
     const h = harness({ replayWindowRecords: 2 });
     for (let i = 1; i <= 5; i++) h.seq.offer(bounded({ i }));
     await h.flush();
@@ -537,7 +545,6 @@ describe("live 扇出", () => {
     const sink = h.seq.health().sinks.find((s) => s.sinkId === "late")!;
     expect(sink.status).toBe("degraded");
     expect(sink.gaps).toHaveLength(1);
-    expect(h.diags.some((d) => d.code === "observation_replay_failed")).toBe(true);
     expect(h.seq.health().capture.canonicalGapCount).toBe(0);
   });
 
@@ -579,16 +586,13 @@ describe("live 扇出", () => {
     // 关掉的 sink 留 tombstone：status:"closed" 与 lastErrorDigest 在 health 里仍可见（review P1）
     const sinks = h.seq.health().sinks;
     expect(sinks.map((s) => `${s.sinkId}:${s.status}`).sort()).toEqual(["bad:closed", "good:healthy"]);
-    // digest 就得是 digest：第三方异常的原文不进可查询的 health，也不进诊断（review P1 实测泄过凭据）
+    // digest 就得是 digest：第三方异常的原文不进可查询的 health（review P1 实测泄过凭据）
     const bad = sinks.find((s) => s.sinkId === "bad")!;
     expect(bad.lastErrorDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(sinks)).not.toContain("boom");
-    const diag = h.diags.find((d) => d.code === "observation_subscriber_failed")!;
-    expect(diag.message).toContain("Error@");
-    expect(diag.message).not.toContain("boom");
   });
 
-  test("凭据出现在 listener 异常里也不会落进 health 或诊断", async () => {
+  test("凭据出现在 listener 异常里也不会落进 health", async () => {
     const h = harness();
     const secret = "Authorization: Bearer sk-secret-123";
     h.seq.subscribe({
@@ -602,7 +606,6 @@ describe("live 扇出", () => {
     await h.flush();
     await Promise.resolve();
     expect(JSON.stringify(h.seq.health())).not.toContain("sk-secret");
-    expect(JSON.stringify(h.diags)).not.toContain("sk-secret");
   });
 
   test("按 runId 过滤订阅", async () => {
@@ -657,7 +660,7 @@ describe("review 修复：sink 隔离、尾部 gap、batch 上限", () => {
     h.seq.offer(bounded({ ok: 1 })); // seq 1
     h.seq.offer(bounded({ bad: NaN })); // hole 2 + gap 3
     h.seq.offer(bounded({ bad: Symbol("x") })); // hole 4 + gap 5
-    await h.seq.appendBoundary(boundary("checkpoint", { ok: true })); // seq 6
+    await commit(h, boundary("checkpoint", { ok: true })); // seq 6
     // 之前 mustReach 会把 gap 强塞进当前批，实测撑成 [3,1]
     expect(h.store.batchSizes).toEqual([2, 2]);
     expect(h.seq.committedSeq).toBe(6);
@@ -670,7 +673,7 @@ describe("review 修复：sink 隔离、尾部 gap、batch 上限", () => {
       h.seq.offer(bounded({ ok: i }));
       h.seq.offer(bounded({ bad: NaN }));
     }
-    await h.seq.appendBoundary(boundary("checkpoint", { ok: true }));
+    await commit(h, boundary("checkpoint", { ok: true }));
     expect(h.store.batchBytes.length).toBeGreaterThan(1);
     for (const [i, n] of h.store.batchBytes.entries()) {
       if (h.store.batchSizes[i] === 1) continue; // 单条超限只能自己走一笔
@@ -714,27 +717,6 @@ describe("review 修复：sink 隔离、尾部 gap、batch 上限", () => {
     }
   });
 
-  test("可注入的 reporter 抛错也击穿不了 offer() / appendBoundary() 的 no-throw 契约", async () => {
-    const clock = new FakeClock(1_000);
-    const seq = new ObservationSequencer({
-      runtimeId: RT,
-      runtimeGeneration: "gen-1",
-      capturePolicy: "metadata",
-      store: new InMemoryCanonicalObservationStore(),
-      clock,
-      report: () => {
-        throw new Error("reporter boom");
-      },
-    });
-    // 这几条都会走 report()：hole 诊断、ring 满、boundary 被拒
-    expect(() => seq.offer(bounded({ bad: NaN }))).not.toThrow();
-    expect(() => seq.offer(bounded({ ok: 1 }))).not.toThrow();
-    await expect(seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, "never"))).rejects.toThrow(/尚未发/);
-    clock.advance(DEFAULT_SEQUENCER_LIMITS.maxBatchDelayMs);
-    await seq.idle();
-    expect(seq.committedSeq).toBeGreaterThan(0);
-  });
-
   test("subscriber 的 gap 账本有界：100 轮 overflow 后只留最新 MAX_SINK_GAPS，丢弃条数记进 droppedGapCount", async () => {
     const h = harness({ subscriberQueueCapacity: 1 });
     h.seq.subscribe({ afterSeq: 0, sinkId: "slow", listener: () => {} });
@@ -763,7 +745,7 @@ describe("review 修复：sink 隔离、尾部 gap、batch 上限", () => {
   test("boundary 不绕过 batch 上限：maxBatchRecords=2，5 条 bounded + boundary → 事务 [2,2,2]", async () => {
     const h = harness({ maxBatchRecords: 2 });
     for (let i = 0; i < 5; i++) h.seq.offer(bounded({ i }));
-    const env = await h.seq.appendBoundary(boundary("checkpoint", { ok: true }));
+    const env = await commit(h, boundary("checkpoint", { ok: true }));
     expect(env.seq).toBe(6);
     expect(h.store.batchSizes).toEqual([2, 2, 2]);
     expect(h.seq.committedSeq).toBe(6);
@@ -813,7 +795,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     const run = "run-p1";
     await acceptRun(h, run);
     const before = h.seq.reservedSeq;
-    const closed = await h.seq.appendBoundary(
+    const closed = await commit(h, 
       boundary("run.closed", { outcome: { status: "completed" }, finalSnapshot: snapshotWith(33), captureGapCountBeforeClose: 999, captureGapDigest: "caller-old-digest" }, run),
     );
     const body = closed.body as RunClosedBodyV1;
@@ -836,7 +818,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     const h = harness();
     const clean = "run-clean";
     await acceptRun(h, clean);
-    const closed = await h.seq.appendBoundary(boundary("run.closed", closedBody(), clean));
+    const closed = await commit(h, boundary("run.closed", closedBody(), clean));
     const body = closed.body as RunClosedBodyV1;
     expect(body.captureGapCountBeforeClose).toBe(0);
     expect("captureGapDigest" in body).toBe(false);
@@ -845,7 +827,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     await acceptRun(h, dirty);
     h.seq.offer(bounded({ bad: NaN }, { scope: { runtimeId: RT, runId: dirty } }));
     await h.flush();
-    const d1 = (await h.seq.appendBoundary(boundary("run.closed", closedBody(), dirty))).body as RunClosedBodyV1;
+    const d1 = (await commit(h, boundary("run.closed", closedBody(), dirty))).body as RunClosedBodyV1;
     expect(d1.captureGapCountBeforeClose).toBe(1);
     expect(d1.captureGapDigest).toMatch(/^[0-9a-f]{64}$/);
 
@@ -854,7 +836,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     h.seq.offer(bounded({ bad: NaN }, { scope: { runtimeId: RT, runId: dirtier } }));
     h.seq.offer(bounded({ bad: Symbol("x") }, { scope: { runtimeId: RT, runId: dirtier } }));
     await h.flush();
-    const d2 = (await h.seq.appendBoundary(boundary("run.closed", closedBody(), dirtier))).body as RunClosedBodyV1;
+    const d2 = (await commit(h, boundary("run.closed", closedBody(), dirtier))).body as RunClosedBodyV1;
     expect(d2.captureGapCountBeforeClose).toBe(2);
     expect(d2.captureGapDigest).not.toBe(d1.captureGapDigest);
   });
@@ -867,7 +849,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     await h.flush();
     expect(h.seq.captureStateOf(run)?.count).toBe(700);
     // 之前把 {seq,reason} 存成数组、封口时整体重编，700 条就 nodes_exceeded，run 永远封不了口
-    const closed = await h.seq.appendBoundary(boundary("run.closed", closedBody(), run));
+    const closed = await commit(h, boundary("run.closed", closedBody(), run));
     const body = closed.body as RunClosedBodyV1;
     expect(body.captureGapCountBeforeClose).toBe(700);
     expect(body.captureGapDigest).toMatch(/^[0-9a-f]{64}$/);
@@ -882,7 +864,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     h.seq.offer(bounded({ bad: NaN }, { scope: { runtimeId: RT, runId: run } }));
     await h.flush();
     expect(h.seq.captureStateOf(run)?.count).toBe(1);
-    await h.seq.appendBoundary(boundary("run.closed", closedBody(), run));
+    await commit(h, boundary("run.closed", closedBody(), run));
     expect(h.seq.captureStateOf(run)).toBeUndefined();
   });
 
@@ -904,7 +886,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     await acceptRun(h, run);
     const snap = snapshotWith(2);
     const withLegacy: ObservationSnapshot<EchoObservableState> = { ...snap, state: { ...snap.state, omittedCapabilitySummaryCount: 5 } };
-    await h.seq.appendBoundary(boundary("run.closed", { outcome: { status: "completed" }, finalSnapshot: withLegacy }, run));
+    await commit(h, boundary("run.closed", { outcome: { status: "completed" }, finalSnapshot: withLegacy }, run));
     const gap = h.seq.committedRecords().find((r) => r.name === "observation.gap" && r.subject?.id === "run.final_snapshot.capabilities");
     expect(gap).toBeDefined();
     expect(h.seq.committedRunIndex(run)?.header.integrity).toBe("partial");
@@ -914,7 +896,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     const h = harness();
     const run = "run-p2";
     await acceptRun(h, run);
-    const closed = await h.seq.appendBoundary(
+    const closed = await commit(h, 
       boundary("run.closed", { outcome: { status: "completed" }, finalSnapshot: snapshotWith(2, "s".repeat(70_000)) }, run),
     );
     expect((closed.body as RunClosedBodyV1).finalSnapshot).toBeNull();
@@ -922,19 +904,17 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     expect((gap.body as ObservationGap).reason).toBe("capture_limit");
     expect(h.seq.committedRunIndex(run)?.header.persistence).toBe("stored");
     expect(h.seq.persistenceState.status).toBe("healthy");
-    await expect(h.seq.appendBoundary(boundary("checkpoint", { ok: true }))).resolves.toBeDefined();
+    expect((await append(h, boundary("checkpoint", { ok: true }))).kind).toBe("committed");
   });
 
-  test("required body 非法（finishReason 超 256 字节）→ 先裁决 hole/gap 再 reject；run 仍开着可重试", async () => {
+  test("required body 非法（finishReason 超 256 字节）→ hole + gap；run 仍开着可重试", async () => {
     const h = harness();
     const run = "run-p3";
     await acceptRun(h, run);
-    await expect(
-      h.seq.appendBoundary(boundary("run.closed", { outcome: { status: "completed", finishReason: "r".repeat(300) }, finalSnapshot: null }, run)),
-    ).rejects.toBeInstanceOf(ObservationEncodingError);
+    expect((await append(h, boundary("run.closed", { outcome: { status: "completed", finishReason: "r".repeat(300) }, finalSnapshot: null }, run))).kind).toBe("hole");
     await h.flush();
     expect(h.seq.committedRecords().some((r) => r.name === "observation.gap" && (r.body as ObservationGap).reason === "encoding_error")).toBe(true);
-    await expect(h.seq.appendBoundary(boundary("run.closed", closedBody(), run))).resolves.toBeDefined();
+    expect((await append(h, boundary("run.closed", closedBody(), run))).kind).toBe("committed");
   });
 });
 
@@ -952,7 +932,6 @@ describe("offer() 的零抛错契约", () => {
     // 每个非法 body 一个 hole + 一个 gap；最后那个是合法的
     const gaps = h.seq.committedRecords().filter((r) => r.name === "observation.gap");
     expect(gaps).toHaveLength(6);
-    expect(h.diags.filter((d) => d.code === "observation_sequencer_internal")).toHaveLength(0);
   });
 });
 
@@ -967,7 +946,7 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
     h.store.failpoint = () => {
       throw new ObservationCorruptionError(cause);
     };
-    await expect(h.seq.appendBoundary(boundary("checkpoint", { ok: 1 }))).rejects.toBeInstanceOf(ObservationStoreUnavailableError);
+    expect((await append(h, boundary("checkpoint", { ok: 1 }))).kind).toBe("not-committed");
     expect(h.seq.persistenceState.status).toBe("sealed");
     return h;
   }
@@ -979,7 +958,6 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
     const h = await sealedHarness();
     const before = h.seq.health();
     const reservedBefore = h.seq.reservedSeq;
-    const sinkDiags: Diagnostic[] = [];
     const sink = sinkInto(
       h.seq,
       {
@@ -988,15 +966,11 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
           throw new Error("projection boom");
         },
       },
-      { runtimeId: RT, runtimeGeneration: "gen-1", report: (d) => sinkDiags.push(d) },
+      { runtimeId: RT, runtimeGeneration: "gen-1" },
     );
     for (let i = 0; i < 100; i++) sink.offer({});
     expect(h.seq.reservedSeq).toBe(reservedBefore);
     expect(h.seq.health().capture.canonicalGapCount).toBe(before.capture.canonicalGapCount);
-    // terminal 是持续状态不是逐条事件：100 次失败只报一次，诊断通道不能成为新的无界增长面
-    // （修复前实测 101 条：sequencer 1 条 + fact-sink 每条 1 条）。
-    expect(sinkDiags).toHaveLength(1);
-    expect(sinkDiags[0]?.message).toContain("只报第一次");
   });
 
   test("terminal 之前同一个真实 fact-sink 仍然逐条开 gap", async () => {
@@ -1034,38 +1008,16 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
     expect(p.reopenAttempts).toBe(0);
   });
 
-  test("seal 的成因先 redact：诊断与 boundary rejection 都只出 Name@digest 前缀，不含凭据", async () => {
+  test("seal 的成因先 redact：health 的任何字段都不含凭据原文", async () => {
     const h = await sealedHarness();
-    const sealDiag = h.diags.find((d) => d.code === "observation_writer_sealed")!;
-    expect(sealDiag.message).toMatch(/canonical writer sealed：ObservationCorruptionError@[0-9a-f]{8}$/);
-    expect(sealDiag.message).not.toContain("sk-secret");
-    expect(sealDiag.message).not.toContain("Authorization");
-    // 所有诊断、以及 health 的任何字段，都不许出现原始正文
-    expect(JSON.stringify(h.diags)).not.toContain("sk-secret");
-    expect(JSON.stringify(h.seq.health())).not.toContain("sk-secret");
-    // 尚未 settle 的 boundary waiter 走同一条 rejection 文案
-    const h2 = harness();
-    h2.seq.offer(bounded({ a: 1 }));
-    await h2.flush();
-    h2.store.failpoint = () => {
-      throw new ObservationCorruptionError(SECRET);
-    };
-    await h2.seq.appendBoundary(boundary("checkpoint", { ok: 1 })).then(
-      () => {
-        throw new Error("should reject");
-      },
-      (e: Error) => {
-        expect(e.message).not.toContain("sk-secret");
-        expect(e.message).toMatch(/ObservationCorruptionError@[0-9a-f]{8}/);
-      },
-    );
+    const health = JSON.stringify(h.seq.health());
+    expect(health).not.toContain("sk-secret");
+    expect(health).not.toContain("Authorization");
   });
 
   test("healthy 直接进 terminal：只有 terminalSince，没有 degradedSince", async () => {
     // `degradedSince` 只在**经历过** degraded/recovering 时才有；直接掉进来就不该凭空造一个时间。
-    // （degraded → sealed 那条路在本 harness 里够不到：`hang` failpoint 永不 resolve，flush 卡住后
-    //  不会再有第二次 commit，而 degraded 只能由 boundary deadline 产生。
-    //  等 O3a 的真实 store 才测得到——不为它写一个测不到真实路径的假测试。）
+    // （今天没有写入端会进 degraded：它原来唯一的来源是边界提交的期限，已随可等待的边界删掉。）
     const h = await sealedHarness();
     const p = h.seq.health().persistence;
     expect(p.terminalSince).toBe(h.clock.now());
@@ -1230,7 +1182,7 @@ describe("boundary 只用同一份物化快照（2026-08-27 review P0）", () =>
         return reads === 2 ? "run.accepted" : "checkpoint";
       },
     };
-    await h.seq.appendBoundary(draft as unknown as BoundaryObservationDraft);
+    await commit(h, draft as unknown as BoundaryObservationDraft);
     await h.flush();
     expect(reads).toBe(1); // 整条路径只读一次
     expect(h.seq.committedRecords().map((r) => r.name)).toEqual(["checkpoint"]);
@@ -1251,7 +1203,7 @@ describe("boundary 只用同一份物化快照（2026-08-27 review P0）", () =>
         },
       },
     );
-    await h.seq.appendBoundary(boundary("run.accepted", body, "r1"));
+    await commit(h, boundary("run.accepted", body, "r1"));
     await h.flush();
     const rec = h.seq.committedRecords().find((r) => r.name === "run.accepted")!;
     const recAgent = (rec.body as { header: { agentId: string } }).header.agentId;
@@ -1269,7 +1221,7 @@ describe("boundary 只用同一份物化快照（2026-08-27 review P0）", () =>
         throw new Error("body trap");
       },
     };
-    await expect(h.seq.appendBoundary(draft as unknown as BoundaryObservationDraft)).rejects.toBeInstanceOf(Error);
+    expect((await append(h, draft as unknown as BoundaryObservationDraft)).kind).toBe("rejected");
     expect(h.seq.reservedSeq).toBe(0);
   });
 });
@@ -1358,33 +1310,6 @@ describe("subscriber 交付状态机（2026-08-27 review P1）", () => {
     const sink = h.seq.health().sinks.find((s) => s.sinkId === "bulk")!;
     expect(sink.status).not.toBe("closed");
     expect(got).toBeGreaterThan(0);
-    expect(h.diags.filter((d) => d.code === "observation_subscriber_failed")).toHaveLength(0);
-  });
-});
-
-describe("诊断通道自己不能击穿主流程（2026-08-27 review P0）", () => {
-  test("async reporter reject：Sequencer 不产生 unhandled rejection", async () => {
-    let unhandled = 0;
-    const on = (): void => {
-      unhandled += 1;
-    };
-    process.on("unhandledRejection", on);
-    const clock = new FakeClock(1_000);
-    const seq = new ObservationSequencer({
-      runtimeId: RT,
-      runtimeGeneration: "gen-1",
-      capturePolicy: "metadata",
-      store: new InMemoryCanonicalObservationStore(),
-      clock,
-      report: (() => Promise.reject(new Error("reporter down"))) as unknown as (d: Diagnostic) => void,
-    });
-    seq.offer(bounded({ bad: NaN })); // 触发 hole + 诊断
-    clock.advance(20);
-    await seq.idle();
-    await new Promise((r) => setTimeout(r, 20));
-    process.off("unhandledRejection", on);
-    expect(unhandled).toBe(0);
-    expect(seq.health().capture.canonicalGapCount).toBe(1); // 诊断坏了不影响裁决
   });
 });
 
@@ -1392,10 +1317,10 @@ describe("boundary body 是固定 schema，不是 producer 的自由字段区（
   const SECRET = "Authorization: Bearer sk-secret";
 
   async function accepted(h: Harness, runId: string): Promise<void> {
-    await h.seq.appendBoundary(boundary("run.accepted", acceptedBody(runId), runId));
+    await commit(h, boundary("run.accepted", acceptedBody(runId), runId));
   }
 
-  test("body getter 抛错：返回 rejected Promise，不是同步抛出", async () => {
+  test("body getter 抛错：appendBoundary 不同步抛出，也不预留 seq", () => {
     // 修复前：checkRunBoundary 在 try 之外读 body.header，getter 一抛就同步穿出 appendBoundary()
     const h = harness();
     const draft = {
@@ -1404,28 +1329,18 @@ describe("boundary body 是固定 schema，不是 producer 的自由字段区（
         throw new Error("header trap");
       },
     };
-    let sync = false;
-    try {
-      await h.seq.appendBoundary(draft as unknown as BoundaryObservationDraft).catch(() => {});
-    } catch {
-      sync = true;
-    }
-    expect(sync).toBe(false);
+    expect(() => h.seq.appendBoundary(draft as unknown as BoundaryObservationDraft)).not.toThrow();
+    expect(h.seq.reservedSeq).toBe(0);
   });
 
-  test("非法 run.closed.outcome.status：hole + gap，且原值不进诊断与 rejection", async () => {
-    // 修复前：在预留之前被拒（没有 hole+gap），且 `String(status)` 把整条凭据回显进诊断
+  test("非法 run.closed.outcome.status：hole + gap，且原值不进 canonical 与 health", async () => {
+    // 修复前：在预留之前被拒（没有 hole+gap）
     const h = harness();
     await accepted(h, "r1");
     const before = h.seq.health().capture.canonicalGapCount;
-    let msg = "";
-    await h.seq.appendBoundary(boundary("run.closed", { outcome: { status: SECRET }, finalSnapshot: null }, "r1")).catch((e: Error) => {
-      msg = e.message;
-    });
-    await h.flush();
+    expect((await append(h, boundary("run.closed", { outcome: { status: SECRET }, finalSnapshot: null }, "r1"))).kind).toBe("hole");
     expect(h.seq.health().capture.canonicalGapCount).toBe(before + 1);
-    expect(msg).not.toContain("sk-secret");
-    expect(JSON.stringify(h.diags)).not.toContain("sk-secret");
+    expect(JSON.stringify({ recs: h.seq.committedRecords(), health: h.seq.health() })).not.toContain("sk-secret");
   });
 
   test("run.started 也验 body：未登记字段进不了 canonical journal", async () => {
@@ -1433,7 +1348,7 @@ describe("boundary body 是固定 schema，不是 producer 的自由字段区（
     const h = harness();
     await accepted(h, "r2");
     const before = h.seq.health().capture.canonicalGapCount;
-    await h.seq.appendBoundary(boundary("run.started", { authorization: SECRET }, "r2")).catch(() => {});
+    expect((await append(h, boundary("run.started", { authorization: SECRET }, "r2"))).kind).toBe("hole");
     await h.flush();
     expect(JSON.stringify(h.seq.committedRecords())).not.toContain("sk-secret");
     expect(h.seq.health().capture.canonicalGapCount).toBe(before + 1); // 数据失败 → 留痕
@@ -1442,18 +1357,18 @@ describe("boundary body 是固定 schema，不是 producer 的自由字段区（
   test("合法 run.started 照常通过", async () => {
     const h = harness();
     await accepted(h, "r3");
-    const env = await h.seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, "r3"));
+    const env = await commit(h, boundary("run.started", { startedBy: "permit-executor" }, "r3"));
     expect(env.name).toBe("run.started");
   });
 
   test("startedBy 只认 permit-executor 与 subloop：隔离子循环照常通过，别的取值判红并留痕", async () => {
     const h = harness();
     await accepted(h, "r3");
-    expect((await h.seq.appendBoundary(boundary("run.started", { startedBy: "subloop" }, "r3"))).name).toBe("run.started");
+    expect((await commit(h, boundary("run.started", { startedBy: "subloop" }, "r3"))).name).toBe("run.started");
     const bad = harness();
     await accepted(bad, "r3");
     const before = bad.seq.health().capture.canonicalGapCount;
-    await bad.seq.appendBoundary(boundary("run.started", { startedBy: "nope" }, "r3")).catch(() => {});
+    expect((await append(bad, boundary("run.started", { startedBy: "nope" }, "r3"))).kind).toBe("hole");
     await bad.flush();
     expect(bad.seq.health().capture.canonicalGapCount).toBe(before + 1);
   });
@@ -1461,9 +1376,7 @@ describe("boundary body 是固定 schema，不是 producer 的自由字段区（
   test("run.accepted body 必须恰好是 { header }：多一个键就判红并留痕", async () => {
     const h = harness();
     const before = h.seq.health().capture.canonicalGapCount;
-    await h.seq
-      .appendBoundary(boundary("run.accepted", { ...acceptedBody("r4"), extra: SECRET }, "r4"))
-      .catch((e: Error) => expect(e.message).not.toContain("sk-secret"));
+    expect((await append(h, boundary("run.accepted", { ...acceptedBody("r4"), extra: SECRET }, "r4"))).kind).toBe("hole");
     await h.flush();
     expect(h.seq.health().capture.canonicalGapCount).toBe(before + 1);
     expect(JSON.stringify(h.seq.committedRecords())).not.toContain("sk-secret");
@@ -1473,32 +1386,9 @@ describe("boundary body 是固定 schema，不是 producer 的自由字段区（
     const h = harness();
     await accepted(h, "r5");
     const reservedBefore = h.seq.reservedSeq;
-    await expect(h.seq.appendBoundary(boundary("run.accepted", acceptedBody("r5"), "r5"))).rejects.toThrow(/已发过/);
+    expect((await append(h, boundary("run.accepted", acceptedBody("r5"), "r5"))).kind).toBe("rejected");
     expect(h.seq.reservedSeq).toBe(reservedBefore);
     expect(h.seq.health().capture.canonicalGapCount).toBe(0);
-  });
-});
-
-describe("诊断通道不能成为资源放大器（2026-08-27 review P1）", () => {
-  test("async reporter 返回 thenable 后立即停用：10,000 条诊断只调它一次", async () => {
-    // 修复前实测：reporter calls=10000、pending promises=10000
-    let calls = 0;
-    const clock = new FakeClock(1_000);
-    const seq = new ObservationSequencer({
-      runtimeId: RT,
-      runtimeGeneration: "gen-1",
-      capturePolicy: "metadata",
-      store: new InMemoryCanonicalObservationStore(),
-      clock,
-      report: (() => {
-        calls += 1;
-        return Promise.reject(new Error("reporter down"));
-      }) as unknown as (d: Diagnostic) => void,
-    });
-    for (let i = 0; i < 10_000; i++) seq.offer(bounded({ bad: NaN }));
-    await new Promise((r) => setTimeout(r, 20));
-    expect(calls).toBe(1);
-    expect(seq.health().capture.canonicalGapCount).toBe(10_000); // 诊断停了，裁决照常
   });
 });
 
@@ -1506,7 +1396,7 @@ describe("run.accepted 的 header 是逐字段 exact schema（2026-08-27 review 
   const SECRET = "Bearer sk-secret";
 
   async function tryAccept(h: Harness, runId: string, header: unknown): Promise<void> {
-    await h.seq.appendBoundary(boundary("run.accepted", { header }, runId)).catch(() => {});
+    expect((await append(h, boundary("run.accepted", { header }, runId))).kind).toBe("hole");
     await h.flush();
   }
 
@@ -1523,7 +1413,7 @@ describe("run.accepted 的 header 是逐字段 exact schema（2026-08-27 review 
     // 修复前：authorization 会同时进 canonical record 与 RunIndex
     const h = harness();
     await tryAccept(h, "r2", { ...acceptedBody("r2").header, authorization: SECRET });
-    const dump = JSON.stringify({ recs: h.seq.committedRecords(), idx: await h.store.readRunIndex("r2"), diags: h.diags });
+    const dump = JSON.stringify({ recs: h.seq.committedRecords(), idx: await h.store.readRunIndex("r2"), health: h.seq.health() });
     expect(dump).not.toContain("sk-secret");
     expect(await h.store.readRunIndex("r2")).toBeNull();
   });
@@ -1568,7 +1458,7 @@ describe("run.accepted 的 header 是逐字段 exact schema（2026-08-27 review 
 
   test("合法 header（含 sessionId:null 与 extension source）照常通过", async () => {
     const h = harness();
-    const env = await h.seq.appendBoundary(
+    const env = await commit(h, 
       boundary("run.accepted", { header: { ...acceptedBody("r5").header, sessionId: null, source: { kind: "extension", entryId: "e", sourceId: "s" } } }, "r5"),
     );
     await h.flush();
@@ -1583,7 +1473,7 @@ describe("run.accepted 的 header 是逐字段 exact schema（2026-08-27 review 
       { kind: "subagent", parentRunId: "p", parentToolCallId: "c1", background: false },
     ] as const) {
       const h = harness();
-      await h.seq.appendBoundary(boundary("run.accepted", { header: { ...acceptedBody("r6").header, source } }, "r6"));
+      await commit(h, boundary("run.accepted", { header: { ...acceptedBody("r6").header, source } }, "r6"));
       await h.flush();
       expect((await h.store.readRunIndex("r6"))?.header.source).toEqual(source);
     }
@@ -1595,7 +1485,7 @@ describe("RunIndex 建立之前的 gap 必须是 runtime-scoped（2026-08-27 rev
     // 修复前实测：gap.scope.runId="r1"、committedPrefix=2、RunIndex("r1")=null
     // ——违反「run-scoped gap 同事务更新 RunIndex」与「retention 窗口内 index 缺失即 corruption」
     const h = harness();
-    await h.seq.appendBoundary(boundary("run.accepted", { header: { runId: "r1" } }, "r1")).catch(() => {});
+    expect((await append(h, boundary("run.accepted", { header: { runId: "r1" } }, "r1"))).kind).toBe("hole");
     await h.flush();
     const gap = h.seq.committedRecords().find((r) => r.name === "observation.gap")!;
     expect(gap.scope.runId).toBeUndefined();
@@ -1605,7 +1495,7 @@ describe("RunIndex 建立之前的 gap 必须是 runtime-scoped（2026-08-27 rev
 
   test("同 runId 重试成功后不被前一次失败污染", async () => {
     const h = harness();
-    await h.seq.appendBoundary(boundary("run.accepted", { header: { runId: "r6" } }, "r6")).catch(() => {});
+    expect((await append(h, boundary("run.accepted", { header: { runId: "r6" } }, "r6"))).kind).toBe("hole");
     await h.flush();
     await acceptRun(h, "r6");
     await h.flush();
@@ -1640,7 +1530,7 @@ describe("record 不许引用不存在的 run（2026-08-27 review P0，双层防
 
   test("boundary lane 的普通 record（非 run boundary 名）同款拒绝", async () => {
     const h = harness();
-    await expect(h.seq.appendBoundary(boundary("checkpoint", { ok: 1 }, "ghost"))).rejects.toThrow(/未建立或已封口的 run/);
+    expect((await append(h, boundary("checkpoint", { ok: 1 }, "ghost"))).kind).toBe("hole");
     await h.flush();
     expect(h.seq.committedRecords().map((r) => r.name)).toEqual(["observation.gap"]);
     expect(await h.store.readRunIndex("ghost")).toBeNull();
@@ -1652,7 +1542,7 @@ describe("record 不许引用不存在的 run（2026-08-27 review P0，双层防
       ["run.closed", { outcome: { status: "completed" }, finalSnapshot: null }],
     ] as const) {
       const h = harness();
-      await expect(h.seq.appendBoundary(boundary(name, body, "ghost"))).rejects.toThrow(/尚未发/);
+      expect((await append(h, boundary(name, body, "ghost"))).kind).toBe("rejected");
       await h.flush();
       expect(h.seq.committedRecords()).toEqual([]);
       expect(await h.store.readRunIndex("ghost")).toBeNull();
@@ -1678,9 +1568,8 @@ describe("record 不许引用不存在的 run（2026-08-27 review P0，双层防
 
   test("正向：同一 batch 内 accepted → record 合法，index.lastSeq 跟着走", async () => {
     const h = harness();
-    const p = h.seq.appendBoundary(boundary("run.accepted", acceptedBody("r2"), "r2"));
+    h.seq.appendBoundary(boundary("run.accepted", acceptedBody("r2"), "r2"));
     h.seq.offer(bounded({ a: 1 }, { name: "x", scope: { runtimeId: RT, runId: "r2" } }));
-    await p;
     await h.flush();
     expect(h.seq.committedRecords().map((r) => r.name)).toEqual(["run.accepted", "x"]);
     const idx = await h.store.readRunIndex("r2");
@@ -1700,7 +1589,7 @@ describe("封口是终态：run.closed 之后不再收任何记录（2026-08-27 
   async function closedRun(runId: string): Promise<Harness> {
     const h = harness();
     await acceptRun(h, runId);
-    await h.seq.appendBoundary(boundary("run.closed", closedBody("completed"), runId));
+    await commit(h, boundary("run.closed", closedBody("completed"), runId));
     await h.flush();
     return h;
   }
@@ -1743,7 +1632,7 @@ describe("封口是终态：run.closed 之后不再收任何记录（2026-08-27 
 
   test("boundary lane 的普通 record 落在已封口的 run 上：同款拒绝", async () => {
     const h = await closedRun("r4");
-    await expect(h.seq.appendBoundary(boundary("checkpoint", { ok: 1 }, "r4"))).rejects.toThrow(/已封口/);
+    expect((await append(h, boundary("checkpoint", { ok: 1 }, "r4"))).kind).toBe("hole");
     await h.flush();
     expect(h.seq.committedRecords().map((r) => r.name)).not.toContain("checkpoint");
   });
@@ -1751,7 +1640,7 @@ describe("封口是终态：run.closed 之后不再收任何记录（2026-08-27 
   test("第二层：commit input 里出现落在已封口 run 上的 effect → corruption + seal", async () => {
     const h = harness();
     await acceptRun(h, "r5");
-    await h.seq.appendBoundary(boundary("run.closed", closedBody("completed"), "r5"));
+    await commit(h, boundary("run.closed", closedBody("completed"), "r5"));
     await h.flush();
     const before = h.seq.committedSeq;
     // 第一层挡住之后走不到这里，所以直接把 candidate 的 runId 塞回已封口的 run，验第二层真的在
@@ -1768,7 +1657,7 @@ describe("封口是终态：run.closed 之后不再收任何记录（2026-08-27 
     const h = harness();
     await acceptRun(h, "r6");
     h.seq.offer(bounded({ a: 1 }, { name: "mid", scope: { runtimeId: RT, runId: "r6" } }));
-    await h.seq.appendBoundary(boundary("run.closed", closedBody("completed"), "r6"));
+    await commit(h, boundary("run.closed", closedBody("completed"), "r6"));
     await h.flush();
     expect(h.seq.committedRecords().map((r) => r.name)).toEqual(["run.accepted", "mid", "run.closed"]);
     expect((await h.store.readRunIndex("r6"))?.lastSeq).toBe(3);
@@ -1780,7 +1669,7 @@ describe("RunIndex 的状态转换契约（2026-08-27 review P0）", () => {
   async function bypassOnClosedRun(runId: string, effect: unknown): Promise<{ h: Harness; before: RunIndexEntryV1 | null; head: number }> {
     const h = harness();
     await acceptRun(h, runId);
-    await h.seq.appendBoundary(boundary("run.closed", closedBody("completed"), runId));
+    await commit(h, boundary("run.closed", closedBody("completed"), runId));
     await h.flush();
     const before = await h.store.readRunIndex(runId);
     const head = h.seq.committedSeq;
@@ -1819,7 +1708,7 @@ describe("RunIndex 的状态转换契约（2026-08-27 review P0）", () => {
   test("started 重复登记也是 corruption——index 上的 startedRecordId 只许写一次", async () => {
     const h = harness();
     await acceptRun(h, "r4");
-    await h.seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, "r4"));
+    await commit(h, boundary("run.started", { startedBy: "permit-executor" }, "r4"));
     await h.flush();
     const before = await h.store.readRunIndex("r4");
     const head = h.seq.committedSeq;
@@ -1835,8 +1724,8 @@ describe("RunIndex 的状态转换契约（2026-08-27 review P0）", () => {
   test("正向：accepted → started → closed 的合法链条不受影响", async () => {
     const h = harness();
     await acceptRun(h, "r5");
-    await h.seq.appendBoundary(boundary("run.started", { startedBy: "permit-executor" }, "r5"));
-    await h.seq.appendBoundary(boundary("run.closed", closedBody("completed"), "r5"));
+    await commit(h, boundary("run.started", { startedBy: "permit-executor" }, "r5"));
+    await commit(h, boundary("run.closed", closedBody("completed"), "r5"));
     await h.flush();
     const idx = await h.store.readRunIndex("r5");
     expect(idx?.acceptedRecordId).toBe("rt-test:1");

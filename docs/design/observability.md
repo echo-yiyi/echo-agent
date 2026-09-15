@@ -76,13 +76,13 @@
 | | `offer()`（bounded） | `appendBoundary()`（boundary） |
 |---|---|---|
 | 谁走 | 各执行节点的探针（§7） | run 的三条边界 + `run.assembly` |
-| 同步性 | **同步、永不抛、没有 Promise** | 返回 Promise；**主线程上没人等它**，只有观测线程里的读（flush）等 |
-| 满了 / 编码失败 | 该 seq 当场成 **hole**，并在任何后续 producer 拿到 seq 之前预留下一个 seq 写一条 gap | 拒绝，调用方按 §5 降级 |
-| 顺序保证 | 由**预留 seq**决定，不由落盘决定 | prefix barrier：worker 先把 `< B` 的全部记录 / 缺口排空，在含 B 及其 RunIndex 变更的同一事务提交并 read-back 到 `committedPrefix >= B` 才 resolve |
+| 同步性 | **同步、永不抛、没有 Promise** | **同步、没有 Promise**：预留完立刻安排提交，不等攒批 |
+| 满了 / 编码失败 | 该 seq 当场成 **hole**，并在任何后续 producer 拿到 seq 之前预留下一个 seq 写一条 gap | body 非法 / 编码失败同样是 hole + gap；生命周期不合法（重复发、缺前置）或写入端已 seal 时什么都不留 |
+| 顺序保证 | 由**预留 seq**决定，不由落盘决定 | prefix barrier：`< B` 的全部记录 / 缺口按批上限一批批先提交，B 与它的 RunIndex 变更在同一事务，一直推到 `committedPrefix >= B` |
 
 **为什么探针不能抛、也不能等**：它被内建能力在自己的决策点直接调（`sink.offer(fact)`，[fact-sink.ts](../../packages/core/src/observability/fact-sink.ts#symbol=factSinkToThread)）。那些点在 agent 主线上，一次异常或一次 await 就会把观测变成主线的一部分。所以探针在主线程上只读 scope、投影、交出去；Sequencer 的两条 lane 都在观测线程里（[thread-host.ts](../../packages/core/src/observability/thread-host.ts#symbol=ingestFact)）。
 
-**缺口不是丢数据，是把「这里丢了」记下来。** `committed prefix` 只越过两类位置：已提交的记录，或被后续 gap 精确覆盖的 hole。缺口原因是封闭集合（`ObservationGapReason`）：`buffer_overflow` `encoding_error` `capture_limit` `store_failure` `canonical_flush_timeout` `lease_lost` `retention`——最后一个今天没有写者，见 §8。
+**缺口不是丢数据，是把「这里丢了」记下来。** `committed prefix` 只越过两类位置：已提交的记录，或被后续 gap 精确覆盖的 hole。缺口原因是封闭集合（`ObservationGapReason`）：`buffer_overflow` `encoding_error` `capture_limit` `store_failure` `canonical_flush_timeout` `lease_lost` `retention`——其中三个今天没有写者，见 §8。
 
 **live 扇出严格在 COMMIT / read-back 之后按 seq 进行**：rollback 或结果不确定的候选记录永远不会被订阅者看见。
 
@@ -135,7 +135,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 
 | 信号 | 在哪读 | 含义 |
 |---|---|---|
-| `persistence` | `getRun()` 的 header；`snapshot().health.persistence` | header 上 `stored` / `degraded`：终态已进 index 才 `stored`。health 上是写入端此刻的 `healthy` / `degraded` / `recovering` / sealed |
+| `persistence` | `getRun()` 的 header；`snapshot().health.persistence` | header 上 `stored` / `degraded`：终态已进 index 才 `stored`。health 上是写入端此刻的 `healthy` / sealed（`degraded` / `recovering` 今天没有写者，见 §8） |
 | `integrity` | `getRun()` 的 header | `complete` / `partial`——`partial` 表示这条 run 的记录里有缺口 |
 | `status` | `getRun()` 的 header | run 的业务终态：`running` / `completed` / `aborted` / `error`（`interrupted` 无写者） |
 
@@ -200,7 +200,7 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端降级（seal）之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
 2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性——产品不调 `expireObservations()` 的会话会越来越慢。这是唯一会随时间恶化的一条，控制它的是产品的过期。
-3. **`lost-lease` 与 `lease_lost` 不再有入口**：观测不挂 lease 之后，`ObservationPersistenceStatus` 的 `lost-lease` 与缺口原因 `lease_lost` 没有写者，类型还在公开面上。
+3. **公开类型里有几个值没有写者**：写入端状态 `ObservationPersistenceStatus` 的 `degraded` / `recovering` / `lost-lease`，缺口原因 `store_failure` / `canonical_flush_timeout` / `lease_lost`。`degraded` 原来唯一的来源是边界提交的期限，2026-09-14 随「可等待的边界」一起删了；`lost-lease` / `lease_lost` 随观测不挂 lease 没了入口；其余从来没有写者。类型还在公开面上。
 4. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
 5. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
 6. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。

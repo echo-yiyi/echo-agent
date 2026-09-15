@@ -63,8 +63,8 @@ export function noopFactSink<T>(): CapabilityFactSink<T> {
 export type FactHandoff = Readonly<{
   /** 交出一条投影。过不了线程（比如 body 里有函数）时自己转成 `failed`。 */
   fact(at: number, scope: unknown, projection: ObservationFactProjection): void;
-  /** 探针在这一侧就失败了：观测线程补 hole + gap 与诊断。`error` 是抛出物的原文，只在观测线程里做成脱敏标签。 */
-  failed(at: number, runId: string | undefined, why: string, error?: string): void;
+  /** 探针在这一侧就失败了：观测线程补 hole + gap。 */
+  failed(at: number, runId: string | undefined): void;
 }>;
 
 export type ThreadFactSinkContext = Readonly<{
@@ -75,16 +75,6 @@ export type ThreadFactSinkContext = Readonly<{
   scope?: () => ObservationFactScope;
   handoff: FactHandoff;
 }>;
-
-/** 抛出物的原文，只读 name / message，永不抛。脱敏在观测线程里做。 */
-export function thrownText(e: unknown): string {
-  try {
-    if (e instanceof Error) return `${String(e.name)}: ${String(e.message)}`;
-  } catch {
-    // Proxy 的 getPrototypeOf / getter 能让判断本身抛
-  }
-  return typeof e === "string" ? e : "non-error thrown";
-}
 
 /** 从 scope 供给的返回值里 total 地取 runId：失败路径给 gap 挂归属用。 */
 function runIdOf(raw: unknown): string | undefined {
@@ -111,20 +101,20 @@ export function factSinkToThread<T>(descriptor: CapabilityFactDescriptor<T>, ctx
       if (supply !== undefined) {
         try {
           raw = supply();
-        } catch (e) {
-          handoff.failed(at, undefined, "scope 供给抛错 ", thrownText(e));
+        } catch {
+          handoff.failed(at, undefined);
           return;
         }
         if (raw === undefined || raw === null) {
-          handoff.failed(at, undefined, `scope 供给返回 ${raw === null ? "null" : "undefined"}（没有 scope 请显式返回 {}）`);
+          handoff.failed(at, undefined);
           return;
         }
       }
       let p: ObservationFactProjection | null;
       try {
         p = project(fact, capturePolicy);
-      } catch (e) {
-        handoff.failed(at, runIdOf(raw), "", thrownText(e));
+      } catch {
+        handoff.failed(at, runIdOf(raw));
         return;
       }
       if (p === null) return;

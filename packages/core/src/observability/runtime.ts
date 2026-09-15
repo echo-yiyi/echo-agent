@@ -19,7 +19,7 @@ import type { StorageDir } from "../storage/types.ts";
 import { BUILTIN_GENERATION } from "../extension/builtin.ts";
 import type { BuiltinSlotContribution } from "./assembly.ts";
 import { DocumentObservationReader } from "./document-store.ts";
-import { factSinkToThread, thrownText, type CapabilityFactDescriptor, type CapabilityFactSink } from "./fact-sink.ts";
+import { factSinkToThread, type CapabilityFactDescriptor, type CapabilityFactSink } from "./fact-sink.ts";
 import { freezeInstrumentation, freezeOwner } from "./identity.ts";
 import { LiveEchoObservations } from "./query.ts";
 import type { SequencerLimits } from "./sequencer.ts";
@@ -166,13 +166,13 @@ export class ObservationRuntime {
         fact: (at, raw, projection) => {
           try {
             this.thread.post({ t: "fact", rt, sink: id, at, ...(raw === undefined ? {} : { scope: raw }), projection });
-          } catch (e) {
-            // 投影里有过不了线程的值（函数、symbol …）：留 hole + gap，不静默丢
-            this.post({ t: "fact-failed", rt, sink: id, at, why: "投影过不了线程 ", error: thrownText(e) });
+          } catch {
+            // 投影里有过不了线程的值（函数、symbol …）：留 hole + gap
+            this.post({ t: "fact-failed", rt, sink: id, at });
           }
         },
-        failed: (at, runId, why, error) => {
-          this.post({ t: "fact-failed", rt, sink: id, at, ...(runId === undefined ? {} : { runId }), why, ...(error === undefined ? {} : { error }) });
+        failed: (at, runId) => {
+          this.post({ t: "fact-failed", rt, sink: id, at, ...(runId === undefined ? {} : { runId }) });
         },
       },
     });

@@ -81,6 +81,7 @@ type ExpireObservationsOptions = Readonly<{ rule: ObservationExpiryRule; now?: n
 - **存储卡死时不无限等**：原来只要有一个存储调用没回来，观测线程就不报空闲、一直拖住进程。实测只卡观测写、会话存储正常时进程照样退不出——下面 Non-Goals 原来那条「与会话存储卡住同一个处境」的类比不成立：会话存储卡住时 `stop()` 本身卡着，看得见；观测卡住时 `stop()` 已经返回，进程却不退。改成：线程拖着进程期间连续 `STALL_MS`（5 秒）没有进展（没收到线程的消息、也没有存储操作做完），就放开进程，没写完的观测随进程丢。
 - **content 档的工具载荷在投影时收进预算**：原来工具结果、参数原样交出去，线程那头超过 64 KB 整条判成缺口——主线程为一份注定丢掉的数据做了一次完整结构化拷贝。现在正文截断、结构化载荷放不进就不带（设计文档 §4）。
 - **起线程同步抛错不再让 `createEcho()` 失败**：这个进程的观测不记，装配照常。
+- **删掉没有消费者的内部机制**：`appendBoundary()` 不再返回 Promise（主线程和观测线程都没人等它），同步预留、立刻安排提交；随之删掉边界提交的期限（`boundaryDeadlineMs`）与等待者。那个期限原来是写入端 `degraded` 的唯一来源，所以 `degraded` 今天也没有写者（设计文档 §8）。探针失败不再携带原因文本与抛出物原文——它们只给诊断用。**没删**对抗性输入的防御（快照读、canonical 编码的校验）：主线程上 content 档的载荷预算（`estimatePayloadBytes` / `fitPayload`）直接拿 producer 的原始值跑同一个编码器。
 
 ## Non-Goals
 
@@ -95,6 +96,7 @@ type ExpireObservationsOptions = Readonly<{ rule: ObservationExpiryRule; now?: n
 - [Node 下同样成立](../../../test/distribution-gate.test.ts#test=node装-tarball-createecho-完整装配-send-echoobservations-读得回stop-不等观测进程写完才退下一个进程离线读得到)：Node 从 dist 起观测线程，最后一个 run 在 `stop()` 之前才封口，下一个 Node 进程离线读得到。
 - 过期只凭盘上事实：[没封口不删](../../../packages/core/test/observability-document-store.test.ts#test=盘上还没封口的-run-不删列进-openruns不给-run-也不给-activitybefore-时什么都不动)、[head 之后的批不动](../../../packages/core/test/observability-document-store.test.ts#test=head-之后的批它那一批的-runs-还没写成不回收哪怕里面的记录都够老)、[两种给法](../../../packages/core/test/observability-document-store.test.ts#test=expireobservations规则拿到全部-run-的-header新的在前与-now按它的决定删状态根目录与注入存储两种给法)、[活着的 agent 旁边删](../../../packages/core/test/observability-runtime.test.ts#test=跑完停下再起都一条不删产品在活着的-agent-旁边按规则删删的是盘上已封口的-run)。
 - 补充的三条：[观测丢数据不往外报](../../../packages/core/test/observability-runtime.test.ts#test=观测丢数据不往外报content-档的大工具结果截断照记存储写不动也不发任何通知2026-09-14观测本身就是日志)（存储写不动时不发任何通知、content 档大工具结果截断照记不成缺口）、[存储卡死最多再等 STALL_MS](../../../packages/core/test/observability-runtime.test.ts#test=观测存储卡死进程最多再等-stallms-就退出没写完的观测放弃exit-监听照常运行)、[起线程抛错装配照常](../../../packages/core/test/observability-runtime.test.ts#test=起观测线程同步抛错createechosendstop-照常这个进程不记观测)；投影侧 [工具结果截断](../../../packages/core/test/observability-projection.test.ts#test=工具结果正文截到预算内并标-resulttruncated放不进的-metadata-不带标-metadataomitted穿过-sequencer-是记录不是缺口) 与 [结构化载荷放不进就不带](../../../packages/core/test/observability-projection.test.ts#test=工具参数进展tooluse-的-input结构化的放不进就不带标-omitted字符串进展截断)。
+- 边界不等：[appendBoundary 不等攒批、立刻提交](../../../packages/core/test/observability-sequencer.test.ts#test=appendboundary-不等攒批b-的-bounded-尾巴与-b-同一事务立刻提交不拨-clock)、[body getter 抛错不同步抛出](../../../packages/core/test/observability-sequencer.test.ts#test=body-getter-抛错appendboundary-不同步抛出也不预留-seq)。
 - `git grep -n -E "leaseLifecycle|afterLeaseAcquired|observation\.expiry|observations\.expire\(|observationIntegrity|persistenceOf" -- 'packages/*/src'` 为空（`EchoObservableState.runtime.observationPersistence` 是状态快照里的字段，由观测线程填，不在此列）。
 - 反证见合入提交信息。
 

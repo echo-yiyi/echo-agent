@@ -16,7 +16,6 @@
 //
 // 本文件不 import `node:` 模块，逻辑可以同线程直接跑；线程入口只是把消息接进来。
 
-import type { Diagnostic } from "../errors.ts";
 import type { Model } from "../provider/types.ts";
 import type { StorageDir } from "../storage/types.ts";
 import { AGENT_INSTRUMENTATION } from "../agent-observe.ts";
@@ -27,8 +26,7 @@ import type { ObservationFactProjection } from "./fact-sink.ts";
 import { hmacSha256Hex, sha256Hex } from "./hash.ts";
 import { freezeInstrumentation, freezeOwner, materializeScope } from "./identity.ts";
 import { canonicalJson } from "./normalize.ts";
-import { redactedLabel } from "./redact.ts";
-import { ObservationSequencer, type ObservationIngest, type ProjectionFailureOutcome } from "./sequencer.ts";
+import { ObservationSequencer, type ObservationIngest } from "./sequencer.ts";
 import type { CanonicalObservationStore } from "./store.ts";
 import { materializeObservableState } from "./terminal.ts";
 import type { AgentAssemblyObservationSnapshot, EchoObservableState, ObservationCapturePolicy, ObservationOwner, ObservationRecordKind, RunClosedBodyInput, RunClosedOutcomeObservation } from "./types.ts";
@@ -119,64 +117,23 @@ export function freezeSinkIdentity(owner: ObservationOwner, instrumentation: Rea
   return { owner: freezeOwner(owner, "owner"), instrumentation: freezeInstrumentation(instrumentation, "descriptor.instrumentation") };
 }
 
-/**
- * 探针事实进 Sequencer 时要的上下文。`state` 同一根探针共用：writer terminal 之后的失败只报第一次；
- * reporter 返回过 thenable 就停用它。
- */
+/** 探针事实进 Sequencer 时要的上下文。 */
 export type FactIngestContext = Readonly<{
   runtimeId: string;
   runtimeGeneration: string;
   sink: SinkIdentity;
-  report: (d: Diagnostic) => void;
-  state: { terminalReported: boolean; reporterDisabled: boolean };
 }>;
 
-/** 一根新探针的上下文。 */
-export function factIngestContext(input: Readonly<{ runtimeId: string; runtimeGeneration: string; sink: SinkIdentity; report: (d: Diagnostic) => void }>): FactIngestContext {
-  return { ...input, state: { terminalReported: false, reporterDisabled: false } };
-}
-
-function reportSafely(ctx: FactIngestContext, d: Diagnostic): void {
-  if (ctx.state.reporterDisabled) return;
-  try {
-    // **只挡同步 throw 不够**（2026-08-27 review P0）：`(d) => void` 同样放行 async reporter，它 reject 时是进程级
-    // unhandled rejection；只吞不停的话每条诊断仍调一次违规 reporter，诊断通道自己成了资源放大器。返回 thenable 即停用。
-    const r: unknown = ctx.report(d);
-    if (typeof r === "object" && r !== null && typeof (r as { then?: unknown }).then === "function") {
-      ctx.state.reporterDisabled = true;
-      Promise.resolve(r as PromiseLike<unknown>).then(
-        () => {},
-        () => {},
-      );
-    }
-  } catch {
-    // 诊断通道自己坏了，没有第二条诊断通道可报——只能吞；绝不击穿探针的 no-throw
-  }
-}
-
 /**
- * canonical 路径的失败出口：**先占失败身份 + 挂 safe gap，再报诊断**——顺序要紧，诊断报完才预留的话，报诊断途中任何抛错
- * 都会让这个洞彻底消失。writer terminal 之后每条失败都报一次的话，诊断通道自己成了无界增长面；terminal 是持续状态，只报第一次。
- * `error`：探针在主线程那一侧抛出物的原文，这里只做成脱敏标签。
+ * canonical 路径的失败出口：占失败身份 + 挂 safe gap（writer 已 terminal 时什么都不留）。不往外报——
+ * 账本上「这里少了一条」就是全部证据。
  */
-export function ingestFactFailure(ingest: ObservationIngest, ctx: FactIngestContext, runId: string | undefined, why: string, error?: string): void {
-  const name = ctx.sink.instrumentation.name;
-  const message = `${why}${error === undefined ? "" : redactedLabel(error)}`;
-  let outcome: ProjectionFailureOutcome = "writer-unavailable";
+export function ingestFactFailure(ingest: ObservationIngest, runId: string | undefined): void {
   try {
-    outcome = ingest.reserveProjectionFailureGap({ runId });
-  } catch (inner) {
-    // Sequencer 内部 bug：没有第二条 canonical 通道可用，只能升一条诊断
-    reportSafely(ctx, { code: "observation_sequencer_internal", message: `${name}：gap 预留失败 ${redactedLabel(inner)}` });
+    ingest.reserveProjectionFailureGap({ runId });
+  } catch {
+    // Sequencer 自己的 bug：没有第二条 canonical 通道，这条不记
   }
-  if (outcome !== "gap-reserved") {
-    // writer 已 terminal：canonical 那条路不存在了，诊断如实说明「这条只剩 live 证据」
-    if (ctx.state.terminalReported) return;
-    ctx.state.terminalReported = true;
-    reportSafely(ctx, { code: "observation_fact_dropped", message: `${name}：${message}（writer 已 terminal，此后的失败只有 live 证据、无 canonical gap；只报第一次）` });
-    return;
-  }
-  reportSafely(ctx, { code: "observation_fact_dropped", message: `${name}：${message}` });
 }
 
 /**
@@ -188,7 +145,7 @@ export function ingestFact(ingest: ObservationIngest, ctx: FactIngestContext, in
   const s = materializeScope(input.scope);
   let gapRunId = s.ok ? s.scope.runId : s.runId;
   if (!s.ok) {
-    ingestFactFailure(ingest, ctx, gapRunId, `scope 物化失败：${s.violation}`);
+    ingestFactFailure(ingest, gapRunId);
     return;
   }
   try {
@@ -213,8 +170,8 @@ export function ingestFact(ingest: ObservationIngest, ctx: FactIngestContext, in
     };
     // draft 里的 identity 由 Sequencer 再物化一次（它才是 canonical 的 owner）；这里不重复校验
     ingest.offer(draft);
-  } catch (e) {
-    ingestFactFailure(ingest, ctx, gapRunId, redactedLabel(e));
+  } catch {
+    ingestFactFailure(ingest, gapRunId);
   }
 }
 
@@ -284,7 +241,7 @@ class ThreadRuntime {
     private readonly open: OpenWork,
   ) {
     this.storage = new ThreadStorage(host, runtimeId, open.storageLock);
-    this.stateSnapshot = factIngestContext({ runtimeId, runtimeGeneration: open.runtimeGeneration, sink: freezeSinkIdentity(open.boundaryOwner, AGENT_INSTRUMENTATION), report: () => {} });
+    this.stateSnapshot = { runtimeId, runtimeGeneration: open.runtimeGeneration, sink: freezeSinkIdentity(open.boundaryOwner, AGENT_INSTRUMENTATION) };
     this.assembly = sealAgentAssemblyObservation(open.assembly);
     this.writerReady = new Promise((resolve, reject) => {
       this.resolveWriter = resolve;
@@ -339,16 +296,12 @@ class ThreadRuntime {
       case "open":
         return;
       case "sink":
-        this.sinks.set(
-          work.sink,
-          factIngestContext({ runtimeId: this.runtimeId, runtimeGeneration: this.open.runtimeGeneration, sink: freezeSinkIdentity(work.owner, work.instrumentation), report: () => {} }),
-        );
+        this.sinks.set(work.sink, { runtimeId: this.runtimeId, runtimeGeneration: this.open.runtimeGeneration, sink: freezeSinkIdentity(work.owner, work.instrumentation) });
         return;
       case "fact":
         return this.onFact(work);
       case "fact-failed": {
-        const ctx = this.sinks.get(work.sink);
-        if (ctx !== undefined) this.withAt(work.at, () => ingestFactFailure(this.sequencer, ctx, work.runId, work.why, work.error));
+        if (this.sinks.has(work.sink)) this.withAt(work.at, () => ingestFactFailure(this.sequencer, work.runId));
         return;
       }
       case "run-accepted":
@@ -518,8 +471,8 @@ class ThreadRuntime {
         attributes: { moment: "run_started", capabilities: state.capabilities.length },
         body: { moment: "run_started", state },
       });
-    } catch (e) {
-      ingestFactFailure(this.sequencer, this.stateSnapshot, work.runId, redactedLabel(e));
+    } catch {
+      ingestFactFailure(this.sequencer, work.runId);
     }
   }
 
@@ -541,16 +494,9 @@ class ThreadRuntime {
     this.fireBoundary(this.boundary("run.closed", "event", this.runScope(work.runId, work.identity), work.at, body));
   }
 
-  /**
-   * 提交不等的 boundary。`appendBoundary()` 的同步段做完 lifecycle 检查 / seq 预留 / RunIndex 登记才返回 Promise，
-   * 所以顺序已定；落不下去的结果只在 Sequencer 的 health 里，这里接住 rejection 不让它成为 unhandled。
-   */
+  /** run 边界交给 Sequencer：同步预留、立刻安排提交；落不落得下去只在 health 里。 */
   private fireBoundary(draft: BoundaryObservationDraft<unknown>): void {
-    try {
-      this.sequencer.appendBoundary(draft).catch(() => {});
-    } catch {
-      // 预留失败（lifecycle 不合法等）：这条边界不记
-    }
+    this.sequencer.appendBoundary(draft);
   }
 
   private identityScope(identity: RunIdentity): Readonly<Record<string, string>> {

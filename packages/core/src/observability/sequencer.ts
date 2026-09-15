@@ -4,13 +4,12 @@
 // 两条 lane 两种 API：
 //   · `offer()`：bounded lane。**同步、永不抛、没有 Promise**。预留 seq → normalize → 进 ring。ring 满或编码
 //     失败 → 该 seq 当场成 hole，并在任何后续 producer 取得 seq 之前预留下一个 seq 写 `CanonicalObservationGap`。
-//   · `appendBoundary()`：boundary lane。可等待；装一个 prefix barrier，worker 先把 `< B` 的全部 record/gap 排空，
-//     在含 B 及其 RunIndex mutation 的同一事务提交并 read-back 到 `committedPrefix >= B` 才 resolve。
+//   · `appendBoundary()`：boundary lane。同步做完 lifecycle 检查 / seq 预留 / RunIndex 登记就返回，并立刻安排提交；
+//     没有人等它落盘（2026-09-14：观测不在主流程上），落没落成看 health 与读面。失败只留 hole + gap，不往外报。
 //
 // committed prefix 只越过两类位置：已 committed 的 record，或被后续 gap 精确覆盖的 hole。
 // live 扇出严格在 COMMIT/read-back 之后按 seq 进行；rollback / indeterminate 的 candidate 永远不可见。
 
-import type { Diagnostic } from "../errors.ts";
 import type { Clock } from "../schedule/clock.ts";
 import type { BoundaryObservationDraft, BoundedObservationDraft, ObservationDraft, RunAcceptedBodyV1, RunObservationHeaderSeed } from "./draft.ts";
 import { RUN_BOUNDARY_NAMES } from "./draft.ts";
@@ -27,7 +26,7 @@ import {
 import { redactError, redactedLabel, toSafeError } from "./redact.ts";
 import { sha256Hex } from "./hash.ts";
 import { assertIdentifier, materializeRecordFrame, materializeScope } from "./identity.ts";
-import { ObservationCorruptionError, ObservationStoreUnavailableError, runIndexDigest } from "./store.ts";
+import { ObservationCorruptionError, runIndexDigest } from "./store.ts";
 import { decodeObservationEnvelope } from "./materialize.ts";
 import { preflightTerminalProjection } from "./terminal.ts";
 import type { CanonicalObservationStore, CanonicalRecordCandidate, CommitBatchInput, RunIndexMutation } from "./store.ts";
@@ -63,8 +62,8 @@ export type ProjectionFailureOutcome = "gap-reserved" | "writer-unavailable";
 export interface ObservationIngest {
   /** 同步预留 identity、normalize 并尝试进入 bounded ring；永不抛、没有 Promise。 */
   offer<TInput>(draft: BoundedObservationDraft<TInput>): void;
-  /** 同步预留/normalize identity，返回「本 boundary exact committed，prefix 已至少推进到它」的 durability 结果。 */
-  appendBoundary<TInput>(draft: BoundaryObservationDraft<TInput>): Promise<ObservationEnvelope>;
+  /** 同步预留 / normalize identity 并立刻安排提交；永不抛、没有 Promise。被拒（生命周期不合法、writer 已 terminal）时什么都不留。 */
+  appendBoundary<TInput>(draft: BoundaryObservationDraft<TInput>): void;
   /**
    * **descriptor 投影失败也必须留痕**：预留失败身份 S，并在 S+1 挂一条 safe `CanonicalObservationGap`。
    *
@@ -74,12 +73,12 @@ export interface ObservationIngest {
    * 不变量因此是假的。诊断不是 canonical 证据，两者不能互相替代。
    *
    * 归到 `encoding_error`：从 canonical 记录的角度，投影失败与 normalize/序列化失败是同一件事
-   * ——**没能把这条事实变成可提交的 bytes**。细分类进诊断，不为它加一个新的公共 gap reason。
+   * ——**没能把这条事实变成可提交的 bytes**。不为它加一个新的公共 gap reason。
    *
    * 只有 Host 拥有的 adapter 会调它（Capability 拿到的是 `CapabilityFactSink`，看不见这个方法）。
    *
    * **writer 进入 terminal 后这条保证不再可能兑现**：gap 也是要提交的记录。那时返回
-   * `"writer-unavailable"`，什么都不预留，调用方只发一次安全的 live 诊断。
+   * `"writer-unavailable"`，什么都不预留；这条失败只剩 health 里的写入端状态。
    */
   reserveProjectionFailureGap(input: Readonly<{ runId: string | undefined }>): ProjectionFailureOutcome;
 }
@@ -101,8 +100,6 @@ export type SequencerLimits = Readonly<{
   maxBatchDelayMs: number;
   /** bounded lane 未提交 candidate 的上限；boundary lane 不计入。 */
   ringCapacity: number;
-  /** `appendBoundary()` 的 durability deadline；到期按 canonical persistence failure 处理。 */
-  boundaryDeadlineMs: number;
   subscriberQueueCapacity: number;
   /** read-after-error 明确 not-found 时的重试上限。 */
   maxCommitAttempts: number;
@@ -118,7 +115,6 @@ export const DEFAULT_SEQUENCER_LIMITS: SequencerLimits = {
   maxBatchBytes: 1024 * 1024,
   maxBatchDelayMs: 20,
   ringCapacity: 4096,
-  boundaryDeadlineMs: 5000,
   subscriberQueueCapacity: 1024,
   maxCommitAttempts: 3,
   replayWindowRecords: 1024,
@@ -136,7 +132,6 @@ export type ObservationSequencerOptions = Readonly<{
   store: CanonicalObservationStore;
   clock: Clock;
   limits?: Partial<SequencerLimits>;
-  report?: (d: Diagnostic) => void;
 }>;
 
 /** 交付给订阅方的一项：记录、本 sink 自己的交付缺口，或回放时跨过被过期删掉的区间（`retention-gap`）。 */
@@ -163,32 +158,6 @@ export const MAX_CLOSED_SINK_TOMBSTONES = 32;
  */
 export const MAX_SINK_GAPS = 32;
 
-/** 把可注入的 reporter 包成 no-throw：它是外部给的，抛错就会击穿 `offer()` 的 no-throw 契约（review 实测）。 */
-function safeReporter(report: ((d: Diagnostic) => void) | undefined): (d: Diagnostic) => void {
-  if (report === undefined) return () => {};
-  let disabled = false;
-  return (d) => {
-    if (disabled) return;
-    try {
-      // **只挡同步 throw 是不够的**（2026-08-27 review P0）：`(d) => void` 同样放行 `async` reporter，
-      // 它 reject 时是进程级 unhandled rejection——观测故障又一次击穿主流程。
-      const r: unknown = report(d);
-      if (typeof r === "object" && r !== null && typeof (r as { then?: unknown }).then === "function") {
-        // **吞掉 rejection 还不够，得停用它**（同轮 review P1）：只吞不停的话，每条诊断仍会调一次违规
-        // reporter——实测 10,000 条诊断 = 10,000 次调用 + 10,000 个 pending Promise，诊断通道自己成了
-        // 资源放大器。与 tap 同一处置：接口要求同步，返回 thenable 即停用。
-        disabled = true;
-        Promise.resolve(r as PromiseLike<unknown>).then(
-          () => {},
-          () => {},
-        );
-      }
-    } catch {
-      // 诊断通道自己坏了，没有第二条诊断通道可报——只能吞
-    }
-  };
-}
-
 /* ══════════════════ 内部状态 ══════════════════ */
 
 type IndexEffect =
@@ -207,6 +176,8 @@ type CandidateSlot = {
   readonly blobs: readonly StagedBlob[];
   readonly runId: string | undefined;
   readonly indexEffect: IndexEffect | undefined;
+  /** `appendBoundary()` 交进来的：一到就提交，不等攒批。 */
+  readonly appended?: true;
 };
 
 type HoleSlot = {
@@ -236,14 +207,6 @@ type OverflowRun = { firstSeq: number; lastSeq: number; readonly runId: string |
 const CLOSED_RUN_RETENTION = 256;
 
 type Slot = CandidateSlot | HoleSlot;
-
-type Waiter = {
-  readonly seq: number;
-  readonly resolve: (env: ObservationEnvelope) => void;
-  readonly reject: (e: Error) => void;
-  readonly cancelDeadline: () => void;
-  settled: boolean;
-};
 
 /**
  * subscribe 要的 afterSeq 早于内存窗口时，从 store 分页回放的进度。`undefined` = 不在回放（或已回放完）。
@@ -326,13 +289,11 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   private readonly store: CanonicalObservationStore;
   private readonly clock: Clock;
   private readonly limits: SequencerLimits;
-  private readonly report: (d: Diagnostic) => void;
 
   private lastReserved = 0;
   private committedPrefix = 0;
   private readonly slots = new Map<number, Slot>();
   private pendingBounded = 0;
-  private readonly waiters = new Map<number, Waiter>();
   /**
    * **只有开着的 run**（2026-09-09，review 2026-09-07 #46）：封口落库那一刻删。此前两张表只进不出，常驻 agent 每跑一个 run
    * 各涨一条。封口后的 run 挪进 `closedRuns`（有界，最老的先出）：它同时是 `committedRunIndex()` 的查询缓存与
@@ -354,7 +315,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   private readonly recentCommitted: ObservationEnvelope[] = [];
 
   private persistence: ObservationPersistenceState = { status: "healthy" };
-  private droppedWhileUnavailable = 0;
 
   private flushing = false;
   private flushRequested = false;
@@ -376,7 +336,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     this.store = opts.store;
     this.clock = opts.clock;
     this.limits = { ...DEFAULT_SEQUENCER_LIMITS, ...opts.limits };
-    this.report = safeReporter(opts.report);
   }
 
   /* ───────── 只读面 ───────── */
@@ -468,20 +427,15 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
    * 那些 gap **永远不可能成为 canonical record**，内存却一直涨，健康数字也跟着失真。
    * 返回 true = 已丢弃（调用方立刻返回）。
    */
-  private unavailable(what: string): boolean {
+  private unavailable(): boolean {
     const s = this.persistence.status;
-    if (s !== "sealed" && s !== "lost-lease") return false;
-    this.droppedWhileUnavailable += 1;
-    if (this.droppedWhileUnavailable === 1) {
-      this.report({ code: "observation_offer_dropped", message: `writer ${s}，${what} 丢弃（只报第一次）` });
-    }
-    return true;
+    return s === "sealed" || s === "lost-lease";
   }
 
   offer<TInput>(draft: BoundedObservationDraft<TInput>): void {
     let seq: number | undefined;
     try {
-      if (this.unavailable("bounded record")) return;
+      if (this.unavailable()) return;
       // ring 满：不编码、不物化，并进当前的溢出区间（一段连续溢出共用一条 gap，见 `OverflowRun`）。
       // 判在预留之前：这条 seq 只会是 hole，而且不该让它把上一段区间收口
       if (this.pendingBounded >= this.limits.ringCapacity) {
@@ -496,10 +450,10 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
         // committed prefix 就此永久卡死，而 writer 还声称 healthy（实测 reserved=2、committed=0、gaps=0）。
         // effect 改由 encodeCandidate 从**物化后的** identity 推导（`"auto"`）。
         candidate = this.encodeCandidate(draft, seq, syncEncodingLimits(), "auto");
-      } catch (e) {
+      } catch {
         // 失败路径只做**一次 total 的 scope 物化**来找回 runId；找不回就是 runtime-scoped gap。
         // 绝不回头再读一次原容器——那正是上面这个洞的成因。
-        this.markHole(seq, safeRunIdOf(draft.scope), "encoding_error", undefined, e);
+        this.markHole(seq, safeRunIdOf(draft.scope), "encoding_error", undefined);
         return;
       }
       // **record 也不许引用一个不存在的 run**（2026-08-27 review P0）：上一轮只在 gap 那侧收了口，
@@ -508,22 +462,20 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       // 「有 canonical record、无 RunIndex」正是 retention 之后查询面无从解释的那种状态。
       // 不静默把 runId 抹掉（那会假装成功还丢了归属），而是把这个 seq 裁决成 hole + runtime-scoped gap。
       if (candidate.runId !== undefined && !this.isRunOpen(candidate.runId)) {
-        this.report({ code: "observation_boundary_rejected", message: `record 引用了未建立或已封口的 run，已裁决为 gap` });
-        this.markHole(seq, undefined, "encoding_error", undefined, undefined);
+        this.markHole(seq, undefined, "encoding_error", undefined);
         return;
       }
       this.slots.set(seq, candidate);
       this.pendingBounded += 1;
       this.scheduleFlush(this.pendingBytesExceedLimits() ? "now" : "delayed");
-    } catch (e) {
-      // 最后一道：`offer()` 的契约是永不抛。走到这里是 Sequencer 自己的 bug，只能报诊断。
-      this.report({ code: "observation_sequencer_internal", message: redactedLabel(e) });
-      // **但预留过的 seq 必须有裁决**：留一个空洞等于把 committed prefix 永久钉死在它前面。
+    } catch {
+      // 最后一道：`offer()` 的契约是永不抛。走到这里是 Sequencer 自己的 bug。
+      // **预留过的 seq 必须有裁决**：留一个空洞等于把 committed prefix 永久钉死在它前面。
       if (seq !== undefined && !this.slots.has(seq)) {
         try {
-          this.markHole(seq, undefined, "encoding_error", undefined, undefined);
+          this.markHole(seq, undefined, "encoding_error", undefined);
         } catch {
-          // markHole 自己坏了（已 seal）：没有第二条通道，诊断上面已经报过
+          // markHole 自己坏了（已 seal）：没有第二条通道，只剩 health 里的 sealed
         }
       }
     }
@@ -531,9 +483,9 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
 
   /* ───────── boundary lane ───────── */
 
-  appendBoundary<TInput>(draft: BoundaryObservationDraft<TInput>): Promise<ObservationEnvelope> {
+  appendBoundary<TInput>(draft: BoundaryObservationDraft<TInput>): void {
     if (this.persistence.status === "sealed" || this.persistence.status === "lost-lease") {
-      return Promise.reject(new ObservationStoreUnavailableError(`canonical writer ${this.persistence.status}`, this.persistence));
+      return;
     }
     // **整份 draft 先浅拷贝成快照，之后只用快照**（2026-08-27 review P0）：原来 `draft.name` / `draft.scope` /
     // `draft.body` 在 boundary registry、RunIndex effect、canonical envelope 三处各读各的，于是一个变脸的
@@ -549,17 +501,16 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       const scope = { ...(shallow.scope as Record<string, unknown>) };
       runId = safeRunIdOf(scope);
       toEncode = { ...shallow, name, scope } as BoundaryObservationDraft<unknown>;
-    } catch (e) {
+    } catch {
       // draft 自己的 getter 抛错：还没预留 seq，直接拒即可
-      return Promise.reject(toSafeError(e, "boundary draft 读取失败"));
+      return;
     }
     const isBoundary = isRunBoundaryName(name);
     let effect: IndexEffect | undefined;
     if (isBoundary) {
       const problem = this.checkRunLifecycle(name as (typeof RUN_BOUNDARY_NAMES)[number], runId);
       if (problem !== undefined) {
-        this.report({ code: "observation_boundary_rejected", message: `${name}(${runId ?? "?"}) 被拒：${problem}` });
-        return Promise.reject(new Error(`${name} 被拒：${problem}`));
+        return;
       }
       if (name === "run.closed" && runId !== undefined) {
         // 先把开着的溢出区间收口：封口 body 里的 capture 计数 / digest 从 `runGaps` 读，而区间要到收口才滚进去；
@@ -574,10 +525,10 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
           const p = preflightTerminalProjection({ outcome: raw.outcome, finalSnapshot: raw.finalSnapshot });
           for (const subjectId of p.projectionGaps) this.reserveOptionalProjectionGap({ runId, subjectId, reason: "capture_limit" });
           toEncode = { ...toEncode, body: this.sealCaptureState(runId, p.body) };
-        } catch (e) {
+        } catch {
           const seq = this.reserve();
-          this.markHole(seq, runId, "encoding_error", undefined, e);
-          return Promise.reject(toSafeError(e, "run.closed preflight 失败"));
+          this.markHole(seq, runId, "encoding_error", undefined);
+          return;
         }
       }
     }
@@ -586,18 +537,17 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     let candidate: CandidateSlot;
     try {
       candidate = this.encodeCandidate(toEncode, seq, boundaryEncodingLimits(), undefined);
-    } catch (e) {
+    } catch {
       // 先裁决 hole/health，再拒绝（required safe body 编码失败）
-      this.markHole(seq, runId, "encoding_error", undefined, e);
-      return Promise.reject(toSafeError(e, "boundary 编码失败"));
+      this.markHole(seq, runId, "encoding_error", undefined);
+      return;
     }
     // **一致性闸**：物化后的 identity 必须与上面用于 registry 裁决的那一份完全一致。
     // 快照之后理论上不可能不一致，但这是 OR4「record 与 index 同事务一致」的最后一道断言——
     // 不一致就当编码失败处理，绝不半推半就地写出去。
     if (candidate.runId !== runId || candidate.envelope.name !== name) {
-      const e = new ObservationEncodingError("unsupported_value", "$", "boundary identity 物化后与裁决时不一致");
-      this.markHole(seq, runId, "encoding_error", undefined, e);
-      return Promise.reject(toSafeError(e, "boundary identity 不一致"));
+      this.markHole(seq, runId, "encoding_error", undefined);
+      return;
     }
     // RunIndex effect 从**已编码的 envelope body** 推导，不是从 producer 的原 body——
     // 后者能在两次读取之间换内容，让 canonical 与 index 记下不同的事实（review P0 第二个复现）。
@@ -605,34 +555,26 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       // body schema 在**预留之后**判，且只吃已归一化冻结的 envelope body：失败是数据失败，必须留 hole+gap
       const bodyProblem = runId === undefined ? undefined : this.boundaryBodyViolation(name as (typeof RUN_BOUNDARY_NAMES)[number], runId, candidate.envelope.body);
       if (bodyProblem !== undefined) {
-        const e = new ObservationEncodingError("unsupported_value", "$.body", bodyProblem);
-        this.markHole(seq, runId, "encoding_error", undefined, e);
-        return Promise.reject(toSafeError(e, `${name} body 非法`));
+        this.markHole(seq, runId, "encoding_error", undefined);
+        return;
       }
       effect = this.effectFor(name as (typeof RUN_BOUNDARY_NAMES)[number], candidate.envelope.body);
       if (effect.kind === "accepted" && effect.seed.runId !== runId) {
-        const e = new ObservationEncodingError("unsupported_value", "$.body.header", "RunIndex seed 与 scope.runId 不一致");
-        this.markHole(seq, runId, "encoding_error", undefined, e);
-        return Promise.reject(toSafeError(e, "RunIndex seed 不一致"));
+        this.markHole(seq, runId, "encoding_error", undefined);
+        return;
       }
     } else if (runId !== undefined) {
       if (!this.isRunOpen(runId)) {
-        const e = new ObservationEncodingError("unsupported_value", "$.scope.runId", "record 引用了未建立或已封口的 run");
-        this.markHole(seq, undefined, "encoding_error", undefined, undefined);
-        return Promise.reject(toSafeError(e, "record 引用了未建立或已封口的 run"));
+        this.markHole(seq, undefined, "encoding_error", undefined);
+        return;
       }
       effect = { kind: "record" };
     }
-    const slot: CandidateSlot = { ...candidate, indexEffect: effect };
+    const slot: CandidateSlot = { ...candidate, indexEffect: effect, appended: true };
     if (isBoundary && runId !== undefined) this.recordRunBoundary(name as (typeof RUN_BOUNDARY_NAMES)[number], runId, seq);
     this.slots.set(seq, slot);
 
-    const promise = new Promise<ObservationEnvelope>((resolve, reject) => {
-      const cancelDeadline = once(this.clock, () => this.onBoundaryDeadline(seq), this.limits.boundaryDeadlineMs);
-      this.waiters.set(seq, { seq, resolve, reject, cancelDeadline, settled: false });
-    });
     this.scheduleFlush("now");
-    return promise;
   }
 
   reserveOptionalProjectionGap(
@@ -640,17 +582,17 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   ): Readonly<{ omittedSeq: number; gapSeq: number }> {
     // 同一个同步 critical section：被省略 slot 取得真实 seq S，gap 紧跟在 S+1
     const omittedSeq = this.reserve();
-    const gapSeq = this.markHole(omittedSeq, input.runId, input.reason, { kind: "capture", id: input.subjectId }, undefined);
+    const gapSeq = this.markHole(omittedSeq, input.runId, input.reason, { kind: "capture", id: input.subjectId });
     return { omittedSeq, gapSeq };
   }
 
   reserveProjectionFailureGap(input: Readonly<{ runId: string | undefined }>): ProjectionFailureOutcome {
     // writer 已经 terminal 时**什么都不预留**：再挂的 gap 永远提交不了，只会把内存和 canonicalGapCount 撑大。
     // 返回值是明确结果而不是伪造的 `{omittedSeq:0, gapSeq:0}`——0 是合法 seq 的邻居，伪造它等于制造假证据。
-    if (this.unavailable("projection failure")) return "writer-unavailable";
+    if (this.unavailable()) return "writer-unavailable";
     // 与上面同构：失败身份先占 seq，gap 紧跟其后，committed prefix 上就留下了「这里少了一条」。
     const omittedSeq = this.reserve();
-    this.markHole(omittedSeq, input.runId, "encoding_error", undefined, undefined);
+    this.markHole(omittedSeq, input.runId, "encoding_error", undefined);
     return "gap-reserved";
   }
 
@@ -733,7 +675,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     this.slots.set(gapSeq, gap);
     this.canonicalGapCount += 1;
     if (open.runId !== undefined) this.rollGap(open.runId, gap.bytes);
-    this.report({ code: "observation_hole", message: `seq ${open.firstSeq}..${open.lastSeq} → hole(buffer_overflow) ×${dropped}，gap @ ${gapSeq}` });
     this.scheduleFlush("delayed");
   }
 
@@ -910,7 +851,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     rawRunId: string | undefined,
     reason: ObservationGapReason,
     subject: Readonly<{ kind: string; id: string }> | undefined,
-    cause: unknown,
   ): number {
     const runId = this.gapRunIdFor(rawRunId);
     // 这里的 seq 是调用方刚 `reserve()` 的，溢出区间已在那次预留时收口；这条 gap 紧跟它
@@ -921,10 +861,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     this.slots.set(gapSeq, gap);
     this.canonicalGapCount += 1;
     if (runId !== undefined) this.rollGap(runId, gap.bytes);
-    if (cause !== undefined) {
-      const code = cause instanceof ObservationEncodingError ? cause.code : "unknown";
-      this.report({ code: "observation_hole", message: `seq ${seq} → hole(${reason}: ${code})，gap @ ${gapSeq}` });
-    }
     this.scheduleFlush("delayed");
     return gapSeq;
   }
@@ -933,9 +869,8 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
 
   /**
    * **只查生命周期，不碰 body**（2026-08-27 review P1）。原来这里顺手读 `body.header` / `body.outcome`，
-   * 三个后果：① 那些读取在 `appendBoundary()` 的 try 之外，getter 抛错时它**同步抛出**而不是返回
-   * rejected Promise；② 非法 body 在**预留 seq 之前**被拒，于是没有文档要求的 hole+gap；
-   * ③ 违规说明里 `String(status)` 把原值回显进诊断与错误（实测 `Authorization: Bearer sk-secret` 整条泄漏）。
+   * 两个后果：① 那些读取在 `appendBoundary()` 的 try 之外，getter 抛错时它**同步抛出**；
+   * ② 非法 body 在**预留 seq 之前**被拒，于是没有文档要求的 hole+gap。
    * 生命周期错（缺 runId / 重复 / 缺前置）是调用方协议错误，本来就不该留记录，pre-reservation 拒是对的；
    * body 形状错是**数据失败**，必须留痕——拆开之后各归各的。
    */
@@ -1157,8 +1092,8 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
         this.flushRequested = false;
         const before = this.committedPrefix;
         await this.flushOnce();
-        // barrier 还没到：继续一批批推进（受 batch 上限约束）；没进展且没人再要求就停，防空转
-        if (this.barrierPending() && this.committedPrefix > before) this.flushRequested = true;
+        // 还有 boundary 没落盘：继续一批批推进（受 batch 上限约束）；没进展且没人再要求就停，防空转
+        if (this.boundaryPending() && this.committedPrefix > before) this.flushRequested = true;
       } while (this.flushRequested && this.persistence.status !== "sealed");
     } catch (e) {
       this.seal(toSafeError(e, "flush 失败"));
@@ -1171,13 +1106,17 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     // 循环退出时 ring 里还可能剩不足一批的 candidate（flush 期间到达、又没触发限额）：
     // 必须重新安排一次，否则它们会一直躺到下一个 offer——delayed flush 的定时器早被 "now" 取消了。
     if (this.slots.size > 0 && this.persistence.status !== "sealed" && this.persistence.status !== "lost-lease") {
-      this.scheduleFlush(this.pendingBytesExceedLimits() || this.waiters.size > 0 ? "now" : "delayed");
+      this.scheduleFlush(this.pendingBytesExceedLimits() || this.boundaryPending() ? "now" : "delayed");
     }
   }
 
-  private barrierPending(): boolean {
-    for (const w of this.waiters.values()) if (!w.settled && w.seq > this.committedPrefix) return true;
-    return false;
+  /** committed prefix 之后还有 `appendBoundary()` 交进来的记录没落盘：它们一到就提交，不等攒批（gap 不算）。 */
+  private boundaryPending(): boolean {
+    for (let seq = this.committedPrefix + 1; ; seq++) {
+      const slot = this.slots.get(seq);
+      if (slot === undefined) return false;
+      if (slot.kind === "candidate" && slot.appended === true) return true;
+    }
   }
 
   private collectWindow(): Window | undefined {
@@ -1351,7 +1290,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   private async flushOnce(): Promise<void> {
     if (this.terminal()) return;
     const window = this.collectWindow();
-    // collectWindow 会给溢出区间收口，收口失败会 seal：terminal 之后这个窗口不能再提交（waiter 已被告知 not durable）
+    // collectWindow 会给溢出区间收口，收口失败会 seal：terminal 之后这个窗口不能再提交
     if (window === undefined || this.terminal()) return;
     const input = this.buildCommitInput(window);
     for (let attempt = 1; ; attempt++) {
@@ -1369,10 +1308,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
           this.applyCommitted(window, input);
           return;
         }
-        if (verdict === "absent" && attempt < this.limits.maxCommitAttempts) {
-          this.report({ code: "observation_commit_retry", message: `batch → ${input.nextCommittedPrefix} 第 ${attempt} 次失败（明确未落）：${redactedLabel(e)}` });
-          continue;
-        }
+        if (verdict === "absent" && attempt < this.limits.maxCommitAttempts) continue;
         this.seal(new Error(`batch → ${input.nextCommittedPrefix} ${verdict === "absent" ? "重试耗尽" : "indeterminate"}：${redactedLabel(e)}`));
         return;
       }
@@ -1430,29 +1366,8 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
         while (this.closedRuns.size > CLOSED_RUN_RETENTION) this.closedRuns.delete(this.closedRuns.keys().next().value!);
       }
     }
-    // 先 resolve barrier，再 live 扇出：两者都在 COMMIT 之后，顺序按 seq
-    for (const w of [...this.waiters.values()]) {
-      if (w.settled || w.seq > this.committedPrefix) continue;
-      w.settled = true;
-      w.cancelDeadline();
-      this.waiters.delete(w.seq);
-      const env = window.slots.find((s) => s.seq === w.seq)?.envelope ?? this.recentCommitted.find((e) => e.seq === w.seq);
-      if (env === undefined) w.reject(new Error(`boundary ${w.seq} 已 committed 但找不到 envelope`));
-      else w.resolve(env);
-    }
+    // live 扇出在 COMMIT 之后，顺序按 seq
     for (const slot of window.slots) this.publish(slot.envelope);
-  }
-
-  private onBoundaryDeadline(seq: number): void {
-    const w = this.waiters.get(seq);
-    if (w === undefined || w.settled) return;
-    w.settled = true;
-    this.waiters.delete(seq);
-    if (this.persistence.status === "healthy") {
-      this.persistence = { status: "degraded", since: this.clock.now(), lastErrorDigest: "canonical_flush_timeout", reopenAttempts: 0 };
-    }
-    this.report({ code: "observation_flush_timeout", message: `boundary seq ${seq} 在 ${this.limits.boundaryDeadlineMs}ms 内未 durable；persistence degraded` });
-    w.reject(new ObservationStoreUnavailableError(`boundary seq ${seq} canonical_flush_timeout`, this.persistence));
   }
 
   private seal(cause: Error): void {
@@ -1461,11 +1376,9 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
 
   private terminate(status: "sealed" | "lost-lease", cause: Error): void {
     if (this.persistence.status === "sealed" || this.persistence.status === "lost-lease") return;
-    // **成因先 redact**：seal 往往由第三方错误触发，`cause.message` 里出现过整条
-    // `Authorization: Bearer sk-…`，而它会同时进诊断和 boundary waiter 的 rejection（review 实测）。
-    // 这与 subscriber failure 那条路已经在用 `redactError()` 也对不上。
+    // **成因先 redact**：seal 往往由第三方错误触发，`cause.message` 里出现过整条 `Authorization: Bearer sk-…`（review 实测），
+    // health 里只存 digest。
     const r = redactError(cause);
-    const label = `${r.name}@${r.digest.slice(0, 8)}`;
     const prev = this.persistence;
     const now = this.clock.now();
     this.persistence = {
@@ -1476,21 +1389,8 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       lastErrorDigest: r.digest, // health 存**完整** digest；对外只露前缀
       reopenAttempts: prev.status === "degraded" || prev.status === "recovering" ? prev.reopenAttempts : 0,
     };
-    const message = `canonical writer ${status}：${label}`;
-    this.report({ code: status === "sealed" ? "observation_writer_sealed" : "observation_writer_lost_lease", message });
-    // 开着的溢出区间不会再有人收口（offer / boundary / flush 都在 terminal 上短路）：那几条丢弃至少要留一句诊断
-    const open = this.overflow;
-    if (open !== undefined) {
-      this.overflow = undefined;
-      this.report({ code: "observation_hole", message: `seq ${open.firstSeq}..${open.lastSeq} → hole(buffer_overflow) ×${open.lastSeq - open.firstSeq + 1}，writer 已 ${status}，没有 gap 落盘` });
-    }
-    for (const w of [...this.waiters.values()]) {
-      if (w.settled) continue;
-      w.settled = true;
-      w.cancelDeadline();
-      w.reject(new ObservationStoreUnavailableError(message, this.persistence));
-    }
-    this.waiters.clear();
+    // 开着的溢出区间不会再有人收口（offer / boundary / flush 都在 terminal 上短路）
+    this.overflow = undefined;
     this.cancelDelayedFlush?.();
     this.cancelDelayedFlush = undefined;
   }
@@ -1576,28 +1476,27 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
             replay.queue.push(env);
           }
           if (exhausted) pushRemovedBefore(replay.upto + 1);
-        } catch (e) {
-          this.failReplay(sub, replay, e);
+        } catch {
+          this.failReplay(sub, replay);
           return;
         }
         if (exhausted) replay.cursor = replay.upto;
         this.scheduleDrain(sub);
       },
-      (e: unknown) => {
+      () => {
         replay.fetching = false;
         if (sub.status === "closed") return;
-        this.failReplay(sub, replay, e);
+        this.failReplay(sub, replay);
       },
     );
   }
 
-  private failReplay(sub: Subscriber, replay: ReplayState, e: unknown): void {
+  private failReplay(sub: Subscriber, replay: ReplayState): void {
     const gap: SinkDeliveryGap = { sinkId: sub.id, afterSeq: replay.cursor, beforeSeq: replay.upto + 1, dropped: replay.upto - replay.cursor, reason: "replay_unavailable" };
     sub.status = "degraded";
     this.pushSinkGap(sub, gap);
     replay.queue.push(gap); // 走同一条交付路径，落在旧记录之后、live 之前
     replay.cursor = replay.upto;
-    this.report({ code: "observation_replay_failed", message: `subscriber ${sub.id} 回放 (${gap.afterSeq}, ${gap.beforeSeq}) 从 store 读不出来：${redactedLabel(e)}` });
     this.scheduleDrain(sub);
   }
 
@@ -1672,7 +1571,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       // 名字叫 digest 就不能装原文：第三方 listener 的 message 曾把整条 Authorization 头带进可查询的 health。
       const r = redactError(e);
       sub.lastErrorDigest = r.digest;
-      this.report({ code: "observation_subscriber_failed", message: `subscriber ${sub.id} 抛错，已关闭：${r.name}@${r.digest.slice(0, 8)}` });
       this.closeSink(sub);
     } catch {
       try {
