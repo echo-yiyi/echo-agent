@@ -153,6 +153,34 @@ function splitRecordId(recordId: string): Readonly<{ runtimeId: string; seq: num
 type BatchName = Readonly<{ path: string; nextPrefix: number }>;
 
 /**
+ * run 列举顺序（`RUN_INDEX_ORDER`）的位置键：`(acceptedAt ↓, runtimeId, firstSeq ↓)`。分页游标带的就是这三个字段。
+ *
+ * **为什么不是 `(acceptedAt, runId)`**（2026-09-15）：`acceptedAt` 只到毫秒，而 `runId` 是随机 UUID
+ * ——同一毫秒被接受的两个 run 谁在前是抛硬币（实测 `listRuns({limit:1})` 约 1/4 拿到的是前一个 run，
+ * `lastRun()` 同病）。同一个 runtime 内 `run.accepted` 按到达顺序预留 seq，`firstSeq` 就是 admission 顺序，
+ * 拿它当第二键既真实又唯一。跨 runtime 没有可比的先后（seq 各数各的），按 `runtimeId` 给一个任意但稳定的
+ * 次序——一个状态根同时只有一个进程在写，同毫秒跨 runtime 实际碰不到。
+ *
+ * 三段**按这个次序逐级比较**，合起来是全序；不能写成「同 runtime 比 firstSeq、跨 runtime 比 runId」
+ * ——那种比较不传递（三条记录能比出一个环），分页会重会漏。
+ */
+export type RunIndexOrderKey = Readonly<{ acceptedAt: number; runtimeId: string; firstSeq: number }>;
+
+/** `RUN_INDEX_ORDER` 的比较器：新的在前。 */
+export function compareRunIndex(a: RunIndexEntryV1, b: RunIndexEntryV1): number {
+  if (a.header.acceptedAt !== b.header.acceptedAt) return b.header.acceptedAt - a.header.acceptedAt;
+  if (a.runtimeId !== b.runtimeId) return a.runtimeId < b.runtimeId ? -1 : 1;
+  return b.firstSeq - a.firstSeq;
+}
+
+/** `e` 是否严格排在位置 `after` 之后（分页 exclusive 游标；与 `compareRunIndex` 同一把尺）。 */
+export function isAfterRunIndex(e: RunIndexEntryV1, after: RunIndexOrderKey): boolean {
+  if (e.header.acceptedAt !== after.acceptedAt) return e.header.acceptedAt < after.acceptedAt;
+  if (e.runtimeId !== after.runtimeId) return e.runtimeId > after.runtimeId;
+  return e.firstSeq < after.firstSeq;
+}
+
+/**
  * 只读面：写入端与离线 reader 共用。只读 rename 完成的文件，不写任何东西、不取锁。
  */
 export class DocumentObservationReader {
@@ -267,7 +295,7 @@ export class DocumentObservationReader {
     return { records, removed };
   }
 
-  /** 全部 RunIndex，按 `(acceptedAt, runId)` 倒序。 */
+  /** 全部 RunIndex，按 `RUN_INDEX_ORDER` 排（新的在前）。 */
   async readAllRunIndex(): Promise<readonly RunIndexEntryV1[]> {
     const out: RunIndexEntryV1[] = [];
     for (const p of await this.dir.list(RUNS)) {
@@ -275,15 +303,15 @@ export class DocumentObservationReader {
       const text = await this.dir.read(p);
       if (text !== null) out.push(parseRunIndex(text, p)); // null：读的这一刻被过期删了
     }
-    return out.sort((a, b) => b.header.acceptedAt - a.header.acceptedAt || (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0));
+    return out.sort(compareRunIndex);
   }
 
-  /** 按 `(acceptedAt, runId)` 倒序分页；`after` 是上一页最后一条的游标（exclusive）。 */
-  async listRunIndex(opts: Readonly<{ limit: number; after?: Readonly<{ acceptedAt: number; runId: string }> }>): Promise<readonly RunIndexEntryV1[]> {
+  /** 按 `RUN_INDEX_ORDER` 分页；`after` 是上一页最后一条的位置（exclusive）。 */
+  async listRunIndex(opts: Readonly<{ limit: number; after?: RunIndexOrderKey }>): Promise<readonly RunIndexEntryV1[]> {
     const limit = Math.max(1, Math.floor(opts.limit));
     const all = await this.readAllRunIndex();
     const after = opts.after;
-    const rest = after === undefined ? all : all.filter((e) => e.header.acceptedAt < after.acceptedAt || (e.header.acceptedAt === after.acceptedAt && e.runId < after.runId));
+    const rest = after === undefined ? all : all.filter((e) => isAfterRunIndex(e, after));
     return rest.slice(0, limit);
   }
 

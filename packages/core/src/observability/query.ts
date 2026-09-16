@@ -8,7 +8,7 @@
 
 import { decodeObservationEnvelope, materializeRunObservation } from "./materialize.ts";
 import type { ThreadHealth } from "./worker-protocol.ts";
-import { DocumentObservationReader, ObservationStoreMissingError, hasObservationStore, observationStorePath } from "./document-store.ts";
+import { DocumentObservationReader, ObservationStoreMissingError, hasObservationStore, observationStorePath, type RunIndexOrderKey } from "./document-store.ts";
 import { FileDir } from "../storage/file-dir.ts";
 import type { ObservationEnvelope } from "./types.ts";
 import type {
@@ -18,6 +18,7 @@ import type {
   ListRunsOptions,
   ObservationSubscribeOptions,
   RunLookupResult,
+  RunIndexEntryV1,
   RunObservationPage,
   RuntimePhase,
   SubmissionObservation,
@@ -26,8 +27,8 @@ import type {
 const DEFAULT_PAGE = 20;
 const MAX_PAGE = 200;
 
-/** `listRunIndex` 的分页游标：`(acceptedAt, runId)` 倒序稳定分页。 */
-export type RunIndexCursor = Readonly<{ acceptedAt: number; runId: string }>;
+/** `listRunIndex` 的分页游标：就是 run 列举顺序上的位置（`RunIndexOrderKey`）。 */
+export type RunIndexCursor = RunIndexOrderKey;
 
 /** 每个 runtime 已提交到哪（`observe health` 用）。 */
 export type RuntimeHeadRow = Readonly<{ runtimeId: string; committedPrefix: number }>;
@@ -53,10 +54,11 @@ export class ObservationNotPersistedError extends Error {
   }
 }
 
-const CURSOR_VERSION = 1;
+// 2：位置键从 `(acceptedAt, runId)` 换成 `(acceptedAt, runtimeId, firstSeq)`（同毫秒按接受顺序，见 document-store.ts#symbol=RunIndexOrderKey）
+const CURSOR_VERSION = 2;
 
 function encodeCursor(c: RunIndexCursor): string {
-  return Buffer.from(JSON.stringify({ v: CURSOR_VERSION, a: c.acceptedAt, r: c.runId }), "utf8").toString("base64url");
+  return Buffer.from(JSON.stringify({ v: CURSOR_VERSION, a: c.acceptedAt, rt: c.runtimeId, s: c.firstSeq }), "utf8").toString("base64url");
 }
 
 function decodeCursor(raw: string): RunIndexCursor {
@@ -67,10 +69,16 @@ function decodeCursor(raw: string): RunIndexCursor {
     throw new ObservationCursorError("cursor 不是合法的 base64url JSON");
   }
   if (typeof parsed !== "object" || parsed === null) throw new ObservationCursorError("cursor 不是对象");
-  const c = parsed as { v?: unknown; a?: unknown; r?: unknown };
+  const c = parsed as { v?: unknown; a?: unknown; rt?: unknown; s?: unknown };
   if (c.v !== CURSOR_VERSION) throw new ObservationCursorError(`cursor 版本 ${String(c.v)} 不被支持（只认 ${CURSOR_VERSION}）`);
-  if (typeof c.a !== "number" || !Number.isFinite(c.a) || typeof c.r !== "string" || c.r.length === 0) throw new ObservationCursorError("cursor 字段缺失或类型不对");
-  return { acceptedAt: c.a, runId: c.r };
+  if (typeof c.a !== "number" || !Number.isFinite(c.a) || typeof c.rt !== "string" || c.rt.length === 0 || typeof c.s !== "number" || !Number.isSafeInteger(c.s) || c.s <= 0) {
+    throw new ObservationCursorError("cursor 字段缺失或类型不对");
+  }
+  return { acceptedAt: c.a, runtimeId: c.rt, firstSeq: c.s };
+}
+
+function orderKeyOf(e: RunIndexEntryV1): RunIndexCursor {
+  return { acceptedAt: e.header.acceptedAt, runtimeId: e.runtimeId, firstSeq: e.firstSeq };
 }
 
 async function lookupRun(store: ObservationReadPort, runId: string): Promise<RunLookupResult> {
@@ -87,11 +95,11 @@ async function listRuns(store: ObservationReadPort, options: ListRunsOptions | u
   const entries = await store.listRunIndex({ limit: limit + 1, ...(after === undefined ? {} : { after }) });
   const page = entries.slice(0, limit);
   const last = page[page.length - 1];
-  const nextCursor = entries.length > limit && last !== undefined ? encodeCursor({ acceptedAt: last.header.acceptedAt, runId: last.runId }) : null;
+  const nextCursor = entries.length > limit && last !== undefined ? encodeCursor(orderKeyOf(last)) : null;
   return { items: page.map((e) => e.header), nextCursor };
 }
 
-/** 最近一次顶层 run：按 `(acceptedAt, runId)` 倒序翻页，跳过隔离子循环（source 带 `parentRunId`）。 */
+/** 最近一次顶层 run：按 run 列举顺序翻页，跳过隔离子循环（source 带 `parentRunId`）。 */
 async function lastRun(store: ObservationReadPort): Promise<RunLookupResult> {
   let after: RunIndexCursor | undefined;
   for (;;) {
@@ -100,7 +108,7 @@ async function lastRun(store: ObservationReadPort): Promise<RunLookupResult> {
     if (top !== undefined) return lookupRun(store, top.runId);
     const last = entries[entries.length - 1];
     if (last === undefined || entries.length < MAX_PAGE) return { kind: "unknown" };
-    after = { acceptedAt: last.header.acceptedAt, runId: last.runId };
+    after = orderKeyOf(last);
   }
 }
 

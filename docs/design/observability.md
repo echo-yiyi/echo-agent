@@ -156,6 +156,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 - **只读入口不启动 agent、不取会话锁**，所以正在跑的会话也能读——读到的是它已提交的部分。reader 只读 rename 完成的文档，看不到半截；`runs/` 最多落后正在写派生文件的那一批。
 - **`getRun()` 只有两态**：`found` / `unknown`（从未有过，或已被过期规则删掉）。
 - **`lastRun()` 是最近一次顶层 run**：隔离子循环（§7）是某个 run 派出来的，`source` 带 `parentRunId`，不算「上一次」。`listRuns()` 照常列出全部。
+- **列举顺序新的在前**（[`RunIndexOrderKey`](../../packages/core/src/observability/document-store.ts#symbol=RunIndexOrderKey)）：`acceptedAt` 倒序；同一毫秒时，同一个 runtime 内按 `firstSeq` 倒序（`run.accepted` 的 seq 就是 admission 顺序），跨 runtime 按 `runtimeId` 定一个固定次序——跨 runtime 的 seq 各数各的，没有可比的先后。三段逐级比较是全序，分页游标带的就是这三个字段，所以翻页不重不漏。
 - **renderer 是纯函数**（[render.ts](../../packages/core/src/observability/render.ts#symbol=renderRunObservation) 头注）：`buildRunObservationViewModel()` 与 `renderRunObservation()` 不读 Agent、不查 store、不看订阅状态，也不改原 envelope。同一批记录必然同一输出，所以能上 golden。时间全部相对 `acceptedAt`，golden 不锁 wall clock。
 
 **跨会话是在装配层做的，不在 core**：core 守「一个状态根、一个 reader」，`packages/base` 的 `SessionObservationReaders` 给每段会话开一个只读 reader 再合并。所以不给 `--session` 时一个面板能看整个集群。只有旧格式 `observations.sqlite` 的会话记进读不了的会话，原因写「旧格式观测，已不再读取」。

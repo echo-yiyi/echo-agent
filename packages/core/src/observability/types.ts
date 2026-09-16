@@ -510,7 +510,7 @@ export type ListRunsOptions = Readonly<{
   cursor?: string;
 }>;
 
-/** `listRuns()` 的一页：按 `(acceptedAt, runId)` 倒序的 header 与下一页游标（null = 没有下一页）。 */
+/** `listRuns()` 的一页：新的在前（同毫秒按接受顺序，`document-store.ts` 的 `RunIndexOrderKey`）的 header 与下一页游标（null = 没有下一页）。 */
 export type RunObservationPage = Readonly<{
   items: readonly RunObservationHeader[];
   nextCursor: string | null;

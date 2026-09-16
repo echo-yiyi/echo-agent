@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeClock } from "../src/schedule/clock.ts";
 import { ObservationCorruptionError, runIndexDigest, InMemoryCanonicalObservationStore, type CommitBatchInput } from "../src/observability/store.ts";
-import { DocumentObservationExpiry, DocumentObservationReader, DocumentObservationStore, ObservationStoreMissingError, PATH_DIGEST_KEY_BYTES } from "../src/observability/document-store.ts";
+import {
+  DocumentObservationExpiry,
+  DocumentObservationReader,
+  DocumentObservationStore,
+  ObservationStoreMissingError,
+  PATH_DIGEST_KEY_BYTES,
+  compareRunIndex,
+  isAfterRunIndex,
+} from "../src/observability/document-store.ts";
 import { expireObservations } from "../src/observability/expiry.ts";
 import { DocumentEchoObservationReader } from "../src/observability/query.ts";
 import { ObservationSequencer, type ObservationSubscribeItem } from "../src/observability/sequencer.ts";
@@ -207,22 +215,68 @@ describe("提交点", () => {
 });
 
 describe("读面", () => {
-  test("listRunIndex 按 (acceptedAt, runId) 倒序稳定分页；正在写的临时文件不算", async () => {
-    const root = await tmp();
-    const store = await open(new FileDir(root));
-    const entries = [index("b", 1, 500), index("a", 2, 500), index("c", 3, 100)];
+  /** 每条 run 一个批：seq 就是它的 firstSeq。 */
+  async function writeRuns(store: DocumentObservationStore, entries: readonly RunIndexEntryV1[]): Promise<void> {
     for (const e of entries) {
       await store.commitBatchIfAbsent(
         batch([e.firstSeq], { expectedCommittedPrefix: e.firstSeq - 1, nextCommittedPrefix: e.firstSeq, runIndexMutations: [{ runId: e.runId, expectedRunIndexDigest: null, nextRunIndex: e }] }, e.runId),
       );
     }
+  }
+
+  test("listRunIndex 按 (acceptedAt ↓, runtimeId, firstSeq ↓) 稳定分页；正在写的临时文件不算", async () => {
+    const root = await tmp();
+    const store = await open(new FileDir(root));
+    await writeRuns(store, [index("b", 1, 500), index("a", 2, 500), index("c", 3, 100)]);
     await Bun.write(join(root, "observability", "runs", "x.json.123.a.b.tmp"), "half");
     const reader = (await DocumentEchoObservationReader.open({ stateRoot: root })) as unknown as { store: DocumentObservationReader };
     const page1 = await reader.store.listRunIndex({ limit: 2 });
-    expect(page1.map((e) => e.runId)).toEqual(["b", "a"]);
+    expect(page1.map((e) => e.runId)).toEqual(["a", "b"]); // 同毫秒：后接受的（firstSeq 2）在前，与 runId 字典序无关
     const last = page1[page1.length - 1]!;
-    expect((await reader.store.listRunIndex({ limit: 2, after: { acceptedAt: last.header.acceptedAt, runId: last.runId } })).map((e) => e.runId)).toEqual(["c"]);
+    expect((await reader.store.listRunIndex({ limit: 2, after: { acceptedAt: last.header.acceptedAt, runtimeId: last.runtimeId, firstSeq: last.firstSeq } })).map((e) => e.runId)).toEqual(["c"]);
     expect(await reader.store.readRuntimeHeads()).toEqual([{ runtimeId: RT, committedPrefix: 3 }]);
+  });
+
+  test("同一毫秒里的先后按接受顺序，不看随机 runId：逐页翻不重不漏（2026-09-15）", async () => {
+    // 修复前：第二键是 `runId` 倒序，而 runId 是随机 UUID——同毫秒的先后是抛硬币
+    // （observability-runtime 的「两次 send…listRuns 倒序」实测约 1/4 红）。这里 runId 的字典序与接受顺序**相反**：
+    // 按 runId 倒序会得到 c,b,a，按接受顺序（firstSeq ↓）应当是 a,b,c。
+    const root = await tmp();
+    const store = await open(new FileDir(root));
+    await writeRuns(store, [index("c", 1, 1_000), index("b", 2, 1_000), index("a", 3, 1_000)]);
+    const reader = (await DocumentEchoObservationReader.open({ stateRoot: root })) as unknown as { store: DocumentObservationReader };
+    expect((await reader.store.listRunIndex({ limit: 10 })).map((e) => e.runId)).toEqual(["a", "b", "c"]);
+
+    const seen: string[] = [];
+    let after: { acceptedAt: number; runtimeId: string; firstSeq: number } | undefined;
+    for (;;) {
+      const page = await reader.store.listRunIndex({ limit: 1, ...(after === undefined ? {} : { after }) });
+      const e = page[0];
+      if (e === undefined) break;
+      seen.push(e.runId);
+      after = { acceptedAt: e.header.acceptedAt, runtimeId: e.runtimeId, firstSeq: e.firstSeq };
+    }
+    expect(seen).toEqual(["a", "b", "c"]); // 一条不少、一条不重
+  });
+
+  test("跨 runtime 同毫秒：顺序任意但固定，且排序与游标是同一把尺（全序，分页不会成环）", async () => {
+    // 跨 runtime 的 seq 各数各的、没有可比的先后，只要求**稳定**：同一组输入两次排序结果相同，
+    // 且「排在 x 之后」与比较器一致——否则分页会重会漏。
+    const mk = (runtimeId: string, runId: string, firstSeq: number, acceptedAt: number): RunIndexEntryV1 => ({
+      ...index(runId, firstSeq, acceptedAt),
+      runtimeId,
+    });
+    const all = [mk("rt-b", "x", 1, 1_000), mk("rt-a", "y", 5, 1_000), mk("rt-a", "z", 9, 1_000), mk("rt-b", "w", 2, 900)];
+    const sorted = [...all].sort(compareRunIndex).map((e) => e.runId);
+    expect([...all].reverse().sort(compareRunIndex).map((e) => e.runId)).toEqual(sorted); // 与输入顺序无关
+    expect(sorted[sorted.length - 1]).toBe("w"); // 旧的那条永远在最后
+
+    for (let i = 0; i < all.length; i++) {
+      const cursor = [...all].sort(compareRunIndex)[i]!;
+      const key = { acceptedAt: cursor.header.acceptedAt, runtimeId: cursor.runtimeId, firstSeq: cursor.firstSeq };
+      const after = [...all].sort(compareRunIndex).filter((e) => isAfterRunIndex(e, key)).map((e) => e.runId);
+      expect(after).toEqual(sorted.slice(i + 1)); // 「在它之后」恰好是排序里它后面那一段
+    }
   });
 });
 

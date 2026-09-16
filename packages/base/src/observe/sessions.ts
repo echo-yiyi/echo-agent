@@ -195,19 +195,25 @@ export class SessionObservationReaders {
     return names.filter((id) => existsSync(this.storePath(id)));
   }
 
-  /** 各段的最近 `limit` 条 run 合起来按 `(acceptedAt, runId)` 倒序，取前 `limit` 条。 */
+  /**
+   * 各段的最近 `limit` 条 run 合起来按 `acceptedAt` 倒序，取前 `limit` 条。
+   *
+   * 同一毫秒的先后：**同一段内保持它自己那一页的次序**（reader 已按接受顺序给出，见
+   * `document-store.ts#symbol=RunIndexOrderKey`），跨段没有可比的先后，按 `sessionId` 定一个固定次序。
+   * 早先这里按 `(acceptedAt, runId)` 重排，把段内已经排好的接受顺序又按随机 UUID 打散了。
+   */
   async listRuns(limit: number): Promise<RunsResponse> {
     await this.refresh();
-    const all: RunObservationHeader[] = [];
+    const all: { h: RunObservationHeader; sessionId: string; rank: number }[] = [];
     for (const [sessionId, reader] of this.readers) {
       const page = await reader.listRuns({ limit });
-      for (const h of page.items) {
-        all.push(h);
+      page.items.forEach((h, rank) => {
+        all.push({ h, sessionId, rank });
         this.runOwner.set(h.runId, sessionId);
-      }
+      });
     }
-    all.sort((a, b) => b.acceptedAt - a.acceptedAt || (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0));
-    const items = all.slice(0, limit);
+    all.sort((a, b) => b.h.acceptedAt - a.h.acceptedAt || (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : a.rank - b.rank));
+    const items = all.slice(0, limit).map((e) => e.h);
     const used: Record<string, SessionBrief> = {};
     for (const h of items) {
       const brief = h.sessionId === null ? undefined : this.briefs[h.sessionId];
