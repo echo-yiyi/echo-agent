@@ -1,17 +1,16 @@
-# 扩展、装配与所有权（审阅稿）
+# 扩展、装配与所有权
 
-> 状态：审阅中；基线为 2026-09-14 当前实现，包含盘上扩展热重载与模型触发入口。§9 初版登记的两条承诺差异已于 2026-09-14 修复（实现改到与承诺一致，判据与测试见 §9）<br>
-> 读者：编写产品或 extension、接入 service、排查挂载失败及热重载行为的人<br>
-> 范围：发现、依赖图、注册、effect、回滚、卸载、安全时机与重载报告；不展开各能力自己的业务契约<br>
-> 退出条件：复核 §9 的判据与本文对代码的断言后移除审阅稿状态；不复制出另一份设计契约
+> 读者：编写产品、壳和 extension，或排查挂载与重载问题的人<br>
+> 范围：发现、依赖、service、effect、卸载与热重载<br>
+> 状态：当前实现说明；资源与安全限制见 §9
 
-**解决什么**：产品、壳、内建能力与第三方文件都要往同一个 agent 里装东西，又要能卸得干净、换得回去。本文写清一条 extension 从文件到运行实例经过哪几步、每一步谁拥有什么、失败停在哪一层、热重载能碰什么不能碰什么。
+## 导读
 
-**Non-Goals**（已决，不在本文范围）：不重载产品代码与壳、不监听文件变化、不做依赖方连带重装、不在 run 中途换代、不回收已求值的旧模块。每条走哪条路见 §6 与[热重载决策](../decisions/implemented/2026-09-14-extension-hot-reload.md)的 Non-Goals。
+**解决什么。** 多种来源的能力需要装入同一个 agent，并在失败、卸载和换代时有明确的归属。
 
-**待拍板**：无。§9 原列的两条已拍板修实现；软依赖的读法已拍板加 `tryGet()`（[决策](../decisions/implemented/2026-09-14-inject-soft-dependency-tryget.md)）。
+**设计主线。** 声明组成 entry 和 generation，Host 先解析依赖再挂载 Fiber；effect 交还资源清理动作，registry 保存能力内容。重载先验证新代，再卸旧装新；装载失败时尝试重装旧代。
 
-**验收判据**：§10 的命令全绿，且 §9 两条 `bun -e` 判据的输出与文中写的一致。
+**边界。** 只重载盘上发现的扩展，不重载产品和壳，不监听文件变化，也不做依赖方连带重装。扩展代码不是沙箱，具体范围见 §6。
 
 ## 1. 扩展的边界
 
@@ -155,35 +154,25 @@ Host 探针区分挂载成功、PREPARE / apply 失败、卸载拒绝、卸载�
 
 排查时先区分：没发现文件、import 失败、依赖图拒绝、apply/start 失败、卸载被依赖方阻挡、disposer 失败、重新装回旧代失败。不要把这几种都归为“加载失败”；对应行动分别是检查发现根、模块导出、service 声明、资源获取、代间依赖和清理代码。
 
-## 9. 两条曾经的承诺差异（2026-09-14 修复）
+## 9. 当前限制与关键保证
 
-审阅稿初版在这里登记了两处「注释这么说、代码不这么做」。两处都改了实现，不改口；下面的 `bun -e` 判据保留为机器可检的验收，输出与文中写的不一致即回归。
+effect 在登记时预留栈位，异步 start 完成后填入 lease；卸载按登记顺序逆序进行，不取决于完成顺序。start 失败且没有 lease 的槽位跳过。判据：[并行 start 按登记序逆序卸](../../packages/core/test/extension-host.test.ts#test=并行的-effect-start栈位按登记顺序占卸载是登记序的逆序先登记后完成的那个后卸)。
 
-### effect 按登记序逆序卸载
+replace 在卸旧前验证新代 config 和依赖图；PREPARE 失败保留旧代原实例。只有进入 LOADING 后失败才需要重新装回旧代。判据：[PREPARE 没过旧代不动](../../packages/core/test/extension-host.test.ts#test=replace新代-prepare-就没过config-抛-required-依赖没-provider-rolledback但旧代根本没卸过也没重装)、[新代只能绑到卸旧之后还在的 provider](../../packages/core/test/extension-host.test.ts#test=replace新代-inject-的-service-只有旧代自己-provide-prepare-把旧代当作已不在它马上要卸rolledback-且旧代原样)、[账本里没有「卸了又装回」](../../packages/core/test/extension-observe.test.ts#test=replace-新代-prepare-就没过config-抛只记-mountfailedprepare没有-unmounted旧代原样账本里也没有卸了又装回)。
 
-此前 [`Fiber.createContext()`](../../packages/core/src/extension/fiber.ts#symbol=Fiber.createContext) 在 start 完成拿到 lease 后才入栈，两个并行 start 按完成序排队，卸载成了完成序的逆序。现在栈位在 `ctx.effect()` 调用时占好（[`EffectStack.reserve()`](../../packages/core/src/extension/effects.ts#symbol=EffectStack.reserve)），lease 到手再填；start 失败的那一位没有 lease，卸载跳过。
+以下边界仍需调用方处理：
 
-```bash
-bun -e 'import {defineExtension,ExtensionHost} from "./packages/core/src/extension/public.ts"; const events=[]; let release; const barrier=new Promise(r=>release=r); const d=defineExtension({name:"probe",hostAbiVersion:1,async apply(c){const first=c.effect({start:async()=>{await barrier;return {value:1,dispose:()=>{events.push("dispose-first")}}}});await c.effect({start:()=>({value:2,dispose:()=>{events.push("dispose-second")}})});release();await first;}});const h=new ExtensionHost();await h.mount("g",[{entryId:"probe",definition:d}]);await h.unmount("g");console.log(events);'
-```
+- 非法 replace 参数可以抛异常；业务结果联合不覆盖 API 误用。
+- LOADING 失败后的回滚是重装，不恢复外部副作用或原连接状态。
+- 已拿到的原始 service 引用不会统一撤销，回调须遵守 signal 与 disposer 协议。
+- start / dispose 不合作时，Host 没有通用强制回收和超时保证。
+- 多文件重载逐项执行，不是整批原子替换；模块求值后的内存也不能由删除快照释放。
 
-输出 `[ "dispose-second", "dispose-first" ]`：后登记的先卸，与 first 完成得更晚无关。门：[并行 start 按登记序逆序卸](../../packages/core/test/extension-host.test.ts#test=并行的-effect-start栈位按登记顺序占卸载是登记序的逆序先登记后完成的那个后卸)。
-
-### 新代的 config 与依赖图在卸旧之前验
-
-此前 [`ExtensionHost.replace()`](../../packages/core/src/extension/host.ts#symbol=ExtensionHost.replace) 先卸旧代再 mount 新代，而 config 解析与依赖图在 mount 的 PREPARE 里，于是 config 抛时旧代已经卸过、再装回来。现在 replace 先 PREPARE 新代（把旧代当作已不在来算跨代 provider），过了才卸旧代、进 LOADING；PREPARE 失败返回 rolled_back、unwindErrors 为空，旧代没被碰过，观测账本里只有一条 mount_failed（prepare）。
-
-```bash
-bun -e 'import {defineExtension,ExtensionHost} from "./packages/core/src/extension/public.ts";const events=[];const old=defineExtension({name:"old",hostAbiVersion:1,reload:"run",apply(c){events.push("old-apply");void c.effect({boundary:"run",start:()=>({value:null,dispose:()=>{events.push("old-dispose")}})});}});const next=defineExtension({name:"next",hostAbiVersion:1,reload:"run",config(){throw Error("bad-config")},apply(){}});const h=new ExtensionHost();await h.mount("old",[{entryId:"old",definition:old}]);const r=await h.replace("old",{generation:"new",entries:[{entryId:"new",definition:next}]},{safePoint:"run"});console.log({kind:r.kind,events});await h.unmount("old");'
-```
-
-输出 `{ kind: "rolled_back", events: [ "old-apply" ] }`：没有 old-dispose，也没有第二次 old-apply。门：[PREPARE 没过旧代不动](../../packages/core/test/extension-host.test.ts#test=replace新代-prepare-就没过config-抛-required-依赖没-provider-rolledback但旧代根本没卸过也没重装)、[新代只能绑到卸旧之后还在的 provider](../../packages/core/test/extension-host.test.ts#test=replace新代-inject-的-service-只有旧代自己-provide-prepare-把旧代当作已不在它马上要卸rolledback-且旧代原样)、[账本里没有「卸了又装回」](../../packages/core/test/extension-observe.test.ts#test=replace-新代-prepare-就没过config-抛只记-mountfailedprepare没有-unmounted旧代原样账本里也没有卸了又装回)。
-
-replace 对未知旧代、已占用新代等非法调用仍会抛异常；「结果联合不抛」只适用于进入换代流程后的业务结果，不能写成绝对保证。
+历史复核探针见 [记录](../code-review/2026-09-15-doc-probes.md)，本文只维护现行契约与测试入口。
 
 ## 10. 验证与人工责任
 
-本稿验证分两层：Host 测试使用受控扩展验证依赖、effect 和事务；重载测试走 createEcho 与临时目录里的真实文件，验证发现、加载、安全时机和回传。真实文件测试也不等于证明任意第三方扩展安全。
+验证分两层：Host 测试使用受控扩展验证依赖、effect 和事务；重载测试走 createEcho 与临时目录里的真实文件，验证发现、加载、安全时机和回传。真实文件测试也不等于证明任意第三方扩展安全。
 
 ```bash
 bun test packages/core/test/extension-host.test.ts \

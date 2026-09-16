@@ -1,32 +1,16 @@
-# Context 与 Message Flow（审阅稿）
+# 上下文与消息流
 
-> 状态：审阅中，尚未成为设计契约<br>
-> 基线：2026-09-01 当前源码与测试<br>
-> 范围：消息账本、system prompt、attempt 动态注入、送模投影、上下文变换、压缩与会话恢复<br>
-> 暂不处理：具体 provider 方言、thinking 字段的厂商兼容、Memory 的提取与写回策略、UI 如何展示消息<br>
-> 退出条件：第 10 节每一项分别形成决策记录，结论吸收到正式设计后删除本稿；历史由 Git 保留
+> 读者：修改消息投影、上下文扩展点或会话恢复的人<br>
+> 范围：transcript、working context、provider context 的数据流、所有权与失败语义<br>
+> 状态：当前实现说明；对象别名、入站验形与来源字段的限制见 §10
 
-这份文档回答四个问题：什么是会话事实，什么只是本轮给模型看的工作材料，哪一步可以改写它们，以及长会话如何压缩和恢复。未经拍板的现状不会被写成目标设计。
+## 导读
 
-## 结论先行
+**解决什么。** 区分会话中发生的事实与临时送给模型的工作材料，明确哪些变更进入账本，哪些只影响一次请求。
 
-当前实现已经有一条值得保留的主轴：
+**设计主线。** AgentMessage 保存本地消息事实，session ledger 持久化这些事实；每个 attempt 从 transcript 的压缩视图构建 working context，加入动态材料并经过 transform、hook 和 projection，得到 provider context。system 单独按主 run 装配，工具按 turn 冻结。
 
-- `AgentMessage` 是本地账本形状，`ProviderMessage` 是临时线上形状；两者不混存。
-- system prompt 每个 run 装配一次，动态内容在每个 attempt 作为 injection 追加，不进入 transcript。
-- 工具结果、环境事件与人类输入在账本里角色分明，出门时再投影成 provider 支持的两种角色。
-- 每条真正入账的消息都经 `message_end`，并由同一事件驱动运行时投影和 session append。
-
-但是“账本是事实、context 是投影”这句话目前还不能成立为公开契约。源码里有六个必须先处理或明确接受的问题（划掉的两个已修）：
-
-1. ~~**compaction 只生成并持久化摘要，不替换送模上下文。**~~ 已修（2026-09-02）：压缩成为作用在 transcript 上的视图状态，策略走 extension 阶梯，撞窗有应急，见 [Compaction](compaction.md) 与 §7。
-2. **消息没有所有权隔离。** `prompt(message)`、`Agent.messages`、context snapshot 与 `transformContext` 共享嵌套对象；调用方或 transform 能在没有新事件、没有新 session entry 的情况下改写已经入账的历史。
-3. ~~**`contextBeforeBuild` 的 block 是假能力。**~~ 已修（2026-09-01）：block 让 run 以 `aborted` 结束、模型不被调用，见 §6。
-4. **`followUp` 的来源只在 hook event 中如实，账本里仍记成 `human`。** 现有测试标题声称 transcript 来源如实，但没有断言消息的 `source`。
-5. **上下文扩展点的失败契约与实现相反。** 注释要求 `transformContext`、`convertToLlm` 和 attempt injection “绝不抛、失败安全回退”；实际任一抛错都会让整个 run 以 internal error 结束。
-6. **消息只在恢复时严格验形，prompt 入站不验。** 一个 JavaScript 调用方可以让 Agent 自己把坏消息写进 session，本次 run 成功，下一次恢复才判坏档。
-
-第二项直接破坏长会话正确性和审计可信度，第四项是测试声称的行为并不存在，后两项是失败发生位置与承诺不一致。它们都不是靠改文案可以解决的问题。
+**边界。** 本文不定义具体 provider 方言、界面渲染或记忆提取策略。对应设计见 [Prompt](prompt.md)、[Compaction](compaction.md) 和 [Memory](memory.md)。
 
 ## 术语与分层
 
@@ -43,7 +27,7 @@
 | projection | `AgentMessage[] → ProviderMessage[]` 的单向转换 | 否 | 产物送模型 |
 | compaction | 作用在 transcript 上的视图状态（哪些段被摘要 / 省略、旧工具结果清到哪），送模前投影；transcript 本身不动 | 状态持久化（session 的 compaction entry） | 投影后的上下文送模型 |
 
-`AgentContext` 目前只含 `systemPrompt` 与 `messages`，工具故意每 turn 重取，见 [`AgentContext`](../../packages/core/src/loop/types.ts#symbol=AgentContext)。“context”在源码里有时指这个 Agent 层工作对象，有时指最终 provider 请求；正式文档应始终带上层级，避免把账本、工作副本和线上电报叫成同一个东西。
+`AgentContext` 保存 `systemPrompt`、`messages` 与 `compaction`，工具故意每 turn 重取，见 [`AgentContext`](../../packages/core/src/loop/types.ts#symbol=AgentContext)。“context”在源码里有时指这个 Agent 层工作对象，有时指最终 provider 请求；本文使用完整层级名称区分这几个对象。
 
 ## 1. 当前数据流
 
@@ -57,7 +41,8 @@ flowchart TD
     D --> F["run 开始时浅拷贝 messages 数组"]
     P["PromptSection sources"] --> Q["每 run 组装 system prompt"]
     Q --> R["AgentContext.systemPrompt"]
-    F --> G["每 attempt 追加 injections"]
+    F --> CV["按 compaction 状态投影"]
+    CV --> G["每 attempt 追加 injections"]
     G --> H["transformContext"]
     H --> I["contextBeforeBuild hook"]
     I --> J["convertToLlm"]
@@ -78,7 +63,7 @@ flowchart TD
 - **prompt 通道**决定模型此刻看见什么：system、injections、transform、hook、projection、tools。
 - **ledger 通道**决定什么成为会话事实：`message_end`、compaction entry、error entry。
 
-一项数据可以只走其中一条。skill 正文 injection 只走 prompt 通道；工具 metadata 只走 ledger 通道；普通 user / assistant 消息先入账，再由 projection 进入 prompt 通道。这个区分是合理的，问题出在两条通道目前共享可变对象。
+一项数据可以只走其中一条。skill 正文 injection 只走 prompt 通道；工具 metadata 只走 ledger 通道；普通 user / assistant 消息先入账，再由 projection 进入 prompt 通道。两条通道当前仍共享部分消息对象，所有权限制见 §4。
 
 ## 2. 消息账本
 
@@ -93,29 +78,19 @@ flowchart TD
 
 形状定义与投影见 [`AgentMessage`](../../packages/core/src/messages.ts#symbol=AgentMessage) 和 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。自定义 role 缺省只进入 transcript 与 session，不送模型；这是忘记实现 projection 时的安全缺省。
 
-把 `toolResult` 和 `environment` 留作一等账本角色是正确的。provider 只有两种 role 是线上协议限制，不应该倒过来污染本地事实模型。相邻工具结果只在 projection 时合并，也保留了逐条审计能力。已有判据见 [toolResult 投影与相邻合并](../../packages/core/test/invariants.test.ts#test=投影toolresult-包回-user-角色的-toolresult-块相邻的合并成一条)。
+toolResult 与 environment 在账本中保留独立角色，provider 的角色限制只在投影时处理。相邻工具结果只在 projection 时合并，也保留了逐条审计能力。已有判据见 [toolResult 投影与相邻合并](../../packages/core/test/invariants.test.ts#test=投影toolresult-包回-user-角色的-toolresult-块相邻的合并成一条)。
 
-### 2.2 来源字段没有覆盖所有入账路径
+### 2.2 消息来源与入站通道
 
 `UserMessage.source` 只有 `human | steer | harness`，见 [`UserMessage`](../../packages/core/src/messages.ts#symbol=UserMessage)。`Agent.followUp("next")` 用 `userMessage(..., "human")` 建消息，见 [`Agent.followUp()`](../../packages/core/src/agent.ts#symbol=Agent.followUp)；之后 `userPromptSubmit` hook 单独收到 `source: "followUp"`，但 admission 不会修正消息本身。
 
-复现：
+来源字段当前不能单独区分初始 prompt 和 followUp；后者的入站通道另在 hook 中表达。使用它做 UI 或评测归因时，应先区分内容作者与入站通道，不把 hook 的来源枚举当成消息的来源枚举。
 
-```bash
-bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { FAKE_MODEL, scriptedStreamFn, textTurn } from "./packages/core/src/testing.ts"; const a=new Agent({model:FAKE_MODEL,streamFunction:scriptedStreamFn([textTurn("one"),textTurn("two")])}); a.subscribe(async e=>{if(e.type==="agent_start") await a.followUp("next")}); await a.prompt("first"); console.log(a.state.messages.filter(m=>m.role==="user").map(m=>({text:m.content[0].text,source:m.source})));'
-```
-
-当前输出中 `next` 的来源是 `human`。现有 [steer / followUp 来源测试](../../packages/core/test/seams.test.ts#test=run-里-steer-followup-进-transcript-时-source-也如实标steer-轮末followup-收尾后) 只断言 hook 收到的 `seenSources`，没有检查 transcript，测试名比判据更强。
-
-这会让恢复后的 session、UI 和离线评测无法区分原始 prompt 与 run 内 follow-up。若 `source` 表示“谁发起内容”，两者都可以叫 human；若它表示“从哪个 admission 通道入账”，就必须增加 `followUp` 并在入口规范化。当前注释和测试明显采用后一个解释，代码却采用前一个解释，必须选一个。
-
-### 2.3 入站验形发生得太晚
+### 2.3 消息验形
 
 [`assertMessageShape()`](../../packages/core/src/message-shape.ts#symbol=assertMessageShape) 会闭合校验内建 role 和 content block，但它用于 session 恢复与 inbox 接收；[`normalizePrompt()`](../../packages/core/src/agent.ts#symbol=normalizePrompt) 对对象和数组原样返回。TypeScript 调用方通常会在编译期被挡住，JavaScript、`any`、反序列化输入和自定义宿主不会。
 
-已经复现：传入缺 `text` 的 `{type:"text"}`，本次 run 可以完成并把它落盘；新 Agent 恢复同一 session 时才报“text 块缺 text”。这使“坏档在读进来时判红”成立，却没有阻止 core 自己写出坏档。
-
-审阅结论：内建消息在所有 durable ingress 进入 transcript 之前必须跑同一份闭合验形；自定义 role 继续只验公共信封。恢复期校验仍要保留，它防的是旧版本、人工修改和外部坏写，不能替代写入前校验。
+因此恢复期拒绝坏消息，不代表程序化 prompt 入站已经具备同等校验。JavaScript 调用方和反序列化入口需要在提交前验证内建消息形状；补齐所有 durable ingress 的统一验形仍是实现限制。恢复校验继续负责发现旧数据或外部坏写。
 
 ## 3. Prompt 通过两条通道进入 context
 
@@ -132,19 +107,9 @@ prompt 的内容、所有权、排序、变量、信任、失败与预算只有�
 
 `Agent.createContextSnapshot()` 使用 `[...this._state.messages]`，只复制最外层数组。`processEvents(message_end)` 也把事件里的原对象追加进 `_state.messages`；`Agent.state` 只浅拷贝 state 对象，`Agent.messages` 直接返回同一个消息数组的 readonly 类型视图。见 [`Agent.createContextSnapshot()`](../../packages/core/src/agent.ts#symbol=Agent.createContextSnapshot)、[`Agent.processEvents()`](../../packages/core/src/agent.ts#symbol=Agent.processEvents) 和 [`Agent.state`](../../packages/core/src/agent.ts#symbol=Agent.state)。
 
-因此 readonly 只是 TypeScript 表面约束，不是运行时所有权边界。两个探针都已复现：
+readonly 是类型约束，不是运行时隔离。调用方修改原消息，或 transform 原地修改嵌套字段，可能同时改变内存 transcript，却没有相应的新 session entry。不要在这些接口上原地修改共享消息；历史复核探针见 [归档](../code-review/2026-09-15-doc-probes.md)。
 
-```text
-prompt(message) 完成后修改 message.content[0].text
-→ agent.state.messages[0] 同步变成 CALLER_MUTATED
-
-transformContext 内修改 messages[0].content[0].text
-→ agent.state.messages[0] 同步变成 TRANSFORM_MUTATED
-```
-
-这两次改写都没有新的 `message_end`，不会追加新的 session entry。内存 transcript 与已经排队或已经落盘的 session 因此可以静默分叉；如果 mutation 发生在 session append 序列化之前，盘上结果还取决于异步时序。
-
-### 4.2 目标所有权边界
+### 4.2 所有权要求与实现边界
 
 要让“transcript 是事实账本”成立，最低判据应是：
 
@@ -153,36 +118,30 @@ transformContext 内修改 messages[0].content[0].text
 3. `transformContext` 与 `contextBeforeBuild` 操作独立 working copy；它们可以增删改送模材料，但不能回写 transcript。
 4. 同一条 `message_end` 在运行时投影与 session ledger 中具有相同的不可变值。
 
-实现可以选择 ingress 时 `structuredClone + deepFreeze`，也可以采用内部不可变消息和 copy-on-write；设计不应预先指定性能策略。但上述四条必须有行为测试，否则“快照”和“账本”仍只是类型注释。
+实现可以选择 ingress 时 `structuredClone + deepFreeze`，也可以采用内部不可变消息和 copy-on-write；这些是隔离目标，不是当前实现已提供的保证；性能策略与实现选择需在补齐边界时决定。
 
-## 5. Projection：账本到 provider 电报
+## 5. Projection：账本到 provider 消息
 
 缺省 projection 做四件事：
 
 - 去掉本地字段：时间、来源、usage、error、model、metadata、environment ref；
 - 把 `toolResult` 变回 provider `user` 消息里的 `tool_result` block；
 - 合并相邻的纯 tool-result provider messages；
-- 对未知自定义 role 和空 assistant 返回 invisible。
+- 对未知自定义 role、空 assistant 和失败的 assistant 消息不生成 provider 消息。
 
-实现见 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。它每 turn 从 working context 重算，产物不持久化，这一设计应该保留：provider 方言和模型切换不应改写历史账本。
+实现见 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。它每个 attempt 从 working context 重算，产物不持久化；provider 方言和模型切换通过投影处理。
 
 但“投影绝不回写”当前只对缺省实现自己的代码成立，不对可替换的 `Agent.convertToLlm` 成立。它收到的仍是与 transcript 共享嵌套对象的数组。正式契约应把输入定义为不可变 working copy，并把返回值验到 provider context 所需的最小形状；否则第三方 converter 可以同时破坏账本并产出坏线上协议。
 
-## 6. `contextBeforeBuild` 的 block（2026-09-01 起生效）
+## 6. contextBeforeBuild 的阻断语义
 
-`contextBeforeBuild` 被列入 hook runtime 的可拦截事件，类型允许 `continue / block / patch`，见 [`INTERCEPTABLE`](../../packages/core/src/hooks/runtime.ts#symbol=INTERCEPTABLE)。2026-09-01 之前 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 只取 `r.event.messages`、不读 `r.decision`——hook 说别调模型，模型照调，run 还是 `completed`。
+contextBeforeBuild 支持 continue / block / patch，见 [INTERCEPTABLE](../../packages/core/src/hooks/runtime.ts#symbol=INTERCEPTABLE)。block 阻止当前 attempt 调用 provider，runAttempt 返回 blocked，turn / reply 向外返回 aborted 并保留 reason；不合成一条模型没有说过的 assistant 消息。
 
-现在的语义：block = **这个 attempt 不发**。[`runAttempt`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt) 把它折成 `AttemptResult.blocked`（不是异常），turn / reply 逐层收成 `{ kind: "aborted", reason }`（reason 透传自 hook；[Run Loop 的四层](run-loop-layers.md) §6），模型不被调用，transcript 里**不合成** assistant 消息（什么都没说过，账本里就不该有一条）。选 aborted 而不是 error：这不是故障，是有人在送模前叫停，和 `userPromptSubmit` 的 block 同一档。判据见 [block 不调模型](../../packages/core/test/prompt.test.ts#test=contextbeforebuild-返回-block不调模型run-以-aborted-收场reason-透传transcript-不多一条)。
+这是主动阻断，不是运行错误。判据见 [block 不调模型](../../packages/core/test/prompt.test.ts#test=contextbeforebuild-返回-block不调模型run-以-aborted-收场reason-透传transcript-不多一条)。
 
-复现（现在应打印 `{ kind: "aborted", reason: "DO_NOT_CALL_MODEL" } 0`）：
+## 7. Compaction 与恢复
 
-```bash
-bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRuntime } from "./packages/core/src/hooks/runtime.ts"; import { FAKE_MODEL, scriptedStreamFn, textTurn } from "./packages/core/src/testing.ts"; const h=new HookRuntime(); h.on("contextBeforeBuild",()=>({decision:"block",reason:"DO_NOT_CALL_MODEL"})); let calls=0; const base=scriptedStreamFn([textTurn("done")]); const a=new Agent({model:FAKE_MODEL,hooks:h,streamFunction:(m,c,o)=>{calls++;return base(m,c,o)}}); console.log((await a.prompt("go")).outcome,calls);'
-```
-
-## 7. Compaction 与恢复（2026-09-02 起见独立设计）
-
-正式设计与实现见 [Compaction](compaction.md)。本节原先记录的四个问题（只摘要不缩上下文、checkpoint 运行前后两种语义、字符估不是上界、重复摘要）都已按那份设计落地；当时列出的六条机器判据现在各有测试：
+压缩只改变送模视图，恢复从账本重建 transcript 与最后的 compaction 状态；完整机制见 [Compaction](compaction.md)。本数据流依赖以下判据：
 
 | 判据 | 测试 |
 | --- | --- |
@@ -193,19 +152,19 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRunti
 | 游标只有一种：transcript 下标，运行时与盘上同一套 | [session 恢复](../../packages/core/test/session-service.test.ts#test=不变量①-恢复后-messages-与-compaction-同源同一份-entries-投影出来取最后一次压缩的状态) |
 | 压到预算内之后下一轮不重复摘要 | 同第一条 |
 
-`AgentState.checkpoint` 已删除，换成 `compaction`（视图状态）与 `contextTokens`。
+运行态分别用 compaction 表达视图状态、contextTokens 表达上下文占用。
 
 ## 8. 失败语义
 
-prompt section、变量与 injection 的失败语义归 [Prompt 设计](prompt.md) §8。这里仅记录 working context 后半段的接缝：源码注释要求 transform 和 converter 失败安全回退，实际调用链却是 fail-loud。
+prompt section、变量与 injection 的失败语义归 [Prompt 设计](prompt.md) §8。transform 和 converter 的调用异常当前导致 internal error，不使用自动回退；实现者须自行返回安全结果，不能依赖外层替换为原输入。
 
 | 失败点 | 当前行为 | 注释或接口暗示 |
 | --- | --- | --- |
 | `transformContext()` 抛错 | run 以 internal error 结束 | “失败原样返回入参” |
 | `convertToLlm()` 抛错 | run 以 internal error 结束 | “绝不抛” |
-| `contextBeforeBuild` 返回 block | run 以 `aborted` 结束、reason 透传，provider 不被调用 | interceptable / block（2026-09-01 起一致） |
+| `contextBeforeBuild` 返回 block | run 以 `aborted` 结束、reason 透传，provider 不被调用 | interceptable / block |
 
-两个抛错探针都得到结构化 `outcome.kind === "error"`；Agent 的 terminal normalizer 保住了完整封口，但它不是安全回退。这里要先按“缺失这项上下文后继续调用模型是否安全”分类，再让类型、实现和测试使用同一个答案。
+终止规范化保留结构化 outcome，但不把失败转成继续请求。注释中的“绝不抛”应理解为实现者的责任，不是外层提供回退的保证。
 
 ## 9. 哪些由机器守，哪些只是纪律
 
@@ -221,41 +180,21 @@ prompt section、变量与 injection 的失败语义归 [Prompt 设计](prompt.m
 
 prompt 自身的机器判据与缺口见 [Prompt 设计](prompt.md) §9–§10，不在这里抄第二份。
 
-### 当前没有门守
+### 未覆盖的保证
 
-- ingress 后调用方不能改写 transcript。
-- transform、converter 和 context hook 不能回写 transcript。
-- `followUp` 在 transcript 中保留真实 admission 来源。
-- transform 与 converter 抛错后的实际 fail-loud 行为和公开注释一致。
+只读类型不证明运行时所有权隔离；hook 来源测试不证明消息的 source 字段保留了入站通道。新增测试应分别断言这两件事，而不是用调用成功代替它们。
 
-（compaction 缩短下一次 provider context、恢复前后一致、游标只有一种语义：2026-09-02 起有机器判据，见 §7。）
+## 10. 当前限制
 
-这些都可以写出确定的行为判据，应该进入相关单测；不能把它们留成文档纪律。
+- 消息对象仍可能与调用方、transform 共享；不可把浅拷贝称为不可变快照。
+- 程序化 prompt 的对象输入未统一经过恢复期的内建消息验形。
+- source 表达内容来源，followUp 入站通道需结合 hook 或 reply 事件判断。
+- transform / converter 抛错会终止 run；当前没有自动 fallback。
+- 自定义 role 缺省不送模型，使用它的产品应同时提供需要的 projection。
 
-## 10. 审阅需要拍板的事项
+这些限制影响账本完整性和调用方用法；实现方案不在本次文档整理中决定。
 
-### 必须在发布前解决
-
-1. ~~**实现或移除 compaction。**~~ 已实现（2026-09-02），见 [Compaction](compaction.md) 与六条决策记录。
-2. **建立消息所有权边界。** admission 取得消息所有权，账本只读，working context 与 transcript 断开对象别名。
-3. ~~**兑现 `contextBeforeBuild` block。**~~ 已实现（2026-09-01），见 §6。
-4. **在 durable ingress 前验消息形状。** 同一份 validator 同时守写入和恢复，不能让 Agent 自己产毒档。
-
-### 需要产品语义确认
-
-1. `UserMessage.source` 表示内容作者，还是入账通道；据此决定 follow-up 是否是独立来源。
-2. transform 与 converter 失败时，是 fail-loud 结束 run，还是使用明确的 fallback；两者分别决定。Prompt section 与 injection 的对应问题归 [Prompt 设计](prompt.md) §8–§9。
-3. 自定义 AgentMessage 是否默认永远 model-invisible，还是注册自定义 role 时必须同时注册 projection。
-4. ~~compaction summary 在账本中采用独立 role、environment role，还是只作为 session entry 经恢复投影。~~ 已决（2026-09-02）：只作为 session entry，送模时投影成 user/harness 消息带固定框定，见 [决策记录](../decisions/implemented/2026-09-02-compaction-summary-message.md)。
-
-### 本轮明确延期
-
-- provider-specific thinking 的同源回放与跨模型迁移。
-- Memory 如何从 transcript 提取、何时写回、如何与 compaction summary 分工。
-- UI 对 raw transcript、working context 和 compacted view 的展示方式。
-- 分支会话、合并会话与跨会话引用。
-
-## 11. 复核命令
+## 11. 验证
 
 已有相关测试：
 
@@ -267,19 +206,4 @@ bun test packages/core/test/prompt.test.ts \
   packages/core/test/intake.test.ts
 ```
 
-当前全绿。它说明既有判据仍成立，不说明本稿列出的缺口不存在。
-
-核实 compaction 消费路径：
-
-```bash
-rg -n 'compactionStages|buildWorkingMessages' \
-  packages/core/src packages/core/test
-```
-
-核实消息所有权探针：
-
-```bash
-bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { userMessage } from "./packages/core/src/messages.ts"; import { FAKE_MODEL, scriptedStreamFn, textTurn } from "./packages/core/src/testing.ts"; const m=userMessage("ORIGINAL"); const a=new Agent({model:FAKE_MODEL,streamFunction:scriptedStreamFn([textTurn("done")])}); await a.prompt(m); m.content[0].text="CALLER_MUTATED"; console.log(a.state.messages[0].content[0].text);'
-```
-
-当前输出：`CALLER_MUTATED`。
+测试结果应以当前执行为准；具名用例只证明其覆盖的输入和断言。历史探针见 [复核记录](../code-review/2026-09-15-doc-probes.md)。

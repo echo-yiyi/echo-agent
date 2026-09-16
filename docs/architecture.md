@@ -1,42 +1,48 @@
 # 架构总览
 
-> 读者：要改 core、写产品或 extension、或评审设计的人。假设已读 [README](../README.md) 与 [packages/core/README.md](../packages/core/README.md) 的「跑起来」与硬约定，本文不重复它们<br>
-> 状态：按 2026-09-07 的 main 写**现状**；正在变的形状集中在 §7，每条指向决策记录。词以仓库根 [CONTEXT.md](../CONTEXT.md) 为准<br>
-> 解决什么：代码分成哪几块、一个 agent 怎么装起来、一轮怎么跑、状态落在哪、扩展从哪进。每条断言落到文件<br>
-> Non-Goals：不复述各子系统的契约（在 [docs/design/](design/)）；不写规划（在 [docs/decisions/proposed/](decisions/proposed/)）；不重述源码树<br>
-> 验收：本文引用的每个路径存在（`scripts/docs-lint.ts` 的 filerefs 门）；§7 列的每条决策都有记录且状态行带拍板日期
+> 读者：理解仓库边界、编写产品或扩展、定位设计文档的人<br>
+> 范围：包依赖、装配、运行与存储的整体关系；子系统契约由对应设计文档维护<br>
+> 状态：当前实现说明；未完成的公开面调整见 §7
+
+## 导读
+
+**解决什么。** 为“产品从哪里进入、能力归谁、运行状态在哪里”提供一张稳定地图。
+
+**设计主线。** createEcho 是唯一高层装配入口；core 拥有运行机制，extension 注册内容，base 连接宿主能力，壳通过运行时协议交互。各 session 独立持有账本与 lease，共享记忆按产品作用域配置。
+
+**边界。** 本文不复制 API 清单、子系统算法或历史实施计划。设计取舍保存在 decisions，代码审阅快照保存在 code-review；术语以 [CONTEXT](../CONTEXT.md) 为准。
 
 ## 1. 五个包，一个方向
 
-依赖只有一个方向：`@echo-agent/core` ← `@echo-agent/base` ← `@echo-agent/tui` ← 各产品（`echo-agent` 与 `echo-coding`，两者平级、互不依赖）。2026-09-09 拆的包，记录见 [装配层独立成包](decisions/implemented/2026-09-09-assembly-layer-packages.md)。各包的职责见 [CLAUDE.md](../CLAUDE.md) 的仓库地图，这里只说边界：
+依赖只有一个方向：`@echo-agent/core` ← `@echo-agent/base` ← `@echo-agent/tui` ← 各产品（`echo-agent` 与 `echo-coding`，两者平级、互不依赖）。包边界取舍见 [装配层独立成包](decisions/implemented/2026-09-09-assembly-layer-packages.md)。各包的职责见 [CLAUDE.md](../CLAUDE.md) 的仓库地图，这里只说边界：
 
 - **core 是纯库**：零运行时依赖（门：`packages/core/test/zero-runtime-deps.test.ts`），不出可执行文件。
 - **base 是装配层**：启动器部件、产品契约、壳端口、宿主能力（凭据、设置、项目指令、`observe` 面板）、管道形态。**它不认识任何界面技术**——交互形态由产品挑一个 `Shell` 实现交进来，所以做 web 界面的产品依赖它而不必装终端库。
 - **tui 是终端壳**：界面本体与引导设置，打成 `terminalShell` 一件东西。它是壳端口的终端实现，换壳就是换这个包。
-- **两个产品都很薄**：各出自己的身份段、纪律段的挂载与可执行文件。`Product = { name, version, preset }`（`packages/base/src/product.ts`），`preset` 返回 `createEcho()` 的 `agent` 与 `extensions` 两个字段（`packages/coding/src/agent.ts` 的 `codingPreset`）；可执行文件是 `mainFor(产品, 壳)`，参数解析、凭据、形态分叉、装配、收摊一行不复制。
+- **两个产品都很薄**：各出自己的身份段、纪律段的挂载与可执行文件。`Product = { name, version, preset }`（`packages/base/src/product.ts`），`preset` 返回 createEcho 的 agent、extensions 与 memory 装配片段（`packages/coding/src/agent.ts` 的 `codingPreset`）；可执行文件是 `mainFor(产品, 壳)`，参数解析、凭据、形态分叉、装配、收摊一行不复制。
 
 ## 2. 一个装配现场
 
 只有一处把东西装成 agent：`createEcho()`（`packages/core/src/create-echo.ts`）。它调内部的 `createAgent()`（`packages/core/src/create-agent.ts`）造 `Agent`，再把 extension 装上去。顺序：
 
 1. **先扫盘、后造 Agent**：发现 `<cwd>/extensions/` 下的文件，此时一行用户代码都不执行。
-2. **`createAgent()`**：解析模型（唯一一次 IO；不看凭据，缺 key 是运行态）、定 session id 与状态根、`store` 与 `lock` 必须成对、开观测库、经所有权账本（`packages/core/src/assembly/ledger.ts`，adopt / borrow 二分）造各内建能力的存储视图与容器（adopt slot 按 `echo:memory` / `echo:schedule` / `echo:inbox` / `echo:session` 这些名字记账，skill 的视图跟着上一层走、不单独占 slot；这是按 dispose 所有权切的，与 §4 按「机制 / 缺省内容」切的五件不是同一个集合）、`new Agent()`、把写入闸与观测 runtime 经 WeakMap 侧挂（`packages/core/src/state/host-wiring.ts`、`packages/core/src/observability/host-wiring.ts`——它们不进公共 `AgentOptions`）。
-3. **mount**，按代：`builtin`（`echo:*` 表，`packages/core/src/extension/builtin.ts`）→ `boot:inline`（`agent.tools` 转成的 `echo:inline-tools`，加容器开了会话面时的 `echo:sessions`）→ 盘上发现的每个扩展**各一代**（坏一个只回滚它自己、记一条 `Echo.diagnostics`，agent 照起）→ `boot`（显式传入的 `opts.extensions`，含壳；失败 fail-loud 整体不起）。
+2. **`createAgent()`**：解析模型并准备存储与观测资源（凭据失败按运行态处理）、定 session id 与状态根、`store` 与 `lock` 必须成对、开观测库、经所有权账本（`packages/core/src/assembly/ledger.ts`，adopt / borrow 二分）造各内建能力的存储视图与容器（adopt slot 按 `echo:memory` / `echo:schedule` / `echo:inbox` / `echo:session` 这些名字记账，skill 的视图跟着上一层走、不单独占 slot；这是按 dispose 所有权切的，与 §4 按「机制 / 缺省内容」切的五件不是同一个集合）、`new Agent()`、把写入闸与观测 runtime 经 WeakMap 侧挂（`packages/core/src/state/host-wiring.ts`、`packages/core/src/observability/host-wiring.ts`——它们不进公共 `AgentOptions`）。
+3. **mount**，按代：`builtin`（`echo:*` 表，`packages/core/src/extension/builtin.ts`）→ `boot:inline`（`agent.tools` 转成的 `echo:inline-tools`，加容器开了会话面时的 `echo:sessions`）→ 盘上发现的每个扩展**各一代**（坏一个只回滚它自己、记一条 `Echo.diagnostics`，agent 照起）→ `boot`（显式传入的 opts.extensions，含壳；失败则整体构造失败）→ role（最后应用角色 identity 与工具限制）。
 4. 返回 `Echo` 句柄：`agent`、`send()`、`observations`、`extensions`、`diagnostics`、`sessions`、`stop()`。`stop()` single-flight，按 mount 的逆序卸所有代再停 Agent。
 
-容器随后显式 `await echo.start()`（就是 `agent.start()`，2026-09-08 起 `Echo` 自己带，第三方不必碰 `agent`）：取单写者 lease、恢复 session / skill / tasks / schedule / inbox、打开 intake 与自主活动。装配不启动，启动不装配。
+容器随后显式 `await echo.start()`：取单写者 lease、恢复 session / skill / tasks / schedule / inbox、打开 intake 与自主活动。装配不启动，启动不装配。
 
 ## 3. Agent 与四层循环
 
-`Agent`（`packages/core/src/agent.ts`）是状态的唯一所有者：公开的 `AgentState` 投影、实例相位（`new → starting → restored → running → pausing → stopping → stopped`，加吸收态 `lost`）、admission（`packages/core/src/admission/standalone.ts`，同一时刻一个执行许可，foreground 优先于 dream）、intake（`packages/core/src/loop/intake.ts`，steer / followUp 的原子接受与关门）、session 账本的 append。
+`Agent`（`packages/core/src/agent.ts`）是状态的唯一所有者：公开的 `AgentState` 投影、实例相位（`new → starting → restored → running → pausing → stopping → stopped`，加吸收态 `lost`）、admission（`packages/core/src/admission/standalone.ts`，前台同一时刻一个执行许可；记忆子循环走独立通道）、intake（`packages/core/src/loop/intake.ts`，steer / followUp 的原子接受与关门）、session 账本的 append。
 
-循环是**纯函数**：`packages/core/src/loop/run-loop.ts` 与 `run-turn.ts`，吃快照 + 装备 + 通道、吐事件，不认识 `Agent` 类、不认识盘。四层 **run ⊃ reply ⊃ turn ⊃ attempt**，每层一对事件、一个 ID、一个函数；重试是同一 turn 的下一个 attempt；工具与 hook 的工作集在 turn 开头定格。契约与判据见 [Run Loop 的四层](design/run-loop-layers.md)，工作入口（prompt / steer / followUp / inbox / dream）的接纳规则见 [Lifecycle 与 Run Loop](design/lifecycle-and-run-loop.md) §2。
+循环通过参数接入模型、工具与事件：`packages/core/src/loop/run-loop.ts` 与 `run-turn.ts`，吃快照 + 装备 + 通道、吐事件，不认识 `Agent` 类、不认识盘。四层 **run ⊃ reply ⊃ turn ⊃ attempt**，每层一对事件、一个 ID、一个函数；重试是同一 turn 的下一个 attempt；工具与 hook 的工作集在 turn 开头定格。契约与判据见 [Run Loop 的四层](design/run-loop-layers.md)，前台工作入口与独立后台通道的边界见 [Lifecycle 与 Run Loop](design/lifecycle-and-run-loop.md) §2。
 
-一个事件的处理顺序固定：应用到 `AgentState`（私有 `processEvents()`）→ 必需的 session 持久化（`message_end`、`compaction_end`、error 的 `agent_end`）→ 观测 tap（不阻塞控制流）→ 普通 listener。run 内投影的主要字段由事件驱动；不走事件的显式写路径另有几条——装备面 setter（`model` / `thinkingLevel`）、`reset()` 与恢复、`setWorkspace()`、run 开合处的 `status` / `startedAt` / `lastError`——它们都在 `Agent` 类内，但「状态只能被事件改」是**纪律**不是门（§8）。实例相位、intake 队列、lease 也不在事件这条路上。
+一个事件的处理顺序固定：应用到 `AgentState`（私有 `processEvents()`）→ 必需的 session 持久化（`message_end`、`compaction_end`、error 的 `agent_end`）→ 普通 listener；观测在对应执行节点独立插桩。run 内投影的主要字段由事件驱动；不走事件的显式写路径另有几条——装备面 setter（`model` / `thinkingLevel`）、`reset()` 与恢复、`setWorkspace()`、run 开合处的 `status` / `startedAt` / `lastError`——因此不能把全部状态都描述成事件溯源。实例相位、intake 队列、lease 也不在事件这条路上。
 
 ## 4. 内建五件：机制在 core，缺省内容是 extension
 
-压缩是这个分法的样板：状态与流水线在 core（`packages/core/src/compaction/pipeline.ts`），别人往里注册的口是 `AgentCompaction` registry，缺省阶梯是 `echo:compaction` 这条 extension。五件内建能力按同一分法（2026-09-07 拍板，见 §7）：
+压缩是这个分法的样板：状态与流水线在 core（`packages/core/src/compaction/pipeline.ts`），别人往里注册的口是 `AgentCompaction` registry，缺省阶梯是 `echo:compaction` 这条 extension。五件内建能力按同一分法：
 
 | 能力 | 机制与状态（core） | 缺省内容（`echo:*`） | 让别人扩展的口 |
 |---|---|---|---|
@@ -46,9 +52,9 @@
 | skills | `packages/core/src/skill/harness.ts`：池与激活 | `echo:skills`：激活 / 创建工具、目录段 | `AgentSkills` registry |
 | inbox | `packages/core/src/inbox/store.ts`：at-least-once、dedupe、ack、轮询 | 无工具 | 无 |
 
-工具对象在 `Agent` 构造函数里造好（含持久化与租约包装），由 `builtinEntriesFor()` 变成 entry 交给 Host 注册——**注册与第三方同一条路、同一本所有权账本**，`echo.extensions` 因此列得出内建。`Agent` 不瘦，这是设计选择不是问题。
+工具对象在 `Agent` 构造函数里造好（含持久化与租约包装），由 `builtinEntriesFor()` 变成 entry 交给 Host 注册——**注册与第三方同一条路、同一本所有权账本**，`echo.extensions` 因此列得出内建。业务状态与默认内容分开，不以 Agent 类的代码体积判断边界。
 
-上表只列有 core 侧机制与状态的五件。内建 extension 不止这些：`echo:agent`（壳协议，§5）、`echo:compaction`（缺省阶梯）、`echo:tool-search` / `echo:ask` / `echo:subagent` / `echo:reload`（只有工具，没有 prompt 段与恢复期状态）走同一条注册路，缺省装配下 `echo.extensions` 列出十条（`packages/core/src/extension/builtin.ts`）。
+上表只列有 core 侧机制与状态的五件。内建 extension 不止这些：`echo:agent`（壳协议，§5）、`echo:compaction`（缺省阶梯）、`echo:tool-search` / `echo:ask` / `echo:subagent` / `echo:reload`（只有工具，没有 prompt 段与恢复期状态）走同一条注册路，当前装配清单由 echo.extensions 返回（`packages/core/src/extension/builtin.ts`）。
 
 ## 5. 扩展从哪进
 
@@ -56,7 +62,7 @@
 
 **Service 两种**（`packages/core/src/extension/registries.ts`）：
 
-- **registry**，extension 往 agent 里注册：`AgentTools`、`AgentHooks`、`AgentSkills`、`AgentPrompt`、`AgentCompaction`。四个具名的同名 fail-loud；`AgentHooks` 的条目无名，同 id 可并存、disposer 认对象身份（门 `packages/core/test/seams.test.ts`）。
+- **registry**，extension 往 agent 里注册：`AgentTools`、`AgentHooks`、`AgentSkills`、`AgentPrompt`、`AgentCompaction`、`AgentMemory`、`AgentPolicies`。具名条目的冲突由各 registry 判定；`AgentHooks` 的条目无名，同 id 可并存、disposer 认对象身份（门 `packages/core/test/seams.test.ts`）。
 - **能力端口**，extension 用 agent 已有的：`AgentBackgroundService`（后台队列）、`AgentSessionsService`（会话面）、`AgentRuntimeService`（壳协议；由 `echo:agent` provide 而不是 Host 自带，所以「只有壳拿得到」没有门——`echo:worktree` 就注入了它）。
 
 **壳也是 extension**：`echo:agent` provide 封闭协议 `AgentRuntime`（`packages/core/src/extension/runtime.ts`：看、说、答、换、停五组，没有 `start` / `stop` / `deliver`），`echo:tui`（`packages/tui/src/extension.ts`）inject 它。换壳只是换一条 inject 同一个 Service 的 extension。
@@ -65,7 +71,7 @@
 
 ## 6. 状态落在哪
 
-**状态根 = 一段 session 的目录**（`resolveStateDir()`，`packages/core/src/create-agent.ts`）：`<ECHO_HOME>/sessions/<id>/` 下是 meta、transcript 账本（一条 entry 一个文件）、inbox、tasks、schedule、dream 状态、lease、`status.json`、观测库。布局与不变量见 [会话与 agent 集群](design/sessions.md) §3。记忆的作用域由产品声明（`packages/core/src/memory/scope.ts`，core 不认识层名）；core 的缺省表是 user / project / role 三层（`DEFAULT_MEMORY_SCOPES`，`packages/core/src/create-agent.ts`）：user 层在 `<ECHO_HOME>/memory/`，project 层在 `<ECHO_HOME>/projects/<workspace 哈希>/memory/`，role 层在 `<ECHO_HOME>/agents/<角色名>/memory/`（没有角色名的 session 没有这层）；每层的 dream 状态（`.dream/`）跟着那层走。技能在 `<ECHO_HOME>/skills/`。
+**状态根 = 一段 session 的目录**（`resolveStateDir()`，`packages/core/src/create-agent.ts`）：`<ECHO_HOME>/sessions/<id>/` 下是 meta、transcript 账本（一条 entry 一个文件）、inbox、tasks、schedule、lease、`status.json`、观测库。布局与不变量见 [会话与 agent 集群](design/sessions.md) §3。记忆的作用域由产品声明（`packages/core/src/memory/scope.ts`，core 不认识层名）；core 的缺省表是 user / project / role 三层（`DEFAULT_MEMORY_SCOPES`，`packages/core/src/create-agent.ts`）：user 层在 `<ECHO_HOME>/memory/`，project 层在 `<ECHO_HOME>/projects/<workspace 哈希>/memory/`，role 层在 `<ECHO_HOME>/agents/<角色名>/memory/`（没有角色名的 session 没有这层）；每层的 dream 状态（`.dream/`）跟着那层走。技能在 `<ECHO_HOME>/skills/`。
 
 三条硬约定怎么守：
 
@@ -75,30 +81,26 @@
 
 会话之间只有一种通道：往对方 `inbox/` 写一条 record（`packages/core/src/session/sessions.ts` 的 `EchoSessions`），同进程与跨进程一条路；持 lease 的进程每秒重扫一次自己的 inbox。core 不起进程，谁把一段跑起来是容器的事。
 
-## 7. 正在变的形状（2026-09-07 拍板；标「已实现」的已落地，本表只为指路，其余未实现）
+## 7. 当前限制与设计入口
 
-| 决定 | 一句话 | 记录 |
-|---|---|---|
-| 受众与版本（根决策） | 受众 = 第三方可装的内核；公共面按「第三方需要不需要」划；0.x，`hostAbiVersion` 独立成线，tag 由人定 | [记录](decisions/proposed/2026-09-07-audience-and-versioning.md) |
-| `Agent` 类内部化 | 仓外只剩 `createEcho()` / `AgentRuntime` / `./testing`；正门是 extension ABI，不是裸 `Agent` | [记录](decisions/proposed/2026-09-07-agent-class-internal.md) |
-| 内建五件留 core | 不搬出 `Agent`；按压缩分法；memory 的 registry 等第一个消费者 | [记录](decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md) |
-| 观测的公开线 | 读面 + extension 发口公开，写面内部；观测 store 从写死的路径分支变成可注入的端口 | [记录](decisions/proposed/2026-09-07-observation-public-face.md) |
-| 并行工具（已合入 59beb8c，本表只为指路） | 工具声明 `concurrent`，连续批；结果按 tool_use 顺序；`toolExecution` 选项删 | [记录](decisions/implemented/2026-09-07-parallel-tools.md) |
-| 落单的 `tool_use`（已实现） | 中止后没跑的调用账本里就是没有结果，送模前由投影补一条 error 结果让请求合法 | [记录](decisions/implemented/2026-09-07-orphan-tool-use.md) |
-| 角色定义 | session 的 agent 定义是产品内的角色，不是产品打包；`section(replace)` 与 `restrict()` 两个口 | [记录](decisions/implemented/2026-09-07-role-agent.md) |
-| 记忆的模块与作用域两个轴（已实现） | 路径前缀选层，工具不加参数 | [记录](decisions/implemented/2026-09-03-memory-three-scopes.md) |
-| 作用域由产品声明，core 不认识层名（已实现） | 锚点闭合、变量闭合、名字开放；session 加载完才绑定一次 | [记录](decisions/implemented/2026-09-07-memory-scopes-by-product.md) |
-| 记忆模块走 registry，内建与第三方同一条（已实现） | 动词集按模块配置；`resident` 没有 rename | [记录](decisions/implemented/2026-09-07-memory-modules.md) |
-| 记忆的产生补上提取，不再只靠前台自觉（已实现） | 每条 reply 结束跑一次隔离子 agent，走独立通道不进 admission | [记录](decisions/implemented/2026-09-07-memory-extraction.md) |
-| dream 按层各整理各的，门加一道水位单开（已实现） | 整理哪些模块由模块声明；从 admission 挪进独立通道 | [记录](decisions/implemented/2026-09-07-dream-rework.md) |
-| 记忆文件的并发（已实现） | 进程内按路径串行 + 跨进程乐观校验；`stop()` 等两条通道收完 | [记录](decisions/implemented/2026-09-07-memory-concurrency.md) |
-| session 的身份 | meta 记 `product`（哪个产品开的）与 `agent`（角色）；`agentId` / `agentName` 退场 | [记录](decisions/implemented/2026-09-07-session-identity.md) |
-| 人优先，后台让位（已合入 e48a366，本表只为措辞改准） | 自称可让位的实例被请走时交还 lease；不可让位的照旧不抢占 | [记录](decisions/implemented/2026-09-07-preemptible-lease.md) |
-| lifecycle 四条小决策（已落地；第二个 prompt 那条就是现状） | abort reason 保留、`agent_end` 保留名字、stop hook 三次留硬编码、第二个 prompt 留 fail-fast | [abort](decisions/implemented/2026-09-01-abort-reason.md) · [agent_end](decisions/implemented/2026-09-01-agent-end-barrier.md) · [stop hook](decisions/implemented/2026-09-01-stop-continuation-limit.md) · [second prompt](decisions/implemented/2026-09-01-second-prompt-policy.md) |
-| 装配层独立成包（2026-09-09 拍板） | `@echo-agent/base` 装启动器部件与宿主能力，`@echo-agent/tui` 装终端壳；产品只剩身份与自带扩展，`Product` 收成身份牌 | [记录](decisions/implemented/2026-09-09-assembly-layer-packages.md) |
-| session 线剩余 | 角色定义先做，再 `/clear`（换 Agent 实例）与 `wait` | [会话与 agent 集群](design/sessions.md) §9 |
+Agent 类内部化和观测公开面的收窄仍由各自决策管理；“已拍板”不等于代码已完成，类型出口以当前源码为准。入口见 [Agent 公共面](decisions/proposed/2026-09-07-agent-class-internal.md) 与 [观测公开面](decisions/proposed/2026-09-07-observation-public-face.md)。
 
-## 8. 门
+| 要理解什么 | 当前设计 |
+| --- | --- |
+| 实例启动、工作接纳、停止 | [Lifecycle](design/lifecycle-and-run-loop.md) |
+| run / reply / turn / attempt | [循环分层](design/run-loop-layers.md) |
+| 消息账本与送模投影 | [上下文与消息流](design/context-and-message-flow.md) |
+| 模型输入的来源与刷新 | [Prompt](design/prompt.md) |
+| 长会话上下文预算 | [Compaction](design/compaction.md) |
+| 跨会话事实与整理 | [Memory](design/memory.md) |
+| 扩展所有权与重载 | [Extensions](design/extensions.md) |
+| 会话身份与通信 | [Sessions](design/sessions.md) |
+| 运行记录与诊断 | [Observability](design/observability.md) |
+| 终端交互 | [TUI](design/tui.md) |
+
+各设计文档的限制段描述当前尚未提供的保证；实现计划与历史争论不在本总览复制。
+
+## 8. 验证
 
 | 守什么 | 在哪 |
 |---|---|
@@ -110,4 +112,4 @@
 | 文档花名册、链接、代码块编译、文件引用 | `scripts/docs-lint.ts`、`test/docs.test.ts`、`test/export-jsdoc.test.ts` |
 | 分发（tarball 装得上、examples 跑得通） | `test/distribution-gate.test.ts` |
 
-「有门守着」和「是纪律」分开标：上表之外的承诺（fail-loud、`write()` resolve 即持久、观测不影响执行）是纪律，靠 review。
+上表只列跨模块判据，不穷举子系统测试。门只证明对应断言；接口注释、作者承诺与人工 review 不自动成为机器保证。

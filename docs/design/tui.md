@@ -1,385 +1,132 @@
-# 产品级 TUI 设计方案
+# 终端交互界面（TUI）
 
-> 状态：P0–P2 与 P3 的 `/model`、`/clear` 已落地（2026-09-01 前后）；2026-09-08 从 `docs/review/` 搬入 `docs/design/` 并登记（八处源码与测试把它当设计权威引用，不该住在免门目录里）。正文仍按当时的方案写、未按现状重写——「现在的 TUI」指 2026-08-31 的样子。§九 的 D1–D8 是这条线的决策留痕，尚未各自成条进 `docs/decisions/`。
+> 读者：修改终端交互、接入壳协议或排查键盘与渲染问题的人<br>
+> 范围：布局、输入、首次配置、消息呈现、运行状态及界面命令<br>
+> 状态：当前实现说明；持久清空与协议边界见 §七
 
 ## 导读
 
-**给谁看**：要实现这份方案的人。假设你已经知道 `AgentRuntime` 是什么、`packages/cli/` 现在长什么样，
-所以下面不解释这两件事。
+**解决什么。** 在终端里完成输入、查看生成过程和工具结果、回答权限询问，并准确显示当前模型、运行状态与上下文占用。
 
-**解决什么问题**：现在的 TUI（`packages/tui/src/app.ts`，373 行）是个能跑的最小壳——
-用了 pi-tui 里最弱的 `Input` 组件（注释里写的理由是「零配置」），键位一条没绑，
-`AgentState` 里已有的 model / usage / tasks / activeSkills 一样都没显示。
-目标是把它做成产品级：**能正常打字、能看见自己在用什么、输出可读**。
+**设计主线。** TUI 是独立壳，消费 AgentRuntime 与会话面，不自行持有 Agent 的启动和停止流程。界面用组件组织文档流、编辑器与状态栏；消息和状态由运行时驱动，选择模型、重载等操作调用协议并显示结果。
 
-**最终形态**：三段式布局（文档流 / 输入行 / 状态栏），多行编辑器带历史与补全，
-状态栏显示模型与用量，消息按类型分组件渲染，**键位与 pi 一致**。参考 pi 的 `interactive-mode.ts`。
+**边界。** 产品与启动装配归 base / 产品层；TUI 不负责 session 落盘、provider 协议或工具执行。固定主题不等于可切换主题系统；本文不引入自定义编辑器扩展接口。
 
-**为什么参考 pi**：我们用的就是它的 TUI 库（`@earendil-works/pi-tui`）。
-库里已经有 `Editor`、`Container`、`Markdown`、`SelectList`、`setKeybindings`、`fuzzyFilter` 这些——
-现在一个都没用。参考它不是抄产品，是**把已经装了的库用起来**。
-键位也照它（§九 D2）：库的缺省键就是 pi 的键，用户在别的工具里已经学过这一套，
-自创一套只会和库的缺省打架。
-
-### Non-Goals（明确不做）
-
-- **不做 slash 命令的完整体系**。P3 只做最少的几条（`/model`、`/clear`），
-  pi 那套有几十条命令 + 扩展注册机制，不是这一轮的事。
-- **不做主题系统**。pi 有 1336 行的 `theme.ts` 和 theme-selector，我们先用固定配色——
-  但「固定配色」不是「没有主题对象」：`Editor` 与 `Markdown` 的构造函数都要求一份主题，
-  所以 P0 / P2 各交一份**常量**（见 §二、§五）。
-- **不做 session 选择器 / 恢复界面**。协议现在也不支持（见 §六）。
-- **不做扩展提供的自定义编辑器**（pi 的 `setEditorComponent` 那套）。
-- **不自创键位**。照 pi（§九 D2）；pi 没有的键不加。
-- **运行中不换 provider / 模型**。首次运行的引导设置里可以选（D4，那时还没装配）；装配之后换家换模型是 P3 `/model` 的事（§三）。
-- **不动 core**。P0–P2 一行协议都不改——这是刻意的，见 §七。
-
-### 已决（记录见 §九）
-
-- 首次运行没有凭据 → **起来，进配置流程**，已落地 main（D1）。
-- 键位**照 pi**（D2）。
-- **配置是运行态，不阻塞启动**（D3）；首次运行是**引导设置**：欢迎 → 选 provider → 贴 key → 选模型，样子照 Claude Code 的选择器（D4）。
-
-### 待拍板
-
-1. **P3b-b：`/sessions`。** 跨 provider 换模已落地（D7）；会话面在 Agent 上只有半套
-   （`sessions.create` 在、列表/切换的公共形状没定），往封闭协议加一组它，要带着具体界面单独来提。
-   **2026-09-01 用户暂缓**：「这涉及到核心层面的更改」——等核心侧想清楚由用户发起，UI 线不推进它。
-### 验收判据
-
-每阶段各自的判据写在对应小节。总的两条：
-
-- **P0–P2 结束时，`packages/core` 的 `api-snapshot.txt` 逐字未变**——如果变了，说明有人在壳里
-  做不下去就去改协议，那正是这份方案要避免的顺序。
-- **P0 起，`packages/cli/src/` 里按键判定只走 `matchesKey()` / `isKeyRelease()` / `decodeKittyPrintable()`**，
-  且 `packages/cli/test/` 里有一条**真 PTY** 测试把 Kitty 编码与应用光标键编码送进去。
-  为什么是硬门而不是纪律，见 §二「按键处理的纪律」。
-
----
-
-## 一、布局（P1 起按行拼三段；P2 起对话区是 Container）
-
-照 pi 的三段式（`interactive-mode.ts:589-611`）：
-
-```
-┌─ documentContainer ──────────────── 文档流，随内容增长，终端负责滚动
-│  ├─ headerContainer      欢迎信息（启动时一次）
-│  └─ chatContainer        对话：用户消息 / 助手消息 / 工具调用 / 权限询问
-├─ editorContainer ────────────────── 输入行，固定在底部上方
-└─ footerContainer ────────────────── 状态栏，最底部一行
-```
-
-用 pi-tui 的 `Container` 拼，不自己算坐标。`TuiMainScreen` 已经在用了。
-
-**换 Container 买到的是结构，不是重绘性能。** 两件事分开说：
-
-- **原地更新现在就有**：`app.ts` 的 `message_update` 走 `transcript.setAssistantText(streamingIndex, partial)`，
-  `tool_execution_end` 走 `transcript.updateTool(row, …)`。这不是换 Container 才做得到的。
-- **重绘粒度由 TUI 决定，不由组件树决定**：pi-tui 的 `TUI` 本身就是 differential rendering
-  （`dist/tui.js:2`、`:70`），给它一个大字符串还是一棵组件树，它都按行 diff。
-
-Container 真正带来的是：**每条消息是一个组件，持有自己的状态、响应自己的按键**——
-工具调用能不能折叠 / 展开（P2 的重点，pi 的 Ctrl+O），取决于那一条有没有自己的状态。
-现在的 `Transcript` 是一份扁平数组，条目没有状态，折叠做不了。
-
----
-
-## 二、输入行（P0，**已落地** `eff6dec`）
-
-### 用 `Editor`，不是 `Input`
+## 一、布局
 
 ```text
-import { Editor, setKeybindings } from "@earendil-works/pi-tui";
+文档区
+  欢迎信息
+  用户消息 / 助手消息 / 工具调用 / 通知与询问
+编辑区
+  多行输入、历史与补全
+状态栏
+  模型、运行状态、用量与能力摘要
 ```
 
-`EditorComponent` 是接口（安装包 `dist/editor-component.d.ts`；源码在 pi 仓
-`packages/tui/src/editor-component.ts`），`Editor` 是实现（pi-tui 根入口导出）。
-**多行是这个组件本身就有的行为**，不需要我们决定。
+布局由 [runTui()](../../packages/tui/src/app.ts#symbol=runTui) 与 [Transcript](../../packages/tui/src/transcript.ts#symbol=Transcript) 组合，组件库使用仓库安装的 pi-tui。文档流随内容增长，终端负责滚动；组件结构用于分离消息状态，不保证任意输出量下的渲染性能。
 
-接口里已经给了的（我们不用自己实现）：
+流式更新修改已有助手组件，工具完成更新对应 toolCallId 的组件，不为每个增量创建一条新消息。换行和裁切按终端可见列宽处理，不能用字符串字符数代替显示宽度。
 
-| 能力 | 接口方法 |
-|---|---|
-| 取值 / 设值 | `getText()` / `setText()` |
-| 提交 | `onSubmit?: (text) => void` |
-| 变更通知 | `onChange?: (text) => void` |
-| **历史** | `addToHistory?(text)` ← **编辑器自己管，不是应用层** |
-| 光标处插入 | `insertTextAtCursor?(text)` |
-| 补全 | `setAutocompleteProvider?(provider)` |
-| 边框色 / 内边距 | `borderColor?` / `setPaddingX?()` |
+## 二、输入行
 
-pi-tui 里还有这些现成的，属于 `Editor` 内部行为，接上就有：
-`word-navigation.ts`（按词移动）、`undo-stack.ts`（撤销）、`kill-ring.ts`（Ctrl+K/U 删到行首尾）。
+输入使用 Editor，编辑历史、光标移动和基础补全由组件提供。主题由 [EDITOR_THEME](../../packages/tui/src/theme.ts#symbol=EDITOR_THEME) 固定提供，应用层不另造一份编辑器状态。
 
-### 主题：P0 要交一份 `EditorTheme` 常量
+### 键位
 
-`Editor` 的构造函数是 `new Editor(tui, theme: EditorTheme, options?)`（`dist/components/editor.d.ts:72`）——
-**主题不是可选项**。「不做主题系统」的意思是不做切换、不做加载，不是不给主题：
-P0 交付物里要有一份写死的 `EditorTheme` 常量（放 `packages/tui/src/theme.ts`，P2 的 `MarkdownTheme` 也进去）。
+应用键表的真源是 [APP_KEYBINDINGS](../../packages/tui/src/keybindings.ts#symbol=APP_KEYBINDINGS)。[installKeybindings()](../../packages/tui/src/keybindings.ts#symbol=installKeybindings) 将它和组件库默认编辑键合并，界面和 Editor 使用同一份 manager。
 
-### 键位：照 pi
+| 键 | 当前应用行为 |
+| --- | --- |
+| Enter | 提交输入 |
+| Shift+Enter / Ctrl+J | 编辑器换行 |
+| Esc | 中断当前工作 |
+| Ctrl+C | 清空输入，不退出 |
+| Ctrl+D | 输入为空时退出；非空时交给编辑器删除字符 |
+| Ctrl+O | 全局展开或收起工具输出 |
+| Ctrl+L | 打开模型选择器 |
+| Shift+Tab | 轮换当前模型实际支持且请求参数不同的 thinking 档 |
+| y / n | 在权限询问状态下回答允许或拒绝 |
 
-两层。**编辑器内**的键是 pi-tui 的缺省（`dist/keybindings.js`），一条都不改；
-**应用级**的键照 pi 的 `app.*`（pi 仓 `packages/coding-agent/src/core/keybindings.ts:92-130`）。
-表里的行号都是这两个文件的。
+历史导航遵循 Editor 的光标与草稿规则；方向键不无条件等于翻历史。Ctrl+P、Alt+Enter 等外部产品键位未在本应用键表登记，不能仅因“参考 pi”就视为支持。
 
-落点：`packages/tui/src/keybindings.ts`——`APP_KEYBINDINGS` 登记应用级键，`installKeybindings()` 把它与
-`TUI_KEYBINDINGS` 合成一个 `KeybindingsManager` 并 `setKeybindings()` 装成全局（`Editor` 内部走
-`getKeybindings()` 取键，不装就是两份真源）。`app.ts` 里所有判定都是 `keys.matches(data, "app.…")`。
+### 按键处理的纪律与判据
 
-编辑器内（缺省，不用注册）：
+按键经过 KeybindingsManager / matchesKey 识别，入口过滤 release，必要时解码 Kitty printable；不直接比较某一种终端编码的字节。
 
-| 键 | 行为 | 出处 |
-|---|---|---|
-| **Enter** | **提交** | `tui.input.submit`（:75） |
-| Shift+Enter / Ctrl+J | 换行 | `tui.input.newLine`（:74） |
-| ↑ / ↓ | **首行且（空 / 正在翻历史 / 光标在行首）时翻历史**，否则移光标 | `dist/components/editor.js:675-681` |
-| Alt+← / Alt+→（也认 Ctrl+←/→、Alt+B/F） | 按词移动 | `tui.editor.cursorWordLeft/Right`（:21-26） |
-| Ctrl+A / Ctrl+E | 行首 / 行尾 | `tui.editor.cursorLineStart/End`（:29-34） |
-| Ctrl+U / Ctrl+K | 删到行首 / 行尾 | `tui.editor.deleteToLineStart/End`（:63-68） |
-| Ctrl+- | 撤销 | `tui.editor.undo`（:73） |
-| Ctrl+D | **有字时**向前删一个字符 | `tui.editor.deleteCharForward`（:52） |
+静态门在 packages/tui/test/key-discipline.test.ts，实际扫描本包 src 中的 fromCharCode 使用；它不等价于识别所有可能的裸字节比较。真 PTY 的 packages/cli/test/tui-pty.test.ts 将 Kitty 和应用光标键编码送进进程，验证行为。假组件测试可检查界面状态，但不能代替终端编码层测试。
 
-应用级（要用 `setKeybindings()` 注册，P0 只接前三个）：
+## 三、欢迎界面与凭据配置
 
-| 键 | 行为 | pi 的名字 | 我们接哪个协议方法 |
-|---|---|---|---|
-| **Esc** | 中断当前这一轮 | `app.interrupt`（:92） | `runtime.abort()` |
-| **Ctrl+C** | **清空输入行**（不是退出） | `app.clear`（:93） | `editor.setText("")` |
-| **Ctrl+D** | **输入行为空时**退出 | `app.exit`（:94） | 结算 `exited`（`extension.ts`） |
-| Ctrl+O | 展开 / 收起工具输出 | `app.tools.expand`（:112） | P2 |
-| Ctrl+L | 打开模型选择器 | `app.model.select`（:111） | P3（要 `setModel`） |
-| Ctrl+P | 切到下一个模型 | `app.model.cycleForward`（:103-106） | P3 |
-| Alt+Enter | 跑着的时候追加一条 | `app.message.followUp`（:129-130） | `runtime.followUp()` 协议已有，本轮不排期 |
+欢迎区显示产品版本、工作目录、模型与键位提示。首次运行的 [runFirstRunSetup()](../../packages/tui/src/first-run.ts#symbol=runFirstRunSetup) 完成 provider、凭据及模型选择，再交回装配层创建运行时；这与运行中凭据失效后的配置界面分开。
 
-三条要写清楚的边界：
+交互模式缺凭据时引导配置，运行中认证失败可重新输入；管道模式不能要求人操作选择器，按启动器的凭据检查返回错误。凭据的读取、验证、保存与模型选择持久化归宿主能力，TUI 只提供交互。
 
-- **Ctrl+D 两个含义怎么并存**：应用级先看 `editor.getText() === ""`，空就退出，
-  不空就放行给编辑器（它会删一个字符）。pi 的描述就是「Exit when editor is empty」。
-- **Ctrl+C 不再退出**。现在 `app.ts` 是 Ctrl+C 退出，P0 之后变成清空输入行——这是照 pi 的代价，
-  欢迎界面的提示行必须写「Ctrl+D 退出」，否则用户按 Ctrl+C 只会看到输入被清掉。
-- **历史的专用键缺省是空的**：`tui.editor.historyPrevious/Next` 的 `defaultKeys: []`（:5-11）。
-  ↑ 能翻历史靠的是上表那条回退规则——单行草稿时按 ↑ 直接翻，多行草稿时 ↑ 先移光标到首行。
-  P0 不另绑专用键。
+## 四、状态栏
 
-**权限询问那段的 `y` / `n`**：现在是在 `root.handleInput` 里判字符（`app.ts:281-282`），
-那是临时做法，不该扩散。P0 把它也登记进 `setKeybindings()`，走同一条路。
+[footerLine()](../../packages/tui/src/app.ts#symbol=footerLine) 从运行态投影生成状态栏，不自行推断业务状态。
 
-### 按键处理的纪律（机器可判）
+| 显示 | 来源与显示条件 |
+| --- | --- |
+| 模型、运行状态 | state.model 与 state.status |
+| 输入 / 输出 token | state.usage |
+| 缓存用量及比例 | provider 给出 cachedInputTokens 且有输入基数时显示 |
+| 上下文占用 | contextTokens 与模型 contextWindow 都可用时显示 |
+| thinking | 映射表中实际请求参数；未映射时显示缺省，不声称已关闭思考 |
+| tasks / skills / MCP | 对应状态摘要非空时显示 |
 
-**`handleInput` / `addInputListener` 里一律 `matchesKey()`，禁止比较字节。** 理由是真终端上撞到的
-（2026-08-31）：pi-tui 的 `ProcessTerminal` 会探测并启用 Kitty 键盘协议（`dist/terminal.js:120`），
-之后 Ctrl+C 到达是 `ESC[99;5u` 而不是字节 `0x03`，↓ 可能是应用光标键模式的 `ESC O B` 而不是 `ESC[B`
-（`dist/keys.js:237-238` 两种都列着）。`app.ts:304` 那句 `data.includes(String.fromCharCode(3))`
-在那种终端里一次都不成立——**退不出去**。Kitty 协议还会给同一次按键补发一条 release，
-所以每个入口先 `isKeyRelease()` 滤掉，否则按一下等于按两下；数字直选要先 `decodeKittyPrintable()`
-解码（`1` 在那种终端里是 `ESC[49u`）。
+未报告缓存不显示为零命中，未给出窗口不伪造占用百分比。状态栏不估算美元费用；长行按可见宽度裁切，次要项位于后部。
 
-为什么是门不是纪律：**假 TUI 测不出这类 bug**——`fake-tui.ts` 的 `feed()` 直接把字符串交给
-`handleInput`，绕过了终端编码这一层。所以：
+## 五、消息渲染
 
-- `packages/tui/test/key-discipline.test.ts`：`packages/cli/src/` 里（递归）`fromCharCode` 只许出现在拼 ANSI **输出**常量的
-  那种行上（`const ESC = String.fromCharCode(27);`）与注释里，其余一律红；门自带正反例自检。
-- `packages/cli/test/tui-pty.test.ts`（驱动在 `packages/cli/test/pty-driver.py`，python3 标准库的 `pty`——Bun 1.3 没有 pty）：
-  真 PTY 里把 `ESC[100;5u`（Kitty 的 Ctrl+D）、`ESC[99;5u`（Kitty 的 Ctrl+C）、`ESC O B`（应用光标键 ↓）
-  送进去，断言**行为**（退没退出、光标到没到下一家）而不是抓屏——差分渲染下旧帧还在缓冲里，
-  抓屏会把「清掉了」误判成「还在」。没有 python3 时这条门**红而不是跳过**。
+| 内容 | 组件与行为 |
+| --- | --- |
+| 用户输入 | [UserMessage](../../packages/tui/src/messages.ts#symbol=UserMessage)，与助手输出区分 |
+| 助手文本 / thinking | [AssistantMessage](../../packages/tui/src/messages.ts#symbol=AssistantMessage)，Markdown 与独立 thinking 样式 |
+| 工具调用 | [ToolExecution](../../packages/tui/src/messages.ts#symbol=ToolExecution)，运行状态、参数摘要与结果 |
+| 通知 | [Notice](../../packages/tui/src/messages.ts#symbol=Notice)，显示拒绝、失败或状态说明 |
 
-假 TUI 有一个坑，写测试时会撞到：`Editor.render()` 按 `tui.terminal.rows * 0.3` 算可见行数
-（`dist/components/editor.js:386-387`），`fake-tui.ts` 的 `terminal` 必须给 `rows`（现在是 24），
-给空对象会得到 `NaN` → 一行正文都不画、屏幕上只剩两条边框。
+工具默认折叠，Ctrl+O 控制全局展开状态；参数与结果不会默认全部铺开。工具输出和模型文本均经过 [clean()](../../packages/tui/src/text.ts#symbol=clean) 做终端输出清理，这不是判断文本语义可信的安全层。
 
-### P0 验收
+Markdown 使用固定 [MARKDOWN_THEME](../../packages/tui/src/theme.ts#symbol=MARKDOWN_THEME)。流式片段与最终消息通过同一条 transcript 更新路径呈现；界面历史是消息投影，不是 session 账本的替代品。
 
-- 能输入多行、能改中间的字、能撤销（Ctrl+-）
-- 单行草稿下 ↑ 能翻出上一条输入
-- Enter 提交、Shift+Enter 换行、Esc 中断、Ctrl+C 清空、**Ctrl+D 空时退出**——五条各一个假 TUI 测试
-- 权限询问的 `y` / `n` 从 `handleInput` 里的字符比较移进 `setKeybindings()`
-- `packages/tui/src/theme.ts` 里有 `EditorTheme` 常量
-- 按键纪律那两条门（grep + 真 PTY）绿
-- **`api-snapshot.txt` 逐字未变**
+## 六、交互能力
 
----
+命令派发由 runTui 中的命令表负责，补全使用同一命令集合。
 
-## 三、欢迎界面（P1，**已落地** `ac9f9c4`）
+| 交互 | 所有者与边界 |
+| --- | --- |
+| /model、Ctrl+L | 壳选择，AgentRuntime 变更装备；忙时显示拒绝，不静默排队 |
+| Shift+Tab | 使用模型 thinking 映射选择有效档位，运行时决定能否变更 |
+| /compact | 调同一压缩流水线的手动入口，显示完成或拒绝 |
+| /clear | 当前调用 reset 清内存投影；不等于持久创建新 session |
+| /sessions | 通过会话面列其他 session，不自行组合 lease 与状态文件 |
+| /resume | 壳选择目标并退出，由容器停止旧实例、装配目标实例 |
+| /reload | 调运行时重载入口，逐项显示结果，不把 done 当作全部成功 |
 
-pi 的做法在 `packages/coding-agent/src/cli/startup-ui.ts`。它做了四件事，我们**只取第一件**：
+会话切换、清空与失败回退以 [Sessions](sessions.md) 为准，重载范围与报告见 [Extensions](extensions.md)。其余命令以源码命令表为准，不在本文复制完整帮助文本。
 
-| pi 做的 | 我们 |
-|---|---|
-| 建 TUI、设键位、初始化主题 | ✅ 取（主题用 §二那份常量） |
-| 首次运行检测（`shouldRunFirstTimeSetup`，`startup-ui.ts:115-127`） | ❌ **不取，已有自己的**：它判的是 `isOfficialDistribution && areExperimentalFeaturesEnabled && settings 路径`，我们判的是 `Models.checkAuth()`，两回事 |
-| 加载扩展主题、包管理器解析 | ❌ 不取 |
-| OAuth / 登录对话框 | ❌ 不取 |
+## 七、当前限制
 
-欢迎界面本身显示什么（一次性，进 `headerContainer`）：
+- /clear 尚未完成“关闭旧段、创建新段”的持久切换；恢复旧 session 可能带回清空前记录。
+- TUI 无权自行启动、停止或替换 Agent，必须通过退出结果交给容器重装；切换不构成跨 session 原子事务。
+- 固定主题、全局工具展开与现有 Editor 是当前产品选择，不是任意主题或编辑器可插拔的接口。
+- 状态栏和组件测试不证明所有真实终端一致；终端编码与显示需要 PTY 和人工交互检查。
 
-```
-echo-agent  <version>
-<cwd>
-模型 <model.id> · <provider>                       ← 来自 AgentState.model
-Enter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出 · ↑ 历史
+## 八、验证
+
+```bash
+bun test packages/tui/test/tui.test.ts packages/tui/test/first-run.test.ts \
+  packages/tui/test/setup.test.ts packages/tui/test/extension.test.ts \
+  packages/tui/test/key-discipline.test.ts
+bun test packages/cli/test/tui-pty.test.ts
 ```
 
-**首次运行（没有凭据）走引导设置**（D4，2026-09-01）：`first-run.ts` 的 `runFirstRunSetup()`，
-欢迎头 → **选择 provider**（编号列表 + 光标，描述列派生自目录）→ 贴 key（掩码，回车验证并保存）→
-**选择模型**（该家目录，缺省 ✓ 预选中，回车即用；这次会话生效，`--model` 固定）→ 直接进对话。
-样子照 Claude Code 的选择器：标题与说明在上、列表在下。列表用 pi-tui 的 `SelectList`
-（↑↓/回车/Esc 内置，Kitty 编码天然认得），数字直选与 Ctrl+D 退出走 `matchesKey`。
-
-**它跑在 `createEcho()` 之前**：选哪家、哪个模型本来就得在装配前定（模型解析在装配期，
-运行中换模型是 P3）。**这不是回退 D3**——装配仍不看凭据；两条运行态路径都在：
-
-- key **中途**失效（端点报 `auth`）：主界面里摆出配置段（`setup.ts` 的 `CredentialSetup`，
-  只收当前那家的 key），配好不用重启；
-- 读不了凭据文件：不挡启动，说一句、当成没配。
-- 管道 / CI 形态不变：启动前同一个 `isConfigured()` 拦下，退出码 1。
-
-模型选择的**持久化**（记住上次选的）是一个新落盘格式，没拍板不做——列在待拍板。
-
-P1 对这块的视觉对齐已并入 D4 的实现。
-
-### P1 验收
-
-- 状态栏显示模型、用量、状态三项起
-- 欢迎界面显示版本、cwd、模型、键位提示（提示行的键与 §二一致）
-- 配置段与输入行同一套边框与配色
-- **`api-snapshot.txt` 逐字未变**
-
----
-
-## 四、状态栏（P1，**已落地** `ac9f9c4`）
-
-pi 的 `footer.ts` + `FooterDataProvider`。这是**验证 UI 协议够不够用的地方**——
-它显示的每一项都必须能从 `AgentRuntime.state` 拿到。
-
-依据只有一行：`AgentRuntime.state` 就是**整个** `AgentState`（`packages/core/src/extension/runtime.ts:50-54`，
-「给整个 `AgentState`（2026-08-31 用户拍板），不收窄成『UI 以为要的那几项』」）。所以下表的 ✅ 不是逐项查出来的，
-是那一行的推论：
-
-| 显示 | 来源 | 有没有 |
-|---|---|---|
-| 当前模型 | `state.model.id` / `.provider` | ✅ |
-| token 用量 | `state.usage` | ✅ |
-| 运行状态 | `state.status` | ✅ |
-| 当前轮次 | `state.iteration` | ✅ |
-| 待办任务数 | `state.tasks` | ✅ |
-| 激活的 skill 数 | `state.activeSkills.length` | ✅ |
-| MCP 服务器状态 | `state.mcp` | ✅ |
-| cwd / git 分支 | **壳自己拿**（`process.cwd()` + git 命令） | — |
-
-**八项里七项现成**。这一步不需要动协议，做完就能回答「现有 state 够不够渲染一个状态栏」。
-
-成本（$）显不显示见「待拍板 1」——P1 先只显示 token。
-
----
-
-## 五、消息渲染（P2，**已落地** `db2a36d`）
-
-现在所有消息都是纯文本拼进 transcript。换成按类型分组件（对照 pi 的
-`modes/interactive/components/`）：
-
-| 消息类型 | 组件 | pi 的对应 | 要点 |
-|---|---|---|---|
-| 用户消息 | `UserMessage` | `user-message.ts` | 缩进 + 前缀，与助手消息区分 |
-| 助手消息 | `AssistantMessage` | `assistant-message.ts` | **走 pi-tui 的 `Markdown` 组件**，不要自己拼（pi 就是 `new Markdown(…)`，`assistant-message.ts:111`） |
-| 工具调用 | `ToolExecution` | `tool-execution.ts` | **可折叠**：默认收起，显示工具名 + 一行摘要；**Ctrl+O** 展开看完整参数与结果（pi 的 `app.tools.expand`） |
-| thinking | 单独样式 | — | 暗色/斜体，与正文区分 |
-| 权限询问 | 已有 | — | 保留现有逻辑，只换渲染 |
-
-**`Markdown` 也要主题**：`new Markdown(text, paddingX, paddingY, theme: MarkdownTheme, …)`
-（`dist/components/markdown.d.ts:64`），`MarkdownTheme` 14 个必填字段。`theme.ts` 里的
-`MARKDOWN_THEME` 就是那份常量，与 `EDITOR_THEME` 同放。
-
-落点：`messages.ts`（四个组件）+ `text.ts`（`clean()` / `wrap()`，清洗仍在 `Transcript` 入口做）+
-`transcript.ts`（一个 Container 装组件，对外方法不变，多了 `setAssistantContent` / `toggleTools`）。
-实测 `Markdown` 的三个行为，写测试时要知道：单换行是**硬**换行（逐行输出的正文不会被挤成一段）；
-四空格缩进**不会**被当代码块；每行右侧补空格到宽度，要 `trimEnd`（不然空行变一串空格、
-「每行不超过宽度」那条老判据也过不了）。
-
-**工具调用的折叠是这一阶段的重点。** 折叠之前工具的参数和结果全量打在流里，一个
-`read_file` 就能刷屏。展开与否是**全局**开关（Ctrl+O 一键看全部，pi 同款），由 `Transcript` 持有、
-每条 `ToolExecution` 现读——各条自己记一份就得逐条去按。折叠时一行「标记 + 名字 + 一行 JSON 摘要」，
-展开时参数多行 JSON + 结果全文缩在 `│` 后面。**结果 `content` 也过 `clean()`**：它来自工具，
-和模型正文一样不可信。
-
-流式消息（`state.streamingMessage`）的原地更新**现在就有**（§一），P2 只是把它从
-「改 transcript 里的一个字符串」换成「改那个 `AssistantMessage` 组件的文本」，行为不变。
-
-### P2 验收
-
-- Markdown 正确渲染（代码块、列表、表格）
-- 工具调用默认折叠，Ctrl+O 展开 / 收起
-- 长输出不刷屏
-- `theme.ts` 里有 `MarkdownTheme` 常量
-- **`api-snapshot.txt` 逐字未变**
-
----
-
-## 六、交互能力（P3a **已落地**，提交见 git log「P3a」；P3b 待拍）
-
-前三阶段一行协议都不用改。到这里会撞上：
-
-| 想做 | 协议现状 | 缺什么 | pi 的键 |
-|---|---|---|---|
-| `/model` 切换模型 | 只能读 `state.model` | **`setModel()`** | Ctrl+L 选择器（`SelectList`）、Ctrl+P 轮换 |
-| 切 thinking 档位 | 只能读 `state.thinkingLevel` | **`setThinkingLevel()`** | Shift+Tab |
-| `/sessions` 切换会话 | 只有 `state.sessionId` | **会话列表 + 切换** | — |
-| `/clear` 清空对话 | — | 待查（可能 `abort` + 新 session） | — |
-
-这三条性质一致：都是**慢变装备的改动**。`AgentState` 的注释写着「装备（慢变；**仅 idle 可换**）」
-（`packages/core/src/agent.ts:83`），说明底层支持换，只是没在 UI 协议上开口。
-
-**开口的成本比「加两个方法」大**，两件事要一起算：
-
-- **`AgentRuntime` 是封闭协议**（`runtime.ts:16-19`）：「加一支就是改契约……值得配一套 conformance」。
-  所以每加一个方法 = 改契约 + 改 conformance suite + 两个壳都跟上。
-- **「仅 idle 可换」是一条判定链**：非 idle 时 `setModel()` 怎么办——拒绝并返回原因（像 `steer` / `followUp`
-  那样给显式结果，不抛不静默），还是排队到 idle 再换？这决定协议方法的返回类型，要先拍（待拍板 2）。
-
-**到这一步再提协议扩展**，带着具体用例来提——这是分阶段的全部理由。
-
----
-
-## 七、分阶段的理由
-
-| 阶段 | 动协议吗 | 做完能回答什么问题 |
-|---|---|---|
-| P0 输入行 | 否 | 壳子的基本可用性 |
-| P1 欢迎 + 状态栏 | 否 | **现有 `AgentState` 够不够渲染一个产品级界面** |
-| P2 消息渲染 | 否 | 事件流够不够驱动一个可读的界面 |
-| P3 交互能力 | **是**（封闭契约 + conformance 一起改） | 协议缺的到底是哪几个方法 |
-
-前三阶段刻意不碰协议，是为了把「壳子做得不好」和「协议不够用」分开。
-做完 P0–P2 还不好用，那是壳的问题；到 P3 卡住了，才是协议的问题——
-而那时提出的每一条扩展需求，背后都有一个做不下去的具体界面。
-
-## 八、参考位置速查
-
-**装在本仓里的 pi-tui 是判据**（版本以 `bun.lock` 为准，现在是 0.84.4）；pi 仓的源码是拿来读注释的。
-
-| 要看什么 | 位置 |
-|---|---|
-| 编辑器内缺省键位 | `node_modules/@earendil-works/pi-tui/dist/keybindings.js` |
-| 编辑器构造 / `EditorTheme` | 同上 `dist/components/editor.d.ts` |
-| `EditorComponent` 接口 | 同上 `dist/editor-component.d.ts` |
-| `Markdown` 构造 / `MarkdownTheme` | 同上 `dist/components/markdown.d.ts` |
-| 按键匹配 / Kitty 协议 | 同上 `dist/keys.js`、`dist/terminal.js` |
-
-| 要抄什么 | pi 的文件（`~/Code/pi`） |
-|---|---|
-| **应用级键位缺省** | `packages/coding-agent/src/core/keybindings.ts:92-130` |
-| 整体布局与容器拼装 | `packages/coding-agent/src/modes/interactive/interactive-mode.ts:589-611` |
-| 编辑器构造 | 同上 `:600-606` |
-| 欢迎 / 首次运行 | `packages/coding-agent/src/cli/startup-ui.ts` |
-| 状态栏 | `packages/coding-agent/src/modes/interactive/components/footer.ts` |
-| 工具调用渲染 | 同目录 `tool-execution.ts` |
-| 助手消息渲染 | 同目录 `assistant-message.ts` |
-| 键位提示 | 同目录 `keybinding-hints.ts` |
+组件测试检查输入、命令、折叠、状态与主题；PTY 测试检查终端编码路径。真实 provider 凭据、长会话可读性和不同终端的视觉效果不由这些 fixture 证明。
 
 ## 九、决策记录
 
-八条都已各自成条进 `docs/decisions/implemented/`（2026-09-08 转录，论证与验收以记录为准；本表只指路）：
+当前界面取舍的历史原因见以下记录；阶段计划不再作为当前实现说明维护。
 
 | # | 日期 | 一句话 | 记录 |
 |---|---|---|---|

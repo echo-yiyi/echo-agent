@@ -1,4 +1,4 @@
-# 观测：一次 run 留下的账本
+# 可观测性：运行记录与诊断
 
 > 状态：已实现并在用（本文写的是**现状**，不是目标形态）；公开面尚未拍板，见「待拍板」<br>
 > 读者：要读观测记录排查问题、给观测加事实、或把观测接到别处的人<br>
@@ -7,7 +7,7 @@
 
 ## 导读
 
-**解决什么。** agent 跑完一次，除了终端上滚过去的字，什么都不剩。会话目录里的 `entries/` 是**功能用的回放队列**（模型要求原样带回上一轮的 reasoning，所以它必须留），不是给人读的历史：它没有时间、没有耗时、没有嵌套、没有失败原因，也不记「这次 run 装配了哪些 extension、绑了哪个模型」。想回答「这次为什么慢」「哪一步失败了」「模型到底想了什么」，没有第二个地方可查。观测层就是那个地方：**它是这个仓里唯一为「读」而存在的记录**。
+**解决什么。** 回答一次运行在哪耗时、何处失败、采用了什么装备，以及在允许采集正文时实际交换了什么内容。session 账本服务于恢复，观测账本服务于诊断，两者职责不同。
 
 **最终形态。** 每次 run 把自己写进会话状态根下的一组观测文档（§5）。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的硬规矩：观测的任何功能都不出现在主机制、主循环里**（2026-09-14，[记录](../decisions/implemented/2026-09-14-observation-off-main-loop.md)）——探针在节点上只取一次字段交给进程里的**观测线程**，编码、摘要、seq、落盘都在那边；admission、装配、`start` / `stop`、lease、run 生命周期都不为观测等待、不为观测计算、不因观测多一种失败（§5）。留多久由产品自己定：两个产品都声明「只留最近 30 天」，由启动逻辑不等地跑一遍，agent 里没有过期代码（§5）。
 
@@ -68,7 +68,7 @@
 两条容易踩的规矩：
 
 - **`attributes` 只放低基数的安全值**（string / number / boolean），正文一律进 `body`——`body` 受档管，`attributes` 不受。
-- **身份是固定 schema**：白名单之外的键一律拒（[identity.ts](../../packages/core/src/observability/identity.ts#symbol=materializeDynamicIdentity) 头注）。否则多余键会原样落进 envelope，等于在身份区开一块不受档管的自由字段区。同一模块还解释了为什么「校验完必须返回快照、不能回头读 producer 的原对象」——两轮 review 实测过 TOCTOU：Proxy 检查时只露安全字段、编码时再露正文，照样落盘且没有 gap。
+- **身份是固定 schema**：白名单之外的键一律拒（[identity.ts](../../packages/core/src/observability/identity.ts#symbol=materializeDynamicIdentity) 头注）。否则多余键会原样落进 envelope，等于在身份区开一块不受档管的自由字段区。校验后使用重建的快照，不再次读取 producer 原对象，避免校验与编码读取到不同值。
 
 ## 3. 两条 lane
 
@@ -154,7 +154,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 | `echo.observations` | `EchoObservations`：`getRun` `lastRun` `listRuns` `snapshot` `subscribe` `flush` | 已在 runtime 内 | 宿主自己读 / 订阅；读之前先等观测线程写完此刻之前交出去的 |
 | `openObservationReader({ stateRoot })` | `EchoObservationReader`：同上去掉 `subscribe` 与 `flush`，多一个 `close()` | **不取** | 离线读一个状态根 |
 
-两条性质值得单说：
+读面性质如下：
 
 - **只读入口不启动 agent、不取会话锁**，所以正在跑的会话也能读——读到的是它已提交的部分。reader 只读 rename 完成的文档，看不到半截；`runs/` 最多落后正在写派生文件的那一批。
 - **`getRun()` 只有两态**：`found` / `unknown`（从未有过，或已被过期规则删掉）。
@@ -196,11 +196,11 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
   - **状态快照照拍**，`state.agent.activeRunId` 记 Agent 此刻开着的 admission run——子循环里是派出它的那个，或者没有。run 开头的 `agent.state` 自带 `runId`，同样不从 Agent 身上补。
   - 面板：子循环的行调暗、「跟随最新」跳过它们；子 agent 的那次工具调用能跳到子 run，子 run 的概览能跳回父 run。
 
-**新工具自动进观测**：工具执行的事实只有一个来源（`loop/run-turn.ts` 的探针），所以产品加工具不需要额外埋点。但**面板要念出人话**得在术语表 `packages/base/src/observe/lexicon.ts` 里登记——没登记只会显示原始名字。那份表是手抄的快照，不是推导出来的门（§8）。
+**新工具自动进观测**：工具执行的事实只有一个来源（`loop/run-turn.ts` 的探针），所以产品加工具不需要额外埋点。但**面板要念出人话**得在术语表 `packages/base/src/observe/lexicon.ts` 里登记——没登记只会显示原始名字。该映射需随新记录和工具维护，自动覆盖范围见 §8。
 
-## 8. 欠账
+## 8. 当前限制
 
-按「会不会随时间恶化」排：
+以下限制影响容量规划、公开 API 与诊断覆盖：
 
 1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端封口之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
 2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性。两个产品的 30 天规则把它压在「最近 30 天的 run 数」上，不是彻底解决——单段会话在 30 天内堆出足够多的 run 仍然会慢。

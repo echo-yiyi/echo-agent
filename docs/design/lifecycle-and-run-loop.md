@@ -1,32 +1,16 @@
-# Lifecycle 与 Run Loop（审阅稿）
+# Lifecycle 与 Run Loop
 
-> 状态：审阅中，尚未成为设计契约<br>
-> 基线：2026-08-31 当前源码与测试<br>
-> 范围：Agent 实例生命周期、一次 run 的执行循环、工作接纳、中断与收摊<br>
-> 暂不处理：多会话并发、state root 的 writer 模型、存储布局、具体 provider 协议<br>
-> 退出条件：第 9 节每一项分别形成决策记录，结论吸收到正式设计后删除本稿；历史由 Git 保留
+> 读者：接入启动与停止、处理输入队列、订阅运行状态的人<br>
+> 范围：实例生命周期、工作接纳、run 边界与资源收摊；循环内部以 [Run Loop 的四层](run-loop-layers.md) 为准<br>
+> 状态：当前实现说明；内部 Agent 的启动与清理限制见 §9，公开入口使用 createEcho
 
-这份文档先回答“代码现在实际上怎么运行”，再列出需要产品和设计共同拍板的地方。未经拍板的现状不会被写成目标设计。
+## 导读
 
-## 结论先行
+**解决什么。** 容器的启动和停止、一次工作的开始和结束是两种生命周期。调用方需要知道何时可以接受输入、何时能换装备，以及何时资源和 lease 已经归还。
 
-当前实现里有两套不同的生命周期：
+**设计主线。** 实例先装配，再取得 lease 并恢复 session，激活后接受工作。前台 run 经 admission 串行执行；一个 run 可包含多条 reply，每条 reply 可包含多个 turn 和 attempt。steer 加入当前 reply，followUp 在同一 run 内开启后续 reply。记忆提取与整理走独立通道，不占前台 permit。
 
-1. **Agent 实例生命周期**：创建、恢复、运行、暂停、停止、丢锁。
-2. **一次 run 的生命周期**：接纳工作、生成、执行工具、压缩上下文、结束。
-
-run loop 本身已经形成了一条可解释的主线：同一时刻只执行一个 run；每个 turn 先冻结工作集，再请求模型，再顺序执行工具；`steer` 在当前 turn 后生效，`followUp` 在当前任务结束后、同一 run 内生效；run intake 原子关闭后才发出 `agent_end`。
-
-但公开 API 还没有形成同样清楚的契约。审阅前必须处理或明确接受以下问题：
-
-- `Agent.start()` 表示实例启动，`agent_start` 却表示一次 run 开始；同一个词指两件事。
-- 同一个 `Agent` 类存在两种启动契约：带持久化或状态锁时必须先 `start()`，裸内存 Agent 却可以直接 `prompt()`。
-- `Agent.dispose()` 是公开方法，但直接调用不会释放 `StateLock`；生命周期托管的 Agent 必须走 `stop()`。
-- ~~`toolExecution: "parallel"` 被类型和构造函数接受，实际仍逐个 `await`，是一个假能力。~~ 2026-09-07 已解决：选项删掉，并不并行改由工具自己声明 `concurrent`，见 §4.1。
-- `abort(reason)` 接收原因，但 run 的 `AgentOutcome` 丢失该原因。
-- `agent_end` 发出时 Agent 还没有回到 `idle`；事件名容易让订阅者误判。
-
-前三项影响生命周期边界，后三项是当前公开行为与接口声明不一致。它们不是文档措辞能修好的问题。
+**边界。** 本文不定义共享工作区的文件冲突策略，也不把内部裸 Agent 的测试用法当作另一条产品装配入口。session 布局与会话通信见 [Sessions](sessions.md)，扩展资源归还见 [Extensions](extensions.md)。
 
 ## 术语
 
@@ -71,17 +55,13 @@ stateDiagram-v2
 
 实现状态为 `new | starting | restored | running | pausing | stopping | stopped | lost`，见 [`Agent.phase`](../../packages/core/src/agent.ts#symbol=Agent.phase)。生命周期命令通过同一条 actor chain 串行化，避免 `start / pause / resume / stop` 交错执行，见 [`Agent.enqueueLifecycle()`](../../packages/core/src/agent.ts#symbol=Agent.enqueueLifecycle)。
 
-这个枚举还不是完整状态机。启动失败发生在 acquire 之前时，`phase` 回到 `new`，允许重试；发生在 acquire 之后时，代码同样把 `phase` 写回 `new`，但另设 `startFencedError` 永久拒绝再次启动，见 [`Agent.startInActor()`](../../packages/core/src/agent.ts#symbol=Agent.startInActor) 和 [`Agent.doStart()`](../../packages/core/src/agent.ts#symbol=Agent.doStart)。也就是说，当前实际还存在一个没有进入 `phase` 联合类型的 `new(fenced)` 终态。上图为了不撒谎没有画“启动失败 → New”；发布版要么把 fenced 变成显式 phase，要么把这第二个状态维度写进正式契约。
+这个枚举还不是完整状态机。启动失败发生在 acquire 之前时，`phase` 回到 `new`，允许重试；发生在 acquire 之后时，代码同样把 `phase` 写回 `new`，但另设 `startFencedError` 永久拒绝再次启动，见 [`Agent.startInActor()`](../../packages/core/src/agent.ts#symbol=Agent.startInActor) 和 [`Agent.doStart()`](../../packages/core/src/agent.ts#symbol=Agent.doStart)。也就是说，当前实际还存在一个没有进入 `phase` 联合类型的 `new(fenced)` 终态。因此启动失败后能否重试还取决于 fenced 标记，不能仅凭 phase 判断。
 
-### 1.2 `start()` 到底是不是必需
+### 1.2 启动前置条件
 
-当前答案是：**取决于构造时注入了什么**。
+createEcho 完成装配，调用方随后显式 await echo.start()；模型输入应在启动完成后发送。底层 Agent 在没有 stateLock / session service 时仍允许未 start 直接 prompt，这是内部测试路径，不是受支持的产品入口。
 
-- 注入 `stateLock` 或 session service 后，Agent 进入 lifecycle-managed 模式；未运行时拒绝新工作。判据见 [`Agent.lifecycleManaged`](../../packages/core/src/agent.ts#symbol=Agent.lifecycleManaged) 和 [`Agent.start()`](../../packages/core/src/agent.ts#symbol=Agent.start)。
-- 裸 `new Agent()` 不带这些端口时，可以处于 `new` 阶段直接 `prompt()`；已有测试明确保护这个行为，见 [低层 Agent 在 `new` 阶段接受工作](../../packages/core/test/phases.test.ts#test=低层-agent无锁无-sessionstart-stop-之后acceptswork-与-prompt-一起为假)。
-- `createEcho()` 只完成 Agent 与扩展装配，不自动调用 `agent.start()`；宿主需要显式启动，见 [`createEcho()`](../../packages/core/src/create-echo.ts#symbol=createEcho)。
-
-因此目前不能笼统写“使用 Agent 前必须调用 `start()`”，也不能写“构造后即可 prompt”。如果这是有意保留的两个使用高度，公开文档必须给它们不同的名字或不同入口；靠构造参数暗中改变方法前置条件，调用方很难从类型上看出来。
+实现见 [Agent.lifecycleManaged](../../packages/core/src/agent.ts#symbol=Agent.lifecycleManaged) 与 [createEcho](../../packages/core/src/create-echo.ts#symbol=createEcho)。Agent 类内部化的边界由 [决策记录](../decisions/proposed/2026-09-07-agent-class-internal.md) 管理。
 
 ### 1.3 启动、暂停与恢复
 
@@ -100,15 +80,7 @@ stateDiagram-v2
 
 装配层的 `echo.stop()` 先逆序卸载外部与 builtin extensions，再调用 `agent.stop()`；多次调用共享同一个 promise，见 [`createEcho()`](../../packages/core/src/create-echo.ts#symbol=createEcho)。所以对 `createEcho()` 的使用者，正确的所有权出口是 `echo.stop()`。
 
-当前存在一个已经复现的 API 缺口：`Agent.dispose()` 本身也是 public，但它只执行资源清理，不推进实例 phase，也不释放 `StateLock`；lease release 位于 `stop()`。直接 `dispose()` 后，同一个 `InMemoryStateLock` 的第二次 acquire 返回 `null`。
-
-复现：
-
-```bash
-bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { InMemoryStateLock } from "./packages/core/src/storage/lock.ts"; import { FAKE_MODEL, scriptedStreamFn, textTurn } from "./packages/core/src/testing.ts"; const lock = new InMemoryStateLock(); const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("ok")]), stateLock: lock }); await agent.start(); await agent.dispose(); console.log((await lock.acquire({ holder: "probe-2" })) === null ? "LEASE_STILL_HELD" : "LEASE_RELEASED");'
-```
-
-当前输出：`LEASE_STILL_HELD`。
+内部 Agent.dispose() 只清理资源，不替代 stop() 的相位迁移和 lease 释放。产品必须使用 echo.stop()，不能用 dispose() 代替完整收摊；该公开面限制见 §9。
 
 ## 2. 工作接纳
 
@@ -116,11 +88,11 @@ bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { InMemoryS
 
 | 入口 | 空闲时 | run 中 | 何时消费 | 是否新 run |
 | --- | --- | --- | --- | --- |
-| `prompt()` | 接受 | 同步抛 busy | admission 后立即 | 是 |
+| `prompt()` | 接受 | 拒绝 busy | admission 后立即 | 是 |
 | inbox | 接受或排队 | 排队 | foreground permit 可用时 | 是 |
-| dream | 接受或排队 | 可被 foreground 抢占 | 无 foreground 时 | 是 |
-| `steer()` | 拒绝 | 当前 turn intake 开放时接受 | 当前 turn 关闭后 | 否，进入 inner loop |
-| `followUp()` | 拒绝 | 当前 run intake 开放时接受 | 当前任务完成后 | 否，进入 outer loop |
+| dream / 提取 | 按各自触发条件调度 | 可与前台并行 | 独立记忆通道 | 隔离子循环，不经前台 admission |
+| `steer()` | 拒绝 | 当前 turn intake 开放时接受 | 当前 turn 关闭后 | 否，留在当前 reply |
+| `followUp()` | 拒绝 | 当前 run intake 开放时接受 | 当前任务完成后 | 否，在同一 run 内开新 reply |
 
 判据来自 [`StandaloneRunAdmission`](../../packages/core/src/admission/standalone.ts#symbol=StandaloneRunAdmission)、[`Agent.prompt()`](../../packages/core/src/agent.ts#symbol=Agent.prompt) 和 [`RunIntakeGate`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate)。
 
@@ -130,46 +102,15 @@ Standalone admission 同时只发一个执行许可，按到达顺序发；来�
 
 模型绑定在 admission 时冻结，包括 provider、model snapshot、stream function、key resolver、thinking 和 retry policy，见 [`Agent.modelBinding()`](../../packages/core/src/agent.ts#symbol=Agent.modelBinding)。工具列表不在这里冻结；它按 turn 重新取快照。
 
-需要明确的一项产品选择是：第二个用户 `prompt()` 当前不会排队，而是立即抛 busy；但 inbox 会排队。这个差异已有测试保护，见 [run 中再次 prompt 不排队](../../packages/core/test/invariants.test.ts#test=跑的中途再-prompt-直接-throw不排队也不并发)。文档只能把它写成现状，是否为目标行为需要另行拍板。
+需要明确的一项产品选择是：第二个用户 `prompt()` 当前不会排队，而是立即抛 busy；但 inbox 会排队。这个差异已有测试保护，见 [run 中再次 prompt 不排队](../../packages/core/test/invariants.test.ts#test=跑的中途再-prompt-直接-throw不排队也不并发)。这是已确认的 [第二个 prompt 策略](../decisions/implemented/2026-09-01-second-prompt-policy.md)。
 
 ## 3. 一次 run 的主循环
 
-> **2026-09-05 起本节与 §4 描述的是 2026-08-31 的现状，已被 [Run Loop 的四层](run-loop-layers.md) 取代**：run ⊃ reply ⊃ turn ⊃ attempt，重试归 loop、`maxIterations` 按 reply 计、run 级 `maxReplies`。下文保留作审阅记录，不再维护。
+admission 接受输入后建立 run intake，循环按 run → reply → turn → attempt 执行；失败与中止沿层级返回 outcome。工具调用或 max_tokens 可继续当前 reply，followUp 与 stop hook 可开启下一条 reply。各层事件、预算与重试规则只在 [Run Loop 的四层](run-loop-layers.md) 维护。
 
-```mermaid
-flowchart TD
-    A["admission 接受工作"] --> B["打开 run intake，状态设为 generating"]
-    B --> C["发出 agent_start"]
-    C --> D{"到达 abort / iteration / deadline 边界?"}
-    D -- 是 --> K["确定 terminal outcome"]
-    D -- 否 --> E["必要时 compact"]
-    E --> F["执行一个 turn"]
-    F --> G{"tool_use / max_tokens / steer?"}
-    G -- 是 --> D
-    G -- 否 --> H{"有 followUp?"}
-    H -- 是 --> D
-    H -- 否 --> I{"stop hook 注入继续工作?"}
-    I -- 是，最多 3 次 --> D
-    I -- 否 --> J["原子关闭 run intake"]
-    J --> K
-    K --> L["发出 agent_end"]
-    L --> M["admission ticket settle"]
-    M --> N["状态回到 idle，调度 inbox / dream"]
-```
+### 3.1 Reply 的继续与结束
 
-主实现见 [`runLoop()`](../../packages/core/src/loop/run-loop.ts#symbol=runLoop)。它在每次 turn 边界检查 abort、最大迭代数和 deadline；重试型 provider 错误在循环内重试，一次成功 turn 会重置 retry count。上下文压缩也只发生在 turn 边界（撞窗后的应急压缩是例外：同一条流水线在 turn 失败后跑一次再重跑本 turn），失败只报告诊断，不终止 run，见 [`runCompaction()`](../../packages/core/src/compaction/pipeline.ts#symbol=runCompaction) 与 [Compaction](compaction.md)。
-
-### 3.1 Inner loop 与 outer loop
-
-一个 run 可以包含多个任务，一个任务可以包含多个 turn：
-
-- 模型返回 `tool_use`：工具结果入账，继续 inner loop。
-- 模型因 `max_tokens` 截断：继续 inner loop。
-- turn 关闭时收到 `steer`：把消息加入下一 turn，继续 inner loop。
-- 当前任务稳定结束后有 `followUp`：留在同一 run，继续 outer loop。
-- 没有 follow-up 时，stop hook 最多可以注入三次继续工作；上限由 [`MAX_STOP_CONTINUATIONS`](../../packages/core/src/loop/run-loop.ts#symbol=MAX_STOP_CONTINUATIONS) 硬编码。
-
-这些分支的决策顺序当时在 `decideAfterTurn()`（2026-09-05 已并入 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply)）。顺序本身是行为契约：例如先决定 `tool_use`，再关闭并排空 steer intake，最后才判定任务稳定结束。
+每条 reply 的 turn 预算独立计算，run 另有 reply 数上限。stop hook 的继续次数由 [MAX_STOP_CONTINUATIONS](../../packages/core/src/loop/run-loop.ts#symbol=MAX_STOP_CONTINUATIONS) 限制，作为防止无限继续的保险丝，不是产品可配置项。
 
 ### 3.2 Run intake 的原子边界
 
@@ -179,27 +120,17 @@ run 结束时不是先检查“队列看起来为空”再异步关闭，而是�
 
 ## 4. 一个 turn 的执行顺序
 
-> 现状快照（2026-08-31），已被 [Run Loop 的四层](run-loop-layers.md) §2.3–§2.4 取代；§4.1 的结论已在 2026-09-07 落地。
-
-每个 turn 按以下顺序执行，见 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn)：
-
-1. 冻结本 turn 的工具、已知工具名和 hooks 工作集。
-2. 打开 turn intake，发出 `turn_start`。
-3. 注入本 turn 的动态上下文，执行 context transform 与 before hook。
-4. 转成 provider 输入，获取 API key，发起模型流。
-5. 以 provider 的最终 `done.message` 为权威结果，补齐成对的 message events。
-6. 按响应中的顺序执行工具调用。
-7. 发出 `turn_end`。
+每个 turn 先冻结工具与 hook 工作集，再进入 attempt 循环；每次 attempt 重建上下文并请求模型。只有落地的响应进入工具批执行，最后关闭 turn intake 并交出 steer。完整顺序见 [Run Loop 的四层](run-loop-layers.md) §2。
 
 工具执行路径会在工作集快照里查找工具，准备并冻结参数，运行 pre-hook，执行授权/询问，再调用工具，最后运行 post-hook 并产出 tool result。见 [`runOneTool()`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool)。
 
 工具和 hook 在一个 turn 内稳定；turn 进行中新增或移除的注册，只能在下一个 turn 被看见。这条边界已有判据，见 [本轮中途注册的工具下一轮才可用](../../packages/core/test/seams.test.ts#test=本轮中途注册的工具即使被同一条消息点中也不执行下一轮才可用)。
 
-### 4.1 并行工具：声明制，已实现
+### 4.1 并行工具批
 
-审阅时（2026-08-31）`AgentOptions` 与 `AgentLoopConfig` 都接受 `toolExecution?: "sequential" | "parallel"`，而执行循环固定逐个 `await`，从不读它——公开声明了一个不存在的行为。2026-09-07 拍板并已落地，语义逐条见 [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)（起因记录：[移除还是实现](../decisions/implemented/2026-09-01-tool-execution-parallel.md)）：
+工具是否可以并行由自身的 concurrent 声明决定，取舍见 [并行工具决策](../decisions/implemented/2026-09-07-parallel-tools.md)。
 
-- **`toolExecution` 选项删掉**，并不并行改由工具自己声明 [`ToolBase.concurrent`](../../packages/core/src/tools/types.ts#symbol=ToolBase)（缺省 false = 独占）。
+- 工具自己声明 [`ToolBase.concurrent`](../../packages/core/src/tools/types.ts#symbol=ToolBase)（缺省 false = 独占）。
 - 同一条 assistant 消息里**连续的**可并行调用切成一批同跑，碰到没标的就断批、它自己一批；切批见 [`runTurn()`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 的 `takeBatch`。
 - 批内：`tool_execution_*` 交错（按 `toolCallId` 配对）；**toolResult 入账按 tool_use 出现顺序**，不按完成顺序；授权询问串行（同一时刻只挂一个问）；`preToolUse` / `postToolUse` 每工具各跑一遍，hook 作者不能假设批内顺序。
 - 中止：已起跑的那一批各自收 signal 结束、结果照样入账，剩下的批不跑。
@@ -231,23 +162,15 @@ run 结束时不是先检查“队列看起来为空”再异步关闭，而是�
 | 主动 abort | prompt resolve，outcome 为 `aborted` |
 | 最大迭代或 deadline | 对应 terminal outcome |
 | 工具抛错 | 转成 error tool result，run 可继续 |
-| compaction 失败 | 报告诊断，run 继续 |
+| 自动压缩阶段失败 | 记录诊断并尝试后续策略；撞窗应急仍无法继续时以错误结束 |
 | busy、未启动、已停止等 API 误用 | 方法 reject / throw |
 | listener 或持久化等回调失败 | 尽量规范化为完整 terminal event/result |
 
 `AgentOutcome` 定义见 [`AgentOutcome`](../../packages/core/src/events.ts#symbol=AgentOutcome)，callback failure 的终止规范化见 [`Agent.normalizeAdmittedCallbackFailure()`](../../packages/core/src/agent.ts#symbol=Agent.normalizeAdmittedCallbackFailure)。“provider 错误不让 prompt reject”已有测试，见 [不可重试失败形成 outcome 而非 prompt rejection](../../packages/core/test/invariants.test.ts#test=不可重试的失败-agentend-带结构化-outcomeprompt-不-reject)。
 
-### 6.1 Abort reason 被丢失
+### 6.1 Abort 原因
 
-`Agent.abort(reason)` 把 reason 写进 lifecycle notification，但调用 `AbortController.abort()` 时没有传 reason，见 [`Agent.abort()`](../../packages/core/src/agent.ts#symbol=Agent.abort)。[`runLoop()`](../../packages/core/src/loop/run-loop.ts#symbol=runLoop) 只返回 `{ kind: "aborted" }`；与此同时，`AgentOutcome` 的 aborted 分支明明允许 `reason?: string`。
-
-实际中断探针的结果是：
-
-```text
-ABORT_OUTCOME={"kind":"aborted"}
-```
-
-因此当前调用者无法从 `LoopResult` 知道是谁、为什么中断。审阅结论：要么把 reason 一路保留到 terminal outcome，要么从公开 outcome 类型和 `abort(reason)` 中删除“可观察原因”的暗示；不能维持现在的半条链路。
+Agent.abort(reason) 通过 AbortSignal 把原因传到最终 aborted outcome；裸 abort 可以没有 reason。run deadline 则归为 timeout 错误，不与主动中断混同。行为归属与测试见 [abort reason 决策](../decisions/implemented/2026-09-01-abort-reason.md) 和 [Run Loop 的四层](run-loop-layers.md) §6。
 
 ## 7. 事件、状态投影与持久化
 
@@ -266,19 +189,7 @@ ABORT_OUTCOME={"kind":"aborted"}
 
 run loop 先原子关闭 intake、发出 `agent_end` 并返回；admission ticket settle 之后，Agent 才把公开 status 设回 `idle` 并调度 inbox/dream。顺序见 [`runLoop()`](../../packages/core/src/loop/run-loop.ts#symbol=runLoop) 和 [`Agent.finishRun()`](../../packages/core/src/agent.ts#symbol=Agent.finishRun)。
 
-所以 listener 在处理 `agent_end` 时仍可能看到 `generating`。这在代码里是有意顺序，但事件名容易被理解为“Agent 已经空闲”。
-
-> 已拍板（2026-09-07，[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）并写进正式契约：见 [Run Loop 的四层](run-loop-layers.md) §2.1；下文是审阅时的现状与选项。
-
-实际事件探针的结果是：
-
-```text
-STATUS_AT_AGENT_END=generating
-STATUS_AFTER_PROMPT=idle
-```
-
-- 如果它表示 run event stream 已封口，应改成不会暗示实例状态的名字；或
-- 如果保留 `agent_end`，公开契约必须明确它不构成 `idle` barrier，并提供真正可等待的 barrier。
+监听器处理 agent_end 时仍可能看到 generating。该事件表示 run 事件流封口，不是 idle barrier；顺序由 [Agent.finishRun()](../../packages/core/src/agent.ts#symbol=Agent.finishRun) 完成。等待 prompt()/continue() 返回后再发下一项工作；需要响应自主工作带来的状态变化时订阅状态。命名与边界见 [决策记录](../decisions/implemented/2026-09-01-agent-end-barrier.md)。
 
 ## 8. 哪些由机器守，哪些只是纪律
 
@@ -295,42 +206,19 @@ STATUS_AFTER_PROMPT=idle
 | 并行工具的批边界、结果顺序、询问串行、批中 abort | [同批真的同跑](../../packages/core/test/parallel-tools.test.ts#test=两个-concurrent-工具同批第二个的-toolexecutionstart-在第一个的-toolexecutionend-之前)、[不标就不并行](../../packages/core/test/parallel-tools.test.ts#test=缺省不并行同样两个探针去掉-concurrent就退回-astart-aend-bstart)、[入账按 tool_use 顺序](../../packages/core/test/parallel-tools.test.ts#test=完成顺序倒过来transcript-里-toolresult-仍按-tooluse-顺序)、[询问批内串行](../../packages/core/test/parallel-tools.test.ts#test=同批两个都要-askpendingpermissions-任一时刻-1问的顺序-tooluse-顺序)、[批中 abort 全员入账](../../packages/core/test/parallel-tools.test.ts#test=批中-abort已起跑的各自收-signal-结束每个-tooluse-都有对应的-toolresult记-error) |
 | `echo-coding` 只给只读工具标 `concurrent` | [identity 里的并发名单](../../packages/coding/test/identity.test.ts#test=identity-的工具集与-prompt-与真装出来的-coding-agent-一致漂移即红) |
 
-### 当前只是纪律或描述
+### 人工责任
 
-- 「有副作用 / 出网的工具不要标 `concurrent`」是**纪律**：core 不判断工具做什么，标了就并跑。`echo-coding` 那一份名单有机器判据（下表），别的产品自己负责。
-- `dispose()` 不能作为 lifecycle-managed Agent 的公开停止入口，没有类型限制或防误用测试——2026-09-07 拍板不单独立门：随 `Agent` 类内部化一起消失（[记录](../decisions/rejected/2026-09-01-teardown-entry.md)）。
-- ~~abort reason 应进入 terminal outcome，没有测试。~~ 2026-09-07 已实现并有测试（[记录](../decisions/implemented/2026-09-01-abort-reason.md)）。
-- ~~`agent_end` 与 `idle` 的关系只有实现注释，没有面向订阅者的契约测试。~~ 2026-09-07 已实现（[记录](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。
-- “高层使用必须 start、低层使用可以不 start”只由构造参数隐式决定，没有不同的类型面——2026-09-07 拍板不拆类型面：随 `Agent` 类内部化一起消失（[记录](../decisions/rejected/2026-09-01-start-precondition.md)）。
+工具作者负责判断副作用是否允许并行；core 只执行 concurrent 声明。事件配对和结果顺序的测试不证明工具本身没有并发冲突。
 
-仍是纪律的那两项不能在开源文档中写成“系统保证”，只能标为当前实现限制。
+## 9. 当前限制
 
-## 9. 审阅需要拍板的事项
+- Agent 类内部化尚未完成，裸类仍公开 start / dispose 等内部入口；产品应使用 createEcho 和 echo.stop()，不自行复制前置条件。
+- acquire 后启动失败的 fenced 状态由额外标记表达，phase 本身不足以决定能否重试。
+- 每段 session 的 lease 保护状态根，不解决多个 session 同时修改同一代码工作区的文件冲突。
 
-### 必须在发布前解决（2026-09-07 三项都已拍板，记录见各条）
+这些限制不改变已确认的前台忙时拒绝、abort 原因透传和 agent_end 非 idle barrier 语义。历史探针归档在 [复核记录](../code-review/2026-09-15-doc-probes.md)，不再作为当前缺陷输出维护。
 
-1. ~~**移除或实现 `toolExecution: "parallel"`。** 当前接口假绿，使用者会据此做错误的时延和副作用假设。~~ 2026-09-07 已解决（实现，选项删掉，声明制），见 §4.1 与[记录](../decisions/implemented/2026-09-01-tool-execution-parallel.md)。
-2. ~~**收窄收摊入口。** lifecycle-managed Agent 直接 `dispose()` 会留下 lease。倾向让 `dispose()` 非公开，或让它与 `stop()` 共享同一个完整 single-flight 终止过程。~~ 2026-09-07 否决：不单独改公共面，随 `Agent` 类内部化一起消失（[记录](../decisions/rejected/2026-09-01-teardown-entry.md)）。
-3. ~~**给两种 lifecycle 分开命名。** 至少不能让 `Agent.start()` 与 `agent_start` 各自表示实例和 run 的开始。~~ 2026-09-07 否决，同上（[记录](../decisions/rejected/2026-09-01-lifecycle-naming.md)）。
-
-### 需要产品语义确认（2026-09-07 六项都已拍板，记录见各条）
-
-1. ~~第二个用户 prompt 是 fail-fast，还是像 inbox 一样排队。~~ 拍板保持 fail-fast（「先留着」；壳按 `acceptsWork` 决定输入框状态），[记录](../decisions/implemented/2026-09-01-second-prompt-policy.md)。
-2. ~~`start()` 是否应成为所有 Agent 的统一前置条件；若保留低层直跑，应不应该拆成独立构造入口。~~ 不拍，问题随 `Agent` 类内部化消失（[记录](../decisions/rejected/2026-09-01-start-precondition.md)）。
-3. ~~abort reason 是否是调用者可依赖的终止信息。~~ 是，一路保留到 terminal outcome，已实现（[记录](../decisions/implemented/2026-09-01-abort-reason.md)）。
-4. ~~`agent_end` 是否应成为 idle barrier。~~ 不是：名字保留、公开契约写清它不是 barrier、不另加 barrier API，已实现（[记录](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。
-5. ~~stop hook 最多继续三次是否是产品约束；如果是，应公开并测试，若不是，不应硬编码在 engine。~~ 是保险丝不是约束：留硬编码、不进配置，文档提一句（[记录](../decisions/implemented/2026-09-01-stop-continuation-limit.md)）。
-6. ~~acquire 后启动失败是否应成为显式 `fenced` phase，而不是由 `phase === "new"` 加一个隐藏 latch 共同表达。~~ 不拍，降为内部实现项随内部化一起修（[记录](../decisions/rejected/2026-09-01-fenced-phase.md)）。
-
-### 本轮明确延期
-
-- 多会话同时 coding 的工作区并发模型。
-- state root 的单 writer 是否合理、writer 的粒度应该是什么。
-- 会话分叉、共享工作区和冲突合并。
-
-这些问题会影响实例生命周期的最终设计，但不妨碍先把当前单 Agent run loop 说明白。本稿不把延期理解为已解决。
-
-## 10. 复核命令
+## 10. 验证
 
 主路径测试：
 
@@ -344,7 +232,7 @@ bun test packages/core/test/lifecycle-api.test.ts \
   packages/core/test/invariants.test.ts
 ```
 
-当前全绿。
+测试通过只证明各用例断言的行为。
 
 核实并行工具真的有执行分支和测试：
 
@@ -353,5 +241,5 @@ rg -n --text 'concurrent' packages/core/src/loop packages/core/src/tools/types.t
 bun test packages/core/test/parallel-tools.test.ts
 ```
 
-`takeBatch()` 是唯一读 `concurrent` 的地方，行为判据在 `parallel-tools.test.ts`（当前全绿）。
-`toolExecution` 这个词在源码里应当一处都搜不到。
+`takeBatch()` 是唯一读 `concurrent` 的地方，行为判据在 `parallel-tools.test.ts`。
+运行参数与并行行为以 concurrent 的实现和上述测试为准。

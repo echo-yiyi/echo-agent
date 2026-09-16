@@ -1,32 +1,16 @@
 # Run Loop 的四层：run / reply / turn / attempt
 
-> 状态：已实现（2026-09-05，分支 `worktree-loop-layers`）；四条决策均已拍板，见导读<br>
-> 读者：要改 run loop、订阅事件流做 UI / 观测、或对循环写评测的人<br>
-> 假设已读：[Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) §2–§4 的现状描述。本文只写目标形态；与现状的差异集中在 §7。实现合入后，该稿 §3–§4 指向本文<br>
-> 决策记录（四条，本文只指向，论证在记录里）：[外层单位叫 reply](../decisions/implemented/2026-09-05-reply-layer.md) · [重试归 loop](../decisions/implemented/2026-09-05-retry-owned-by-loop.md) · [失败 attempt 留 transcript](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) · [迭代预算按 reply 计](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)。**相邻但不在本文范围**的已有记录：[abort reason](../decisions/implemented/2026-09-01-abort-reason.md) · [`agent_end` 是否 idle barrier](../decisions/implemented/2026-09-01-agent-end-barrier.md) · [stop hook 三次](../decisions/implemented/2026-09-01-stop-continuation-limit.md) · [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)（`toolExecution` 已删，[来源](../decisions/implemented/2026-09-01-tool-execution-parallel.md)）
+> 读者：修改循环、消费事件流或编写运行评测的人<br>
+> 范围：循环层级、ID、预算、事件顺序、重试与结果传播<br>
+> 状态：当前实现说明；实例的启动与停止见 [Lifecycle](lifecycle-and-run-loop.md)
 
 ## 导读
 
-**解决什么。** 循环里有名字的只有 run（`agent_start / agent_end`）和 turn（`turn_start / turn_end`）。「agent 对一条输入的完整回应」「一次模型请求」「一次重试」都没有名字、没有 ID、没有事件；内层 / 外层只存在于 `inner:` / `outer:` 两个标签里。于是 turn 同时扛着三个意思（一次请求、一次回答、一批工具），重试一发生三个意思就对不齐：同一个 iteration 号发两对 `turn_start / turn_end`；transport 重试与整轮重跑共用一个事件名 `retry_scheduled`、两套计数；撞窗重跑则什么都不发。事件是按实现方便发的，不是按概念边界发的。证据逐条见 §7。
+**解决什么。** 一条输入可能触发多次模型调用，一次调用可能重试，一次执行又可能继续处理追加输入。分层让计数、事件和错误归属保持一致。
 
-**最终形态。** 四层，每层一个名字、一个 ID、一对事件、一个函数：**run ⊃ reply ⊃ turn ⊃ attempt**，tool call 挂在 turn 下。事件只在概念边界发，配对由结构保证而不是靠各分支各自记得补；重试是「同一 turn 的下一个 attempt」这一结构，只有一份预算；内外层写进 `TurnCause` 类型而不是标签；迭代预算按 reply 计，run 级另有 reply 数上限。turn 的定义与 Claude Agent SDK、OpenAI Agents SDK 一致，reply 对应两家的自然单位（§1.1）。
+**设计主线。** run 包含 reply，reply 包含 turn，turn 包含 attempt；工具批在 attempt 落地后、turn 结束前执行。每层负责自己的起止事件，重试只增加 attempt，不增加 turn。预算分别限制 reply 内迭代、run 内回复及 turn 内请求次数。
 
-**Non-Goals（已决，不做）。**
-
-- Agent 实例生命周期（`start / stop / dispose / phase`）：归 [Lifecycle 与 Run Loop](lifecycle-and-run-loop.md) §1 与它的决策记录。
-- 并行工具（工具自己声明 `concurrent`）、stop hook 三次上限、abort reason、`agent_end` 与 idle 的关系：各有记录（见页首），本文的结构让它们更好落，但不替它们拍板；并行工具已按它自己的记录落地，本文只在 §2.3 说批的边界。
-- tool call 内部的授权等待：仍只在 hook 侧（`waiting_permission`）可见，本文不加 loop 事件。
-- 新事件的落盘范围（session 账本存不存 reply / attempt、观测 journal 存哪些）：归观测层与 session 设计。
-- TUI 怎么展示 reply / attempt：归 TUI 设计。
-
-**待拍板。** 四条已各成记录：
-
-1. [外层单位叫 `reply`](../decisions/implemented/2026-09-05-reply-layer.md) —— 拍板 2026-09-05。
-2. [重试归 loop，dialect 不再重试](../decisions/implemented/2026-09-05-retry-owned-by-loop.md) —— 拍板 2026-09-05。
-3. [失败 attempt 的消息留 transcript、投影时丢](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) —— 拍板 2026-09-05。
-4. [`maxIterations` 按 reply 计，run 级加 `maxReplies`](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md) —— 拍板 2026-09-05（条件「run 级 reply 上限」已纳入）。
-
-**验收判据（机器可判）。** 在 `packages/core/test/` 下新增 `loop-layers.test.ts`（随实现一起提交），对下列每种 run 用同一个栈式校验器扫事件流：只有文本、要工具、transport 错误后成功、退避中 abort、退避中 deadline、撞窗应急后成功、`contextBeforeBuild` block、工具执行中 abort、**轮首 abort（零 attempt 的 turn、零 turn 的 reply）**、run 超时、followUp、stop hook 注入、`shouldStopAfterTurn`、从 transcript 续跑、reply 数达上限。校验器只看 loop 事件（`agent_* / reply_* / turn_* / attempt_* / message_* / tool_execution_* / compaction_* / retry_scheduled / usage`），`queue_update` 与 `resource_changed` 不参与排序规则。断言：① `agent / reply / turn / attempt` 四层 start / end 成对且严格嵌套，run 内至少一条 reply，reply 可零 turn、turn 可零 attempt（§5 规则 1）；② assistant 的 `message_start / message_end` 与 `usage` 只出现在 attempt 内，`tool_execution_*` 与 toolResult 的 `message_end` 只出现在 `attempt_end{landed}` 之后、同一 turn 内；③ `retry_scheduled` 只出现在同一 turn 的 `attempt_end{failed}` 之后，其后是下一个 `attempt_start`，或退避被 abort / deadline 打断时的 `turn_end{aborted}`；④ `turnId` 在一个 run 内唯一，其 n 在每条 reply 内从 1 起、每个 turn 加 1（重试不消耗）；⑤ 输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`，或轮首硬闸命中时直接 `reply_end`。另断言：失败 attempt 之后的 provider 请求不含那条失败消息；provider 持续返回 retryable 错误时一个 run 的请求总数 = `maxAttempts`；reply 数达 `maxReplies` 且仍有待办 → `agent_end{error, code: "max_replies"}` 且未吸收的消息经 `queue_dropped` 报出，达上限但无待办 → `completed`；异常路径下进程不被 deadline timer 撑住。现有 `bun test packages/core` 全绿。
+**边界。** 本文不定义 provider 的线协议或 TUI 展示。命名与取舍见 [reply](../decisions/implemented/2026-09-05-reply-layer.md)、[重试](../decisions/implemented/2026-09-05-retry-owned-by-loop.md)、[失败消息](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md)、[迭代预算](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)。
 
 ## 1. 术语
 
@@ -37,26 +21,17 @@
 | **run** | 一次 admission 到 `agent_end`。可含多条 reply | 进程存活期；一次用户输入 |
 | **reply** | agent 对**一条输入**的完整回应。输入来自 prompt、followUp、stop hook 注入之一，或从 transcript 续跑；steer **不**开新 reply，它并入正在进行的这条 | 一条 assistant 消息；一次模型请求 |
 | **turn** | reply 里的一次迭代：调一次模型、处理它落地的响应及其工具批。一个 turn **至多一条落地的** assistant 消息 | 一条消息（Messages API 的 turn）；一整个回答 |
-| **attempt** | turn 里的**一次模型请求**：一次完整的上下文构建 + 一次 `streamFn`。重试 = 同一 turn 的下一个 attempt | dialect 内部的 HTTP 重试（目标形态下不存在，§6） |
+| **attempt** | turn 里的**一次模型请求**：一次完整的上下文构建 + 一次 `streamFn`。重试 = 同一 turn 的下一个 attempt | dialect 内部的 HTTP 重试（本仓不在 dialect 内重试，见 §6） |
 | **tool call** | 落地消息里一个 toolUse 块从被识别到 toolResult 入账，含找工具、修参、hook、授权等待、执行 | 只是 `tool_execution_start / end` 那一段 |
 | **落地（landed）** | 一个 attempt 的定稿被采纳：进 transcript 并交给 reply 判决。失败 / block / abort 的 attempt 不落地 | — |
 
-**ID 与计数。** `runId`（现状）；`replyId = ${runId}/${k}`，k 按 run 从 1 起；`turnId = ${replyId}#${n}`，n 按 **reply** 从 1 起、每个 turn 加 1，**重试不消耗**；`shouldStopAfterTurn` / `prepareNextTurn` 收到的 `iteration` 就是这个 n，不另设计数器；attempt 用 `(turnId, attempt)` 二元组，attempt 按 turn 从 1 起。turnId 由 loop 产生、随事件带出，permission 与观测都引用它，不再各自拼一套（§7）。
+**ID 与计数。** `runId`；`replyId = ${runId}/${k}`，k 按 run 从 1 起；`turnId = ${replyId}#${n}`，n 按 **reply** 从 1 起、每个 turn 加 1，**重试不消耗**；`shouldStopAfterTurn` / `prepareNextTurn` 收到的 `iteration` 就是这个 n，不另设计数器；attempt 用 `(turnId, attempt)` 二元组，attempt 按 turn 从 1 起。turnId 由 loop 产生、随事件带出，permission 与观测都引用它，由同一套 ID 函数生成。
 
 **预算。** `maxIterations` 是每条 reply 的 turn 上限；`maxReplies` 是每个 run 的 reply 上限。两者都是硬闸，命中都以 `error` 收场（`max_iterations` / `max_replies`）。`timeoutMs` 仍是可选的墙钟，不承担总闸。
 
-### 1.1 与其他 SDK 的对照
+### 1.1 术语边界
 
-| 概念 | 本设计 | Claude Agent SDK | OpenAI Agents SDK |
-|---|---|---|---|
-| 一次模型调用 + 它的工具 | turn | turn（`maxTurns` = "tool-use round trips"） | turn（loop 一圈；`max_turns`） |
-| 对一条输入的完整回应 | reply | 一条 `result` 消息（`num_turns` 等） | **run**（`Runner.run()` = "a single logical turn in a chat conversation"） |
-| 多条输入共用执行上下文 | run | 一次 `query()`（streaming input） | 无；对话靠 `to_input_list()` 串 |
-| 一次请求 | attempt | 不暴露 | `raw_responses` 每次 model call 一个 |
-| 重试 | attempt k → k+1，事件可见 | 不暴露 | 不暴露 |
-| 迭代预算的作用域 | 每条 reply | 每次 query（`maxTurns`） | 每次 run（`max_turns`） |
-
-三点：turn 三家一致，但 Anthropic 的 Messages API 里 turn 指**一条消息**，同一家两个意思，所以本仓必须在代码里定义；**OpenAI 的 run 是本设计的 reply**，从那边来的读者会撞名；attempt 两家都不暴露，本仓暴露它是因为观测是产品目标。
+本仓的 run、reply、turn、attempt 以本节和 [术语表](../../CONTEXT.md) 为准，不根据其他 SDK 的同名字段推断。尤其不要用“一条消息”代替 turn，或用“一次 HTTP 请求”代替整条 reply。
 
 ## 2. 边界
 
@@ -65,7 +40,7 @@
 ### 2.1 run
 
 - **开**：admission 通过，[`RunIntakeGate.openRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openRun) 与 `agent_start`。
-- **关**：intake 关门（[`tryCloseRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.tryCloseRun) 或 [`closeRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.closeRun)）→ `agent_end`。**`agent_end` 是 run 事件流的封口，不是 idle barrier**：它发出时 admission ticket 还没 settle，监听器里读到的 `status` 仍是 `generating`；要等空闲，等 `prompt()` / `continue()` 的 resolve（那就是 barrier），或订阅 `onChange` 看状态变化。不另设 barrier API（[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。**关门三件事（清 deadline timer、`closeRun`、`agent_end`）在 `finally` 里**，任何异常路径都走（§8 第二个探针）。
+- **关**：intake 关门（[`tryCloseRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.tryCloseRun) 或 [`closeRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.closeRun)）→ `agent_end`。**`agent_end` 是 run 事件流的封口，不是 idle barrier**：它发出时 admission ticket 还没 settle，监听器里读到的 `status` 仍是 `generating`；要等空闲，等 `prompt()` / `continue()` 的 resolve（那就是 barrier），或订阅 `onChange` 看状态变化。不另设 barrier API（[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。**关门三件事（清 deadline timer、`closeRun`、`agent_end`）在 `finally` 里**，任何异常路径都走（验证见 §8）。
 - **reply 之间**，按序：
   1. 上一条 reply 是被 `shouldStopAfterTurn` 叫停的 → 直接关门（不 drain、不问 stop hook）。
   2. reply 数 < `maxReplies`：drain followUp 有货 → 新 reply（`follow_up`）；没货 → 问 stop hook，block 且注入次数未到上限 → 新 reply（`stop_hook`）。**stop hook 最多把 agent 拉回来 3 次**（[`MAX_STOP_CONTINUATIONS`](../../packages/core/src/loop/run-loop.ts#symbol=MAX_STOP_CONTINUATIONS)），第 4 次 block 被忽略、run 照常关门。这是防死循环的保险丝，不是产品契约、不进配置（[决策](../decisions/implemented/2026-09-01-stop-continuation-limit.md)）。
@@ -89,13 +64,13 @@
 ### 2.4 attempt
 
 - **开**：`attempt_start`。
-- **内容**：压缩投影 → 每轮注入 → `transformContext` → `contextBeforeBuild`（block 则结果 `blocked`，不调模型）→ `convertToLlm` → 取 key → `streamFn` → 消费流（`message_start / message_update`）→ 定稿入 transcript（`message_end`、`usage`）。
+- **内容**：压缩投影 → attempt 注入 → `transformContext` → `contextBeforeBuild`（block 则结果 `blocked`，不调模型）→ `convertToLlm` → 取 key → `streamFn` → 消费流（`message_start / message_update`）→ 定稿入 transcript（`message_end`、`usage`）。
 - **每个 attempt 完整重建。** 同一 turn 内重试时，`getTurnInjections`、`transformContext`、`contextBeforeBuild`、`convertToLlm`、`getApiKey` **每个 attempt 各调一次**。这是有意的：两次 attempt 之间上下文可能已被应急压缩改过，短命 key 可能已过期。代价是这些回调的契约要补一句「同一 turn 内可能被多次调用，有副作用的实现自己去重」。方言层不再自带重试（`packages/core/src/provider/dialect.ts` 只剩 `RetryPolicy` 类型）。
 - **关**：`attempt_end{result}`。定稿的 `stopReason` 决定 `result.kind`：`end_turn / tool_use / max_tokens` → `landed`；`error` → `failed`；`aborted` → `aborted`。
 
 ### 2.5 tool call
 
-[`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool) 的跨度从落地消息的 `message_end` 到 toolResult 的 `message_end`；`tool_execution_start` 只标记执行阶段开始，它前面的找不到 / 修参失败 / hook 拦 / 授权拒等出口只走 hook notify（见 Non-Goals）。
+[`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool) 的跨度从落地消息的 `message_end` 到 toolResult 的 `message_end`；`tool_execution_start` 只标记执行阶段开始，它前面的找不到 / 修参失败 / hook 拦 / 授权拒等出口只走 hook notify；对应观测事实见 [Observability](observability.md) §7。
 
 ## 3. 类型与事件
 
@@ -135,7 +110,7 @@ export type LoopLayerEvent =
   | { type: "retry_scheduled"; turnId: string; attempt: number; maxAttempts: number; delayMs: number; cause: string };
 ```
 
-不改的：`agent_start / agent_end`、`message_*`、`tool_execution_*`、`compaction_*`、`usage`、`queue_update`、`resource_changed`。`ProviderEvent` 里的 `retry` 变体删除（§6）。`AgentError` 的 `code` 新增 `"max_replies"`。
+其他事件包括：`agent_start / agent_end`、`message_*`、`tool_execution_*`、`compaction_*`、`usage`、`queue_update`、`resource_changed`。provider 不另外发一套重试事件；reply 上限错误码是 max_replies。
 
 ## 4. 函数与归属
 
@@ -157,13 +132,13 @@ run-turn.ts
 | `runTurn` | `turn_start / turn_end`、`retry_scheduled`、toolResult 的 `message_end`、`tool_execution_*` | `openTurn` / `closeTurn` | 重试预算、撞窗应急 |
 | `runAttempt` | `attempt_start / attempt_end`、assistant 的 `message_*`、`usage` | — | `contextBeforeBuild` 的 block |
 
-原先 `decideAfterTurn` 的四步归 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply)；原先的 `ContextBuildBlocked` 异常不再存在，是 [`runAttempt`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt) 返回的 `AttemptResult.blocked`。压缩器仍由 `runLoop` 建一次，经 deps 传给下面两层。
+reply 内的继续判决归 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply)；context block 由 [`runAttempt`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt) 返回的 `AttemptResult.blocked`。压缩器仍由 `runLoop` 建一次，经 deps 传给下面两层。
 
 ## 5. 事件排序
 
 规则三条：
 
-1. **四层成对且严格嵌套；允许空层。** run 内至少一条 reply；reply 内**可以零 turn**——输入吸收之后轮首硬闸就命中（abort / deadline / `max_iterations`，§6 那一行）；turn 内**可以零 attempt**——`turn_start` 之后、发请求之前被 abort。消费者按栈配对消费永远成立；「取 turn 的最后一个 attempt」「按 attempt 数算重试率」这类非空假设不成立。（2026-09-08 review 放宽：此前写「每层至少一对」，而 §6 的轮首硬闸行自己就承认 n=0，普通用户 Ctrl-C 落在 `turn_start` 期间就能造出零 attempt 的 turn；为满足文档去造一对假的 attempt 事件不如把话说准。）
+1. **四层成对且严格嵌套；允许空层。** run 内至少一条 reply；reply 内**可以零 turn**——输入吸收之后轮首硬闸就命中（abort / deadline / `max_iterations`，§6 那一行）；turn 内**可以零 attempt**——`turn_start` 之后、发请求之前被 abort。消费者按栈配对消费永远成立；「取 turn 的最后一个 attempt」「按 attempt 数算重试率」这类非空假设不成立。
 2. **输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`**（轮首 `maybeCompact()` 触发时插在这里）；轮首硬闸在吸收之后就命中时没有 `turn_start`，紧接着是 `reply_end`（规则 1 的零 turn reply）。prompt / followUp / stop hook 的在 `reply_start` 之后；steer 的在上一个 `turn_end` 之后。
 3. **失败不破配对。** 失败 attempt 的 assistant 消息照常 `message_start … message_end`，随后 `attempt_end{failed}`；只是不落地。
 
@@ -199,9 +174,9 @@ agent_end{completed}
 
 ## 6. 重试与失败
 
-**attempt 是唯一的重试单位。** dialect 只做协议翻译：一次请求、一条流、流断了就以 `error` 收场并标 `retryable`；它自己不重试，`ProviderEvent.retry` 删除。压缩摘要器的模型调用（[`modelCallFor`](../../packages/core/src/compaction/pipeline.ts#symbol=modelCallFor)）不是 attempt，但同一份 `retryPolicy`、同一个受 signal 管的退避（[`loop/backoff.ts`](../../packages/core/src/loop/backoff.ts#symbol=sleep)）：retryable 错误重试到 `maxAttempts`，只发 hook 侧的 `modelCallFailed` / `retryScheduled`，不发 loop 事件（它不在任何 turn 里）。重试由 `runTurn` 按 `retryPolicy` 做：`retryable && attempt < maxAttempts` → `retry_scheduled` → `backoffMs(attempt)` → 下一个 attempt（完整重建，§2.4）。撞窗（`context_overflow`）→ 应急压缩一次 → 下一个 attempt；压不动 → `failed`。hook 侧 `modelCallFailed`（每次 `attempt_end{failed}`）与 `retryScheduled`（每次 `retry_scheduled`）由 `runTurn` 在同一位置 notify，attempt 计数与事件一致——现状这两个通知**没有任何发送点**（§7）。
+**attempt 是唯一的重试单位。** dialect 只做协议翻译：一次请求、一条流、流断了就以 `error` 收场并标 `retryable`；它自己不重试，`ProviderEvent.retry` 删除。压缩摘要器的模型调用（[`modelCallFor`](../../packages/core/src/compaction/pipeline.ts#symbol=modelCallFor)）不是 attempt，但同一份 `retryPolicy`、同一个受 signal 管的退避（[`loop/backoff.ts`](../../packages/core/src/loop/backoff.ts#symbol=sleep)）：retryable 错误重试到 `maxAttempts`，只发 hook 侧的 `modelCallFailed` / `retryScheduled`，不发 loop 事件（它不在任何 turn 里）。重试由 `runTurn` 按 `retryPolicy` 做：`retryable && attempt < maxAttempts` → `retry_scheduled` → `backoffMs(attempt)` → 下一个 attempt（完整重建，§2.4）。撞窗（`context_overflow`）→ 应急压缩一次 → 下一个 attempt；压不动 → `failed`。hook 侧 `modelCallFailed`（每次 `attempt_end{failed}`）与 `retryScheduled`（每次 `retry_scheduled`）由 `runTurn` 在同一位置 notify，attempt 计数与事件一致。
 
-**失败消息的去向。** 失败 attempt 的定稿进 transcript（`stopReason: "error"`，与现状同），`convertToLlm` 投影时丢掉 `stopReason === "error"` 的 assistant 消息——它不是模型说过的话，不该作为上文送回去。现状没有这道过滤（§7）。
+**失败消息的去向。** 失败 attempt 的定稿进 transcript（stopReason: error），`convertToLlm` 投影时丢掉 `stopReason === "error"` 的 assistant 消息——它不是模型说过的话，不该作为上文送回去。
 
 **outcome 自内向外传，外层不发明内层没报的结果**：
 
@@ -213,53 +188,26 @@ agent_end{completed}
 | failed（终） | `failed` | `error` | `error` |
 | blocked | `blocked` | `aborted{reason}` | `aborted{reason}` |
 | aborted（调用方 signal） | `aborted` | `aborted{reason}` | `aborted{reason}` |
-| aborted（deadline signal） | `aborted` | `error{timeout}`（reply 区分两个 signal，现状同） | `error{timeout}` |
+| aborted（deadline signal） | `aborted` | `error{timeout}`（reply 区分两个 signal） | `error{timeout}` |
 
 **abort 的 reason 一路带到 outcome**（[决策](../decisions/implemented/2026-09-01-abort-reason.md)）：`Agent.abort(reason)` 把 reason 装进 `AbortSignal.reason`（[`AbortReason`](../../packages/core/src/errors.ts#symbol=AbortReason)——必须是 `AbortError` 形状的 `DOMException`，provider 靠 `name` 识别「被中止」，裸字符串会被当成别的错误），reply 在收场时从调用方 signal 取回，落在 `agent_end` 与 `LoopResult` 的 `{ kind: "aborted", reason }` 里。宿主传的 reason 是自由字符串原样透传；core 自己发起的中断用 [`ABORT_REASON`](../../packages/core/src/errors.ts#symbol=ABORT_REASON) 里的常量：`lease-lost`（丢锁）、`dispose`（收摊）。没给理由的裸 `abort()` 与 admission 的抢占 / 收摊仍是不带 reason 的 `{ kind: "aborted" }`；run 超时不是 aborted，是 `error{timeout}`。
 | — | — | 轮首硬闸：`aborted` / `error{max_iterations}` / `error{timeout}` | 同 reply |
 | — | — | — | reply 之间：达 `maxReplies` 且仍有待办 → `error{max_replies}` |
 
-## 7. 落地记录（2026-09-05 的现状 → 目标）
+## 7. 使用边界
 
-左栏是写这份设计时的现状，**已全部按右栏落地**（2026-09-08 逐行复核）；表留作迁移记录，读现状看 §2–§5。与表里写的三处出入：block 用例的事件序列断言落在 `packages/core/test/loop-layers.test.ts`，`prompt.test.ts` 的用例仍只断 outcome；失败定稿的投影丢弃在 `packages/core/src/messages.ts`（不是 `message-shape.ts`），且范围是 `stopReason` 为 `error` 或 `aborted`（2026-09-07 修订）；压缩摘要器自带的重试环（`packages/core/src/compaction/pipeline.ts`）是独立模型调用、只发 hook 事件，不是 turn 的 attempt。
+- start / end 成对不表示各层非空：消费者必须处理零 turn 的 reply 与零 attempt 的 turn。
+- agent_end 只封口 run 事件流；调用方要等 prompt/continue 返回，或观察状态变化，再判断能否发起新工作。
+- attempt 回调可能在同一 turn 内多次执行，带副作用的 transform、取 key 或注入函数必须自行处理重复调用。
+- 主循环的迭代上限不等同于墙钟超时，工具和 provider 还需遵守 signal。
+- 存入 transcript 的失败响应不参与后续模型上下文；离线分析账本时应读取 stopReason。
 
-| 现状（2026-09-05） | 目标（已落地） | 影响面 |
-|---|---|---|
-| [`runTurn`](../../packages/core/src/loop/run-turn.ts#symbol=runTurn) 每次重跑都发一对 `turn_start / turn_end`，同一 `iteration`；[`openTurn`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openTurn) 为此专门顺延上一 turn 的 steer | 一个 turn 一对事件；重跑是 attempt；`openTurn` 的顺延分支删除 | 事件消费者：`agent.ts`、`memory/dream.ts`、`memory/harness.ts`、`observability/agent-events.ts`；10 个测试文件 |
-| `turn_end` 在工具批之后立即发，早于 `decideAfterTurn`（已删）里的 `closeTurn` | `closeTurn` 之后发；gate 与事件边界重合 | 同上 |
-| turn 事件带 `iteration`，turnId 另算 | 事件只带 `turnId`，其 n 即 iteration | `memory/dream.ts`、`memory/harness.ts`、`observability/agent-events.ts` 读 `event.iteration` 的地方 |
-| turnId **两套格式**：loop 给 permission 的是 `${runId}#${iteration}`；`agent.ts` 与 `observability/agent-events.ts` 给观测 scope 的是自己拼的 `t${iteration}` | 一个 `turnId = ${replyId}#${n}` 由 loop 产、随事件带，permission 与观测都用它 | `permission/types.ts`（只当不透明字符串用，无解析）、`observability/agent-events.ts`、`agent.ts` 的观测 scope 供给 |
-| `ContextBuildBlocked`（已删）用异常出 `runTurn`，`turn_start` 发了、`turn_end` 没发（探针见 §8） | `AttemptResult.blocked`，配对由结构成立 | `packages/core/test/prompt.test.ts` 的 block 用例要加事件序列断言 |
-| [`runLoop`](../../packages/core/src/loop/run-loop.ts#symbol=runLoop) 无 `try / finally`：`runTurn` 抛出时 deadline timer 不清、`closeRun` 不调（探针见 §8） | 关门三件事在 `finally` | — |
-| `iteration -= 1` 记账重试；`maxIterations` 按 run 计 | attempt 计数；`maxIterations` 按 reply 计，run 级加 `maxReplies` | `shouldStopAfterTurn` / `prepareNextTurn` 的 `iteration` 变为 reply 内计数；`AgentOptions` 与 `AgentLoopConfig` 新增 `maxReplies` |
-| 重试两层：`packages/core/src/provider/dialect.ts` 读 `retry.maxAttempts` 重试，`runLoop` 再按同一个 `retryPolicy` 整轮重跑；最坏 3 × (1 + 3) = 12 次请求；dialect 重试是同一份请求体重发 | 只有 `runTurn` 一层，最多 `maxAttempts` 次；每个 attempt 完整重建上下文 | dialect 的重试段与 `ProviderEvent.retry`；`packages/core/test` 里的重试用例；`transformContext` / `getTurnInjections` / `contextBeforeBuild` 的实现者（同一 turn 内会被多次调用） |
-| 撞窗重跑不发任何重试事件 | 是下一个 attempt，`attempt_end{failed} → compaction_* → attempt_start` | — |
-| `retry_scheduled` 两个意思（dialect 内 / 整轮），字段 `attempt` 两套计数 | 一个意思，`attempt` 是即将开始的那个 | 同上 |
-| 失败 attempt 的定稿进 transcript 且被投影送回模型 | 进 transcript，投影丢 `stopReason === "error"` | `packages/core/src/message-shape.ts` |
-| hook 侧 `modelCallFailed` / `retryScheduled` 声明了但无发送点 | `runTurn` 在 attempt 边界发 | hook 订阅者 |
-| prompt 的 `message_end` 早于 `agent_start`（[`runAgentLoop`](../../packages/core/src/loop/run-loop.ts#symbol=runAgentLoop) 先 push 再进 `runLoop`） | 在 `reply_start` 之后吸收 | 按 run 分组事件的观测侧 |
-| 内层 / 外层是 `inner:` / `outer:` 标签，settle 与 followUp 吸收不发事件 | `reply_*` 与 `TurnCause` | — |
+## 8. 验证
 
-## 8. 复核
-
-`contextBeforeBuild` block 时四层仍配对（回归探针）：
-
-```bash
-bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { HookRuntime } from "./packages/core/src/hooks/runtime.ts"; import { FAKE_MODEL, scriptedStreamFn, textTurn } from "./packages/core/src/testing.ts"; const h = new HookRuntime(); h.on("contextBeforeBuild", () => ({ decision: "block", reason: "NO" })); const a = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("x")]), hooks: h }); const ev: string[] = []; a.subscribe((e) => { ev.push(e.type); }); await a.prompt("go"); console.log(ev.join(","));'
-```
-
-应打印 `agent_start,reply_start,message_end,turn_start,attempt_start,attempt_end,turn_end,reply_end,agent_end`（2026-09-08 实测）：四层各自成对，输入在 `reply_start` 之后吸收。落地前这里是 `message_end,agent_start,turn_start,agent_end`。
-
-`runTurn` 抛出时 deadline timer 不撑住进程（回归探针）：
-
-```bash
-bun -e 'import { Agent } from "./packages/core/src/agent.ts"; import { FAKE_MODEL } from "./packages/core/src/testing.ts"; const boom = (() => { throw new Error("BOOM"); }) as any; const a = new Agent({ model: FAKE_MODEL, streamFunction: boom, timeoutMs: 8000 }); const r = await a.prompt("go"); console.log(r.outcome.kind, "logic done — process should exit now");'
-```
-
-应打印 `error logic done — process should exit now` 后立即退出（2026-09-08 实测 0.04s；timer 在 `finally` 里清）。落地前进程会再挂 8 秒。
-
-主路径回归：
+loop-layers 测试使用栈式校验器检查四层嵌套、输入入账位置、失败配对、重试计数和工具结果顺序。覆盖正常文本、工具批、重试、block、abort、deadline、followUp 与 reply 预算路径；其断言不扩展到任意第三方工具的副作用。
 
 ```bash
 bun test packages/core/test/loop-layers.test.ts packages/core/test/invariants.test.ts packages/core/test/intake.test.ts packages/core/test/prompt.test.ts packages/core/test/compaction.test.ts
 ```
+
+历史变更前后的探针见 [复核记录](../code-review/2026-09-15-doc-probes.md)。本文只维护当前事件契约，不保留旧实现对照表。

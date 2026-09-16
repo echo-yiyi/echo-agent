@@ -1,27 +1,25 @@
 # 上下文压缩（Compaction）
 
-> 状态：已实现（2026-09-02）<br>
+> 状态：当前实现说明；估算与摘要质量的限制见 §9<br>
 > 读者：要调压缩参数、换一套压缩策略、写自己的压缩 extension，或排查「模型为什么看不到那一段」的人<br>
 > 假设已读：[Context 与 Message Flow](context-and-message-flow.md) 的术语表——transcript、working context、provider context、projection 在本文按那里的含义用<br>
 > 决策记录（六条，本文只指向，不复述论证）：[策略是 extension](../decisions/implemented/2026-09-02-compaction-as-extension.md) · [状态是视图](../decisions/implemented/2026-09-02-compaction-state-is-a-view.md) · [四段阶梯与应急](../decisions/implemented/2026-09-02-compaction-ladder.md) · [摘要的送模形态](../decisions/implemented/2026-09-02-compaction-summary-message.md) · [阈值以 usage 为准](../decisions/implemented/2026-09-02-compaction-threshold.md) · [手动压缩与状态面](../decisions/implemented/2026-09-02-compaction-manual-and-state.md)
 
 ## 导读
 
-**解决什么。** 长会话会超出模型窗口。2026-09-02 之前的 `maybeCompact()` 只把摘要写进 session、不缩短送模上下文，而且两个产品都没接它——长会话最后一律撞 `context_overflow`、run 以 error 收场。
+**解决什么。** 在长会话接近上下文窗口时，缩小下一次请求，同时保留可追溯的完整账本。
 
-**最终形态。** transcript 与 session 账本永远全量原文；压缩是一个作用在 transcript 上的**视图状态**（哪些段被摘要 / 省略、旧工具结果清到哪），送模前才投影。策略（怎么选段、怎么摘要）是 **extension**：core 只拥有状态、校验、投影、流水线、事件与落盘；`echo:compaction` builtin 注册缺省的四段阶梯（tool-results → collapse → summary → snip）和 `transcript_read` 工具，产品或第三方经同一个 `AgentCompaction` registry 换策略，装卸在轮边界生效。触发以 provider 报的 usage 为基准；撞窗后同一条流水线应急一次；`/compact` 走同一条流水线。
+**设计主线。** transcript 和 session entry 保留原文，CompactionState 描述摘要、省略与工具结果清理范围；发送模型前按状态投影。core 拥有校验、状态和流水线，extension 提供压缩策略，自动、手动与撞窗应急复用同一机制。
 
-**Non-Goals（已决，不做）。**
+**边界。**
 
 - tokenizer 级精确计数：估算永远是「usage 基准 + 尾巴字符估」，不绑定任何厂商 tokenizer。
-- 从摘要往 memory 提取：记忆的写入仍归 memory 工具与 dream。
+- 记忆的提取与写入归 [Memory](memory.md)，压缩流水线不另建记忆写入通道。
 - 压缩视图在 UI 怎么展示：TUI 只显示上下文占用与 `/compact` 结果，账本视图归 TUI 设计。
 - 分支会话、跨会话引用。
-- 厂商 cache 编辑接口（Claude Code 的 microcompact 靠它零成本改前缀）：本仓的 tool-results 清理按批触发、两次触发之间字节不动，用普通 prefix cache 就够。
+- 不依赖厂商专属 cache 编辑接口；本仓只控制投影字节，命中与计费由 provider 决定。
 
-**待拍板。** 无。六项决策已拍（2026-09-02），见决策记录。
-
-**验收判据（机器可判）。** `bun test packages/core/test/compaction.test.ts` 全绿，其中：触发后紧接着的 provider 请求不含被覆盖原文、含摘要；切点永远不落在 tool_use 与 tool_result 之间；压完下一轮不重复压；撞窗应急一次、第二次按 error 收场；压缩后立即续跑与重启恢复后续跑，送模消息逐字节相同；extension 装卸后下一轮即生效；没有阶段时不压、撞窗直接 error。
+验证入口见 §9；摘要质量与模型是否正确利用摘要不由结构测试证明。
 
 ## 1. 不变量
 
@@ -101,22 +99,22 @@ system                       不变，每 run 装配一次，不含摘要
 | --- | --- |
 | 阶段抛错 | 诊断 + 跳过该段，run 继续 |
 | auto 跑完没压动 | 诊断，本轮照常发（超窗由 provider 报错兜底 → 走 overflow） |
-| overflow 没压动 / 第二次撞窗 | run 以 `context_overflow` error 收场（与 2026-09-02 之前相同） |
+| overflow 没压动 / 第二次撞窗 | run 以 `context_overflow` error 收场 |
 | 没有任何阶段 | auto 静默不压；overflow / manual 直接按上面两条 |
 | `preCompact` block | 这次不压，三种 reason 都尊重 |
 
 ## 5. 缺省阶梯：`echo:compaction`
 
-实现见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages)。参照 Claude Code 的 microcompact → snip → collapse → auto compact 与 reactive compact 改成本仓形态：
+实现见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages)。各阶段作用如下：
 
 | order | 阶段 | 只在 | 做什么 | 模型调用 |
 | --- | --- | --- | --- | --- |
 | 10 | `tool-results` | 三种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`） | 0 |
 | 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；`used ≤ goal` 就停；一次最多 8 段 | 每段 1 次 |
 | 30 | `summary` | 三种 | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
-| 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`）——总好过再撞一次窗 | 0 |
+| 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`），作为有损的应急保底 | 0 |
 
-**摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，措辞与节名都是自己写的）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节：goal、ground rules、touched files、failures and fixes、findings、the user's messages（逐字）、open work、in progress、resume with；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。
+**摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，由本模块维护）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节：goal、ground rules、touched files、failures and fixes、findings、the user's messages（逐字）、open work、in progress、resume with；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。
 
 **框定**：`frameFull()` 给整段摘要加来历（这段对话被压缩过）、范围（`#0–#k`）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
 
@@ -170,7 +168,7 @@ void echo;
 
 ## 7. 产品用法
 
-- 缺省什么都不用接：`createEcho()` / `createAgent()` 装出来的 agent 自带四段阶梯、应急、`/compact`、`transcript_read`。
+- 缺省什么都不用接：createEcho 的缺省装配带压缩阶梯、应急与 transcript_read；壳通过运行时接 /compact。
 - 调参：`createEcho({ agent: { compaction: { reserveTokens, keepRecentTokens, sectionTokens, keepRecentToolResults } } })`，形状见 `CompactionOptions`。
 - TUI：`/compact [指令]` 调协议 `AgentRuntime.compact()`，结果如实显示（压了哪些阶段 / 没什么可压 / 被拒）；状态栏在 `contextTokens` 与 `model.capabilities.contextWindow` 都有时显示「上下文 12k/262k (5%)」。
 - 状态：`AgentState.compaction`（视图状态）与 `AgentState.contextTokens`（每轮 usage、压缩后估算）；`reset()` 都归零。
@@ -181,7 +179,14 @@ session entry：`{ kind: "compaction", at, reason, compaction: CompactionState }
 
 判据：压缩后立即续跑与重启恢复后续跑，下一次 provider 请求的 messages 深度相等（`at` 在投影时剥掉，所以逐字节相同）。
 
-## 9. 复核命令
+## 9. 当前限制与验证
+
+- token 估算与校准不是精确 tokenizer，也不是严格上界；窗口错误仍可能由 provider 返回。
+- 摘要和省略会损失细节，结构校验只保证范围与配对，不保证语义完整。
+- transcript 的写入纪律不等于所有外部对象都不可变；消息别名限制见 [上下文与消息流](context-and-message-flow.md)。
+- 运行期 normalize 与恢复期 assert 的容错程度不同：前者校正合法范围，后者拒绝坏档。
+
+
 
 ```bash
 bun test packages/core/test/compaction.test.ts packages/core/test/session-service.test.ts packages/core/test/create-echo.test.ts
