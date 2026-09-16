@@ -47,7 +47,6 @@ function writeRun(root: string, sessionId: string, runId: string, acceptedAt: nu
       endedAt: closed ? acceptedAt + 1 : null,
       status: closed ? "completed" : "running",
       integrity: "complete",
-      persistence: "stored",
     },
     firstSeq: 1,
     lastSeq: 2,

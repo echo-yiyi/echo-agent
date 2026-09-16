@@ -123,7 +123,6 @@ describe("send → getRun → render（completed）", () => {
     const o = lookup.observation;
     expect(o.status).toBe("completed");
     expect(o.integrity).toBe("complete");
-    expect(o.persistence).toBe("stored");
     expect(o.source).toEqual({ kind: "user" });
     expect(o.sessionId).not.toBeNull();
     expect(o.startedAt).not.toBeNull();
@@ -189,7 +188,6 @@ describe("send → getRun → render（completed）", () => {
     expect(text.content.startsWith(`Run ${result.runId} · completed · observation complete · `)).toBe(true);
     expect(text.content).toContain("tool.execute");
     expect(text.content).toContain("ping calls=1 ok=1 err=0");
-    expect(text.content).toContain("persistence stored");
     // JSON round-trip（canonical serializer 之后 renderer 结果不变）
     const round = JSON.parse(JSON.stringify(o)) as RunObservation;
     expect(renderRunObservation(round, { format: "text" }).content).toBe(text.content);
@@ -408,7 +406,6 @@ describe("error / abort / Tool 抛错", () => {
     expect(result.outcome.kind).toBe("error");
     const lookup = await echo.observations.getRun(result.runId);
     if (lookup.kind !== "found") throw new Error(`expected found, got ${lookup.kind}`);
-    expect(lookup.observation.persistence).toBe("stored");
     expect(lookup.observation.status).toBe("error");
     expect(lookup.observation.outcome?.status).toBe("error");
     expect(lookup.observation.outcome?.error?.code).toBe("boom");
@@ -509,7 +506,6 @@ describe("canonical gap（硬门 4）", () => {
       if (lookup.kind !== "found") throw new Error(`expected found, got ${lookup.kind}`);
       const o = lookup.observation;
       expect(o.integrity).toBe("partial");
-      expect(o.persistence).toBe("stored");
       expect(o.status).toBe("completed");
       expect(o.gaps.length).toBeGreaterThanOrEqual(1);
       expect(o.gaps.every((g) => g.reason === "buffer_overflow")).toBe(true);

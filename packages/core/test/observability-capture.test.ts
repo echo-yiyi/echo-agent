@@ -58,7 +58,6 @@ async function runWith(capture: ObservationCapturePolicy | undefined, turns: Scr
   const result = await echo.send("找一下");
   const lookup = await echo.observations.getRun(result.runId);
   if (lookup.kind !== "found") throw new Error(`run 没找到：${lookup.kind}`);
-  expect(lookup.observation.persistence).toBe("stored");
   return lookup.observation;
 }
 

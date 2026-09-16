@@ -43,11 +43,6 @@ export const INTEGRITY: Readonly<Record<string, Term>> = {
   partial: { zh: "有缺口", en: "partial", tone: "caution", hint: "至少一条 observation.gap：缓冲溢出 / 编码失败 / 采集上限 / 落盘失败；缺的是记录，不是 agent 的产出" },
 };
 
-export const PERSISTENCE: Readonly<Record<string, Term>> = {
-  stored: { zh: "已落盘", en: "stored", tone: "positive", hint: "run.closed 已 COMMIT 且读回可见" },
-  degraded: { zh: "未落盘", en: "degraded", tone: "caution", hint: "封口那笔没落盘（writer 降级 / 到期）；agent 的 outcome 不受影响" },
-};
-
 /**
  * 工具名 → 人话动词（设计系统的动词表：读取 / 搜索 / 写入 / 记住 / 回忆 / 运行 / 请求 / 打开 / 修改 / 删除）。
  * 没登记的工具用「调用」+ 原名。`memory` 工具的动作（记住 / 修改 / 删除 / 回忆）在紧随其后的 `memory.mutation.*` 事实里，
@@ -210,7 +205,6 @@ export type Lexicon = Readonly<{
   runSource: typeof RUN_SOURCE;
   replySource: typeof REPLY_SOURCE;
   integrity: typeof INTEGRITY;
-  persistence: typeof PERSISTENCE;
   toolVerbs: typeof TOOL_VERBS;
   toolVerbFallback: string;
   records: typeof RECORD_TERMS;
@@ -224,7 +218,6 @@ export function lexicon(): Lexicon {
     runSource: RUN_SOURCE,
     replySource: REPLY_SOURCE,
     integrity: INTEGRITY,
-    persistence: PERSISTENCE,
     toolVerbs: TOOL_VERBS,
     toolVerbFallback: TOOL_VERB_FALLBACK,
     records: RECORD_TERMS,

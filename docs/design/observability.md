@@ -138,7 +138,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 
 | 信号 | 在哪读 | 含义 |
 |---|---|---|
-| `persistence` | `getRun()` 的 header；`snapshot().health.persistence` | header 上 `stored` / `degraded`：终态已进 index 才 `stored`（今天只写得出 `stored`，见 §8）。health 上是写入端此刻的 `healthy` / `sealed` 两态，封口时带 `terminalSince` 与 `lastErrorDigest` |
+| `persistence` | `snapshot().health.persistence` | 写入端此刻的 `healthy` / `sealed` 两态，封口时带 `terminalSince` 与 `lastErrorDigest`。**不在 run 的 header 上**：run 的记录进没进账本看 `integrity`，run 在不在看 `getRun()` 的两态 |
 | `integrity` | `getRun()` 的 header | `complete` / `partial`——`partial` 表示这条 run 的记录里有缺口 |
 | `status` | `getRun()` 的 header | run 的业务终态：`running` / `completed` / `aborted` / `error` |
 
@@ -204,9 +204,8 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端封口之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
 2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性。两个产品的 30 天规则把它压在「最近 30 天的 run 数」上，不是彻底解决——单段会话在 30 天内堆出足够多的 run 仍然会慢。
-3. **`RunObservationHeader.persistence` 只写得出 `stored`**：`degraded` 那一档今天没有写者（封口那笔没落盘时，这个 run 的 index 压根不会更新）。其余没有写者的值——写入端状态的 `degraded` / `recovering` / `lost-lease`、缺口原因 `store_failure` / `canonical_flush_timeout` / `lease_lost`、run 终态 `interrupted`、envelope 的 `sourceSeq`——2026-09-15 已从公开类型里删掉。
-4. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
-5. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
-6. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
-7. **记忆的能力摘要没接。** 状态快照在节点上只收同步可读的值，记忆的状态在盘上要异步读。
-8. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。
+3. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
+4. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
+5. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
+6. **记忆的能力摘要没接。** 状态快照在节点上只收同步可读的值，记忆的状态在盘上要异步读。
+7. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。

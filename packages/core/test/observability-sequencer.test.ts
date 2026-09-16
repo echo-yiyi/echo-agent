@@ -369,7 +369,6 @@ describe("run 边界：唯一 emission 与 RunIndex 物化", () => {
     let idx = h.seq.committedRunIndex(run)!;
     expect(idx.acceptedRecordId).toBe(acc.recordId);
     expect(idx.header.status).toBe("running");
-    expect(idx.header.persistence).toBe("stored");
     expect(idx.firstSeq).toBe(1);
 
     h.clock.advance(5);
@@ -809,7 +808,6 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     const idx = h.seq.committedRunIndex(run)!;
     expect(idx.header.status).toBe("completed");
     expect(idx.header.integrity).toBe("partial");
-    expect(idx.header.persistence).toBe("stored");
     expect(h.seq.persistenceState.status).toBe("healthy");
   });
 
@@ -901,7 +899,6 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     expect((closed.body as RunClosedBodyV1).finalSnapshot).toBeNull();
     const gap = h.seq.committedRecords().find((r) => r.name === "observation.gap" && r.subject?.id === "run.final_snapshot")!;
     expect((gap.body as ObservationGap).reason).toBe("capture_limit");
-    expect(h.seq.committedRunIndex(run)?.header.persistence).toBe("stored");
     expect(h.seq.persistenceState.status).toBe("healthy");
     expect((await append(h, boundary("checkpoint", { ok: true }))).kind).toBe("committed");
   });

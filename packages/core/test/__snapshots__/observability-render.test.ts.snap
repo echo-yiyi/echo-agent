@@ -39,6 +39,6 @@ Final State         status generating · iteration 2 · messages 5 · runtime re
 Outcome             completed
 Tool Analysis       ping calls=1 ok=1 err=0 denied=0 total=13ms args=7B result=4ch
 Model               calls=2 in=20 out=10 total=64ms
-Observation Health  integrity complete · gaps 0 · persistence stored · redacted yes · records 27
+Observation Health  integrity complete · gaps 0 · redacted yes · records 27
 "
 `;

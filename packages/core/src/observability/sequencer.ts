@@ -1184,7 +1184,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
               endedAt: null,
               status: "running",
               integrity: this.gapCountOf(runId) > 0 ? "partial" : "complete",
-              persistence: "stored",
             },
             firstSeq: slot.seq,
             lastSeq: slot.seq,
