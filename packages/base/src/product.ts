@@ -5,7 +5,7 @@
 // 只把自己那份不同交进来：名字、版本、装配片段。不复制 `main()`——两份 `main()` 会分家，
 // 实证见 `cli.ts` 文件头。
 //
-// **能交进来的只有这三样**。特别地，`preset` 的返回值限定为 `createEcho()` 的 `agent` 与
+// **能交进来的只有名字、版本、装配片段与观测留多久这几样**。特别地，`preset` 的返回值限定为 `createEcho()` 的 `agent` 与
 // `extensions` 两个字段：扩展**发现**（`extensionDirs`）归 `--extensions` 那个 flag、归用户，
 // 产品层碰不到——产品自带的 Extension 走显式传入，不走扫盘，也不能被 flag 关掉。
 //
@@ -13,7 +13,7 @@
 // 形态列在 `extensions` 里——没有 `systemPrompt` 字符串这条路了。workspace 不再经 preset：
 // 它是 session 级事实，`mainFor()` 直接交给 `createEcho({ workspace })`。
 
-import type { CreateEchoOptions, CredentialStore } from "@echo-agent/core";
+import type { CreateEchoOptions, CredentialStore, ObservationExpiryRule } from "@echo-agent/core";
 
 /** 装配前已经定了的形态。产品层据此决定「谁答权限询问」之类；工作目录不在这里（见文件头）。 */
 export type PresetForm = Readonly<{
@@ -56,4 +56,15 @@ export type Product = Readonly<{
    * 产品能换掉内建的记忆模块（`memory.builtin: false`），但关不掉用户要的记忆，也打不开用户关掉的。
    */
   preset?: (form: PresetForm, host: ProductHost) => Pick<CreateEchoOptions, "agent" | "extensions" | "memory">;
+  /**
+   * 观测留多久（2026-09-15 用户拍板）。**规则归产品，core 一条都不删**：不给这个字段 = 这个产品不清理，
+   * 观测文档只增不减（`listRuns` / `lastRun` 读全部概要，会越来越慢——设计文档 §8 的第 2 条）。
+   *
+   * 给了的话，`mainFor()` 在启动时**不等地**跑一遍会话根下每一段（`expireSessionObservations`）：
+   * 观测的任何功能都不许让主流程多等一拍，所以它不 await、失败不报。清理只凭盘上的事实，
+   * 不取锁、不问写入端，别的会话正跑着也照样能清。
+   *
+   * 为什么按会话根扫而不是只扫这一段：缺省每次启动都新建一段，新目录里没有旧 run。
+   */
+  observationExpiry?: ObservationExpiryRule;
 }>;

@@ -9,7 +9,7 @@
 
 **解决什么。** agent 跑完一次，除了终端上滚过去的字，什么都不剩。会话目录里的 `entries/` 是**功能用的回放队列**（模型要求原样带回上一轮的 reasoning，所以它必须留），不是给人读的历史：它没有时间、没有耗时、没有嵌套、没有失败原因，也不记「这次 run 装配了哪些 extension、绑了哪个模型」。想回答「这次为什么慢」「哪一步失败了」「模型到底想了什么」，没有第二个地方可查。观测层就是那个地方：**它是这个仓里唯一为「读」而存在的记录**。
 
-**最终形态。** 每次 run 把自己写进会话状态根下的一组观测文档（§5）。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的硬规矩：观测的任何功能都不出现在主机制、主循环里**（2026-09-14，[记录](../decisions/implemented/2026-09-14-observation-off-main-loop.md)）——探针在节点上只取一次字段交给进程里的**观测线程**，编码、摘要、seq、落盘都在那边；admission、装配、`start` / `stop`、lease、run 生命周期都不为观测等待、不为观测计算、不因观测多一种失败（§5）。留多久由产品自己调 `expireObservations()` 决定，agent 里没有过期代码（§5）。
+**最终形态。** 每次 run 把自己写进会话状态根下的一组观测文档（§5）。**观测是插桩，不是事件协议**（§7）：循环、压缩、Agent 自身、extension 装载、各能力模块在自己的执行节点上各插一个**探针**，节点走到就当场记一条事实，与给壳的事件（`AgentEvent` / `LifecycleEvent`）并列、互不依赖。一条记录是一个 **envelope**（§2）：谁发的、什么时候、挂在哪个 run / turn 下、body 是什么。记录分两条 lane（§3）——run 的三条边界走 boundary lane（有序、可等），其余走 bounded lane（同步、永不抛、满了就留缺口而不是丢消息不吭声）。记多少由 **capture policy** 三档决定（§4）。读面有三个入口（§6）：`observe` 子命令、`echo.observations`、离线的 `openObservationReader()`。**一条贯穿全篇的硬规矩：观测的任何功能都不出现在主机制、主循环里**（2026-09-14，[记录](../decisions/implemented/2026-09-14-observation-off-main-loop.md)）——探针在节点上只取一次字段交给进程里的**观测线程**，编码、摘要、seq、落盘都在那边；admission、装配、`start` / `stop`、lease、run 生命周期都不为观测等待、不为观测计算、不因观测多一种失败（§5）。留多久由产品自己定：两个产品都声明「只留最近 30 天」，由启动逻辑不等地跑一遍，agent 里没有过期代码（§5）。
 
 **Non-Goals（已决，不做）。**
 
@@ -17,7 +17,7 @@
 - **观测不判断进程死活**（2026-09-06 拍板）。观测只记别人做过的决定；没封口的 run 只说「未收尾」，不由观测推断它是崩了还是还在跑。所以 `RunObservationStatus` 里没有「被接管封口」那一档（2026-09-15 删掉没有写者的 `interrupted`）——将来若有管进程的那一层做了接管决定，由它把决定当事实交给观测记，那时再加。会话死活另有其人，见[会话存活探针](../decisions/implemented/2026-09-09-session-alive-pid-probe.md)。
 - **不脱敏。** `content` 档把模型文本、思考、工具参数与结果**明文**写进盘上的观测文档。`redact.ts` 只处理第三方异常对象（stack 只留 digest），不是内容脱敏层。谁开这一档，谁承担盘上有明文这件事。
 - **不做 crash recovery**（列在「欠账」§8，不是本文要设计的东西）。
-- **不在 agent 的任何流程里清理，也不内置清理规则。** 留多久、留多少归产品：产品不调 `expireObservations()` 就一条不删；core 不在启动、run 封口、lease 的任何一步上跑它（§5）。旧格式的 `observations.sqlite` 不迁移、不读（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)）。
+- **不在 agent 的任何流程里清理，core 也不内置清理规则。** 留多久、留多少归产品：产品不给规则就一条不删；core 不在启动、run 封口、lease 的任何一步上跑它（§5）。装配层只管**什么时候跑产品给的规则**，那一步不在 agent 的流程里、也不让谁等它。旧格式的 `observations.sqlite` 不迁移、不读（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)）。
 - **语义层的 canonical store 不是用户可换的端口**，只开字节面：`observation.store?: StorageDir` 决定文档放在哪（内存 / 别处），格式与提交语义仍是 core 的（§5）。in-memory 的 `CanonicalObservationStore` 只供参考一致性测试。「换成另一种数据库」的注入等真有使用方再拍（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)决定 4）。
 - 面板长什么样归 UI，本文只说它读什么。
 
@@ -35,6 +35,7 @@
 - `bun test packages/core/test/observability-capture.test.ts` `observability-capabilities.test.ts` —— 三档的采集差异、各能力模块的事实。
 - `bun test packages/core/test/observability-render.test.ts` —— renderer 是纯函数（golden 锁层级与相对顺序，不锁 wall clock）。
 - `bun test packages/base/test/observe-serve.test.ts` —— 面板的路由、页面自检门（内联脚本能编译、配色规则）、术语表覆盖。
+- `bun test packages/base/test/observe-expire.test.ts packages/cli/test/cli.test.ts` —— 产品的过期规则（只删超期且已封口的、坏的那一段不连累别段）与启动时那一跑（产品给了规则才清，不给一条不删）。
 
 ## 1. 术语
 
@@ -131,6 +132,8 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 - 批文件只在 `nextCommittedPrefix ≤ head`、里面出现过的 run 都已不在 `runs/`、run 之外的记录都早于 `activityBefore` 时回收。
 - 订阅回放跨过被删的批，交付 `retention-gap`（传输通知，不进 journal、不改 integrity）。
 
+**今天两个产品怎么调**（2026-09-15 拍板）：`echo-agent` 与 `echo-coding` 各自在自己的 `Product` 上声明 [`observationExpiry: retainRecentDays(30)`](../../packages/base/src/observe/expire.ts#symbol=retainRecentDays)——两个产品平级，规则各写各的。时机归装配层：[`mainFor()`](../../packages/base/src/cli.ts#symbol=mainFor) 启动时**不等地**跑一遍 [`expireSessionObservations`](../../packages/base/src/observe/expire.ts#symbol=expireSessionObservations)，失败不报——观测的任何功能都不许让启动多等一拍。扫的是**会话根下每一段**，不是当前这一段：缺省每次启动都新建一段，只清自己那一段等于什么都不清。某一段的观测坏了只跳过那一段。
+
 **`send()` 不带观测状态**：它只返回 `runId`、`outcome` 与观测引用。写没写成事后读，调用方拿到的是三个可读的信号，而不是一次异常：
 
 | 信号 | 在哪读 | 含义 |
@@ -200,7 +203,7 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 按「会不会随时间恶化」排：
 
 1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端封口之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
-2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性——产品不调 `expireObservations()` 的会话会越来越慢。这是唯一会随时间恶化的一条，控制它的是产品的过期。
+2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性。两个产品的 30 天规则把它压在「最近 30 天的 run 数」上，不是彻底解决——单段会话在 30 天内堆出足够多的 run 仍然会慢。
 3. **`RunObservationHeader.persistence` 只写得出 `stored`**：`degraded` 那一档今天没有写者（封口那笔没落盘时，这个 run 的 index 压根不会更新）。其余没有写者的值——写入端状态的 `degraded` / `recovering` / `lost-lease`、缺口原因 `store_failure` / `canonical_flush_timeout` / `lease_lost`、run 终态 `interrupted`、envelope 的 `sourceSeq`——2026-09-15 已从公开类型里删掉。
 4. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
 5. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。

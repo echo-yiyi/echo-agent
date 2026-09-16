@@ -70,3 +70,6 @@ export { linesOf } from "./stdin.ts";
 
 /** 观测面板：只读盘上的观测库，不装配、不取锁。 */
 export { runObserve, parseObserveArgs, observeUsage, type ObserveCommand, type ObserveOptions, type ObserveIo } from "./observe.ts";
+
+/** 观测过期：规则给 `Product.observationExpiry`，时机由 `mainFor()` 定（启动时不等地跑一遍）。 */
+export { retainRecentDays, expireSessionObservations } from "./observe/expire.ts";

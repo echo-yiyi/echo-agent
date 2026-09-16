@@ -4,7 +4,7 @@
 // 本文件只剩「echo-agent 是哪一个产品」这件事实。壳由产品挑——终端那份是 `@echo-agent/tui`。
 
 import { readFileSync } from "node:fs";
-import { conductEntry, mainFor, type Main, type Product } from "@echo-agent/base";
+import { conductEntry, mainFor, retainRecentDays, type Main, type Product } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { identityEntry } from "./prompt.ts";
 
@@ -17,6 +17,9 @@ export const ECHO_AGENT: Product = Object.freeze({
   name: "echo-agent",
   version: VERSION,
   preset: (form) => ({ extensions: [identityEntry(), conductEntry(form)] }),
+  // 观测留 30 天（2026-09-15 用户拍板）：更早且已封口的 run 在启动时被清掉。
+  // 不给这条规则的话观测只增不减，`listRuns` 越来越慢（observability.md §8）。
+  observationExpiry: retainRecentDays(30),
 });
 
 /** 进程入口的实质：装配层的 `main` 绑上本产品与终端壳。 */

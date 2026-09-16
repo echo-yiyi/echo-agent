@@ -29,12 +29,13 @@ import {
   type ModelTool,
   type Provider,
   type ProviderEvent,
+  type RunObservationHeader,
 } from "@echo-agent/core";
 import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { inspectStateLock } from "@echo-agent/core";
 import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
-import { echoOptions, mainFor, parseArgs, usage, wakeArgs, type PresetForm } from "@echo-agent/base";
+import { echoOptions, mainFor, parseArgs, retainRecentDays, usage, wakeArgs, type PresetForm } from "@echo-agent/base";
 import { ECHO_AGENT, main } from "../src/product.ts";
 import { isConfigured } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
@@ -933,6 +934,98 @@ test("--resume 点名不存在的会话 / --continue 没有可续的 → 退出�
   } finally {
     restore();
   }
+});
+
+/** 盘上的一条 RunIndex（已封口）：过期只看盘上的事实，不需要真跑出一个 run。 */
+function writeClosedRun(sessionsRoot: string, sessionId: string, runId: string, acceptedAt: number): string {
+  const runs = join(sessionsRoot, sessionId, "observability", "runs");
+  mkdirSync(runs, { recursive: true });
+  const entry = {
+    schemaVersion: 1,
+    runtimeId: "rt",
+    runId,
+    acceptedRecordId: "rt:1",
+    terminalRecordId: "rt:2",
+    header: {
+      schemaVersion: 1,
+      runId,
+      source: { kind: "user" },
+      runtimeId: "rt",
+      agentId: "a",
+      agentInstanceId: "a#1",
+      sessionId,
+      runtimeGeneration: "g",
+      capturePolicy: "metadata",
+      acceptedAt,
+      startedAt: null,
+      endedAt: acceptedAt + 1,
+      status: "completed",
+      integrity: "complete",
+      persistence: "stored",
+    },
+    firstSeq: 1,
+    lastSeq: 2,
+  };
+  const path = join(runs, `${runId}.json`);
+  writeFileSync(path, JSON.stringify(entry));
+  return path;
+}
+
+test("mainFor：产品给了 observationExpiry → 启动时清掉会话根下每一段的超期 run，且不等它（2026-09-15）", async () => {
+  // 规则归产品、时机归装配层。扫的是**会话根**：缺省每次启动都新建一段，只清自己这一段等于什么都不清。
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    const stateRoot = join(dir, "state");
+    const day = 24 * 60 * 60 * 1000;
+    const oldA = writeClosedRun(stateRoot, "s-old-a", "r-a", Date.now() - 90 * day);
+    const oldB = writeClosedRun(stateRoot, "s-old-b", "r-b", Date.now() - 40 * day);
+    const recent = writeClosedRun(stateRoot, "s-old-b", "r-recent", Date.now() - day);
+
+    const productMain = mainFor({ name: "echo-试产品", version: "9.9.9", observationExpiry: retainRecentDays(30) }, terminalShell);
+    const running = productMain(["--state-dir", stateRoot, "--no-memory"], true, { ui, credentials, verify: async () => ({ ok: true }) });
+    // 界面照常起来：清理没有挡在启动路上（它是 fire-and-forget）
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
+    // 比 bun 的单条超时短：清理没发生时要红在这一句上，而不是把整条测试挂到超时（会连累下一条）
+    await waitFor(() => !existsSync(oldA) && !existsSync(oldB), "两段旧会话的超期 run 被清掉", 2000);
+    expect(existsSync(recent), "保留线之内的 run 被误删").toBe(true);
+
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("mainFor：产品不给 observationExpiry → 一条都不删（清理归产品，装配层不替它定）", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    const stateRoot = join(dir, "state");
+    const ancient = writeClosedRun(stateRoot, "s-old", "r-ancient", Date.now() - 999 * 24 * 60 * 60 * 1000);
+
+    const productMain = mainFor({ name: "echo-试产品", version: "9.9.9" }, terminalShell);
+    const running = productMain(["--state-dir", stateRoot, "--no-memory"], true, { ui, credentials, verify: async () => ({ ok: true }) });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+    expect(existsSync(ancient), "产品没给规则，却删了东西").toBe(true);
+  } finally {
+    restore();
+  }
+});
+
+test("echo-agent 这个产品自己带 30 天的规则", () => {
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  const rule = ECHO_AGENT.observationExpiry!;
+  const header = (runId: string, acceptedAt: number): RunObservationHeader => ({ runId, acceptedAt }) as RunObservationHeader;
+  const decision = rule([header("old", now - 31 * day), header("new", now - 29 * day)], now);
+  expect(decision.runs).toEqual(["old"]);
 });
 
 test("preset 能给记忆的**形状**（memory），给不了**开关**（withoutMemory 归用户的 --no-memory）", () => {

@@ -14,7 +14,7 @@
 // 评测或别的宿主可以自己传——本产品不缺省开它。
 
 import { readFileSync } from "node:fs";
-import { conductEntry, mainFor, type Product } from "@echo-agent/base";
+import { conductEntry, mainFor, retainRecentDays, type Product } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { codingPreset } from "./agent.ts";
 
@@ -38,6 +38,8 @@ export const ECHO_CODING: Product = Object.freeze({
     const preset = codingPreset({ permission: false, maxIterations: 200, credentials: host.credentials });
     return { ...preset, extensions: [conductEntry(form), ...preset.extensions] };
   },
+  // 观测留 30 天（2026-09-15 用户拍板，与 echo-agent 同一条规则；两个产品平级，各自声明各自的）。
+  observationExpiry: retainRecentDays(30),
 });
 
 /** 进程入口的实质：`echo-agent` 的 `main` 绑上本产品。签名与它完全相同，退出码语义也相同。 */

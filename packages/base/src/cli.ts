@@ -49,6 +49,7 @@ import { pipeSurfaceEntry } from "./prompt.ts";
 import type { Shell } from "./shell.ts";
 import { run } from "./run.ts";
 import { runObserve } from "./observe.ts";
+import { expireSessionObservations } from "./observe/expire.ts";
 import type { FirstRunChoice } from "./shell.ts";
 // （FirstRunChoice 同时是装配与选择器的「一家」形状：name = --provider 短名，provider = 实例）
 import { readSettings, writeSettings } from "./settings.ts";
@@ -437,6 +438,11 @@ export function mainFor(product: Product, shell: Shell): Main {
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
       const form: PresetForm = { interactive };
+      // 观测过期：产品给了规则才清，**不等它**——观测的任何功能都不许让启动多等一拍（observability.md §5）。
+      // 扫的是会话根下每一段：缺省每次启动都新建一段，只清自己这一段等于什么都不清。
+      if (product.observationExpiry !== undefined) {
+        void expireSessionObservations({ sessionsRoot: expandHome(effective.stateDir ?? resolveSessionsRoot()), rule: product.observationExpiry });
+      }
       // 无界面形态排在最前：它既不是交互也不是管道——不装壳、不读 stdin，跑完就退。
       if (effective.serve) return await runServe(product, form, effective, provider, choices, credentials, sessionId, controller.signal);
       return interactive
