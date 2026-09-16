@@ -34,7 +34,7 @@
 
 受支持入口是 [`createEcho()`](../../packages/core/src/create-echo.ts#symbol=createEcho)。默认装配记忆；一次性评测或不希望保留跨任务状态时传 `withoutMemory: true`，记忆工具、记忆 section 及这两条后台工作随能力一起缺席。不要围着裸 Agent 复制装配。
 
-**开关归用户，形状归产品。** `withoutMemory` 对应用户的 `--no-memory`，产品碰不到；装哪些模块、分哪几层由产品经 `Product.preset` 返回的 `memory` 决定。`memory.builtin: false` 不装内建的三个模块（agent / user / notes），模块全部来自扩展经 `AgentMemory.module()` 的注册——扩展注册在缺省情况下只是**追加**，要替换就得先关掉内建这组。想保留其中某几个，就把 `@echo-agent/core/extension` 导出的定义再注册一遍。**什么值得记的判据写在各模块自己的 instructions 里**：记忆段、提取、整理三处 prompt 只讲机制（先看再写、合并不新增近似条、超预算先整理、绝不存凭据、可以什么都不写），所以 `builtin: false` 会连同内建模块的判据一起拿掉，产品模块用自己的 instructions 带自己的判据。
+**开关归用户，形状归产品。** `withoutMemory` 对应用户的 `--no-memory`，产品碰不到；装哪些模块、分哪几层由产品经 `Product.preset` 返回的 `memory` 决定。`memory.builtin: false` 不装内建的三个模块（agent / user / memory——笔记模块的名字就是 `memory`，点名、关 dream、重新注册都用这个键），模块全部来自扩展经 `AgentMemory.module()` 的注册——扩展注册在缺省情况下只是**追加**，要替换就得先关掉内建这组。想保留其中某几个，就把 `@echo-agent/core/extension` 导出的定义再注册一遍。**什么值得记的判据写在各模块自己的 instructions 里**：记忆段、提取、整理三处 prompt 只讲机制（先看再写、合并不新增近似条、超预算先整理、绝不存凭据、可以什么都不写），所以 `builtin: false` 会连同内建模块的判据一起拿掉，产品模块用自己的 instructions 带自己的判据。
 
 **作用域回答“谁共享”，记忆模块回答“记什么”。** 路径由两者组合：`<作用域>/<模块路径>`。例如 `project/agent.md` 是这个项目里共同使用的行为记忆，不是某个 agent 实例的私有文件。相同内容出现在不同作用域时，不自动覆盖、去重或跨层提升。
 
@@ -60,7 +60,7 @@
 
 ## 3. 模块、预算与召回
 
-内建模块与第三方都经 [`AgentMemoryRegistry.module()`](../../packages/core/src/extension/registries.ts#symbol=AgentMemoryRegistry.module) 登记。extension 注入 `AgentMemory`，在自己的 effect 中注册并交还 disposer；没有记忆能力时这个 service 缺席。扩展只增加内容声明，不另建落盘流程。模块声明的 `ops` 在 harness 的唯一写路径上生效（`op_not_supported` 拒绝），不在工具 schema 上——一把工具服务所有模块，动词枚举是全局的；落在方法上则无论缺省工具还是复写的 handlers 都挡得住。整理那把工具除了限定在当前层，还碰不到同层声明了 `dream: false` 的模块（读不拦）。
+内建模块与第三方都经 [`AgentMemoryRegistry.module()`](../../packages/core/src/extension/registries.ts#symbol=AgentMemoryRegistry.module) 登记。extension 注入 `AgentMemory`，在自己的 effect 中注册并交还 disposer；没有记忆能力时这个 service 缺席。扩展只增加内容声明，不另建落盘流程。模块声明的 `ops` 在 harness 的写路径上生效（`op_not_supported` 拒绝），不在工具 schema 上——一把工具服务所有模块，动词枚举是全局的；落在方法上则无论缺省工具还是复写的 handlers 都挡得住。实际支持的动词是**声明的 `ops` 与该 mode 默认集的交集**（[`memoryOps()`](../../packages/core/src/memory/tool-commands.ts#symbol=memoryOps)）：**只能收紧，不能放宽**——resident 的默认集里没有 `rename`（[`defaultOpsForMode()`](../../packages/core/src/memory/tool-commands.ts#symbol=defaultOpsForMode)），写进 `ops` 也不会生效。这道闸只管五个写动词，`view` 不过闸、禁不掉。整理那把工具除了限定在当前层，还碰不到同层声明了 `dream: false` 的模块（读不拦）。
 
 当前内建定义见 [`agentMemory`](../../packages/core/src/memory/types.ts#symbol=agentMemory)、[`userMemory`](../../packages/core/src/memory/types.ts#symbol=userMemory)、[`notesMemory`](../../packages/core/src/memory/types.ts#symbol=notesMemory)：
 
@@ -70,9 +70,22 @@
 | user | `user.md` | resident：全文进 system | 对用户的认知、偏好与沟通方式 |
 | memory（笔记） | `memory/` | indexed：索引进 system，正文用工具读取 | 长期事实及以后去哪里找东西 |
 
-模块不填 `scopes` 表示当前所有层都有；填写则限定在那些层。同一模块每层独立存储、独立预算。`residentMemory()` / `indexedMemory()` 是声明构造器，不会自行装入运行中的产品。重复名字、已绑定后的路径重叠会拒绝，避免同一路径落进两个预算域。
+模块不填 `scopes` 表示当前所有层都有；填写则限定在那些层。同一模块每层独立存储、独立预算。[`residentMemory()`](../../packages/core/src/memory/types.ts#symbol=residentMemory) / [`indexedMemory()`](../../packages/core/src/memory/types.ts#symbol=indexedMemory) 是仓内的声明构造器，**不在公共面上**：包外扩展交的是纯数据 `AnyMemory`（必填 `name` / `mode` / `path` / `budget` / `instructions` / `dream`，indexed 另有 `fileBudget` 且 `path` 以 `/` 结尾），或把 `@echo-agent/core/extension` 导出的内建定义再注册一遍。构造器本身也不会自行装入运行中的产品。重复名字、已绑定后的路径重叠会拒绝，避免同一路径落进两个预算域。
 
-预算以 JavaScript 字符串 `length` 计，不是 token 或 UTF-8 字节。resident 校验全文；indexed 同时校验单文件全文和该层完整索引的渲染长度。具体缺省值以构造器和内建定义为准，本文链接参数真源。模块数量和作用域数量可以增长，因此单模块预算不等于最终 system 的总上界。
+当前缺省值如下。**真源是链接的符号**，数值随构造器与内建定义改：
+
+| 项 | 缺省 | 真源 |
+| --- | --- | --- |
+| agent / user 预算 | 2200 / 1400 字符 | [`agentMemory`](../../packages/core/src/memory/types.ts#symbol=agentMemory)、[`userMemory`](../../packages/core/src/memory/types.ts#symbol=userMemory) |
+| 笔记模块预算 | 索引 25000，单文件 4096 | [`notesMemory`](../../packages/core/src/memory/types.ts#symbol=notesMemory) |
+| 构造器缺省 | resident 2000；indexed 索引 25000、单文件 4096 | [`residentMemory()`](../../packages/core/src/memory/types.ts#symbol=residentMemory)、[`indexedMemory()`](../../packages/core/src/memory/types.ts#symbol=indexedMemory) |
+| 索引描述行 | 单行化后截断 200 字符 | [`indexEntries()`](../../packages/core/src/memory/compose.ts#symbol=indexEntries) |
+| Dream 门 | 写 5 次、10 个 indexed 文件、24 小时、水位 0.8；**没有轮数门** | [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) |
+| startedAt 过期 | 1 小时 | [`DREAM_LOCK_STALE_MS`](../../packages/core/src/memory/dream.ts#symbol=DREAM_LOCK_STALE_MS) |
+| 提取轮数上限 | 5 | [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS) |
+| 提交锁等待 | 10 秒 | [`DEFAULT_LOCK_TIMEOUT_MS`](../../packages/core/src/storage/name-lock.ts#symbol=DEFAULT_LOCK_TIMEOUT_MS) |
+
+预算以 JavaScript 字符串 `length` 计，不是 token 或 UTF-8 字节。resident 校验全文；indexed 同时校验单文件全文和该层完整索引的渲染长度。模块数量和作用域数量可以增长，因此单模块预算不等于最终 system 的总上界。
 
 ### 索引是派生物，不是记忆真源
 
@@ -95,43 +108,45 @@
 | str_replace | old_str 必须非空且恰好命中一次 |
 | insert | 指定行之后插入，零表示文件开头；拒绝非法或越界行号 |
 | delete | 删除属于已注册模块的文件 |
-| rename | 同一作用域、同一模块内移名；目标必须不存在 |
+| rename | 同一作用域、同一模块内移名；目标必须不存在。**resident 模块没有这个动词**（见第 3 节的动词交集） |
+
+**先看后写**：`create` 覆盖已有文件、`insert`、`delete` 之前，这把工具必须 `view` 过那个文件，而且看到的就是现在这一版，否则拒（`not_read` / `stale_read`，机制见第 7 节）。`str_replace` 与 `rename` 不需要——前者拿 `old_str` 在最新内容上对，后者搬的就是最新内容。**看目录或看概览不算看过那个文件**：只有读文件才记账。
 
 路径先经 [`normalizeMemoryPath()`](../../packages/core/src/memory/tool.ts#symbol=normalizeMemoryPath) 规范化，接受 `/memories/` 前缀，拒绝路径穿越、反斜杠、控制字符、点开头的内部段。`.dream` 状态不通过该工具暴露。这是路径协议的判据，不是模型语义安全保证。
 
-写入骨架归 [`writeMemory()`](../../packages/core/src/memory/harness.ts#symbol=writeMemory)：规范化 → 保护索引 → 路由模块 → 读取并准备新正文 → 预算检查 → 新鲜度检查 → 写入 → 更新计数和索引 → 发 mutation 事实。删除、改名有各自路径，不能假定它们具备完全相同的保护。
+写入骨架归 [`writeMemory()`](../../packages/core/src/memory/harness.ts#symbol=writeMemory)：规范化 → 保护索引 → 路由模块 → **动词闸** → 进**「层 × 模块」提交锁**（[`commitUnderLock()`](../../packages/core/src/memory/harness.ts#symbol=commitUnderLock)，第 7 节）→ 锁内读取并准备新正文、**核对读到的版本** → 预算检查 → 新鲜度检查 → 写入 → 记账、更新计数与索引 → 出锁发 mutation 事实。删除、改名有各自路径（同样过动词闸与同一把提交锁，删除另核对读到的版本），但不能假定三条路径的保护逐条相同。
 
-工具拒绝或失败用 error result 回给模型；成功正文写入后索引重建失败，正文仍已提交，诊断为 `memory_index_rebuild_failed`，事实的 `indexOutcome` 为 failed。改名先写目标再删源，删源失败报告 partial，可能留下两份文件，不是事务回滚。判据与事实生成见 [`finishMemoryMutation()`](../../packages/core/src/memory/harness.ts#symbol=finishMemoryMutation)。
+工具拒绝或失败用 error result 回给模型；成功正文写入后索引重建失败，正文仍已提交，诊断为 `memory_index_rebuild_failed`，事实的 `indexOutcome` 为 failed。改名先写目标再删源，删源失败报告 partial，可能留下两份文件，不是事务回滚。判据与事实生成见 [`finishMemoryMutation()`](../../packages/core/src/memory/harness.ts#symbol=finishMemoryMutation)。模型看得到的拒绝分四类：**路径与归属**（`invalid_path`、`not_a_file`、`index_file_protected`、`outside_regions`、`not_found`、`cross_region`、`cross_scope`、`target_exists`）、**内容与配额**（`old_str_not_found`、`old_str_ambiguous`、`empty_old_str`、`bad_line`、`line_out_of_range`、`budget_exceeded`）、**动词闸**（`op_not_supported`）、**并发**（`not_read`、`stale_read`、`busy`）。`budget_exceeded` 的文案带当前字符数、上限与整理指引；`busy` 带层名、模块名与持有者。
 
-默认工具通过 harness 共用操作面执行预算和 ops 校验，Dream 工具另限制可写模块。内部代码仍能接触字节面，因此这些保证只覆盖受支持的写入路径；包外扩展使用公开 registry 声明模块。
+默认工具通过 harness 共用操作面执行预算和 ops 校验，Dream 工具另限制可写模块。逐动词复写 handlers 时，第四个参数 `caller`（[`MemoryCaller`](../../packages/core/src/memory/harness.ts#symbol=MemoryCaller)）必须原样传给 harness 方法；换掉 `view` 的实现还要自己把读到的全文记进 `caller.reads`，否则之后的覆写一律判 `not_read`。内部代码仍能接触字节面，因此这些保证只覆盖受支持的写入路径；包外扩展使用公开 registry 声明模块。
 
 ## 5. 记忆怎样产生：前台与提取
 
 前台仍可主动记忆，触发提示和排除项由 [`renderMemorySystem()`](../../packages/core/src/memory/compose.ts#symbol=renderMemorySystem) 提供。提取是另一条后台通道，入口是主事件流的 reply_end，而不是每次模型请求。
 
-当前 [`Agent.enqueueExtract()`](../../packages/core/src/agent.ts#symbol=Agent.enqueueExtract) 检查记忆已绑定、生命周期允许工作且有运行 scope，然后对 reply 结束时的 transcript 做压缩视图投影并渲染文本。**这不是该 reply 最后一次 provider request 的精确快照**：不包含同一条 transform / hook / 临时 injection 管线，且时间点已经在 reply 收尾。
+当前 [`Agent.enqueueExtract()`](../../packages/core/src/agent.ts#symbol=Agent.enqueueExtract) 依次检查：记忆已绑定、生命周期允许工作且有运行 scope；**一个模块都没有就不跑**（不为提取起一次模型调用）；本 reply 的重叠保护标志。都过了才对 reply 结束时的 transcript 做压缩视图投影并渲染文本。**这不是该 reply 最后一次 provider request 的精确快照**：不包含同一条 transform / hook / 临时 injection 管线，且时间点已经在 reply 收尾。
 
-[`defaultExtractPrompt()`](../../packages/core/src/memory/extract.ts#symbol=defaultExtractPrompt) 把这份会话材料连同作用域与模块说明给隔离子循环，要求先查看已有记忆、避免重复、只保留以后有用的事实，允许什么都不写。
+[`defaultExtractPrompt()`](../../packages/core/src/memory/extract.ts#symbol=defaultExtractPrompt) 把这份会话材料连同作用域与模块说明给隔离子循环，要求**先对照 prompt 自带的已存清单**（prompt 里的 `Stored now` 一节，怎么来的见下一段）、只在要改某个文件之前 `view`、避免重复、只保留以后有用的事实，允许什么都不写。
 
 [`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract) 当前只给 memory 工具，不继承父的动态注入；上限来自 [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS)。子循环拿不到 system prompt，所以此刻存着什么由提取 prompt 自带（[`memoryManifest()`](../../packages/core/src/memory/harness.ts#symbol=memoryManifest)，与前台记忆段同一种呈现：常驻模块全文、indexed 模块给索引），并说明 INDEX.md 由系统重建，减少为了解已有内容而额外调用工具。模型绑定仍来自父 scope，**没有单独实现“便宜模型档”选择**；轮数上限也不等于费用或墙钟时间的硬上界。
 
 提取不通过 admission，不抢前台许可；独立消息数组、不消费前台 steer / followUp，子循环事件不发进主 transcript。但它复用父的循环配置与相关服务，不能笼统宣称与前台完全不共享可变状态。
 
-目前重叠保护是“本 reply 出现成功的 memory 工具结束事件”，并非已提交 mutation 事实。因此只读 view 也会跳过提取，别名工具的写入则未必触发跳过。提取还在跑时又结束的几条 reply 会折叠成一次：[`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel) 跑完只再跑最后排进来的那次，它的 transcript 包含前面几次的材料；stop / 丢锁时还没开始的那次直接丢掉。所以不能承诺每条 reply 各跑一次提取，但忙时的新材料最终会被看到。
+目前重叠保护是“本 reply 出现成功的 memory 工具结束事件”，并非已提交 mutation 事实。因此只读 view 也会跳过提取，别名工具的写入则未必触发跳过。**标志只在走到它那一步时复位**：前面两道任一挡住（比如这条 reply 收尾时刚丢锁，或一个模块都没有），标志会留到下一条 reply，把下一次提取也压掉。提取还在跑时又结束的几条 reply 会折叠成一次：[`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel) 跑完只再跑最后排进来的那次，它的 transcript 包含前面几次的材料；stop / 丢锁时还没开始的那次直接丢掉。所以不能承诺每条 reply 各跑一次提取，但忙时的新材料最终会被看到。
 
 ## 6. Dream 怎样整理
 
-主 agent 回 idle 后可排 Dream；生命周期激活时为已有记忆打开自动整理。它走与提取分开的 [`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel)，两条通道各自同时至多一个任务在跑，前台不会通过 admission 抢占它们。
+主 agent 回 idle 后可排 Dream——**inbox 还有待消费时那一轮先让给 inbox**。`autoDream` 在裸 `Agent` 上默认关着，受管激活时为已有记忆打开；pause 与 inbox 状态不明时会关掉。它走与提取分开的 [`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel)，两条通道各自同时至多一个任务在跑，前台不会通过 admission 抢占它们。
 
 [`dreamScopes()`](../../packages/core/src/memory/harness.ts#symbol=dreamScopes) 选出 dream 模块涉及的层，按作用域顺序逐层处理。每层的 [`shouldDream()`](../../packages/core/src/memory/harness.ts#symbol=shouldDream) 判据为：
 
 1. 有未过期 startedAt 标记时不启动。
 2. 否则，任一参与整理模块达到配置水位即可启动。
-3. 未达水位时，所有已配置的节流条件都满足才启动：间隔、写入数、轮数、indexed 文件数。
+3. 未达水位时，所有**已配置**的节流条件都满足才启动：间隔、写入数、轮数、indexed 文件数——缺省门里没有轮数这一条（见第 3 节的缺省值表），没配的条件不参与。
 
 缺省阈值以 [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) 为准。水位对 resident 看全文，对 indexed 看索引，不看 indexed 单个正文是否快满。轮次来自前台 turn_end 并向各参与层计数；状态存于各层 `.dream/state.json`。
 
-[`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask) 写 startedAt 并生成限定该层的 memory 工具；写操作还会拒绝同层 dream:false 的模块。读取不受该模块整理开关限制。
+[`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask) 写 startedAt 并生成限定该层的 memory 工具；写操作还会拒绝同层 dream:false 的模块。读取不受该模块整理开关限制。同一层同时只有一个整理者，靠的是第 7 节那把 `.dream/pass` 的试拿；startedAt 管的是失败之后的退避。
 
 [`defaultDreamPrompt()`](../../packages/core/src/memory/dream.ts#symbol=defaultDreamPrompt) 要求去重、把错放的内容重建到正确模块后从原处删掉、剪枝、保留无法裁决的冲突及控制预算。这些语义步骤不具备事务性，也没有机器判据证明模型真的完成了它们。
 
@@ -147,12 +162,12 @@
 - **持有者崩溃后自动接管**（与 lease 同一个实现，[决策](../decisions/implemented/2026-09-10-generation-lock-takeover.md)）：持有者崩在持锁窗口里，下一个写者确认它已死（同一台机器、pid 查无此号）就接管，不会一直 `busy`。确认不了死活（别的机器、pid 被复用）或记录被写坏时，照旧等到超时返回 `busy`，报错里带锁的位置与持有者。
 - **覆写前核对读到的版本**（[决策](../decisions/implemented/2026-09-11-memory-read-version-check.md)）：提交锁只罩住一次工具调用，而模型「读完 → 思考 → 写回」横跨好几次调用。每把记忆工具记一本 [`MemoryReads`](../../packages/core/src/memory/harness.ts#symbol=MemoryReads)（view 看到的全文）；整份覆写已有文件、insert、delete 之前核对它还是不是现在这一版，不是就拒（`not_read` / `stale_read`），让模型重看。str_replace 不核对（old_str 在最新内容上找得到本身就是核对），rename 搬的就是最新内容。前台那把工具、每次提取、每次整理各一本账；程序直接调写方法、不给账，就不核对。
 - [`assertFresh()`](../../packages/core/src/memory/lock.ts#symbol=assertFresh) 仍在落盘前重读旧内容，挡的是**不守提交锁**的写者（人手改文件）。
-- **一层同时只有一个整理者**：整理前按层试拿一次 `.dream/pass`（[`claimDreamPass()`](../../packages/core/src/memory/harness.ts#symbol=claimDreamPass)，不等），拿不到（别的 session 正在整理这一层）就跳过这一层，拿到之后再判一次门。startedAt 仍是状态文件里的标记，管的是失败之后的退避。
+- **一层同时只有一个整理者**：每层先判一次门，过了才按层试拿一次 `.dream/pass`（[`claimDreamPass()`](../../packages/core/src/memory/harness.ts#symbol=claimDreamPass)，只试一次、不等）；拿不到（别的 session 正在整理这一层）就跳过这一层，拿到之后**再判一次门**——刚放手的那个 session 可能已经整理完、把计数清零了。startedAt 仍是状态文件里的标记，管的是失败之后的退避。
 - 正文、预算、索引在同一把提交锁里；Dream 状态（计数、startedAt）的读改写在这一层另一把短锁（`.dream/state`）里，多个 session 同时记数不丢增量。
 
 [`Agent.settleDream()`](../../packages/core/src/agent.ts#symbol=Agent.settleDream) 虽沿用旧名字，实际会同时 abort 并等待提取、Dream 两条通道，接入 stop / 丢锁路径。停发新工作与等待在飞工作结束是两件事；不能以“后台不阻塞前台”推导“退出不必等后台”。
 
-正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。子循环里那把记忆工具带自己的 sink（[`MemoryCaller`](../../packages/core/src/memory/harness.ts#symbol=MemoryCaller)），写入事实挂在那次提取 / 整理自己的 run 上，不借 Agent 此刻开着的 admission run。提取没跑完会报诊断 `memory_extract_failed`，并说明此前已写入几条（那几条已经落盘）：通道兜住的抛错，与子循环以 error 收场（provider 出错、轮数用完）是同一个 code；stop / 丢锁造成的 aborted 不报。
+正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。子循环里那把记忆工具带自己的事实 sink：由 [`Agent.memoryFactsFor()`](../../packages/core/src/agent.ts#symbol=Agent.memoryFactsFor) 造，scope 里放的是这个子循环的 runId，随那把工具的调用方状态（[`MemoryCaller`](../../packages/core/src/memory/harness.ts#symbol=MemoryCaller)，同时也是「读到过的版本」那本账）传下去。于是写入事实挂在那次提取 / 整理自己的 run 上，不借 Agent 此刻开着的 admission run。提取没跑完会报诊断 `memory_extract_failed`，并说明此前已写入几条（那几条已经落盘）：通道兜住的抛错，与子循环以 error 收场（provider 出错、轮数用完）是同一个 code；stop / 丢锁造成的 aborted 不报。
 
 ## 8. 当前限制
 
@@ -160,7 +175,7 @@
 
 ### 模块自带工具未落地
 
-记忆模块决策里的 `tools` 回调（模块自带工具，只拿 harness 方法、拿不到字节面）没有落地：registry 接收的是 `AnyMemory`，模块形状里没有这一格。harness 的写方法也不在公共面上，所以**包外扩展今天没有办法给自己的模块配一件专用写工具**，只能靠缺省的 `memory` 工具。
+记忆模块决策里的 `tools` 回调（模块自带工具，只拿 harness 方法、拿不到字节面）没有落地：registry 接收的是 `AnyMemory`，模块形状里没有这一格。harness 的写方法也不在公共面上，所以**包外扩展今天没有办法给自己的模块配一件专用写工具**，只能靠缺省的 `memory` 工具。声明构造器 `residentMemory()` / `indexedMemory()` 同样不在公共面，包外只能手写纯数据 `AnyMemory`（第 3 节）。
 
 ### 提取的输入、重叠保护与模型档
 
@@ -178,7 +193,7 @@
 - [具名角色的目录](../../packages/core/test/create-agent.test.ts#test=有角色名时-role-层就在落在-agents角色名memory与角色定义同一棵树)：默认 role 层的装配落点；同文件另有无角色名的情形。
 - [Dream 未达写入门不启动](../../packages/core/test/dream-schedule.test.ts#test=门不满足-不跑写入数没到)：基本触发条件；同文件另有前台并行、主 transcript 隔离、失败不记成功及 stop 等待测试。
 - [提取真的起来](../../packages/core/test/memory-extract.test.ts#test=一条回复结束-提取子循环真的起来提取-prompt-里有这次对话模型用记忆工具写的东西落了盘)：一条回复结束后，提取 prompt 里有这次对话、模型经记忆工具写的内容落了盘；同文件另有忙时折叠（再跑的那次看的是最新对话）与没跑完报诊断两条，通道的折叠语义另见 `memory-channel.test.ts`。它们不判断提取选得对不对。
-- [子循环是自己的 run](../../packages/core/test/observability-runtime.test.ts#test=前台子-agent-是自己的-run链回派出它的工具调用turn-挂在自己的-runid-下不与父撞lastrun-仍是用户那条)：提取、整理与子 agent 共用 `Agent.runSubagent`，账本口径由子 agent 的端到端用例验证；提取与整理本身没有端到端的观测用例。
+- [提取是自己的 run，写入事实挂在它上面](../../packages/core/test/observability-runtime.test.ts#test=记忆提取是自己的-run它写的记忆事实挂在这个-run-上不是空-run也不是父-run2026-09-14-实测此前-runid-为空)：提取写的 `memory.mutation.committed` 落在提取那个 run 下，父 run 里没有；同文件另有[子 agent 的端到端用例](../../packages/core/test/observability-runtime.test.ts#test=前台子-agent-是自己的-run链回派出它的工具调用turn-挂在自己的-runid-下不与父撞lastrun-仍是用户那条)（提取、整理与子 agent 共用 `Agent.runSubagent`）。整理本身没有端到端的观测用例。
 
 旧测试中的 session 层是显式 fixture，不代表默认产品仍有该层；标题中的“只整理 session”不能被当成当前全局设计。链接门只检查文件或符号存在，不审判这些测试的语义。
 
