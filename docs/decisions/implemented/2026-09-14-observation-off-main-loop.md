@@ -103,5 +103,5 @@ type ExpireObservationsOptions = Readonly<{ rule: ObservationExpiryRule; now?: n
 
 ## 遗留
 
-- `ObservationPersistenceStatus` 的 `lost-lease` 与缺口原因 `lease_lost` 不再有入口，类型还在公开面上；要删另起一条（公开类型变更）。
-- `listRuns` / `lastRun` 读全部概要的线性成本照旧（设计文档 §8）。
+- ~~`ObservationPersistenceStatus` 的 `lost-lease` 与缺口原因 `lease_lost` 不再有入口，类型还在公开面上~~ **2026-09-15 已删**：连同同样没有写者的 `degraded` / `recovering`、`store_failure` / `canonical_flush_timeout`、run 终态 `interrupted`、envelope 的 `sourceSeq` 一起（用户拍板，见设计文档 §8）。剩 `RunObservationHeader.persistence` 的 `degraded` 仍没有写者，未拍板。
+- ~~`listRuns` / `lastRun` 读全部概要的线性成本照旧~~ **2026-09-15 起有产品的过期压着**：两个产品各声明「只留最近 30 天」，`mainFor()` 启动时不等地扫一遍会话根。成本仍随保留窗口内的 run 数线性（设计文档 §8）。
