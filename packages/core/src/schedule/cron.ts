@@ -16,11 +16,11 @@ const FIELD_RANGES: readonly [number, number][] = [
 /** 合法返回 null,非法返回给模型看的错误说明(创建时拒,不排注定炸的任务)。 */
 export function validateCron(expr: string): string | null {
   const fields = expr.trim().split(/\s+/);
-  if (fields.length !== 5) return `cron 须为五段(分 时 日 月 星期),收到 ${fields.length} 段`;
-  const names = ["分", "时", "日", "月", "星期"];
+  if (fields.length !== 5) return `cron must have five fields (minute hour day month weekday), got ${fields.length}`;
+  const names = ["minute", "hour", "day", "month", "weekday"];
   for (let i = 0; i < 5; i++) {
     const err = validateField(fields[i]!, FIELD_RANGES[i]![0], FIELD_RANGES[i]![1]);
-    if (err !== null) return `第 ${i + 1} 段(${names[i]})非法:${err}`;
+    if (err !== null) return `field ${i + 1} (${names[i]}) is invalid: ${err}`;
   }
   return null;
 }
@@ -119,23 +119,23 @@ function partMatches(part: string, value: number, fieldLo: number, fieldHi: numb
 }
 
 function validateField(field: string, lo: number, hi: number): string | null {
-  if (field === "") return "空段";
+  if (field === "") return "empty field";
   for (const part of field.split(",")) {
     let range = part;
     if (part.includes("/")) {
       const [r, s] = part.split("/");
       range = r ?? "";
       const step = Number(s);
-      if (!Number.isInteger(step) || step < 1) return `步长 '${s}' 非法`;
+      if (!Number.isInteger(step) || step < 1) return `step '${s}' is invalid`;
     }
     if (range === "*") continue;
     const nums = range.includes("-") ? range.split("-") : [range];
-    if (nums.length > 2) return `'${part}' 非法`;
+    if (nums.length > 2) return `'${part}' is invalid`;
     for (const n of nums) {
       const v = Number(n);
-      if (!Number.isInteger(v) || v < lo || v > hi) return `'${n}' 超出 [${lo},${hi}]`;
+      if (!Number.isInteger(v) || v < lo || v > hi) return `'${n}' is out of range [${lo},${hi}]`;
     }
-    if (nums.length === 2 && Number(nums[0]) > Number(nums[1])) return `区间 '${range}' 起点大于终点`;
+    if (nums.length === 2 && Number(nums[0]) > Number(nums[1])) return `range '${range}' starts after it ends`;
   }
   return null;
 }

@@ -106,6 +106,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-01-model-facing-english.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-05-reply-layer.md",
       "bilingual": false
     },

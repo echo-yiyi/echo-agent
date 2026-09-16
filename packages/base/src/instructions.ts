@@ -7,12 +7,12 @@
 // 取第一个存在的（pi 同款）；不走祖先目录链、不追加嵌套目录。放 system 段而不是首条 user 消息：
 // 我们的 system 每 run 装配一次，文件不变字节就不变，不需要第二条通道。
 //
-// 安全：它是仓库文件，可能来自第三方 clone——**第三方文本进上下文必须过公共防线**
-// （`fenceSafe` 中和反引号、`truncateMarked` 截断留标记，都从 core 同源消费），并用定界符包起来，
-// 一段精心构造的 AGENTS.md 不能伪装成新的 system 段。「不越过上面的确认规则」那句靠模型自觉，
-// 定界与消毒才是结构隔离——**定界符自己也要消毒**（review 2026-09-07）：`fenceSafe` 护的是围栏，
-// 护不住 XML 标签，此前正文里写一行 `</project-instructions>` 就能提前收尾、后面的字变成「system 段之外的话」。
-// 中和只在这一处做（cli 本地），不往 core 的公共防线加函数。
+// 信任与卫生分开说（design/prompt.md §7）：它是仓库文件，可能来自第三方 clone。这里做的只是**结构卫生**——
+// `fenceSafe` 中和反引号、`truncateMarked` 截断留标记（都从 core 同源消费）、定界标签包起来、
+// 正文里冒充闭合标签的字样中和掉（review 2026-09-07：`fenceSafe` 护的是围栏，护不住 XML 标签，
+// 此前写一行 `</project-instructions>` 就能提前收尾）。这些让格式与体积可控，**不是安全隔离**：
+// 正文本来就是要模型执行的用户级指令，第三方仓库可不可信要在宿主权限 / 确认 / 沙箱层决定，
+// 「不越过上面的纪律」那句也只靠模型自觉。中和只在这一处做（装配层本地），不往 core 的公共防线加函数。
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -22,7 +22,10 @@ import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extensio
 /** 候选文件名，按序取第一个存在的。 */
 export const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
 
-/** 进 system 的上限（字符）。照 dsh 的 64 KB；超了截断并留标记，不静默吞。 */
+/**
+ * 正文截断阈值（字符），照 dsh 的 64 KB：`truncateMarked` 截取这么长的前缀再追加标记，header 与标签
+ * 另加固定字节，所以它**不是**最终段长的上限。超了截断并留标记，不静默吞。
+ */
 export const INSTRUCTIONS_CAP = 65_536;
 
 export const INSTRUCTIONS_HEADER =

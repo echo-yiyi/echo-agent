@@ -94,15 +94,15 @@ export async function addSchedule(ctx: AgentSchedule, schedule: Schedule, at?: n
   await ensureLoaded(ctx);
   const max = ctx.maxSchedules ?? DEFAULT_SCHEDULE_LIMITS.maxSchedules;
   const minInterval = ctx.minIntervalMs ?? DEFAULT_SCHEDULE_LIMITS.minIntervalMs;
-  if (ctx.entries.has(schedule.id)) throw new Error(`定时任务 '${schedule.id}' 已存在`);
-  if (ctx.entries.size >= max) throw new Error(`定时任务已达上限 ${max} 条,先 schedule_cancel 一些`);
-  if (schedule.prompt.trim() === "") throw new Error("prompt 不能为空");
+  if (ctx.entries.has(schedule.id)) throw new Error(`Schedule '${schedule.id}' already exists`);
+  if (ctx.entries.size >= max) throw new Error(`Schedule limit reached (${max}); cancel some with schedule_cancel first`);
+  if (schedule.prompt.trim() === "") throw new Error("prompt must not be empty");
   // fail-closed 的写法：`!(x >= min)` 让 NaN / undefined 一并被拒（`x < min` 对 NaN 为 false，会放过去），
   // `addSchedule` 是公共入口，宿主直接调时形状不经工具那道验（review 2026-09-07）
   if (schedule.kind === "every" && !(Number.isFinite(schedule.everyMs) && schedule.everyMs >= minInterval)) {
-    throw new Error(`周期最短 ${Math.floor(minInterval / 1000)} 秒(防空转)`);
+    throw new Error(`Interval must be at least ${Math.floor(minInterval / 1000)} seconds (prevents busy loops)`);
   }
-  if (schedule.kind === "at" && schedule.at < now - ONESHOT_GRACE_MS) throw new Error("触发时刻已经过去");
+  if (schedule.kind === "at" && schedule.at < now - ONESHOT_GRACE_MS) throw new Error("The trigger time is already in the past");
   if (schedule.kind === "cron") {
     const err = validateCron(schedule.cron);
     if (err !== null) throw new Error(err);

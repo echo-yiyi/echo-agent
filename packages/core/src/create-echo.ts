@@ -632,7 +632,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     // 消费成下一个 run，模型在那里接着验证。同一 run 里只登记一次；报告投不进去（收摊中）记一条诊断，不抛。
     let reloadPending = false;
     const requestReload = (): ScheduleResult => {
-      if (reloadPending) return { kind: "rejected", reason: "已经登记过了：结束这条回复即可，重载会在本 run 收尾后执行，报告随后到达" };
+      if (reloadPending) return { kind: "rejected", reason: "Already scheduled: finish this reply; the reload runs after this run ends and the report arrives afterwards." };
       const scheduled = agent.afterRun(async () => {
         reloadPending = false;
         const result = await reloadExtensions();

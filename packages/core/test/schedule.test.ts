@@ -107,11 +107,11 @@ describe("cron 子集", () => {
 
   test("校验:坏表达式给人话拒因", () => {
     expect(validateCron("0 9 * * *")).toBeNull();
-    expect(validateCron("0 9 * *")).toContain("五段");
-    expect(validateCron("60 * * * *")).toContain("超出");
-    expect(validateCron("* * * * 8")).toContain("超出");
-    expect(validateCron("*/0 * * * *")).toContain("步长");
-    expect(validateCron("5-2 * * * *")).toContain("起点大于终点");
+    expect(validateCron("0 9 * *")).toContain("five fields");
+    expect(validateCron("60 * * * *")).toContain("out of range");
+    expect(validateCron("* * * * 8")).toContain("out of range");
+    expect(validateCron("*/0 * * * *")).toContain("step");
+    expect(validateCron("5-2 * * * *")).toContain("starts after it ends");
   });
 });
 
@@ -120,19 +120,19 @@ describe("cron 子集", () => {
 describe("创建闸", () => {
   test("坏任务创建时拒:非法 cron / 周期过短 / 时刻已过 / 撞 id / 超上限", async () => {
     const { h } = harness();
-    await expect(addSchedule(h, sched({ kind: "cron", cron: "bad" } as never))).rejects.toThrow("五段");
-    await expect(addSchedule(h, sched({ kind: "every", everyMs: 5000 } as never))).rejects.toThrow("最短");
+    await expect(addSchedule(h, sched({ kind: "cron", cron: "bad" } as never))).rejects.toThrow("five fields");
+    await expect(addSchedule(h, sched({ kind: "every", everyMs: 5000 } as never))).rejects.toThrow("at least");
     // 非有限数绕闸（review 2026-09-07）：`x < min` 对 NaN 为 false 会放过去；Infinity 过了闸落盘成 null，重启后每一拍都到期
-    await expect(addSchedule(h, sched({ kind: "every", everyMs: Number.NaN } as never, "nan"))).rejects.toThrow("最短");
-    await expect(addSchedule(h, sched({ kind: "every", everyMs: Number.POSITIVE_INFINITY } as never, "inf"))).rejects.toThrow("最短");
-    await expect(addSchedule(h, sched({ kind: "at", at: Date.now() - 600_000 } as never))).rejects.toThrow("已经过去");
+    await expect(addSchedule(h, sched({ kind: "every", everyMs: Number.NaN } as never, "nan"))).rejects.toThrow("at least");
+    await expect(addSchedule(h, sched({ kind: "every", everyMs: Number.POSITIVE_INFINITY } as never, "inf"))).rejects.toThrow("at least");
+    await expect(addSchedule(h, sched({ kind: "at", at: Date.now() - 600_000 } as never))).rejects.toThrow("in the past");
     await addSchedule(h, sched({ kind: "every", everyMs: 60_000 } as never, "dup"));
-    await expect(addSchedule(h, sched({ kind: "every", everyMs: 60_000 } as never, "dup"))).rejects.toThrow("已存在");
+    await expect(addSchedule(h, sched({ kind: "every", everyMs: 60_000 } as never, "dup"))).rejects.toThrow("already exists");
 
     const small = createAgentSchedule(new InMemoryDir(), { maxSchedules: 1 });
     Object.assign(small, fakeHost().host);
     await addSchedule(small, sched({ kind: "every", everyMs: 60_000 } as never, "a"));
-    await expect(addSchedule(small, sched({ kind: "every", everyMs: 60_000 } as never, "b"))).rejects.toThrow("上限");
+    await expect(addSchedule(small, sched({ kind: "every", everyMs: 60_000 } as never, "b"))).rejects.toThrow("limit");
   });
 });
 

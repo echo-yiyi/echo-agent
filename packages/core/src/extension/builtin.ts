@@ -555,7 +555,7 @@ export function agentRuntimeOf(agent: RuntimeSource, assembly: RuntimeAssemblyOp
     // 热部署：装配层给了才有；没给的装配（低层 `mountBuiltinTools` 那条路）如实说没有，不假装扫了个空目录
     reloadExtensions:
       assembly.reloadExtensions ??
-      (() => Promise.resolve({ kind: "rejected", reason: "这条装配没有扩展目录可扫：热部署只在 createEcho() 装出来的 Runtime 上有" })),
+      (() => Promise.resolve({ kind: "rejected", reason: "This assembly has no extension directory to scan: hot reload is only available on a Runtime built by createEcho()." })),
     get acceptsWork() {
       return agent.acceptsWork;
     },

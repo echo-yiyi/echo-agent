@@ -543,9 +543,9 @@ test("落盘失败不许返回成功——模型必须看得见", async () => {
   // **措辞要与真实状态一致**：内存里那条任务确实建上了，下一轮的任务注入里模型也看得见。
   // 回执却说「没有生效」的话，模型据此重试就会建出重复任务（2026-08-24 第二轮 review 第 2 条）。
   expect(agent.state.tasks.total, "前置：内存里确实改了").toBe(1);
-  expect(out.content, "说了「没有生效」，可它明明在清单里").not.toContain("没有生效");
-  expect(out.content).toContain("已经在当前进程里改好了");
-  expect(out.content, "没告诉模型别重试——重试就会建重复的").toContain("不要重试");
+  expect(out.content, "说了「没有生效」，可它明明在清单里").not.toContain("did not take effect");
+  expect(out.content).toContain("was changed in this process");
+  expect(out.content, "没告诉模型别重试——重试就会建重复的").toContain("Do not retry");
   // 收摊时那一笔照样写不进去，`dispose()` 的契约是**逐段捕获、最后抛第一个错**——
   // 它不许把写失败咽下去，所以这里 expect 它抛，而不是 `await` 完当没事发生
   await expect(agent.dispose()).rejects.toThrow("盘满了");
@@ -636,8 +636,8 @@ test("没拿到租约就改任务：工具不许回执成功（取消 ≠ 成功
 
   expect(written, "没拿锁却写了盘").toEqual([]);
   expect(out.isError, "取消被当成了成功").toBe(true);
-  expect(out.content).toContain("单写者租约");
-  expect(out.content, "没告诉模型别重试").toContain("不要重试");
+  expect(out.content).toContain("single-writer lease");
+  expect(out.content, "没告诉模型别重试").toContain("Do not retry");
   // 与真实状态一致：内存里确实有
   expect(agent.state.tasks.total).toBe(1);
 
@@ -667,7 +667,7 @@ test("丢锁之后改任务：工具同样不许回执成功", async () => {
     ctx(),
   );
   expect(out.isError, "丢锁之后的取消被当成了成功").toBe(true);
-  expect(out.content).toContain("单写者租约");
+  expect(out.content).toContain("single-writer lease");
   await agent.stop().catch(() => undefined);
 });
 
@@ -705,7 +705,7 @@ test("排队之后、真正写之前丢锁：工具回执也得说取消（执�
 
   const out = await call;
   expect(out.isError, "执行点撤回了那一笔，回执却说成功").toBe(true);
-  expect(out.content).toContain("单写者租约");
+  expect(out.content).toContain("single-writer lease");
   expect(c.writes.length, "丢锁之后还是把它写出去了").toBe(1);
   await agent.stop().catch(() => undefined);
 });

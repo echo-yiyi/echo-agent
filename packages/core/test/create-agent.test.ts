@@ -697,8 +697,8 @@ test("skill_create 归单写者管：没拿到租约就拒绝，**池里也不�
   // 还没 start()：没有租约
   const before = await execTool(agent, "skill_create", { name: "early", description: "抢在拿锁之前", content: "x" });
   expect(before.isError, "没拿锁就创建成功了").toBe(true);
-  expect(before.content).toContain("单写者租约");
-  expect(before.content, "没说清这次根本没执行").toContain("没有执行");
+  expect(before.content).toContain("single-writer lease");
+  expect(before.content, "没说清这次根本没执行").toContain("was **not** performed");
   expect(agent.skills.has("early"), "拒绝了却还进了池").toBe(false);
   expect(await dir.list("skills/"), "拒绝了却写了盘").toEqual([]);
 
@@ -728,7 +728,7 @@ test("skill_create 归单写者管：丢锁之后拒绝", async () => {
 
   const out = await execTool(agent, "skill_create", { name: "late", description: "丢锁之后", content: "x" });
   expect(out.isError, "丢锁之后还创建成功了").toBe(true);
-  expect(out.content).toContain("单写者租约");
+  expect(out.content).toContain("single-writer lease");
   expect(await dir.read("skills/late/SKILL.md"), "丢锁之后还写了盘").toBeNull();
   await agent.stop().catch(() => undefined);
 });

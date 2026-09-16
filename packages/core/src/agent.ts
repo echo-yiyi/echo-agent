@@ -362,7 +362,7 @@ function dedupeKeyOf(message: AgentMessage): string {
 }
 
 const NO_LEASE_MESSAGE =
-  "本 agent 没有持有状态根的单写者租约（还没 start()，或者租约已经丢失）。";
+  "This agent does not hold the single-writer lease on its state root (start() has not run, or the lease was lost).";
 
 /**
  * 一笔任务落盘的结局。**「取消」不是「成功」**——盘上什么都没有，调用方不许把它当写完了
@@ -2182,7 +2182,7 @@ export class Agent {
       ...tool,
       execute: async (params: never, ctx: never) => {
         if (!this.persistAllowed) {
-          return toolError(`${NO_LEASE_MESSAGE}这次创建**没有执行**（池里也没有）。不要重试；请把这件事告诉用户。`);
+          return toolError(`${NO_LEASE_MESSAGE} The creation was **not** performed (nothing was added to the pool). Do not retry; tell the user.`);
         }
         return inner(params, ctx);
       },
@@ -2220,9 +2220,9 @@ export class Agent {
             // **取消不是成功**：没拿到单写者租约（还没 `start()`）或已经丢了它，
             // 这一笔根本没写出去。回执必须说出来，否则模型以为清单已经存下了。
             return toolError(
-              `任务清单**已经在当前进程里改好了**（清单里能看到），但没有写到盘上：` +
-                `这个 agent 没有持有状态根的单写者租约（还没启动，或者租约已经丢失）。` +
-                `这次改动重启后会丢失。**不要重试**——重试只会建出重复的任务；请把这件事告诉用户。`,
+              `The task list **was changed in this process** (the list shows it) but was not written to disk: ` +
+                `this agent does not hold the single-writer lease on its state root (it has not started, or the lease was lost). ` +
+                `The change will be lost on restart. **Do not retry**: a retry would only create duplicate tasks. Tell the user.`,
             );
           }
         } catch (e) {
@@ -2232,9 +2232,9 @@ export class Agent {
           // 这里选的是**如实说明局部生效**，不是回滚：回滚要给并行工具调用做序列化，
           // 而且 `inner` 的副作用不止 Map 一处（id 计数器等），假装能整个撤销才是更大的谎。
           return toolError(
-            `任务清单**已经在当前进程里改好了**（清单里能看到），但没能写到盘上：${errText(e)}。` +
-              `这个进程重启后这次改动会丢失。**不要重试**——重试只会建出重复的任务；` +
-              `请把这件事告诉用户。`,
+            `The task list **was changed in this process** (the list shows it) but could not be written to disk: ${errText(e)}. ` +
+              `The change will be lost when this process restarts. **Do not retry**: a retry would only create duplicate tasks. ` +
+              `Tell the user.`,
           );
         }
         return result;

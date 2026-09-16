@@ -59,7 +59,7 @@ flowchart LR
 
 | 内容 | owner | 当前实现 |
 | --- | --- | --- |
-| 通用 / coding 身份与纪律 | 产品 | [`ECHO_AGENT_IDENTITY`](../../packages/cli/src/prompt.ts#symbol=ECHO_AGENT_IDENTITY)、[`CODING_IDENTITY`](../../packages/coding/src/prompt.ts#symbol=CODING_IDENTITY) |
+| 通用 / coding 身份与纪律 | 产品 | [`ECHO_AGENT_IDENTITY`](../../packages/cli/src/prompt.ts#symbol=ECHO_AGENT_IDENTITY)、[`CODING_IDENTITY`](../../packages/coding/src/prompt.ts#symbol=CODING_IDENTITY)；通用纪律 [`conductSection()`](../../packages/base/src/prompt.ts#symbol=conductSection) 按有人 / 无人形态两版，由产品 preset 挂；coding 纪律 [`CODING_CONDUCT`](../../packages/coding/src/prompt.ts#symbol=CODING_CONDUCT) |
 | 终端的交互说明 | 壳 | [`terminalSurfaceSection()`](../../packages/tui/src/prompt.ts#symbol=terminalSurfaceSection) 与 TUI extension |
 | pipe 的交互说明 | 装配层 | [`pipeSurfaceSection()`](../../packages/base/src/prompt.ts#symbol=pipeSurfaceSection)（非交互形态由 `runPiped()` 挂） |
 | workspace、model、provider | core Agent | [`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection) |
@@ -69,7 +69,9 @@ flowchart LR
 | task 快照 | task module | [`renderTaskInjection()`](../../packages/core/src/task/tools.ts#symbol=renderTaskInjection) |
 | 某组工具的跨调用习惯 | 拥有该工具组的 extension | [`sessionToolsSection()`](../../packages/core/src/session/tools.ts#symbol=sessionToolsSection)、[`compactionSection()`](../../packages/core/src/compaction/tool.ts#symbol=compactionSection) |
 
-`new Agent()` 是低层使用高度：它构造各能力本体，但 prompt registry 初始为空。`mountBuiltinTools()` 只把可用的内建能力经 extension 注册上去；产品 identity、conduct 和 surface 仍由产品 / 壳提供。`createEcho()` 是唯一高层 composition root，按 builtin → inline / role → discovered / explicit 的装配路径挂载。
+`new Agent()` 是低层使用高度：它构造各能力本体，但 prompt registry 初始为空。`mountBuiltinTools()` 只把可用的内建能力经 extension 注册上去；产品 identity、conduct 和 surface 仍由产品 / 壳提供。`createEcho()` 是唯一高层 composition root，挂载顺序为 builtin → inline → 盘上发现 → 显式 `opts.extensions` → 角色；角色最后，因为它要替换的 `identity` 来自显式那一代（§3.3，[Extensions](extensions.md) §2）。
+
+所有模型可见文本——system section、attempt injection、工具的 description / 参数说明 / 返回文本、系统投进会话的 `environment` 消息——都用英文写；人面文字（CLI usage、TUI 文案、工具的 `label`、诊断与 run 错误）不受此约束。决定见 [模型面全英文](../decisions/implemented/2026-09-01-model-facing-english.md)。这条没有机器门，新代码是否漂回中文只能靠 review。
 
 ## 3. System sections 与装配
 
@@ -102,7 +104,7 @@ flowchart LR
 
 完整的 `{{name}}` 必须名字合法、已经注册且本次有值，否则抛 `PromptVariableError`；孤立且没有 `}}` 的 `{{` 作为普通文本保留；替换值不二次扫描。现有门见 [排序与空段](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null) 和 [严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名)。
 
-[`sectionFromMarkdown()`](../../packages/core/src/prompt/import.ts#symbol=sectionFromMarkdown) 接受极简 frontmatter：`name`、整数 `order`，缺 order 为 0；`tier`、缺名字、非整数 order 判红。正文去掉首尾空白，不保证字节级原样保留。
+[`sectionFromMarkdown()`](../../packages/core/src/prompt/import.ts#symbol=sectionFromMarkdown) 接受极简 frontmatter：`name`、整数 `order`，缺 order 为 0；`tier`、frontmatter 与 `fallbackName` 都没给名字、非整数 order 判红。正文去掉首尾空白，不保证字节级原样保留。
 
 ### 3.3 角色只替换 identity
 
@@ -170,7 +172,7 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 | 来源 | authority | 当前卫生措施 | 必须如实说明的限制 |
 | --- | --- | --- | --- |
 | 产品 / extension 字面量 | 产品代码 | 无；视为受信 | 改文案就是改模型行为，应与代码一起 review |
-| workspace 的 AGENTS.md / CLAUDE.md | 作为用户自己的项目指令执行 | 反引号替换、正文前缀 65 536 字符、XML-like 标记 | 标记可被正文自行闭合；第三方仓库本身不可信时，靠 prompt 包装无法授权它 |
+| workspace 的 AGENTS.md / CLAUDE.md | 作为用户自己的项目指令执行 | 反引号替换、正文前缀 65 536 字符、XML-like 标记、闭合标签中和（[`neutralizeClosingTag()`](../../packages/base/src/instructions.ts#symbol=neutralizeClosingTag) 把正文里 `</project-instructions>` 及其大小写 / 空白变体的 `<` 换成全角） | 中和只让标签整齐，正文照样是模型要执行的指令；第三方仓库本身不可信时，靠 prompt 包装无法授权它 |
 | skill 正文与激活参数 | 被激活后作为工作指令执行 | 围栏字符替换、单条和总预算、参数单行化 | 起止标记不是安全沙箱；skill 的安装 / 激活就是信任决定 |
 | memory | 跨 run 的持久背景 | resident / index 各自有预算；索引描述单行化 | 正文有意保留多行并直接影响模型，旧记忆可能陈旧或被污染 |
 | task title / executor | 只应是清单数据 | 只有条数上限 | 当前可换行、可无界增长，能伪装成额外指令段 |
