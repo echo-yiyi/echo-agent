@@ -151,6 +151,9 @@ test("装备变更在 setter 节点上记（run 之外）：思考档从哪档�
   echo.agent.thinkingLevel = next;
   await echo.send("go");
   await echo.stop();
+  // `stop()` 不等观测写完（2026-09-14：观测不在主流程上），写入端可能还没打开过——
+  // 离线读之前必须先 flush，否则这一句是竞态：本机快、CI 上慢，实测 CI 连红三天报 ObservationStoreMissingError。
+  await echo.observations.flush();
   const reader = await openObservationReader({ stateRoot: stateDir });
   try {
     const changed = [...(await reader.recentActivity({ limit: 500 }))].filter((e) => e.name === "agent.equipment.changed");

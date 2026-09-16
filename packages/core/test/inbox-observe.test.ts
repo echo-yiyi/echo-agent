@@ -169,6 +169,7 @@ test("e2e：deliver → consumeInbox：run 里有 inbox.consumed（谁的消息�
   expect(JSON.stringify(consumed!.body)).not.toContain("你那边好了吗"); // metadata 档没有正文
 
   await echo.stop();
+  await echo.observations.flush(); // 同上：`stop()` 不等观测写完，离线读之前先把手上的写完
   const { openObservationReader } = await import("../src/index.ts");
   const reader = await openObservationReader({ stateRoot: join(dir, "s1") });
   try {
