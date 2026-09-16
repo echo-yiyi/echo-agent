@@ -54,5 +54,8 @@ export function graceMs(periodMs: number): number {
  */
 export const CRON_GRACE_MS = 7_200_000;
 
-/** 一次性任务的宽限:「5 秒后执行」的创建流程本身可能花掉几秒。 */
+/**
+ * 一次性任务的**创建**宽限:「5 秒后执行」的创建流程本身可能花掉几秒,所以刚过去一点的时刻仍可创建。
+ * 只管创建闸——已经排上的一次性任务迟到多久都照投(2026-09-15 拍板),不存在「过期删除」。
+ */
 export const ONESHOT_GRACE_MS = 120_000;

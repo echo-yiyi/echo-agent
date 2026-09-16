@@ -179,7 +179,7 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
         continue;
       }
       // **等接受成功再簿记**：投递抛错时下面几行不执行，条目原样留着，下一 tick 重来。
-      await ctx.deliver?.(environmentMessage(renderFire(entry.schedule), SCHEDULE_KIND, entry.schedule.id));
+      await ctx.deliver?.(environmentMessage(renderFire(entry.schedule, now), SCHEDULE_KIND, entry.schedule.id));
       // deliver 返回 = 投递被接受：这是 delivered 的唯一 emission point
       observe(ctx, { kind: "delivered", id: entry.schedule.id, scheduleKind: entry.schedule.kind, via: "tick" }, now);
       fired.push(entry.schedule);
@@ -259,16 +259,9 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
   for (const entry of [...ctx.entries.values()]) {
     const s = entry.schedule;
     try {
-      if (s.kind === "at") {
-        if (s.at <= now && now - s.at > ONESHOT_GRACE_MS) {
-          // 错过太久的一次性任务:不补、删除并留痕(永远不会再触发,留着是死条目)
-          ctx.entries.delete(s.id);
-          ctx.report?.({ code: "schedule_expired", message: `一次性任务 '${s.id}' 错过触发窗口,已删除` });
-          observe(ctx, { kind: "missed", id: s.id, scheduleKind: s.kind, via: "catch-up", reason: "expired" }, now);
-          dirty = true;
-        }
-        continue; // 窗口内的交给首次 tick 正常触发
-      }
+      // 一次性任务在补跑里不裁决:**迟到也照投**(2026-09-15 拍板),交给首次 tick。
+      // 「错过窗口就删」删的是提醒本身——周期任务错过一次还有下一次,提醒错过就永远没有了。
+      if (s.kind === "at") continue;
       if (s.kind === "every") {
         const due = (entry.lastFiredAt ?? s.createdAt) + s.everyMs;
         if (due <= now && now - due > graceMs(s.everyMs)) {
@@ -285,7 +278,7 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
         dirty = true;
       } else if (due !== null) {
         // 补跑同样：接受成功才记 fired，否则下次启动还会补
-        await ctx.deliver?.(environmentMessage(renderFire(s), SCHEDULE_KIND, s.id));
+        await ctx.deliver?.(environmentMessage(renderFire(s, now), SCHEDULE_KIND, s.id));
         observe(ctx, { kind: "delivered", id: s.id, scheduleKind: s.kind, via: "catch-up" }, now);
         fired.push(s);
         ctx.entries.set(s.id, { ...entry, lastFiredAt: due });
@@ -381,6 +374,25 @@ function skipMissedCron(ctx: AgentSchedule, entry: ScheduleEntry, now: number, v
   observe(ctx, { kind: "missed", id: s.id, scheduleKind: s.kind, via, reason: "skipped-backlog" }, now);
 }
 
-function renderFire(s: Schedule): string {
-  return `[Schedule fired: ${s.id}]\n${s.prompt}`;
+/** 迟到到这个份上才在正文里说一句——正常一拍(1s)内的抖动不值得写进给模型的话。 */
+const LATE_NOTE_MS = 60_000;
+
+/**
+ * 给模型看的那句话。一次性任务迟到就带上**本应何时触发、迟了多久**:它照投不删(见 catchUp),
+ * 迟到与否要由读到的人判断还做不做,而不是由调度器替他决定。
+ */
+function renderFire(s: Schedule, now: number): string {
+  const head = `[Schedule fired: ${s.id}]`;
+  if (s.kind !== "at" || now - s.at < LATE_NOTE_MS) return `${head}\n${s.prompt}`;
+  return `${head} (scheduled for ${new Date(s.at).toISOString()}, ${formatLate(now - s.at)} late)\n${s.prompt}`;
+}
+
+/** 迟到时长的人话:天 / 小时 / 分钟两级,给模型读的,不要毫秒。 */
+function formatLate(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}d ${hours % 24}h`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  return `${minutes}m`;
 }

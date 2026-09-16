@@ -104,26 +104,22 @@ test("deferred start 不做 catch-up：错过窗口的闹钟要等 activate() �
   const clock = new FakeClock(0);
   const first = await createAgent(opts(store, { clock }));
   await first.start();
-  await addSchedule(first.schedule!, { kind: "at", id: "s1", prompt: "到点了", createdAt: 0, at: 60_000 });
+  // 判据用**周期任务超窗**：catch-up 的裁决是「跳过欠账、基线对齐到 now」，不投递、不依赖 timer，确定性可判
+  //（一次性任务迟到照投、补跑里不裁决，2026-09-15 拍板，所以不能再拿它当观测点）
+  await addSchedule(first.schedule!, { kind: "every", id: "s1", prompt: "到点了", createdAt: 0, everyMs: 60_000 });
   await first.stop();
 
-  // 停机期间错过了整个补跑窗口：catch-up 的裁决是「删掉并留痕」（这条路径不依赖 timer，确定性可判）
-  clock.advance(60_000 + 10 * 60_000);
+  clock.advance(60 * 60_000); // 停机一小时：远超 60s 周期的补跑窗口
   const agent = await createAgent(opts(store, { clock }));
-  const notes: string[] = [];
-  agent.subscribeLifecycle((e) => {
-    if (e.type === "notification") notes.push(e.message);
-  });
 
   await agent.start({ activation: "deferred" });
-  // **deferred 只恢复规则**：条目原样还在，一次清算都没做
-  expect((await listSchedules(agent.schedule!)).map((e) => e.schedule.id)).toEqual(["s1"]);
-  expect(notes.some((m) => m.includes("schedule_expired"))).toBe(false);
+  // **deferred 只恢复规则**：条目原样还在、基线一次都没动
+  expect((await listSchedules(agent.schedule!)).map((e) => e.lastFiredAt)).toEqual([null]);
 
   await agent.activate();
-  // activate 才在 managed-activation lane 上做 catch-up
-  expect(await listSchedules(agent.schedule!)).toEqual([]);
-  expect(notes.some((m) => m.includes("schedule_expired"))).toBe(true);
+  // activate 才在 managed-activation lane 上做 catch-up：基线对齐到 now，欠账不补
+  expect((await listSchedules(agent.schedule!)).map((e) => e.lastFiredAt)).toEqual([clock.now()]);
+  expect((agent as unknown as { inbox: InboxStore }).inbox.pendingCount).toBe(0); // 欠账没被补投
   await agent.stop();
 });
 
@@ -222,15 +218,16 @@ test("restored 也能直接 stop()：不要求先 activate", async () => {
 /* ─────────────── review 反例：lifecycle actor / 吸收态 / barrier / drain ─────────────── */
 
 /**
- * 造一个 catch-up 会卡住的状态根：盘上留一条过期的一次性闹钟，
- * catch-up 删它时要写 schedules.json——把那次写卡住，activation 就停在半路。
+ * 造一个 catch-up 会卡住的状态根：盘上留一条超窗的周期闹钟，
+ * catch-up 把它的基线对齐到 now 时要写 schedules.json——把那次写卡住，activation 就停在半路。
+ * （一次性闹钟迟到照投、补跑里不裁决，2026-09-15 拍板，所以卡点用周期任务造。）
  */
 async function seedSlowCatchUp(store: InMemoryDir, clock: FakeClock): Promise<{ store: StorageDir; release: () => void; written: () => boolean }> {
   const first = await createAgent(opts(store, { clock }));
   await first.start();
-  await addSchedule(first.schedule!, { kind: "at", id: "s1", prompt: "到点了", createdAt: 0, at: 60_000 });
+  await addSchedule(first.schedule!, { kind: "every", id: "s1", prompt: "到点了", createdAt: 0, everyMs: 60_000 });
   await first.stop();
-  clock.advance(60_000 + 10 * 60_000); // 错过整个补跑窗口 → catch-up 会删它并写盘
+  clock.advance(60 * 60_000); // 停机一小时,远超补跑窗口 → catch-up 跳过欠账、对齐基线并写盘
 
   let release = (): void => {};
   const gate = new Promise<void>((r) => {

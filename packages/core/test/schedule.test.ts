@@ -280,16 +280,30 @@ describe("重启接续(同一 dir 建新 harness)", () => {
     expect(c.delivered.length).toBe(1);
   });
 
-  test("过期一次性任务:start 时删除并留痕", async () => {
+  test("迟到的一次性任务:不删也不静默丢,照投并在正文里说明迟了多久（2026-09-15 拍板）", async () => {
+    // 此前:错过 120s 宽限就在补跑里删掉,只留一条诊断——提醒本身没了,人什么都收不到
     const dir = new InMemoryDir();
     const a = harness(dir);
-    await addSchedule(a.h, sched({ kind: "at", at: T0 + 60_000 } as never, "missed"), T0);
+    await addSchedule(a.h, sched({ kind: "at", at: T0 + 60_000 } as never, "late"), T0);
     const b = harness(dir);
-    await startSchedule(b.h, T0 + 3_600_000); // 错过近一小时,超 120s 宽限
+    await startSchedule(b.h, T0 + 3 * 3_600_000 + 60_000); // 停机三小时后重启
     stopSchedule(b.h);
-    expect(b.delivered.length).toBe(0);
-    expect(b.reports.some((r) => r.code === "schedule_expired")).toBe(true);
-    expect((await listSchedules(b.h)).length).toBe(0);
+    expect(b.delivered.length).toBe(0); // 补跑不裁决一次性任务
+    expect((await listSchedules(b.h)).length).toBe(1); // 还在,没被删
+    await tickSchedule(b.h, T0 + 3 * 3_600_000 + 60_000); // 首次 tick 照投
+    expect(b.delivered.length).toBe(1);
+    const text = JSON.stringify(b.delivered[0]);
+    expect(text).toContain(new Date(T0 + 60_000).toISOString());
+    expect(text).toContain("3h 0m late");
+    expect(b.reports.length).toBe(0);
+    expect((await listSchedules(b.h)).length).toBe(0); // 投完即删
+  });
+
+  test("一次性任务只有迟到超过一分钟才加说明", async () => {
+    const { h, delivered } = harness();
+    await addSchedule(h, sched({ kind: "at", at: T0 + 60_000 } as never, "ontime"), T0);
+    await tickSchedule(h, T0 + 61_000);
+    expect(JSON.stringify(delivered[0])).not.toContain("late");
   });
 
   test("cron 补跑:错过窗口内最近一次匹配,start 补投一次", async () => {

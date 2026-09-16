@@ -279,7 +279,7 @@ describe("Schedule：created / cancelled / delivered / missed / bookkeeping-fail
     expect(sink.facts.length).toBe(4);
   });
 
-  test("重启补跑：过期的一次性 → missed(expired)；超窗的 every → missed(skipped-backlog)；错过的 cron → delivered(catch-up)", async () => {
+  test("重启补跑：超窗的 every → missed(skipped-backlog)；错过的 cron → delivered(catch-up)；迟到的一次性不在补跑里裁决、首拍照投", async () => {
     const dir = new InMemoryDir();
     const now = Date.UTC(2026, 0, 1, 12, 0, 0);
     await dir.write(
@@ -298,10 +298,13 @@ describe("Schedule：created / cancelled / delivered / missed / bookkeeping-fail
     await startSchedule(ctx);
     ctx.cancelTick?.();
     const kinds = sink.facts.map((f) => `${f.id}:${f.kind}:${f.reason ?? f.via ?? ""}`);
-    expect(kinds).toContain("old-at:missed:expired");
     expect(kinds).toContain("stale-every:missed:skipped-backlog");
     expect(kinds).toContain("missed-cron:delivered:catch-up");
-    expect(sink.facts.length).toBe(3);
+    expect(kinds.some((k) => k.startsWith("old-at:"))).toBe(false); // 迟到的一次性在补跑里不产生任何事实
+    expect(sink.facts.length).toBe(2);
+    // 首拍照投,迟到说明在正文里
+    await tickSchedule(ctx, clock.now());
+    expect(sink.facts.at(-1)).toMatchObject({ kind: "delivered", id: "old-at", scheduleKind: "at", via: "tick" });
   });
 
   test("投递之后簿记落盘失败 → bookkeeping-failed（每条已投递的一次），错照抛", async () => {

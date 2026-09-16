@@ -2,7 +2,8 @@
 //   · created / cancelled：`add / cancel` 的 `save()` settle 之后；
 //   · delivered：`tickSchedule` / `catchUp` 的 deliver callback 返回之后（投递被接受才算）；
 //   · bookkeeping-failed：投递之后簿记 `save()` 抛错；
-//   · missed：补跑判定错过（超窗的一次性任务被删、every 跳过欠账对齐到下次）；cron 欠着的那次超宽限（tick 与补跑都会发）。
+//   · missed：周期任务跳过欠账（every 超窗对齐到下次；cron 欠着的那次超宽限，tick 与补跑都会发）。
+//     一次性任务不在此列——迟到也照投，见 harness.ts 的 catchUp。
 // 这些多发生在 run 之外：没有 runId 就是 runtime activity，经 snapshot → subscribe 取得。
 
 import type { CapabilityFactDescriptor, ObservationFactProjection } from "../observability/fact-sink.ts";
@@ -17,7 +18,7 @@ export type ScheduleFact = Readonly<{
   scheduleKind?: Schedule["kind"];
   /** delivered 是 tick 正常到期还是重启补跑；missed 是哪种错过。 */
   via?: "tick" | "catch-up";
-  reason?: "expired" | "skipped-backlog";
+  reason?: "skipped-backlog";
   message?: string;
   occurredAt: number;
 }>;
