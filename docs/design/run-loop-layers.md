@@ -65,7 +65,7 @@
 
 - **开**：`attempt_start`。
 - **内容**：压缩投影 → attempt 注入 → `transformContext` → `contextBeforeBuild`（block 则结果 `blocked`，不调模型）→ `convertToLlm` → 取 key → `streamFn` → 消费流（`message_start / message_update`）→ 定稿入 transcript（`message_end`、`usage`）。
-- **每个 attempt 完整重建。** 同一 turn 内重试时，`getTurnInjections`、`transformContext`、`contextBeforeBuild`、`convertToLlm`、`getApiKey` **每个 attempt 各调一次**。这是有意的：两次 attempt 之间上下文可能已被应急压缩改过，短命 key 可能已过期。代价是这些回调的契约要补一句「同一 turn 内可能被多次调用，有副作用的实现自己去重」。方言层不再自带重试（`packages/core/src/provider/dialect.ts` 只剩 `RetryPolicy` 类型）。
+- **每个 attempt 完整重建。** 同一 turn 内重试时，`getTurnInjections`、`transformContext`、`contextBeforeBuild`、`convertToLlm`、`getApiKey` **每个 attempt 各调一次**。这是有意的：两次 attempt 之间上下文可能已被应急压缩改过，短命 key 可能已过期。代价是这些回调的契约要补一句「同一 turn 内可能被多次调用，有副作用的实现自己去重」。方言层不再执行重试（`packages/core/src/provider/dialect.ts` 只保留 `RetryPolicy` 的定义与缺省值 `DEFAULT_RETRY_POLICY`，供 loop 与压缩摘要器读）。
 - **关**：`attempt_end{result}`。定稿的 `stopReason` 决定 `result.kind`：`end_turn / tool_use / max_tokens` → `landed`；`error` → `failed`；`aborted` → `aborted`。
 
 ### 2.5 tool call
@@ -74,7 +74,7 @@
 
 ## 3. 类型与事件
 
-`loop/types.ts` 新增下列类型，`AgentLoopConfig` 新增 `maxReplies: number`（与 `maxIterations` 同形，Agent 给缺省）；`events.ts` 的 `AgentEventInput` 新增四个变体、改三个：
+循环层的类型住在 `loop/types.ts`（`AgentLoopConfig.maxReplies` 与 `maxIterations` 同形，Agent 给缺省）；四层事件是 `events.ts` 里 `AgentEventInput` 的变体。下面是它们的形状——`LoopLayerEvent` 只是本文为摘录起的名字，不是导出：
 
 ```ts
 import type { AgentError, AgentMessage, AgentOutcome, AssistantMessage, ToolResultMessage } from "@echo-agent/core";
@@ -86,7 +86,7 @@ export type ReplySource = "prompt" | "follow_up" | "stop_hook" | "resume";
 export type TurnCause = "input" | "tool_use" | "max_tokens" | "steer";
 
 export type AttemptResult =
-  | { kind: "landed"; message: AssistantMessage } // 定稿被采纳，交给 reply 判决
+  | { kind: "landed"; message: Extract<AgentMessage, { role: "assistant" }> } // 定稿被采纳：就是 transcript 里那条（带 at），交给 reply 判决
   | { kind: "failed"; error: AgentError } // 重不重试看 error.retryable 与预算
   | { kind: "blocked"; reason?: string } // contextBeforeBuild 说别发
   | { kind: "aborted" };
@@ -98,7 +98,7 @@ export type TurnResult = {
   steers: AgentMessage[]; // closeTurn 交出的插话，由 reply 决定吸收
 };
 
-/** turn 事件不再带 iteration：turnId 的 n 就是它。 */
+/** turn 事件不带 iteration：turnId 的 n 就是它。 */
 export type LoopLayerEvent =
   | { type: "reply_start"; replyId: string; source: ReplySource }
   | { type: "reply_end"; replyId: string; outcome: AgentOutcome; final: AssistantMessage | null; turns: number }
@@ -174,9 +174,9 @@ agent_end{completed}
 
 ## 6. 重试与失败
 
-**attempt 是唯一的重试单位。** dialect 只做协议翻译：一次请求、一条流、流断了就以 `error` 收场并标 `retryable`；它自己不重试，`ProviderEvent.retry` 删除。压缩摘要器的模型调用（[`modelCallFor`](../../packages/core/src/compaction/pipeline.ts#symbol=modelCallFor)）不是 attempt，但同一份 `retryPolicy`、同一个受 signal 管的退避（[`loop/backoff.ts`](../../packages/core/src/loop/backoff.ts#symbol=sleep)）：retryable 错误重试到 `maxAttempts`，只发 hook 侧的 `modelCallFailed` / `retryScheduled`，不发 loop 事件（它不在任何 turn 里）。重试由 `runTurn` 按 `retryPolicy` 做：`retryable && attempt < maxAttempts` → `retry_scheduled` → `backoffMs(attempt)` → 下一个 attempt（完整重建，§2.4）。撞窗（`context_overflow`）→ 应急压缩一次 → 下一个 attempt；压不动 → `failed`。hook 侧 `modelCallFailed`（每次 `attempt_end{failed}`）与 `retryScheduled`（每次 `retry_scheduled`）由 `runTurn` 在同一位置 notify，attempt 计数与事件一致。
+**attempt 是唯一的重试单位。** dialect 只做协议翻译：一次请求、一条流、流断了就以 `error` 收场并标 `retryable`；它自己不重试，也没有 `retry` 一类的 provider 事件。压缩摘要器的模型调用（[`modelCallFor`](../../packages/core/src/compaction/pipeline.ts#symbol=modelCallFor)）不是 attempt，但同一份 `retryPolicy`、同一个受 signal 管的退避（[`loop/backoff.ts`](../../packages/core/src/loop/backoff.ts#symbol=sleep)）：retryable 错误重试到 `maxAttempts`，只发 hook 侧的 `modelCallFailed` / `retryScheduled`，不发 loop 事件（它不在任何 turn 里）。重试由 `runTurn` 按 `retryPolicy` 做：`retryable && attempt < maxAttempts` → `retry_scheduled` → `backoffMs(attempt)` → 下一个 attempt（完整重建，§2.4）。撞窗（`context_overflow`）→ 应急压缩一次 → 下一个 attempt；压不动 → `failed`。hook 侧 `modelCallFailed`（每次 `attempt_end{failed}`）与 `retryScheduled`（每次 `retry_scheduled`）由 `runTurn` 在同一位置 notify，attempt 计数与事件一致。
 
-**失败消息的去向。** 失败 attempt 的定稿进 transcript（stopReason: error），`convertToLlm` 投影时丢掉 `stopReason === "error"` 的 assistant 消息——它不是模型说过的话，不该作为上文送回去。
+**失败消息的去向。** 失败 attempt 的定稿（`stopReason: "error"`）与中止的半截回复（`stopReason: "aborted"`）都进 transcript 当事实；`convertToLlm` 投影时把 `stopReason` 为 `error | aborted` 的 assistant 消息整条丢掉——它们不是模型说完的话，不该作为上文送回去（范围从 `error` 扩到 `error | aborted` 的修订见[失败消息](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md)记录的 2026-09-07 一节）。
 
 **outcome 自内向外传，外层不发明内层没报的结果**：
 
@@ -189,10 +189,10 @@ agent_end{completed}
 | blocked | `blocked` | `aborted{reason}` | `aborted{reason}` |
 | aborted（调用方 signal） | `aborted` | `aborted{reason}` | `aborted{reason}` |
 | aborted（deadline signal） | `aborted` | `error{timeout}`（reply 区分两个 signal） | `error{timeout}` |
-
-**abort 的 reason 一路带到 outcome**（[决策](../decisions/implemented/2026-09-01-abort-reason.md)）：`Agent.abort(reason)` 把 reason 装进 `AbortSignal.reason`（[`AbortReason`](../../packages/core/src/errors.ts#symbol=AbortReason)——必须是 `AbortError` 形状的 `DOMException`，provider 靠 `name` 识别「被中止」，裸字符串会被当成别的错误），reply 在收场时从调用方 signal 取回，落在 `agent_end` 与 `LoopResult` 的 `{ kind: "aborted", reason }` 里。宿主传的 reason 是自由字符串原样透传；core 自己发起的中断用 [`ABORT_REASON`](../../packages/core/src/errors.ts#symbol=ABORT_REASON) 里的常量：`lease-lost`（丢锁）、`dispose`（收摊）。没给理由的裸 `abort()` 与 admission 的抢占 / 收摊仍是不带 reason 的 `{ kind: "aborted" }`；run 超时不是 aborted，是 `error{timeout}`。
 | — | — | 轮首硬闸：`aborted` / `error{max_iterations}` / `error{timeout}` | 同 reply |
 | — | — | — | reply 之间：达 `maxReplies` 且仍有待办 → `error{max_replies}` |
+
+**abort 的 reason 一路带到 outcome**（[决策](../decisions/implemented/2026-09-01-abort-reason.md)）：`Agent.abort(reason)` 把 reason 装进 `AbortSignal.reason`（[`AbortReason`](../../packages/core/src/errors.ts#symbol=AbortReason)——必须是 `AbortError` 形状的 `DOMException`，provider 靠 `name` 识别「被中止」，裸字符串会被当成别的错误），reply 在收场时从调用方 signal 取回，落在 `agent_end` 与 `LoopResult` 的 `{ kind: "aborted", reason }` 里。宿主传的 reason 是自由字符串原样透传；core 自己发起的中断用 [`ABORT_REASON`](../../packages/core/src/errors.ts#symbol=ABORT_REASON) 里的常量：`lease-lost`（丢锁）、`dispose`（收摊）。没给理由的裸 `abort()` 与 admission 的抢占 / 收摊仍是不带 reason 的 `{ kind: "aborted" }`；run 超时不是 aborted，是 `error{timeout}`。
 
 ## 7. 使用边界
 
@@ -200,11 +200,11 @@ agent_end{completed}
 - agent_end 只封口 run 事件流；调用方要等 prompt/continue 返回，或观察状态变化，再判断能否发起新工作。
 - attempt 回调可能在同一 turn 内多次执行，带副作用的 transform、取 key 或注入函数必须自行处理重复调用。
 - 主循环的迭代上限不等同于墙钟超时，工具和 provider 还需遵守 signal。
-- 存入 transcript 的失败响应不参与后续模型上下文；离线分析账本时应读取 stopReason。
+- 存入 transcript 的失败与中止响应（`stopReason` 为 `error` / `aborted`）不参与后续模型上下文；离线分析账本时应读取 stopReason。
 
 ## 8. 验证
 
-loop-layers 测试使用栈式校验器检查四层嵌套、输入入账位置、失败配对、重试计数和工具结果顺序。覆盖正常文本、工具批、重试、block、abort、deadline、followUp 与 reply 预算路径；其断言不扩展到任意第三方工具的副作用。
+loop-layers 测试使用栈式校验器检查四层嵌套、输入入账位置、失败配对与重试计数；工具结果的入账顺序（按 tool_use 出现顺序，不按完成顺序）由 `packages/core/test/parallel-tools.test.ts` 守。覆盖正常文本、工具批、重试、block、abort、deadline、followUp 与 reply 预算路径；其断言不扩展到任意第三方工具的副作用。
 
 ```bash
 bun test packages/core/test/loop-layers.test.ts packages/core/test/invariants.test.ts packages/core/test/intake.test.ts packages/core/test/prompt.test.ts packages/core/test/compaction.test.ts
