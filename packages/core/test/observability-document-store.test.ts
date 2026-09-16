@@ -65,7 +65,6 @@ function header(runId: string, acceptedAt = 1_000): RunObservationHeader {
     endedAt: null,
     status: "running",
     integrity: "complete",
-    persistence: "stored",
   };
 }
 

@@ -81,7 +81,6 @@ export function buildRunObservationViewModel(observation: RunObservation): RunOb
       endedAt: observation.endedAt,
       status: observation.status,
       integrity: observation.integrity,
-      persistence: observation.persistence,
     },
     identity: {
       agentId: observation.agentId,
@@ -100,7 +99,6 @@ export function buildRunObservationViewModel(observation: RunObservation): RunOb
     summary: observation.summary,
     health: {
       canonicalGaps: observation.gaps,
-      persistence: observation.persistence,
       // metadata / off 都经过采集边界的投影与 redaction；只有 content 才可能带原文
       redacted: observation.capturePolicy !== "content",
     },
@@ -186,7 +184,7 @@ function renderText(vm: RunObservationViewModel, options: RenderRunObservationOp
 
   const gaps = vm.health.canonicalGaps;
   const gapText = gaps.length === 0 ? "gaps 0" : `gaps ${gaps.length} [${gaps.map((g) => `${g.reason}(${g.afterSeq},${g.beforeSeq})`).join(" ")}]`;
-  lines.push(`${label("Observation Health")}integrity ${h.integrity} · ${gapText} · persistence ${vm.health.persistence} · redacted ${vm.health.redacted ? "yes" : "no"} · records ${vm.summary.recordCount}`);
+  lines.push(`${label("Observation Health")}integrity ${h.integrity} · ${gapText} · redacted ${vm.health.redacted ? "yes" : "no"} · records ${vm.summary.recordCount}`);
   return `${lines.join("\n")}\n`;
 }
 

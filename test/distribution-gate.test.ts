@@ -429,7 +429,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
             "const last = await echo.send(\"y\");",
             "// 不 flush：stop 不等观测写完，进程要等观测线程写完才退",
             "await echo.stop();",
-            "console.log(JSON.stringify({ outcome: r.outcome.kind, live: live.kind === \"found\" ? live.observation.persistence : live.kind, last: last.runId }));",
+            "console.log(JSON.stringify({ outcome: r.outcome.kind, live: live.kind === \"found\" ? live.observation.status : live.kind, last: last.runId }));",
           ].join("\n"),
         );
         writeFileSync(
@@ -447,7 +447,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
         const run = sh(["node", "echo.mjs", stateDir], consumer);
         expect(run.ok, `Node 下 createEcho 跑失败：\n${run.out}`).toBe(true);
         const line = JSON.parse(run.out.split("\n").filter(Boolean).at(-1) ?? "{}") as { outcome: string; live: string; last: string };
-        expect({ outcome: line.outcome, live: line.live }).toEqual({ outcome: "completed", live: "stored" });
+        // live 面读得回这个 run，而且已经封口（读之前 getRun 自己先 flush）
+        expect({ outcome: line.outcome, live: line.live }).toEqual({ outcome: "completed", live: "completed" });
 
         // 最后一个 run 在 stop 之前才封口、没人等它：它出现在盘上，说明进程是等观测线程写完才退的
         const read = sh(["node", "read.mjs", stateDir, line.last], consumer);

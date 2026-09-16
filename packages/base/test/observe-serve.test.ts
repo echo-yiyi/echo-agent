@@ -238,7 +238,7 @@ test("术语表覆盖：每个会落盘的记录名都念得出，每个模型�
 
 test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   const lex = lexicon();
-  for (const group of [lex.runStatus, lex.runSource, lex.replySource, lex.integrity, lex.persistence, lex.records]) {
+  for (const group of [lex.runStatus, lex.runSource, lex.replySource, lex.integrity, lex.records]) {
     for (const [key, term] of Object.entries(group)) {
       expect(term.zh.length, key).toBeGreaterThan(0);
       expect(term.en.length, key).toBeGreaterThan(0);

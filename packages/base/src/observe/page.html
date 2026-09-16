@@ -1045,8 +1045,7 @@ function renderDetail() {
     el("span", { class: "muted mono dur", text: duration }),
     el("span", { class: "marks" },
       markButton(LEX.runStatus[sk], sk),
-      markButton(LEX.integrity[h.integrity], h.integrity),
-      markButton(LEX.persistence[h.persistence], h.persistence)),
+      markButton(LEX.integrity[h.integrity], h.integrity)),
   ));
   // 状态的解释不藏在 title 里：点圆点，下面出一行人话（评审：「完整」「已落盘」要可查看的解释）
   if (STATE.markWhy) ov.append(el("p", { class: "markwhy", text: STATE.markWhy }));

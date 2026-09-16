@@ -76,7 +76,6 @@ function headerOf(o: RunObservation): RunObservationHeader {
     endedAt: o.endedAt,
     status: o.status,
     integrity: o.integrity,
-    persistence: o.persistence,
   };
 }
 

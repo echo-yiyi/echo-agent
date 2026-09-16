@@ -177,7 +177,7 @@ describe("renderRunObservation", () => {
     expect(a.summary.model).toEqual({ calls: 2, inputTokens: 20, outputTokens: 10, totalDurationMs: 64 });
     expect(a.summary.tools[0]).toMatchObject({ toolId: "ping", calls: 1, successes: 1, totalDurationMs: 13 });
     expect(a.finalStateAbsence).toBe("captured");
-    expect(a.health).toEqual({ canonicalGaps: [], persistence: "stored", redacted: true });
+    expect(a.health).toEqual({ canonicalGaps: [], redacted: true });
   });
 
   test("off policy 的空领域字段显示 not captured by policy；缺 run.assembly 显示 not captured", () => {
@@ -196,7 +196,6 @@ describe("renderRunObservation", () => {
       endedAt: 1_050,
       status: "completed",
       integrity: "complete",
-      persistence: "stored",
       agentAssembly: { digest: "not-captured", slots: [] },
       modelBinding: { providerId: "not-captured", modelId: "not-captured", catalogRevision: "not-captured", configDigest: "not-captured" },
       outcome: { status: "completed" },

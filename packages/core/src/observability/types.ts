@@ -328,7 +328,6 @@ export type RunObservationHeader = Readonly<{
   endedAt: number | null;
   status: RunObservationStatus;
   integrity: ObservationIntegrity;
-  persistence: "stored" | "degraded";
 }>;
 
 /** 一个 run 的 RunIndex（观测目录里的 `runs/<runId>.json`）：header 的唯一真相源；与这个 run 的 records 在同一个批文件里提交。 */
@@ -573,7 +572,6 @@ export type RunObservationViewModel = Readonly<{
   summary: RunObservationSummary;
   health: Readonly<{
     canonicalGaps: readonly ObservationGap[];
-    persistence: "stored" | "degraded";
     redacted: boolean;
   }>;
 }>;
