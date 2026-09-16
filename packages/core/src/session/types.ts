@@ -68,13 +68,13 @@ export type SessionInfo = {
   readonly agent: AgentRef;
   /**
    * 谁建的这一段（2026-09-03，sessions.md §6）。**判据是谁调的 create**：经容器自己的路径建的
-   * （cli 启动、`/clear`、宿主 `echo.sessions.create`）为 `true`；经 extension 面的 `session_create`
+   * （cli 启动、宿主 `echo.sessions.create`）为 `true`；经 extension 面的 `session_create`
    * 工具建的为 `false`。只有 main 挂 `session_create`，所以扇出只有一层、不会自己繁殖。
    * `--continue` 只在 main 里挑——续到一段别人派的活不是「上次那段对话」。
    */
   readonly main: boolean;
   /**
-   * 持久状态。`closed` 由 `session_close` 与 `/clear` 写；**容器退出不写**——退出的段仍是
+   * 持久状态。`closed` 只由 `session_close` 写（`/clear` 今天只清内存，不换段、不写它）；**容器退出不写**——退出的段仍是
    * `active`、只是没进程，`--continue` 才续得回来。`closed` 的段缺省不列、不收信。
    * 运行状态（idle / working）是另一份，在 `status.json`，不进 meta。
    */
@@ -87,7 +87,7 @@ export type SessionInfo = {
 /**
  * 一段 session 的**持久**状态。运行状态（idle / working）是另一份，不在 meta 里。
  *
- * `active` = 还能收信、还能被续；`closed` = 显式关掉的（`session_close` / `/clear`），
+ * `active` = 还能收信、还能被续；`closed` = 显式关掉的（`session_close`），
  * 留在盘上可 `--resume`，但不进缺省清单、也不再收信。**容器退出不写 closed**——
  * 退出的段仍是 active，只是没进程。
  */
