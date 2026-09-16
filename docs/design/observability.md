@@ -14,7 +14,7 @@
 **Non-Goals（已决，不做）。**
 
 - **观测不订阅、不转发事件协议，也不为观测往事件协议里加成员**（2026-09-11 拍板）。事件协议是功能模块：agent 状态要给前端实时展示，形状由「前端要展示什么」决定；观测是插进执行过程的节点，留下整体运行状态供事后分析评估，覆盖面由「复盘与评估要什么」决定。两者耦合的后果实测过：循环的观测曾经转手 `AgentEvent`，于是 reply / attempt 事件没投影时落成看不出含义的 `agent.custom_event`，Dream 与子 agent 因为不想广播给前端而传了空 `emit`，内部在账本里一条都没有。
-- **观测不判断进程死活**（2026-09-06 拍板）。观测只记别人做过的决定；没封口的 run 只说「未收尾」，不由观测推断它是崩了还是还在跑。`RunObservationStatus` 里的 `interrupted` 今天没有任何写者——将来若有管进程的那一层做了接管决定，由它把决定当事实交给观测记。会话死活另有其人，见[会话存活探针](../decisions/implemented/2026-09-09-session-alive-pid-probe.md)。
+- **观测不判断进程死活**（2026-09-06 拍板）。观测只记别人做过的决定；没封口的 run 只说「未收尾」，不由观测推断它是崩了还是还在跑。所以 `RunObservationStatus` 里没有「被接管封口」那一档（2026-09-15 删掉没有写者的 `interrupted`）——将来若有管进程的那一层做了接管决定，由它把决定当事实交给观测记，那时再加。会话死活另有其人，见[会话存活探针](../decisions/implemented/2026-09-09-session-alive-pid-probe.md)。
 - **不脱敏。** `content` 档把模型文本、思考、工具参数与结果**明文**写进盘上的观测文档。`redact.ts` 只处理第三方异常对象（stack 只留 digest），不是内容脱敏层。谁开这一档，谁承担盘上有明文这件事。
 - **不做 crash recovery**（列在「欠账」§8，不是本文要设计的东西）。
 - **不在 agent 的任何流程里清理，也不内置清理规则。** 留多久、留多少归产品：产品不调 `expireObservations()` 就一条不删；core 不在启动、run 封口、lease 的任何一步上跑它（§5）。旧格式的 `observations.sqlite` 不迁移、不读（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)）。
@@ -60,7 +60,7 @@
 | 组 | 字段 | 谁给 |
 |---|---|---|
 | 身份 | `recordId` `seq` `observedAt` | **只有 Sequencer**。producer 给不了，给了也不认 |
-| 是什么 | `kind`（`event` / `span_start` / `span_end` / `snapshot` / `health`）· `name` · `occurredAt` · `sourceSeq`（可选，今天没有生产者，见 §8） | producer |
+| 是什么 | `kind`（`event` / `span_start` / `span_end` / `snapshot` / `health`）· `name` · `occurredAt` | producer |
 | 挂在哪 | `scope`（`runtimeId` / `agentId` / `sessionId` / `runId` / `turnId` / `toolCallId` …）· `correlation` · `generation` | producer 给业务部分，`runtimeId` 由 Sequencer 盖 |
 | 内容 | `owner` · `instrumentation` · `subject` · `attributes` · `body` | producer |
 
@@ -82,7 +82,7 @@
 
 **为什么探针不能抛、也不能等**：它被内建能力在自己的决策点直接调（`sink.offer(fact)`，[fact-sink.ts](../../packages/core/src/observability/fact-sink.ts#symbol=factSinkToThread)）。那些点在 agent 主线上，一次异常或一次 await 就会把观测变成主线的一部分。所以探针在主线程上只读 scope、投影、交出去；Sequencer 的两条 lane 都在观测线程里（[thread-host.ts](../../packages/core/src/observability/thread-host.ts#symbol=ingestFact)）。
 
-**缺口不是丢数据，是把「这里丢了」记下来。** `committed prefix` 只越过两类位置：已提交的记录，或被后续 gap 精确覆盖的 hole。缺口原因是封闭集合（`ObservationGapReason`）：`buffer_overflow` `encoding_error` `capture_limit` `store_failure` `canonical_flush_timeout` `lease_lost` `retention`——其中三个今天没有写者，见 §8。
+**缺口不是丢数据，是把「这里丢了」记下来。** `committed prefix` 只越过两类位置：已提交的记录，或被后续 gap 精确覆盖的 hole。缺口原因是封闭集合（`ObservationGapReason`）：`buffer_overflow`（ring 满）、`encoding_error`（编码不了）、`capture_limit`（可选快照超预算）、`retention`（回放跨过被过期删掉的批）。**每个都有写者**——没有写者的值 2026-09-15 已从公开类型里删掉。
 
 **live 扇出严格在 COMMIT / read-back 之后按 seq 进行**：rollback 或结果不确定的候选记录永远不会被订阅者看见。
 
@@ -135,9 +135,9 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 
 | 信号 | 在哪读 | 含义 |
 |---|---|---|
-| `persistence` | `getRun()` 的 header；`snapshot().health.persistence` | header 上 `stored` / `degraded`：终态已进 index 才 `stored`。health 上是写入端此刻的 `healthy` / sealed（`degraded` / `recovering` 今天没有写者，见 §8） |
+| `persistence` | `getRun()` 的 header；`snapshot().health.persistence` | header 上 `stored` / `degraded`：终态已进 index 才 `stored`（今天只写得出 `stored`，见 §8）。health 上是写入端此刻的 `healthy` / `sealed` 两态，封口时带 `terminalSince` 与 `lastErrorDigest` |
 | `integrity` | `getRun()` 的 header | `complete` / `partial`——`partial` 表示这条 run 的记录里有缺口 |
-| `status` | `getRun()` 的 header | run 的业务终态：`running` / `completed` / `aborted` / `error`（`interrupted` 无写者） |
+| `status` | `getRun()` 的 header | run 的业务终态：`running` / `completed` / `aborted` / `error` |
 
 **corruption 是唯一 fail-loud 的一类**：同一个批文件内容不同、committed prefix 或 RunIndex digest 的 CAS 不符、RunIndex 引用了不存在的记录、文档不是它该是的形状——store 立即抛，writer 被 seal，reader 不「修复」。这不是可降级的错误，是账本不再可信。
 
@@ -199,12 +199,11 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 按「会不会随时间恶化」排：
 
-1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端降级（seal）之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
+1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端封口之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
 2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性——产品不调 `expireObservations()` 的会话会越来越慢。这是唯一会随时间恶化的一条，控制它的是产品的过期。
-3. **公开类型里有几个值没有写者**：写入端状态 `ObservationPersistenceStatus` 的 `degraded` / `recovering` / `lost-lease`，缺口原因 `store_failure` / `canonical_flush_timeout` / `lease_lost`。`degraded` 原来唯一的来源是边界提交的期限，2026-09-14 随「可等待的边界」一起删了；`lost-lease` / `lease_lost` 随观测不挂 lease 没了入口；其余从来没有写者。类型还在公开面上。
+3. **`RunObservationHeader.persistence` 只写得出 `stored`**：`degraded` 那一档今天没有写者（封口那笔没落盘时，这个 run 的 index 压根不会更新）。其余没有写者的值——写入端状态的 `degraded` / `recovering` / `lost-lease`、缺口原因 `store_failure` / `canonical_flush_timeout` / `lease_lost`、run 终态 `interrupted`、envelope 的 `sourceSeq`——2026-09-15 已从公开类型里删掉。
 4. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
 5. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
 6. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
 7. **记忆的能力摘要没接。** 状态快照在节点上只收同步可读的值，记忆的状态在盘上要异步读。
-8. **`sourceSeq` 没有生产者。** 它原本是转手 `AgentEvent` 时带的事件 seq；观测改成插桩之后没有任何记录再带它。envelope 上这个可选字段留在已发布的公开类型里没删。
-9. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。
+8. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。

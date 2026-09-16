@@ -106,8 +106,6 @@ describe("循环事实逐 kind 固定投影（metadata 档）", () => {
       expect(p.kind).toBe(kind);
       expect(p.name).toBe(name);
       expect(p.occurredAt).toBe(f.at);
-      // 探针事实不带 AgentEvent 的 seq：观测与事件协议是两条互不依赖的输出
-      expect(p.sourceSeq).toBeUndefined();
     });
   }
 

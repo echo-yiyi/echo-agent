@@ -376,17 +376,8 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       persistence: {
         status: p.status,
         lastCommittedSeq: this.committedPrefix,
-        ...(p.status === "degraded" || p.status === "recovering"
-          ? { degradedSince: p.since, lastErrorDigest: p.lastErrorDigest, reopenAttempts: p.reopenAttempts }
-          : p.status === "sealed" || p.status === "lost-lease"
-            ? {
-                // terminal 也要交出「什么时候、因为什么」：只报 reopenAttempts:0 等于把最需要证据的一刻做成空白
-                terminalSince: p.since,
-                ...(p.degradedSince === undefined ? {} : { degradedSince: p.degradedSince }),
-                lastErrorDigest: p.lastErrorDigest,
-                reopenAttempts: p.reopenAttempts,
-              }
-            : { reopenAttempts: 0 }),
+        // 封口也要交出「什么时候、因为什么」：只报一个 status 等于把最需要证据的一刻做成空白
+        ...(p.status === "sealed" ? { terminalSince: p.since, lastErrorDigest: p.lastErrorDigest } : {}),
       },
       capture: { policy: this.capturePolicy, canonicalGapCount: this.canonicalGapCount },
       sinks: [...[...this.subscribers.values()].map((s) => this.sinkHealthOf(s)), ...this.closedSinks],
@@ -406,8 +397,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
    */
   async flushPending(): Promise<void> {
     for (;;) {
-      const s = this.persistence.status;
-      if (s === "sealed" || s === "lost-lease") return;
+      if (this.persistence.status === "sealed") return;
       if (this.slots.size === 0 && !this.flushing) return;
       this.scheduleFlush("now");
       await this.idle();
@@ -428,8 +418,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
    * 返回 true = 已丢弃（调用方立刻返回）。
    */
   private unavailable(): boolean {
-    const s = this.persistence.status;
-    return s === "sealed" || s === "lost-lease";
+    return this.persistence.status === "sealed";
   }
 
   offer<TInput>(draft: BoundedObservationDraft<TInput>): void {
@@ -484,7 +473,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
   /* ───────── boundary lane ───────── */
 
   appendBoundary<TInput>(draft: BoundaryObservationDraft<TInput>): void {
-    if (this.persistence.status === "sealed" || this.persistence.status === "lost-lease") {
+    if (this.persistence.status === "sealed") {
       return;
     }
     // **整份 draft 先浅拷贝成快照，之后只用快照**（2026-08-27 review P0）：原来 `draft.name` / `draft.scope` /
@@ -724,11 +713,10 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     const body = draft.body;
     if (lane !== "bounded" && lane !== "boundary") throw new ObservationEncodingError("unsupported_value", "$.lane", "非法取值");
 
-    // frame 物化只有 `materializeRecordFrame` 这一处：kind / occurredAt / sourceSeq / attributes / identity 同一把尺。
+    // frame 物化只有 `materializeRecordFrame` 这一处：kind / occurredAt / attributes / identity 同一把尺。
     const framing = materializeRecordFrame({
       kind: draft.kind,
       occurredAt: draft.occurredAt,
-      ...(draft.sourceSeq === undefined ? {} : { sourceSeq: draft.sourceSeq }),
       name: draft.name,
       attributes: { ...draft.attributes },
       scope: { ...draft.scope, runtimeId: this.runtimeId },
@@ -744,7 +732,6 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     const id = frame.identity;
     const kind = frame.kind;
     const occurredAt = frame.occurredAt;
-    const sourceSeq = frame.sourceSeq;
     const attributes = frame.attributes;
 
     const recordId = `${this.runtimeId}:${seq}`;
@@ -766,11 +753,10 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
       attributes,
       body,
     };
-    if (sourceSeq !== undefined) input.sourceSeq = sourceSeq;
     if (id.disposeOwner !== undefined) input.disposeOwner = id.disposeOwner;
     if (id.subject !== undefined) input.subject = id.subject;
 
-    // 框架探针：只量**ephemeral fact 不背的那部分**。两边共有的 kind / name / occurredAt / sourceSeq /
+    // 框架探针：只量**ephemeral fact 不背的那部分**。两边共有的 kind / name / occurredAt /
     // 业务 scope id / attributes / body 都不进探针——把它们算进来等于同一段内容在两边被记进不同预算，
     // 反而造出新的不对称。配合 `OBSERVATION_IDENTITY_LIMITS` 的上限，额外框架的上界是可算的，
     // 「engine 永不比 Runtime 宽」才有依据。探针吃的也是物化后的快照。
@@ -1105,7 +1091,7 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     }
     // 循环退出时 ring 里还可能剩不足一批的 candidate（flush 期间到达、又没触发限额）：
     // 必须重新安排一次，否则它们会一直躺到下一个 offer——delayed flush 的定时器早被 "now" 取消了。
-    if (this.slots.size > 0 && this.persistence.status !== "sealed" && this.persistence.status !== "lost-lease") {
+    if (this.slots.size > 0 && this.persistence.status !== "sealed") {
       this.scheduleFlush(this.pendingBytesExceedLimits() || this.boundaryPending() ? "now" : "delayed");
     }
   }
@@ -1281,10 +1267,9 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     };
   }
 
-  /** writer 已进终态（sealed / lost-lease）。单独一个方法：同一函数里两次读 `this.persistence.status`，TS 会把第二次窄成不可能。 */
+  /** writer 已封口。单独一个方法：同一函数里两次读 `this.persistence.status`，TS 会把第二次窄成不可能。 */
   private terminal(): boolean {
-    const s = this.persistence.status;
-    return s === "sealed" || s === "lost-lease";
+    return this.persistence.status === "sealed";
   }
 
   private async flushOnce(): Promise<void> {
@@ -1370,24 +1355,16 @@ export class ObservationSequencer implements ObservationIngest, SequencerFinaliz
     for (const slot of window.slots) this.publish(slot.envelope);
   }
 
+  /** 账本不再可信：就此封口，不再预留、不再提交。没有中间档，也没有重开。 */
   private seal(cause: Error): void {
-    this.terminate("sealed", cause);
-  }
-
-  private terminate(status: "sealed" | "lost-lease", cause: Error): void {
-    if (this.persistence.status === "sealed" || this.persistence.status === "lost-lease") return;
+    if (this.persistence.status === "sealed") return;
     // **成因先 redact**：seal 往往由第三方错误触发，`cause.message` 里出现过整条 `Authorization: Bearer sk-…`（review 实测），
     // health 里只存 digest。
     const r = redactError(cause);
-    const prev = this.persistence;
-    const now = this.clock.now();
     this.persistence = {
-      status,
-      since: now,
-      // 之前经历过 degraded/recovering 就把首次 degradation 的时刻留下；直接从 healthy 掉进来则没有
-      ...(prev.status === "degraded" || prev.status === "recovering" ? { degradedSince: prev.since } : {}),
+      status: "sealed",
+      since: this.clock.now(),
       lastErrorDigest: r.digest, // health 存**完整** digest；对外只露前缀
-      reopenAttempts: prev.status === "degraded" || prev.status === "recovering" ? prev.reopenAttempts : 0,
     };
     // 开着的溢出区间不会再有人收口（offer / boundary / flush 都在 terminal 上短路）
     this.overflow = undefined;

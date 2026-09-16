@@ -144,9 +144,8 @@ describe("send → getRun → render（completed）", () => {
     expect(n).toContain("span_end:tool.execute");
     // 每条 run 内记录都带 runId；turn 内的 model / tool span 带 turnId
     for (const r of o.records) expect(r.scope.runId).toBe(result.runId);
-    // 观测不再骑在 AgentEvent 上：记录没有 sourceSeq，canonical seq 的顺序就是执行节点被走到的顺序。
+    // 观测不再骑在 AgentEvent 上：canonical seq 的顺序就是执行节点被走到的顺序。
     // 脚本化的 run 执行顺序是确定的，所以逐项比整段——不许被别的时刻（例如持久化完成的时刻）重排，也不许多一拍少一拍
-    expect(o.records.some((r) => r.sourceSeq !== undefined)).toBe(false);
     // run.started 之后紧跟 run 开头的整体状态快照，再进循环
     expect(n[3]).toBe("snapshot:agent.state");
     expect(n.slice(4, -1)).toEqual([

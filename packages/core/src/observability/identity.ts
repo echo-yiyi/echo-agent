@@ -161,7 +161,6 @@ export type IdentityMaterialization =
 export type MaterializedFrame = Readonly<{
   kind: ObservationRecordKind;
   occurredAt: number;
-  sourceSeq?: number;
   attributes: Readonly<Record<string, string | number | boolean>>;
   identity: MaterializedIdentity;
 }>;
@@ -173,7 +172,7 @@ export type FrameMaterialization =
 const RECORD_KINDS: readonly string[] = ["event", "span_start", "span_end", "snapshot", "health"];
 
 /**
- * **frame 物化只有这一处**：Sequencer 对每条 draft 调它，kind / occurredAt / sourceSeq / attributes / identity 同一把尺。
+ * **frame 物化只有这一处**：Sequencer 对每条 draft 调它，kind / occurredAt / attributes / identity 同一把尺。
  * `kind` 也在这里校（descriptor 返回 `kind:"bogus"` 就是 gap，不是静默收下）；attributes 也在这里验形与物化——
  * 它是 envelope 的固定 schema 的一部分。
  */
@@ -187,11 +186,6 @@ export function materializeRecordFrame(input: unknown): FrameMaterialization {
     if (typeof kind !== "string" || !RECORD_KINDS.includes(kind)) return fail(`kind 非法取值`);
     const occurredAt = d.occurredAt;
     if (typeof occurredAt !== "number" || !Number.isFinite(occurredAt)) return fail(`occurredAt 必须是有限数`);
-    const sourceSeq = d.sourceSeq;
-    if (sourceSeq !== undefined && (typeof sourceSeq !== "number" || !Number.isSafeInteger(sourceSeq) || sourceSeq < 0)) {
-      return fail(`sourceSeq 必须是非负安全整数`);
-    }
-
     // 走**共用的精确字典读取**：只判「是 object 且非 array」再 `Object.keys()` 的话，
     // `new Map([["toolName","secret"]])` 会得到 `[]`——非法容器在进 normalizer 之前就被洗成合法空字典
     // （review 实测 `ok:true` 而 attributes 是 `{}`）。原型、symbol 键、accessor、non-enumerable 一并拒。
@@ -227,7 +221,6 @@ export function materializeRecordFrame(input: unknown): FrameMaterialization {
       frame: Object.freeze({
         kind: kind as ObservationRecordKind,
         occurredAt,
-        ...(sourceSeq === undefined ? {} : { sourceSeq }),
         attributes: Object.freeze(attributes),
         identity: id.identity,
       }),

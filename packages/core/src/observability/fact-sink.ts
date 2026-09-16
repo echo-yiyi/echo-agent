@@ -30,7 +30,6 @@ export type ObservationFactProjection = Readonly<{
   kind: ObservationRecordKind;
   name: string;
   occurredAt: number;
-  sourceSeq?: number;
   scope: ObservationFactScope;
   attributes: Readonly<Record<string, string | number | boolean>>;
   body: unknown;

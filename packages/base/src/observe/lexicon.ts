@@ -19,7 +19,6 @@ export const RUN_STATUS: Readonly<Record<string, Term>> = {
   truncated: { zh: "已截停", en: "truncated", tone: "caution", hint: "跑到迭代上限被截断、未自行收尾——产出可能不完整（error code = max_iterations）" },
   aborted: { zh: "已中止", en: "aborted", tone: "neutral", hint: "用户或壳主动 abort；已产出的部分保留" },
   error: { zh: "失败", en: "error", tone: "critical", hint: "provider / 工具 / 内核的不可恢复错误；outcome.error.code 说明是哪一类" },
-  interrupted: { zh: "已中断", en: "interrupted", tone: "neutral", hint: "进程崩溃后由下一次持锁启动封口的 run；它自己没有结局" },
 };
 
 export const RUN_SOURCE: Readonly<Record<string, Term>> = {

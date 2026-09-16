@@ -78,7 +78,6 @@ export type ObservationEnvelope<T extends ObservationValue = ObservationValue> =
   lane: ObservationLane;
   occurredAt: number;
   observedAt: number; // 只由 Sequencer 分配
-  sourceSeq?: number; // 如 concrete AgentEvent.seq；绝不充当 canonical seq
 
   kind: ObservationRecordKind;
   name: string;
@@ -155,8 +154,11 @@ export type ObservedRunSource = RunSource | SubloopRunSource;
 /** 采集档位（OR9）：off 只留身份骨架与安全 outcome；metadata 缺省；content 才带正文（需显式打开）。 */
 export type ObservationCapturePolicy = "off" | "metadata" | "content";
 
-/** run 的业务终态；`interrupted` 只由跨进程 recovery 封（O3b）。 */
-export type RunObservationStatus = "running" | "completed" | "aborted" | "error" | "interrupted";
+/**
+ * run 的业务终态。**只有做过那个决定的人能写**：observer 不推断进程死活（2026-09-06 拍板），
+ * 所以这里没有「被接管封口」那一档——将来管进程的那一层做了接管决定，再由它把决定当事实交进来。
+ */
+export type RunObservationStatus = "running" | "completed" | "aborted" | "error";
 
 /** canonical 记录完整性：本 run 有任何 CanonicalObservationGap 即 partial；与业务 status 正交。 */
 export type ObservationIntegrity = "complete" | "partial";
@@ -364,15 +366,8 @@ export type RunLookupResult = Readonly<{ kind: "found"; observation: RunObservat
 
 /* ══════════════════ gap 三族与 sink / persistence health ══════════════════ */
 
-/** canonical gap 的原因。 */
-export type ObservationGapReason =
-  | "buffer_overflow"
-  | "encoding_error"
-  | "capture_limit"
-  | "store_failure"
-  | "canonical_flush_timeout"
-  | "lease_lost"
-  | "retention";
+/** canonical gap 的原因。ring 满、编码不了、可选快照超预算，外加回放跨过被过期删掉的批。 */
+export type ObservationGapReason = "buffer_overflow" | "encoding_error" | "capture_limit" | "retention";
 
 /** 缺失区间：`(afterSeq, beforeSeq)` 两端 exclusive，`dropped === beforeSeq - afterSeq - 1`。 */
 export type ObservationGap = Readonly<{
@@ -417,34 +412,27 @@ export type SinkHealth = Readonly<{
   lastErrorDigest?: string;
 }>;
 
-/** canonical persistence 的五态；与 RuntimePhase 正交。 */
-export type ObservationPersistenceStatus = "healthy" | "degraded" | "recovering" | "sealed" | "lost-lease";
+/**
+ * canonical 写入端的两态；与 RuntimePhase 正交。**没有中间档**：写入端要么在写，要么账本不再可信、
+ * 就此封口（corruption / 提交裁决失败）。曾经有 degraded / recovering / lost-lease 三档，前两档的唯一
+ * 来源是边界提交的期限（2026-09-14 随「可等待的边界」一起删），lost-lease 随观测不挂 lease 没了入口。
+ */
+export type ObservationPersistenceStatus = "healthy" | "sealed";
 
-/** persistence 状态带证据：非 healthy 时必有 since / lastErrorDigest / reopenAttempts。 */
+/** persistence 状态带证据：封口时必有 since / lastErrorDigest。 */
 export type ObservationPersistenceState =
   | Readonly<{ status: "healthy" }>
-  | Readonly<{
-      status: "degraded" | "recovering";
-      since: number;
-      lastErrorDigest: string;
-      reopenAttempts: number;
-    }>
   /**
-   * **terminal 也必须带证据**（2026-08-27 review P1）：上一版只有一个 `status`，于是 health 对 sealed
-   * 只能报 `reopenAttempts: 0`，用户看不到**什么时候、因为什么**停的——写不动了却查不出原因，
-   * 等于把最需要证据的那一刻做成了空白。
+   * **封口也必须带证据**（2026-08-27 review P1）：上一版只有一个 `status`，用户看不到**什么时候、因为什么**
+   * 停的——写不动了却查不出原因，等于把最需要证据的那一刻做成了空白。
    *
-   * `since` 的语义与 degraded/recovering 一致：**当前 status 自身的起点**，这里就是进入 terminal 的时刻。
-   * 之前若经历过 degraded/recovering，首次 degradation 的时刻另记在 `degradedSince`——两个时间都要，
-   * 但不能挤进同一个字段（review 点出的歧义）。`lastErrorDigest` 是 `redactError()` 的完整 digest，
-   * **不是原始 message**：seal 的成因往往就是第三方错误正文，那里面出现过 `Authorization: Bearer …`。
+   * `since` 是进入封口的时刻。`lastErrorDigest` 是 `redactError()` 的完整 digest，**不是原始 message**：
+   * seal 的成因往往就是第三方错误正文，那里面出现过 `Authorization: Bearer …`。
    */
   | Readonly<{
-      status: "sealed" | "lost-lease";
+      status: "sealed";
       since: number;
-      degradedSince?: number;
       lastErrorDigest: string;
-      reopenAttempts: number;
     }>;
 
 /** persistence × capture × sinks 三面的 health；live `snapshot()` 用，不回填进历史 run。 */
@@ -452,12 +440,9 @@ export type ObservationHealth = Readonly<{
   persistence: Readonly<{
     status: ObservationPersistenceStatus;
     lastCommittedSeq: number;
-    /** 首次 degradation 的时刻（terminal 之前若经历过 degraded/recovering 才有）。 */
-    degradedSince?: number;
-    /** 进入 terminal（sealed / lost-lease）的时刻。 */
+    /** 进入封口的时刻（healthy 时没有）。 */
     terminalSince?: number;
     lastErrorDigest?: string;
-    reopenAttempts: number;
   }>;
   capture: Readonly<{
     policy: ObservationCapturePolicy;

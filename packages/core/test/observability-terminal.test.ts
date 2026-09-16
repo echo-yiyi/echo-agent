@@ -214,6 +214,22 @@ describe("preflightTerminalProjection", () => {
     expect(preflightTerminalProjection(body(base)).body.finalSnapshot).not.toBeNull();
   });
 
+  test("写入端状态白名单跟着类型走：只认 healthy / sealed（2026-09-15 删掉没有写者的三档）", () => {
+    // 这份白名单是字符串数组，类型删了值它不会自己红——留着 degraded / recovering / lost-lease
+    // 就等于读面仍接受一个谁也写不出来的状态。
+    const base = snapshotWith([{ id: "a", summary: summary(0) }]);
+    const withPersistence = (v: string): ObservationSnapshot<EchoObservableState> => ({
+      ...base,
+      state: { ...base.state, runtime: { ...base.state.runtime, observationPersistence: v } as EchoObservableState["runtime"] },
+    });
+    for (const live of ["healthy", "sealed"]) {
+      expect(preflightTerminalProjection(body(withPersistence(live))).body.finalSnapshot).not.toBeNull();
+    }
+    for (const gone of ["degraded", "recovering", "lost-lease"]) {
+      expect(preflightTerminalProjection(body(withPersistence(gone))).body.finalSnapshot).toBeNull();
+    }
+  });
+
   test("capabilities.length 检查时 1,024、循环时 1,025：扫描上限绕不过", () => {
     const items = Array.from({ length: OBSERVATION_BOUNDARY_LIMITS.maxCapabilityScan + 1 }, (_, i) => ({
       id: `c${String(i).padStart(5, "0")}`,

@@ -352,7 +352,7 @@ describe("length 也只读一次：Proxy 改不动硬上限", () => {
   });
 });
 
-describe("两条路共用的 frame 物化：kind / occurredAt / sourceSeq / attributes", () => {
+describe("两条路共用的 frame 物化：kind / occurredAt / attributes", () => {
   const base = { kind: "event", occurredAt: 1, name: "n", attributes: {} };
 
   test("kind 必须是枚举值", () => {
@@ -363,12 +363,9 @@ describe("两条路共用的 frame 物化：kind / occurredAt / sourceSeq / attr
     }
   });
 
-  test("occurredAt 必须有限、sourceSeq 必须非负安全整数", () => {
+  test("occurredAt 必须有限", () => {
     expect(materializeRecordFrame({ ...base, occurredAt: NaN }).ok).toBe(false);
     expect(materializeRecordFrame({ ...base, occurredAt: "1" }).ok).toBe(false);
-    expect(materializeRecordFrame({ ...base, sourceSeq: -1 }).ok).toBe(false);
-    expect(materializeRecordFrame({ ...base, sourceSeq: 1.5 }).ok).toBe(false);
-    expect(materializeRecordFrame({ ...base, sourceSeq: 7 }).ok).toBe(true);
   });
 
   test("attributes 只许 string / 有限 number / boolean，且物化成副本", () => {

@@ -156,7 +156,6 @@ export function ingestFact(ingest: ObservationIngest, ctx: FactIngestContext, in
     const draft: BoundedObservationDraft<unknown> = {
       lane: "bounded",
       occurredAt: p.occurredAt,
-      ...(p.sourceSeq === undefined ? {} : { sourceSeq: p.sourceSeq }),
       kind: p.kind,
       name: p.name,
       scope,

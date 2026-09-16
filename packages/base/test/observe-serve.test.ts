@@ -286,7 +286,7 @@ test("术语表：每条四字段齐全，hint 不是同义反复", () => {
   for (const marker of ["function recordMark", "CAPABILITY_PREFIXES", "tl--cap"]) expect(html).toContain(marker);
   // 标签不再中英双写：badge 只出中文，英文进 title
   expect(html).not.toContain('el("span", { class: "en", text: t.en })');
-  expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "interrupted", "running", "truncated"]);
+  expect(Object.keys(lex.runStatus).sort()).toEqual(["aborted", "completed", "error", "running", "truncated"]);
 });
 
 test("类别记号：按最长前缀匹配，容器不给记号，工具 / 失败沿用设计系统规定的字符", () => {

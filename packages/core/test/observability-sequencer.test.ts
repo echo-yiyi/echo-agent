@@ -182,7 +182,7 @@ async function acceptRun(h: Harness, runId: string): Promise<ObservationEnvelope
 describe("bounded lane：seq / identity / batch", () => {
   test("offer 三条 → 一个事务、seq 1..3、recordId = runtimeId:seq、observedAt 由 Sequencer 盖", async () => {
     const h = harness();
-    h.seq.offer(bounded({ n: 1 }, { sourceSeq: 7 }));
+    h.seq.offer(bounded({ n: 1 }));
     h.seq.offer(bounded({ n: 2 }));
     h.seq.offer(bounded({ n: 3 }));
     expect(h.seq.committedSeq).toBe(0); // 还没 flush：什么都没 committed
@@ -193,7 +193,6 @@ describe("bounded lane：seq / identity / batch", () => {
     expect(recs.map((r) => r.seq)).toEqual([1, 2, 3]);
     expect(recs[0]?.recordId).toBe(`${RT}:1`);
     expect(recs[0]?.observedAt).toBe(1_000);
-    expect(recs[0]?.sourceSeq).toBe(7);
     expect(recs[0]?.generation.runtime).toBe("gen-1");
     expect(await h.store.readCommittedPrefix(RT)).toBe(3);
   });
@@ -999,13 +998,12 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
     expect(h.seq.committedRecords().map((r) => r.name)).toContain("observation.gap");
   });
 
-  test("sealed 的 health 交出「什么时候、因为什么」，不再只有 reopenAttempts:0", async () => {
+  test("sealed 的 health 交出「什么时候、因为什么」，不是只有一个 status", async () => {
     const h = await sealedHarness();
     const p = h.seq.health().persistence;
     expect(p.status).toBe("sealed");
     expect(p.terminalSince).toBe(h.clock.now());
     expect(p.lastErrorDigest).toMatch(/^[0-9a-f]{64}$/); // health 存完整 digest
-    expect(p.reopenAttempts).toBe(0);
   });
 
   test("seal 的成因先 redact：health 的任何字段都不含凭据原文", async () => {
@@ -1015,13 +1013,15 @@ describe("writer terminal 之后：不再预留，也不再泄露成因（2026-0
     expect(health).not.toContain("Authorization");
   });
 
-  test("healthy 直接进 terminal：只有 terminalSince，没有 degradedSince", async () => {
-    // `degradedSince` 只在**经历过** degraded/recovering 时才有；直接掉进来就不该凭空造一个时间。
-    // （今天没有写入端会进 degraded：它原来唯一的来源是边界提交的期限，已随可等待的边界删掉。）
-    const h = await sealedHarness();
+  test("healthy 时 health 上没有封口的那几个字段：不凭空造时间与 digest", async () => {
+    // 写入端只有健康 / 封口两态（2026-09-15 删掉没有写者的 degraded / recovering / lost-lease）：
+    // 没封口就不该出现 terminalSince / lastErrorDigest。
+    const h = harness();
     const p = h.seq.health().persistence;
-    expect(p.terminalSince).toBe(h.clock.now());
-    expect(p.degradedSince).toBeUndefined();
+    expect(p.status).toBe("healthy");
+    expect(p.terminalSince).toBeUndefined();
+    expect(p.lastErrorDigest).toBeUndefined();
+    expect((await sealedHarness()).seq.health().persistence.terminalSince).toBeGreaterThan(0);
   });
 });
 

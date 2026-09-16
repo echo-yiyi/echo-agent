@@ -115,7 +115,9 @@ function takeEnum<T extends string>(v: unknown, allowed: readonly string[]): T |
 
 const RUNTIME_PHASES: readonly string[] = ["bootstrapping", "ready", "reconfiguring", "failed", "disposing", "disposed"];
 const RUNTIME_STATUSES: readonly string[] = [...RUNTIME_PHASES, "degraded"];
-const PERSISTENCE_STATUSES: readonly string[] = ["healthy", "degraded", "recovering", "sealed", "lost-lease"];
+// 写入端两态（`ObservationPersistenceStatus`）。`RUNTIME_STATUSES` 里的 "degraded" 是另一回事：
+// 那是 runtime 自己的状态（ready 但写入端不健康），不是写入端状态。
+const PERSISTENCE_STATUSES: readonly string[] = ["healthy", "sealed"];
 
 /** 把 `Record<string, number>` 物化成新对象；键数超限或值非有限数 → undefined。 */
 function projectNumberMap(raw: unknown, maxKeys: number): Record<string, number> | undefined {
