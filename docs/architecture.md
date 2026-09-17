@@ -26,7 +26,7 @@
 只有一处把东西装成 agent：`createEcho()`（`packages/core/src/create-echo.ts`）。它调内部的 `createAgent()`（`packages/core/src/create-agent.ts`）造 `Agent`，再把 extension 装上去。顺序：
 
 1. **先扫盘、后造 Agent**：发现 `<cwd>/extensions/` 下的文件，此时一行用户代码都不执行。
-2. **`createAgent()`**：解析模型并准备存储与观测资源（凭据失败按运行态处理）、定 session id 与状态根、`store` 与 `lock` 必须成对、开观测库、经所有权账本（`packages/core/src/assembly/ledger.ts`，adopt / borrow 二分）造各内建能力的存储视图与容器（adopt slot 按 `echo:memory` / `echo:schedule` / `echo:inbox` / `echo:session` 这些名字记账，skill 的视图跟着上一层走、不单独占 slot；这是按 dispose 所有权切的，与 §4 按「机制 / 缺省内容」切的五件不是同一个集合）、`new Agent()`、把写入闸与观测 runtime 经 WeakMap 侧挂（`packages/core/src/state/host-wiring.ts`、`packages/core/src/observability/host-wiring.ts`——它们不进公共 `AgentOptions`）。
+2. **`createAgent()`**：解析模型并准备存储与观测资源（凭据失败按运行态处理）、定 session id 与状态根、`store` 与 `lock` 必须成对、开观测库、经所有权账本（`packages/core/src/assembly/ledger.ts`，adopt / borrow 二分）造各内建能力的存储视图与容器（adopt slot 按 `echo:memory` / `echo:schedule` / `echo:inbox` / `echo:session` 这些名字记账，skill 的视图跟着上一层走、不单独占 slot；这是按 dispose 所有权切的，与 §4 按「机制 / 缺省内容」切的五件不是同一个集合）、`new Agent()`、把写入闸与观测 runtime 经 WeakMap 侧挂（`packages/core/src/state/host-wiring.ts`、`packages/core/src/observability/host-wiring.ts`——它们不进 `AgentOptions`）。
 3. **mount**，按代：`builtin`（`echo:*` 表，`packages/core/src/extension/builtin.ts`）→ `boot:inline`（`agent.tools` 转成的 `echo:inline-tools`，加容器开了会话面时的 `echo:sessions`）→ 盘上发现的每个扩展**各一代**（坏一个只回滚它自己、记一条 `Echo.diagnostics`，agent 照起）→ `boot`（显式传入的 opts.extensions，含壳；失败则整体构造失败）→ role（最后应用角色 identity 与工具限制）。
 4. 返回 `Echo` 句柄：`agent`、`send()`、`observations`、`extensions`、`diagnostics`、`sessions`、`stop()`。`stop()` single-flight，按 mount 的逆序卸所有代再停 Agent。
 
@@ -83,7 +83,7 @@
 
 ## 7. 当前限制与设计入口
 
-Agent 类内部化和观测公开面的收窄仍由各自决策管理；“已拍板”不等于代码已完成，类型出口以当前源码为准。入口见 [Agent 公共面](decisions/proposed/2026-09-07-agent-class-internal.md) 与 [观测公开面](decisions/proposed/2026-09-07-observation-public-face.md)。
+`Agent` 类已收进 core 内部（[记录](decisions/implemented/2026-09-07-agent-class-internal.md)），`@echo-agent/core/extension` 上仍有几件要喂 `Agent` 内部件的装配零件，去留未拍板。观测公开面的收窄仍由 [观测公开面](decisions/proposed/2026-09-07-observation-public-face.md) 管理；“已拍板”不等于代码已完成，类型出口以当前源码为准。
 
 | 要理解什么 | 当前设计 |
 | --- | --- |

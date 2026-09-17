@@ -84,17 +84,17 @@ const echo = await createEcho({
   extensionDirs: [], // 样例自带工具，不扫盘——免得跑它的目录里碰巧有 extensions/
   // `agent.tools` 在 `createEcho()` 这一层会被转成一条 **inline Extension**（`echo:inline-tools`）：
   // 调用方照旧一行传工具，但工具进的是**和内建、和第三方同一本所有权账本**——
-  // 它出现在 `echo.extensions` 里，收摊时跟着下线。低层 `new Agent({ tools })` 不受影响。
+  // 它出现在 `echo.extensions` 里，收摊时跟着下线。
   agent: { tools: [nowTool] },
 });
 
 const agent = echo.agent;
-await agent.start();
+await echo.start();
 try {
   const result = await agent.prompt("今年是哪一年？用工具查。");
   // 打出**工具真正返回的内容**，不是「有没有一条 toolResult」——工具不存在时也会有一条
   // toolResult（内容是「没这个工具」）。分不清这两者，判据就等于没有。
-  const toolResults = agent.messages.filter((m) => m.role === "toolResult");
+  const toolResults = agent.state.messages.filter((m) => m.role === "toolResult");
   console.log(
     JSON.stringify({
       outcome: result.outcome.kind,

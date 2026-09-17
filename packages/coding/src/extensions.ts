@@ -63,8 +63,8 @@ export const ECHO_WORKTREE = defineExtension({
  * 都提供得了它，所以这里就该是硬依赖：走 `createEcho()` 恒有；自己搭 Host 而不传 `background` 就在 PREPARE 装不上，
  * 报错明确指向缺的那条 Service——比装上一个「bash 在但后台不灵」的半残工具好。
  *
- * （`makeBashTool()` 的 `deps.background` 仍是可选：那是给「自己给端口、自己注册」的
- * 低层 `new Agent()` 用的，与本扩展的装配前提是两件事。）
+ * （`makeBashTool()` 的 `deps.background` 仍是可选：单独造工具、不接后台队列时 `background: true` 不可用，
+ * 与本扩展的装配前提是两件事。）
  */
 export const ECHO_SHELL = defineExtension({
   name: "echo:shell",

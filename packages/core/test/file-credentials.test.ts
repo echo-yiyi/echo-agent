@@ -297,7 +297,7 @@ test("没 key 也能 createEcho；缺 key 是第一句 prompt 报 `auth`，不�
   });
   try {
     expect(echo.agent.state.model.id).toBe("kimi-k3"); // 模型照常解析——目录里有它就够
-    await echo.agent.start();
+    await echo.start();
     let code: string | undefined;
     const off = echo.agent.subscribe((ev) => {
       if (ev.type === "agent_end" && ev.outcome.kind === "error") code = ev.outcome.error.code;

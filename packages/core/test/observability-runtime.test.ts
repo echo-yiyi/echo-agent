@@ -2,7 +2,7 @@ import { test, expect, describe, afterEach } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, type Echo } from "../src/create-echo.ts";
+import { agentOf, createEcho, type Echo } from "../src/create-echo.ts";
 import { openObservationReader, ObservationStoreMissingError } from "../src/index.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
@@ -97,7 +97,7 @@ async function echoWith(opts: {
     },
   });
   running.push(echo);
-  if (opts.start !== false) await echo.agent.start();
+  if (opts.start !== false) await echo.start();
   return echo;
 }
 
@@ -360,7 +360,7 @@ describe("send → getRun → render（completed）", () => {
     const end = o.finalSnapshot!.state;
     for (const st of [start, end]) {
       expect(st.agent.tools).toContain("ping");
-      expect(st.agent.thinkingLevel).toBe(echo.agent.thinkingLevel);
+      expect(st.agent.thinkingLevel).toBe(agentOf(echo).thinkingLevel);
       expect(typeof st.agent.workspace).toBe("string");
       expect(st.agent.activeSkills).toEqual([]);
       const ids = st.capabilities.map((c) => c.id);
@@ -641,7 +641,7 @@ describe("观测不在主流程上（2026-09-14 硬规矩）", () => {
       `const stuck = { read: (p) => inner.read(p), write: (p) => never, remove: (p) => inner.remove(p), list: (p) => inner.list(p) };`,
       `const provider = createProvider({ id: "s", auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } }, models: [{ id: "only", api: "fake" }], api: createProviderStreams(scriptedDialect([textTurn("hi")])) });`,
       `const echo = await createEcho({ provider, stateDir: ${JSON.stringify(join(dir, "state"))}, allowNetwork: false, withoutMemory: true, extensionDirs: [], observation: { store: stuck } });`,
-      `await echo.agent.start();`,
+      `await echo.start();`,
       `const r = await echo.send("x");`,
       `await echo.stop();`,
       `console.log(r.outcome.kind);`,
@@ -686,7 +686,7 @@ describe("观测不在主流程上（2026-09-14 硬规矩）", () => {
 
     const b = await echo.send("b");
     expect(b.outcome.kind).toBe("completed");
-    expect(echo.agent.messages.filter((m) => m.role === "assistant").length).toBe(2);
+    expect(agentOf(echo).messages.filter((m) => m.role === "assistant").length).toBe(2);
     await echo.stop();
   });
 
@@ -706,7 +706,7 @@ describe("观测不在主流程上（2026-09-14 硬规矩）", () => {
       `process.on("exit", () => appendFileSync(${JSON.stringify(marker)}, "exit\\n"));`,
       `const provider = createProvider({ id: "s", auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } }, models: [{ id: "only", api: "fake" }], api: createProviderStreams(scriptedDialect([textTurn("hi")])) });`,
       `const echo = await createEcho({ provider, stateDir: ${JSON.stringify(stateDir)}, allowNetwork: false, withoutMemory: true, extensionDirs: [] });`,
-      `await echo.agent.start();`,
+      `await echo.start();`,
       `const r = await echo.send("x");`,
       `await echo.stop();`,
       `console.log(r.runId);`,

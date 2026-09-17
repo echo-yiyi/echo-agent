@@ -1,7 +1,7 @@
 // 权限：产品策略翻译成 core 的 authorization stage，不再是一条 preToolUse hook。
 //
 // 三档规则不变:allow(放行)/ deny(拒)/ ask(问裁决人)。规则在构造期交给 Agent
-// （`permissionPolicyFor()` → `AgentOptions.permission`），跑在固定 stage：
+// （`permissionPolicyFor()` → `EchoAgentOptions.permission`），跑在固定 stage：
 // transform hooks → 重新校验 → freeze → authorization → execute。裁决看到的是冻结后的最终参数，
 // 人批准的和工具执行的是同一份；hook 在它之后改不了参数。
 //
@@ -48,7 +48,7 @@ export const DEFAULT_PERMISSION: PermissionPolicy = {
   fallback: "allow",
 };
 
-/** 把产品策略翻译成 core 的 stage 策略——构造期交给 `new Agent({ permission })`。 */
+/** 把产品策略翻译成 core 的 stage 策略——构造期经 `createEcho({ agent: { permission } })` 交给 core。 */
 export function permissionPolicyFor(policy: PermissionPolicy = DEFAULT_PERMISSION): CorePermissionPolicy {
   return {
     authorize: ({ toolName }) => {

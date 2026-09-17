@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 344（value 121 · type 204 · both 19）
+符号 339（value 118 · type 203 · both 18）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -42,9 +42,7 @@ value  DEFAULT_AGENT_REF
 value  describeAgentRef
 value  isEmptyDefinition
 
--- src/agent.ts (7) --
-both   Agent
-type   AgentOptions
+-- src/agent.ts (5) --
 type   AgentRunResult
 type   AgentState
 type   AgentStatus
@@ -115,7 +113,8 @@ value  sameCompaction
 value  snapBack
 value  snapForward
 
--- src/create-agent.ts (4) --
+-- src/create-agent.ts (5) --
+type   EchoAgentOptions
 value  resolveModel
 value  resolveSessionsRoot
 value  resolveSharedDir
@@ -390,12 +389,8 @@ type   SessionListFilter
 type   SessionRow
 type   SessionRunner
 
--- src/session/status.ts (5) --
-value  readSessionPhase
+-- src/session/status.ts (1) --
 type   SessionPhase
-type   SessionStatusFile
-value  STATUS_FILE
-value  writeSessionPhase
 
 -- src/session/types.ts (6) --
 value  newSessionId
@@ -486,7 +481,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 85（value 36 · type 45 · both 4）
+符号 82（value 35 · type 43 · both 4）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -504,8 +499,7 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (23) --
-value  agentRuntimeOf
+-- src/extension/builtin.ts (20) --
 value  BUILTIN_GENERATION
 value  builtinEntries
 type   BuiltinToolGroup
@@ -526,8 +520,6 @@ value  ECHO_TOOL_SEARCH
 value  mountBuiltinTools
 type   PromptPackConfig
 value  registerAll
-type   RuntimeAssemblyOps
-type   RuntimeSource
 
 -- src/extension/cleanup.ts (2) --
 value  unmountGenerations

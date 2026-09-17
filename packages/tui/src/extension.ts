@@ -90,7 +90,7 @@ export function tuiShell(
       runtime: { service: AgentRuntimeService, required: true },
       prompt: { service: AgentPrompt, required: true },
       // 会话面（2026-09-07）：`/sessions` 读它。**恒有**，所以 required 装得上——
-      // 容器给真的那一份，裸 `new Agent()` 上是 `NO_SESSION_FACE`。
+      // 容器给真的那一份，没有容器时是 `NO_SESSION_FACE`。
       sessions: { service: AgentSessionsService, required: true },
     },
     apply(ctx) {

@@ -7,7 +7,7 @@ import { inboxFactDescriptor, type InboxFact } from "../src/inbox/observe.ts";
 import { createRecordIdSource, recordPath, serializeRecord } from "../src/inbox/records.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
 import { environmentMessage } from "../src/messages.ts";
-import { createEcho, type Echo } from "../src/create-echo.ts";
+import { agentOf, createEcho, type Echo } from "../src/create-echo.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { scriptedDialect, textTurn, type ScriptedTurn } from "../src/testing.ts";
@@ -153,10 +153,10 @@ test("e2e：deliver → consumeInbox：run 里有 inbox.consumed（谁的消息�
   temps.push(dir);
   const echo = await createEcho({ provider: scripted([textTurn("收到，我去看。")]), stateDir: join(dir, "s1"), allowNetwork: false, extensionDirs: [], withoutMemory: true });
   running.push(echo);
-  await echo.agent.start();
-  await echo.agent.ingress.deliverDurable({ message: environmentMessage("你那边好了吗", "session", "s-peer:m1"), dedupeKey: "session:s-peer:m1" });
+  await echo.start();
+  await agentOf(echo).ingress.deliverDurable({ message: environmentMessage("你那边好了吗", "session", "s-peer:m1"), dedupeKey: "session:s-peer:m1" });
   // 装配层开着自动消费：投递被接受后 agent 自己起 run；显式再叫一次也无妨（没东西就返回 null）
-  await echo.agent.consumeInbox();
+  await agentOf(echo).consumeInbox();
   const run = await waitForInboxRun(echo);
   expect(run.status).toBe("completed");
   const lookup = await echo.observations.getRun(run.runId);

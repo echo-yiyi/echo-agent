@@ -59,7 +59,7 @@ async function session(sessionsRoot: string, turns: ScriptedTurn[]): Promise<Ech
     sessions: {}, // 开会话面（没给 runner：两段都已经在跑，不需要叫醒）
   });
   running.push(echo);
-  await echo.agent.start();
+  await echo.start();
   return echo;
 }
 
@@ -75,8 +75,8 @@ test("A wait 发给 B：B 看得见抬头、带 reply_to 回信，A 的工具直
   const runA = a.agent.prompt("去问 B");
 
   // ① B 那边：消息带抬头，说清发件段与这条的 id——没有它 B 的模型不知道回给谁
-  await until(() => b.agent.messages.some((m) => m.role === "environment" && textOf(m).includes("问个事")), "B 收到 A 的消息");
-  const received = b.agent.messages.find((m) => m.role === "environment" && textOf(m).includes("问个事"))!;
+  await until(() => b.agent.state.messages.some((m) => m.role === "environment" && textOf(m).includes("问个事")), "B 收到 A 的消息");
+  const received = b.agent.state.messages.find((m) => m.role === "environment" && textOf(m).includes("问个事"))!;
   const header = textOf(received).split("\n")[0]!;
   expect(header).toStartWith(`[from session ${aId} · message ${aId}:`);
   const messageId = /message (\S+?)\]/.exec(header)![1]!;
@@ -91,11 +91,11 @@ test("A wait 发给 B：B 看得见抬头、带 reply_to 回信，A 的工具直
 
   // ③ A 的工具等到了，回信原样交回（带它自己的抬头，里面点名回的是哪一条）
   await runA;
-  const toolResult = a.agent.messages.find((m) => m.role === "toolResult");
+  const toolResult = a.agent.state.messages.find((m) => m.role === "toolResult");
   expect(toolResult !== undefined && textOf(toolResult)).toContain("答案是 42");
   expect(toolResult !== undefined && textOf(toolResult)).toContain(`reply to ${messageId}`);
 
   // ④ 不二次投递：A 开着自动消费、每秒刷一次盘，多等两拍，回信也不会再以普通消息进来
   await new Promise((r) => setTimeout(r, 2_500));
-  expect(a.agent.messages.filter((m) => m.role === "environment" && textOf(m).includes("答案是 42"))).toHaveLength(0);
+  expect(a.agent.state.messages.filter((m) => m.role === "environment" && textOf(m).includes("答案是 42"))).toHaveLength(0);
 }, 20_000);

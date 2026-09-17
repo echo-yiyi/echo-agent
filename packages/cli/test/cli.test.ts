@@ -22,7 +22,6 @@ import {
   SessionService,
   listSessions,
   toolOk,
-  type Agent,
   type Context,
   type Echo,
   type Model,

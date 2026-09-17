@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file applies to the whole repository. echo-agent has one composition root and three front doors: products and the CLI assemble through `createEcho()`; adding tools, prompt sections, compaction stages, or hooks means writing an extension; a new shell is an extension that injects the `AgentRuntime` service. Wiring ports around the bare `Agent` class is not a supported path — its internalization is decided but not yet implemented, see `docs/decisions/proposed/2026-09-07-agent-class-internal.md`. Do not duplicate assembly logic at any other entry point.
+This file applies to the whole repository. echo-agent has one composition root and three front doors: products and the CLI assemble through `createEcho()`; adding tools, prompt sections, compaction stages, or hooks means writing an extension; a new shell is an extension that injects the `AgentRuntime` service. The `Agent` class is internal to core; `echo.agent` is the `AgentRuntime` protocol, see `docs/decisions/implemented/2026-09-07-agent-class-internal.md`. Do not duplicate assembly logic at any other entry point.
 
 ## Pre-release: get the foundation right
 

@@ -4,10 +4,30 @@
 // 用一个假 TUI 接住 pi-tui 的 `TUI` 接口，就能在没有真终端的进程里断言渲染结果——
 // 真终端只在 `bin/echo-tui.ts` 里出现，测试一行都不碰它。
 
-import { test, expect } from "bun:test";
-import { Agent, deepseekProvider, InMemoryCredentialStore, kimiProvider, NO_SESSION_FACE, type CredentialStore, type Model, type ProviderEvent, type SessionFace, type SessionRow } from "@echo-agent/core";
-import { agentRuntimeOf, type AgentRuntime } from "@echo-agent/core/extension";
-import { scriptedStreamFn, textTurn, toolTurn } from "@echo-agent/core/testing";
+import { test, expect, afterAll, afterEach } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createEcho,
+  createProvider,
+  deepseekProvider,
+  InMemoryCredentialStore,
+  kimiProvider,
+  NO_SESSION_FACE,
+  type AgentListener,
+  type CredentialStore,
+  type Echo,
+  type Model,
+  type ModelTool,
+  type Provider,
+  type ProviderEvent,
+  type SessionFace,
+  type SessionRow,
+} from "@echo-agent/core";
+import type { AgentRuntime } from "@echo-agent/core/extension";
+import { scriptedStreams, textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { CURSOR_MARKER, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { runTui, type TuiConfigureOptions } from "../src/app.ts";
 import { fakeTui } from "../src/testing.ts";
@@ -33,11 +53,58 @@ function quit(ui: ReturnType<typeof fakeTui>): void {
   ui.feed(String.fromCharCode(4));
 }
 
-function agentWith(turns: ReturnType<typeof textTurn>[], model: Partial<Model> = {}): Agent {
-  return new Agent({
-    model: { provider: "t", id: "only", api: "scripted", ...model },
-    streamFunction: scriptedStreamFn(turns),
+/* ─────────────── 底座：壳在生产里拿到的那份协议，测试就拿那份 ─────────────── */
+//
+// 壳子只认 `AgentRuntime` 那份**封闭协议**——不认 Agent，也不认 Echo。生产里它来自 `createEcho()`：
+// `echo:agent` 经 `AgentRuntimeService` 注入给壳的，与 `Echo.agent` 是同一个对象。所以这里的底座
+// 就是一次真装配（脚本化 provider、不扫盘、不装记忆、状态根放临时目录）再 `start()`，
+// **不是测试自己另拼一份协议**：另拼一份就等于壳子在测一个与生产不同的形状。
+
+// 记忆与技能在 ECHO_HOME 下，`stateDir` 管不到：不隔离就会读到开发机上真的 `~/.echo`
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-tui-home-"));
+const stateRoot = mkdtempSync(join(tmpdir(), "echo-tui-state-"));
+/** 本条测试装出来的 Echo：测完由「装配层」（这里是 afterEach）收摊——壳子不碰 stop。 */
+const opened: Echo[] = [];
+afterEach(async () => {
+  for (const echo of opened.splice(0)) await echo.stop();
+});
+afterAll(async () => {
+  await rm(stateRoot, { recursive: true, force: true });
+});
+
+/** 假 provider：`model` 给的是目录里那一个模型的身份（家、id、api、思考档位映射）。流按脚本吐。 */
+function scriptedProvider(turns: ScriptedTurn[], model: Partial<Model> = {}): Provider {
+  const { provider = "t", id = "only", api = "scripted", ...rest } = model;
+  return createProvider({
+    id: provider,
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: id,
+    models: [{ id, api, ...rest }],
+    api: scriptedStreams(turns),
   });
+}
+
+/**
+ * 装一个 Echo 并启动。**必须 `start()`**：`createEcho()` 出来的 agent 只有 running 才接活。
+ * 要营造「装配层还没把它起起来」就给 `start: false`，之后由测试自己 `echo.start()`。
+ */
+async function echoWith(
+  turns: ScriptedTurn[],
+  model: Partial<Model> = {},
+  opts: { tools?: ModelTool[]; workspace?: string; start?: boolean } = {},
+): Promise<Echo> {
+  const echo = await createEcho({
+    provider: scriptedProvider(turns, model),
+    allowNetwork: false,
+    withoutMemory: true,
+    extensionDirs: [], // 不扫盘：`<cwd>/extensions` 会让判据随运行目录漂
+    stateDir: await mkdtemp(join(stateRoot, "s-")),
+    ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),
+    ...(opts.tools !== undefined ? { agent: { tools: opts.tools } } : {}),
+  });
+  opened.push(echo);
+  if (opts.start !== false) await echo.start();
+  return echo;
 }
 
 /** GLM / K3 那种目录：七档折成三档、关不掉（表里没 off）。 */
@@ -53,24 +120,25 @@ const FOLD_NO_OFF = {
 const FOLD_WITH_OFF = { off: { thinking: { type: "disabled" } }, ...FOLD_NO_OFF } as const;
 
 /**
- * 壳子只认 `AgentRuntime` 那份**封闭协议**——不认 Agent，也不认 Echo。
- * 这里把测试用的低层 Agent 收窄成协议，走的是 core 出的那个收窄函数，
- * **不是测试自己另写一份**：另写一份就等于壳子在测一个与生产不同的形状。
- */
-/**
  * 投递一条 lifecycle 事件。**捕获 `runTui` 真正挂上去的监听器**，不伪造假 Agent——
  * 走的仍是生产那条订阅通道，只是事件由测试给。
  */
-function emitLifecycle(agent: Agent, event: Record<string, unknown>): void {
-  const captured = lifecycleListeners.get(agent) ?? [];
+function emitLifecycle(echo: Echo, event: Record<string, unknown>): void {
+  const captured = lifecycleListeners.get(echo) ?? [];
   for (const l of captured) l(event as never);
 }
-const lifecycleListeners = new WeakMap<Agent, ((e: never) => unknown)[]>();
+const lifecycleListeners = new WeakMap<Echo, ((e: never) => unknown)[]>();
+/** `runTui` 经协议挂上去的渲染监听器（`tapEvents` 拿它合成自主 run 的事件）。 */
+const eventListeners = new WeakMap<Echo, AgentListener[]>();
+/** 壳经协议真正发出去的 prompt（`capturePrompts` 打开记录）。 */
+const promptLogs = new WeakMap<Echo, string[]>();
+/** 在协议层钉住的 `acceptsWork`（`setCoreAccepts`）；没钉就读装配出来的那份。 */
+const acceptsPins = new WeakMap<Echo, boolean>();
 
-function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRuntime {
-  const base = agentRuntimeOf(agent);
+function runtimeOf(echo: Echo, overrides: Partial<AgentRuntime> = {}): AgentRuntime {
+  const base = echo.agent;
   // **不能用 `{...base}`**：`state` / `acceptsWork` / `pendingPermissions` 是 getter，
-  // spread 会把它们**求值成快照**——打桩改了 `agent.acceptsWork` 之后协议这边还是旧值
+  // spread 会把它们**求值成快照**——钉住 / 放开 `acceptsWork` 之后协议这边还是旧值
   // （写这条时实测踩到：装配层「起来了」之后壳子仍然拒收）。
   // 所以逐个用 `get` 转发，覆盖项单独盖在上面。
   const forwarded: AgentRuntime = {
@@ -84,16 +152,24 @@ function runtimeOf(agent: Agent, overrides: Partial<AgentRuntime> = {}): AgentRu
       return base.pendingQuestions;
     },
     get acceptsWork() {
-      return base.acceptsWork;
+      return acceptsPins.get(echo) ?? base.acceptsWork;
     },
-    subscribe: (l) => base.subscribe(l),
+    subscribe: (l) => {
+      const list = eventListeners.get(echo) ?? [];
+      list.push(l);
+      eventListeners.set(echo, list);
+      return base.subscribe(l);
+    },
     subscribeLifecycle: (l) => {
-      const list = lifecycleListeners.get(agent) ?? [];
+      const list = lifecycleListeners.get(echo) ?? [];
       list.push(l as never);
-      lifecycleListeners.set(agent, list);
+      lifecycleListeners.set(echo, list);
       return base.subscribeLifecycle(l);
     },
-    prompt: (i, images) => base.prompt(i, images),
+    prompt: (i, images) => {
+      promptLogs.get(echo)?.push(typeof i === "string" ? i : JSON.stringify(i));
+      return base.prompt(i, images);
+    },
     steer: (m) => base.steer(m),
     followUp: (m) => base.followUp(m),
     answerPermission: (a) => base.answerPermission(a),
@@ -179,15 +255,15 @@ test("工具折叠行：摘要再长也截到宽度——pi-tui 对超宽行直�
 
 test("状态栏在窄终端上按可见列宽裁：宽字符段按码点切会超宽——实测 60 > 55 整屏崩（2026-09-04）；先丢尾部次要段，模型名恒在", async () => {
   const ui = fakeTui();
-  const agent = agentWith([]);
+  const echo = await echoWith([]);
   // 崩溃现场那组数：deepseek-v4-flash · 空闲 · ↑279k ↓18k · 缓存 255k (91%) · 上下文 …
   const state = {
-    ...agent.state,
-    model: { ...agent.state.model, id: "deepseek-v4-flash", capabilities: { contextWindow: 256_000 } },
+    ...echo.agent.state,
+    model: { ...echo.agent.state.model, id: "deepseek-v4-flash", capabilities: { contextWindow: 256_000 } },
     usage: { inputTokens: 279_000, outputTokens: 18_000, cachedInputTokens: 255_000 },
     contextTokens: 90_000,
   };
-  const done = runTui({ agent: runtimeOf(agent, { state }), ui });
+  const done = runTui({ agent: runtimeOf(echo, { state }), ui });
   await flush();
   for (const width of [55, 40, 20]) {
     const footer = ui.lines(width).at(-1)!;
@@ -201,7 +277,7 @@ test("状态栏在窄终端上按可见列宽裁：宽字符段按码点切会�
 
 test("欢迎头在窄终端上按宽度折：键位提示 95 列，40 列终端上原来启动即崩", async () => {
   const ui = fakeTui();
-  const done = runTui({ agent: runtimeOf(agentWith([])), ui });
+  const done = runTui({ agent: runtimeOf(await echoWith([])), ui });
   await flush();
   for (const line of ui.lines(40)) expect(visibleWidth(line), line).toBeLessThanOrEqual(40);
   expect(ui.lines(40).join("\n")).toContain("Ctrl+O 工具输出"); // 折了，没丢
@@ -216,8 +292,8 @@ test("欢迎头在窄终端上按宽度折：键位提示 95 列，40 列终端�
 
 test("emoji 退格删掉整个字符，不是半个代理对（上一版：删了等于没删）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("a😀");
   ui.feed(String.fromCharCode(127)); // Backspace
@@ -229,8 +305,8 @@ test("emoji 退格删掉整个字符，不是半个代理对（上一版：删�
 
 test("bracketed paste 的多行内容不许被当成回车提交（上一版：擅自提交第一行）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   const ESC = String.fromCharCode(27);
   ui.feed(`${ESC}[200~foo\nbar${ESC}[201~`); // 粘贴两行
@@ -244,8 +320,8 @@ test("bracketed paste 的多行内容不许被当成回车提交（上一版：�
 
 test("跑着的时候提交被拒，且**文字放回输入行**——不排队也不用重打", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("第一句")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("第一句")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("第一条");
   ui.feed("\r");
@@ -266,8 +342,8 @@ test("跑着的时候提交被拒，且**文字放回输入行**——不排队�
 
 test("端到端：输入一句 → 屏幕上出现用户行与模型正文；Ctrl+D 退出，**但不停 Agent**", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("我在")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("我在")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
 
   await flush();
   expect(ui.screen()).toContain("模型 only");
@@ -285,14 +361,14 @@ test("端到端：输入一句 → 屏幕上出现用户行与模型正文；Ctr
   // **上一版这里断言「Agent 已 stop」。壳变 extension 之后那条不成立也不该成立**：
   // 协议里没有 `stop`，收摊归装配层（`echo.stop()` 先卸壳这条 Extension、再停 Agent）。
   // 壳子自己停 Agent 就是两个所有者——那正是把 `start`/`stop` 挡在协议外面要防的事。
-  expect(agent.acceptsWork).toBe(true); // 壳退出了，Agent 还活着
-  await agent.stop(); // 由「装配层」收
+  expect(echo.agent.acceptsWork).toBe(true); // 壳退出了，Agent 还活着
+  await echo.stop(); // 由「装配层」收
 });
 
 test("模型报错要显示出来，不静默吞掉；退出码为 1", async () => {
   const ui = fakeTui();
-  const agent = agentWith([]); // 脚本用尽 → provider 报错
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([]); // 脚本用尽 → provider 报错
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("说点什么");
   ui.feed("\r");
@@ -304,9 +380,7 @@ test("模型报错要显示出来，不静默吞掉；退出码为 1", async () 
 
 test("工具调用在屏幕上有独立一行，跑完变成 ✓", async () => {
   const ui = fakeTui();
-  const agent = new Agent({
-    model: { provider: "t", id: "only", api: "scripted" },
-    streamFunction: scriptedStreamFn([toolTurn("call-1", "echo_back", { text: "喂" }), textTurn("好了")]),
+  const echo = await echoWith([toolTurn("call-1", "echo_back", { text: "喂" }), textTurn("好了")], {}, {
     tools: [
       {
         kind: "model" as const,
@@ -318,7 +392,7 @@ test("工具调用在屏幕上有独立一行，跑完变成 ✓", async () => {
       },
     ],
   });
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("用一下工具");
   ui.feed("\r");
@@ -331,36 +405,27 @@ test("工具调用在屏幕上有独立一行，跑完变成 ✓", async () => {
 
 test("传进来的 signal 已经 abort：必须立刻收摊，不能永远停在等退出上", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("不会被用到")]);
+  // 装配好、**还没启动**的那一刻交给壳（产品里就是这个时序：壳 mount 在 `createEcho()` 里，`start()` 在后）
+  const echo = await echoWith([textTurn("不会被用到")], {}, { start: false });
   const controller = new AbortController();
   controller.abort(); // **进 runTui 之前就中止**——addEventListener 不会补发历史事件
-  let starts = 0;
-  const realStart = agent.start.bind(agent);
-  agent.start = async (...args: Parameters<Agent["start"]>): Promise<void> => {
-    starts += 1;
-    return realStart(...args);
-  };
 
-  const done = runTui({ agent: runtimeOf(agent), ui, signal: controller.signal });
+  const done = runTui({ agent: runtimeOf(echo), ui, signal: controller.signal });
   await flush(200);
   expect(await done).toBe(0); // 上一版这里会永远挂着
   // **而且根本不许启动**：`start()` 会取锁、恢复会话、激活 Schedule、开 Inbox 消费。
   // 上一版只是提前 resolve 了退出信号，`start()` 照跑（review 实测 starts === 1）——
-  // 那不叫立刻收摊，那叫先把副作用做完再退出。
-  expect(starts).toBe(0);
+  // 那不叫立刻收摊，那叫先把副作用做完再退出。协议里已经没有 `start`，判据落在装配层看得见的结果上：
+  // 壳退出之后它仍然没起来，不接活。
+  expect(echo.agent.acceptsWork).toBe(false);
 });
 
 test("发完一句之后直接回车：不许重复发送同一句（换成 `Editor` 之后它会自己清空，判据不变）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("收到一"), textTurn("收到二")]);
-  const prompts: string[] = [];
-  const realPrompt = agent.prompt.bind(agent);
-  agent.prompt = ((text: string, ...rest: never[]) => {
-    prompts.push(text);
-    return realPrompt(text, ...rest);
-  }) as Agent["prompt"];
+  const echo = await echoWith([textTurn("收到一"), textTurn("收到二")]);
+  const prompts = capturePrompts(echo);
 
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("first");
   ui.feed("\r");
@@ -376,8 +441,8 @@ test("发完一句之后直接回车：不许重复发送同一句（换成 `Edi
 
 test("聚焦之后渲染里要有 CURSOR_MARKER（可见光标——这正是改用 pi-tui 编辑器的理由之一）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   // 上一版把焦点给了没有 `focused` 字段的 wrapper，Input.focused 永远 false，标记一次都不输出
   expect(ui.screen()).toContain(CURSOR_MARKER);
@@ -386,25 +451,25 @@ test("聚焦之后渲染里要有 CURSOR_MARKER（可见光标——这正是改
 });
 
 test("壳子**不停 Agent**：协议里没有 stop，收摊归装配层（壳变 extension 之后的边界）", async () => {
-  // 上一版壳子自己调 `echo.stop()`。现在启停归装配层（`echo.agent.start()` / `echo.stop()`），
+  // 上一版壳子自己调 `echo.stop()`。现在启停归装配层（`echo.start()` / `echo.stop()`），
   // 协议里根本没有那两个方法——壳子想碰也碰不到。判据落在**Agent 没被停掉**上：
   // 壳子退出之后 Agent 仍然可用，因为收摊是别人的事。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   quit(ui);
   expect(await done).toBe(0);
 
   // 壳子退出了，但 Agent 还活着——它还接得了活
-  expect(agent.acceptsWork).toBe(true);
-  await agent.stop(); // 由「装配层」来收
+  expect(echo.agent.acceptsWork).toBe(true);
+  await echo.stop(); // 由「装配层」来收
 });
 
 test("欢迎头报模型 id（启动是装配层的事，壳子只说自己接上了谁）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   expect(ui.screen()).toContain("模型 only");
   expect(ui.screen()).toContain("only"); // FAKE 模型 id
@@ -416,9 +481,9 @@ test("欢迎头报模型 id（启动是装配层的事，壳子只说自己接�
 
 test("question（ask_user）摆上屏幕：单选按数字直答；没选项的在输入行打字回车；多选打序号串；答完撤掉（2026-09-05）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好")]);
   const answered: { questionId: string; selected: readonly string[]; text?: string }[] = [];
-  const runtime = runtimeOf(agent, {
+  const runtime = runtimeOf(echo, {
     answerQuestion: async (a) => {
       answered.push({ questionId: a.questionId, selected: a.selected, ...(a.text === undefined ? {} : { text: a.text }) });
       return { kind: "accepted" as const, questionId: a.questionId, toolCallId: "c" };
@@ -427,7 +492,7 @@ test("question（ask_user）摆上屏幕：单选按数字直答；没选项的�
   const done = runTui({ agent: runtime, ui });
   await flush();
 
-  emitLifecycle(agent, {
+  emitLifecycle(echo, {
     type: "question",
     questionId: "q1",
     toolCallId: "c1",
@@ -464,7 +529,7 @@ test("question（ask_user）摆上屏幕：单选按数字直答；没选项的�
   expect(ui.screen()).toContain("[回答] bun test");
 
   // 没选项：输入行打字回车就是回答，不会当成新的一句 prompt
-  emitLifecycle(agent, { type: "question", questionId: "q2", toolCallId: "c2", question: "分支叫什么？", options: [], multiSelect: false });
+  emitLifecycle(echo, { type: "question", questionId: "q2", toolCallId: "c2", question: "分支叫什么？", options: [], multiSelect: false });
   await flush();
   ui.feed("feature/x");
   ui.feed(ENTER);
@@ -472,7 +537,7 @@ test("question（ask_user）摆上屏幕：单选按数字直答；没选项的�
   expect(answered.at(-1)).toEqual({ questionId: "q2", selected: [], text: "feature/x" });
 
   // 多选：序号串按序号选，去重
-  emitLifecycle(agent, { type: "question", questionId: "q3", toolCallId: "c3", question: "要哪些？", options: [{ label: "a" }, { label: "b" }, { label: "c" }], multiSelect: true });
+  emitLifecycle(echo, { type: "question", questionId: "q3", toolCallId: "c3", question: "要哪些？", options: [{ label: "a" }, { label: "b" }, { label: "c" }], multiSelect: true });
   await flush();
   expect(ui.screen()).toContain("可多个");
   ui.feed("1,3,1");
@@ -481,10 +546,10 @@ test("question（ask_user）摆上屏幕：单选按数字直答；没选项的�
   expect(answered.at(-1)).toEqual({ questionId: "q3", selected: ["a", "c"] });
 
   // 没等到答案（那一轮中止）：撤掉
-  emitLifecycle(agent, { type: "question", questionId: "q4", toolCallId: "c4", question: "还在吗？", options: [], multiSelect: false });
+  emitLifecycle(echo, { type: "question", questionId: "q4", toolCallId: "c4", question: "还在吗？", options: [], multiSelect: false });
   await flush();
   expect(ui.screen()).toContain("还在吗？");
-  emitLifecycle(agent, { type: "questionCancelled", questionId: "q4", toolCallId: "c4", reason: "run-aborted" });
+  emitLifecycle(echo, { type: "questionCancelled", questionId: "q4", toolCallId: "c4", reason: "run-aborted" });
   await flush();
   expect(ui.screen()).not.toContain("在输入行打字回答");
 
@@ -498,9 +563,9 @@ test("permissionRequest 摆上屏幕并按 y 放行——不订阅 lifecycle 的
   // 上一版 TUI **根本没订阅 lifecycle**：每次 `ask` 都因无人回答被折成 deny，
   // 用户看到「工具被拒」却不知道为什么。那不是设计，是壳子少实现了协议的一半。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好")]);
   const answered: { permissionId: string; decision: string }[] = [];
-  const runtime = runtimeOf(agent, {
+  const runtime = runtimeOf(echo, {
     answerPermission: async (a) => {
       answered.push({ permissionId: a.permissionId, decision: a.decision });
       return { kind: "accepted" as const, permissionId: a.permissionId, runId: "r", toolCallId: "c", decision: a.decision };
@@ -510,7 +575,7 @@ test("permissionRequest 摆上屏幕并按 y 放行——不订阅 lifecycle 的
   await flush();
 
   // core 发来一次 ask（真实来源是 authorization stage，这里直接投递那条 lifecycle 事件）
-  emitLifecycle(agent, {
+  emitLifecycle(echo, {
     type: "permissionRequest",
     permissionId: "p1",
     runId: "r1",
@@ -542,10 +607,10 @@ test("permissionRequest 摆上屏幕并按 y 放行——不订阅 lifecycle 的
 
 test("按 n 就是 deny；`y`/`n` 在待答期间**不落进输入行**", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好")]);
   const answered: string[] = [];
   const runtime: AgentRuntime = {
-    ...runtimeOf(agent),
+    ...runtimeOf(echo),
     answerPermission: async (a) => {
       answered.push(a.decision);
       return { kind: "accepted" as const, permissionId: a.permissionId, runId: "r", toolCallId: "c", decision: a.decision };
@@ -553,7 +618,7 @@ test("按 n 就是 deny；`y`/`n` 在待答期间**不落进输入行**", async 
   };
   const done = runTui({ agent: runtime, ui });
   await flush();
-  emitLifecycle(agent, {
+  emitLifecycle(echo, {
     type: "permissionRequest",
     permissionId: "p2",
     runId: "r",
@@ -578,10 +643,10 @@ test("按 n 就是 deny；`y`/`n` 在待答期间**不落进输入行**", async 
 
 test("那一轮没了（permissionCancelled）：问题从屏幕上撤掉，不让用户对着死问题按键", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
-  emitLifecycle(agent, {
+  emitLifecycle(echo, {
     type: "permissionRequest",
     permissionId: "p3",
     runId: "r",
@@ -594,7 +659,7 @@ test("那一轮没了（permissionCancelled）：问题从屏幕上撤掉，不�
   await flush();
   expect(ui.screen()).toContain("[y/n]");
 
-  emitLifecycle(agent, { type: "permissionCancelled", permissionId: "p3", toolCallId: "c", reason: "run-aborted" });
+  emitLifecycle(echo, { type: "permissionCancelled", permissionId: "p3", toolCallId: "c", reason: "run-aborted" });
   await flush();
   expect(ui.screen()).not.toContain("[y/n]");
 
@@ -692,28 +757,25 @@ test("组合符不许与基字符分家", () => {
 /**
  * 让 core 报告「我接不接新工作」。
  *
- * 打桩的是 `acceptsWork` 而**不是** `status`：五轮 review 的那条就死在这个区别上——
+ * 在协议层钉住的是 `acceptsWork` 而**不是** `status`：五轮 review 的那条就死在这个区别上——
  * Inbox run 之后 core 是 `closeRun()`（置 `status = "idle"`）→ `await ackBatch()` →
  * 清 `inboxTicketOutstanding`，中间 `status` 已经 idle 而 `prompt()` 照拒。
  * 「core 忙不忙」的真判据只有 `acceptsWork` 一个（core 侧那条真跑 InboxStore 的判据在
  * `packages/core/test/inbox-durable.test.ts`「ack 窗口」，这里只验壳子读没读它）。
  */
-function setCoreAccepts(agent: Agent, accepts: boolean): void {
-  Object.defineProperty(agent, "acceptsWork", { get: () => accepts, configurable: true });
+function setCoreAccepts(echo: Echo, accepts: boolean): void {
+  acceptsPins.set(echo, accepts); // `runtimeOf` 的 `acceptsWork` getter 现读它：钉住 / 改值立刻生效
 }
 
-/** 捕获 runTui 挂上去的事件监听器，用来合成自主 run（Inbox / Schedule）的事件。 */
-function tapEvents(agent: Agent): (event: Record<string, unknown>) => void {
-  const captured: ((e: unknown, s: AbortSignal) => unknown)[] = [];
-  const real = agent.subscribe.bind(agent);
-  agent.subscribe = ((l: (e: unknown, s: AbortSignal) => unknown) => {
-    captured.push(l);
-    return real(l as never);
-  }) as Agent["subscribe"];
+/**
+ * 捕获 runTui 经协议挂上去的事件监听器，用来合成自主 run（Inbox / Schedule）的事件。
+ * 监听器在 `runTui()` 订阅时才进表，所以发射时现取。
+ */
+function tapEvents(echo: Echo): (event: Record<string, unknown>) => void {
   let seq = 1000;
   return (event) => {
     const enveloped = { seq: seq++, at: Date.now(), ...event };
-    for (const l of captured) l(enveloped, new AbortController().signal);
+    for (const l of eventListeners.get(echo) ?? []) l(enveloped as never, new AbortController().signal);
   };
 }
 
@@ -721,27 +783,23 @@ test("装配层还没把 Agent 起起来（acceptsWork=false）就提交：不�
   // 上一版这条叫「慢启动期间提交」，判据是壳子自己 `start()` 到一半。**壳变 extension 之后
   // 启停归装配层**，壳子压根不 start——「还没起来」这件事对它就是 `acceptsWork === false`，
   // 与「正忙」「Inbox 还在 ack」走同一条判据。这正是协议要达到的效果：壳子不再自己数状态。
+  // 这里是真的没起来：装配好、不 `start()`（产品里壳 mount 在 `createEcho()` 里，`start()` 在后）。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  setCoreAccepts(agent, false); // 装配层还没 start：core 说不接活
-  const prompts: string[] = [];
-  const realPrompt = agent.prompt.bind(agent);
-  agent.prompt = ((text: string, ...rest: never[]) => {
-    prompts.push(text);
-    return realPrompt(text, ...rest);
-  }) as Agent["prompt"];
+  const echo = await echoWith([textTurn("好")], {}, { start: false });
+  const prompts = capturePrompts(echo);
 
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("等不及了");
   ui.feed("\r");
   await flush(100);
 
+  expect(echo.agent.acceptsWork).toBe(false); // 前提成立：真没起来
   expect(prompts).toEqual([]);
   expect(ui.screen()).toContain("等不及了"); // 还在输入行里，不用重打
   expect(ui.screen()).not.toContain("[拒绝]");
 
-  setCoreAccepts(agent, true);
+  await echo.start(); // 装配层把它起起来
   ui.feed("\r");
   await flush(200);
   expect(prompts).toEqual(["等不及了"]); // 起来了就发得出去
@@ -752,21 +810,16 @@ test("装配层还没把 Agent 起起来（acceptsWork=false）就提交：不�
 
 test("自主 run（Inbox / Schedule）跑着的时候提交：同样不发出、不清空", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const emit = tapEvents(agent);
-  const prompts: string[] = [];
-  const realPrompt = agent.prompt.bind(agent);
-  agent.prompt = ((text: string, ...rest: never[]) => {
-    prompts.push(text);
-    return realPrompt(text, ...rest);
-  }) as Agent["prompt"];
+  const echo = await echoWith([textTurn("好")]);
+  const emit = tapEvents(echo);
+  const prompts = capturePrompts(echo);
 
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   // 没有任何本地 prompt()，纯粹是 Agent 自己在跑一轮：
   // run 落位（core 从此不接新工作）比 agent_start 那一拍还早，顺序与 `executeAdmitted` 一致
-  setCoreAccepts(agent, false);
+  setCoreAccepts(echo, false);
   emit({ type: "agent_start" });
   ui.feed("插一句");
   ui.feed("\r");
@@ -776,7 +829,7 @@ test("自主 run（Inbox / Schedule）跑着的时候提交：同样不发出、
   expect(ui.screen()).toContain("插一句");
 
   emit({ type: "agent_end", outcome: { kind: "completed" } });
-  setCoreAccepts(agent, true); // core 真正收完摊了（含 Inbox 的 ack 裁决）
+  setCoreAccepts(echo, true); // core 真正收完摊了（含 Inbox 的 ack 裁决）
   await flush();
   quit(ui);
   await done;
@@ -787,19 +840,14 @@ test("`agent_end` 不等于空闲：循环收尾了但 core 还没 closeRun()，
   // → `finishRun()` → `closeRun()` 才清 `activeRun`。上一版在 `agent_end` 就把运行态灭掉，
   // 第二条输入于是被吃掉并换来一句「Agent 正在处理上一个 prompt」。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const emit = tapEvents(agent);
-  const prompts: string[] = [];
-  const realPrompt = agent.prompt.bind(agent);
-  agent.prompt = ((text: string, ...rest: never[]) => {
-    prompts.push(text);
-    return realPrompt(text, ...rest);
-  }) as Agent["prompt"];
+  const echo = await echoWith([textTurn("好")]);
+  const emit = tapEvents(echo);
+  const prompts = capturePrompts(echo);
 
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
-  setCoreAccepts(agent, false);
+  setCoreAccepts(echo, false);
   emit({ type: "agent_start" });
   emit({ type: "agent_end", outcome: { kind: "completed" } }); // 循环收尾了……
   await flush();
@@ -813,7 +861,7 @@ test("`agent_end` 不等于空闲：循环收尾了但 core 还没 closeRun()，
   expect(ui.screen()).not.toContain("[拒绝]");
 
   // core 真的收完摊（permit settle + closeRun，Inbox 还要 ack 裁决）之后才放行
-  setCoreAccepts(agent, true);
+  setCoreAccepts(echo, true);
   ui.feed("\r");
   await flush(200);
   expect(prompts).toEqual(["抢跑的第二条"]);
@@ -824,9 +872,9 @@ test("`agent_end` 不等于空闲：循环收尾了但 core 还没 closeRun()，
 
 test("自主 run 报错：屏幕要看得见，退出码要是 1", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const emit = tapEvents(agent);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const emit = tapEvents(echo);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   emit({ type: "agent_start" });
@@ -846,9 +894,9 @@ test("自主 run 报错：屏幕要看得见，退出码要是 1", async () => {
 test("迭代上限不是坏了，是预算用完：错误后面跟着「输入继续」的提示；别的错误不跟", async () => {
   // 实测 `[错误] 迭代上限 20` 这一行没告诉用户下一步能做什么（2026-09-02）
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const emit = tapEvents(agent);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const emit = tapEvents(echo);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   emit({ type: "agent_start" });
@@ -866,8 +914,8 @@ test("迭代上限不是坏了，是预算用完：错误后面跟着「输入�
 
 test("本地一轮出错只显示一次（`agent_end` 显示，`submit()` 不重复显示）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([]); // 脚本用尽 → provider 报错，走真的 agent_end(error)
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([]); // 脚本用尽 → provider 报错，走真的 agent_end(error)
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("会失败的一句");
   ui.feed("\r");
@@ -886,18 +934,14 @@ test("Inbox 的 ack 窗口：core 报 `status = idle` 但还不接活，壳子�
   // 还没出来，`inboxTicketOutstanding` 还立着——这时 `prompt()` 会抛「Inbox 的一批还在等 ack 裁决」。
   // 所以这条把 `status` 与 `acceptsWork` **故意摆成相反**：壳子读错哪一个，这里就红。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  Object.defineProperty(agent, "status", { get: () => "idle", configurable: true });
-  setCoreAccepts(agent, false);
+  const echo = await echoWith([textTurn("好")]);
+  // `status` 是真的 idle（起来了、没在跑）；`acceptsWork` 在协议层钉成 false——ack 窗口那一刻的形状
+  expect(echo.agent.state.status).toBe("idle");
+  setCoreAccepts(echo, false);
 
-  const prompts: string[] = [];
-  const realPrompt = agent.prompt.bind(agent);
-  agent.prompt = ((text: string, ...rest: never[]) => {
-    prompts.push(text);
-    return realPrompt(text, ...rest);
-  }) as Agent["prompt"];
+  const prompts = capturePrompts(echo);
 
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("ack 还没裁决就发");
   ui.feed("\r");
@@ -907,7 +951,7 @@ test("Inbox 的 ack 窗口：core 报 `status = idle` 但还不接活，壳子�
   expect(ui.screen()).toContain("ack 还没裁决就发");
   expect(ui.screen()).not.toContain("[拒绝]");
 
-  setCoreAccepts(agent, true);
+  setCoreAccepts(echo, true);
   ui.feed("\r");
   await flush(200);
   expect(prompts).toEqual(["ack 还没裁决就发"]);
@@ -916,15 +960,15 @@ test("Inbox 的 ack 窗口：core 报 `status = idle` 但还不接活，壳子�
   await done;
 });
 
-test("参数里的终端控制序列不许注入——「请你确认」这一步尤其不能被劫持", () => {
+test("参数里的终端控制序列不许注入——「请你确认」这一步尤其不能被劫持", async () => {
   // 参数来自模型，与正文一样不可信。不洗的话一条 `OSC 52` 就能在确认框里改用户剪贴板：
   // 用户以为自己在读「要执行什么」，实际屏幕已经被写这条参数的人接管了。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   return (async () => {
     await flush();
-    emitLifecycle(agent, {
+    emitLifecycle(echo, {
       type: "permissionRequest",
       permissionId: "pX",
       runId: "r",
@@ -960,8 +1004,8 @@ test("带着**已存在的 ask** 启动：壳子必须把它摆出来（`pending
   // Extension 换代 / 壳重挂时，订阅只能收到「此后」的事件——**在那之前就欠着的那条谁也不会重发**。
   // 不补的话用户看不到问题，run 一直等到 `askTimeoutMs` 折成 deny，全程无人知情。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const runtime = runtimeOf(agent, {
+  const echo = await echoWith([textTurn("好")]);
+  const runtime = runtimeOf(echo, {
     pendingPermissions: [
       { permissionId: "old-1", runId: "r", turnId: "t", toolCallId: "c", toolName: "write_file", params: { path: "/etc/hosts" }, reason: "要写盘" },
     ] as never,
@@ -981,8 +1025,8 @@ test("带着**已存在的 ask** 启动：壳子必须把它摆出来（`pending
 
 test("同一个 permissionId 不重复摆：补发的与订阅收到的会合并", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const runtime = runtimeOf(agent, {
+  const echo = await echoWith([textTurn("好")]);
+  const runtime = runtimeOf(echo, {
     pendingPermissions: [
       { permissionId: "dup", runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params: {}, reason: "第一次" },
     ] as never,
@@ -991,7 +1035,7 @@ test("同一个 permissionId 不重复摆：补发的与订阅收到的会合并
   await flush();
 
   // 订阅之后 core 又把同一条发了一遍（换代重放的常见形状）
-  emitLifecycle(agent, {
+  emitLifecycle(echo, {
     type: "permissionRequest",
     permissionId: "dup",
     runId: "r",
@@ -1023,14 +1067,13 @@ const CTRL_MINUS = String.fromCharCode(0x1f);
 const LEFT = `${ESC_KEY}[D`;
 const UP = `${ESC_KEY}[A`;
 
-/** 记下真正发出去的 prompt。走的是 `Agent.prompt` 本身，只是包一层。 */
-function capturePrompts(agent: Agent): string[] {
+/**
+ * 记下壳真正发出去的 prompt。记在 `runtimeOf` 的 `prompt` 转发上——壳调的就是协议的 `prompt`，
+ * 记完照样交给装配出来的那份去跑。要在 `runTui()` 之前调。
+ */
+function capturePrompts(echo: Echo): string[] {
   const prompts: string[] = [];
-  const realPrompt = agent.prompt.bind(agent);
-  agent.prompt = ((text: string, ...rest: never[]) => {
-    prompts.push(text);
-    return realPrompt(text, ...rest);
-  }) as Agent["prompt"];
+  promptLogs.set(echo, prompts);
   return prompts;
 }
 
@@ -1042,9 +1085,9 @@ async function stillRunning(done: Promise<number>, ms = 50): Promise<boolean> {
 
 test("Enter 提交；Shift+Enter 换行——多行草稿整段发出去", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const prompts = capturePrompts(agent);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const prompts = capturePrompts(echo);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   ui.feed("第一行");
@@ -1061,8 +1104,8 @@ test("Enter 提交；Shift+Enter 换行——多行草稿整段发出去", async
 
 test("Ctrl+C 清空输入行，**不退出**", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   ui.feed("打了一半");
@@ -1077,8 +1120,8 @@ test("Ctrl+C 清空输入行，**不退出**", async () => {
 
 test("Ctrl+D：输入行为空时退出；有字时是向前删一个字符，不退出", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   ui.feed("ab");
@@ -1095,9 +1138,9 @@ test("Ctrl+D：输入行为空时退出；有字时是向前删一个字符，�
 
 test("Esc 中断在飞的那一轮（走协议的 `abort`）；空闲时按 Esc 什么都不发生", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好")]);
   const aborts: (string | undefined)[] = [];
-  const done = runTui({ agent: runtimeOf(agent, { abort: (r) => aborts.push(r) }), ui });
+  const done = runTui({ agent: runtimeOf(echo, { abort: (r) => aborts.push(r) }), ui });
   await flush();
 
   ui.feed(ESC_KEY); // 空闲：不该 abort
@@ -1116,9 +1159,9 @@ test("Esc 中断在飞的那一轮（走协议的 `abort`）；空闲时按 Esc 
 
 test("↑ 翻出上一条输入（单行草稿），再按回车就是重发那一句", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("一"), textTurn("二")]);
-  const prompts = capturePrompts(agent);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("一"), textTurn("二")]);
+  const prompts = capturePrompts(echo);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   ui.feed("first");
@@ -1135,9 +1178,9 @@ test("↑ 翻出上一条输入（单行草稿），再按回车就是重发那�
 
 test("被拒的那次提交不进历史：↑ 翻出来的是发出去的那句，不是被拒的", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("一"), textTurn("二")]);
-  const prompts = capturePrompts(agent);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("一"), textTurn("二")]);
+  const prompts = capturePrompts(echo);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   ui.feed("发出去的");
@@ -1157,8 +1200,8 @@ test("被拒的那次提交不进历史：↑ 翻出来的是发出去的那句�
 
 test("Ctrl+- 撤销", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   ui.feed("abc");
@@ -1185,8 +1228,8 @@ const KITTY = {
 
 test("Kitty 编码的 Ctrl+D 也能退出", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed(KITTY.ctrlD);
   expect(await done).toBe(0);
@@ -1194,9 +1237,9 @@ test("Kitty 编码的 Ctrl+D 也能退出", async () => {
 
 test("Kitty 的按键 release 不算一次按键：release 的 Ctrl+D 不退出，release 的 y 不答题", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好")]);
   const answered: string[] = [];
-  const runtime = runtimeOf(agent, {
+  const runtime = runtimeOf(echo, {
     answerPermission: async (a) => {
       answered.push(a.decision);
       return { kind: "accepted" as const, permissionId: a.permissionId, runId: "r", toolCallId: "c", decision: a.decision };
@@ -1208,7 +1251,7 @@ test("Kitty 的按键 release 不算一次按键：release 的 Ctrl+D 不退出�
   ui.feed(KITTY.ctrlDRelease);
   expect(await stillRunning(done), "release 事件被当成按下，退出了").toBe(true);
 
-  emitLifecycle(agent, { type: "permissionRequest", permissionId: "p", runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params: {}, reason: "" });
+  emitLifecycle(echo, { type: "permissionRequest", permissionId: "p", runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params: {}, reason: "" });
   await flush();
   ui.feed(KITTY.yRelease);
   await flush();
@@ -1241,11 +1284,8 @@ function isolateKeys(): () => void {
 }
 
 /** 配置段 / 选择器相关的测试要用 kimi 身份：当前家按 `state.model.provider` 现查，`"t"` 查不到。 */
-function kimiAgent(turns: ProviderEvent[][]): Agent {
-  return new Agent({
-    model: { provider: "kimi", id: "kimi-k3", api: "scripted" },
-    streamFunction: scriptedStreamFn(turns as never),
-  });
+function kimiEcho(turns: ProviderEvent[][]): Promise<Echo> {
+  return echoWith(turns, { provider: "kimi", id: "kimi-k3", api: "scripted" });
 }
 
 function configureWith(over: Partial<TuiConfigureOptions> = {}): TuiConfigureOptions {
@@ -1265,10 +1305,10 @@ test("没配 key：主界面**照样起来**，配置段顶替输入行；配好
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("我在")]);
-    const prompts = capturePrompts(agent);
+    const echo = await kimiEcho([textTurn("我在")]);
+    const prompts = capturePrompts(echo);
     const credentials = new InMemoryCredentialStore();
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     expect(ui.screen()).toContain("模型 kimi-k3"); // 主界面起来了
@@ -1306,10 +1346,10 @@ test("配好了的：不摆配置段", async () => {
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]); // 身份必须能查到家，「配好了」这句话才有内容
+    const echo = await kimiEcho([textTurn("好")]); // 身份必须能查到家，「配好了」这句话才有内容
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
     expect(ui.screen()).not.toContain("的 API key");
     expect(ui.screen()).toContain("Enter 发送");
@@ -1327,10 +1367,10 @@ test("跑着的时候端点报 `auth`（key 被撤了）：配置段再摆一次
     const authTurn: ProviderEvent[] = [
       { type: "error", error: { source: "provider", code: "auth", retryable: false, message: "端点未配置凭据：kimi" } },
     ];
-    const agent = kimiAgent([authTurn]);
+    const echo = await kimiEcho([authTurn]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-revoked" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
     expect(ui.screen()).not.toContain("的 API key"); // 启动时是配好的
 
@@ -1353,8 +1393,8 @@ test("配置段里：Ctrl+C 清空、有字时 Ctrl+D 不退出、空了 Ctrl+D 
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith() });
+    const echo = await kimiEcho([textTurn("好")]);
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith() });
     await flush();
     expect(ui.screen()).toContain("的 API key");
 
@@ -1375,7 +1415,7 @@ test("读不了凭据文件：**不挡启动**，说一句，当成没配", asyn
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const broken: CredentialStore = {
       read: async () => {
         throw new Error("凭据文件不是合法 JSON：/x/credentials.json");
@@ -1383,7 +1423,7 @@ test("读不了凭据文件：**不挡启动**，说一句，当成没配", asyn
       write: async () => undefined,
       delete: async () => undefined,
     };
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials: broken }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials: broken }) });
     await flush();
     expect(ui.screen()).toContain("模型 kimi-k3");
     expect(ui.screen()).toContain("[凭据] 读不了凭据文件");
@@ -1399,8 +1439,8 @@ test("不给 configure：壳子不管凭据，什么都不摆（低层用户自�
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
-    const done = runTui({ agent: runtimeOf(agent), ui });
+    const echo = await echoWith([textTurn("好")]);
+    const done = runTui({ agent: runtimeOf(echo), ui });
     await flush();
     expect(ui.screen()).not.toContain("的 API key");
     quit(ui);
@@ -1414,13 +1454,9 @@ test("不给 configure：壳子不管凭据，什么都不摆（低层用户自�
 
 test("欢迎头：版本、cwd、模型、键位提示，在文档流最上面", async () => {
   const ui = fakeTui();
-  const agent = new Agent({
-    model: { provider: "t", id: "only", api: "scripted" },
-    streamFunction: scriptedStreamFn([textTurn("好")]),
-    workspace: "/tmp/echo-welcome-workspace",
-  });
+  const echo = await echoWith([textTurn("好")], {}, { workspace: "/tmp/echo-welcome-workspace" });
   // 产品由调用方给：**壳不认识任何产品**（2026-09-09 拆包），不给就显示一个中性名字
-  const done = runTui({ agent: runtimeOf(agent), ui, product: { name: "echo-agent", version: "9.9.9" } });
+  const done = runTui({ agent: runtimeOf(echo), ui, product: { name: "echo-agent", version: "9.9.9" } });
   await flush();
 
   const screen = ui.screen();
@@ -1443,8 +1479,8 @@ test("欢迎头：版本、cwd、模型、键位提示，在文档流最上面",
 
 test("状态栏：最底下一行，模型 / 状态 / 用量恒显；任务 / skill / MCP 为零不占地方", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   const lines = ui.screen().split("\n");
@@ -1464,8 +1500,8 @@ test("状态栏在配置段期间也在（它不依赖输入行）", async () =>
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith() });
+    const echo = await kimiEcho([textTurn("好")]);
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith() });
     await flush();
     expect(ui.screen()).toContain("的 API key"); // 配置段真的在（不在的话这条判据是空的）
     const footer = ui.screen().split("\n").at(-1)!.replace(/\x1b\[[0-9;]*m/g, "");
@@ -1557,9 +1593,7 @@ test("工具结果也要洗：展开时结果里的控制序列不许进终端",
 
 test("端到端：Ctrl+O 展开 / 收起工具输出；折叠时长结果不刷屏", async () => {
   const ui = fakeTui();
-  const agent = new Agent({
-    model: { provider: "t", id: "only", api: "scripted" },
-    streamFunction: scriptedStreamFn([toolTurn("call-1", "list", { dir: "/" }), textTurn("列完了")]),
+  const echo = await echoWith([toolTurn("call-1", "list", { dir: "/" }), textTurn("列完了")], {}, {
     tools: [
       {
         kind: "model" as const,
@@ -1575,7 +1609,7 @@ test("端到端：Ctrl+O 展开 / 收起工具输出；折叠时长结果不刷�
       },
     ],
   });
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("列一下");
   ui.feed(ENTER);
@@ -1606,13 +1640,10 @@ test("Ctrl+L：选择器顶替输入行，当前项 ✓ 且预选中；选另一
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = new Agent({
-      model: { provider: "kimi", id: "kimi-k3", api: "openai-completions" },
-      streamFunction: scriptedStreamFn([textTurn("好")]),
-    });
+    const echo = await echoWith([textTurn("好")], { provider: "kimi", id: "kimi-k3", api: "openai-completions" });
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     ui.feed(CTRL_L);
@@ -1628,7 +1659,7 @@ test("Ctrl+L：选择器顶替输入行，当前项 ✓ 且预选中；选另一
     ui.feed("2"); // 数字直选 kimi-k2.7-code
     await flush();
     expect(ui.screen()).toContain("[模型] 已换到 kimi-k2.7-code");
-    expect(agent.state.model.id).toBe("kimi-k2.7-code");
+    expect(echo.agent.state.model.id).toBe("kimi-k2.7-code");
     expect(ui.screen().split("\n").at(-1)!).toContain("kimi-k2.7-code"); // 状态栏现读 state
 
     quit(ui);
@@ -1642,10 +1673,10 @@ test("Ctrl+L：Esc 收起、再按 Ctrl+L 也是收起；没给 configure 的低
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     ui.feed(CTRL_L);
@@ -1666,8 +1697,8 @@ test("Ctrl+L：Esc 收起、再按 Ctrl+L 也是收起；没给 configure 的低
 
 test("没给 configure 的低层用法：Ctrl+L 如实说没有目录，不摆一个空选择器", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui }); // 不给 configure
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui }); // 不给 configure
   await flush();
   ui.feed(CTRL_L);
   expect(ui.screen()).toContain("[模型] 壳子没拿到目录");
@@ -1680,13 +1711,10 @@ test("忙的时候选模型：rejected 原因上屏，装备原样不动", async
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = new Agent({
-      model: { provider: "kimi", id: "kimi-k3", api: "openai-completions" },
-      streamFunction: scriptedStreamFn([textTurn("好")]),
-    });
+    const echo = await echoWith([textTurn("好")], { provider: "kimi", id: "kimi-k3", api: "openai-completions" });
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     ui.feed("跑一轮");
@@ -1698,7 +1726,7 @@ test("忙的时候选模型：rejected 原因上屏，装备原样不动", async
 
     expect(ui.screen()).toContain("[模型] 没换成");
     expect(ui.screen()).toContain("正在运行");
-    expect(agent.state.model.id).toBe("kimi-k3");
+    expect(echo.agent.state.model.id).toBe("kimi-k3");
 
     quit(ui);
     await done;
@@ -1709,8 +1737,8 @@ test("忙的时候选模型：rejected 原因上屏，装备原样不动", async
 
 test("Shift+Tab：只轮映射表里发出去的参数不同的档，状态栏显示真发的值；关不掉的模型圈里没有 off、起手显示「缺省」", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")], { thinkingLevelMap: FOLD_NO_OFF });
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")], { thinkingLevelMap: FOLD_NO_OFF });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   const bar = (): string => ui.screen().split("\n").at(-1)!;
 
@@ -1719,7 +1747,7 @@ test("Shift+Tab：只轮映射表里发出去的参数不同的档，状态栏�
   for (let i = 0; i < 4; i++) {
     ui.feed(SHIFT_TAB);
     await flush();
-    seen.push(agent.state.thinkingLevel);
+    seen.push(echo.agent.state.thinkingLevel);
   }
   expect(seen).toEqual(["low", "high", "max", "low"]); // minimal / medium / xhigh 与相邻档同值，跳过；没有 off
   expect(bar()).toContain("思考 low");
@@ -1730,28 +1758,28 @@ test("Shift+Tab：只轮映射表里发出去的参数不同的档，状态栏�
 
 test("Shift+Tab：能关的模型（表里有 off）圈里有 off、显示 disabled；没有映射表的模型只报一句、档位不动", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")], { thinkingLevelMap: FOLD_WITH_OFF });
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")], { thinkingLevelMap: FOLD_WITH_OFF });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   expect(ui.screen().split("\n").at(-1)!).toContain("思考 disabled"); // 起手 off = 真关
   const seen: string[] = [];
   for (let i = 0; i < 4; i++) {
     ui.feed(SHIFT_TAB);
     await flush();
-    seen.push(agent.state.thinkingLevel);
+    seen.push(echo.agent.state.thinkingLevel);
   }
   expect(seen).toEqual(["low", "high", "max", "off"]);
   quit(ui);
   await done;
 
   const bareUi = fakeTui();
-  const bare = agentWith([textTurn("好")]);
+  const bare = await echoWith([textTurn("好")]);
   const bareDone = runTui({ agent: runtimeOf(bare), ui: bareUi });
   await flush();
   expect(bareUi.screen()).not.toContain("思考");
   bareUi.feed(SHIFT_TAB);
   await flush();
-  expect(bare.state.thinkingLevel).toBe("off");
+  expect(bare.agent.state.thinkingLevel).toBe("off");
   expect(bareUi.screen()).toContain("[思考] 这个模型没有思考档位");
   quit(bareUi);
   await bareDone;
@@ -1759,8 +1787,8 @@ test("Shift+Tab：能关的模型（表里有 off）圈里有 off、显示 disab
 
 test("/clear：协议 reset() 清会话真相，屏幕投影一起清；装备不动", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("这句会被清掉"), textTurn("新的一句")], { thinkingLevelMap: FOLD_NO_OFF });
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("这句会被清掉"), textTurn("新的一句")], { thinkingLevelMap: FOLD_NO_OFF });
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   ui.feed(SHIFT_TAB); // 先把 thinking 拨到 low，验证 /clear 不动装备
@@ -1768,7 +1796,7 @@ test("/clear：协议 reset() 清会话真相，屏幕投影一起清；装备�
   ui.feed(ENTER);
   await flush(300);
   expect(ui.screen()).toContain("这句会被清掉");
-  expect(agent.state.messages.length).toBeGreaterThan(0);
+  expect(echo.agent.state.messages.length).toBeGreaterThan(0);
 
   for (const ch of "/clear") ui.feed(ch);
   ui.feed(ENTER);
@@ -1776,8 +1804,8 @@ test("/clear：协议 reset() 清会话真相，屏幕投影一起清；装备�
 
   expect(ui.screen()).toContain("[清空] 对话已清");
   expect(ui.screen(), "屏幕投影没清").not.toContain("这句会被清掉");
-  expect(agent.state.messages, "会话真相没清").toEqual([]);
-  expect(agent.state.thinkingLevel, "/clear 把装备也清了").toBe("low");
+  expect(echo.agent.state.messages, "会话真相没清").toEqual([]);
+  expect(echo.agent.state.thinkingLevel, "/clear 把装备也清了").toBe("low");
 
   // 清完还能正常说话
   ui.feed("再来");
@@ -1791,9 +1819,9 @@ test("/clear：协议 reset() 清会话真相，屏幕投影一起清；装备�
 
 test("/reload：协议 reloadExtensions()，变了的一行一个（带原因），没变的不刷屏", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("不该被跑到")]);
+  const echo = await echoWith([textTurn("不该被跑到")]);
   const done = runTui({
-    agent: runtimeOf(agent, {
+    agent: runtimeOf(echo, {
       reloadExtensions: async () => ({
         kind: "done",
         report: {
@@ -1817,7 +1845,7 @@ test("/reload：协议 reloadExtensions()，变了的一行一个（带原因）
   expect(screen).toContain("换代  /x/b.ts");
   expect(screen).toContain("新版没装上，旧版仍在  /x/c.ts——语法错");
   expect(screen, "没变的不该刷屏").not.toContain("quiet.ts");
-  expect(agent.state.messages, "斜杠命令不发给模型").toEqual([]);
+  expect(echo.agent.state.messages, "斜杠命令不发给模型").toEqual([]);
 
   quit(ui);
   await done;
@@ -1825,8 +1853,8 @@ test("/reload：协议 reloadExtensions()，变了的一行一个（带原因）
 
 test("/reload：忙时协议 rejected → 原样显示原因；全部没变 → 一句「没有变化」", async () => {
   const busyUi = fakeTui();
-  const busyAgent = agentWith([textTurn("x")]);
-  const busyDone = runTui({ agent: runtimeOf(busyAgent, { reloadExtensions: async () => ({ kind: "rejected", reason: "Agent 正在处理上一个 prompt" }) }), ui: busyUi });
+  const busyEcho = await echoWith([textTurn("x")]);
+  const busyDone = runTui({ agent: runtimeOf(busyEcho, { reloadExtensions: async () => ({ kind: "rejected", reason: "Agent 正在处理上一个 prompt" }) }), ui: busyUi });
   await flush();
   for (const ch of "/reload") busyUi.feed(ch);
   busyUi.feed(ENTER);
@@ -1836,9 +1864,9 @@ test("/reload：忙时协议 rejected → 原样显示原因；全部没变 → 
   await busyDone;
 
   const quietUi = fakeTui();
-  const quietAgent = agentWith([textTurn("x")]);
+  const quietEcho = await echoWith([textTurn("x")]);
   const quietDone = runTui({
-    agent: runtimeOf(quietAgent, { reloadExtensions: async () => ({ kind: "done", report: { changes: [{ kind: "unchanged", file: "/x/a.ts" }, { kind: "unchanged", file: "/x/b.ts" }] } }) }),
+    agent: runtimeOf(quietEcho, { reloadExtensions: async () => ({ kind: "done", report: { changes: [{ kind: "unchanged", file: "/x/a.ts" }, { kind: "unchanged", file: "/x/b.ts" }] } }) }),
     ui: quietUi,
   });
   await flush();
@@ -1852,9 +1880,9 @@ test("/reload：忙时协议 rejected → 原样显示原因；全部没变 → 
 
 test("不认识的斜杠命令：报一句、原文放回输入行，不发给模型", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("不该被跑到")]);
-  const prompts = capturePrompts(agent);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("不该被跑到")]);
+  const prompts = capturePrompts(echo);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
 
   for (const ch of "/foo") ui.feed(ch);
@@ -1879,12 +1907,12 @@ test("Ctrl+L 选 DeepSeek 的模型：换过去、onModelChange 拿到 provider 
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" }); // 只配了 kimi
     const changes: { provider: string; id: string }[] = [];
     const done = runTui({
-      agent: runtimeOf(agent),
+      agent: runtimeOf(echo),
       ui,
       configure: configureWith({ credentials, onModelChange: (m) => changes.push(m) }),
     });
@@ -1896,7 +1924,7 @@ test("Ctrl+L 选 DeepSeek 的模型：换过去、onModelChange 拿到 provider 
     await flush(100);
 
     expect(ui.screen()).toContain("[模型] 已换到 deepseek-v4-flash（deepseek，下一轮生效）");
-    expect(agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" });
+    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" });
     expect(changes).toEqual([{ provider: "deepseek", id: "deepseek-v4-flash" }]); // D7：cli 拿它写 settings.json
     // deepseek 没配 key：不等第一句 prompt 撞 auth，配置段**这就**摆出来，而且对的是 DeepSeek
     expect(ui.screen()).toContain("DeepSeek 的 API key");
@@ -1914,7 +1942,7 @@ test("Ctrl+L：某一家的凭据条目坏了 → 那家当没配并说一声，
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
     const realRead = credentials.read.bind(credentials);
@@ -1924,7 +1952,7 @@ test("Ctrl+L：某一家的凭据条目坏了 → 那家当没配并说一声，
         return realRead(provider);
       },
     });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
     ui.feed(CTRL_L);
     await flush(100);
@@ -1943,10 +1971,10 @@ test("Ctrl+L 选已配好那家的模型：换过去就完，不弹配置段", a
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     ui.feed(CTRL_L);
@@ -1954,7 +1982,7 @@ test("Ctrl+L 选已配好那家的模型：换过去就完，不弹配置段", a
     ui.feed("2"); // kimi-k2.7-code，同一家
     await flush(100);
 
-    expect(agent.state.model.id).toBe("kimi-k2.7-code");
+    expect(echo.agent.state.model.id).toBe("kimi-k2.7-code");
     expect(ui.screen()).not.toContain("的 API key"); // 配好了就别烦人
     quit(ui);
     await done;
@@ -1978,8 +2006,8 @@ test("provider 报了缓存：状态栏出现「缓存 <数> (<百分比>%)」�
     },
   ];
   const ui = fakeTui();
-  const agent = agentWith([withCache]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([withCache]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("说");
   ui.feed(ENTER);
@@ -2004,8 +2032,8 @@ test("provider 报了缓存：状态栏出现「缓存 <数> (<百分比>%)」�
     },
   ];
   const ui2 = fakeTui();
-  const agent2 = agentWith([noCache]);
-  const done2 = runTui({ agent: runtimeOf(agent2), ui: ui2 });
+  const echo2 = await echoWith([noCache]);
+  const done2 = runTui({ agent: runtimeOf(echo2), ui: ui2 });
   await flush();
   ui2.feed("说");
   ui2.feed(ENTER);
@@ -2021,12 +2049,12 @@ test("`/model` 开选择器（与 Ctrl+L 同一个）；`/model <id>` 跨家直�
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
     const changes: { provider: string; id: string }[] = [];
     const done = runTui({
-      agent: runtimeOf(agent),
+      agent: runtimeOf(echo),
       ui,
       configure: configureWith({ credentials, onModelChange: (m) => changes.push(m) }),
     });
@@ -2041,7 +2069,7 @@ test("`/model` 开选择器（与 Ctrl+L 同一个）；`/model <id>` 跨家直�
     for (const ch of "/model deepseek-v4-flash") ui.feed(ch);
     ui.feed(ENTER);
     await flush(100);
-    expect(agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" });
+    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" });
     expect(changes).toEqual([{ provider: "deepseek", id: "deepseek-v4-flash" }]); // 写设置那条回调同样走到
     expect(ui.screen()).toContain("DeepSeek 的 API key"); // deepseek 没配 key：主动弹配置段
 
@@ -2056,12 +2084,12 @@ test("`/model 不存在的id`：如实报、装备不动、不发给模型", asy
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("不该被跑到")]);
-    const prompts = capturePrompts(agent);
+    const echo = await kimiEcho([textTurn("不该被跑到")]);
+    const prompts = capturePrompts(echo);
     // kimi 预先配好 key：让输入行在场（否则配置段顶替输入行，敲的字全进了密钥框）
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     for (const ch of "/model gpt-99-并不存在") ui.feed(ch);
@@ -2069,7 +2097,7 @@ test("`/model 不存在的id`：如实报、装备不动、不发给模型", asy
     await flush(100);
 
     expect(ui.screen()).toContain("目录里没有 'gpt-99-并不存在'");
-    expect(agent.state.model.id).toBe("kimi-k3");
+    expect(echo.agent.state.model.id).toBe("kimi-k3");
     expect(prompts).toEqual([]);
 
     quit(ui);
@@ -2087,11 +2115,11 @@ test("敲 `/cl`：菜单弹出且过滤掉不匹配的命令；Tab 补全成 /cl
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("不该被跑到")]);
-    const prompts = capturePrompts(agent);
+    const echo = await kimiEcho([textTurn("不该被跑到")]);
+    const prompts = capturePrompts(echo);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     for (const ch of "/cl") ui.feed(ch);
@@ -2120,10 +2148,10 @@ test("`/mo` 菜单开着按 Enter：补全并**直接执行**——模型选择�
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     for (const ch of "/mo") ui.feed(ch);
@@ -2147,10 +2175,10 @@ test("`/model dee`：模型 id 参数补全弹出；Tab 补全整个 id；Enter 
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     for (const ch of "/model dee") ui.feed(ch);
@@ -2161,7 +2189,7 @@ test("`/model dee`：模型 id 参数补全弹出；Tab 补全整个 id；Enter 
     await flush();
     ui.feed(ENTER);
     await flush(100);
-    expect(agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" }); // 只敲了 dee，Tab 补全后直切成功
+    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" }); // 只敲了 dee，Tab 补全后直切成功
     expect(ui.screen()).toContain("DeepSeek 的 API key"); // 未配 key 的家：主动弹配置段
 
     quit(ui);
@@ -2175,10 +2203,10 @@ test("`/zz` 什么都不匹配：不弹菜单", async () => {
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = kimiAgent([textTurn("好")]);
+    const echo = await kimiEcho([textTurn("好")]);
     const credentials = new InMemoryCredentialStore();
     await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
-    const done = runTui({ agent: runtimeOf(agent), ui, configure: configureWith({ credentials }) });
+    const done = runTui({ agent: runtimeOf(echo), ui, configure: configureWith({ credentials }) });
     await flush();
 
     for (const ch of "/zz") ui.feed(ch);
@@ -2222,8 +2250,8 @@ const row = (over: Partial<SessionRow> & { id: string }): SessionRow => ({
 test("/sessions：把别的会话摆出来——在跑 / 忙着 / 没在跑各说各的，自己那一段不列", async () => {
   // 两个终端各跑一段时，这是唯一能一眼看到对面的地方。没有它只能去翻 ~/.echo/sessions/。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const runtime = runtimeOf(agent, { state: { ...agent.state, sessionId: "s-me" } as never });
+  const echo = await echoWith([textTurn("好")]);
+  const runtime = runtimeOf(echo, { state: { ...echo.agent.state, sessionId: "s-me" } as never });
   const done = runTui({
     agent: runtime,
     ui,
@@ -2251,8 +2279,8 @@ test("/sessions：把别的会话摆出来——在跑 / 忙着 / 没在跑各�
 
 test("/sessions：只有自己在跑时说一句，不摆一张空表", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui, sessions: sessionsWith([]) });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui, sessions: sessionsWith([]) });
   await flush();
   ui.feed("/sessions");
   ui.feed(ENTER);
@@ -2265,8 +2293,8 @@ test("/sessions：只有自己在跑时说一句，不摆一张空表", async ()
 test("/sessions：列不出来时如实说，不把界面掀了", async () => {
   // 会话目录在别人手里、盘上有坏 meta 都可能让它抛——那不该让正在用的这一段崩掉。
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui, sessions: sessionsWith([], new Error("meta 解不开")) });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui, sessions: sessionsWith([], new Error("meta 解不开")) });
   await flush();
   ui.feed("/sessions");
   ui.feed(ENTER);
@@ -2279,8 +2307,8 @@ test("/sessions：列不出来时如实说，不把界面掀了", async () => {
 
 test("不给 sessions 也能跑：/sessions 说只有这一段（低层用户自己装壳的场合）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui });
   await flush();
   ui.feed("/sessions");
   ui.feed(ENTER);
@@ -2293,11 +2321,11 @@ test("不给 sessions 也能跑：/sessions 说只有这一段（低层用户自
 /* ─────────────── /resume：挑一段、退出，换实例归装配层 ─────────────── */
 
 /** `/resume` 的常备场景：自己是 s-me，另外两段在盘上。 */
-function resumeFixture(): { ui: ReturnType<typeof fakeTui>; runtime: AgentRuntime; sessions: SessionFace } {
-  const agent = agentWith([textTurn("好")]);
+async function resumeFixture(): Promise<{ ui: ReturnType<typeof fakeTui>; runtime: AgentRuntime; sessions: SessionFace }> {
+  const echo = await echoWith([textTurn("好")]);
   return {
     ui: fakeTui(),
-    runtime: runtimeOf(agent, { state: { ...agent.state, sessionId: "s-me" } as never }),
+    runtime: runtimeOf(echo, { state: { ...echo.agent.state, sessionId: "s-me" } as never }),
     sessions: sessionsWith([
       row({ id: "a1b2c3d4e5f60000", name: "改接口" }),
       row({ id: "9988776655443322", name: "看 PR", alive: true, phase: "idle" }),
@@ -2308,7 +2336,7 @@ function resumeFixture(): { ui: ReturnType<typeof fakeTui>; runtime: AgentRuntim
 
 test("/resume <id>：说出要换到哪一段，然后界面自己退出——壳不换 Agent", async () => {
   // 换实例（租约、收件箱、任务清单、闹钟、观测库）归装配层，壳子只挑段。
-  const { ui, runtime, sessions } = resumeFixture();
+  const { ui, runtime, sessions } = await resumeFixture();
   const resumed: string[] = [];
   const done = runTui({ agent: runtime, ui, sessions, onResume: (id) => resumed.push(id) });
   await flush();
@@ -2319,7 +2347,7 @@ test("/resume <id>：说出要换到哪一段，然后界面自己退出——�
 });
 
 test("/resume：认 id 的前缀，也认名字的一截——16 位十六进制没人照着敲全", async () => {
-  const { ui, runtime, sessions } = resumeFixture();
+  const { ui, runtime, sessions } = await resumeFixture();
   const resumed: string[] = [];
   const done = runTui({ agent: runtime, ui, sessions, onResume: (id) => resumed.push(id) });
   await flush();
@@ -2328,7 +2356,7 @@ test("/resume：认 id 的前缀，也认名字的一截——16 位十六进制
   await done;
   expect(resumed).toEqual(["a1b2c3d4e5f60000"]);
 
-  const second = resumeFixture();
+  const second = await resumeFixture();
   const alsoResumed: string[] = [];
   const done2 = runTui({ agent: second.runtime, ui: second.ui, sessions: second.sessions, onResume: (id) => alsoResumed.push(id) });
   await flush();
@@ -2340,7 +2368,7 @@ test("/resume：认 id 的前缀，也认名字的一截——16 位十六进制
 
 test("/resume：list() 挂起期间 core 忙起来了 → await 之后复查、顶回去，不掐在飞的那一轮（review 2026-09-07）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好")]);
   let release: (rows: readonly SessionRow[]) => void = () => {};
   const sessions: SessionFace = {
     ...NO_SESSION_FACE,
@@ -2350,27 +2378,27 @@ test("/resume：list() 挂起期间 core 忙起来了 → await 之后复查、�
       }),
   };
   const resumed: string[] = [];
-  const done = runTui({ agent: runtimeOf(agent), ui, sessions, onResume: (id) => resumed.push(id) });
+  const done = runTui({ agent: runtimeOf(echo), ui, sessions, onResume: (id) => resumed.push(id) });
   await flush();
   ui.feed("/resume aa11");
   ui.feed(ENTER);
   await flush();
-  setCoreAccepts(agent, false); // list() 还挂着，这时 core 开跑了
+  setCoreAccepts(echo, false); // list() 还挂着，这时 core 开跑了
   release([row({ id: "aa11", name: "前端" })]);
   await flush();
   expect(resumed).toEqual([]);
   expect(ui.screen()).toContain("正在跑");
-  setCoreAccepts(agent, true);
+  setCoreAccepts(echo, true);
   quit(ui);
   await done;
 });
 
 test("/resume：对上多段就把候选摆出来，**不猜**——切错段是打断别人的活", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好")]);
   const resumed: string[] = [];
   const done = runTui({
-    agent: runtimeOf(agent),
+    agent: runtimeOf(echo),
     ui,
     sessions: sessionsWith([row({ id: "aa11", name: "前端" }), row({ id: "aa22", name: "后端" })]),
     onResume: (id) => resumed.push(id),
@@ -2387,7 +2415,7 @@ test("/resume：对上多段就把候选摆出来，**不猜**——切错段是
 });
 
 test("/resume：没匹配、不带参数、点到自己——各说各的，都不切", async () => {
-  const { ui, runtime, sessions } = resumeFixture();
+  const { ui, runtime, sessions } = await resumeFixture();
   const resumed: string[] = [];
   const done = runTui({ agent: runtime, ui, sessions, onResume: (id) => resumed.push(id) });
   await flush();
@@ -2410,10 +2438,10 @@ test("/resume：没匹配、不带参数、点到自己——各说各的，都�
 
 test("/resume：不空就不切——切=收摊这一段，会把在飞的那一轮掐掉（「还没就绪」同一条判据）", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好")]);
   const resumed: string[] = [];
   const done = runTui({
-    agent: runtimeOf(agent, { acceptsWork: false }),
+    agent: runtimeOf(echo, { acceptsWork: false }),
     ui,
     sessions: sessionsWith([row({ id: "aa11", name: "前端" })]),
     onResume: (id) => resumed.push(id),
@@ -2430,8 +2458,8 @@ test("/resume：不空就不切——切=收摊这一段，会把在飞的那一
 
 test("不给 onResume 的低层用法：/resume 如实说一句没地方去，不假装切了", async () => {
   const ui = fakeTui();
-  const agent = agentWith([textTurn("好")]);
-  const done = runTui({ agent: runtimeOf(agent), ui, sessions: sessionsWith([row({ id: "aa11" })]) });
+  const echo = await echoWith([textTurn("好")]);
+  const done = runTui({ agent: runtimeOf(echo), ui, sessions: sessionsWith([row({ id: "aa11" })]) });
   await flush();
   ui.feed("/resume aa11");
   ui.feed(ENTER);
@@ -2450,9 +2478,9 @@ test("跑着的时候：状态段有 spinner 帧和计秒，且帧随时间前�
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
-    const pinned = { ...agent.state, status: "generating" as const };
-    const done = runTui({ agent: runtimeOf(agent, { state: pinned }), ui });
+    const echo = await echoWith([textTurn("好")]);
+    const pinned = { ...echo.agent.state, status: "generating" as const };
+    const done = runTui({ agent: runtimeOf(echo, { state: pinned }), ui });
     await flush();
 
     const footer = (): string => ui.screen().split("\n").at(-1)!;
@@ -2475,8 +2503,8 @@ test("空闲：状态段没有帧、没有计秒——动效只属于跑着的�
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
-    const done = runTui({ agent: runtimeOf(agent), ui });
+    const echo = await echoWith([textTurn("好")]);
+    const done = runTui({ agent: runtimeOf(echo), ui });
     await flush();
 
     const footer = ui.screen().split("\n").at(-1)!;
@@ -2495,10 +2523,10 @@ test("执行中的工具标记跟着帧走（不再是静态 ⋯），完成后�
   const restore = isolateKeys();
   try {
     const ui = fakeTui();
-    const agent = agentWith([textTurn("好")]);
-    const emit = tapEvents(agent);
-    const pinned = { ...agent.state, status: "acting" as const };
-    const done = runTui({ agent: runtimeOf(agent, { state: pinned }), ui });
+    const echo = await echoWith([textTurn("好")]);
+    const emit = tapEvents(echo);
+    const pinned = { ...echo.agent.state, status: "acting" as const };
+    const done = runTui({ agent: runtimeOf(echo, { state: pinned }), ui });
     await flush();
 
     emit({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", params: { cmd: "sleep 9" } });

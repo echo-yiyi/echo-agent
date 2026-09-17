@@ -81,7 +81,10 @@ export {
 } from "./builtin.ts";
 export { unmountGenerations, type UnmountTarget } from "./cleanup.ts";
 export { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult, type RuntimeTurnResult } from "./runtime.ts";
-export { ECHO_AGENT, agentRuntimeOf, type RuntimeAssemblyOps, type RuntimeSource } from "./builtin.ts";
+// `agentRuntimeOf()` 与它的入参 `RuntimeSource` / `RuntimeAssemblyOps` 在 core 内部（2026-09-17）：
+// 它要的是一个 `Agent`，而 `Agent` 类不出 core，仓外没有东西可传。协议本身经 `Echo.agent` 与
+// `AgentRuntimeService` 拿。
+export { ECHO_AGENT } from "./builtin.ts";
 
 /** `AgentPolicies.declare()` 收的形状与三项的全集：扩展作者写 config 时要念得出它们。 */
 export type { AgentPolicyValues, DeclaredPolicies } from "../policies.ts";

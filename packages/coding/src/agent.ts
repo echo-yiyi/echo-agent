@@ -180,5 +180,5 @@ export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
   };
 }
 
-/** `bash` 单独造一把（不经 Extension）。给「自己给端口、自己注册」的低层 `new Agent()` 用。 */
+/** `bash` 单独造一把（不经 Extension）。`makeShellTools()` 与测试都从这里造。 */
 export { makeBashTool };

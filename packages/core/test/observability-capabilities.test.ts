@@ -24,7 +24,7 @@ import { createTasks, linkTasks, removeTask, saveTasks, unlinkTasks, updateTask,
 import { attachTaskObserver, taskFactDescriptor, type TaskFact } from "../src/task/observe.ts";
 import { addSchedule, cancelSchedule, createAgentSchedule, startSchedule, tickSchedule } from "../src/schedule/harness.ts";
 import { scheduleFactDescriptor, type ScheduleFact } from "../src/schedule/observe.ts";
-import { createEcho, type Echo } from "../src/create-echo.ts";
+import { agentOf, createEcho, type Echo } from "../src/create-echo.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
@@ -351,7 +351,7 @@ describe("完整 Runtime：run 内的 Memory 事实由 getRun 取得，run 外�
       extensionDirs: [],
     });
     running.push(echo);
-    await echo.agent.start();
+    await echo.start();
     const result = await echo.send("remember");
     expect(result.outcome.kind).toBe("completed");
     const lookup = await echo.observations.getRun(result.runId);
@@ -373,8 +373,8 @@ describe("完整 Runtime：run 内的 Memory 事实由 getRun 取得，run 外�
     const snap = await echo.observations.snapshot();
     const unsubscribe = await echo.observations.subscribe({ afterSeq: snap.throughSeq, listener: (r) => void ("recordId" in r && seen.push(r)) });
     try {
-      expect(createTasks(echo.agent.tasks, [{ title: "t" }]).ok).toBe(true);
-      const schedule = echo.agent.schedule!;
+      expect(createTasks(agentOf(echo).tasks, [{ title: "t" }]).ok).toBe(true);
+      const schedule = agentOf(echo).schedule!;
       await addSchedule(schedule, { id: "s1", kind: "every", everyMs: 60_000, prompt: "p", createdAt: Date.now() });
       // bounded lane 按 maxBatchDelayMs 批量 COMMIT 后才 live 扇出：等到两条都到（有界轮询，不碰内部）
       for (let i = 0; i < 100 && !(seen.some((r) => r.name === "task.state.committed") && seen.some((r) => r.name === "schedule.created")); i++) {

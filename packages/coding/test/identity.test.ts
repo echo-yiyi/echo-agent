@@ -12,8 +12,8 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, createProvider, createProviderStreams, type Echo, type Provider } from "@echo-agent/core";
-import { scriptedDialect } from "@echo-agent/core/testing";
+import { createEcho, createProvider, createProviderStreams, type Dialect, type Echo, type Provider } from "@echo-agent/core";
+import { textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { codingPreset } from "../src/index.ts";
 import { codingAgentIdentity } from "../src/agent.ts";
 
@@ -24,21 +24,41 @@ process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 const dirs: string[] = [];
 process.on("exit", () => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 
-/** 假 provider：`createEcho()` 要一个来解析模型。形状照 core 测试里的同名助手，不另造一套。 */
-function scriptedProvider(): Provider {
+/** 模型一次被调时收到的全部输入：system、消息、工具菜单。 */
+type ModelInput = Parameters<Dialect["request"]>[1];
+
+/**
+ * 假 provider（2026-09-17）：**真相从模型收到的输入里取**——`Agent` 收进 core 内部之后，工具池、装配出的 system、
+ * 执行预算都不在公共面上，第三方能观察的就是 provider 这一头。每次被调先记下输入，再按顺序吐 `script`
+ * （可以边跑边往里追加），吐完就一句 "ok" 收场（后台作业结束唤醒的那一轮也落在这里）。
+ */
+function scriptedProvider(script: ScriptedTurn[], seen: ModelInput[]): Provider {
+  let next = 0;
+  const dialect: Dialect = {
+    api: "fake",
+    async *request(_model, context) {
+      seen.push({ systemPrompt: context.systemPrompt, messages: [...context.messages], tools: context.tools.map((t) => ({ ...t })) });
+      const turn = next < script.length ? script[next++]! : textTurn("ok");
+      for (const ev of turn) yield structuredClone(ev);
+    },
+  };
   return createProvider({
     id: "scripted",
     auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
     defaultModelId: "only",
     models: [{ id: "only", api: "fake" }],
-    api: createProviderStreams(scriptedDialect([])),
+    api: createProviderStreams(dialect),
   });
 }
 
+type Harness = { echo: Echo; script: ScriptedTurn[]; seen: ModelInput[] };
+
 /** 起一个真 Echo：真 FileDir、真文件锁，只有模型是假的。**装完就 start**——见下方注释。 */
-async function echoFor(opts: { workspace: string; stateDir: string }): Promise<Echo> {
+async function echoFor(opts: { workspace: string; stateDir: string }): Promise<Harness> {
+  const script: ScriptedTurn[] = [];
+  const seen: ModelInput[] = [];
   const echo = await createEcho({
-    provider: scriptedProvider(),
+    provider: scriptedProvider(script, seen),
     allowNetwork: false,
     stateDir: opts.stateDir,
     withoutMemory: true,
@@ -47,10 +67,22 @@ async function echoFor(opts: { workspace: string; stateDir: string }): Promise<E
     ...codingPreset({ permission: false }),
   });
   // **必须 `start()`**：`createEcho()` 的 Agent 是 lifecycle-managed——只有 running 才接活，
-  // 而**任务清单的恢复也在这一步**（低层装配是显式 `loadTasks()`，这里归 `start()`）。
-  // 下面那条「仓库预置的 tasks 进不来」的判据，不 start 就会恒绿——两边都是 0。
-  await echo.agent.start();
-  return echo;
+  // 而**任务清单的恢复也在这一步**。下面那条「仓库预置的 tasks 进不来」的判据，不 start 就会恒绿——两边都是 0。
+  await echo.start();
+  return { echo, script, seen };
+}
+
+/**
+ * 模型能用到的全部工具 = 菜单（`context.tools`）∪ 延迟层。延迟层的名字列在 `tool_search` 的 description 里
+ * （每轮现算，`makeToolSearchTool`）。
+ */
+function offeredTools(input: ModelInput): string[] {
+  const menu = input.tools.map((t) => t.name);
+  const search = input.tools.find((t) => t.name === "tool_search");
+  expect(search, "菜单上没有 tool_search：延迟层看不到").toBeDefined();
+  const listed = /Deferred tools: (.*)\.$/s.exec(search!.description)?.[1] ?? "";
+  const deferred = listed === "" ? [] : listed.split(", ").map((n) => n.replace(/ \(loaded\)$/, ""));
+  return [...menu, ...deferred];
 }
 
 function freshDir(prefix: string): string {
@@ -61,18 +93,21 @@ function freshDir(prefix: string): string {
 
 test("identity 的工具集与 prompt 与真装出来的 coding agent 一致(漂移即红)", async () => {
   const root = freshDir("ca-identity-");
-  const echo = await echoFor({ workspace: root, stateDir: freshDir("ca-identity-state-") });
-  const agent = echo.agent;
+  const { echo, script, seen } = await echoFor({ workspace: root, stateDir: freshDir("ca-identity-state-") });
   const identity = codingAgentIdentity();
 
+  // 真相取自模型第一次被调时收到的东西
+  await echo.agent.prompt("看看");
+  const first = seen[0]!;
+
   // **完全相等**(不是子集):Agent 新增/删除任何工具都必须红——子集断言漏掉过 Task 四件(review 五轮 #3)
-  expect(identity.toolNames).toEqual([...agent.tools.keys()].sort());
+  expect(identity.toolNames).toEqual(offeredTools(first).sort());
   expect(identity.toolNames).toContain("bash");        // 产品层的 `echo:shell`
   expect(identity.toolNames).toContain("TaskCreate");  // core 的 `echo:tasks`
 
-  // 产品自己出的四段逐字进 digest 材料，并且**真的在**装配出来的 system 里、按 order 排
+  // 产品自己出的四段逐字进 digest 材料，并且**真的在**模型收到的 system 里、按 order 排
   expect(identity.sections.map((s) => s.name)).toEqual(["identity", "conduct:coding", "tool:workspace", "tool:shell"]);
-  const sys = (await agent.assemblePrompt()) ?? "";
+  const sys = first.systemPrompt ?? "";
   let cursor = -1;
   for (const s of identity.sections) {
     expect(s.text.length).toBeGreaterThan(50);
@@ -82,8 +117,13 @@ test("identity 的工具集与 prompt 与真装出来的 coding agent 一致(漂
   }
 
   // 执行预算同样决定成绩(review 六轮 P1):identity 必须等于真 agent 的生效值——
-  // core 改 DEFAULT_MAX_ITERATIONS 而 digest 不变的话,这里立刻红
-  expect(identity.maxIterations).toBe(agent.maxIterations);
+  // core 改 DEFAULT_MAX_ITERATIONS 而 digest 不变的话,这里立刻红。
+  // 生效值从外面量：模型每轮都要工具，数 run 在第几次调模型之后以 max_iterations 收场。
+  for (let i = 0; i < identity.maxIterations + 5; i++) script.push(toolTurn(`it${i}`, "list_dir", {}));
+  const callsBefore = seen.length;
+  const { outcome } = await echo.agent.prompt("一直看目录");
+  expect(outcome).toEqual({ kind: "error", error: expect.objectContaining({ code: "max_iterations" }) });
+  expect(seen.length - callsBefore).toBe(identity.maxIterations);
 
   await echo.stop();
 });
@@ -92,21 +132,18 @@ test("bash 真的接上了后台队列(能力端口装上没有)", async () => {
   // `echo:shell` 从 `AgentBackgroundService` 拿 `agent.background`（2026-08-31 新增的能力端口）。
   // **没有这条判据，端口没接上也看不出来**：bash 照样注册、照样能前台跑，只有
   // `background: true` 那条路会悄悄退化成一句「本 agent 未接后台队列」。
+  // 走模型点工具那条路：模型要 `background: true` 跑一条命令，看 agent 交回的 toolResult。
   const root = freshDir("ca-bg-");
-  const echo = await echoFor({ workspace: root, stateDir: freshDir("ca-bg-state-") });
-  const bash = echo.agent.tools.get("bash");
-  expect(bash).toBeDefined();
-
-  const run = bash as unknown as {
-    execute: (p: unknown, c: unknown) => Promise<{ isError: boolean; content: string }>;
-  };
-  const result = await run.execute(
-    { command: "sleep 0.05", background: true },
-    { toolCallId: "t1", workspace: root, sessionId: null, iteration: 0 },
-  );
+  const { echo, script } = await echoFor({ workspace: root, stateDir: freshDir("ca-bg-state-") });
+  script.push(toolTurn("bg1", "bash", { command: "sleep 0.05", background: true }), textTurn("started"));
+  await echo.agent.prompt("后台跑一下");
+  const result = echo.agent.state.messages.find((m) => m.role === "toolResult" && m.toolCallId === "bg1") as
+    | { isError: boolean; content: string }
+    | undefined;
+  expect(result).toBeDefined();
   // 端口没接上时这里是 `isError:true` + 「本 agent 未接后台队列」
-  expect([result.isError, result.content.includes("no background queue")]).toEqual([false, false]);
-  expect(result.content).toContain("Started in the background");
+  expect([result!.isError, result!.content.includes("no background queue")]).toEqual([false, false]);
+  expect(result!.content).toContain("Started in the background");
 
   await echo.stop();
 });
@@ -130,12 +167,12 @@ test("状态根不在被测仓库里 → 仓库预置的 tasks 进不来(review 
   ]));
 
   // ① 反证：状态根**就是**仓库那个目录 → 预置任务确实会被读进来
-  const leaky = await echoFor({ workspace: root, stateDir: repoEcho });
-  expect(leaky.agent.tasks.size).toBeGreaterThan(0);
+  const { echo: leaky } = await echoFor({ workspace: root, stateDir: repoEcho });
+  expect(leaky.agent.state.tasks.total).toBeGreaterThan(0);
   await leaky.stop();
 
   // ② 正例：状态根在仓库外（评测就是这么接的）→ 一条都进不来
-  const isolated = await echoFor({ workspace: root, stateDir: freshDir("ca-tasks-state-") });
-  expect(isolated.agent.tasks.size).toBe(0);
+  const { echo: isolated } = await echoFor({ workspace: root, stateDir: freshDir("ca-tasks-state-") });
+  expect(isolated.agent.state.tasks.total).toBe(0);
   await isolated.stop();
 });

@@ -9,6 +9,8 @@
 //   bun scripts/dump-prompt.ts            # 交互形态（终端）
 //   bun scripts/dump-prompt.ts pipe       # 非交互形态（管道 / CI / 评测）
 import { createEcho, kimiProvider } from "@echo-agent/core";
+// 读装配结果要 `Agent.assemblePrompt()`，它不在公共协议上；scratch 脚本本来就走仓内源码，直接拿内部句柄
+import { agentOf } from "../packages/core/src/create-echo.ts";
 import { definePromptPack } from "@echo-agent/core/extension";
 import { conductEntry, pipeSurfaceSection } from "../packages/base/src/prompt.ts";
 import { instructionsEntry } from "../packages/base/src/instructions.ts";
@@ -37,7 +39,7 @@ const echo = await createEcho({
 });
 
 try {
-  const prompt = await echo.agent.assemblePrompt();
+  const prompt = await agentOf(echo).assemblePrompt();
   console.log(`── 形态：${interactive ? "交互（终端）" : "非交互（管道）"} ──`);
   console.log(prompt === null ? "(null)" : prompt);
   console.log("── 段注册顺序（mount 序）──");

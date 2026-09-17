@@ -9,7 +9,7 @@ import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, discoverExtensionFiles, type Echo } from "../src/create-echo.ts";
+import { agentOf, createEcho, discoverExtensionFiles, type Echo } from "../src/create-echo.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
@@ -90,10 +90,10 @@ async function echoAt(opts: { dir: string; turns?: ScriptedTurn[]; tools?: Model
 
 /** 模型调一次 `toolName`，回它的 toolResult 文本。 */
 async function callTool(echo: Echo): Promise<string> {
-  const before = echo.agent.messages.length;
+  const before = agentOf(echo).messages.length;
   const result = await echo.send("调一下");
   expect(result.outcome.kind).toBe("completed");
-  const toolResults = echo.agent.messages.slice(before).filter((m) => m.role === "toolResult");
+  const toolResults = agentOf(echo).messages.slice(before).filter((m) => m.role === "toolResult");
   expect(toolResults.length).toBe(1);
   expect(toolResults[0]!.isError).not.toBe(true);
   return JSON.stringify(toolResults[0]!.content);
@@ -187,7 +187,7 @@ test("apply 抛（mount 失败）→ rolled_back：旧版**卸了再装回来**�
   const change = (r as { report: ReloadReport }).report.changes[0]!;
   expect(change.kind).toBe("rolled_back");
   expect((change as { reason: string }).reason).toContain("v2 apply 炸了");
-  expect(echo.agent.tools.has("hello")).toBe(true);
+  expect(agentOf(echo).tools.has("hello")).toBe(true);
   expect(echo.diagnostics.map((d) => d.code)).toEqual(["extension_mount_failed"]);
 });
 
@@ -246,15 +246,15 @@ test("删掉文件 → removed，工具没了、清单里没了；新加文件 �
   await writeFile(hello, extensionSource("hello", "v1"));
   const echo = await echoAt({ dir });
   await echo.start();
-  expect(echo.agent.tools.has("hello")).toBe(true);
+  expect(agentOf(echo).tools.has("hello")).toBe(true);
 
   await rm(hello);
   const bye = join(dir, "bye.ts");
   await writeFile(bye, extensionSource("bye", "b1"));
   const r = await echo.reloadExtensions();
   expect(kinds((r as { report: ReloadReport }).report)).toEqual({ [bye]: "added", [hello]: "removed" });
-  expect(echo.agent.tools.has("hello")).toBe(false);
-  expect(echo.agent.tools.has("bye")).toBe(true);
+  expect(agentOf(echo).tools.has("hello")).toBe(false);
+  expect(agentOf(echo).tools.has("bye")).toBe(true);
   expect(echo.extensions.filter((e) => e.file !== undefined).map((e) => e.name)).toEqual(["bye"]);
 });
 
@@ -278,7 +278,7 @@ test("启动时就坏着的文件（诊断里有）修好后 reload → added，
   await writeFile(file, extensionSource("hello", "v1"));
   const fixed = await echo.reloadExtensions();
   expect(kinds((fixed as { report: ReloadReport }).report)).toEqual({ [file]: "added" });
-  expect(echo.agent.tools.has("hello")).toBe(true);
+  expect(agentOf(echo).tools.has("hello")).toBe(true);
   expect(echo.diagnostics).toEqual([]);
 });
 
@@ -336,7 +336,7 @@ test("没声明 reload 的扩展（ABI 缺省 agent）→ refused，报文告诉
   expect(change.kind).toBe("refused");
   expect((change as { reason: string }).reason).toContain("没声明 reload（缺省 'agent'）");
   expect((change as { reason: string }).reason).toContain('声明 reload: "run"');
-  expect(echo.agent.tools.has("plain")).toBe(true);
+  expect(agentOf(echo).tools.has("plain")).toBe(true);
 });
 
 /* ───────────── 快照的账：换代后只留当前那份；收摊全清；发现时跳过 ───────────── */

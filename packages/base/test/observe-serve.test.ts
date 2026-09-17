@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, createProvider, createProviderStreams, environmentMessage, observationStorePath, toolError, type Echo, type ModelTool, type Provider } from "@echo-agent/core";
+import { createEcho, createProvider, createProviderStreams, observationStorePath, toolError, type Echo, type ModelTool, type Provider } from "@echo-agent/core";
 import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import { OBSERVE_DEFAULT_PORT, parseObserveArgs, runObserve } from "../src/observe.ts";
 import { observePageHtml, startObserveServer } from "../src/observe/server.ts";
@@ -47,7 +47,7 @@ async function echoAt(turns: ScriptedTurn[], extra: Partial<Parameters<typeof cr
   // `dir` 是**会话目录的上一层**（2026-09-03）：每段 session 一个状态根，观测库也跟着一段一份。
   const echo = await createEcho({ provider: scripted(turns), sessionsRoot: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [], ...extra });
   running.push(echo);
-  await echo.agent.start();
+  await echo.start();
   return echo;
 }
 
@@ -142,9 +142,9 @@ test("跨 session：/api/runs 合并各段、/api/runs/<id> 不必知道在哪�
   const rb = await b.send("b");
   await b.observations.flush();
   const bId = b.agent.state.sessionId!;
-  // A 给 B 发一句：与 session_send 同一条路（进 B 的 inbox 账本），B 消费成一条 inbox run
-  await b.agent.ingress.deliverDurable({ message: environmentMessage("A 找你", "session", `${aId}:m1`), dedupeKey: `session:${aId}:m1` });
-  await b.agent.consumeInbox();
+  // A 给 B 发一句：走会话面（`session_send` 工具背后就是它），进 B 的 inbox 账本，B 轮询到后消费成一条 inbox run
+  const sent = await a.sessions.send(bId, "A 找你");
+  expect(sent.kind).toBe("accepted");
   const inboxRun = await waitForInboxRun(b);
   await b.observations.flush(); // ack 那条在 run 封口之后才记
 
@@ -172,7 +172,8 @@ test("跨 session：/api/runs 合并各段、/api/runs/<id> 不必知道在哪�
       expect(i.sessionId).toBe(bId);
       expect(i.record.scope.runId).toBeUndefined(); // run 之外的记录
     }
-    expect(inbox.find((i) => i.record.name === "inbox.accepted")!.record.attributes).toMatchObject({ source: "session", ref: `${aId}:m1` });
+    // ref 由发送方落款：`<发送方 sessionId>:<消息 id>`，消息 id 是写者自己发的号
+    expect(inbox.find((i) => i.record.name === "inbox.accepted")!.record.attributes).toMatchObject({ source: "session", ref: expect.stringMatching(new RegExp(`^${aId}:`)) });
     expect(inbox.find((i) => i.record.name === "inbox.acked")!.record.attributes).toMatchObject({ runId: inboxRun });
     expect(Object.keys(activity.sessions)).toEqual(expect.arrayContaining([aId, bId]));
   } finally {

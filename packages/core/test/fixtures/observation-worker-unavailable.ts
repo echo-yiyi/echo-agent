@@ -26,7 +26,7 @@ test("Worker 构造抛错：createEcho、send、stop 照常，观测读不到这
     withoutMemory: true,
     extensionDirs: [],
   });
-  await echo.agent.start();
+  await echo.start();
   const r = await echo.send("x");
   expect(r.outcome.kind).toBe("completed");
   expect((await echo.observations.getRun(r.runId)).kind).toBe("unknown");

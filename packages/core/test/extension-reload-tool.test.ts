@@ -8,7 +8,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, type Echo } from "../src/create-echo.ts";
+import { agentOf, createEcho, type Echo } from "../src/create-echo.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { scriptedDialect, textTurn, toolTurn, FAKE_MODEL, scriptedStreamFn, type ScriptedTurn } from "../src/testing.ts";
@@ -104,20 +104,20 @@ test("模型调 extension_reload → 本 run 收尾后重载 → 报告投进自
   await writeFile(file, extensionSource("hello", "v2"));
   const r1 = await echo.send("我改好了 hello.ts，重载一下");
   expect(r1.outcome.kind).toBe("completed");
-  const scheduled = echo.agent.messages.find((m) => m.role === "toolResult");
+  const scheduled = agentOf(echo).messages.find((m) => m.role === "toolResult");
   expect(scheduled?.isError).not.toBe(true);
   expect(JSON.stringify(scheduled?.content)).toContain("Scheduled");
 
   // run 2 是系统自己起的：等它跑完（第二条 toolResult 落进 transcript）
-  await waitFor(() => echo.agent.messages.filter((m) => m.role === "toolResult").length === 2, "run 2 的工具调用");
-  const report = echo.agent.messages.find((m) => m.role === "environment" && m.source === "echo:reload");
+  await waitFor(() => agentOf(echo).messages.filter((m) => m.role === "toolResult").length === 2, "run 2 的工具调用");
+  const report = agentOf(echo).messages.find((m) => m.role === "environment" && m.source === "echo:reload");
   expect(report).toBeDefined();
   const text = JSON.stringify(report!.content);
   expect(text).toContain("replaced");
   expect(text).toContain("hello.ts");
   expect(text).toContain("Tools now available");
   expect(text).toContain("hello");
-  const second = echo.agent.messages.filter((m) => m.role === "toolResult")[1]!;
+  const second = agentOf(echo).messages.filter((m) => m.role === "toolResult")[1]!;
   expect(second.isError).not.toBe(true);
   expect(JSON.stringify(second.content)).toContain("v2");
   expect(echo.diagnostics).toEqual([]);
@@ -138,13 +138,13 @@ test("同一 run 里调两次 → 第二次 toolError「已经登记过」；重
   await echo.start();
   const r = await echo.send("重载两次");
   expect(r.outcome.kind).toBe("completed");
-  const results = echo.agent.messages.filter((m) => m.role === "toolResult");
+  const results = agentOf(echo).messages.filter((m) => m.role === "toolResult");
   expect(results.length).toBe(2);
   expect(results[0]!.isError).not.toBe(true);
   expect(results[1]!.isError).toBe(true);
   expect(JSON.stringify(results[1]!.content)).toContain("已经登记过");
-  await waitFor(() => echo.agent.messages.some((m) => m.role === "environment" && m.source === "echo:reload"), "报告");
-  expect(echo.agent.messages.filter((m) => m.role === "environment" && m.source === "echo:reload").length).toBe(1);
+  await waitFor(() => agentOf(echo).messages.some((m) => m.role === "environment" && m.source === "echo:reload"), "报告");
+  expect(agentOf(echo).messages.filter((m) => m.role === "environment" && m.source === "echo:reload").length).toBe(1);
 });
 
 /* ───────────── ③ ④ 边界 ───────────── */
@@ -211,7 +211,7 @@ test("登记之后、run 还没收尾就 stop() → 收尾时重载被拒、报�
   await stopping; // 不抛
   await new Promise((r) => setTimeout(r, 50));
 
-  expect(echo.agent.messages.some((m) => m.role === "environment" && m.source === "echo:reload")).toBe(false); // 没有 run 2
+  expect(agentOf(echo).messages.some((m) => m.role === "environment" && m.source === "echo:reload")).toBe(false); // 没有 run 2
   expect(echo.diagnostics.map((d) => d.code)).not.toContain("after_run_work_failed"); // 收尾的活自己兜住了
   expect(echo.diagnostics.map((d) => d.code)).toContain("extension_reload_report_undelivered"); // 报告投不进：如实记下
 });

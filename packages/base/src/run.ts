@@ -81,7 +81,7 @@ export async function run(opts: RunOptions): Promise<number> {
   signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
-    await agent.start();
+    await echo.start();
     // **`start()` 期间也可能被中止**（它要拿锁、恢复状态，不是瞬间的事）。
     // 不在这里看一眼就会一头扎进输入循环，交互式 stdin 下等的是一行永远不会来的输入。
     if (aborted()) return failed ? 1 : 0;

@@ -244,34 +244,45 @@ export type CreateAgentOptions = {
    * `memory` / `taskStore` / `schedule` / `inboxStore` / `skillStore` 同理：本函数按状态根装配它们，
    * 嵌套里给的会被 spread 顶掉。**接受配置又静默忽略是最坏的一种参数**——
    * 实测传自定义 `schedule`，返回的不是那个实例。
-   * 要自己的实现就走低层 `new Agent({ ... })`；想在本函数下关掉记忆用 `withoutMemory: true`。
+   * 想在本函数下关掉记忆用 `withoutMemory: true`。
    */
-  agent?: Omit<
-    AgentOptions,
-    | "model"
-    | "sessionService"
-    | "stateLock"
-    | "product"
-    | "agent"
-    | "preemptible"
-    | "sessionId"
-    | "memory"
-    | "taskStore"
-    | "schedule"
-    | "inboxStore"
-    | "skillStore"
-    | "streamFunction"
-  > & {
-    /**
-     * **可省**：不给就用本函数从 `provider` 装出来的那个（见下方装配处）。
-     *
-     * 之所以要在这里单独放宽：`AgentOptions.streamFunction` 是**必填**，而 `Omit` 会把
-     * 必填带过来——于是「其余一律透传」这句话在类型上不成立，想传任何一个嵌套项
-     * （比如 `skills`）都得连 `streamFunction` 一起给。文档说有默认值、类型却逼你传，
-     * 是**写了没生效的反面**：说了能省却省不掉。
-     */
-    streamFunction?: AgentOptions["streamFunction"];
-  };
+  agent?: EchoAgentOptions;
+};
+
+/**
+ * `createEcho({ agent })` 收的那组选项：工具、skill、权限、hooks、执行预算、压缩等**装备与决策点**。
+ *
+ * 由 core 按状态根装配的端口不在这里——`model` / `sessionService` / `stateLock` / `memory` / `taskStore` /
+ * `schedule` / `inboxStore` / `skillStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible`。
+ * 嵌套里再给一个只会被**静默覆盖**，写了没生效是最坏的一种参数。
+ *
+ * 它有自己的名字，是因为 `Agent` 类在 core 内部（2026-09-17）：仓外念不出 `AgentOptions`，
+ * 这组选项又是 `createEcho()` 的公开入参。
+ */
+export type EchoAgentOptions = Omit<
+  AgentOptions,
+  | "model"
+  | "sessionService"
+  | "stateLock"
+  | "product"
+  | "agent"
+  | "preemptible"
+  | "sessionId"
+  | "memory"
+  | "taskStore"
+  | "schedule"
+  | "inboxStore"
+  | "skillStore"
+  | "streamFunction"
+> & {
+  /**
+   * **可省**：不给就用 `createAgent` 从 `provider` 装出来的那个。
+   *
+   * 之所以要在这里单独放宽：`AgentOptions.streamFunction` 是**必填**，而 `Omit` 会把
+   * 必填带过来——想传任何一个嵌套项（比如 `skills`）都得连 `streamFunction` 一起给。
+   * 说了有默认值、类型却逼你传，是**写了没生效的反面**。
+   */
+  streamFunction?: AgentOptions["streamFunction"];
 };
 
 /**

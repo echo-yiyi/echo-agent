@@ -3,7 +3,7 @@
 // 模型直接点名要被准确拒绝、取过之后下一轮真能调——只测 harness 的过滤函数证明不了循环那半边。
 
 import { expect, test } from "bun:test";
-import { createEcho } from "../src/create-echo.ts";
+import { agentOf, createEcho } from "../src/create-echo.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
@@ -46,12 +46,12 @@ async function echoWith(turns: ScriptedTurn[], tools: AgentTool[]): Promise<Echo
     extensionDirs: [],
     agent: { tools },
   });
-  await echo.agent.start();
+  await echo.start();
   return echo;
 }
 
 const toolResults = (echo: Echo): { content: string; isError: boolean }[] =>
-  echo.agent.messages
+  agentOf(echo).messages
     .filter((m) => m.role === "toolResult")
     .map((m) => m as unknown as { content: string; isError: boolean })
     .map((m) => ({ content: String(m.content), isError: m.isError }));
@@ -68,8 +68,8 @@ test("标了 deferred 的工具不上菜单：直接点名 → 准确拒绝并�
   );
   // `echo:tool-search` 恒装；工具在池里（activeTools 仍列它：它是可用的，只是不在菜单上）
   expect(echo.extensions.map((e) => e.name)).toContain("echo:tool-search");
-  expect(echo.agent.tools.has("tool_search")).toBe(true);
-  expect(echo.agent.tools.has("ping")).toBe(true);
+  expect(agentOf(echo).tools.has("tool_search")).toBe(true);
+  expect(agentOf(echo).tools.has("ping")).toBe(true);
 
   await echo.agent.prompt("试试");
   const results = toolResults(echo);
@@ -100,7 +100,7 @@ test("tool_search：description 每轮现算列出延迟层（取过的标 loade
     ],
     [lazyPing, lazyOther],
   );
-  const search = echo.agent.tools.get("tool_search") as unknown as { description: string };
+  const search = agentOf(echo).tools.get("tool_search") as unknown as { description: string };
   // core 自己那几件缺省延迟的（schedule_* / skill_create / TaskGet / transcript_read）也在名单里
   expect(search.description).toContain("other, ping, schedule_cancel, schedule_create, schedule_list, skill_create");
 

@@ -62,7 +62,8 @@ import { ExtensionHost, type ExtensionEntry } from "./extension/host.ts";
 import { extensionFactDescriptor } from "./extension/observe.ts";
 import { AGENT_ENTRY_ID, builtinOwner } from "./observability/runtime.ts";
 import { agentRegistries } from "./extension/registries.ts";
-import { BUILTIN_GENERATION, builtinEntriesFor, defineToolPack, mountBuiltinTools } from "./extension/builtin.ts";
+import { agentRuntimeOf, BUILTIN_GENERATION, builtinEntriesFor, defineToolPack, mountBuiltinTools } from "./extension/builtin.ts";
+import type { AgentRuntime } from "./extension/runtime.ts";
 import { unmountGenerations } from "./extension/cleanup.ts";
 import type { ReloadChange, ReloadReport, ReloadResult } from "./extension/reload.ts";
 import { environmentMessage, type AgentMessage } from "./messages.ts";
@@ -111,8 +112,6 @@ export type CreateEchoOptions = CreateAgentOptions & {
    * 问题只在**实现路径**——直接注册的工具能被模型调用，却不经 ExtensionHost、
    * 不出现在 `echo.extensions`、没有 Fiber/Effect owner，与本层「一份注册机制、一份所有权账本」
    * 直接冲突。转成 inline Extension 之后两边都要：调用方照旧一行传工具，账本照旧只有一本。
-   *
-   * 低层 `new Agent({ tools })` **不受影响**——那一层本来就是「自己给端口、自己注册」。
    */
   /**
    * 去哪几个目录发现 Extension。**给了就只用给的**（不再叠加约定目录），相对路径按 `cwd` 解析。
@@ -152,12 +151,30 @@ export type LoadedExtension = Readonly<{
   file: string | undefined;
 }>;
 
+/** `Echo` → 它装出来的那个 `Agent`。只给 core 自己的测试（`agentOf`），不经根入口出去。 */
+const AGENT_OF_ECHO = new WeakMap<Echo, Agent>();
+
+/**
+ * **core 内部**：从 `createEcho()` 的句柄拿回底下那个 `Agent`。给 core 自己测内部机制的测试用
+ * （记忆、任务、inbox 这些不在协议上的面），`index.ts` 不导出它，仓外的包与第三方够不到——
+ * 它们只该经 `Echo.agent`（运行协议）与 extension 看 agent。不是 `createEcho()` 造的句柄 → 抛。
+ */
+export function agentOf(echo: Echo): Agent {
+  const agent = AGENT_OF_ECHO.get(echo);
+  if (agent === undefined) throw new Error("agentOf：这个句柄不是 createEcho() 造的");
+  return agent;
+}
+
 export type Echo = Readonly<{
-  agent: Agent;
   /**
-   * 启动（2026-09-08）：就是 `agent.start()`——取单写者 lease、恢复 session / skill / tasks / schedule / inbox、打开 intake。
-   * 装配不启动，启动不装配；第三方走这条，不碰 `agent`（`Agent` 类内部化后 `agent` 字段退场，见
-   * `docs/decisions/proposed/2026-09-07-agent-class-internal.md` 第 4 条）。幂等，与 `agent.start()` 同一份判据。
+   * 这个 agent 的运行协议：看状态、订阅、说话、回答、换装备、中断。与壳经 `AgentRuntimeService`
+   * 注入的是**同一个对象**。`Agent` 类在 core 内部（2026-09-17），仓外拿到的只有这份协议；
+   * 启停不在协议里，走下面的 `start()` / `stop()`。
+   */
+  agent: AgentRuntime;
+  /**
+   * 启动（2026-09-08）：取单写者 lease、恢复 session / skill / tasks / schedule / inbox、打开 intake。
+   * 装配不启动，启动不装配。幂等。
    */
   start(options?: { activation?: "immediate" | "deferred" }): Promise<void>;
   /**
@@ -650,8 +667,11 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       if (scheduled.kind === "scheduled") reloadPending = true;
       return scheduled;
     };
-    const builtin = builtinEntriesFor(agent, { reloadExtensions: () => reloadExtensions(), requestReload });
-    await mountBuiltinTools(agent, host, builtin); // 与低层用户 / 单测**同一条路、同一张表**
+    // **一份协议对象**：壳经 `echo:agent` 注入的，与 `Echo.agent` 交给产品的是同一个（`builtinEntriesFor` 头注）
+    const assemblyOps = { reloadExtensions: () => reloadExtensions(), requestReload };
+    const runtime = agentRuntimeOf(agent, assemblyOps);
+    const builtin = builtinEntriesFor(agent, assemblyOps, runtime);
+    await mountBuiltinTools(agent, host, builtin); // 与 core 单测**同一条路、同一张表**
 
     // ── ② 外部：磁盘发现的 + 显式传入的 ──────────────────────────────────────────
     const extra = opts.extensions ?? [];
@@ -904,8 +924,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       return { runId: result.runId, outcome: result.outcome, observation: { runtimeId: observation.runtimeId, runId: result.runId } };
     };
 
-    return Object.freeze({
-      agent,
+    const echo: Echo = Object.freeze({
+      agent: runtime,
       start: (options?: { activation?: "immediate" | "deferred" }): Promise<void> => agent.start(options),
       send,
       sessions,
@@ -920,6 +940,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       reloadExtensions,
       stop: (): Promise<void> => (stopPromise ??= doStop()),
     });
+    AGENT_OF_ECHO.set(echo, agent);
+    return echo;
   } catch (e) {
     // **构造失败也要按逆序清干净**：boot → builtin → agent（review 二轮 P1）。
     // 上一版这里只 `agent.stop()`：builtin 已经 mount 成功、boot 才失败时，

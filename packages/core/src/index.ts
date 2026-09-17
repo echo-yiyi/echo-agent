@@ -8,8 +8,9 @@
 //   - `createEcho()` —— **唯一**的装配现场，端口与内建能力都已备好；
 //   - 写 extension（`./extension`）—— 加工具、prompt 段、压缩阶段、hook；
 //   - 换壳 —— 也是一条 extension，注入 `AgentRuntime` 这个 service 并把它渲染出来。
-// `Agent` 类今天仍导出，但不是受支持的正门：内部化已拍板、尚未实现
-// （`docs/decisions/proposed/2026-09-07-agent-class-internal.md`），新代码别 `new Agent()`。
+// **`Agent` 类在 core 内部**（2026-09-17，`docs/decisions/implemented/2026-09-07-agent-class-internal.md`）：
+// 仓外拿到的是 `Echo.agent`——壳注入的同一份 `AgentRuntime`——不是类本身。`AgentState` / `AgentStatus`
+// 仍导出，因为它们在 `AgentRuntime.state` 的签名里。
 //
 // **能力的构造器与操作面下沉子路径**。判据是那句：「普通用户不 import 这些子路径
 // 也已经得到工作的默认能力，**只有替换默认件或开发扩展时才进入子路径**」。
@@ -22,13 +23,13 @@
 // 会直接失败（2026-08-24 review 点出）。
 //
 // 留在本文件的能力**类型**（`AgentMemories` / `AgentSchedule` / `TaskSnapshot` …）不是例外：
-// 它们出现在 `AgentOptions` 与 `AgentState` 的签名里，**读状态就得念得出它们的名字**。
+// 它们出现在 `EchoAgentOptions` 与 `AgentState` 的签名里，**读状态就得念得出它们的名字**。
 // 值（怎么造、怎么改）才是子路径的事。
 //
 // 测试替身不在这条面上——它走 `@echo-agent/core/testing`。
 
-export { Agent, DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_REPLIES } from "./agent.ts";
-export type { AgentOptions, AgentState, AgentStatus } from "./agent.ts";
+export { DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_REPLIES } from "./agent.ts";
+export type { AgentState, AgentStatus } from "./agent.ts";
 
 export * from "./messages.ts";
 export * from "./events.ts";
@@ -79,7 +80,7 @@ export type {
   ToolExecutionContext,
 } from "./tools/types.ts";
 
-/* ───────────── hooks：`AgentOptions.hooks` 收的就是它 ───────────── */
+/* ───────────── hooks：`EchoAgentOptions.hooks` 收的就是它 ───────────── */
 
 export { HookRuntime, INTERCEPTABLE, isInterceptable } from "./hooks/runtime.ts";
 export type {
@@ -98,7 +99,7 @@ export type {
   Patchable,
 } from "./hooks/runtime.ts";
 
-/* ───────────── permission：固定 stage 的公共词汇（`AgentOptions.permission` 收的就是 PermissionPolicy） ───────────── */
+/* ───────────── permission：固定 stage 的公共词汇（`EchoAgentOptions.permission` 收的就是 PermissionPolicy） ───────────── */
 
 export type {
   PermissionAnswer,
@@ -134,7 +135,7 @@ export { PromptVariableError } from "./prompt/assemble.ts";
 export { sectionFromMarkdown } from "./prompt/import.ts";
 export { fenceSafe, truncateMarked } from "./prompt/sanitize.ts";
 
-// 各能力的容器类型——它们出现在 `AgentOptions` / `AgentState` 的签名里
+// 各能力的容器类型——它们出现在 `EchoAgentOptions` / `AgentState` 的签名里
 export type { AgentMemories } from "./memory/harness.ts";
 export type { AgentSchedule } from "./schedule/harness.ts";
 export type { InboxStore } from "./inbox/store.ts";
@@ -149,8 +150,9 @@ export type { InboxBatchAckCommitV1, InboxRecordV1 } from "./inbox/records.ts";
 export { SessionService, listSessions, setSessionStatus } from "./session/service.ts";
 export { EchoSessions, NO_SESSION_FACE, SESSION_SOURCE, DEFAULT_RUN_TIMEOUT_MS } from "./session/sessions.ts";
 export type { CreateSessionInput, EchoSessionsDeps, SendOptions, SendResult, SessionFace, SessionListFilter, SessionRow, SessionRunner } from "./session/sessions.ts";
-export { readSessionPhase, writeSessionPhase, STATUS_FILE } from "./session/status.ts";
-export type { SessionPhase, SessionStatusFile } from "./session/status.ts";
+// status.json 的读写与文件形状在 core 内部（2026-09-17）：第三方经 `Echo.sessions` 拿合成好的 `SessionRow`，
+// `SessionPhase` 只因为是那一行的字段类型才出来
+export type { SessionPhase } from "./session/status.ts";
 export type { AgentBackground, BackgroundLimits } from "./background/types.ts";
 export type { ActiveSkill, Skill, SkillActivation, SkillCreation } from "./skill/types.ts";
 export type { SessionData, SessionEntry, SessionInfo, SessionStatus, SessionStore } from "./session/types.ts";
@@ -290,7 +292,7 @@ export type { PeekedLockRecord, StateLockInspection } from "./storage/file-lock.
 
 /**
  * **一个 composition root、三条正门**（`createEcho()` / 写 extension / 换壳），见文件头；
- * `Agent` 类仍导出但不是正门（内部化已拍板、尚未实现）。
+ * `Agent` 类在 core 内部。
  *
  * `createAgent` **不在公共面上**（2026-08-31 收）：它曾经是第二个 composition root，
  * 与「一个包、**一个** composition root」直接冲突。
@@ -299,6 +301,7 @@ export type { PeekedLockRecord, StateLockInspection } from "./storage/file-lock.
  * 消费方（Runner / 测试）要先算出 `stateDir` 或校验模型 id 时用得上。
  */
 export { resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "./create-agent.ts";
+export type { EchoAgentOptions } from "./create-agent.ts";
 export {
   createEcho,
   discoverExtensionFiles,

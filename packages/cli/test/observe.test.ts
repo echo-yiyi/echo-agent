@@ -56,7 +56,7 @@ function scripted(turns: ScriptedTurn[]): Provider {
 async function echoAt(turns: ScriptedTurn[]): Promise<Echo> {
   const echo = await createEcho({ provider: scripted(turns), sessionsRoot: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [] });
   running.push(echo);
-  await echo.agent.start();
+  await echo.start();
   return echo;
 }
 

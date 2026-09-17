@@ -20,7 +20,7 @@ agent.subscribe((e) => {
   if (e.type === "message_update" && e.delta.type === "text_delta") process.stdout.write(e.delta.text);
 });
 
-await agent.start();
+await echo.start();
 try {
   await agent.prompt("用一句话介绍你自己");
 } finally {

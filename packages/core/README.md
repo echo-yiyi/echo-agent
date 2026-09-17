@@ -29,7 +29,7 @@ await echo.stop();                      // 先卸扩展 → 等落盘 settle →
 | 给它加工具 / prompt 段 / 压缩阶段 / hook | 写一条 extension（`@echo-agent/core/extension`）：声明注入什么、提供什么，生命周期归 host，卸载不留残骸 |
 | 换一个壳（Web、别的终端） | 同样是一条 extension，注入 `AgentRuntime` 这个 service 并把它渲染出来 |
 
-**`Agent` 类将收进内部**（2026-09-07 拍板、尚未实现，记录在仓库 `docs/decisions/proposed/2026-09-07-agent-class-internal.md`；今天它还在公共面上，api-snapshot 里能看到）：它有相当一部分是为承载 host 专用接线（写入闸、所有权账本、观测 writer）而存在的，把它当公共面等于承诺那些。第三方要的深度在 extension ABI 上——那条路带 `hostAbiVersion` 校验、Fiber/Effect 所有权与整代回滚，比裸类安全。别在新代码里 `new Agent()`。
+**`Agent` 类不在公共面上**：它有相当一部分是为承载 host 专用接线（写入闸、所有权账本、观测 writer）而存在的，公开它等于承诺那些。`echo.agent` 是 `AgentRuntime` 协议（和壳 extension 注入的是同一个对象），启停在 `echo.start()` / `echo.stop()`。第三方要的深度在 extension ABI 上——那条路带 `hostAbiVersion` 校验、Fiber/Effect 所有权与整代回滚。
 
 另有 `@echo-agent/core/testing`（FakeProvider 与脚本化流、in-memory 观测 collector）、
 `@echo-agent/core/extension`（写扩展的 ABI）、`@echo-agent/core/task/fs`、`@echo-agent/core/mcp`。

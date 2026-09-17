@@ -6,7 +6,7 @@ import { test, expect, afterEach } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEcho, type Echo } from "../src/create-echo.ts";
+import { agentOf, createEcho, type Echo } from "../src/create-echo.ts";
 import { openObservationReader } from "../src/index.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
@@ -56,7 +56,7 @@ async function echoWith(opts: { turns: ScriptedTurn[]; tools?: ModelTool[]; perm
     ...(opts.capture !== undefined ? { observation: { capture: opts.capture } } : {}),
   });
   running.push(echo);
-  await echo.agent.start();
+  await echo.start();
   return { echo, stateDir };
 }
 
@@ -146,9 +146,9 @@ test("每轮开头记下模型这一轮能看见的工具（工作集）", async
 
 test("装备变更在 setter 节点上记（run 之外）：思考档从哪档换到哪档", async () => {
   const { echo, stateDir } = await echoWith({ turns: [textTurn("ok")] });
-  const before = echo.agent.thinkingLevel;
+  const before = agentOf(echo).thinkingLevel;
   const next = before === "high" ? "low" : "high";
-  echo.agent.thinkingLevel = next;
+  agentOf(echo).thinkingLevel = next;
   await echo.send("go");
   await echo.stop();
   // `stop()` 不等观测写完（2026-09-14：观测不在主流程上），写入端可能还没打开过——

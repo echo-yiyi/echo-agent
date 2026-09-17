@@ -59,9 +59,9 @@ stateDiagram-v2
 
 ### 1.2 启动前置条件
 
-createEcho 完成装配，调用方随后显式 await echo.start()；模型输入应在启动完成后发送。底层 Agent 在没有 stateLock / session service 时仍允许未 start 直接 prompt，这是内部测试路径，不是受支持的产品入口。
+createEcho 完成装配，调用方随后显式 await echo.start()；模型输入应在启动完成后发送。core 内部的 `Agent` 在没有 stateLock / session service 时仍允许未 start 直接 prompt，这只是 core 单元测试走的路径，仓外构造不出这种实例。
 
-实现见 [Agent.lifecycleManaged](../../packages/core/src/agent.ts#symbol=Agent.lifecycleManaged) 与 [createEcho](../../packages/core/src/create-echo.ts#symbol=createEcho)。Agent 类内部化的边界由 [决策记录](../decisions/proposed/2026-09-07-agent-class-internal.md) 管理。
+实现见 [Agent.lifecycleManaged](../../packages/core/src/agent.ts#symbol=Agent.lifecycleManaged) 与 [createEcho](../../packages/core/src/create-echo.ts#symbol=createEcho)。`Agent` 类在 core 内部，见 [决策记录](../decisions/implemented/2026-09-07-agent-class-internal.md)。
 
 ### 1.3 启动、暂停与恢复
 

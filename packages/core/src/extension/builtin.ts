@@ -409,14 +409,22 @@ export type BuiltinMountable = RuntimeSource & {
  * 而 `mountBuiltinTools()` 内部另算一次带 runtime 的拿去 mount——于是 `echo:agent`
  * 真的装上了、清单里却没有。**清单与真相分家是最难查的一类假绿**：看清单的人以为它不在。
  */
-export function builtinEntriesFor(agent: BuiltinMountable, assembly: RuntimeAssemblyOps = {}): readonly ExtensionEntry[] {
+export function builtinEntriesFor(
+  agent: BuiltinMountable,
+  assembly: RuntimeAssemblyOps = {},
+  /**
+   * `echo:agent` 要 provide 的那份协议。装配层传进来是为了**与 `Echo.agent` 是同一个对象**：
+   * 壳注入的与产品手里拿的若各造一份，就是同一件事两个真源（本函数头注那条教训）。
+   */
+  runtime: AgentRuntime = agentRuntimeOf(agent, assembly),
+): readonly ExtensionEntry[] {
   const groups: BuiltinToolGroups = {
     ...agent.builtinTools,
     // 模型触发的热部署（2026-09-14）：装配层给了登记口才有这件工具。低层 `mountBuiltinTools()` 没有热部署，
     // 「能力不在就不出条目」（与 echo:ask「没人能答就不装」同一口径）
     reload: assembly.requestReload === undefined ? undefined : { tools: [makeExtensionReloadTool({ request: assembly.requestReload })] },
   };
-  return builtinEntries(groups, agentRuntimeOf(agent, assembly)) as readonly ExtensionEntry[];
+  return builtinEntries(groups, runtime) as readonly ExtensionEntry[];
 }
 
 export async function mountBuiltinTools(

@@ -69,7 +69,7 @@ flowchart LR
 | task 快照 | task module | [`renderTaskInjection()`](../../packages/core/src/task/tools.ts#symbol=renderTaskInjection) |
 | 某组工具的跨调用习惯 | 拥有该工具组的 extension | [`sessionToolsSection()`](../../packages/core/src/session/tools.ts#symbol=sessionToolsSection)、[`compactionSection()`](../../packages/core/src/compaction/tool.ts#symbol=compactionSection) |
 
-`new Agent()` 是低层使用高度：它构造各能力本体，但 prompt registry 初始为空。`mountBuiltinTools()` 只把可用的内建能力经 extension 注册上去；产品 identity、conduct 和 surface 仍由产品 / 壳提供。`createEcho()` 是唯一高层 composition root，按 builtin → inline / role → discovered / explicit 的装配路径挂载。
+`Agent`（core 内部）构造各能力本体，但 prompt registry 初始为空：可用的内建能力经 builtin extension 注册上去；产品 identity、conduct 和 surface 仍由产品 / 壳提供。`createEcho()` 是唯一 composition root，按 builtin → inline / role → discovered / explicit 的装配路径挂载。
 
 ## 3. System sections 与装配
 
@@ -153,7 +153,7 @@ system 的“冻结”只指主 Agent 从 registry 装配的快照。内部 loop
 
 skill 的总预算在激活时拒绝超额，而不是渲染时静默丢掉已经激活的内容；该预算不包含最终消息的全部包装开销。task 的条数限制不是字符预算：`TaskSpec.title` 只验非空，`renderList()` 原样插入 title / executor。一条 100 000 字符、带换行的标题会生成 100 000 字符以上的 injection，并能造出新的 Markdown 标题。因此 task injection 当前没有字符总上界。
 
-PromptSource 虽从根入口导出，但当前只由 Agent 内部构造，AgentOptions 与 AgentPromptRegistry 没有 source 注册方法。它不能作为第三方动态注入入口；生命周期命名与公开面限制见 §9。
+PromptSource 虽从根入口导出，但当前只由 Agent 内部构造，`EchoAgentOptions` 与 AgentPromptRegistry 没有 source 注册方法。它不能作为第三方动态注入入口；生命周期命名与公开面限制见 §9。
 
 Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它们，因为子 agent 看不到父会话、拿到的是调用者单独给的 task / system / tools；fork 模式与 Dream 一样继承。接线见 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。
 

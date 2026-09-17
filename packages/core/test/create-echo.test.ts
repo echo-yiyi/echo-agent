@@ -10,6 +10,7 @@ import {
   resolveExtensionDirs,
   ExtensionLoadError,
   EXTENSIONS_DIR,
+  agentOf,
   type Echo,
 } from "../src/create-echo.ts";
 import { createProvider } from "../src/provider/models.ts";
@@ -175,7 +176,7 @@ test("扫 extensions/ → 两个 Extension 都 mount，工具真的进了 agent 
   ]);
   expect(echo.extensions.filter((e) => e.file === undefined).map((e) => e.entryId)).toEqual([...BUILTIN_NAMES]);
 
-  const names = [...echo.agent.tools.keys()];
+  const names = [...agentOf(echo).tools.keys()];
   expect(names).toContain("fixture_year");
   expect(names).toContain("fixture_nested");
 });
@@ -193,12 +194,12 @@ test("**装上了 ≠ 用得上**：模型点名调扩展里的工具，execute 
     stateDir: join(await tmp(), "state"),
     turns: [toolTurn("c1", "fixture_year", {}), textTurn("2026")],
   });
-  await echo.agent.start();
+  await echo.start();
 
   const result = await echo.agent.prompt("今年几几年？");
   expect(result.outcome.kind).toBe("completed");
 
-  const toolResults = echo.agent.messages.filter((m) => m.role === "toolResult");
+  const toolResults = agentOf(echo).messages.filter((m) => m.role === "toolResult");
   expect(toolResults.length).toBe(1);
   // 工具不存在时**也会有**一条 toolResult（内容是「没这个工具」）——所以要看内容，不能只数条数
   expect(toolResults[0]!.isError).not.toBe(true);
@@ -235,7 +236,7 @@ test("stop() 真的 unmount 了 Extension，而且发生在 Agent 收摊之前",
             dispose: () => {
               disposed = true;
               // 顺序探针：Agent 收摊时会清空工具表，所以这里**还看得见工具** = 卸载发生在收摊之前
-              toolsWhenDisposed = echo.agent.tools.size;
+              toolsWhenDisposed = agentOf(echo).tools.size;
               off();
             },
           };
@@ -252,13 +253,13 @@ test("stop() 真的 unmount 了 Extension，而且发生在 Agent 收摊之前",
     extensions: [{ entryId: "probe", definition }],
   });
   running.push(echo);
-  expect(echo.agent.tools.has("dispose_probe")).toBe(true);
+  expect(agentOf(echo).tools.has("dispose_probe")).toBe(true);
 
   await echo.stop();
   expect(disposed).toBe(true);
   expect(toolsWhenDisposed).toBeGreaterThan(0);
   // Agent 也真的停了：停过的 Agent 不许再起（相位是私有的，这是它唯一的可观察面）
-  await expect(echo.agent.start()).rejects.toThrow("已经 stop() 过了");
+  await expect(echo.start()).rejects.toThrow("已经 stop() 过了");
 
   await echo.stop(); // 幂等
 });
@@ -280,11 +281,11 @@ test("providers 多注册（P3b-a）：换到另一家的模型，请求真的�
     extensionDirs: [],
   });
   try {
-    await echo.agent.start();
-    echo.agent.model = { id: "b-only", api: "fake", provider: "scripted-b" }; // 装备 setter（P3a 协议底下同一条路）
+    await echo.start();
+    agentOf(echo).model = { id: "b-only", api: "fake", provider: "scripted-b" }; // 装备 setter（P3a 协议底下同一条路）
     const result = await echo.agent.prompt("你是谁");
     expect(result.outcome.kind).toBe("completed");
-    const texts = echo.agent.messages
+    const texts = agentOf(echo).messages
       .filter((m) => m.role === "assistant")
       .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
       .filter((c): c is { type: "text"; text: string } => (c as { type?: string }).type === "text")
@@ -321,7 +322,7 @@ test("盘上的坏扩展**不阻塞启动**：跳过 + 诊断带路径，好的�
     expect(echo.diagnostics[0]!.code).toBe("extension_load_failed");
     expect(echo.diagnostics[0]!.path).toBe(join(dir, "broken.ts"));
     // agent 真的能起、能跑
-    await echo.agent.start();
+    await echo.start();
     const result = await echo.agent.prompt("在吗");
     expect(result.outcome.kind).toBe("completed");
   } finally {
@@ -491,8 +492,8 @@ test("extensionDirs: [] 关掉自动发现；opts.extensions 仍然照装（file
 
   expect(echo.extensions.map((e) => e.name)).toEqual([...BUILTIN_NAMES, "inline"]);
   expect(echo.extensions.at(-1)).toEqual({ entryId: "inline", name: "inline", file: undefined });
-  expect(echo.agent.tools.has("inline_tool")).toBe(true);
-  expect(echo.agent.tools.has("fixture_year")).toBe(false); // 自动发现确实被关掉了
+  expect(agentOf(echo).tools.has("inline_tool")).toBe(true);
+  expect(agentOf(echo).tools.has("fixture_year")).toBe(false); // 自动发现确实被关掉了
 });
 
 /* ───────────── 收摊是 single-flight 事务（review 二轮） ───────────── */
@@ -753,12 +754,12 @@ test("`agent.tools` 走 inline Extension，不再绕过 ExtensionHost（review �
   running.push(echo);
 
   // ① 工具真的在（易用性没丢）
-  expect(echo.agent.tools.has("inline_via_options")).toBe(true);
+  expect(agentOf(echo).tools.has("inline_via_options")).toBe(true);
   // ② **而且进了账本**：清单里看得见，说明它有 owner
   expect(echo.extensions.map((e) => e.name)).toContain("echo:inline-tools");
   // ③ 卸载时跟着下线——直接注册的做不到这一点
   await echo.stop();
-  expect(echo.agent.tools.has("inline_via_options")).toBe(false);
+  expect(agentOf(echo).tools.has("inline_via_options")).toBe(false);
 });
 
 test("公开清单 = Host 实际挂上的那一份（review 二轮 P1：上一版 `echo:agent` 装了却没进清单）", async () => {
@@ -786,7 +787,7 @@ test("会话面是**容器的开关**：不给 `sessions` 就一件工具都不�
   // 没有这条时：三件 session 工具会进每一个产品的 prompt，而单会话形态的用户根本用不上它们。
   const off = await createEcho({ provider: scripted([textTurn("ok")]), allowNetwork: false, store: new InMemoryDir(), lock: new InMemoryStateLock(), extensionDirs: [] });
   expect(off.extensions.map((e) => e.name)).not.toContain("echo:sessions");
-  expect([...off.agent.tools.keys()].filter((n) => n.startsWith("session_"))).toEqual([]);
+  expect([...agentOf(off).tools.keys()].filter((n) => n.startsWith("session_"))).toEqual([]);
   await off.stop();
 
   const on = await createEcho({
@@ -799,7 +800,7 @@ test("会话面是**容器的开关**：不给 `sessions` 就一件工具都不�
   });
   expect(on.extensions.map((e) => e.name)).toContain("echo:sessions");
   // **没给 runner 就没有 session_create**：工具不能承诺系统不交付的事
-  expect([...on.agent.tools.keys()].filter((n) => n.startsWith("session_")).sort()).toEqual([
+  expect([...agentOf(on).tools.keys()].filter((n) => n.startsWith("session_")).sort()).toEqual([
     "session_close",
     "session_list",
     "session_send",
@@ -814,7 +815,7 @@ test("会话面是**容器的开关**：不给 `sessions` 就一件工具都不�
     extensionDirs: [],
     sessions: { run: async () => {} },
   });
-  expect([...withRunner.agent.tools.keys()]).toContain("session_create");
+  expect([...agentOf(withRunner).tools.keys()]).toContain("session_create");
   await withRunner.stop();
 });
 
@@ -833,8 +834,8 @@ test("续一段非 main 的段（sessionsRoot + sessionId）：createEcho 按盘
     sessions: { run: async () => {} },
   });
   running.push(echo);
-  expect([...echo.agent.tools.keys()]).not.toContain("session_create");
-  expect([...echo.agent.tools.keys()]).toContain("session_send");
+  expect([...agentOf(echo).tools.keys()]).not.toContain("session_create");
+  expect([...agentOf(echo).tools.keys()]).toContain("session_send");
 });
 
 test("不越权比的是创建者此刻的工具集而不是池：被角色收紧挡掉的、被禁用的判红，没取过的延迟工具放行", async () => {
@@ -865,7 +866,7 @@ test("不越权比的是创建者此刻的工具集而不是池：被角色收�
 
   await expect(create(["write_b"])).rejects.toThrow(/write_b/); // 在池里、被角色收紧挡掉——比池的话会放行
   expect((await create(["cold_c"])).id).toMatch(/^s-/); // 延迟、没取过、不在菜单上：创建者随时取得来，算它有
-  disableTools(echo.agent.tools, ["read_a"], "test");
+  disableTools(agentOf(echo).tools, ["read_a"], "test");
   await expect(create(["read_a"])).rejects.toThrow(/read_a/); // 在池里、已禁用
 });
 
@@ -912,18 +913,18 @@ test("会话的缺省命名：第一句人话的首行当名字，之后不再�
     extensionDirs: [],
   });
   running.push(echo);
-  await echo.agent.start();
+  await echo.start();
   const id = echo.agent.state.sessionId!;
-  expect(echo.agent.sessionName).toBe(id); // 起手就是 id
+  expect(agentOf(echo).sessionName).toBe(id); // 起手就是 id
 
   await echo.send("把登录页的报错改掉\n第二行不该进名字");
-  expect(echo.agent.sessionName).toBe("把登录页的报错改掉"); // 只取首行
+  expect(agentOf(echo).sessionName).toBe("把登录页的报错改掉"); // 只取首行
   // **落到盘上才算数**：清单读的是 meta，不是内存里那份
   expect(JSON.parse((await store.read("meta.json"))!).name).toBe("把登录页的报错改掉");
 
   // 第二句不再改名：名字是「这段会话是关于什么的」，不是「最后说了什么」
   await echo.send("再看一下别的");
-  expect(echo.agent.sessionName).toBe("把登录页的报错改掉");
+  expect(agentOf(echo).sessionName).toBe("把登录页的报错改掉");
 });
 
 test("会话命名：产品挂一个更早的钩子就能接管（缺省那个只在名字还是 id 时动手）", async () => {
@@ -937,10 +938,10 @@ test("会话命名：产品挂一个更早的钩子就能接管（缺省那个�
   });
   running.push(echo);
   // priority 更小 = 更早跑。它先起了名字，缺省那个看见「名字不是 id 了」就不再碰
-  echo.agent.hooks.on("userPromptSubmit", () => void echo.agent.renameSession("产品说了算"), { priority: 1 });
-  await echo.agent.start();
+  agentOf(echo).hooks.on("userPromptSubmit", () => void agentOf(echo).renameSession("产品说了算"), { priority: 1 });
+  await echo.start();
   await echo.send("随便说一句");
-  expect(echo.agent.sessionName).toBe("产品说了算");
+  expect(agentOf(echo).sessionName).toBe("产品说了算");
 });
 
 /* ───────────── 角色与产品 prompt 的挂载顺序（2026-09-10） ───────────── */
@@ -965,7 +966,7 @@ test("产品经 extensions 给 identity 段 + 同时传 agentDef.identity：角�
     agentDef: { name: "reviewer", definition: { identity: "ROLE IDENTITY" } },
   });
   running.push(echo);
-  const sys = (await echo.agent.assemblePrompt()) ?? "";
+  const sys = (await agentOf(echo).assemblePrompt()) ?? "";
   expect(sys.startsWith("ROLE IDENTITY")).toBe(true);
   expect(sys).not.toContain("PRODUCT IDENTITY");
   // 清单顺序 = 挂载顺序：角色在产品之后
@@ -1031,7 +1032,7 @@ test("memory.builtin: false：内建三个不装，模块全部来自扩展（�
     extensions: [{ entryId: "test:companion-memory", definition: memoryPack([relationship, notesMemory]) as never }],
   });
   running.push(echo);
-  expect([...echo.agent.memory!.memories.keys()].sort()).toEqual(["memory", "relationship"]);
+  expect([...agentOf(echo).memory!.memories.keys()].sort()).toEqual(["memory", "relationship"]);
 });
 
 test("缺省（builtin 不给）：扩展注册的模块是**追加**，内建三个仍在", async () => {
@@ -1043,6 +1044,6 @@ test("缺省（builtin 不给）：扩展注册的模块是**追加**，内建�
     extensions: [{ entryId: "test:companion-memory", definition: memoryPack([relationship]) as never }],
   });
   running.push(echo);
-  expect([...echo.agent.memory!.memories.keys()].sort()).toEqual(["agent", "memory", "relationship", "user"]);
+  expect([...agentOf(echo).memory!.memories.keys()].sort()).toEqual(["agent", "memory", "relationship", "user"]);
 });
 

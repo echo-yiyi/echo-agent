@@ -86,7 +86,7 @@ const echo = await createEcho({
 await echo.start();
 try {
   const result = await echo.agent.prompt("今年是哪一年？用工具查。");
-  const toolResults = echo.agent.messages.filter((m) => m.role === "toolResult");
+  const toolResults = echo.agent.state.messages.filter((m) => m.role === "toolResult");
   // 打三件事：装上了哪些扩展 · 模型看得见哪些工具 · 工具**真正返回的内容**
   //（只看「有没有 toolResult」是不够的——工具不存在时也会有一条，内容是「没这个工具」）。
   console.log(

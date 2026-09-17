@@ -3,43 +3,52 @@
 // 核心那条：**「Fiber 被卸载」不等于「用户要退出」**。上一版把两者并进同一个 stopper，
 // 于是任何 unmount 都会让 `shell.exited` resolve，CLI 接着 `echo.stop()`——
 // 将来一次 agent-boundary reload 就会直接关掉整个 Runtime。换代应当只是换一份界面。
+//
+// 壳怎么装就怎么测：交给 `createEcho({ extensions })` mount，`AgentRuntimeService` 由 `echo:agent` 那条内建给，
+// 与产品的交互形态（`packages/base/src/cli.ts` 的 `runInteractive`）同一条路。
 
-import { test, expect } from "bun:test";
-import { Agent } from "@echo-agent/core";
-import { scriptedStreamFn, textTurn, FAKE_MODEL } from "@echo-agent/core/testing";
-import { ExtensionHost, agentRegistries, agentRuntimeOf, AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
-import { HookRuntime } from "@echo-agent/core";
-import { tuiShell } from "../src/extension.ts";
+import { test, expect, afterAll } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createEcho, createProvider, type Echo, type Provider } from "@echo-agent/core";
+import { scriptedStreams, textTurn } from "@echo-agent/core/testing";
+import { tuiShell, type TuiShell } from "../src/extension.ts";
 import { fakeTui } from "../src/testing.ts";
 
-function hostWith(agent: Agent): ExtensionHost {
-  const host = new ExtensionHost({
-    services: agentRegistries({
-      tools: agent.tools,
-      hooks: agent.hooks,
-      prompt: { sections: agent.promptSections, variables: agent.promptVariables }, // 壳注册 surface 段要它
-    }),
-  });
-  return host;
-}
+// 记忆与技能在 ECHO_HOME 下，`stateDir` 管不到：不隔离就会读到开发机上真的 `~/.echo`
+process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-tui-ext-home-"));
+const stateRoot = mkdtempSync(join(tmpdir(), "echo-tui-ext-state-"));
+afterAll(async () => {
+  await rm(stateRoot, { recursive: true, force: true });
+});
 
-/** 把 runtime 作为 Service 提供出去——真实里这是 `echo:agent` 干的。 */
-function runtimeProvider(agent: Agent) {
-  return defineExtension({
-    name: "echo:agent",
-    hostAbiVersion: 1,
-    provide: [AgentRuntimeService as never],
-    apply(ctx) {
-      ctx.provide(AgentRuntimeService, agentRuntimeOf(agent));
-    },
+function scriptedProvider(): Provider {
+  return createProvider({
+    id: "t",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "scripted" }],
+    api: scriptedStreams([textTurn("好")]),
   });
 }
 
-const agentWith = (): Agent => new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("好")]) });
+/** 产品怎么装壳就怎么装：壳是 `extensions` 里的一条，装完 `start()`。 */
+async function echoWithShell(shell: TuiShell): Promise<Echo> {
+  const echo = await createEcho({
+    provider: scriptedProvider(),
+    allowNetwork: false,
+    withoutMemory: true,
+    extensionDirs: [],
+    stateDir: await mkdtemp(join(stateRoot, "s-")),
+    extensions: [{ entryId: "echo:tui", definition: shell.definition }],
+  });
+  await echo.start();
+  return echo;
+}
 
 test("unmount 只是换代：界面停下来，但**不结算** exited（不该拖垮整个 Runtime）", async () => {
-  const agent = agentWith();
-  const host = hostWith(agent);
   const ui = fakeTui();
   const shell = tuiShell({ ui });
 
@@ -48,34 +57,29 @@ test("unmount 只是换代：界面停下来，但**不结算** exited（不该�
     settled = true;
   });
 
-  await host.mount("g1", [
-    { entryId: "echo:agent", definition: runtimeProvider(agent) as never },
-    { entryId: "echo:tui", definition: shell.definition as never },
-  ]);
+  const echo = await echoWithShell(shell);
   for (let i = 0; i < 50; i++) await Promise.resolve();
+  // 壳真的经 extension 挂上、拿到了装配出来的那份协议：界面起来了，欢迎头报的是这条装配的模型
+  expect(echo.extensions.map((e) => e.entryId)).toContain("echo:tui");
+  expect(ui.screen()).toContain("模型 only");
 
-  await host.unmount("g1");
+  await echo.stop(); // 先卸 Extension（含壳）再停 Agent——壳这一代被 unmount
   for (let i = 0; i < 50; i++) await Promise.resolve();
 
   // 上一版这里 `settled === true`：CLI 会据此 `echo.stop()`，把整个 Runtime 关掉
   expect(settled).toBe(false);
-  expect(host.mountedGenerations).toEqual([]);
 });
 
 test("进程信号才结算 exited——那是「真要退出」", async () => {
-  const agent = agentWith();
-  const host = hostWith(agent);
   const controller = new AbortController();
   const shell = tuiShell({ ui: fakeTui(), signal: controller.signal });
 
-  await host.mount("g1", [
-    { entryId: "echo:agent", definition: runtimeProvider(agent) as never },
-    { entryId: "echo:tui", definition: shell.definition as never },
-  ]);
+  const echo = await echoWithShell(shell);
   for (let i = 0; i < 50; i++) await Promise.resolve();
 
   controller.abort();
   expect(await shell.exited).toEqual({ code: 0 }); // 没有 `resume`：这是「退出」不是「换段」
+  await echo.stop();
 });
 
 test("**已经 abort 过**的进程信号：不许挂着——注册监听器等不到一个已经过去的事件", async () => {
@@ -86,14 +90,9 @@ test("**已经 abort 过**的进程信号：不许挂着——注册监听器等
   // 同一个坑 `stdin.ts` 修过一次（那边是 readline 永久等下一行）——**经验没跟着搬进包装层**。
   const controller = new AbortController();
   controller.abort(); // 先 abort，再装
-  const agent = agentWith();
-  const host = hostWith(agent);
   const shell = tuiShell({ ui: fakeTui(), signal: controller.signal });
 
-  await host.mount("g1", [
-    { entryId: "echo:agent", definition: runtimeProvider(agent) as never },
-    { entryId: "echo:tui", definition: shell.definition as never },
-  ]);
+  const echo = await echoWithShell(shell);
 
   // 判据是**它会结算**，不是「结算成某个码」：挂住的那一版在这里永久等待。
   // 用超时兜底，否则测试自己也会挂——那样反倒看不出是它在挂。
@@ -102,11 +101,13 @@ test("**已经 abort 过**的进程信号：不许挂着——注册监听器等
     new Promise<"hung">((r) => setTimeout(() => r("hung"), 2000)),
   ]);
   expect(settled).toBe("settled");
+  await echo.stop();
 });
 
 test("换代不累积 listener：每代 unmount 都把挂在进程信号上的那个摘掉", async () => {
   // `opts.signal` 是**跨代活着**的进程信号。每代挂一个匿名监听器而不摘，
   // 换代多了就是一串泄漏——而且它们还都指着已经死掉的那一代。
+  // 三代照 `/resume` 换段的形状走：同一个进程信号，每段开一份壳、装一个 Echo、收摊。
   const controller = new AbortController();
   const signal = controller.signal;
   let added = 0;
@@ -128,20 +129,14 @@ test("换代不累积 listener：每代 unmount 都把挂在进程信号上的�
     configurable: true,
   });
 
-  const agent = agentWith();
-  const host = hostWith(agent);
-  const shell = tuiShell({ ui: fakeTui(), signal });
-
-  for (const generation of ["g1", "g2", "g3"]) {
-    await host.mount(generation, [
-      { entryId: "echo:agent", definition: runtimeProvider(agent) as never },
-      { entryId: "echo:tui", definition: shell.definition as never },
-    ]);
+  for (let generation = 0; generation < 3; generation++) {
+    const echo = await echoWithShell(tuiShell({ ui: fakeTui(), signal }));
     for (let i = 0; i < 30; i++) await Promise.resolve();
-    await host.unmount(generation);
+    await echo.stop();
     for (let i = 0; i < 30; i++) await Promise.resolve();
   }
 
   // 挂几个就得摘几个。上一版 `removed === 0`——三代之后进程信号上挂着三个死监听器
+  expect(added).toBeGreaterThan(0); // 真挂过（不然下面那条是空判据）
   expect([added, removed]).toEqual([added, added]);
 });
