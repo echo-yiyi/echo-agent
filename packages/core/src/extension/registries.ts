@@ -27,6 +27,7 @@ import type { CompactionStage } from "../compaction/types.ts";
 import { addMemory, removeMemoryRegion, type AgentMemories } from "../memory/harness.ts";
 import type { AnyMemory } from "../memory/types.ts";
 import { NO_SESSION_FACE, type SessionFace } from "../session/sessions.ts";
+import type { AgentInboxPort } from "../inbox/watch.ts";
 import { defineService, type Disposer, type ServiceKey } from "./abi.ts";
 import type { AgentPolicySlots, DeclaredPolicies } from "../policies.ts";
 
@@ -210,6 +211,21 @@ export const AgentSessionsService: ServiceKey<SessionFace> = defineService<Sessi
   reload: "agent",
 });
 
+/**
+ * 等在自己的 inbox 上（2026-09-16，设计里的 `inbox.watch`）：等到第一条匹配的消息，**命中即消费**。
+ * `session_send` 的 `wait` 是第一个用户；第三方想做「发出去等回执」的也走这一个，不自己扫盘。
+ *
+ * 与 `AgentSessionsService` 同款 `single` / `agent`，**Agent 恒有**（inbox 是每个 Agent 都有的），
+ * 由 Agent 造的 Host 恒提供。语义与失败形状见 `inbox/watch.ts`。
+ */
+export const AgentInbox: ServiceKey<AgentInboxPort> = defineService<AgentInboxPort>({
+  id: "echo.agent.inbox",
+  version: 1,
+  kind: "single",
+  scope: "agent",
+  reload: "agent",
+});
+
 /** `AgentPolicies` 的那一格：声明 agent 级选项（权限策略、迭代预算、提问策略）。 */
 export type AgentPoliciesRegistry = {
   /**
@@ -263,6 +279,11 @@ export function agentRegistries(input: {
    * 不传就提供 `NO_SESSION_FACE`，因为这个 Service 恒有（理由见它的定义处）。
    */
   sessions?: SessionFace;
+  /**
+   * 等在自己 inbox 上的那个口子（2026-09-16，`agent.watchInbox`）。与 `prompt` 同款：Agent 恒有，
+   * 由 Agent 造的 Host 应当恒传；可选只为假 Host——不传就不提供这个 Service（消费方 required 会诚实装不上）。
+   */
+  inbox?: AgentInboxPort;
 }): ReadonlyArray<readonly [ServiceKey<unknown>, unknown]> {
   const tools: AgentToolsRegistry = {
     register: (tool) => {
@@ -296,6 +317,7 @@ export function agentRegistries(input: {
   if (input.background !== undefined) out.push([AgentBackgroundService, input.background]);
   // **恒有**：没有容器就是 `NO_SESSION_FACE`，不是「这个 Service 缺席」——消费方声明 required 才装得上
   out.push([AgentSessionsService, input.sessions ?? NO_SESSION_FACE]);
+  if (input.inbox !== undefined) out.push([AgentInbox, input.inbox]);
   // 恒提供：三项是 Agent 恒有的。没接上真持有者时 `declare()` 抛——同 `restrict()`，不静默装上不生效
   const slots = input.policies;
   out.push([

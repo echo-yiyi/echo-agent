@@ -24,6 +24,7 @@
 
 import type { AgentTool } from "../tools/types.ts";
 import type { ToolMap, ToolRestrictions } from "../tools/harness.ts";
+import type { AgentInboxPort } from "../inbox/watch.ts";
 import type { HookRuntime } from "../hooks/runtime.ts";
 import type { ActiveSkillMap, SkillMap } from "../skill/harness.ts";
 import type { AgentBackground } from "../background/types.ts";
@@ -378,6 +379,8 @@ export type BuiltinMountable = RuntimeSource & {
   readonly policySlots: AgentPolicySlots;
   /** 收紧工作集的那一叠。同理：Agent 恒有，默认 Host 要接上，否则 `AgentTools.restrict()` 无处生效。 */
   readonly toolRestrictions: ToolRestrictions;
+  /** 等在自己 inbox 上（`AgentInbox`）。同理：Agent 恒有，默认 Host 要接上，否则 `required` 的消费方装不上。 */
+  watchInbox: AgentInboxPort["watch"];
   readonly hooks: HookRuntime;
   readonly skills: SkillMap;
   readonly activeSkills: ActiveSkillMap;
@@ -422,6 +425,8 @@ export async function mountBuiltinTools(
     services: agentRegistries({
       tools: agent.tools,
       toolRestrictions: agent.toolRestrictions,
+      // 等在自己 inbox 上的口子（2026-09-16）：`session_send` 的 `wait` 与第三方的回执等待走同一个
+      inbox: { watch: (match, opts) => agent.watchInbox(match, opts) },
       // agent 级选项（2026-09-09）：扩展经 `AgentPolicies` 声明权限 / 预算 / 提问策略
       policies: agent.policySlots,
       hooks: agent.hooks,

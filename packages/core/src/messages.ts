@@ -119,6 +119,12 @@ export type EnvironmentMessage = {
   content: ContentBlock[];
   /** 关联物（后台任务 id 之类）。UI 用它把消息挂回来源。 */
   ref?: string;
+  /**
+   * 这一条在**回复**哪一条（2026-09-16，会话回信）：填被回复那条的 `ref`。
+   * 与 `source` / `ref` 一样**不出门**——模型看不到它，它只给账本匹配用：`session_send` 的 `wait`
+   * 靠它从自己的 inbox 里认出那封回信（`Agent.watchInbox`）。可选：绝大多数环境消息不是回信。
+   */
+  replyTo?: string;
 };
 
 /** 内核认识的四种，闭合。 */

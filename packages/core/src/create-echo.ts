@@ -47,6 +47,7 @@ import { pathToFileURL } from "node:url";
 import type { Agent } from "./agent.ts";
 import { createAgent, resolveSessionsRoot, resolveStateDir, type CreateAgentOptions } from "./create-agent.ts";
 import { EchoSessions, type SessionRunner } from "./session/sessions.ts";
+import type { AgentInboxPort } from "./inbox/watch.ts";
 import { makeSessionTools, sessionToolsSection } from "./session/tools.ts";
 import { FileDir, echoHome, expandHome } from "./storage/file-dir.ts";
 import { AGENT_DEF_DIR, loadAgentDefs } from "./agent-def/loader.ts";
@@ -202,9 +203,11 @@ async function sessionToolsEntry(
   sessionDirOf: (id: string) => string,
   sessionId: string | null,
   hasRunner: boolean,
+  watchInbox: AgentInboxPort["watch"],
 ): Promise<readonly ExtensionEntry[]> {
   const main = sessionId === null ? true : await isMainSession(sessionDirOf, sessionId);
-  const toolOpts = { canCreate: main && hasRunner };
+  // `watchInbox` 是**这一段自己的** inbox：`session_send` 的 `wait` 等的是发给本段的回信
+  const toolOpts = { canCreate: main && hasRunner, watchInbox };
   return [
     {
       entryId: "echo:sessions",
@@ -536,6 +539,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       tools: agent.tools,
       // 收紧工作集的那一叠（2026-09-07）：角色（`echo:inline-agent`）经它把工具集收到子集
       toolRestrictions: agent.toolRestrictions,
+      // 等在自己 inbox 上的口子（2026-09-16）：`session_send` 的 `wait` 与第三方的回执等待走同一个
+      inbox: { watch: (match, opts) => agent.watchInbox(match, opts) },
       // agent 级选项（2026-09-09）：扩展经 `AgentPolicies` 声明权限 / 预算 / 提问策略，
       // 于是「本地扩展把 echo-agent 长成另一个 agent」这条路不再差预算与权限那一截
       policies: agent.policySlots,
@@ -669,7 +674,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       //     系统却什么都不做，比没有这件工具更坏（工具不能承诺系统不交付的事）。
       ...(opts.sessions === undefined
         ? [] // **开关**：容器不提会话面，这个 agent 就是今天的单会话形态，工具一件不多
-        : await sessionToolsEntry(sessions, sessionDirOf, agent.state.sessionId, opts.sessions.run !== undefined)),
+        : await sessionToolsEntry(sessions, sessionDirOf, agent.state.sessionId, opts.sessions.run !== undefined, (match, o) => agent.watchInbox(match, o))),
     ];
     // ── `echo:inline-agent`：这一段挂的角色（2026-09-07）──────────────────────────────
     //

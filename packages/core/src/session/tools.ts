@@ -13,17 +13,29 @@
 import { errText } from "../errors.ts";
 import { PROMPT_ORDER, type PromptSection } from "../prompt/types.ts";
 import { toolError, toolOk, type ModelTool } from "../tools/types.ts";
-import type { EchoSessions, SessionRow } from "./sessions.ts";
+import { SESSION_SOURCE, type EchoSessions, type SessionRow } from "./sessions.ts";
+import type { AgentInboxPort } from "../inbox/watch.ts";
+import type { AgentMessage } from "../messages.ts";
 import { isValidAgentName, type AgentDefinition, type AgentRef } from "../agent-def/types.ts";
 
 export type SessionToolsOptions = {
   /** 挂不挂 `session_create`。装配层按「是不是 main」与「容器给没给 runner」决定。 */
   readonly canCreate: boolean;
+  /**
+   * 调用方这一段的「等在自己 inbox 上」（`AgentInbox.watch`，2026-09-16）。`session_send` 的 `wait` 靠它。
+   * 不给 = 这组工具等不了回信：带 `wait: true` 的调用如实判红，不假装等过。
+   */
+  readonly watchInbox?: AgentInboxPort["watch"];
 };
+
+/** `wait` 缺省等多久（秒）。一轮 run 挂着等，太长会把这一段卡住；要更久就显式给。 */
+const DEFAULT_WAIT_SECONDS = 120;
+/** `wait` 最多等多久（秒）。挂得再久应该改成不等、回信照普通消息进来。 */
+const MAX_WAIT_SECONDS = 600;
 
 /** `echo:sessions` 这组工具。`canCreate` 为假时少一件——少的正是「派活」那件。 */
 export function makeSessionTools(sessions: EchoSessions, opts: SessionToolsOptions): ModelTool[] {
-  const tools: ModelTool[] = [listTool(sessions), sendTool(sessions), closeTool(sessions)];
+  const tools: ModelTool[] = [listTool(sessions), sendTool(sessions, opts.watchInbox), closeTool(sessions)];
   if (opts.canCreate) tools.unshift(createTool(sessions));
   return tools;
 }
@@ -41,15 +53,24 @@ export function sessionToolsSection(opts: SessionToolsOptions): PromptSection {
       "It is not a copy of you: it starts as the plain product unless you give it an agent, and it never inherits yours. " +
       "Whatever you give it can only narrow what you already have, never widen it.\n"
     : "";
+  // `wait` 只在装配层给了 watch 时讲：工具等不了的话，习惯段也不该教模型去等
+  const wait =
+    opts.watchInbox !== undefined
+      ? "If you cannot go on without the answer, set wait: true and session_send returns the reply itself. " +
+        "Keep such waits short: while you wait, this session does nothing else.\n\n"
+      : "";
   return {
     name: "tool:sessions",
     order: PROMPT_ORDER.tools + 10,
     render: () =>
       "## Other sessions\n\n" +
-      "Each session is a separate agent running on its own. Messages between sessions are asynchronous: " +
-      "session_send hands your message to the other session's inbox and returns immediately. It does not wait for a reply, " +
-      "and there is no guarantee one ever comes. If the reply matters, say what you need and then continue with something " +
-      "else; the answer arrives later as a message from that session.\n\n" +
+      "Each session is a separate agent running on its own. A message from another session starts with a header like " +
+      "[from session s-abc · message s-abc:1f2e]. To answer it, session_send to that session with reply_to set to that " +
+      "message id; a reply to one of yours has 'reply to' in its header, naming your message.\n\n" +
+      "Messages are asynchronous: by default session_send returns as soon as your message is delivered, and there is no " +
+      "guarantee a reply ever comes. If the reply matters but you can keep working, say what you need and continue; the " +
+      "answer arrives later as a message from that session.\n" +
+      wait +
       create +
       "A session that is not running right now is started when you message it, so you are always talking to a live " +
       "session. Where that is not possible, session_send says so and sends nothing — there is no such thing as a " +
@@ -220,35 +241,85 @@ function listTool(sessions: EchoSessions): ModelTool<{ workspace?: string; agent
   };
 }
 
-function sendTool(sessions: EchoSessions): ModelTool<{ to: string; message: string }> {
+function sendTool(
+  sessions: EchoSessions,
+  watchInbox: AgentInboxPort["watch"] | undefined,
+): ModelTool<{ to: string; message: string; reply_to?: string; wait?: boolean; timeout_seconds?: number }> {
   return {
     kind: "model",
     name: "session_send",
     label: "发给会话",
     description:
       "Send a message to another session. It lands in that session's inbox and it reads it when it is next free. " +
-      "This returns as soon as the message is delivered — it does not wait for an answer, and an answer may never come. " +
-      "A session that is not running is started first; if it cannot be started from here, the message is not sent and you are told so.",
+      "A session that is not running is started first; if it cannot be started from here, the message is not sent and you are told so.\n" +
+      "Messages from other sessions start with a header like [from session s-abc · message s-abc:1f2e]. " +
+      "To answer one, send to that session and set reply_to to its message id.\n" +
+      "By default this returns as soon as the message is delivered. Set wait: true when you need the answer before you " +
+      "can continue: the call then waits until that session sends a message with reply_to pointing at yours, and returns " +
+      `that reply (at most ${MAX_WAIT_SECONDS} seconds, default ${DEFAULT_WAIT_SECONDS}). A reply you waited for is not ` +
+      "delivered to you a second time. If no reply comes in time, nothing is lost: a later reply arrives as a normal message.",
     parameters: {
       type: "object",
       properties: {
-        to: { type: "string", description: "Session id, from session_list" },
+        to: { type: "string", description: "Session id, from session_list or from a message header" },
         message: { type: "string", description: "What to say to it" },
+        reply_to: { type: "string", description: "The message id you are answering (from its header), if this is a reply" },
+        wait: { type: "boolean", description: "Wait for the reply to this message and return it" },
+        timeout_seconds: { type: "number", description: `How long to wait when wait is true (default ${DEFAULT_WAIT_SECONDS}, at most ${MAX_WAIT_SECONDS})` },
       },
       required: ["to", "message"],
     },
-    async execute(params) {
+    async execute(params, ctx) {
       if (typeof params.message !== "string" || params.message === "") return toolError("message is required");
+      if (params.reply_to !== undefined && (typeof params.reply_to !== "string" || params.reply_to === "")) {
+        return toolError("reply_to must be the message id from the header of the message you are answering");
+      }
+      const wait = params.wait === true;
+      let timeoutSeconds = DEFAULT_WAIT_SECONDS;
+      if (params.timeout_seconds !== undefined) {
+        if (typeof params.timeout_seconds !== "number" || !Number.isFinite(params.timeout_seconds) || params.timeout_seconds <= 0) {
+          return toolError("timeout_seconds must be a positive number");
+        }
+        timeoutSeconds = Math.min(params.timeout_seconds, MAX_WAIT_SECONDS);
+      }
+      // 等不了就在发之前说：发出去了再说「等不了」，模型会以为要重发
+      if (wait && watchInbox === undefined) return toolError("wait is not available here; send without wait and the reply arrives as a normal message");
       try {
-        const outcome = await sessions.send(params.to, params.message);
+        const outcome = await sessions.send(params.to, params.message, params.reply_to === undefined ? {} : { replyTo: params.reply_to });
         if (outcome.kind === "rejected") return toolError(`Not delivered (${outcome.reason}): ${outcome.detail}`);
-        // `accepted` 时对方一定活着（没在跑的已经被叫起来了），所以只有一句话可说
-        return toolOk(`Delivered to ${params.to}; it will read this when free.`);
+        // `accepted` 时对方一定活着（没在跑的已经被叫起来了）
+        if (!wait || watchInbox === undefined) return toolOk(`Delivered to ${params.to} as message ${outcome.ref}; it will read this when free.`);
+
+        const ref = outcome.ref;
+        const waited = await watchInbox((m) => m.role === "environment" && m.source === SESSION_SOURCE && m.replyTo === ref, {
+          timeoutMs: timeoutSeconds * 1000,
+          ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+        });
+        switch (waited.kind) {
+          case "matched":
+            // 回信原样交回（带它自己的抬头）：模型要接着回，id 就在里面
+            return toolOk(textOf(waited.message));
+          case "timeout":
+            return toolOk(
+              `Delivered to ${params.to} as message ${ref}, but no reply came within ${timeoutSeconds} seconds. ` +
+                "If it answers later, the reply arrives as a normal message.",
+            );
+          case "aborted":
+            return toolError(`Delivered to ${params.to} as message ${ref}; stopped waiting before a reply came.`);
+          case "rejected":
+            return toolError(`Delivered to ${params.to} as message ${ref}, but could not wait for the reply: ${waited.reason}`);
+        }
       } catch (e) {
         return toolError(errText(e));
       }
     },
   };
+}
+
+/** 一条消息里的文字。回信都是 environment 消息，内容就是文本块。 */
+function textOf(message: AgentMessage): string {
+  if (!("content" in message) || !Array.isArray(message.content)) return "";
+  return message.content.map((b) => (b.type === "text" ? b.text : "")).join("");
 }
 
 function closeTool(sessions: EchoSessions): ModelTool<{ id: string }> {

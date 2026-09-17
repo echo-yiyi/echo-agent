@@ -148,7 +148,7 @@ export type { InboxBatchAckCommitV1, InboxRecordV1 } from "./inbox/records.ts";
  */
 export { SessionService, listSessions, setSessionStatus } from "./session/service.ts";
 export { EchoSessions, NO_SESSION_FACE, SESSION_SOURCE, DEFAULT_RUN_TIMEOUT_MS } from "./session/sessions.ts";
-export type { CreateSessionInput, EchoSessionsDeps, SendResult, SessionFace, SessionListFilter, SessionRow, SessionRunner } from "./session/sessions.ts";
+export type { CreateSessionInput, EchoSessionsDeps, SendOptions, SendResult, SessionFace, SessionListFilter, SessionRow, SessionRunner } from "./session/sessions.ts";
 export { readSessionPhase, writeSessionPhase, STATUS_FILE } from "./session/status.ts";
 export type { SessionPhase, SessionStatusFile } from "./session/status.ts";
 export type { AgentBackground, BackgroundLimits } from "./background/types.ts";

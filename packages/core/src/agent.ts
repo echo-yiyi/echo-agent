@@ -52,6 +52,7 @@ import type { SessionEntryInput, SessionService } from "./session/service.ts";
 import type { SessionPhase } from "./session/status.ts";
 import type { Lease, StateLock } from "./storage/lock.ts";
 import { InboxAckError, InboxStore } from "./inbox/store.ts";
+import type { InboxWatchOptions, InboxWatchResult } from "./inbox/watch.ts";
 import { inboxFactDescriptor } from "./inbox/observe.ts";
 import { systemClock, type Clock } from "./schedule/clock.ts";
 import { environmentDedupeKey, scheduleDedupeKey } from "./inbox/records.ts";
@@ -1414,7 +1415,17 @@ export class Agent {
       }
       // 裁决出来了才放行：committed / pre-commit 先清标记再排下一轮；indeterminate 只清标记，一轮都不排
       this.inboxTicketOutstanding = false;
-      if (!indeterminate) this.scheduleAutonomousWork();
+      // 与用户 run 的收尾（`finishRun`）同一条：run 里登记的收尾活（`afterRun`）先排空，再排自主工作。
+      // 此前这里不排空——被叫醒的会话跑的全是 inbox run，它们登记的活（模型触发的热部署、`wait` 命中后的 ack）
+      // 要等到下一个用户 run 收尾才执行，而 `--serve` 宿主上根本没有用户 run。
+      // indeterminate 时活照样排空（它们自己不抛），只是一轮都不排。
+      if (this.afterRunQueue.length > 0) {
+        void this.drainAfterRun().then(() => {
+          if (!indeterminate) this.scheduleAutonomousWork();
+        });
+      } else if (!indeterminate) {
+        this.scheduleAutonomousWork();
+      }
       return settled.result;
     } finally {
       this.inboxTicketOutstanding = false;
@@ -1528,6 +1539,96 @@ export class Agent {
     if (this.activeRun === undefined) return { kind: "rejected", reason: "没有进行中的 run，没有「收尾」可等" };
     this.afterRunQueue.push(work);
     return { kind: "scheduled" };
+  }
+
+  /**
+   * 等在自己的 inbox 上，直到出现第一条 `match` 为真的消息——**命中即消费**（2026-09-16，
+   * `docs/decisions/implemented/2026-09-03-sessions-are-peers.md` 的 `wait`）。
+   *
+   * **只能在 run 里等**：命中的那条从待投递里摘走（`InboxStore.reserveMatching`），作为结果交回去，
+   * 真正的 ack 挂在本轮 run 的收尾上（`afterRun`），而且要等 transcript 落定之后——工具结果入账了，
+   * 才能说这封信被消费了。收尾之前崩溃，它还在盘上，重启照普通消息重放：at-least-once 不破。
+   *
+   * **自己刷盘**：`pollInbox` 在有 run 时一拍不扫（扫了也不能消费），而 `wait` 恰恰是在 run 的工具调用里挂着，
+   * 靠它的话别的进程写进来的回信永远看不见。所以这里按同一个节拍、用同一个时钟自己 `refresh()`。
+   *
+   * 超时 / 叫停什么都不消费：之后到的信照普通路径进来，恰好一次。
+   */
+  async watchInbox(match: (message: AgentMessage) => boolean, opts: InboxWatchOptions): Promise<InboxWatchResult> {
+    if (this.activeRun === undefined) return { kind: "rejected", reason: "没有进行中的 run：命中之后的 ack 要跟 run 的收尾绑在一起，run 外等不了" };
+    if (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0) return { kind: "rejected", reason: `timeoutMs 必须是正数，收到 ${String(opts.timeoutMs)}` };
+
+    const take = (): InboxWatchResult | null => {
+      if (this.inboxFailure !== null || this.inbox.sealed !== null) return { kind: "rejected", reason: "inbox 账本已封，不再消费" };
+      // run 已经收尾（被打断之类）就不再摘：摘出来的那条没有收尾可挂，只会卡在预留里
+      if (this.activeRun === undefined) return { kind: "rejected", reason: "等的时候 run 已经收尾" };
+      const hit = this.inbox.reserveMatching(match);
+      if (hit === null) return null;
+      const runId = this.currentRunId;
+      if (runId !== null) this.inbox.noteConsumed(hit.reservationId, runId);
+      this.afterRunQueue.push(() => this.ackWatched(hit.reservationId, runId));
+      return { kind: "matched", message: hit.messages[0]! };
+    };
+
+    return await new Promise<InboxWatchResult>((resolve) => {
+      const deadline = this.clock.now() + opts.timeoutMs;
+      let done = false;
+      let busy = false;
+      let cancel: () => void = () => {};
+      const finish = (result: InboxWatchResult): void => {
+        if (done) return;
+        done = true;
+        cancel();
+        opts.signal?.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onAbort = (): void => finish({ kind: "aborted" });
+      const tick = async (): Promise<void> => {
+        if (done || busy) return;
+        busy = true;
+        try {
+          try {
+            await this.inbox.refresh();
+          } catch (e) {
+            this.reportDiagnostic({ code: "inbox_refresh_failed", message: errText(e) });
+          }
+          if (done) return; // refresh 那个 await 里被叫停了：不许再摘
+          const r = take();
+          if (r !== null) return finish(r);
+          if (this.clock.now() >= deadline) finish({ kind: "timeout" });
+        } finally {
+          busy = false;
+        }
+      };
+
+      if (opts.signal?.aborted === true) return finish({ kind: "aborted" });
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      // 已经在内存里的（同进程投进来的、之前刷到的）不必等一拍
+      const first = take();
+      if (first !== null) return finish(first);
+      cancel = this.clock.setInterval(() => void tick(), INBOX_POLL_MS);
+      void tick();
+    });
+  }
+
+  /** `watchInbox` 命中那条的 ack：transcript 先落定，再按整批同一套账本 ack。 */
+  private async ackWatched(reservationId: string, runId: string | null): Promise<void> {
+    try {
+      await this.sessionService?.settle();
+    } catch (e) {
+      // 工具结果没写进账本：那就不能说它被消费了——放回待投递，照普通消息再来一次
+      this.inbox.releaseBatch(reservationId, "released");
+      throw e;
+    }
+    try {
+      await this.inbox.ackBatch(reservationId, runId === null ? {} : { runId });
+    } catch (e) {
+      if (e instanceof InboxAckError && e.verdict === "indeterminate") {
+        this.enterInboxFailure(e);
+        return;
+      }
+      throw e; // pre-commit：账本已把它放回待投递，下次照普通消息投；诊断由 drainAfterRun 记
+    }
   }
 
   /** `afterRun` 登记的活：顺序执行，一件失败不影响下一件，错误进诊断。 */

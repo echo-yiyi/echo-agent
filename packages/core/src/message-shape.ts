@@ -123,6 +123,8 @@ export function assertMessageShape(message: unknown, where: string): void {
       return;
     case "environment":
       if (typeof m["source"] !== "string") throw new Error(`${where} 的 environment 消息缺 source`);
+      // 可选，但给了就得是字符串：它是账本匹配回信的键，形状不对就是永远匹配不上的回信
+      if (m["replyTo"] !== undefined && typeof m["replyTo"] !== "string") throw new Error(`${where} 的 environment 消息 replyTo 必须是字符串`);
       blocks("environment");
       return;
     default:

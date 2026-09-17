@@ -68,6 +68,12 @@ export type CreateSessionInput = {
   readonly main?: boolean;
 };
 
+/** `send()` 的可选项。 */
+export type SendOptions = {
+  /** 这条在回复哪一条：填对方那条消息的 id（它的抬头里 `message …` 那一段）。发件方的 `wait` 靠它认出回信。 */
+  readonly replyTo?: string;
+};
+
 /** `send()` 的结局。`accepted` 带 `alive`：对方没进程时这句话只是留言，发送方得知道。 */
 /**
  * `send()` 的结局。`accepted` 时对方**一定是活着的**——这是 2026-09-07 拍板的那条
@@ -75,7 +81,16 @@ export type CreateSessionInput = {
  * 所以不存在「存下了但没人读」这种中间态。
  */
 export type SendResult =
-  | { readonly kind: "accepted"; readonly alive: true; readonly recordId: string }
+  | {
+      readonly kind: "accepted";
+      readonly alive: true;
+      readonly recordId: string;
+      /**
+       * 这条消息的 id（发件方落的款，2026-09-16 起交回来）。对方回信时 `replyTo` 填它；
+       * 发件方拿它去等回信（`session_send` 的 `wait`）。与 `recordId` 不同：那是收件方 inbox 里的文件名。
+       */
+      readonly ref: string;
+    }
   | {
       readonly kind: "rejected";
       /**
@@ -158,7 +173,7 @@ export interface SessionFace {
   readonly canWake: boolean;
   create(input: CreateSessionInput): Promise<SessionRow>;
   list(filter?: SessionListFilter): Promise<readonly SessionRow[]>;
-  send(to: string, message: string): Promise<SendResult>;
+  send(to: string, message: string, opts?: SendOptions): Promise<SendResult>;
   close(sessionId: string): Promise<void>;
 }
 
@@ -318,8 +333,11 @@ export class EchoSessions implements SessionFace {
    * 返回值带对方**活没活着**：发给一段没进程的 session，这句话只是躺在盘上等它下次起来。
    * 发送方得知道自己是在留言还是在对话。
    */
-  async send(to: string, message: string): Promise<SendResult> {
+  async send(to: string, message: string, opts: SendOptions = {}): Promise<SendResult> {
     if (typeof to !== "string" || to === "") return { kind: "rejected", reason: "invalid", detail: "收件人不能为空" };
+    if (opts.replyTo !== undefined && (typeof opts.replyTo !== "string" || opts.replyTo === "")) {
+      return { kind: "rejected", reason: "invalid", detail: "replyTo 给了就得是非空字符串（被回复那条消息的 ref）" };
+    }
     try {
       assertSafeSessionId(to);
     } catch (e) {
@@ -342,11 +360,11 @@ export class EchoSessions implements SessionFace {
     const ref = `${self.sessionId ?? "host"}:${newMessageId()}`;
     let recordId: string;
     try {
-      recordId = await this.deliver(this.deps.storeFor(to), to, this.envelope(self.sessionId, message, ref), `${SESSION_SOURCE}:${ref}`);
+      recordId = await this.deliver(this.deps.storeFor(to), to, this.envelope(self.sessionId, message, ref, opts.replyTo), `${SESSION_SOURCE}:${ref}`);
     } catch (e) {
       return { kind: "rejected", reason: "store-error", detail: `写不进对方的 inbox：${e instanceof Error ? e.message : String(e)}` };
     }
-    return { kind: "accepted", alive: true, recordId };
+    return { kind: "accepted", alive: true, recordId, ref };
   }
 
   /**
@@ -435,9 +453,29 @@ export class EchoSessions implements SessionFace {
    * `ref` 不用收方的 `recordId`：那个是收方 `accept()` 时才发的号，发送方拿不到、也不该依赖。
    * 等回信（`wait` / `replyTo`）要靠它来对上号，那部分还没做。
    */
-  private envelope(from: string | null, text: string, ref?: string): AgentMessage {
-    return environmentMessage(text, SESSION_SOURCE, ref ?? `${from ?? "host"}:${newMessageId()}`);
+  /**
+   * 会话消息的信封。**正文前面加一行抬头**（2026-09-16）：environment 消息投给模型时 `source` / `ref`
+   * 都被剥掉（`messages.ts` 的投影），在那之前收件方的模型只拿到一段裸文本——不知道是哪一段发的，
+   * 也就没法回信。抬头说清发件段与这条的 id，回信时照着填 `to` 与 `reply_to`。
+   *
+   * 宿主程序发的（没有发件段）不加：那种消息没有「回给谁」可言。`replyTo` 另外记进消息字段（不出门），
+   * 给发件方的 `wait` 在账本里认回信用。
+   */
+  private envelope(from: string | null, text: string, ref?: string, replyTo?: string): AgentMessage {
+    const id = ref ?? `${from ?? "host"}:${newMessageId()}`;
+    const body = from === null ? text : `${sessionHeader(from, id, replyTo)}\n${text}`;
+    const m = environmentMessage(body, SESSION_SOURCE, id);
+    if (replyTo !== undefined && m.role === "environment") m.replyTo = replyTo;
+    return m;
   }
+}
+
+/**
+ * 会话消息的抬头：**模型逐字读的 prompt 资产**。形状固定、一行、英文——
+ * `session_send` 的描述与习惯段都按这个形状教模型怎么回信，改这里要一起改那两处。
+ */
+export function sessionHeader(from: string, messageId: string, replyTo?: string): string {
+  return `[from session ${from} · message ${messageId}${replyTo === undefined ? "" : ` · reply to ${replyTo}`}]`;
 }
 
 /** 发送方自己发的消息 id。与 inbox 的 recordId 无关——那是**收方**发的，发送方拿不到也不该依赖。 */

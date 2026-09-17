@@ -144,7 +144,9 @@ interface AgentToolsRegistry {
 
 `SessionFace.canWake` 说的就是「这个容器叫不叫得醒」。消费方按它决定**怎么说话**：叫得醒时没在跑的段仍是可以对话的 peer（`session_list` 说「发消息会把它叫起来」）；叫不醒时它们只是盘上的记录（说「从这儿够不着，`/resume` 切过去」）。
 
-等待特定 replyTo 并在命中时消费的接口尚未完成；send 成功只说明接收，不代表对方已经处理或回答，见 §9。
+**回信（2026-09-16 实现）。** 会话消息的正文前面有一行抬头 `[from session <发件段> · message <这条的 id>]`（回信还带 ` · reply to <被回的 id>`），由 [`sessionHeader()`](../../packages/core/src/session/sessions.ts#symbol=sessionHeader) 生成。要这一行是因为 environment 消息投给模型时 `source` / `ref` 都被剥掉——没有抬头，收件方只看得到一段裸文本，不知道是谁发的，也就回不了信。回信时 `session_send` 带 `reply_to`，它进消息的 `replyTo` 字段（与 `source` / `ref` 一样不出门，只给账本匹配）。
+
+`send` 成功只说明投进了对方的 inbox，不代表对方已经处理或回答。要等回答就带 `wait: true`：工具挂在**自己的** inbox 上，等 `replyTo` 指回这条的那封回信，**命中即消费**——回信作为工具结果交回，不再以 environment 消息进来一次；超时 / 被叫停什么都不消费，之后到的照普通路径进来，恰好一次。实现落点与 at-least-once 的边界见 §7 的 `AgentInbox` 与 §9。
 
 ## 6. main 与状态
 
@@ -170,14 +172,20 @@ interface AgentToolsRegistry {
 
 **core 不起进程**：findjob 给的 runner 在进程内挂一个实例上去、等它 `start()` 完成；coding 产品给的 runner 可以开一个终端窗口 `--resume`，然后等那段的 `.lock` 出现，各自出 extension 或宿主代码。容器没给 runner 时，宿主 API 的 `create` 仍可用（宿主自己知道怎么跑它），但 **`session_create` 工具不挂**：模型面的工具不能承诺系统不交付的事，模型调了 `session_create` 却什么都不会发生，比没有这个工具更坏。宿主 API 建的空段由宿主负责 close。
 
-extension 通过 AgentSessionsService 使用同一会话面；未接实际能力时由 NO_SESSION_FACE 返回明确的空结果或拒绝。服务注入规则见 [Extensions](extensions.md)。inbox.watch 与基于它的 wait 尚未实现，不作为当前可调用 API 列出。
+extension 通过 AgentSessionsService 使用同一会话面；未接实际能力时由 NO_SESSION_FACE 返回明确的空结果或拒绝。服务注入规则见 [Extensions](extensions.md)。
+
+**等在自己 inbox 上**是另一个能力端口 [`AgentInbox`](../../packages/core/src/extension/registries.ts#symbol=AgentInbox)（设计里一直叫它 `inbox.watch`，2026-09-16 实现），`session_send` 的 `wait` 是它的第一个用户，第三方要做「发出去等回执」也走它。形状与结局在 [`AgentInboxPort`](../../packages/core/src/inbox/watch.ts#symbol=AgentInboxPort)，实现是 [`Agent.watchInbox`](../../packages/core/src/agent.ts#symbol=Agent.watchInbox)：
+
+- **只能在 run 里等**：命中的那条单独预留出来（[`InboxStore.reserveMatching`](../../packages/core/src/inbox/store.ts#symbol=InboxStore.reserveMatching)，从待投递里摘走，整批消费就拿不到它），ack 挂在本轮 run 的收尾上、而且等 transcript 落定之后——工具结果入账了才算消费。
+- **自己刷盘**：常规的 inbox 轮询在有 run 时一拍不扫，而 `wait` 恰恰是在 run 的工具调用里挂着，所以它按同一节拍、同一个时钟自己 `refresh()`。
+- **inbox run 的收尾也排空收尾活**：被叫醒的会话跑的全是 inbox 触发的 run，此前只有用户 run 收尾才排空 `afterRun`，这类段里命中之后永远不会 ack（模型触发的热部署同样受影响）。判据见 [inbox run 也排空](../../packages/core/test/inbox-watch.test.ts#test=afterrun-在-inbox-触发的-run-里登记收尾时同样排空不只用户-run-才排)。
 
 **`echo:sessions` 工具组**（内建 extension，就是上面 API 的薄壳）：
 
 | 工具 | 参数 | 挂给谁 |
 |---|---|---|
 | `session_create` | `name`、`agent`（名字、inline 定义，或带 `name` 的 inline 定义——具名身份，同名的段共享个人记忆）、`workspace?`、`message` | 只 main，且容器给了 `SessionRunner` |
-| `session_send` | `to`、`message`；等待回信能力见 §9 | 全部 |
+| `session_send` | `to`、`message`、`reply_to?`（回的是哪一条，填它抬头里的 message id）、`wait?`、`timeout_seconds?`（缺省 120，最多 600） | 全部 |
 | `session_list` | `workspace?`、`includeClosed?` | 全部 |
 | `session_close` | `id` | 全部 |
 
@@ -200,7 +208,11 @@ extension 通过 AgentSessionsService 使用同一会话面；未接实际能力
 
 ## 9. 当前限制
 
-**等待回信。** send 已有持久投递，wait / inbox.watch 的命中消费、超时及回信关联尚未完成，不能把 API 草图当成当前能力。进程内一次性任务可用 subagent，但它不等同于跨 session 回信。
+**等待回信。** `wait` 已实现，剩下这几条边界：
+- **等的时候这一段什么都不做**：`wait` 挂在一次工具调用里，整轮 run 跟着挂，所以设了上限（600 秒）；能边干边等的场景应该不等、让回信照普通消息进来。
+- **at-least-once，不是 exactly-once**：命中后到 ack 之间崩溃，那封回信还在盘上，重启后会再以普通消息进来一次——这时对话里它可能已经作为工具结果出现过。
+- **宿主程序发的消息没有抬头**：没有发件段，就没有「回给谁」，模型也无从 `reply_to`。
+- 进程内一次性任务仍可用 subagent，它与跨 session 回信是两件事。
 
 **持久清空。** /clear 目前仅 reset 内存；目标是关闭旧段、新建一段并切换。旧 inbox 尚未消费的 record 如何处理仍未确定，不在本文假定为自动转投。
 
@@ -214,13 +226,14 @@ extension 通过 AgentSessionsService 使用同一会话面；未接实际能力
 - **跨进程消息**：A 进程 `session_send` 到 B，B 进程不重启，下一轮的 provider 请求里含那条 environment 消息，`source` 为 `session`、`ref` 指向 A。
 - **同进程与跨进程同一条**：同一个容器里两段互发，盘上 `inbox/` 里有那条 record，ack marker 在消费后出现。
 - **多写者不撞号**：两个进程同时往同一段的 inbox 各投 100 条，盘上恰好 200 个 record 文件，消费后 200 条都进过 transcript。
-- **wait 不双送**（**`wait` 还没做**，见 §9；这条与下面那条是它落地时的判据，不是当前已通过的测试）：A `wait: true` 命中回信后，那条回信不再以 environment 消息出现在 A 的任何一轮 provider 请求里；超时后到的回信恰好出现一次。
+- **wait 不双送**：A `wait: true` 命中回信后，那条回信不再以 environment 消息出现在 A 的对话里（A 开着自动消费、多等几拍也不出现）；超时后到的回信恰好出现一次。判据见 [端到端](../../packages/core/test/session-wait.test.ts#test=a-wait-发给-bb-看得见抬头带-replyto-回信a-的工具直接拿到回信之后不再以普通消息出现) 与 [超时](../../packages/core/test/inbox-watch.test.ts#test=超时什么都不消费之后到的回信照普通路径进来恰好一次)。
 - **崩在 working**：一段的进程在 working 时被杀，`session_list` 里它 `alive = false`、`phase = null`。
 - **runner 失败不留孤儿**：runner 抛错或超过 `runTimeoutMs` 不 resolve，`create` 判红，那段在盘上 `status = closed`，`session_list` 缺省不列它；runner 成功时 `create` 返回的行 `alive = true`。
 - **project 哈希校验**：把一个 project 目录的 `workspace.json` 改成别的路径，从原 workspace 起的 session 打开时判红。
 - **快照只能收紧**：一段 inline 定义的 session，在工具比创建时少的容器里 `--resume`，工具集是交集、不报错；没有任何路径能让它多出快照外的工具。
 - **只跟活着的段说话**（2026-09-07 替代原「留言」判据）：send 到没进程的段，容器给了 runner 就先叫醒再投递、返回 `accepted` 且对方此刻活着；叫不醒（没给 runner 或 runner 失败）返回 `rejected: unreachable`，盘上 `inbox/` 里不多任何 record。
-- **wait**（未实现的目标判据）：A `wait: true` 发给 B，B 回信带 `replyTo`，A 的工具调用在回信落盘后返回；超时返回 `timedOut`。
+- **wait**：A `wait: true` 发给 B，B 回信带 `reply_to`，A 的工具调用在回信落盘后返回回信本身；超时返回「没等到」且什么都不消费；没 ack 就崩溃，重启照样重放（[账本层](../../packages/core/test/inbox-watch.test.ts#test=reservematching-只摘第一条匹配的其余-pending-原样原序没-ack-就崩重启照样重放at-least-once)）。
+- **收件方看得见是谁发的**：会话消息投给模型的正文带抬头，写明发件段与这条的 id；回信的抬头点名回的是哪一条（[判据](../../packages/core/test/sessions-face.test.ts#test=send正文带抬头发件段-这条的-id回信另记-replyto-字段结果交回-ref)）。
 - **main**：非 main 的 session 工具表里没有 `session_create`；宿主 API 的 `create` 不受限。
 - **不越权**：inline 点名创建者当前工具集（§4）之外的工具，`create` 判红、`~/.echo/sessions/` 下不多目录；池里有、但被角色收紧挡掉或已禁用的，同样判红。判据见 [不越权比的是工具集而不是池](../../packages/core/test/create-echo.test.ts#test=不越权比的是创建者此刻的工具集而不是池被角色收紧挡掉的被禁用的判红没取过的延迟工具放行)。
 - **`/clear` 落盘（目标判据，未实现）**：`/clear` 后旧段 `status = closed`，新段 id 不同；`--resume` 旧段回来的是清之前的对话，`--continue` 挑到的是新段。
@@ -234,7 +247,7 @@ extension 通过 AgentSessionsService 使用同一会话面；未接实际能力
 
 | 层 | 夹具 | 落哪些判据 |
 |---|---|---|
-| **单元（`InMemoryDir`，零盘）** | `packages/core/test/session-service.test.ts`、`inbox-durable.test.ts`（含 durable ingress 的 conformance suite）、`extension-host.test.ts`、`create-agent.test.ts` | 布局扁平化与 `list()` 扫上级目录；运行时空会话可发现与退出清理；meta 的 `agent` / `main` / `status` 验形；**多写者不撞号**（两个 `InboxStore` 实例对同一个 `StorageDir` 各投 100 条）；`watch` 命中即消费、超时不消费（**随 `wait` 一起还没做**）；`echo:inline-agent` 装上时 identity 段替换、工作集收紧，卸下时复原；三层作用域解析与 `workspace.json` 校验；角色不越权判红、快照只能收紧 |
+| **单元（`InMemoryDir`，零盘）** | `packages/core/test/session-service.test.ts`、`inbox-durable.test.ts`（含 durable ingress 的 conformance suite）、`extension-host.test.ts`、`create-agent.test.ts` | 布局扁平化与 `list()` 扫上级目录；运行时空会话可发现与退出清理；meta 的 `agent` / `main` / `status` 验形；**多写者不撞号**（两个 `InboxStore` 实例对同一个 `StorageDir` 各投 100 条）；`watch` 命中即消费、超时不消费、只摘匹配的那条（`inbox-watch.test.ts`）；会话消息的抬头与 `replyTo`（`sessions-face.test.ts`）；两段同进程走真装配的 `wait` 端到端（`session-wait.test.ts`）；`echo:inline-agent` 装上时 identity 段替换、工作集收紧，卸下时复原；三层作用域解析与 `workspace.json` 校验；角色不越权判红、快照只能收紧 |
 | **单进程集成（真盘，脚本化 provider）** | `create-agent.test.ts` 的 `fakeProvider`、`packages/cli/test/cli.test.ts` 的 `scriptedProvider`：脚本让模型按顺序调 `session_create` / `session_send` | 同一个容器里两段互发、先落盘再投、ack marker；runner 失败 / 超时判红并置 closed、成功时 `alive = true`；非 main 的工具表；`alive = false` 则 `phase = null` |
 | **跨进程（真 spawn，已实现）** | `packages/core/test/sessions-cross-process.test.ts` + `fixtures/session-peer.ts`：一个真进程起一段 session 然后**待着**，末行吐 JSON 报告 | 别的进程写进它 inbox 的一条，它不重启就看见（反证过：把轮询摘掉这条立刻红）；两段各拿各的锁、同时活着、收摊都还回去。留言之后 `--resume` 第一轮看到那条仍在 `resident-v0.test.ts` 里。注意 `resident-v0` 的 replay 阶段本来就有 ack 裁决窗口的抖动，别把新判据挂在那个窗口上 |
 | **壳（真 spawn `bin`）** | `cli.test.ts` 的 `spawnBin` | `--continue` 只挑 main 且 active；持久清空为待补目标；启动即退出不留目录；续了壳有提示 |

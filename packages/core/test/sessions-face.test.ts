@@ -267,14 +267,53 @@ test("工具面：main 且容器给了 runner 才挂 session_create；非 main /
   expect(limited).toContain("session_send");
 });
 
-test("工具面：习惯段只在能派活时讲派活；异步这条两种情况都讲", () => {
-  const withCreate = sessionToolsSection({ canCreate: true }).render({} as never);
+test("工具面：习惯段只在能派活时讲派活、只在等得了时讲 wait；异步与怎么回信两种情况都讲", () => {
+  const watch = async () => ({ kind: "timeout" }) as const;
+  const withCreate = sessionToolsSection({ canCreate: true, watchInbox: watch }).render({} as never);
   const without = sessionToolsSection({ canCreate: false }).render({} as never);
   expect(withCreate).toContain("session_create");
   expect(without).not.toContain("session_create");
+  // 2026-09-16 起能等回信：等得了才教模型 wait，等不了的装配里不许提
+  expect(withCreate).toContain("wait: true");
+  expect(without).not.toContain("wait: true");
   for (const text of [withCreate, without]) {
-    expect(text).toContain("does not wait for a reply"); // 异步是这组工具最容易被误解的一条
+    expect(text).toContain("returns as soon as your message is delivered"); // 缺省仍是异步——这组工具最容易被误解的一条
+    expect(text).toContain("reply_to"); // 抬头怎么读、怎么回：没有这一句模型不知道回给谁
   }
+});
+
+test("send：正文带抬头（发件段 + 这条的 id），回信另记 replyTo 字段，结果交回 ref", async () => {
+  // 没有抬头时（2026-09-16 之前）：environment 消息投给模型时 source / ref 都被剥掉，
+  // 收件方只看得到一段裸文本，不知道是谁发的，也就回不了信。
+  const h = harness();
+  await seed(h.root, "s-peer");
+  h.alive.add("s-peer");
+  const first = await h.sessions.send("s-peer", "问个事");
+  expect(first.kind).toBe("accepted");
+  const ref = first.kind === "accepted" ? first.ref : "";
+  expect(ref).toStartWith("s-self:");
+
+  const reply = await h.sessions.send("s-peer", "再补一句", { replyTo: "s-peer:abc" });
+  const inbox = await new InboxStore(scoped(h.root, "s-peer/")).restore();
+  const [m1, m2] = inbox.map((r) => r.message);
+  const text = (m: typeof m1): string => JSON.stringify(m !== undefined && "content" in m ? m.content : "");
+  expect(text(m1)).toContain(`[from session s-self · message ${ref}]\\n问个事`);
+  expect(m1?.role === "environment" ? m1.replyTo : "not-env").toBeUndefined(); // 不是回信就没有这个字段
+  expect(text(m2)).toContain(`· reply to s-peer:abc]`);
+  expect(m2?.role === "environment" && m2.replyTo).toBe("s-peer:abc");
+  expect(reply.kind).toBe("accepted");
+
+  expect(await h.sessions.send("s-peer", "x", { replyTo: "" })).toMatchObject({ kind: "rejected", reason: "invalid" });
+});
+
+test("工具面：没接 watch 时 wait 在发之前就判红——发出去了再说等不了，模型会以为要重发", async () => {
+  const h = harness();
+  await seed(h.root, "s-peer");
+  h.alive.add("s-peer");
+  const send = makeSessionTools(h.sessions, { canCreate: false }).find((t) => t.name === "session_send")!;
+  const r = await send.execute({ to: "s-peer", message: "等你回", wait: true }, ctx());
+  expect(r.isError).toBe(true);
+  expect(await new InboxStore(scoped(h.root, "s-peer/")).restore()).toHaveLength(0); // 一条都没发出去
 });
 
 test("工具面：session_create 的 agent 参数——按名点中、现写一份、不点就是产品原样", async () => {

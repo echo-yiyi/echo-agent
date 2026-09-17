@@ -33,6 +33,7 @@ export {
   AgentBackgroundService,
   AgentCompaction,
   AgentHooks,
+  AgentInbox,
   AgentMemory,
   AgentPrompt,
   AgentPolicies,
@@ -48,6 +49,8 @@ export {
   type AgentSkillsRegistry,
   type AgentToolsRegistry,
 } from "./registries.ts";
+// 等在自己 inbox 上（2026-09-16，`AgentInbox`）：消费方要能写出 watch 的回调与结局分支
+export type { AgentInboxPort, InboxWatchOptions, InboxWatchResult } from "../inbox/watch.ts";
 // 记忆模块（2026-09-10 进公共面）：第一个真实的包外消费者是陪伴产品——它要在 extension 里经
 // `AgentMemory.module()` 声明自己的模块（relationship / collaboration / experiences），并在
 // `memory.builtin: false` 之后按需把内建的某几个再注册回来。所以内建三个的**定义**与模块的**类型**

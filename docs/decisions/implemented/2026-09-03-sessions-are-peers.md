@@ -1,6 +1,6 @@
 # 会话对等无父子,通道是 inbox 落盘,`wait` 是通道上的等待;core 不管进程
 
-> 状态:proposed · 提出 2026-09-03 · 拍板 2026-09-03(口头,实现后移入 implemented) · 来源 [会话与 agent 集群](../../design/sessions.md) §5、§7
+> 状态:implemented · 提出 2026-09-03 · 拍板 2026-09-03(口头) · 挪入 implemented 2026-09-16(`wait` 落地,对照代码逐条核过验收) · 来源 [会话与 agent 集群](../../design/sessions.md) §5、§7
 
 ## 现状(拍板前)
 
@@ -23,3 +23,14 @@
 ## 验收
 
 A 进程 `session_send` 到 B,B 不重启,下一轮 provider 请求里含那条 environment 消息;同容器两段互发,盘上 `inbox/` 里有 record、消费后有 ack marker;两个进程同时往同一段各投 100 条,盘上恰好 200 个文件、200 条都进过 transcript;send 到没进程的段返回 `alive: false`,之后 `--resume` 那段第一轮看到它;`wait: true` 在回信落盘后返回且那条回信不再以 environment 消息出现,超时返回 `timedOut`、之后到的回信恰好出现一次。
+
+## 实现注(2026-09-16)
+
+**验收里有一句已被后来的决定替代**:「send 到没进程的段返回 `alive: false`,之后 `--resume` 那段第一轮看到它」。2026-09-07 用户拍板「只跟活着的段说话」(虚拟 actor):send 发现对方没在跑,先叫醒再投递;叫不醒就 `rejected: unreachable`,一条都不留。所以不存在「留言」这个中间态,现行判据见 [会话与 agent 集群](../../design/sessions.md) §10「只跟活着的段说话」。
+
+**`wait` 落地时多做了两件,都是它成立的前提**:
+
+- **会话消息加抬头**。environment 消息投给模型时 `source` / `ref` 都被剥掉,收件方的模型原本只看得到一段裸文本——不知道谁发的,回信无从谈起。现在正文前有一行 `[from session <发件段> · message <id>]`,回信带 `reply_to`,进消息的 `replyTo` 字段(不出门,只给账本匹配)。`EnvironmentMessage` 因此多了一个可选字段;旧数据没有它,照读,不需要迁移。
+- **inbox 触发的 run 收尾也排空 `afterRun`**。此前只有用户 run 收尾才排空,而被叫醒的会话跑的全是 inbox run——`wait` 命中之后的 ack 挂在那里,不排空就永远不 ack。模型触发的热部署在这类段里同样不会执行,一并修了。
+
+实现落点:[`Agent.watchInbox`](../../../packages/core/src/agent.ts#symbol=Agent.watchInbox)、[`InboxStore.reserveMatching`](../../../packages/core/src/inbox/store.ts#symbol=InboxStore.reserveMatching)、extension 面的 [`AgentInbox`](../../../packages/core/src/extension/registries.ts#symbol=AgentInbox)。

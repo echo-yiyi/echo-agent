@@ -392,6 +392,23 @@ export class InboxStore {
     return { reservationId, recordIds: batch.map((r) => r.recordId), messages: batch.map((r) => r.message) };
   }
 
+  /**
+   * 从 pending 里摘出**第一条**满足条件的 record，单独成一批 reserve（2026-09-16，`wait` 的命中即消费）。
+   *
+   * 其余 pending 原样、原序留着。摘出来的这条从此不在 pending 里，所以正常的整批消费拿不到它，
+   * 也就不会再以 environment 消息投一次；它的 durable fact 仍在盘上，ack / release 走与整批**同一套**
+   * 账本（`ackBatch` / `releaseBatch`）——marker 落盘前崩溃，重启照旧重放，at-least-once 不破。
+   */
+  reserveMatching(predicate: (message: AgentMessage) => boolean): InboxReservedBatch | null {
+    this.assertNotSealed("reserveMatching");
+    const i = this.pending.findIndex((r) => predicate(r.message));
+    if (i === -1) return null;
+    const [record] = this.pending.splice(i, 1) as [InboxRecordV1];
+    const reservationId = `rsv:${crypto.randomUUID()}`;
+    this.reservations.set(reservationId, [record]);
+    return { reservationId, recordIds: [record.recordId], messages: [record.message] };
+  }
+
   /** admission 在创建 ticket 前同步核对：存在、未消费、record 集合与顺序**完全相等**。抛 = 编程不变量破坏。 */
   assertReserved(reservationId: string, orderedRecordIds: readonly string[]): void {
     const batch = this.reservations.get(reservationId);
