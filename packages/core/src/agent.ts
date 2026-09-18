@@ -2814,6 +2814,8 @@ export class Agent {
     this._state.startedAt = null;
     this._state.streamingMessage = undefined;
     this._state.pendingToolCalls = new Set();
+    this._state.iteration = 0;
+    this._state.retryCount = 0;
     this.activeRun?.resolve();
     this.activeRun = undefined;
     if (this.currentRunId !== null) this.terminalByRun.delete(this.currentRunId);

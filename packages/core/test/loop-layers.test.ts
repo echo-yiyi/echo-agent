@@ -345,6 +345,21 @@ test("transport 错误后成功：同一 turn 两个 attempt，中间恰好一�
   expect(JSON.stringify(requests[1]!.messages)).not.toContain("半截");
 });
 
+test("运行态 idle 时归零：run 里重试过（retryCount 到过 2、iteration 到过 1），回到 idle 两者都是 0，不把上一个 run 的值带进空闲态", async () => {
+  const { fn } = capturing([partialThenError("半截", "rate_limit"), textTurn("ok")]);
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, retryPolicy: FAST_RETRY });
+  const seen = { retryCount: 0, iteration: 0 };
+  agent.subscribe(() => {
+    seen.retryCount = Math.max(seen.retryCount, agent.state.retryCount);
+    seen.iteration = Math.max(seen.iteration, agent.state.iteration);
+  });
+  await agent.prompt("go");
+  expect(seen).toEqual({ retryCount: 2, iteration: 1 }); // 跑的时候确实非零——下面的 0 才有意义
+  expect(agent.state.status).toBe("idle");
+  expect(agent.state.retryCount).toBe(0);
+  expect(agent.state.iteration).toBe(0);
+});
+
 test("持续 retryable 错误：一个 run 的请求总数 = maxAttempts，outcome 是那个错误", async () => {
   const { fn, requests } = capturing([errorTurn("rate_limit", "限流", true), errorTurn("rate_limit", "限流", true), errorTurn("rate_limit", "限流", true), textTurn("不该到")]);
   const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, retryPolicy: FAST_RETRY });
