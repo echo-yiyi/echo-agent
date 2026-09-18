@@ -212,6 +212,13 @@ function partialThenError(text: string, code: string): ScriptedTurn {
 
 const FAST_RETRY = { maxAttempts: 3, backoffMs: () => 0 };
 
+/**
+ * 循环事件外面那一层（2026-09-18，状态变化都有事件）：admission 放行时先不接活、再进 generating；
+ * 收尾先回 idle、再恢复接活。四个都在 `prompt()` resolve 之前送达。
+ */
+const RUN_OPEN = ["availability_changed", "status_changed"] as const;
+const RUN_CLOSE = ["status_changed", "availability_changed"] as const;
+
 /* ─────────────── 场景 ─────────────── */
 
 test("只有文本：一条 reply、一个 turn、一个 attempt，事件序列逐拍确定", async () => {
@@ -221,6 +228,7 @@ test("只有文本：一条 reply、一个 turn、一个 attempt，事件序列�
   expect(r.outcome.kind).toBe("completed");
   expect(validate(events)).toEqual([]);
   expect(types(events)).toEqual([
+    ...RUN_OPEN,
     "agent_start",
     "reply_start",
     "message_end", // user 输入，在 reply 里、turn 之前
@@ -232,6 +240,7 @@ test("只有文本：一条 reply、一个 turn、一个 attempt，事件序列�
     "turn_end",
     "reply_end",
     "agent_end",
+    ...RUN_CLOSE,
   ]);
   const reply = events.find((e) => e.type === "reply_start");
   const turn = events.find((e) => e.type === "turn_start");
@@ -252,7 +261,7 @@ test("轮首 abort（turn 里）：turn_start 之后、发请求之前被中止 
   const r = await agent.prompt("go");
   expect(r.outcome).toEqual({ kind: "aborted", reason: "轮首中断" });
   expect(validate(events)).toEqual([]);
-  expect(types(events)).toEqual(["agent_start", "reply_start", "message_end", "turn_start", "turn_end", "reply_end", "agent_end"]);
+  expect(types(events)).toEqual([...RUN_OPEN, "agent_start", "reply_start", "message_end", "turn_start", "turn_end", "reply_end", "agent_end", ...RUN_CLOSE]);
   const turnEnd = events.find((e) => e.type === "turn_end");
   expect(turnEnd?.type === "turn_end" && turnEnd.result.kind).toBe("aborted");
 });
@@ -266,7 +275,7 @@ test("轮首 abort（reply 里）：输入吸收之后、第一个 turn 之前�
   const r = await agent.prompt("go");
   expect(r.outcome).toEqual({ kind: "aborted", reason: "还没开 turn 就停" });
   expect(validate(events)).toEqual([]);
-  expect(types(events)).toEqual(["agent_start", "reply_start", "message_end", "reply_end", "agent_end"]);
+  expect(types(events)).toEqual([...RUN_OPEN, "agent_start", "reply_start", "message_end", "reply_end", "agent_end", ...RUN_CLOSE]);
   const replyEnd = events.find((e) => e.type === "reply_end");
   expect(replyEnd?.type === "reply_end" && replyEnd.turns).toBe(0);
 });
@@ -280,7 +289,7 @@ test("轮首 deadline：输入吸收期间就超时 → 零 turn 的 reply，out
   const r = await agent.prompt("go");
   expect(r.outcome).toMatchObject({ kind: "error", error: { code: "timeout" } });
   expect(validate(events)).toEqual([]);
-  expect(types(events)).toEqual(["agent_start", "reply_start", "message_end", "reply_end", "agent_end"]);
+  expect(types(events)).toEqual([...RUN_OPEN, "agent_start", "reply_start", "message_end", "reply_end", "agent_end", ...RUN_CLOSE]);
 });
 
 test("要工具：第二个 turn 的 cause 是 tool_use，工具事件与 toolResult 落在第一个 turn 里、attempt_end{landed} 之后", async () => {
@@ -477,7 +486,7 @@ test("contextBeforeBuild block：attempt_end{blocked} → turn_end → reply_end
   const r = await agent.prompt("go");
   expect(r.outcome).toEqual({ kind: "aborted", reason: "DO_NOT_CALL_MODEL" });
   expect(validate(events)).toEqual([]);
-  expect(types(events)).toEqual(["agent_start", "reply_start", "message_end", "turn_start", "attempt_start", "attempt_end", "turn_end", "reply_end", "agent_end"]);
+  expect(types(events)).toEqual([...RUN_OPEN, "agent_start", "reply_start", "message_end", "turn_start", "attempt_start", "attempt_end", "turn_end", "reply_end", "agent_end", ...RUN_CLOSE]);
   const attemptEnd = events.find((e) => e.type === "attempt_end");
   expect(attemptEnd?.type === "attempt_end" && attemptEnd.result).toEqual({ kind: "blocked", reason: "DO_NOT_CALL_MODEL" });
 });
@@ -682,7 +691,7 @@ test("从 transcript 续跑：reply source=resume，没有输入的 message_end�
   const r = await agent.continue();
   expect(r.outcome.kind).toBe("completed");
   expect(validate(events)).toEqual([]);
-  expect(types(events).slice(0, 4)).toEqual(["agent_start", "reply_start", "turn_start", "attempt_start"]);
+  expect(types(events).slice(0, 6)).toEqual([...RUN_OPEN, "agent_start", "reply_start", "turn_start", "attempt_start"]);
   const reply = events.find((e) => e.type === "reply_start");
   expect(reply?.type === "reply_start" && reply.source).toBe("resume");
 });
@@ -735,7 +744,7 @@ test("streamFn 抛出（违约）：折成 attempt_end{failed, internal}，层�
   const r = await agent.prompt("go");
   expect(r.outcome).toMatchObject({ kind: "error", error: { code: "internal", message: "STREAM_FN_EXPLODED" } });
   expect(validate(events)).toEqual([]);
-  expect(types(events)).toEqual(["agent_start", "reply_start", "message_end", "turn_start", "attempt_start", "message_start", "message_end", "attempt_end", "turn_end", "reply_end", "agent_end"]);
+  expect(types(events)).toEqual([...RUN_OPEN, "agent_start", "reply_start", "message_end", "turn_start", "attempt_start", "message_start", "message_end", "attempt_end", "turn_end", "reply_end", "agent_end", ...RUN_CLOSE]);
   // deadline timer 已清：run 立刻收场，不等 timeoutMs
   expect(Date.now() - started).toBeLessThan(1_000);
   expect(agent.status).toBe("idle");

@@ -3,8 +3,8 @@
 // 为什么是类不是函数（三条，函数形态给不出）：
 //   ① 生命周期跨越多次调用——`streamingMessage` / `pendingToolCalls` 这些「正在发生什么」
 //      在函数里无处安放，UI 也就永远拿不到逐字流。
-//   ② 状态需要唯一所有者——事件应用集中在私有 `processEvents()`；run 内投影的主要字段由事件驱动，
-//      装备面 setter / reset / 恢复 / setWorkspace 与 run 开合处的直写是另一条显式路径，两条都在类内（是纪律不是门）。
+//   ② 状态需要唯一所有者——存储字段只在私有 `processEvents()` 里归约：装备面 setter / reset / 恢复 /
+//      setWorkspace / run 开合也各发一个事件，由它的归约改状态（例外见 `events.ts` 文件头）。
 //   ③ 决策点需要具名外露——convertToLlm / transformContext / streamFunction / hooks
 //      是公共可替换字段：上层换行为不改内核，评测塞假 streamFn 就能跑。
 
@@ -380,17 +380,17 @@ type TaskWriteOutcome = "written" | "cancelled";
  * `createTasks()` / `updateTask()` / `removeTask()` / `loadTasks()` 全都直接对它 `set`/`delete`，
  * 换个子类它们一行都不用改，也不会有第二种「任务清单」的类型在公共面上。
  */
-class ObservedTaskMap extends Map<string, TaskItem> {
+class ObservedMap<K, V> extends Map<K, V> {
   /** 由 Agent 在构造期接上；在此之前（字段初始化顺序）改动不通知，那时也还没有 store。 */
   onChange: () => void = () => {};
 
-  override set(key: string, value: TaskItem): this {
+  override set(key: K, value: V): this {
     super.set(key, value);
     this.onChange();
     return this;
   }
 
-  override delete(key: string): boolean {
+  override delete(key: K): boolean {
     const removed = super.delete(key);
     if (removed) this.onChange();
     return removed;
@@ -403,6 +403,29 @@ class ObservedTaskMap extends Map<string, TaskItem> {
   }
 }
 
+/**
+ * 工作集收紧那一叠（`ToolRestrictions`）的同款：`restrictTools()` 只 `push` / `splice`，换成子类它一行不用改。
+ * `splice` 等内部造数组时用普通 `Array`（species），不让结果也带上通知。
+ */
+class ObservedList<T> extends Array<T> {
+  static override get [Symbol.species](): ArrayConstructor {
+    return Array;
+  }
+  onChange: () => void = () => {};
+
+  override push(...items: T[]): number {
+    const n = super.push(...items);
+    if (items.length > 0) this.onChange();
+    return n;
+  }
+
+  override splice(start: number, deleteCount?: number, ...items: T[]): T[] {
+    const removed = deleteCount === undefined ? super.splice(start) : super.splice(start, deleteCount, ...items);
+    if (removed.length > 0 || items.length > 0) this.onChange();
+    return removed;
+  }
+}
+
 export class Agent {
   private _state: MutableAgentState;
 
@@ -410,14 +433,14 @@ export class Agent {
         （2026-08-05 用户拍定）。操作它们的方法在各自的 `xxx/harness.ts` 里，
         都是纯函数：`registerTool(agent.tools, t)`、`activateSkill(agent.skills, agent.activeSkills, "h5")`。 ── */
   /** 工具池。「能用 / 禁用」是工具自己的状态（`tool.disabled`），不外挂。 */
-  readonly tools: ToolMap = new Map();
+  readonly tools: ToolMap = new ObservedMap<string, AgentTool>();
   /**
    * 收紧工作集的那一叠（2026-09-07，角色定义）：`AgentTools.restrict()` 往里压，卸载时摘。
    * **池与它分开**——池是「装了什么」，这里是「这一段露出什么」，角色卸掉之后池原样还在。
    * 三个读点（`state.tools` / `getTools()` / `resolveTool()`）都要过 `restriction()`，
    * 漏一个就是「菜单上没有但点得动」。
    */
-  readonly toolRestrictions: ToolRestrictions = [];
+  readonly toolRestrictions: ToolRestrictions = new ObservedList<ReadonlySet<string>>();
   /**
    * 内建能力**造好但尚未注册**的工具，按生命周期 owner 分四组。
    *
@@ -431,7 +454,7 @@ export class Agent {
   readonly skills: SkillMap = new Map();
   private readonly skillStore?: StorageDir;
   /** skill 工作集：激活的那些（Map 保插入序 = 激活顺序）。 */
-  readonly activeSkills: ActiveSkillMap = new Map();
+  readonly activeSkills: ActiveSkillMap = new ObservedMap<string, ActiveSkill>();
   /** 后台活动的一整包（任务表 + 回调 + 闸）——传给 `startBackground(agent.background, spec)`。 */
   readonly background: AgentBackground;
   /**
@@ -440,7 +463,7 @@ export class Agent {
    * `createTasks()` / `updateTask()` 直接改 map 时要一直等到 `stop()` 才写回去，
    * 与「Task 变化由 Agent 自动持久化」这句话不符（2026-08-24 review 的第 1 条）。
    */
-  readonly tasks: TaskMap = new ObservedTaskMap();
+  readonly tasks: TaskMap = new ObservedMap<string, TaskItem>();
   private readonly listeners = new Set<AgentListener>();
   private seq = 0;
 
@@ -725,7 +748,7 @@ export class Agent {
     // 全局约定：优先显式依赖注入,不用全局 holder）。
     const onChanged = (c: ResourceChange): void => {
       probeAgent(this.agentProbeNow(), { kind: "resource_changed", change: c });
-      void this.processEvents({ type: "resource_changed", ...c });
+      this.emitDetached({ type: "resource_changed", ...c });
     };
     const report = (d: Diagnostic): void => void this.reportDiagnostic(d);
     const deliver = (m: AgentMessage): void => this.deliver(m);
@@ -759,7 +782,13 @@ export class Agent {
     // 模型 `TaskCreate` 拿到「已建 1 条任务」的成功回执之后进程崩掉，那条任务就没了——
     // 工具说成功、盘上没有，是最坏的一种谎。resident 测试此前用干净 stop 掩盖了这个缺口。
     // 任何人改 `tasks`（工具、公开的 `createTasks()`、甚至直接 `map.set`）都会落盘
-    (this.tasks as ObservedTaskMap).onChange = (): void => {
+    // 现算视图的权威是这几个集合：接在集合上，不接在调用点——改它们的入口（扩展注册、角色收紧、
+    // skill 激活、热部署卸载、任务工具……）散在各处，接调用点必然漏。构造期的初始数据在这之前装，不通知。
+    (this.tools as ObservedMap<string, AgentTool>).onChange = (): void => this.noteViewChanged("tools");
+    (this.toolRestrictions as ObservedList<ReadonlySet<string>>).onChange = (): void => this.noteViewChanged("tools");
+    (this.activeSkills as ObservedMap<string, ActiveSkill>).onChange = (): void => this.noteViewChanged("activeSkills");
+    (this.tasks as ObservedMap<string, TaskItem>).onChange = (): void => {
+      this.noteViewChanged("tasks");
       // **取消也要说出来。** 工具路径有回执可以承载这件事，这条路径（公开的 `createTasks()`
       // 之类直接改 map）没有返回值——上一版只 `.catch()`，而 `"cancelled"` 是**正常返回值
       // 不是异常**，于是「改动进了内存、盘上什么都没有」是完全静默的。
@@ -989,7 +1018,12 @@ export class Agent {
    * 壳用它收 `permissionRequest`，再单独调 `answerPermission()`。
    */
   subscribeLifecycle(listener: LifecycleEventListener): () => void {
-    return this.hooks.subscribe(listener);
+    const off = this.hooks.subscribe(listener);
+    this.syncAvailability(); // 有没有订阅者是 acceptsWork 的判据之一
+    return () => {
+      off();
+      this.syncAvailability();
+    };
   }
 
   /**
@@ -1058,7 +1092,9 @@ export class Agent {
     if (!this.questions.isOpen(handle.questionId)) return handle.settled;
     await this.hooks.notify({ type: "question", ...handle.ask }, this.hookContext());
     const settlement = await handle.settled;
-    if (settlement.kind === "unanswered" && settlement.reason !== "no-responder") {
+    if (settlement.kind === "answered") {
+      await this.hooks.notify({ type: "questionAnswered", questionId: handle.questionId, toolCallId: handle.ask.toolCallId }, this.hookContext());
+    } else if (settlement.reason !== "no-responder") {
       await this.hooks.notify(
         { type: "questionCancelled", questionId: handle.questionId, toolCallId: handle.ask.toolCallId, reason: settlement.reason },
         this.hookContext(),
@@ -1084,7 +1120,7 @@ export class Agent {
     this.assertIdle("model");
     normalizeModelSnapshot(value); // fail-loud 在这里：admission 时冻结 binding 不能再抛
     const from = this._state.model;
-    this._state.model = value;
+    this.emitDetached({ type: "equipment_changed", field: "model", model: value });
     this.catalogRevision += 1;
     probeAgent(this.agentProbeNow(), { kind: "equipment_changed", field: "model", from: `${from.provider}/${from.id}`, to: `${value.provider}/${value.id}` });
   }
@@ -1095,7 +1131,7 @@ export class Agent {
   set thinkingLevel(value: ThinkingLevel) {
     this.assertIdle("thinkingLevel");
     const from = this._state.thinkingLevel;
-    this._state.thinkingLevel = value;
+    this.emitDetached({ type: "equipment_changed", field: "thinkingLevel", thinkingLevel: value });
     probeAgent(this.agentProbeNow(), { kind: "equipment_changed", field: "thinkingLevel", from, to: value });
   }
 
@@ -1362,9 +1398,11 @@ export class Agent {
     // 上一版在 ack 之前就清了标记，于是 marker 还卡着、裁决没出来时新 run 已经拿到 permit——
     // 它可能跑在「这批要重放」或「账本要 seal」之前（实测 agent_start 从 1 变成 2）。
     this.inboxTicketOutstanding = true;
+    this.syncAvailability();
     const batch = this.inbox.reserveBatch();
     if (batch === null) {
       this.inboxTicketOutstanding = false;
+      this.syncAvailability();
       return null;
     }
     try {
@@ -1415,6 +1453,7 @@ export class Agent {
       }
       // 裁决出来了才放行：committed / pre-commit 先清标记再排下一轮；indeterminate 只清标记，一轮都不排
       this.inboxTicketOutstanding = false;
+      this.syncAvailability();
       // 与用户 run 的收尾（`finishRun`）同一条：run 里登记的收尾活（`afterRun`）先排空，再排自主工作。
       // 此前这里不排空——被叫醒的会话跑的全是 inbox run，它们登记的活（模型触发的热部署、`wait` 命中后的 ack）
       // 要等到下一个用户 run 收尾才执行，而 `--serve` 宿主上根本没有用户 run。
@@ -1429,6 +1468,7 @@ export class Agent {
       return settled.result;
     } finally {
       this.inboxTicketOutstanding = false;
+      this.syncAvailability();
     }
   }
 
@@ -1456,16 +1496,12 @@ export class Agent {
   /** 清 transcript + 运行态 + 队列；**装备与决策点不动**。 */
   reset(): void {
     this.assertIdle("transcript");
-    this._state.messages = [];
-    this._state.streamingMessage = undefined;
-    this._state.pendingToolCalls = new Set();
-    this._state.lastError = null;
-    this._state.compaction = EMPTY_COMPACTION;
-    this._state.contextTokens = null;
-    this.lastCalibration = 1;
-    this._state.iteration = 0;
-    this._state.usage = { inputTokens: 0, outputTokens: 0 };
+    // idle 时 steer / followUp 恒空；inbox 可能攒着（没开自动消费），清掉要让订阅方的计数跟上
+    const inboxHad = this.inbox.pendingCount > 0;
     this.clearAllQueues();
+    this.lastCalibration = 1;
+    this.emitDetached({ type: "reset" });
+    if (inboxHad) this.emitDetached({ type: "queue_update", queue: "inbox", size: 0 });
   }
 
   /**
@@ -1674,6 +1710,7 @@ export class Agent {
   private setPhase(to: AgentLifecyclePhase): void {
     const from = this.phase;
     this.phase = to;
+    this.syncAvailability();
     probeAgent(this.agentProbeNow(), {
       kind: "phase_changed",
       from,
@@ -1801,10 +1838,14 @@ export class Agent {
           product: this.product,
           agent: this.agentRef,
         });
-        this._state.messages = [...data.messages];
-        this._state.compaction = data.compaction;
-        this._state.sessionId = data.info.id;
-        this._state.workspace = data.workspace; // resume 以盘上为准：最后一条 workspace entry，没切过 = 开会话的目录
+        // resume 以盘上为准：workspace 是最后一条 workspace entry，没切过 = 开会话的目录
+        await this.processEvents({
+          type: "session_restored",
+          sessionId: data.info.id,
+          messages: [...data.messages],
+          compaction: data.compaction,
+          workspace: data.workspace,
+        });
         // **记忆的作用域在这里第一次解析并绑定**（2026-09-07）：workspace、角色、产品都是
         // session 级事实，权威值就是上面刚从盘上读回来的那几个——`--resume` 一段在别的目录、
         // 别的角色下建的会话时，装配期知道的那些是错的。位置卡在这里：恢复刚落定、任何自主
@@ -2081,10 +2122,12 @@ export class Agent {
     }
     const { ticket, promise } = this.enqueueLifecycle(() => this.doStop());
     this.stopInFlight = { ticket, promise };
+    this.syncAvailability();
     try {
       await promise;
     } finally {
       if (this.stopInFlight?.ticket === ticket) this.stopInFlight = undefined;
+      this.syncAvailability();
     }
   }
 
@@ -2193,6 +2236,7 @@ export class Agent {
     this.sessionService?.seal(); // ①
     this.persistSealed = true; // ① 的另一半：任务清单与 skill 落盘也是持久化，此前它们没被封
     this.leaseLostError = error; // ③ 的开关，先置上免得 abort 触发的收尾又开新活
+    this.syncAvailability();
     this.setPhase("lost");
     this.intake.closeForReconfiguration(); // 新的 steer / followUp 不再 accepted
     this.abort(ABORT_REASON.leaseLost); // ②
@@ -2484,10 +2528,8 @@ export class Agent {
   async setWorkspace(workspace: string): Promise<void> {
     if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必须是非空字符串（宿主给绝对路径）");
     if (workspace === this._state.workspace) return;
-    this._state.workspace = workspace;
-    const id = this._state.sessionId;
-    if (id === null) return;
-    await this.sessionService?.append(id, [{ kind: "workspace", at: Date.now(), workspace }]);
+    // 入账（`workspace` entry）在 `persist()` 里，与消息同一条路：先归约、再落盘、再告诉订阅方
+    await this.processEvents({ type: "workspace_changed", workspace });
   }
 
   /* ───────────── 私有：运行 ───────────── */
@@ -2578,8 +2620,11 @@ export class Agent {
     this.inboxFailure = error;
     this.autoConsumeInbox = false;
     this.autoDream = false;
+    // 直写 lastError 是 `events.ts` 文件头登记的例外：此刻 ticket 仍在，清掉它的那一拍发 availability_changed，
+    // reason 带的就是这条消息
     this._state.lastError = { source: "internal", code: "internal", retryable: false, message: error.message };
     this.reportDiagnostic({ code: "inbox_indeterminate", message: `${error.message}——已停止接受新工作，需重启重新裁决` });
+    this.syncAvailability();
   }
 
   /**
@@ -2591,6 +2636,9 @@ export class Agent {
    * 这中间 `prompt()` 照拒）。判据散着就必然有人对不齐，所以收成一处、并开一个只读面出去。
    *
    * @returns 拒绝理由；`null` = 现在可以起一轮新 run。顺序即优先级，与拆分前逐条一致。
+   *
+   * **判据的每个输入，写它的地方都要紧跟一句 `syncAvailability()`**，订阅方才收得到 `availability_changed`。
+   * 这是纪律不是门：`processEvents()` 每次归约后也核对一次兜底，漏掉的写点最迟在下一个事件时被发现。
    */
   private refuseWorkReason(): string | null {
     if (this.activeRun !== undefined || this.userRunPending) {
@@ -2647,6 +2695,7 @@ export class Agent {
   /** 用户 run：经 admission 取 permit、等 ticket 结算。rejected 只来自关门（stopping / lease-lost），抛出来。 */
   private async admitUserRun(executor: RunExecutor): Promise<AgentRunResult> {
     this.userRunPending = true;
+    this.syncAvailability();
     try {
       const ticket = this.admission.admitUser((scope) => this.executeAdmitted(scope, executor));
       const settled = await ticket.settled;
@@ -2654,10 +2703,11 @@ export class Agent {
       // permit 已 close、ticket 已结算——这时才归 idle、才排 Inbox / Dream。
       // 先清 pending 标记再 finishRun：它里面的 consumeInbox() 看到 userRunPending 还是 true 就会直接返回（实测漏消费）。
       this.userRunPending = false;
-      this.finishRun();
+      this.finishRun(); // 里面的 closeRun() 核对 acceptsWork
       return { ...settled.result, runId: settled.runId };
     } finally {
       this.userRunPending = false;
+      this.syncAvailability();
     }
   }
 
@@ -2684,9 +2734,8 @@ export class Agent {
     this.activeRun = { promise, resolve: resolvePromise, abortController };
     this.activeScope = scope;
     this.lastScope = scope;
-    this._state.status = "generating";
-    this._state.startedAt = Date.now();
-    this._state.lastError = null;
+    // 不 await：订阅方抛错不能打断 run 的簿记（activeRun 已落位，必须走到 finally 里的 closeRun）
+    this.emitDetached({ type: "status_changed", status: "generating", startedAt: Date.now() });
     try {
       // permit executor 进入 loop 的那一拍发 `run.started`——只预留不等，落不下去只降级
       this.observeRunStarted(runId, "permit-executor");
@@ -2809,16 +2858,12 @@ export class Agent {
    * 否则裁决为 indeterminate 时下一轮已经拿到 admission 了（实测两次 agent_start）。
    */
   private closeRun(): void {
-    this._state.status = "idle";
+    this.emitDetached({ type: "status_changed", status: "idle" });
     this.publishPhase("idle");
-    this._state.startedAt = null;
-    this._state.streamingMessage = undefined;
-    this._state.pendingToolCalls = new Set();
-    this._state.iteration = 0;
-    this._state.retryCount = 0;
     this.activeRun?.resolve();
     this.activeRun = undefined;
     if (this.currentRunId !== null) this.terminalByRun.delete(this.currentRunId);
+    this.syncAvailability();
   }
 
   /**
@@ -3344,7 +3389,10 @@ export class Agent {
   async dispose(): Promise<void> {
     // 幂等：第二次调用拿到同一个结果，不再跑一遍收摊——
     // 再跑一遍会把已经关掉的存储再关一次、把已经归零的资产再清一次，两者都可能抛。
-    if (this.disposeInFlight === undefined) this.disposeInFlight = this.doDispose();
+    if (this.disposeInFlight === undefined) {
+      this.disposeInFlight = this.doDispose();
+      this.syncAvailability();
+    }
     return this.disposeInFlight;
   }
 
@@ -3504,6 +3552,35 @@ export class Agent {
   }
 
   /**
+   * 同步调用点（setter、run 开合、集合回调）发事件用：归约在 `processEvents()` 的第一个 await 之前就做完，
+   * 所以状态照样当场生效；订阅方或落盘抛的错记成诊断，不成 unhandled rejection、也不打断调用方。
+   */
+  private emitDetached(event: AgentEventInput): void {
+    this.processEvents(event).catch((e: unknown) => this.reportDiagnostic({ code: "event_delivery_failed", message: errText(e) }));
+  }
+
+  /** 同一拍里对同一视图的多次改动合成一条 `view_changed`（恢复任务清单、热部署卸一批工具时会连着改几十次）。 */
+  private readonly viewsPending = new Set<"tools" | "activeSkills" | "tasks">();
+  private noteViewChanged(view: "tools" | "activeSkills" | "tasks"): void {
+    if (this.viewsPending.has(view)) return;
+    this.viewsPending.add(view);
+    queueMicrotask(() => {
+      this.viewsPending.delete(view);
+      this.emitDetached({ type: "view_changed", view });
+    });
+  }
+
+  /** 上一次发出去的接活判据；null = 还没发过（第一次核对必发）。 */
+  private lastAvailability: string | null | undefined = undefined;
+  /** `acceptsWork` 的判据变了就发 `availability_changed`。调用点见 `refuseWorkReason()` 的说明。 */
+  private syncAvailability(): void {
+    const reason = this.refuseWorkReason();
+    if (reason === this.lastAvailability) return;
+    this.lastAvailability = reason;
+    this.emitDetached({ type: "availability_changed", acceptsWork: reason === null, reason });
+  }
+
+  /**
    * 三步顺序**不可换**：
    *   ① 归约状态 ② 增量交给 SessionService ③ 逐个 await listener
    * 监听器看到的必须是已经生效的状态——反过来就会读到旧值。
@@ -3592,6 +3669,44 @@ export class Agent {
         };
         break;
       }
+      case "equipment_changed":
+        if (input.field === "model") this._state.model = input.model;
+        else this._state.thinkingLevel = input.thinkingLevel;
+        break;
+      case "workspace_changed":
+        this._state.workspace = input.workspace;
+        break;
+      case "reset":
+        this._state.messages = [];
+        this._state.streamingMessage = undefined;
+        this._state.pendingToolCalls = new Set();
+        this._state.lastError = null;
+        this._state.compaction = EMPTY_COMPACTION;
+        this._state.contextTokens = null;
+        this._state.iteration = 0;
+        this._state.retryCount = 0;
+        this._state.usage = { inputTokens: 0, outputTokens: 0 };
+        break;
+      case "session_restored":
+        this._state.messages = [...input.messages];
+        this._state.compaction = input.compaction;
+        this._state.sessionId = input.sessionId;
+        this._state.workspace = input.workspace;
+        break;
+      case "status_changed":
+        if (input.status === "generating") {
+          this._state.status = "generating";
+          this._state.startedAt = input.startedAt;
+          this._state.lastError = null;
+        } else {
+          this._state.status = "idle";
+          this._state.startedAt = null;
+          this._state.streamingMessage = undefined;
+          this._state.pendingToolCalls = new Set();
+          this._state.iteration = 0;
+          this._state.retryCount = 0;
+        }
+        break;
       case "agent_end":
         this._state.streamingMessage = undefined;
         this._state.lastError = input.outcome.kind === "error" ? input.outcome.error : null;
@@ -3603,6 +3718,9 @@ export class Agent {
       default:
         break;
     }
+
+    // 兜底：漏在写点外的判据变化，最迟在这里被发现（见 `refuseWorkReason()`）
+    if (input.type !== "availability_changed") this.syncAvailability();
 
     // 观测**不在这条链上**：AgentEvent 是给壳的事件协议，观测的事实由各执行节点上的探针记（`loop/observe.ts`）
     await this.persist(input);
@@ -3839,6 +3957,8 @@ export class Agent {
       if (input.stages.length > 0) parts.push({ kind: "compaction", at: Date.now(), reason: input.reason, compaction: input.compaction });
     } else if (input.type === "agent_end" && input.outcome.kind === "error") {
       parts.push({ kind: "error", at: Date.now(), error: input.outcome.error });
+    } else if (input.type === "workspace_changed") {
+      parts.push({ kind: "workspace", at: Date.now(), workspace: input.workspace });
     }
     if (parts.length === 0) return;
     await this.sessionService?.append(id, parts);

@@ -1,7 +1,13 @@
 // 事件层。
 //
-// **事件是变化本身，不只是记录**：`state = apply(state, event)` 是状态更新的唯一路径，
-// 所以对外广播与状态更新同源，不可能漂移（不存在「状态变了但外面没看见」）。
+// **事件是变化本身，不只是记录**：`AgentState` 的存储字段只经 `state = apply(state, event)` 更新
+// （Agent 的私有 `processEvents()`），所以对外广播与状态更新同源，不可能漂移。
+// 三种字段各有一个口：
+//   · 存储字段（model、messages、status…）——归约它的那个事件就是变化本身；
+//   · 读取时现算的视图（`tools` / `activeSkills` / `tasks`）——权威在各自的集合，集合一改就发 `view_changed`；
+//   · 协议上的派生值 `acceptsWork`——判据的输入一变就核对一次，变了发 `availability_changed`。
+// 两处例外，都写在这里：`stop()` 收摊之后的归零不发事件（Agent 已不再服务）；Inbox 账本无法裁决时
+// 直写 `lastError`，同一次收尾里 `availability_changed` 带着同一条消息发出（`Agent.enterInboxFailure`）。
 // 事件**不落盘**——事件驱动是进程内结构，持久化是 session 的事。
 //
 // 三套事件，各管一段：
@@ -15,6 +21,7 @@ import type { AgentMessage, AssistantMessage, ToolResultMessage, Usage } from ".
 import type { AgentToolResult } from "./tools/types.ts";
 import type { CompactionReason, CompactionState } from "./compaction/types.ts";
 import type { AttemptResult, ReplySource, TurnCause } from "./loop/types.ts";
+import type { Model, ThinkingLevel } from "./provider/types.ts";
 
 /* ══════════════════ 1. ProviderEvent ══════════════════ */
 
@@ -93,14 +100,37 @@ export type CoreAgentEvent =
   | { type: "retry_scheduled"; turnId: string; attempt: number; maxAttempts: number; delayMs: number; cause: string }
   | { type: "usage"; usage: Usage }
   /**
-   * 资源面变了（工具注册/卸载、skill 装入/激活）。
-   * **它是观察事件,不是状态写路径**——池的权威在 harness，`state` 里那份是读取时算出来的视图
-   * （与 `isStreaming` 同款）。发它是因为订阅事件流的 UI 需要知道「skill 激活了」，
-   * 而不是因为有人要靠它改状态。
+   * 逐项的资源变化：后台任务的起止（`background/harness.ts`）与 MCP 适配器经 `McpHost.onChanged` 报的连断。
+   * **它是观察事件,不是状态写路径**——后台任务不在 `state` 里，MCP 的 `state.mcp` 是读取时现算的视图。
+   * 工具与 skill 不走它（对象上没有来源字段可报），它们的变化是 `view_changed`。
    */
   | { type: "resource_changed"; kind: string; action: "added" | "removed" | "activated" | "deactivated"; name: string; source: string }
   /* 队列 */
-  | { type: "queue_update"; queue: "steering" | "followUp" | "inbox"; size: number };
+  | { type: "queue_update"; queue: "steering" | "followUp" | "inbox"; size: number }
+  /* 装备与会话面。只在 idle 时换（setter 先守 idle），下一个 run 起生效 */
+  | { type: "equipment_changed"; field: "model"; model: Model }
+  | { type: "equipment_changed"; field: "thinkingLevel"; thinkingLevel: ThinkingLevel }
+  /** 切工作目录（worktree 隔离）。**不守 idle**：工具在轮中途调；入账一条 `workspace` entry，resume 以最后一条为准。 */
+  | { type: "workspace_changed"; workspace: string }
+  /** 清空对话（`/clear`）：messages、压缩状态、上下文估算、用量、lastError 归零，队列清空。只在 idle 时发。 */
+  | { type: "reset" }
+  /** 启动时从会话账本恢复：带回来的就是 `state` 此刻的这几项。新建会话也发（messages 为空）。 */
+  | { type: "session_restored"; sessionId: string; messages: readonly AgentMessage[]; compaction: CompactionState; workspace: string }
+  /**
+   * 不依附循环事件的两条 status 边（循环里的 generating / acting / compacting 由各自的事件归约）：
+   * admission 放行、执行体开始那一拍进 generating（记 startedAt、清 lastError）——`compact()` / `betweenRuns()`
+   * 不发 agent_start，靠的就是这一拍；收尾回到 idle（startedAt / streamingMessage / pendingToolCalls / iteration /
+   * retryCount 归零），晚于 `agent_end`（那只是循环事件流的封口）。**空闲不等于接活**——接不接看 `availability_changed`。
+   */
+  | { type: "status_changed"; status: "generating"; startedAt: number }
+  | { type: "status_changed"; status: "idle" }
+  /**
+   * `acceptsWork` 或拒绝理由变了（`reason` 为 null = 接活）。与 `status` 是两个维度：Inbox 那批还在等 ack 裁决时
+   * 已经 idle 却不接活，stop 之后同理。
+   */
+  | { type: "availability_changed"; acceptsWork: boolean; reason: string | null }
+  /** 读取时现算的视图变了（工具池或收紧、已激活 skill、任务清单），重读 `state` 的那一项。同一拍里的多次改动合成一条。 */
+  | { type: "view_changed"; view: "tools" | "activeSkills" | "tasks" };
 
 /** 上层 agent 的领域事件走这里（评测打分、飞轮进展…），内核零改动。 */
 export interface CustomAgentEvents {}
@@ -138,16 +168,13 @@ export type LifecycleEvent =
   /* 会话与命令 */
   /** `messageCount`：续了多少条进上下文（新建为 0）。壳据此把「恢复」说出来，无声恢复是禁止的。 */
   | { type: "sessionStart"; sessionId: string | null; resumed: boolean; messageCount: number }
-  | { type: "sessionEnd"; sessionId: string | null; reason: "closed" | "process_exit" }
   | { type: "userPromptSubmit"; text: string; source: "human" | "steer" | "followUp" }
   | { type: "abortRequested"; reason?: string }
   /* 任务级 */
   | { type: "agentTimeout"; elapsedMs: number; timeoutMs: number }
-  | { type: "equipmentChanged"; field: "tools" | "model" | "timeoutMs"; source: string }
   /* 模型调用 */
   | { type: "modelCallFailed"; error: AgentError; attempt: number }
   | { type: "retryScheduled"; attempt: number; maxAttempts: number; delayMs: number; cause: string }
-  | { type: "toolCallDropped"; reason: "malformed" | "truncated" }
   /* 工具 */
   | { type: "preToolUse"; toolCallId: string; toolName: string; params: Record<string, unknown> }
   | {
@@ -198,7 +225,8 @@ export type LifecycleEvent =
     }
   | { type: "permissionCancelled"; permissionId: string; toolCallId: string; reason: "run-aborted" | "runtime-disposed" }
   /* 提问（`ask_user`，2026-09-05）：与权限询问平行的另一条通道——那是壳子拦工具的工程机制，这是模型主动调的工具。
-     同样 notify-only：回答只能来自可信宿主的 answerQuestion()。没等到答案（超时 / 中止 / 收摊）发 cancelled，壳子据此撤掉问题。 */
+     同样 notify-only：回答只能来自可信宿主的 answerQuestion()。答上了发 answered，没等到答案（超时 / 中止 / 收摊）发 cancelled，
+     壳子据此撤掉问题——三拍任一都让它离开 pendingQuestions。 */
   | {
       type: "question";
       questionId: string;
@@ -207,10 +235,11 @@ export type LifecycleEvent =
       options: readonly QuestionOption[];
       multiSelect: boolean;
     }
+  | { type: "questionAnswered"; questionId: string; toolCallId: string }
   | { type: "questionCancelled"; questionId: string; toolCallId: string; reason: "timed-out" | "run-aborted" | "runtime-disposed" }
   /* 通知 */
   | { type: "notification"; kind: "waiting_permission"; permissionId: string; message: string }
-  | { type: "notification"; kind: "idle" | "task_done" | "error"; message: string };
+  | { type: "notification"; kind: "error"; message: string };
 
 export type LifecycleEventType = LifecycleEvent["type"];
 export type LifecycleEventOf<E extends LifecycleEventType> = Extract<LifecycleEvent, { type: E }>;

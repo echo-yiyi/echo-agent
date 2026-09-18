@@ -254,7 +254,7 @@ test("终态之前 listener 抛错（agent_start 就炸）：runLoop 在 finally
   expect(result.outcome).toMatchObject({ kind: "error", error: { code: "internal", message: "listener 在开头炸了" } });
   expect(events.filter((t) => t === "agent_end")).toHaveLength(1);
   // reply / turn / attempt 一个都没开（agent_start 就炸），所以一个 *_end 都不合成——配对由结构成立，不靠外层补
-  expect(events).toEqual(["agent_start", "agent_end"]);
+  expect(events).toEqual(["availability_changed", "status_changed", "agent_start", "agent_end", "status_changed", "availability_changed"]);
   expect(agent.status).toBe("idle");
 });
 
@@ -275,7 +275,7 @@ test("终态之前 listener 抛错（attempt 中途炸）：Agent 按序收掉�
   expect(events.filter((t) => t === "agent_end")).toHaveLength(1);
   expect(events.filter((t) => t === "turn_end")).toHaveLength(1);
   expect(events.filter((t) => t === "reply_end")).toHaveLength(1);
-  expect(events.slice(-3)).toEqual(["turn_end", "reply_end", "agent_end"]);
+  expect(events.slice(-5)).toEqual(["turn_end", "reply_end", "agent_end", "status_changed", "availability_changed"]);
 });
 
 test("Inbox：同一个 message 对象投递两次 = 两条事实、两个 recordId、一次批量 run，最终没有 reservation 泄漏", async () => {

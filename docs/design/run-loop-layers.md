@@ -40,7 +40,7 @@
 ### 2.1 run
 
 - **开**：admission 通过，[`RunIntakeGate.openRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openRun) 与 `agent_start`。
-- **关**：intake 关门（[`tryCloseRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.tryCloseRun) 或 [`closeRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.closeRun)）→ `agent_end`。**`agent_end` 是 run 事件流的封口，不是 idle barrier**：它发出时 admission ticket 还没 settle，监听器里读到的 `status` 仍是 `generating`；要等空闲，等 `prompt()` / `continue()` 的 resolve（那就是 barrier），或订阅 `onChange` 看状态变化。不另设 barrier API（[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。**关门三件事（清 deadline timer、`closeRun`、`agent_end`）在 `finally` 里**，任何异常路径都走（验证见 §8）。
+- **关**：intake 关门（[`tryCloseRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.tryCloseRun) 或 [`closeRun`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.closeRun)）→ `agent_end`。**`agent_end` 是 run 事件流的封口，不是 idle barrier**：它发出时 admission ticket 还没 settle，监听器里读到的 `status` 仍是 `generating`；要等空闲，等 `prompt()` / `continue()` 的 resolve（那就是 barrier），或订阅事件看 `status_changed{idle}`（空闲）与 `availability_changed`（接不接活，两者是不同维度）。不另设 barrier API（[决策](../decisions/implemented/2026-09-01-agent-end-barrier.md)）。**关门三件事（清 deadline timer、`closeRun`、`agent_end`）在 `finally` 里**，任何异常路径都走（验证见 §8）。
 - **reply 之间**，按序：
   1. 上一条 reply 是被 `shouldStopAfterTurn` 叫停的 → 直接关门（不 drain、不问 stop hook）。
   2. reply 数 < `maxReplies`：drain followUp 有货 → 新 reply（`follow_up`）；没货 → 问 stop hook，block 且注入次数未到上限 → 新 reply（`stop_hook`）。**stop hook 最多把 agent 拉回来 3 次**（[`MAX_STOP_CONTINUATIONS`](../../packages/core/src/loop/run-loop.ts#symbol=MAX_STOP_CONTINUATIONS)），第 4 次 block 被忽略、run 照常关门。这是防死循环的保险丝，不是产品契约、不进配置（[决策](../decisions/implemented/2026-09-01-stop-continuation-limit.md)）。
@@ -110,7 +110,7 @@ export type LoopLayerEvent =
   | { type: "retry_scheduled"; turnId: string; attempt: number; maxAttempts: number; delayMs: number; cause: string };
 ```
 
-其他事件包括：`agent_start / agent_end`、`message_*`、`tool_execution_*`、`compaction_*`、`usage`、`queue_update`、`resource_changed`。provider 不另外发一套重试事件；reply 上限错误码是 max_replies。
+其他事件包括：`agent_start / agent_end`、`message_*`、`tool_execution_*`、`compaction_*`、`usage`、`queue_update`、`resource_changed`，以及状态变化的那一族（`status_changed`、`availability_changed`、`equipment_changed`、`workspace_changed`、`reset`、`session_restored`、`view_changed`，见[决策](../decisions/implemented/2026-09-18-state-changes-emit-events.md)）。provider 不另外发一套重试事件；reply 上限错误码是 max_replies。
 
 ## 4. 函数与归属
 
@@ -142,7 +142,7 @@ reply 内的继续判决归 [`runReply`](../../packages/core/src/loop/run-loop.t
 2. **输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`**（轮首 `maybeCompact()` 触发时插在这里）；轮首硬闸在吸收之后就命中时没有 `turn_start`，紧接着是 `reply_end`（规则 1 的零 turn reply）。prompt / followUp / stop hook 的在 `reply_start` 之后；steer 的在上一个 `turn_end` 之后。
 3. **失败不破配对。** 失败 attempt 的 assistant 消息照常 `message_start … message_end`，随后 `attempt_end{failed}`；只是不落地。
 
-`queue_update`、`resource_changed` 不是 loop 事件，可以出现在任何位置，排序规则不管它们。
+run 外面还有一层：admission 放行时先 `availability_changed`（不接活）、再 `status_changed{generating}`，都在 `agent_start` 之前；收尾时 `agent_end` 之后先 `status_changed{idle}`、再 `availability_changed`（Inbox 那批要等 ack 裁决出来才发接活）。其余非 loop 事件（`queue_update`、`resource_changed`、`view_changed` 等）可以出现在任何位置，排序规则不管它们。
 
 一条要工具、第一次请求 529 的 reply（runId 记作 `R`）：
 

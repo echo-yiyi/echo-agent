@@ -286,6 +286,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-18-state-changes-emit-events.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md",
       "bilingual": false
     },

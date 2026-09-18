@@ -23,8 +23,8 @@ export type AgentFactBody =
    */
   | { kind: "phase_changed"; from: AgentLifecyclePhase; to: AgentLifecyclePhase; restoredReason?: RestoredReason }
   /**
-   * 装备换了（只能在 idle 时换，setter 先守 idle）：模型记 `provider/id`，思考档记档名。工具的增删走 `resource_changed`。
-   * `LifecycleEvent` 里声明过一个 `equipmentChanged`，但全仓没有任何地方发它——这里是观测自己的节点，不依赖它。
+   * 装备换了（只能在 idle 时换，setter 先守 idle）：模型记 `provider/id`，思考档记档名。
+   * 与事件协议的 `equipment_changed` 同一个节点、各记各的——观测是插桩，不订阅事件。
    */
   | { kind: "equipment_changed"; field: "model" | "thinkingLevel"; from: string; to: string }
   | { kind: "queue_updated"; queue: "steering" | "followUp" | "inbox"; size: number }
