@@ -17,7 +17,7 @@ run loop 先原子关闭 intake、发出 `agent_end` 并返回;admission ticket 
 
 ## 决定
 
-**保留 `agent_end` 这个名字,公开契约写清它不是 idle barrier**(2026-09-07 用户拍板)。不另加 barrier API:调用方要等的是 `prompt()` 的 resolve,那就是它的 barrier;订阅者要的是状态变化,`onChange` 已经带。验收里「若提供 barrier」那一半作废。
+**保留 `agent_end` 这个名字,公开契约写清它不是 idle barrier**(2026-09-07 用户拍板)。不另加 barrier API:调用方要等的是 `prompt()` 的 resolve,那就是它的 barrier;订阅者要的是状态变化,`onChange` 已经带。验收里「若提供 barrier」那一半作废。**2026-09-18 订正**:`onChange` 在代码里从来不存在,这句话写的时候就不成立;订阅者看空闲用 `status_changed{idle}`、看接不接活用 `availability_changed`,见 [状态变化都有事件](2026-09-18-state-changes-emit-events.md)。
 
 ## 验收
 

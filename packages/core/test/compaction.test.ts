@@ -640,7 +640,15 @@ test("Agent.compact：走同一条流水线（manual，无视阈值，指令交�
   expect(JSON.stringify(requests[1]!.messages)).toContain("only the TODOs");
   expect(agent.state.compaction.spans[0]!.summary).toContain("MANUAL");
   expect(agent.state.status).toBe("idle");
-  expect(events.map((e) => e.type)).toEqual(["compaction_start", "compaction_end"]); // 不是一个 run：没有 agent_start / agent_end
+  // 不是一个 run：没有 agent_start / agent_end；但 status 的两条边照样发（开门 generating、收尾 idle）
+  expect(events.map((e) => e.type)).toEqual([
+    "availability_changed",
+    "status_changed",
+    "compaction_start",
+    "compaction_end",
+    "status_changed",
+    "availability_changed",
+  ]);
   expect((await loadSession(store, "s1")).compaction).toEqual(agent.state.compaction);
 
   // 忙：run 中途 compact
