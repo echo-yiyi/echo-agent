@@ -116,10 +116,14 @@ export function openAiDialect(opts: OpenAiDialectOptions): Dialect {
 
       yield { type: "start" };
       const turn = new Turn(model);
+      let sawDone = false;
 
       try {
         for await (const data of sseLines(res.body)) {
-          if (data === "[DONE]") break;
+          if (data === "[DONE]") {
+            sawDone = true;
+            break;
+          }
           let chunk: OpenAiChunk;
           try {
             chunk = JSON.parse(data) as OpenAiChunk;
@@ -136,6 +140,13 @@ export function openAiDialect(opts: OpenAiDialectOptions): Dialect {
         }
       } catch (e) {
         yield { type: "error", error: classifyThrown(e) };
+        return;
+      }
+
+      // 连接干净关掉不等于回复完整：`[DONE]` 与 finish_reason 都没见到，就是流在半路断了。
+      // 当成 done 会把半截回复按 end_turn 提交；与读流抛错同属传输故障，按 network 可重试。
+      if (!sawDone && !turn.finished) {
+        yield { type: "error", error: agentError("provider", "network", "流在终结事件之前断开：没有 finish_reason，也没有 [DONE]") };
         return;
       }
 
@@ -320,6 +331,8 @@ class Turn {
   private pendingWarnings: ProviderEvent[] = [];
   private usage: Usage | null = null;
   private stop: StopReason = "end_turn";
+  /** 上游报过 finish_reason：内容已经完整，之后即便没等到 `[DONE]` 也算正常收尾。 */
+  finished = false;
 
   constructor(private readonly model: Model) {}
 
@@ -356,7 +369,10 @@ class Turn {
         yield { type: "toolcall_delta", argsText: args };
       }
     }
-    if (choice?.finish_reason != null) this.stop = mapStop(choice.finish_reason);
+    if (choice?.finish_reason != null) {
+      this.stop = mapStop(choice.finish_reason);
+      this.finished = true;
+    }
     if (chunk.usage != null) {
       // 缓存命中：两种上报形状择一（OpenAI 系 / DeepSeek）。没报就不带字段——不冒充报了账。
       const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? chunk.usage.prompt_cache_hit_tokens;

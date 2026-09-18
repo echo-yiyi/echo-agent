@@ -300,6 +300,41 @@ test("429 → 壳不重试：一次 stream = 一次请求，以 error{retryable}
   expect(msg.error).toMatchObject({ code: "rate_limit", retryable: true });
 });
 
+/* ══════════ 流在半路断开：连接干净关闭 ≠ 回复完整 ══════════ */
+
+/** 与 `sse()` 相同，但**不补** `[DONE]`——模拟连接在终结事件之前被关掉。 */
+function sseCut(chunks: unknown[]): string {
+  return chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("");
+}
+
+test("流在终结事件之前断开（没有 finish_reason 也没有 [DONE]）：报 network 可重试，不当成 end_turn 完成；已流出的正文留在失败消息里", async () => {
+  const { fn } = fakeFetch(() => new Response(sseCut([{ choices: [{ delta: { content: "Hello, wor" } }] }])));
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, { apiKey: "k" }));
+
+  expect(events.some((e) => e.type === "done")).toBe(false);
+  expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "network", retryable: true } });
+
+  const { fn: fn2 } = fakeFetch(() => new Response(sseCut([{ choices: [{ delta: { content: "Hello, wor" } }] }])));
+  const msg = await createProviderStreams(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn2 })).stream(MODEL, CTX, { apiKey: "k" }).result();
+  expect(msg.stopReason).toBe("error");
+  expect(msg.error).toMatchObject({ code: "network", retryable: true });
+  expect(msg.content).toEqual([{ type: "text", text: "Hello, wor" }]);
+});
+
+test("有 finish_reason、没等到 [DONE] 就关连接：内容已完整，照常 done", async () => {
+  const { fn } = fakeFetch(() => new Response(sseCut([{ choices: [{ delta: { content: "好" }, finish_reason: "stop" }] }])));
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, { apiKey: "k" }));
+
+  expect(events.at(-1)).toMatchObject({ type: "done", message: { stopReason: "end_turn", content: [{ type: "text", text: "好" }] } });
+});
+
+test("只有 [DONE]、没有 finish_reason：上游明确收尾，照常 done（不误伤）", async () => {
+  const { fn } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "好" } }] }])));
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, { apiKey: "k" }));
+
+  expect(events.at(-1)).toMatchObject({ type: "done", message: { stopReason: "end_turn" } });
+});
+
 /* ══════════ provider 与 Models 整链 ══════════ */
 
 /**
