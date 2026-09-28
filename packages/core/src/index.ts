@@ -35,6 +35,10 @@ export * from "./messages.ts";
 export * from "./events.ts";
 export * from "./errors.ts";
 
+/* 给远端客户端的投影：JSON 化、洗掉 provider 回放数据；快照与订阅的衔接点是 `state.lastSeq` */
+export { clientSnapshot, clientState, clientEvent, MESSAGE_CARRYING_EVENTS } from "./client-view.ts";
+export type { ClientSnapshot, ClientState, ClientEvent, ClientTool } from "./client-view.ts";
+
 export { EventStream, AssistantMessageEventStream, finalizeError, emptyAssistant, withPartial } from "./event-stream.ts";
 
 /* ───────────── 配 provider：`createAgent({ provider })` 的唯一必填项 ───────────── */

@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 339（value 118 · type 203 · both 18）
+符号 347（value 122 · type 207 · both 18）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -52,6 +52,16 @@ value  DEFAULT_MAX_REPLIES
 -- src/background/types.ts (2) --
 type   AgentBackground
 type   BackgroundLimits
+
+-- src/client-view.ts (8) --
+value  clientEvent
+type   ClientEvent
+value  clientSnapshot
+type   ClientSnapshot
+value  clientState
+type   ClientState
+type   ClientTool
+value  MESSAGE_CARRYING_EVENTS
 
 -- src/compaction/builtin.ts (16) --
 value  chooseTailStart

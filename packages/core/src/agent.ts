@@ -169,6 +169,14 @@ export type AgentState = {
   readonly contextTokens: number | null;
   readonly lastError: AgentError | null;
   readonly usage: Usage;
+  /**
+   * 状态已经吸收到第几号事件（`AgentEvent.seq`）。构造出来是 -1（一个事件都还没有）。
+   *
+   * 它是**快照与订阅的衔接点**：同一拍里先读 `state` 再 `subscribe()`，`seq > lastSeq` 的才是快照之后
+   * 发生的；`seq <= lastSeq` 的那些已经归约进快照了，收到也要丢掉——归约在派发之前完成
+   * （`processEvents()` 三步），订阅赶在这中间挂上就会两头都看见同一条。
+   */
+  readonly lastSeq: number;
   /* 会话指针：指向盘上那段；null = 未落盘的临时对话 */
   readonly sessionId: string | null;
   /**
@@ -732,6 +740,7 @@ export class Agent {
       contextTokens: null,
       lastError: null,
       usage: { inputTokens: 0, outputTokens: 0 },
+      lastSeq: -1,
       sessionId: opts.sessionId ?? null,
       workspace: opts.workspace ?? "/",
       activeSkills: [],
@@ -3587,6 +3596,8 @@ export class Agent {
    */
   private async processEvents(input: AgentEventInput): Promise<void> {
     const event = { ...input, seq: this.seq++, at: Date.now() } as AgentEvent;
+    // 水位先落：这一拍之后读到的 state 就该说「我已经吸收到这号了」（见 `AgentState.lastSeq`）
+    this._state.lastSeq = event.seq;
 
     switch (input.type) {
       case "agent_start":
