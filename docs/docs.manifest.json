@@ -290,6 +290,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-20-client-view-projection.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md",
       "bilingual": false
     },
