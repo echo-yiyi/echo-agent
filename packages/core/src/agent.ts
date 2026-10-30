@@ -70,8 +70,10 @@ import {
   memoryScopeTableOf,
   memoryPromptSections,
   memoryTool,
+  memoryUpdateMessage,
   shouldDream,
   type AgentMemories,
+  type MemorySystemFreeze,
 } from "./memory/harness.ts";
 import {
   disposeSchedule,
@@ -678,6 +680,11 @@ export class Agent {
    */
   private lastCalibration = 1;
   private lastSystemEstimate = 0;
+  /**
+   * system 里那份记忆段，会话内冻结（`MemorySystemFreeze`）。压缩落地、transcript 清空或从盘上换掉时
+   * 置回 null（`processEvents` 里），下一次组装重取。
+   */
+  private readonly memorySystem: MemorySystemFreeze = { text: null };
 
   /* 可替换的决策点 */
   public convertToLlm: ConvertToLlm;
@@ -890,7 +897,7 @@ export class Agent {
           ? undefined
           : {
               tools: memoryTools,
-              sections: memoryPromptSections(this.memory),
+              sections: memoryPromptSections(this.memory, this.memorySystem),
               modules: this.memory.builtinModules ? [agentMemory, userMemory, notesMemory] : [],
             },
       scheduler: scheduleTools === undefined ? undefined : { tools: scheduleTools },
@@ -2604,9 +2611,13 @@ export class Agent {
         // 全部被拦下：**不进 transcript、不起循环**——没有 agent_start，也就没有半截 run。
         return { outcome: { kind: "aborted", reason: `userPromptSubmit（${source}）被 hook 拦下` }, messages: [] };
       }
+      // 先组装（system 里的记忆段此刻冻结或复用），再看记忆是否已变：变了就在本 run 的输入前追加一条，
+      // system 不动——请求只在末尾长，缓存不断。续跑（`runContinuation`）不追加：它接的是被打断的那个 run。
+      const context = await this.createContextSnapshot(scope);
+      const update = await this.memoryUpdate();
       return runAgentLoop(
-        admitted,
-        await this.createContextSnapshot(scope),
+        update === null ? admitted : [update, ...admitted],
+        context,
         this.createLoopConfig(scope),
         (e) => this.processEvents(e),
         signal,
@@ -3266,6 +3277,20 @@ export class Agent {
   }
 
   /**
+   * 两次 run 之间记忆变了：给本 run 追加的那条更新消息（`memoryUpdateMessage`）。没变 / 没装记忆段 = null。
+   * 与段 `render()` 抛错同一个档位：失败只留诊断、不挡这个 run——模型仍可用 `view` 读到新内容。
+   */
+  private async memoryUpdate(): Promise<AgentMessage | null> {
+    if (this.memory === undefined || !this.promptSections.has("memory")) return null;
+    try {
+      return await memoryUpdateMessage(this.memory, this.memorySystem, buildWorkingMessages(this._state.messages, this._state.compaction));
+    } catch (e) {
+      this.reportDiagnostic({ code: "memory_update_failed", message: errText(e) });
+      return null;
+    }
+  }
+
+  /**
    * prompt 组装（2026-09-01 改为 extension 出段）：把 `AgentPrompt` registry 里的段按 order 拼起来，
    * `{{变量}}` 从同一 registry 的变量表取值。每次 run 调一次 = **冻结的是时刻,不是内容**：
    * run 内 system 逐字节不变，记忆写盘、skill 激活都动不了它。
@@ -3656,7 +3681,11 @@ export class Agent {
         break;
       case "compaction_end":
         this._state.status = "generating";
-        if (input.stages.length > 0) this._state.compaction = input.compaction;
+        if (input.stages.length > 0) {
+          this._state.compaction = input.compaction;
+          // 历史被改写，缓存本来就断了：顺势让 system 重取一次记忆，之前追加的更新可能已被摘要掉
+          this.memorySystem.text = null;
+        }
         this._state.contextTokens = input.contextTokens;
         break;
       case "retry_scheduled":
@@ -3688,6 +3717,7 @@ export class Agent {
         this._state.workspace = input.workspace;
         break;
       case "reset":
+        this.memorySystem.text = null; // 之前追加的记忆更新随 transcript 一起没了
         this._state.messages = [];
         this._state.streamingMessage = undefined;
         this._state.pendingToolCalls = new Set();
@@ -3699,6 +3729,7 @@ export class Agent {
         this._state.usage = { inputTokens: 0, outputTokens: 0 };
         break;
       case "session_restored":
+        this.memorySystem.text = null; // 换了一份 transcript：system 按此刻的记忆重取，历史里的旧更新由下一个 run 补齐
         this._state.messages = [...input.messages];
         this._state.compaction = input.compaction;
         this._state.sessionId = input.sessionId;

@@ -14,7 +14,8 @@ import {
   type Echo,
 } from "../src/create-echo.ts";
 import { createProvider } from "../src/provider/models.ts";
-import { createProviderStreams } from "../src/provider/dialect.ts";
+import { createProviderStreams, type Dialect } from "../src/provider/dialect.ts";
+import type { Context } from "../src/messages.ts";
 import { scriptedDialect, textTurn, toolTurn } from "../src/testing.ts";
 import { defineExtension } from "../src/extension/abi.ts";
 import { AgentTools } from "../src/extension/registries.ts";
@@ -1045,5 +1046,56 @@ test("缺省（builtin 不给）：扩展注册的模块是**追加**，内建�
   });
   running.push(echo);
   expect([...agentOf(echo).memory!.memories.keys()].sort()).toEqual(["agent", "memory", "relationship", "user"]);
+});
+
+/* ───────────── 记忆段会话内冻结 × 续会话（2026-10-29） ───────────── */
+
+test("续上一段会话：system 按此刻的记忆重取；历史里那条更早的记忆更新比它旧，第一个 run 就补一条新的", async () => {
+  // 风险在续上之后：system 是新的，可历史里还留着上个进程追加的那条旧更新——它排在 system 后面，
+  // 不补一条新的，模型会把旧的当成最新。
+  const seen: Context[] = [];
+  const replies = ["一", "二", "三"];
+  let next = 0;
+  const dialect: Dialect = {
+    api: "fake",
+    async *request(_model, context) {
+      // 提取子循环没有 system：回一句空话，不吃主循环的脚本
+      const turn = context.systemPrompt === null ? textTurn("Nothing to keep.") : (seen.push(context), textTurn(replies[next++] ?? "多余"));
+      for (const ev of turn) yield structuredClone(ev);
+    },
+  };
+  const provider = createProvider({
+    id: "scripted",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams(dialect),
+  });
+  const shared = new InMemoryDir(); // 记忆的 user 层落在它的 memory/ 下，不碰开发机的 home
+  const root = await tmp();
+  const base = { provider, allowNetwork: false, sessionsRoot: root, sharedStore: shared, extensionDirs: [] };
+
+  const first = await createEcho(base);
+  await first.start();
+  await first.agent.prompt("甲");
+  await shared.write("memory/user.md", "偏好A");
+  await first.agent.prompt("乙"); // 追加一条更新（偏好A）
+  const id = first.agent.state.sessionId!;
+  await first.stop();
+
+  await shared.write("memory/user.md", "偏好B"); // 两个进程之间又变了
+  const second = await createEcho({ ...base, sessionId: id });
+  running.push(second);
+  await second.start();
+  await second.agent.prompt("丙");
+
+  const last = seen[seen.length - 1]!;
+  expect(last.systemPrompt).toContain("偏好B");
+  const texts = last.messages.map((m) => m.content.map((b) => (b.type === "text" ? b.text : "")).join(""));
+  const updates = texts.filter((t) => t.startsWith("Your memory changed"));
+  expect(updates).toHaveLength(2);
+  expect(updates[0]).toContain("偏好A"); // 上个进程追加的那条，续上之后原样还在
+  expect(updates[1]).toContain("偏好B");
+  expect(texts[texts.length - 1]).toBe("丙"); // 新的那条紧挨在本 run 的输入之前
 });
 

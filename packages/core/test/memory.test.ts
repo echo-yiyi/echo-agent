@@ -48,8 +48,10 @@ import {
   createAgentMemories, addMemory, removeMemoryRegion, listMemories, getMemory, memoryFor,
   memoryView, memoryCreate, memoryStrReplace, memoryInsert, memoryDelete, memoryRename,
   memoryPromptSections, composeMemoryRegion, memoryTool, memoryObserver, bindMemoryScopes, memoryScopeTableOf, dreamScopes,
-  shouldDream, dreamTask, markDreamed, disposeMemory, MEMORY_KIND, type AgentMemories, type MemoryHarnessOptions,
+  shouldDream, dreamTask, markDreamed, disposeMemory, MEMORY_KIND, MEMORY_UPDATE_SOURCE, type AgentMemories, type MemoryHarnessOptions,
 } from "../src/memory/harness.ts";
+import type { CompactionStage } from "../src/compaction/types.ts";
+import type { ScriptedTurn } from "../src/testing.ts";
 
 import { InMemoryDir } from "../src/memory/in-memory-dir.ts";
 import { createMemoryTool, normalizeMemoryPath, MEMORY_TOOL_NAME } from "../src/memory/tool.ts";
@@ -671,39 +673,130 @@ describe("Agent 接线", () => {
     expect(agent.state.tools.map((t) => t.name)).not.toContain(MEMORY_TOOL_NAME);
   });
 
-  test("冻结快照:模型 run 内写记忆,本 run system 不变、下个 run 可见", async () => {
+  // 记忆段会话内冻结（2026-10-29）。此前每个 run 重组 system：两次 run 之间记忆一变，记忆段之后的
+  // 工具定义与整段对话全部失去 provider 缓存（实测 98% → 38%）。现在 system 逐字不变，变化以一条
+  // 环境消息追加在下一个 run 的输入之前——请求只在末尾长。
+
+  /** 主循环的请求记下来；提取子循环（没有 system）一律回一句空话，不吃主循环的脚本、不进 `seen`。 */
+  function routedStream(turns: ScriptedTurn[]): { fn: StreamFn; seen: Context[] } {
+    const seen: Context[] = [];
+    const main = scriptedStreamFn(turns);
+    const fn: StreamFn = (m, c, o) => {
+      if (c.systemPrompt === null) return scriptedStreamFn([textTurn("Nothing to keep.")])(m, c, o);
+      seen.push(c);
+      return main(m, c, o);
+    };
+    return { fn, seen };
+  }
+  const textOfMessage = (m: Context["messages"][number]): string => m.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+  const memoryUpdates = (c: Context): string[] => c.messages.map(textOfMessage).filter((t) => t.startsWith("Your memory changed"));
+
+  async function memoryAgent(dir: InMemoryDir, fn: StreamFn, opts: { compaction?: { builtin: false } } = {}): Promise<Agent> {
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memories(dir), ...opts });
+    await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
+    return agent;
+  }
+
+  test("会话内冻结：run 内写记忆本 run system 不变；下个 run system 仍逐字不变，新内容以一条环境消息追加在输入之前", async () => {
     const dir = new InMemoryDir();
     await dir.write("user/user.md", "旧偏好");
-    const seen: Context[] = [];
-    const inner = scriptedStreamFn([
+    const { fn, seen } = routedStream([
       toolTurn("t1", MEMORY_TOOL_NAME, { command: "str_replace", path: "user/user.md", old_str: "旧偏好", new_str: "新偏好" }),
       textTurn("记好了"),
       textTurn("第二个任务"),
     ]);
-    const spy: StreamFn = (m, c, o) => {
-      seen.push(c);
-      return inner(m, c, o);
-    };
-    const agent = new Agent({
-      model: FAKE_MODEL,
-      streamFunction: spy,
-      memory: memories(dir),
-    });
-    await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
+    const agent = await memoryAgent(dir, fn);
 
     const first = await agent.prompt("记住:新偏好");
     expect(first.outcome.kind).toBe("completed");
     expect(await dir.read("user/user.md")).toBe("新偏好"); // 盘上立即生效
-    // 本 run 两轮看到同一份快照(旧内容)——冻结,不破 prompt cache
     expect(seen[0]?.systemPrompt).toContain("旧偏好");
-    expect(seen[1]?.systemPrompt).toContain("旧偏好");
+    expect(seen[1]?.systemPrompt).toBe(seen[0]!.systemPrompt);
 
     await agent.prompt("下一个任务");
-    expect(seen[2]?.systemPrompt).toContain("新偏好"); // 任务边界刷新
+    expect(seen[2]?.systemPrompt).toBe(seen[0]!.systemPrompt); // 跨 run 逐字不变：前缀缓存不断
+    expect(seen[2]!.messages.slice(0, seen[1]!.messages.length)).toEqual(seen[1]!.messages); // 只在末尾长
+    const msgs = seen[2]!.messages;
+    expect(textOfMessage(msgs[msgs.length - 1]!)).toBe("下一个任务");
+    expect(memoryUpdates(seen[2]!)).toHaveLength(1);
+    expect(textOfMessage(msgs[msgs.length - 2]!)).toContain("新偏好"); // 更新紧挨在本 run 的输入之前
+    // 落进 transcript 的是一条 environment 消息，来源 memory
+    const env = agent.state.messages.filter((m) => m.role === "environment");
+    expect(env.map((m) => (m.role === "environment" ? m.source : ""))).toEqual([MEMORY_UPDATE_SOURCE]);
     // 环境段（order 300）在前，记忆段（order 900）沉底
     const sys = seen[2]?.systemPrompt ?? "";
     expect(sys.indexOf("# Environment")).toBeGreaterThanOrEqual(0);
-    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("新偏好"));
+    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("旧偏好"));
+  });
+
+  test("记忆没变：下个 run 什么都不追加，system 逐字不变、消息只在末尾长", async () => {
+    const dir = new InMemoryDir();
+    await dir.write("user/user.md", "偏好");
+    const { fn, seen } = routedStream([textTurn("一"), textTurn("二")]);
+    const agent = await memoryAgent(dir, fn);
+    await agent.prompt("甲");
+    await agent.prompt("乙");
+    expect(seen[1]!.systemPrompt).toBe(seen[0]!.systemPrompt);
+    expect(seen[1]!.messages.map(textOfMessage)).toEqual(["甲", "一", "乙"]);
+    expect(agent.state.messages.some((m) => m.role === "environment")).toBe(false);
+  });
+
+  test("一次变化只送一次：之后记忆不变就不再追加；再变一次再送一条", async () => {
+    const dir = new InMemoryDir();
+    await dir.write("user/user.md", "旧");
+    const { fn, seen } = routedStream([textTurn("一"), textTurn("二"), textTurn("三"), textTurn("四")]);
+    const agent = await memoryAgent(dir, fn);
+    await agent.prompt("甲");
+    await dir.write("user/user.md", "新"); // 两次 run 之间的写（提取、Dream、别的 session 都是这条路）
+    await agent.prompt("乙");
+    await agent.prompt("丙");
+    expect(memoryUpdates(seen[1]!)).toHaveLength(1);
+    expect(memoryUpdates(seen[2]!)).toHaveLength(1); // 还是乙之前那一条，没有第二条
+    await dir.write("user/user.md", "更新");
+    await agent.prompt("丁");
+    const updates = memoryUpdates(seen[3]!);
+    expect(updates).toHaveLength(2);
+    expect(updates[1]).toContain("更新");
+    expect(seen[3]!.systemPrompt).toBe(seen[0]!.systemPrompt);
+  });
+
+  test("压缩落地后 system 重取一次记忆；历史里还看得见的旧更新比它旧，就再补一条新的", async () => {
+    const dir = new InMemoryDir();
+    await dir.write("user/user.md", "旧");
+    const { fn, seen } = routedStream([textTurn("一"), textTurn("二"), textTurn("三")]);
+    const agent = await memoryAgent(dir, fn, { compaction: { builtin: false } });
+    // 一个零成本、确实改了状态的阶段：把 clearedBefore 推到末尾（不碰环境消息，那条旧更新仍可见）
+    const clearAll: CompactionStage = {
+      name: "clear-all",
+      order: 10,
+      run: ({ messages, state }) => (messages.length > state.clearedBefore ? { spans: state.spans, clearedBefore: messages.length } : null),
+    };
+    agent.compactionStages.set(clearAll.name, clearAll);
+    await agent.prompt("甲");
+    await dir.write("user/user.md", "新");
+    await agent.prompt("乙"); // 追加一条更新（新）
+    await dir.write("user/user.md", "更新");
+    const compacted = await agent.compact();
+    expect(compacted.kind === "done" && compacted.stages.length).toBe(1);
+    await agent.prompt("丙");
+    expect(seen[2]!.systemPrompt).toContain("更新"); // 重取：system 是此刻的记忆
+    expect(seen[2]!.systemPrompt).not.toBe(seen[0]!.systemPrompt);
+    const updates = memoryUpdates(seen[2]!);
+    expect(updates).toHaveLength(2); // 乙之前那条（新）还看得见，所以补一条（更新）压过它
+    expect(updates[1]).toContain("更新");
+  });
+
+  test("清空 transcript（reset）后 system 重取记忆，不追加更新", async () => {
+    const dir = new InMemoryDir();
+    await dir.write("user/user.md", "旧");
+    const { fn, seen } = routedStream([textTurn("一"), textTurn("二")]);
+    const agent = await memoryAgent(dir, fn);
+    await agent.prompt("甲");
+    await dir.write("user/user.md", "新");
+    agent.reset();
+    await agent.prompt("乙");
+    expect(seen[1]!.systemPrompt).toContain("新");
+    expect(memoryUpdates(seen[1]!)).toEqual([]);
   });
 
   test("dispose 链:close 传到 MemoryDir", async () => {

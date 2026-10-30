@@ -12,6 +12,7 @@
 
 import { errText } from "../errors.ts";
 import type { AgentEvent, AgentListener } from "../events.ts";
+import { environmentMessage, type AgentMessage } from "../messages.ts";
 import type { Diagnostic } from "../errors.ts";
 import type { CapabilityFactSink } from "../observability/fact-sink.ts";
 import type { MemoryFact, MemoryIndexOutcome, MemoryMutationStage, MemoryOperation } from "./observe.ts";
@@ -472,16 +473,80 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
 
 /* ───────────── 记忆进 system 的段(格式在 compose.ts;由 echo:memory builtin 注册) ───────────── */
 
-export function memoryPromptSections(ctx: AgentMemories): readonly PromptSection[] {
+/**
+ * system 里那份记忆段：**会话内冻结**（2026-10-29 用户拍板，决策见
+ * `docs/decisions/implemented/2026-10-29-memory-frozen-in-system.md`）。
+ *
+ * 为什么不每个 run 重组：provider 的缓存按前缀命中，记忆段之后是工具定义与整段对话——两次 run
+ * 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低）。所以第一次组装时
+ * 取一次，之后原样复用；记忆的变化改由 `memoryUpdateMessage` 在下一个 run 开头追加一条消息送到。
+ *
+ * 由 Agent 持有：只有它知道何时作废——压缩改写了历史、transcript 被清空或换掉，`text` 置回 null，
+ * 下一次组装重取。
+ */
+export type MemorySystemFreeze = { text: string | null };
+
+/** 记忆更新消息的 `source`（环境消息的开放来源字符串）。 */
+export const MEMORY_UPDATE_SOURCE = "memory";
+
+export function memoryPromptSections(ctx: AgentMemories, frozen: MemorySystemFreeze): readonly PromptSection[] {
   return [
     {
       name: "memory",
-      // 字节何时变:记忆文件变化后的**下一次 run**(冻结快照:run 内写盘不动本 run 的 system)。
-      // 沉底(order 最大):它是最常变的段,变了只打掉自己之后的缓存。
+      // 沉底(order 最大):冻结之后它只在作废后重取时变,变了只打掉自己之后的缓存。
       order: PROMPT_ORDER.memory,
-      render: () => renderMemorySystem(ctx),
+      render: async () => {
+        if (frozen.text !== null) return frozen.text;
+        const text = await renderMemorySystem(ctx);
+        // 作用域没绑之前组装出来的没有内容（读不到盘），不能冻结——否则整段会话都看不到记忆
+        if (ctx.binding.bound()) frozen.text = text;
+        return text;
+      },
     },
   ];
+}
+
+/**
+ * 本 run 开头要不要追加一条记忆更新：此刻的记忆段与**模型最后看到的那一版**不同，就返回一条环境消息，
+ * 正文是整段新记忆。模型最后看到的 = `visible`（本次送模的投影）里最后一条记忆更新；没有就是 system
+ * 里冻结的那份。
+ *
+ * 看投影而不是原始 transcript：被压缩摘要掉的更新模型已经看不到了。看最后一条而不是只比 system：
+ * 续上的会话（或作废后重取过的 system）里，历史中较早的更新可能比 system 旧，不补一条新的，
+ * 模型会把那条旧的当成最新。
+ *
+ * `frozen.text === null` = 记忆段这一轮没进 system（没装 `echo:memory`、或刚作废），不发。
+ */
+export async function memoryUpdateMessage(
+  ctx: AgentMemories,
+  frozen: MemorySystemFreeze,
+  visible: readonly AgentMessage[],
+): Promise<AgentMessage | null> {
+  if (frozen.text === null) return null;
+  const current = await renderMemorySystem(ctx);
+  if (current === "") return null;
+  const text = memoryUpdateText(current);
+  const last = lastMemoryUpdate(visible);
+  if (last !== undefined ? last === text : frozen.text === current) return null;
+  return environmentMessage(text, MEMORY_UPDATE_SOURCE);
+}
+
+function memoryUpdateText(section: string): string {
+  return (
+    "Your memory changed since it was last shown to you. Its current contents follow; " +
+    "they replace the Memory section of the system prompt and any earlier memory update.\n\n" +
+    section
+  );
+}
+
+function lastMemoryUpdate(messages: readonly AgentMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "environment" || m.source !== MEMORY_UPDATE_SOURCE) continue;
+    const first = m.content[0];
+    return first !== undefined && first.type === "text" ? first.text : "";
+  }
+  return undefined;
 }
 
 /* ───────────── 给 prompt 组装层的数据面(只读) ───────────── */

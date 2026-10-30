@@ -95,7 +95,11 @@
 
 [`defaultComposeMemory`](../../packages/core/src/memory/compose.ts#symbol=defaultComposeMemory) 为每个模块的非空层生成带路径的块；模块按注册次序遍历，模块内部按作用域顺序遍历。它不会加载 indexed 正文来代替索引。读入超预算的手工文件会截断并留标记，不能据此承诺文件本身已被修复。
 
-[`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections) 把规则和内容接进 system。每个主 run 装配一次：run 内写记忆不回写这份 system，下一次 run 才重新呈现；模型仍可用 `view` 主动读取更新后的文件。冻结的是生成后的字符串，不是多个记忆文件的事务快照。
+[`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections) 把规则和内容接进 system，**会话内冻结**：第一次组装时取一次，之后每个 run 原样复用；压缩落地、transcript 被清空（`reset`）或从盘上换掉（续会话）时作废，下一次组装重取。冻结的是生成后的字符串，不是多个记忆文件的事务快照。
+
+两次 run 之间记忆变了（提取、Dream、模型自己写、别的 session 写），system 不动，改由 [`memoryUpdateMessage()`](../../packages/core/src/memory/harness.ts#symbol=memoryUpdateMessage) 在下一个前台 run 的输入之前追加一条 environment 消息（`source` 为 `memory`），正文是整段新记忆。判断「变没变」比的是**模型最后看到的那一版**：本次送模投影里最后一条记忆更新，没有就是 system 里那份——所以续会话后历史里较早的更新不会被当成最新。run 内写记忆本 run 看不到（system 与已发的消息都不变），模型仍可用 `view` 主动读取。续跑（被打断的 run 接着跑）不追加。
+
+为什么这样：provider 的缓存按前缀命中，记忆段之后是工具定义与整段对话。每个 run 重组时，两次 run 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低）。决策见 [记忆段会话内冻结](../decisions/implemented/2026-10-29-memory-frozen-in-system.md)。
 
 ## 4. 模型读写与失败语义
 

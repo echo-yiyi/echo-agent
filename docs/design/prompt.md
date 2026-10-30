@@ -86,7 +86,7 @@ flowchart LR
 | 300 | run / session 环境事实 | workspace、model、provider |
 | 400 | workspace 项目指令 | AGENTS.md，找不到才看 CLAUDE.md |
 | 500 | skill 目录 | 只列 model-invocable skills |
-| 900 | memory | 最常变化，放在末尾 |
+| 900 | memory | 会话内冻结，作废重取时才变；放在末尾 |
 
 数值越小越靠前；同数保注册序。排序意图是把更稳定的字节留在前缀，不代表 core 提供或承诺 provider cache。`order` 也不决定刷新频率：刷新由 system / turn / attempt 所在的生命周期决定。
 
@@ -117,6 +117,7 @@ flowchart LR
 | 数据 | 何时取快照 | 同一 run 内变化何时可见 |
 | --- | --- | --- |
 | system sections / variables | admission 后、run 开始前装配一次 | 本 run 不变；下一 run 重装配 |
+| system 里的 memory 段 | 会话内第一次装配时取一次；压缩落地、`reset`、续会话后重取 | system 不变；下一个前台 run 的输入前追加一条 `source: "memory"` 的 environment 消息（见 [memory §3](memory.md)） |
 | 工具工作集 | 每个 turn 开头冻结 | 下一 turn |
 | skill / task injections | 每个 attempt 构建 working context 时重算 | 下一 attempt；通常就是下一 turn，重试时可能仍是同一 turn |
 | transcript / compaction view | 每个 attempt 重建 | 按账本与压缩流水线的时序 |
@@ -193,7 +194,7 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 
 PromptSection 不区分 required / optional，render 异常统一省略。产品若将关键策略放在可能失败的动态 render 中，必须自行处理失败；段名 identity 不会自动得到更强的失败保护。
 
-装配出的 system 本身不写入 session。角色定义快照存在 session 元数据中，memory 与 workspace 文件在各自位置维护，不是本次请求的逐字快照。这意味着同一 session 在下个 run 可能因文件、extension 或模型装备变化得到不同 system，符合“每 run 装配”的设计，但排障需要能看到当次实际请求或稳定 digest。当前 prompt 单测证明字节与行为，不能替代生产观测对“这次到底发了什么”的回答。
+装配出的 system 本身不写入 session。角色定义快照存在 session 元数据中，memory 与 workspace 文件在各自位置维护，不是本次请求的逐字快照。这意味着同一 session 在下个 run 可能因项目指令文件、extension 或模型装备变化得到不同 system，符合“每 run 装配”的设计（记忆文件除外：memory 段会话内冻结，变化走追加消息，见 §4），但排障需要能看到当次实际请求或稳定 digest。当前 prompt 单测证明字节与行为，不能替代生产观测对“这次到底发了什么”的回答。
 
 ## 9. 当前限制
 
