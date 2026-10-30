@@ -85,3 +85,6 @@ C 被否:它把两件语义相反的活压进一个 run——提取要读对话�
 **实现注（2026-09-14）：提取从来没真跑过。** d346b56 的 `enqueueExtract` 用 `viewAt(messages, compaction, messages.length)` 取 transcript——`viewAt(…, i)` 是「第 i 条单条在视图里的样子」，i 越界恒为空数组，`runExtract` 见空串直接返回，不报诊断；当时没有一条测试让提取子循环真的起来。改成 [`buildWorkingMessages`](../../../packages/core/src/compaction/view.ts#symbol=buildWorkingMessages)（整个 transcript 经压缩投影，正是本记录要的 working context），端到端判据在 `packages/core/test/memory-extract.test.ts`。
 
 **实现注（2026-09-14，第二条）：提取真跑之后轮数不够。** 真实会话里最近 6 次提取有 4 次 `max_iterations`：账本显示前三轮全在 view（一轮最多 9 次），第四轮才写，第五轮去写系统维护的 INDEX.md 被拒——子循环没有 system prompt，不知道已经存了什么，也不知道索引是自动的。改法（用户拍板，上限保持 5）：提取 prompt 自带此刻存着的记忆（`memoryManifest`，常驻模块全文、indexed 模块给索引）并说明 INDEX.md 由系统重建、只在要改某个文件时才 view；没跑完的诊断带上已写入条数；提取 / 整理子循环里的写入事实挂到它自己的 run 上（此前 run 为空）。判据在 `packages/core/test/memory-extract.test.ts` 与 `packages/core/test/observability-runtime.test.ts`，都反证过。
+
+
+**实现注（2026-10-30）：触发与输入改了。** 不再每条 reply 都跑：用户亲口说的话自上次提取以来攒到门槛才跑，且只看游标之后的新内容、不再重发整段。见 [记忆提取降频](2026-10-30-memory-extraction-gate.md)；本条「每条 reply 结束跑一次」「看 working context」两处以那条为准。

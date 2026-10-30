@@ -128,7 +128,11 @@
 
 前台仍可主动记忆，触发提示和排除项由 [`renderMemorySystem()`](../../packages/core/src/memory/compose.ts#symbol=renderMemorySystem) 提供。提取是另一条后台通道，入口是主事件流的 reply_end，而不是每次模型请求。
 
-当前 [`Agent.enqueueExtract()`](../../packages/core/src/agent.ts#symbol=Agent.enqueueExtract) 依次检查：记忆已绑定、生命周期允许工作且有运行 scope；**一个模块都没有就不跑**（不为提取起一次模型调用）；本 reply 的重叠保护标志。都过了才对 reply 结束时的 transcript 做压缩视图投影并渲染文本。**这不是该 reply 最后一次 provider request 的精确快照**：不包含同一条 transform / hook / 临时 injection 管线，且时间点已经在 reply 收尾。
+当前 [`Agent.enqueueExtract()`](../../packages/core/src/agent.ts#symbol=Agent.enqueueExtract) 依次检查：记忆已绑定、生命周期允许工作且有运行 scope；**一个模块都没有就不跑**（不为提取起一次模型调用）；本 reply 的重叠保护标志——前台这轮写过记忆，就把提取游标推过这一段、不提取。都过了就把 reply 结束时的 transcript 定格，排进提取通道。
+
+**游标与门槛**（2026-10-30，决策见 [记忆提取降频](../decisions/implemented/2026-10-30-memory-extraction-gate.md)）：Agent 记一个 transcript 下标，之前的部分算已看过。真跑的那一刻从游标读起，先数游标之后**用户亲口说了多少话**（[`userProseWords()`](../../packages/core/src/memory/extract.ts#symbol=userProseWords)：只数 `human` / `steer` 的用户正文，中日韩文字一字一词、其余按空白分词），不到 [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS) 就不跑、游标不动——攒着，下一条有内容的话出现时一并看。过了门槛，只把游标之后的部分经压缩视图投影（被压掉的以摘要 / 占位出现）、渲染成文本交给提取；**正常跑完**才把游标推到这次材料的末尾，出错、轮数用完、被中止都不动。压缩不改 transcript 下标，游标照样有效；`reset` 归零，续会话设到末尾（上个进程的历史不再回头看）。会话结束时没攒够的那一截不提取。
+
+**这不是该 reply 最后一次 provider request 的精确快照**：不包含同一条 transform / hook / 临时 injection 管线，且时间点已经在 reply 收尾。
 
 [`defaultExtractPrompt()`](../../packages/core/src/memory/extract.ts#symbol=defaultExtractPrompt) 把这份会话材料连同作用域与模块说明给隔离子循环，要求**先对照 prompt 自带的已存清单**（prompt 里的 `Stored now` 一节，怎么来的见下一段）、只在要改某个文件之前 `view`、避免重复、只保留以后有用的事实，允许什么都不写。
 
@@ -136,7 +140,7 @@
 
 提取不通过 admission，不抢前台许可；独立消息数组、不消费前台 steer / followUp，子循环事件不发进主 transcript。但它复用父的循环配置与相关服务，不能笼统宣称与前台完全不共享可变状态。
 
-目前重叠保护是“本 reply 出现成功的 memory 工具结束事件”，并非已提交 mutation 事实。因此只读 view 也会跳过提取，别名工具的写入则未必触发跳过。**标志只在走到它那一步时复位**：前面两道任一挡住（比如这条 reply 收尾时刚丢锁，或一个模块都没有），标志会留到下一条 reply，把下一次提取也压掉。提取还在跑时又结束的几条 reply 会折叠成一次：[`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel) 跑完只再跑最后排进来的那次，它的 transcript 包含前面几次的材料；stop / 丢锁时还没开始的那次直接丢掉。所以不能承诺每条 reply 各跑一次提取，但忙时的新材料最终会被看到。
+目前重叠保护是“本 reply 出现成功的 memory 工具结束事件”，并非已提交 mutation 事实。因此只读 view 也会把游标推过这一段，别名工具的写入则未必触发。**标志只在走到它那一步时复位**：前面两道任一挡住（比如这条 reply 收尾时刚丢锁，或一个模块都没有），标志会留到下一条 reply，把下一次提取也压掉。提取还在跑时又结束的几条 reply 会折叠成一次：[`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel) 跑完只再跑最后排进来的那次，它从游标读起，看的是前一次没看过的全部；stop / 丢锁时还没开始的那次直接丢掉（游标不动，同一进程里下次再看）。所以既不承诺每条 reply 各跑一次提取，也不承诺每段都会被提取——门槛没过、进程就结束了的那一截不提取。
 
 ## 6. Dream 怎样整理
 

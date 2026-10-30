@@ -1,4 +1,5 @@
-// 记忆的**产生**:每条 reply 结束跑一次提取(2026-09-07 用户拍板)。
+// 记忆的**产生**:reply 结束时提取(2026-09-07 用户拍板);只看上次提取之后的新内容,
+// 用户说的话攒够了才跑(2026-10-30 用户拍板,见 `DEFAULT_EXTRACT_MIN_USER_WORDS`)。
 //
 // 为什么要它:记忆此前只有一条写入路径——前台模型自己想起来——而那段规则里**没有一条讲
 // 什么时候写**。实测:自 2026-09-04 那次整理以来 320 轮对话,记忆写入 3 次,且三次全发生在
@@ -13,6 +14,40 @@
 
 import { memoryPaths, type AnyMemory } from "./types.ts";
 import type { MemoryScopeTable } from "./scope.ts";
+import type { AgentMessage } from "../messages.ts";
+
+/**
+ * 提取的门槛（2026-10-30 用户拍板）：**自上次提取以来，用户亲口说的话**攒到这么多才跑一次。
+ * 计量见 `userProseWords`。没攒够就攒着（游标不动）——下一条有内容的话出现时一并看。
+ *
+ * 为什么只数用户说的：「谢谢」「继续」这种回复后面，助手可能刚读完一个大文件，按全部新内容算会照样触发。
+ * 而攒着不丢：埋头干活那几轮里踩到的坑，会随下一条过门槛的话一起被看到。
+ * 数值是首版的估计（滤掉致谢 / 确认这一类），实测后再调。
+ */
+export const DEFAULT_EXTRACT_MIN_USER_WORDS = 8;
+
+/** 中日韩文字：一个字记一个词（这些文字不靠空格分词）。 */
+const CJK_CHAR = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]/gu;
+/** 其余文字按空白分词，只认带字母或数字的词——纯标点不算话。 */
+const WORD = /[\p{L}\p{N}]/u;
+
+/**
+ * 一段消息里用户亲口说了多少「词」：只数 `human` / `steer` 的用户消息正文（harness 插话、助手回复、
+ * 工具输出、环境消息都不算）。中日韩文字一个字一个词，其余按空白分词。
+ */
+export function userProseWords(messages: readonly AgentMessage[]): number {
+  let n = 0;
+  for (const m of messages) {
+    if (m.role !== "user" || m.source === "harness") continue;
+    for (const b of m.content) {
+      if (b.type !== "text") continue;
+      const cjk = b.text.match(CJK_CHAR)?.length ?? 0;
+      const rest = b.text.replace(CJK_CHAR, " ").split(/\s+/).filter((w) => WORD.test(w)).length;
+      n += cjk + rest;
+    }
+  }
+  return n;
+}
 
 /**
  * 提取子 agent 的轮数上限：够它「看一两个要改的文件 → 写两三条 → 收尾」，又给成本一个硬上界。
@@ -44,7 +79,7 @@ export function defaultExtractPrompt(memories: readonly AnyMemory[], table: Memo
     .filter((l): l is string => l !== null)
     .join("\n");
   return [
-    `${EXTRACT_PROMPT_OPENING} Read the conversation below and decide whether anything in it is worth keeping after this session ends.`,
+    `${EXTRACT_PROMPT_OPENING} Read the conversation below — only the part since memory was last reviewed — and decide whether anything in it is worth keeping after this session ends.`,
     "Work in this order:\n" +
       "1. Check what is already stored — it is listed under \"Stored now\" below (resident modules in full, indexed modules by their index). Most of what feels new is already there in some form.\n" +
       "2. Pick out only what the module descriptions below say is worth keeping.\n" +
@@ -60,6 +95,6 @@ export function defaultExtractPrompt(memories: readonly AnyMemory[], table: Memo
     `Modules:\n${modules}`,
     `Stored now:\n${stored === "" ? "(nothing stored yet)" : stored}`,
     "Writing nothing is a normal outcome. Most replies produce no memory. Do not invent something to record.",
-    `--- conversation ---\n${transcript}`,
+    `--- conversation since the last review ---\n${transcript}`,
   ].join("\n\n");
 }

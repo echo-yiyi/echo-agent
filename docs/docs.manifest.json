@@ -298,6 +298,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-10-30-memory-extraction-gate.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md",
       "bilingual": false
     },

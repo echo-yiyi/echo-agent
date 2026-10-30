@@ -19,7 +19,7 @@ import { MemoryChannel } from "./memory/channel.ts";
 import { MEMORY_TOOL_NAME } from "./memory/tool.ts";
 import { agentMemory, notesMemory, userMemory } from "./memory/types.ts";
 import { renderTranscriptMessage } from "./compaction/tool.ts";
-import { DEFAULT_EXTRACT_MAX_TURNS, defaultExtractPrompt } from "./memory/extract.ts";
+import { DEFAULT_EXTRACT_MAX_TURNS, DEFAULT_EXTRACT_MIN_USER_WORDS, defaultExtractPrompt, userProseWords } from "./memory/extract.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import { loopFactDescriptor, loopProbeFor } from "./loop/observe.ts";
@@ -46,7 +46,7 @@ import type { AgentContext, AgentLoopConfig, AttemptResult, LoopProbes, LoopResu
 import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
-import { buildWorkingMessages, estimateText, estimateTokens } from "./compaction/view.ts";
+import { buildWorkingMessages, estimateText, estimateTokens, projectRange } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
 import type { SessionPhase } from "./session/status.ts";
@@ -715,6 +715,14 @@ export class Agent {
    * 不然前台刚记完一条,提取回头看见"这轮有值得记的",又写一条几乎一样的。
    */
   private memoryWrittenThisReply = false;
+  /**
+   * 提取的**游标**（2026-10-30）：transcript 里 `[0, extractCursor)` 已经被看过（提取跑完，或前台自己写过记忆）。
+   * 下标是原始 transcript 的——压缩只改视图、不动 transcript，所以压缩后照样有效。
+   * 只在提取**正常跑完**时推进；出错 / 轮数用完 / 被中止都不动，下次重看。`reset` 归零，续会话设到末尾。
+   */
+  private extractCursor = 0;
+  /** transcript 被清空或换掉的代数：在飞的提取认出自己看的是旧的那份，就不推游标（推了会对不上新的下标）。 */
+  private extractEpoch = 0;
   /** 当前 run 的稳定身份；permission ask 与事件关联引用它。 */
   private currentRunId: string | null = null;
   /**
@@ -2937,7 +2945,8 @@ export class Agent {
   }
 
   /**
-   * 每条 reply 收尾排一次提取。**不进 admission**，走自己的通道——为什么见 `memory/channel.ts` 头注。
+   * reply 收尾时把材料定格、排进提取通道；真跑时用户说的话没攒够门槛就不起模型调用（`DEFAULT_EXTRACT_MIN_USER_WORDS`）。
+   * **不进 admission**，走自己的通道——为什么见 `memory/channel.ts` 头注。
    */
   private enqueueExtract(): void {
     const memory = this.memory;
@@ -2946,29 +2955,46 @@ export class Agent {
     // 一个模块都没有（`memory.builtin: false` 且没有扩展注册）：没有地方可写，不为此起一次模型调用
     if (memory.memories.size === 0) return;
     // **重叠保护**：这条 reply 里前台自己已经写过记忆就跳过——不然刚写完一条，
-    // 提取回头看见"这轮有值得记的"，又写一条几乎一样的。
+    // 提取回头看见"这轮有值得记的"，又写一条几乎一样的。游标推过这一段：前台已经处理过它。
     if (this.memoryWrittenThisReply) {
       this.memoryWrittenThisReply = false;
+      this.extractCursor = Math.max(this.extractCursor, this._state.messages.length);
       return;
     }
-    // working context = 这次实际送给模型的那份（被压缩预算管着，成本有界）。被压掉的原文
-    // 以九节摘要的形态还在它眼前，所以不需要为压缩再加一个联动。
-    const view = buildWorkingMessages(this._state.messages, this._state.compaction);
-    const transcript = view.map((m, i) => renderTranscriptMessage(m, i)).join("\n");
-    this.extractChannel.schedule((signal) => this.runExtract(memory, scope, transcript, signal));
+    // 材料在 reply 边界上定格（不取跑的那一刻：那时前台可能正在下一条 reply 的半路上）。
+    // `_state.messages` 每次追加都换新数组，所以这两个引用就是此刻的快照。
+    const epoch = this.extractEpoch;
+    const messages = this._state.messages;
+    const compaction = this._state.compaction;
+    const end = messages.length;
+    this.extractChannel.schedule(async (signal) => {
+      if (epoch !== this.extractEpoch) return; // transcript 已被清空或换掉
+      // 起点在跑的那一刻读：排队期间前一次提取可能已经看过一截
+      const from = this.extractCursor;
+      if (from >= end) return;
+      // **门槛**：用户亲口说的话没攒够就不跑、游标不动——攒着，等下一条有内容的话一并看
+      if (userProseWords(messages.slice(from, end)) < DEFAULT_EXTRACT_MIN_USER_WORDS) return;
+      // 只看游标之后：经压缩视图投影（被压掉的部分以摘要 / 占位出现），成本跟新内容走、不跟会话长度走
+      const transcript = projectRange(messages, compaction, from, end)
+        .map((m, i) => renderTranscriptMessage(m, i))
+        .join("\n");
+      const done = await this.runExtract(memory, scope, transcript, signal);
+      if (done && epoch === this.extractEpoch) this.extractCursor = Math.max(this.extractCursor, end);
+    });
   }
 
   /**
    * 一次提取：隔离子循环、**全套记忆工具**、`maxTurns` 限死。
    * **绝不抛**（通道自己也兜一层）：后台活失败不该影响前台，结果体现在记忆文件上。
+   * 返回这次是否**正常跑完**——只有跑完游标才推进（没起来、出错、轮数用完、被中止都是 false）。
    */
   private async runExtract(
     memory: AgentMemories,
     scope: AgentAdmissionExecuteScope,
     transcript: string,
     signal: AbortSignal,
-  ): Promise<void> {
-    if (transcript === "" || !this.memoryWorkAllowed || signal.aborted) return;
+  ): Promise<boolean> {
+    if (transcript === "" || !this.memoryWorkAllowed || signal.aborted) return false;
     const table = memoryScopeTableOf(memory);
     // 此刻存着什么由 prompt 自带：子循环没有 system prompt，不给它就只能一个个 view 去摸，轮数先用完（2026-09-14 实测）
     const prompt = defaultExtractPrompt(listMemories(memory), table, transcript, await memoryManifest(memory));
@@ -3007,6 +3033,7 @@ export class Agent {
         message: `记忆提取没跑完（${result.outcome.error.code}）：${result.outcome.error.message}；${written > 0 ? `此前已写入 ${written} 条` : "没有写入"}`,
       });
     }
+    return result.outcome.kind === "completed";
   }
 
   /**
@@ -3718,6 +3745,8 @@ export class Agent {
         break;
       case "reset":
         this.memorySystem.text = null; // 之前追加的记忆更新随 transcript 一起没了
+        this.extractCursor = 0;
+        this.extractEpoch += 1;
         this._state.messages = [];
         this._state.streamingMessage = undefined;
         this._state.pendingToolCalls = new Set();
@@ -3730,6 +3759,9 @@ export class Agent {
         break;
       case "session_restored":
         this.memorySystem.text = null; // 换了一份 transcript：system 按此刻的记忆重取，历史里的旧更新由下一个 run 补齐
+        // 续上的历史不再回头提取：上个进程已经看过（或在它收摊时没攒够、就此放下）
+        this.extractCursor = input.messages.length;
+        this.extractEpoch += 1;
         this._state.messages = [...input.messages];
         this._state.compaction = input.compaction;
         this._state.sessionId = input.sessionId;
