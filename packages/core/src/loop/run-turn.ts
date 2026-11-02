@@ -30,6 +30,7 @@ import type { PermissionVerdict } from "../permission/types.ts";
 import type { AgentMessage, ToolResultMessage, ToolUseBlock } from "../messages.ts";
 import { toolResultMessage, toolUsesFromMessage } from "../messages.ts";
 import { isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type McpTool, type ModelTool } from "../tools/types.ts";
+import { spillToolResult, TOOL_OUTPUT_INLINE_TOKENS, TOOL_OUTPUT_READ } from "../tools/output.ts";
 import { buildWorkingMessages } from "../compaction/view.ts";
 import { clampDelay, sleep } from "./backoff.ts";
 import { turnIdOf } from "./ids.ts";
@@ -533,13 +534,21 @@ async function runOneTool(
 
   probe({ kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: finalResult }, turnId);
   await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: finalResult });
+  // **入账前外存**（2026-11-02）：事件与 hook 拿的是全文，记进对话的超上限就只剩说明加头尾预览、全文进会话目录。
+  // 读回工具不在本轮菜单上（比如角色收紧掉了）就不在说明里点它的名——不教模型用它没有的工具
+  const recorded =
+    config.saveToolOutput === undefined
+      ? finalResult
+      : await spillToolResult(finalResult, use.id, tool.maxInlineTokens ?? TOOL_OUTPUT_INLINE_TOKENS, config.saveToolOutput, {
+          readBack: tools.some((t) => t.name === TOOL_OUTPUT_READ),
+        });
   return toolResultMessage(
     use.id,
     use.name,
-    finalResult.content,
-    finalResult.isError,
-    finalResult.metadata as Record<string, unknown> | null,
-    finalResult.images,
+    recorded.content,
+    recorded.isError,
+    recorded.metadata as Record<string, unknown> | null,
+    recorded.images,
   );
 }
 

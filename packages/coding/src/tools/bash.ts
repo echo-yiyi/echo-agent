@@ -12,7 +12,12 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { toolError, toolOk, type AgentBackground, type AgentToolResult, type ModelTool } from "@echo-agent/core";
 
-const OUTPUT_CAP = 30_000;
+/**
+ * 前台命令最多收这么多字符（2026-11-02）：不再在这里截到 30,000 丢掉后半——报错多在末尾。
+ * 收全了交给 core：超过内联上限时全文外存、对话里只留头尾预览（`@echo-agent/core` 的工具结果外存）。
+ * 这个上限只防内存失控。
+ */
+const CAPTURE_CAP = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** job_output 缺省回读的字符数:够看清最近的日志,又不至于一次把缓冲全倒进上下文。 */
 const JOB_TAIL_DEFAULT = 4_000;
@@ -217,7 +222,7 @@ function runForeground(
     let tail = ""; // 末尾几百字节单独留着：cwd 标记在这里找，输出被截断也丢不了
     const append = (chunk: string): void => {
       tail = (tail + chunk).slice(-CWD_TAIL_KEEP);
-      if (out.length >= OUTPUT_CAP) {
+      if (out.length >= CAPTURE_CAP) {
         truncated = true;
         return;
       }
@@ -248,8 +253,8 @@ function runForeground(
       const marked = CWD_MARK_RE.exec(tail);
       const newCwd = marked?.[1];
       const body = marked === null ? out : out.replace(CWD_MARK_RE, "").replace(/\n$/, "");
-      let text = body.slice(0, OUTPUT_CAP);
-      if (truncated || body.length > OUTPUT_CAP) text += `\n…[output truncated: over ${OUTPUT_CAP} characters]`;
+      let text = body.slice(0, CAPTURE_CAP);
+      if (truncated || body.length > CAPTURE_CAP) text += `\n…[output truncated: over ${CAPTURE_CAP} characters]`;
       const withCwd = (r: AgentToolResult): AgentToolResult & { cwd?: string } => (newCwd === undefined ? r : { ...r, cwd: newCwd });
       if (spawnError !== undefined) {
         resolvePromise(toolError(`The command could not start: ${spawnError}`));

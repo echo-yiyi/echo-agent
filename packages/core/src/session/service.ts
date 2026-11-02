@@ -626,7 +626,7 @@ function project(loaded: Loaded): SessionData {
   return { info: loaded.info, messages, compaction, workspace };
 }
 
-const COMPACTION_REASONS: ReadonlySet<unknown> = new Set<CompactionReason>(["auto", "overflow", "manual"]);
+const COMPACTION_REASONS: ReadonlySet<unknown> = new Set<CompactionReason>(["auto", "overflow", "manual", "idle"]);
 
 /**
  * 改一段 session 的持久状态（`active` ↔ `closed`，2026-09-03）。

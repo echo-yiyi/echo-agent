@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 347（value 122 · type 207 · both 18）
+符号 357（value 129 · type 210 · both 18）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -104,7 +104,7 @@ value  DEFAULT_SECTION_TOKENS
 value  EMPTY_COMPACTION
 value  isEmptyCompaction
 
--- src/compaction/view.ts (17) --
+-- src/compaction/view.ts (16) --
 value  assertCompactionFits
 value  buildWorkingMessages
 value  clearedNotice
@@ -112,7 +112,6 @@ type   ContextAnchor
 value  estimateMessage
 value  estimateText
 value  estimateTokens
-value  IMAGE_TOKEN_ESTIMATE
 value  isLegalCut
 value  isTurnStart
 value  measureContext
@@ -196,6 +195,17 @@ value  isInterceptable
 type   LifecycleEventListener
 type   NotifyOnlyType
 type   Patchable
+
+-- src/image.ts (9) --
+value  IMAGE_TOKEN_ESTIMATE
+type   ImageFormat
+value  imageFromBytes
+type   ImageFromBytes
+type   ImageInfo
+value  imageTokens
+value  MAX_IMAGE_BYTES
+value  MAX_IMAGE_EDGE
+value  sniffImage
 
 -- src/inbox/ingress.ts (3) --
 type   DurableDeliveryRequest
@@ -460,6 +470,10 @@ type   TaskStatus
 type   TaskStore
 type   TaskView
 type   TaskWriteResult
+
+-- src/tools/output.ts (2) --
+value  TOOL_OUTPUT_INLINE_TOKENS
+value  TOOL_OUTPUT_READ
 
 -- src/tools/types.ts (11) --
 type   AgentTool

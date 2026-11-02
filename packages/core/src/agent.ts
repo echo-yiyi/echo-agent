@@ -96,6 +96,8 @@ import type { ScheduleResult } from "./extension/reload.ts";
 import { makeSubagentTool, makeReceiptBook, renderReceiptLine, finalStatusOf, SUBAGENT_NAME, REPORT_NAME, type Receipt, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
 import type { Diagnostic } from "./errors.ts";
 import type { StorageDir } from "./storage/types.ts";
+import { InMemoryDir } from "./storage/in-memory-dir.ts";
+import { makeToolOutputReadTool } from "./tools/output.ts";
 import type { ResourceChange } from "./events.ts";
 import { addSkills, listActiveSkills, type ActiveSkillMap, type SkillMap } from "./skill/harness.ts";
 import { makeSkillTools } from "./skill/tools.ts";
@@ -250,6 +252,12 @@ export type AgentOptions = {
    * 文件实现走 `@echo-agent/core/task/fs`。**`loadTasks()` 不自动调**——与 `connectAllMcp()` 同款仪式。
    */
   taskStore?: TaskStore;
+  /**
+   * 大工具结果的外存目录（2026-11-02）：结果超过内联上限时全文写进这里，对话里只留头尾预览，
+   * 模型经 `tool_output_read` 读回。`createAgent` 给的是会话目录下的 `tool-outputs/`。
+   * 不传 = 进程内存（外存与读回照常，只是不跨进程）。
+   */
+  toolOutputStore?: StorageDir;
   /**
    * MCP 端口。不传 = 本 agent 不认识 MCP（`agent.mcp` 为 `undefined`，`state.mcp` 恒空）。
    * 实现在适配器一侧（不在本仓）——服务器配置、传输、超时都是**它**的词汇，core 不认识。
@@ -685,6 +693,8 @@ export class Agent {
    * 置回 null（`processEvents` 里），下一次组装重取。
    */
   private readonly memorySystem: MemorySystemFreeze = { text: null };
+  /** 大工具结果的外存目录（`AgentOptions.toolOutputStore`，不给就是进程内存）。 */
+  private readonly toolOutputs: StorageDir;
 
   /* 可替换的决策点 */
   public convertToLlm: ConvertToLlm;
@@ -767,6 +777,7 @@ export class Agent {
     this.disposables = opts.disposables ?? [];
     this.finalDisposables = opts.finalDisposables ?? [];
     this.taskStore = opts.taskStore;
+    this.toolOutputs = opts.toolOutputStore ?? new InMemoryDir();
 
     // **回调逐个显式给,不打包**（2026-08-05 拆掉 HarnessHost 之后的形态；
     // 全局约定：优先显式依赖注入,不用全局 holder）。
@@ -912,6 +923,11 @@ export class Agent {
       // 渐进式披露的入口，恒装：延迟工具是标记、随时可能被 extension / MCP 注册进来；
       // 池里没有待取的延迟工具时它自己不上菜单（`visibleTools`），不多占一格
       toolSearch: { tools: [makeToolSearchTool({ tools: this.tools, loaded: this.loadedTools })] },
+      // 大工具结果的读回 `tool_output_read`（2026-11-02），恒装、常驻菜单：外存一直开着，读回不能跟着别的开关消失；
+      // 常驻而不延迟，菜单不随它变、缓存不断（多约 150 token）
+      toolOutput: {
+        tools: [makeToolOutputReadTool({ read: (file) => this.toolOutputs.read(file), transcript: () => this._state.messages })],
+      },
       // 提问 `ask_user`（2026-09-05）。**没有人能答就不装**（2026-09-09 用户拍板）：
       // 与「能力不在就不出条目」同一口径（memory / scheduler 早就这么做）。此前它无条件上菜单，
       // 于是 Docker 里跑评测的模型看得见一件必然失败的工具，白花一轮去问一个不存在的人。
@@ -3368,6 +3384,7 @@ export class Agent {
     return {
       model: binding.model as Model, // RunModelSnapshot 与 Model 同形——JSON-like 的冻结副本
       runId: scope.runId,
+      saveToolOutput: (file, text) => this.toolOutputs.write(file, text),
       permission: this.permissionStage(),
       sessionId: this._state.sessionId,
       thinkingLevel: binding.thinkingLevel,
@@ -3422,6 +3439,7 @@ export class Agent {
         ...(this.compaction.reserveTokens !== undefined ? { reserveTokens: this.compaction.reserveTokens } : {}),
         getStages: () => [...this.compactionStages.values()],
         calibration: this.lastCalibration,
+        now: () => this.clock.now(),
       },
       // **现读**：`setWorkspace()`（worktree 隔离）在轮中途改它，下一次工具执行就要看到新目录
       get workspace() {

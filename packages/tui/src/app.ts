@@ -7,7 +7,8 @@
 // 于是这个文件**只认协议、不认 Agent**：`start` / `stop` / `deliver` 都不在协议里，
 // 进程级启停归装配层（`createEcho()` / `echo.stop()`），壳子碰不到也不该碰。
 
-import { errText, NO_SESSION_FACE, type AgentState, type CredentialStore, type Model, type Provider, type SessionFace, type ThinkingLevel } from "@echo-agent/core";
+import { errText, NO_SESSION_FACE, type AgentState, type CredentialStore, type ImageBlock, type Model, type Provider, type SessionFace, type ThinkingLevel } from "@echo-agent/core";
+import { basename } from "node:path";
 import type { AgentRuntime, ReloadChange } from "@echo-agent/core/extension";
 import {
   decodeKittyPrintable,
@@ -27,7 +28,7 @@ import { wrap } from "./text.ts";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { installKeybindings } from "./keybindings.ts";
 import { CredentialSetup } from "./setup.ts";
-import { isConfigured, type VerifyFn } from "@echo-agent/base";
+import { imagePathsIn, isConfigured, loadImageFile, type VerifyFn } from "@echo-agent/base";
 import { SlashCommandProvider, type SlashSpec } from "./slash.ts";
 import { describeModel } from "./catalog.ts";
 import { bold, dim, EDITOR_THEME, SELECT_LIST_THEME } from "./theme.ts";
@@ -926,6 +927,31 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
   for (const ask of agent.pendingPermissions) takeAsk(ask);
   for (const q of agent.pendingQuestions) takeQuestion(q);
 
+  /**
+   * 拖进终端的图片（2026-11-02，照 Claude Code）：终端把文件拖进来粘贴的是路径——输入里指向已存在图片文件的路径，
+   * 读出来（大了缩放）作为图片附上；原文照发，模型看得到是哪个文件。当前模型不收图就一张都不附，说清楚。
+   */
+  const attachImages = async (text: string): Promise<ImageBlock[] | undefined> => {
+    const paths = imagePathsIn(text, agent.state.workspace);
+    if (paths.length === 0) return undefined;
+    if (agent.state.model.capabilities?.vision !== true) {
+      transcript.push({ kind: "notice", text: `[图片] 当前模型 ${agent.state.model.id} 不收图片，${paths.length} 张没有附上` });
+      return undefined;
+    }
+    const images: ImageBlock[] = [];
+    for (const path of paths) {
+      const loaded = await loadImageFile(path);
+      if (loaded.ok) {
+        images.push(loaded.image);
+        const scaled = loaded.original === undefined ? "" : `，从 ${loaded.original.width}×${loaded.original.height} 缩放`;
+        transcript.push({ kind: "notice", text: `[图片] 已附上 ${basename(path)}（${loaded.info.width}×${loaded.info.height}${scaled}）` });
+      } else {
+        transcript.push({ kind: "notice", text: `[图片] 没有附上 ${basename(path)}：${loaded.message}` });
+      }
+    }
+    return images.length > 0 ? images : undefined;
+  };
+
   const submit = async (text: string): Promise<void> => {
     transcript.push({ kind: "user", text });
     // 只封「已经发出去、`agent_start` 还没到」这一小段：`prompt()` 是异步的，
@@ -933,9 +959,11 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     pendingLocal = true;
     rerender();
     try {
+      const images = await attachImages(text);
+      if (images !== undefined) rerender();
       // **`outcome` 里的错误不在这里显示**——`agent_end` 统一显示（见上面那支 case）。
       // 两边都显示 = 同一个错误在屏幕上出现两次（review 点名要避免的）。
-      await agent.prompt(text);
+      await agent.prompt(text, images);
     } catch (e) {
       // `prompt()` **自己抛**（被拒、已停）是另一回事：那种情况下 run 根本没开始，
       // 也就没有 `agent_end` 会来——不在这里显示就彻底没人显示了。

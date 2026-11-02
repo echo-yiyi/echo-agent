@@ -141,6 +141,8 @@ export function compactionSection(): PromptSection {
       "As this conversation grows, older parts get compacted: some are replaced by a summary, some stretches are condensed, " +
       "and old tool results are cleared. Each notice states the message range it covers, for example #12–#40. " +
       "A summary keeps decisions and state, not wording: when the task needs exact code, file contents, error output, or text you produced earlier, " +
-      "call transcript_read with that range instead of reconstructing it. The task list is not affected by compaction; keep it current.",
+      "call transcript_read with that range instead of reconstructing it. " +
+      "A cleared tool result names its tool call: read its full text back with tool_output_read and that id. " +
+      "The task list is not affected by compaction; keep it current.",
   };
 }

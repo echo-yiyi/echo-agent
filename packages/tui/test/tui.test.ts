@@ -6,7 +6,7 @@
 
 import { test, expect, afterAll, afterEach } from "bun:test";
 import { mkdtempSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -437,6 +437,59 @@ test("发完一句之后直接回车：不许重复发送同一句（换成 `Edi
   expect(prompts).toEqual(["first"]);
   quit(ui);
   await done;
+});
+
+/* ─────────────── 拖进来的图片（2026-11-02，照 Claude Code） ─────────────── */
+
+/** 只有文件头的 PNG：1568 像素以内不缩放，只读头。 */
+function pngHeader(w: number, h: number): Uint8Array {
+  const b = new Uint8Array(33);
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const v = new DataView(b.buffer);
+  v.setUint32(16, w);
+  v.setUint32(20, h);
+  b.set([8, 6, 0, 0, 0], 24);
+  return b;
+}
+
+async function dragImageIn(vision: boolean): Promise<{ sent: { text: string; images: number }[]; screen: string }> {
+  const workspace = await mkdtemp(join(tmpdir(), "echo-tui-img-"));
+  await writeFile(join(workspace, "shot.png"), pngHeader(320, 200));
+  const ui = fakeTui();
+  const echo = await echoWith([textTurn("看到了")], { capabilities: { vision } }, { workspace });
+  const sent: { text: string; images: number }[] = [];
+  const runtime = runtimeOf(echo, {
+    prompt: (i, images) => {
+      sent.push({ text: typeof i === "string" ? i : JSON.stringify(i), images: images?.length ?? 0 });
+      return echo.agent.prompt(i, images);
+    },
+  });
+  const done = runTui({ agent: runtime, ui });
+  await flush();
+  ui.feed(`这张图里是什么 ${workspace}/shot.png`); // 终端里拖进文件，粘贴的就是路径
+  ui.feed("\r");
+  // 附图要真读盘：空转事件循环等不到 I/O，按真实时间等到 prompt 发出去（最多 2 秒）
+  const deadline = Date.now() + 2_000;
+  while (sent.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+  await flush(300);
+  const screen = ui.screen();
+  quit(ui);
+  await done;
+  return { sent, screen };
+}
+
+test("输入里有指向已存在图片文件的路径：读出来作为图片附上，原文照发，屏幕上说附上了哪张", async () => {
+  const { sent, screen } = await dragImageIn(true);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.images).toBe(1);
+  expect(sent[0]!.text).toContain("shot.png");
+  expect(screen).toContain("[图片] 已附上 shot.png（320×200）");
+});
+
+test("当前模型不收图片：一张都不附，屏幕上说清楚，文字照发", async () => {
+  const { sent, screen } = await dragImageIn(false);
+  expect(sent).toEqual([{ text: expect.stringContaining("shot.png"), images: 0 }]);
+  expect(screen).toContain("不收图片，1 张没有附上");
 });
 
 test("聚焦之后渲染里要有 CURSOR_MARKER（可见光标——这正是改用 pi-tui 编辑器的理由之一）", async () => {

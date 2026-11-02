@@ -62,7 +62,7 @@ type CompactionState = { spans: readonly CompactionSpan[]; clearedBefore: number
 system                       不变，每 run 装配一次，不含摘要
 [user · harness]             每个 span 一条：summary 原文；null 时 "[Messages #a–#b were omitted to save context.]"
 [原文尾巴]                   下标 < clearedBefore 的 toolResult 正文换成
-                             "[Tool result cleared to save context: N characters omitted (message #k).]"
+                             "[Tool result cleared to save context: N characters omitted (message #k, tool call "id").]"
 [turn injections]            激活 skill 正文、任务清单：本来就每轮重注入，压缩自动不丢
 ```
 
@@ -70,19 +70,20 @@ system                       不变，每 run 装配一次，不含摘要
 
 实现见 [`runCompaction()`](../../packages/core/src/compaction/pipeline.ts#symbol=runCompaction) 与 [`createCompactor()`](../../packages/core/src/compaction/pipeline.ts#symbol=createCompactor)。
 
-**什么时候跑。** 三个入口，同一条流水线，只差 `reason`：
+**什么时候跑。** 四个入口，同一条流水线，只差 `reason`：
 
 | reason | 入口 | 阈值 |
 | --- | --- | --- |
 | `auto` | 每轮轮首（`runLoop`） | `used ≥ target` 才跑；目录没标 `contextWindow` 就永不自动压 |
 | `overflow` | 本 attempt provider 报 `context_overflow` 之后 | 无视阈值；**一个 run 只准一次**，成功就同一 turn 的下一个 attempt（[Run Loop 的四层](run-loop-layers.md) §2.3），否则按 error 收场 |
 | `manual` | `Agent.compact(instructions?)`（TUI `/compact`） | 无视阈值；走 admission 拿 permit（忙时 rejected），但不是一个 run：没有 agent_start / agent_end |
+| `idle` | 每轮轮首，`auto` 没触发时（2026-11-02，照 Claude Code 的空闲清理） | 两道门都过才跑（[`idleClearDue()`](../../packages/core/src/compaction/pipeline.ts#symbol=idleClearDue)）：上一条助手回复到此刻超过 `DEFAULT_IDLE_CLEAR_MS`（60 分钟，provider 缓存多半已过期），且最近 3 批之前还没清的旧工具结果估计至少 `DEFAULT_IDLE_CLEAR_MIN_TOKENS`（1 万）。只有 `tool-results` 阶段注册着才看。缓存热的时候不清：清掉一条旧结果，它之后的整段历史要按未命中重付一次 |
 
 **预算**（`compactionBudget()`）：
 
 - `used`：以本 run 最近一次 `usage` 的 `inputTokens + outputTokens` 为基准（它量的是那条 assistant 之前的视图加它自己的输出），之后入账的消息按字符估；压缩一发生基准作废，回到「system + 视图」字符估，直到下一轮 usage 回来。provider 没报 usage 的路径（FakeProvider、测试）只有字符估。
 - **校准比**：字符估（4 字符 ≈ 1 token）对中文低 2–4 倍，而阶段之间只能重新字符估——两个量纲直接比，中文会话会在第一段就「够了」。所以每次 usage 到达时算一次 `真 token / 同一份视图的字符估`，之后流水线里的 `used`、给阶段的 `input.estimate`、压完报出去的 `contextTokens` 都乘它（范围夹在 0.2–10）。Agent 记住最近一次算出的比值：手动压缩（run 之外）与新 run 的首轮没有 usage 基准，就沿用它；`reset()` 归 1。判据：同一段对话的 ASCII 版与中文版，跑过的阶段一致；手动压缩报出的值明显高于裸字符估。
-- 图片按固定 `IMAGE_TOKEN_ESTIMATE`（1 200）估，绝不按 base64 长度；`toolResult.images` 也算进去。
+- 图片按尺寸估（[`imageTokens()`](../../packages/core/src/image.ts#symbol=imageTokens)：宽 × 高 ÷ 750，从 base64 的文件头读尺寸），认不出尺寸按 `IMAGE_TOKEN_ESTIMATE`（1 200），绝不按 base64 长度；`toolResult.images` 也算进去。
 - `target = contextWindow − reserveTokens`，`reserveTokens` 缺省 `max(maxOutputTokens, 16 000)`。
 - `goal`：auto / manual 是 `target − 10% window`（免得下一轮又碰线），overflow 是半窗。
 
@@ -101,7 +102,7 @@ system                       不变，每 run 装配一次，不含摘要
 | auto 跑完没压动 | 诊断，本轮照常发（超窗由 provider 报错兜底 → 走 overflow） |
 | overflow 没压动 / 第二次撞窗 | run 以 `context_overflow` error 收场 |
 | 没有任何阶段 | auto 静默不压；overflow / manual 直接按上面两条 |
-| `preCompact` block | 这次不压，三种 reason 都尊重 |
+| `preCompact` block | 这次不压，四种 reason 都尊重 |
 
 ## 5. 缺省阶梯：`echo:compaction`
 
@@ -109,9 +110,9 @@ system                       不变，每 run 装配一次，不含摘要
 
 | order | 阶段 | 只在 | 做什么 | 模型调用 |
 | --- | --- | --- | --- | --- |
-| 10 | `tool-results` | 三种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`） | 0 |
+| 10 | `tool-results` | 四种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`）；清掉的用 `tool_output_read` 按工具调用 id 读回原文 | 0 |
 | 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；`used ≤ goal` 就停；一次最多 8 段 | 每段 1 次 |
-| 30 | `summary` | 三种 | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
+| 30 | `summary` | auto / overflow / manual | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
 | 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`），作为有损的应急保底 | 0 |
 
 **摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，由本模块维护）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节：goal、ground rules、touched files、failures and fixes、findings、the user's messages（逐字）、open work、in progress、resume with；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。

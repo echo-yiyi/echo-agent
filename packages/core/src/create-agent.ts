@@ -53,6 +53,7 @@ import { ObservationRuntime } from "./observability/runtime.ts";
 import type { ObservationCapturePolicy } from "./observability/types.ts";
 import { OBSERVATION_STORE_DIR, observationStorePath } from "./observability/document-store.ts";
 import type { AgentRef } from "./agent-def/types.ts";
+import { TOOL_OUTPUTS_DIR } from "./tools/output.ts";
 
 /** 不给产品名时的缺省（2026-09-07，原 `DEFAULT_AGENT_ID`）。 */
 const DEFAULT_PRODUCT = "default";
@@ -241,7 +242,7 @@ export type CreateAgentOptions = {
    * `sessionId` 也在 omit 之列：本函数在顶层收它、并据此定状态根，
    * 嵌套里再给一个只会被**静默覆盖**——写了没生效是最坏的一种参数。
    *
-   * `memory` / `taskStore` / `schedule` / `inboxStore` / `skillStore` 同理：本函数按状态根装配它们，
+   * `memory` / `taskStore` / `schedule` / `inboxStore` / `skillStore` / `toolOutputStore` 同理：本函数按状态根装配它们，
    * 嵌套里给的会被 spread 顶掉。**接受配置又静默忽略是最坏的一种参数**——
    * 实测传自定义 `schedule`，返回的不是那个实例。
    * 想在本函数下关掉记忆用 `withoutMemory: true`。
@@ -253,7 +254,7 @@ export type CreateAgentOptions = {
  * `createEcho({ agent })` 收的那组选项：工具、skill、权限、hooks、执行预算、压缩等**装备与决策点**。
  *
  * 由 core 按状态根装配的端口不在这里——`model` / `sessionService` / `stateLock` / `memory` / `taskStore` /
- * `schedule` / `inboxStore` / `skillStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible`。
+ * `schedule` / `inboxStore` / `skillStore` / `toolOutputStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible`。
  * 嵌套里再给一个只会被**静默覆盖**，写了没生效是最坏的一种参数。
  *
  * 它有自己的名字，是因为 `Agent` 类在 core 内部（2026-09-17）：仓外念不出 `AgentOptions`，
@@ -273,6 +274,7 @@ export type EchoAgentOptions = Omit<
   | "schedule"
   | "inboxStore"
   | "skillStore"
+  | "toolOutputStore"
   | "streamFunction"
 > & {
   /**
@@ -554,6 +556,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       schedule: parts.schedule,
       inboxStore: parts.inboxStore,
       skillStore: parts.skillStore,
+      toolOutputStore: parts.toolOutputStore,
       // 收摊全部 settle 之后，**唯一的那次** close：进程域（borrow）由 assembly 收，
       // 恰好一次由 slot 的三态保证——不再是这里直接调 `store.close()`。
       // 观测只是告诉观测线程「写完手上的就收」，不等（observability/runtime.ts 头注）。
@@ -645,6 +648,8 @@ type AssembledCapabilities = Readonly<{
   inboxStore: InboxStore;
   sessionService: SessionService;
   skillStore: StorageDir;
+  /** 大工具结果的外存目录：会话目录下的 `tool-outputs/`。 */
+  toolOutputStore: StorageDir;
   /**
    * 记忆 project 层的一次性重指口，`start()` 拿到盘上权威的 workspace 之后调。
    * 关了记忆（`withoutMemory`）时是 `undefined`——没有这一层可指。
@@ -772,6 +777,8 @@ function prepareCapabilities(input: {
   // 给 Agent 的是这一层的**字节视图**（D3），发现 / 落盘 / 工具 / 租约门全在 Agent 里。
   // 视图不是独立的值，跟着它上面那层 slot 走，所以不单独占一个 slot。
   const skillStore = scopedDir(skillView, `${SKILLS_DIR}/`);
+  // 大工具结果的外存（2026-11-02）：它是 transcript 的附属物，跟 transcript 走同一个视图（同一组写入通道）
+  const toolOutputStore = scopedDir(sessionView, `${TOOL_OUTPUTS_DIR}/`);
 
   return {
     memory,
@@ -780,6 +787,7 @@ function prepareCapabilities(input: {
     inboxStore,
     sessionService,
     skillStore,
+    toolOutputStore,
     resolveMemoryScopes: input.withoutMemory === true ? undefined : resolveMemoryScopes,
     memoryOwnedDirs,
   };
@@ -789,7 +797,7 @@ function prepareCapabilities(input: {
  * core 自己会往 session 目录里写的东西。**只删这些**——目录里出现别的，说明有人另有用处，
  * 那就一个字都不动。收摊阶段删错东西的代价远大于留下一个空目录。
  */
-const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.json", "status.json", "inbox", "entries", ".lock", ".dream", "memory"]);
+const SESSION_DIR_OWNED = new Set(["observability", "tasks.json", "schedules.json", "status.json", "inbox", "entries", ".lock", ".dream", "memory", TOOL_OUTPUTS_DIR]);
 
 /**
  * 收摊时清掉「一句话都没说过」的那个 session 目录。

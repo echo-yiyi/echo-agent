@@ -22,6 +22,7 @@ import {
   DEFAULT_KEEP_RECENT_TOKENS,
   DEFAULT_KEEP_RECENT_TOOL_RESULTS,
   DEFAULT_SECTION_TOKENS,
+  TOOL_RESULTS_STAGE,
   type CompactionInput,
   type CompactionOptions,
   type CompactionSpan,
@@ -182,7 +183,7 @@ export function frameSection(from: number, to: number, body: string): string {
 /** order 10：清最近 `keepBatches` 批工具调用之前的所有工具结果正文（overflow 时只留 1 批）。零模型成本。 */
 export function toolResultsStage(keepBatches: number = DEFAULT_KEEP_RECENT_TOOL_RESULTS): CompactionStage {
   return {
-    name: "tool-results",
+    name: TOOL_RESULTS_STAGE,
     order: 10,
     run(input: CompactionInput): CompactionState | null {
       const { messages, state } = input;
@@ -268,6 +269,8 @@ export function summaryStage(opts: { keepRecentTokens?: number } = {}): Compacti
     order: 30,
     async run(input, signal) {
       const { messages, state, reason, estimate } = input;
+      // 空闲清理只清工具结果：摘要要调模型，不是「趁缓存凉了顺手清一下」该做的事
+      if (reason === "idle") return null;
       const keep = reason === "overflow" ? Math.min(keepRecent, OVERFLOW_KEEP_TOKENS) : keepRecent;
       const tailStart = chooseTailStart(messages, state, keep, lastSpanEnd(state), estimate);
       if (tailStart <= 0) return null;

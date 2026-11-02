@@ -10,7 +10,14 @@
 // 压完报出去的 `contextTokens`，全在 usage 的量纲上。校准比随本 run 最近一次 usage 走（`createCompactor`）。
 
 import type { CompactionReason, CompactionBudget, CompactionModelCall, CompactionState } from "./types.ts";
-import { COMPACTION_SLACK_RATIO, DEFAULT_RESERVE_TOKENS } from "./types.ts";
+import {
+  COMPACTION_SLACK_RATIO,
+  DEFAULT_IDLE_CLEAR_MIN_TOKENS,
+  DEFAULT_IDLE_CLEAR_MS,
+  DEFAULT_KEEP_RECENT_TOOL_RESULTS,
+  DEFAULT_RESERVE_TOKENS,
+  TOOL_RESULTS_STAGE,
+} from "./types.ts";
 import { probeCompaction } from "./observe.ts";
 import { estimateText, estimateTokens, buildWorkingMessages, measureContext, normalizeCompaction, sameCompaction, type ContextAnchor } from "./view.ts";
 import type { LoopDeps, TurnResult } from "../loop/types.ts";
@@ -196,6 +203,40 @@ export async function runCompaction(
 }
 
 /**
+ * 空闲清理该不该做（2026-11-02，照 Claude Code 的空闲清理）。两道门都过才做：
+ *   · **空闲**：最后一条助手回复到 `now` 超过 `DEFAULT_IDLE_CLEAR_MS`——provider 缓存多半已过期，改写前缀不多付钱；
+ *   · **够量**：最近 `DEFAULT_KEEP_RECENT_TOOL_RESULTS` 批之前、还没清的旧工具结果，估计（乘校准比）至少 `DEFAULT_IDLE_CLEAR_MIN_TOKENS`。
+ * 缓存热的时候不清：清掉一条旧结果，它之后的整段历史就要按未命中重付一次，往往比省下的多。
+ */
+export function idleClearDue(messages: readonly AgentMessage[], state: CompactionState, now: number, calibration = 1): boolean {
+  let lastAssistantAt: number | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "assistant") {
+      lastAssistantAt = messages[i]!.at;
+      break;
+    }
+  }
+  if (lastAssistantAt === null || now - lastAssistantAt < DEFAULT_IDLE_CLEAR_MS) return false;
+  // 与清工具结果阶段同一个切点：从末尾数第 K 批带 tool_use 的 assistant，它之前的结果可清
+  let seen = 0;
+  let cut = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role === "assistant" && m.content.some((b) => b.type === "tool_use") && ++seen === DEFAULT_KEEP_RECENT_TOOL_RESULTS) {
+      cut = i;
+      break;
+    }
+  }
+  if (cut <= state.clearedBefore) return false;
+  let tokens = 0;
+  for (let i = state.clearedBefore; i < cut; i++) {
+    const m = messages[i]!;
+    if (m.role === "toolResult" && !state.spans.some((s) => s.from <= i && i < s.to)) tokens += estimateTokens([m]);
+  }
+  return Math.ceil(tokens * calibration) >= DEFAULT_IDLE_CLEAR_MIN_TOKENS;
+}
+
+/**
  * 一个 run 里的压缩簿记：provider 报的 usage 当基准并算校准比、应急只准一次。
  * 循环在轮首调 `maybeCompact()`、轮末调 `noteTurn()`、撞窗时调 `recover()`。
  */
@@ -212,7 +253,16 @@ export function createCompactor(deps: LoopDeps): {
   return {
     async maybeCompact() {
       const r = await runCompaction(deps, { reason: "auto", anchor, calibration });
-      if (r?.changed === true) anchor = null;
+      if (r !== null) {
+        if (r.changed) anchor = null;
+        return;
+      }
+      // 没碰窗口线：再看空闲清理该不该做（2026-11-02，照 Claude Code）。只在清旧工具结果的阶段注册着时才看
+      if (!deps.config.compaction.getStages().some((s) => s.name === TOOL_RESULTS_STAGE)) return;
+      const now = deps.config.compaction.now?.() ?? Date.now();
+      if (!idleClearDue(deps.context.messages, deps.context.compaction, now, calibration)) return;
+      const idle = await runCompaction(deps, { reason: "idle", anchor, calibration });
+      if (idle?.changed === true) anchor = null;
     },
     noteTurn(turn) {
       // 只有落地的 turn 有可信的 usage；失败 / block / abort 的没有基准可记

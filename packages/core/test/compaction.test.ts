@@ -160,7 +160,8 @@ test("投影：段 → 一条 user/harness；清掉的 toolResult 换占位但 t
   if (cleared.role !== "toolResult") throw new Error("expected toolResult");
   expect(cleared.toolCallId).toBe("c2");
   expect(cleared.isError).toBe(false);
-  expect(cleared.content).toBe(clearedNotice(6, "result two".length, 0));
+  expect(cleared.content).toBe(clearedNotice(6, "result two".length, 0, "c2"));
+  expect(cleared.content).toContain('tool call "c2"'); // 读回工具按这个 id 找原文（2026-11-02）
   // 未动的消息是同一个对象（不复制），动过的是新对象；transcript 本身与之前逐字节相同
   expect(view[1]).toBe(m[4]);
   expect(view[2]).toBe(m[5]);
@@ -194,8 +195,8 @@ test("估算：图片按固定值不按 base64 长度；toolResult 挂在 images
   const m = [userMessage("q"), assistantMessage([{ type: "tool_use", id: "c9", name: "shot", input: {} }], "tool_use"), result, assistantMessage([{ type: "text", text: "done" }], "end_turn")];
   const view = buildWorkingMessages(m, { spans: [], clearedBefore: 3 });
   const cleared = view[2]!;
-  expect(cleared.role === "toolResult" && cleared.content).toBe(clearedNotice(2, 2, 2));
-  expect(clearedNotice(2, 2, 2)).toContain("2 images");
+  expect(cleared.role === "toolResult" && cleared.content).toBe(clearedNotice(2, 2, 2, "c9"));
+  expect(clearedNotice(2, 2, 2, "c9")).toContain("2 images");
   expect(cleared.role === "toolResult" && cleared.images).toBeUndefined();
 });
 

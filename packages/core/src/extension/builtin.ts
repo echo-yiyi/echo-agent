@@ -223,6 +223,8 @@ export type MemoryPackConfig = { tools: readonly AgentTool[]; sections: readonly
 export const ECHO_SCHEDULER = defineToolPack("echo:scheduler");
 /** 渐进式披露的入口 `tool_search`（2026-09-02）：恒装；延迟是工具自己的标记（`ToolBase.deferred`）。 */
 export const ECHO_TOOL_SEARCH = defineToolPack("echo:tool-search");
+/** 大工具结果的读回 `tool_output_read`（2026-11-02），恒装。 */
+export const ECHO_TOOL_OUTPUT = defineToolPack("echo:tool-output");
 /** 提问 `ask_user`（2026-09-05）：恒装；有没有人答由 `AgentOptions.questions` 定，没人时工具如实回话。 */
 export const ECHO_ASK = defineToolPack("echo:ask");
 /** 模型触发的热部署 `extension_reload`（2026-09-14）：装配层给了登记口才有（`builtinEntriesFor` 的第二个参数），低层没有。 */
@@ -301,6 +303,8 @@ export type BuiltinToolGroups = {
   readonly scheduler: BuiltinToolGroup | undefined;
   /** 渐进式披露的入口（`tool_search`），恒在；上不上菜单由 `visibleTools()` 按池里有没有待取的延迟工具决定。 */
   readonly toolSearch: BuiltinToolGroup | undefined;
+  /** 大工具结果的读回 `tool_output_read`（2026-11-02），恒在、常驻菜单：外存一直开着，读回不能跟着别的开关消失。 */
+  readonly toolOutput: BuiltinToolGroup | undefined;
   /** 提问 `ask_user`，恒在。 */
   readonly askUser: BuiltinToolGroup | undefined;
   /** 委派 `subagent`，恒在。 */
@@ -346,6 +350,7 @@ export function builtinEntries(
     ["echo:memory", ECHO_MEMORY as ExtensionDefinition<unknown>, groups.memory],
     ["echo:scheduler", ECHO_SCHEDULER as ExtensionDefinition<unknown>, groups.scheduler],
     ["echo:tool-search", ECHO_TOOL_SEARCH as ExtensionDefinition<unknown>, groups.toolSearch],
+    ["echo:tool-output", ECHO_TOOL_OUTPUT as ExtensionDefinition<unknown>, groups.toolOutput],
     ["echo:ask", ECHO_ASK as ExtensionDefinition<unknown>, groups.askUser],
     ["echo:subagent", ECHO_SUBAGENT as ExtensionDefinition<unknown>, groups.subagent],
     ["echo:reload", ECHO_RELOAD as ExtensionDefinition<unknown>, groups.reload],

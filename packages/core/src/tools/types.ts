@@ -69,6 +69,13 @@ type ToolBase<TParams, TMeta> = {
    * `subagent` 工具的可委派清单（fresh 模式点名、fork 模式整套继承）都看这个字段。
    */
   readonly delegable?: boolean;
+  /**
+   * 结果正文最多内联多少 token（2026-11-02，与 Claude Code 每个工具的 `maxResultSizeChars` 同一个口子）。
+   * 缺省 undefined = 用 core 的 `TOOL_OUTPUT_INLINE_TOKENS`；超了就在入账时外存全文、对话里只留头尾预览
+   * （`tools/output.ts`）。**`Infinity` = 这件工具自己管尺寸，从不外存**——自己会分页的读文件、
+   * 以及 `tool_output_read` 本身（不然它的输出会被再外存一遍）。与上面几条同一条规矩：状态住在工具身上。
+   */
+  readonly maxInlineTokens?: number;
   execute(params: TParams, ctx: ToolExecutionContext): Promise<AgentToolResult<TMeta>>;
 };
 

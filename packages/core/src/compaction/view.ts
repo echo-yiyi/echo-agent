@@ -9,15 +9,13 @@
 // 策略（阶段）产出的状态无论多离谱，经 `normalizeCompaction` 之后送模的消息都不会撕裂配对。
 
 import { userMessage, type AgentMessage, type ToolResultMessage } from "../messages.ts";
+import { imageTokens } from "../image.ts";
 import type { CompactionSpan, CompactionState } from "./types.ts";
 
 /* ───────────────────────── 估算 ───────────────────────── */
 
-/**
- * 一张图固定按这么多 token 算——**绝不按 base64 长度**：一张 1MB 的图按字符估会算成三十多万 token，
- * 压缩会被它疯狂提前触发；各家 provider 对图的计费本来就是按尺寸分档的固定值，这里取一个中档。
- */
-export const IMAGE_TOKEN_ESTIMATE = 1_200;
+// 图片按尺寸估（2026-11-02，`image.ts` 的 `imageTokens`）；认不出尺寸时的估值就是这个常量，真源在 `image.ts`。
+export { IMAGE_TOKEN_ESTIMATE } from "../image.ts";
 
 /** 一段文本的粗估：4 字符 ≈ 1 token（对 CJK 偏低——所以真跑时要乘 usage 校准比，见 `pipeline.ts`）。 */
 export function estimateText(text: string | null | undefined): number {
@@ -25,13 +23,13 @@ export function estimateText(text: string | null | undefined): number {
 }
 
 /**
- * 一条消息的粗估，**按块**：文本 / 思考按字符，图片固定 `IMAGE_TOKEN_ESTIMATE`，tool_use 按名字加参数 JSON，
- * toolResult 的正文按字符、`images` 逐张固定值（它们挂在 `.images` 不在 `.content`，按 JSON 估会一张都不算）。
+ * 一条消息的粗估，**按块**：文本 / 思考按字符，图片按尺寸（`imageTokens`），tool_use 按名字加参数 JSON，
+ * toolResult 的正文按字符、`images` 逐张按尺寸（它们挂在 `.images` 不在 `.content`，按 JSON 估会一张都不算）。
  */
 export function estimateMessage(m: AgentMessage): number {
   switch (m.role) {
     case "toolResult":
-      return estimateText(m.content) + (m.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
+      return estimateText(m.content) + (m.images ?? []).reduce((n, img) => n + imageTokens(img), 0);
     case "user":
     case "assistant":
     case "environment": {
@@ -39,7 +37,7 @@ export function estimateMessage(m: AgentMessage): number {
       for (const b of m.content) {
         if (b.type === "text") tokens += estimateText(b.text);
         else if (b.type === "thinking") tokens += estimateText(b.thinking);
-        else if (b.type === "image") tokens += IMAGE_TOKEN_ESTIMATE;
+        else if (b.type === "image") tokens += imageTokens(b);
         else if (b.type === "tool_use") tokens += estimateText(b.name) + estimateText(JSON.stringify(b.input));
       }
       return tokens;
@@ -191,10 +189,14 @@ export function omissionNotice(from: number, to: number): string {
   return `[Messages #${from}–#${to - 1} were omitted to save context.]`;
 }
 
-/** 被清掉的工具结果在送模时的占位正文：说明省了多少字符、几张图、是第几条，同样不提任何工具。 */
-export function clearedNotice(index: number, chars: number, images: number): string {
+/**
+ * 被清掉的工具结果在送模时的占位正文：说明省了多少字符、几张图、是第几条、哪次工具调用，同样不提任何工具
+ * ——占位一直留在视图里，而读回工具可能不在这段会话的菜单上；怎么读回由压缩的 prompt 段讲。
+ * 带上工具调用 id（2026-11-02）：读回工具按它找原文。
+ */
+export function clearedNotice(index: number, chars: number, images: number, toolCallId: string): string {
   const what = images > 0 ? `${chars} characters and ${images} image${images === 1 ? "" : "s"}` : `${chars} characters`;
-  return `[Tool result cleared to save context: ${what} omitted (message #${index}).]`;
+  return `[Tool result cleared to save context: ${what} omitted (message #${index}, tool call "${toolCallId}").]`;
 }
 
 function spanMessage(span: CompactionSpan, messages: readonly AgentMessage[]): AgentMessage {
@@ -205,7 +207,7 @@ function spanMessage(span: CompactionSpan, messages: readonly AgentMessage[]): A
 function clearedCopy(m: ToolResultMessage & { readonly at: number }, index: number): AgentMessage {
   // 新对象：transcript 里那条一个字都不动（所有权边界）；images 一并去掉——清的就是体积，占位里要说有几张
   const { images, ...rest } = m;
-  return { ...rest, content: clearedNotice(index, m.content.length, images?.length ?? 0) };
+  return { ...rest, content: clearedNotice(index, m.content.length, images?.length ?? 0, m.toolCallId) };
 }
 
 /**

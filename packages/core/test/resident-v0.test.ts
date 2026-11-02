@@ -95,7 +95,8 @@ test(
     // 宿主脚本里第一轮就是 tool_search，所以后面的轮次能调 skill_create / schedule_create（上面 `called` 已证）
     // 2026-09-05 `ask_user`（提问）常驻：菜单上多它一件
     // 2026-09-09 `ask_user` 只在「有人能答」时才装：这个 fixture 没给 questions 策略，所以菜单上没有它
-    expect(ra.seen[0]!.tools).toEqual(["TaskCreate", "TaskList", "TaskUpdate", "memory", "skill_activate", "subagent", "tool_search"].sort());
+    // 2026-11-02 `tool_output_read`（大工具结果的读回）恒装、常驻菜单
+    expect(ra.seen[0]!.tools).toEqual(["TaskCreate", "TaskList", "TaskUpdate", "memory", "skill_activate", "subagent", "tool_output_read", "tool_search"].sort());
     // 取过之后：后面某一轮的菜单里延迟的两件已经在，tool_search 仍在（还有别的延迟工具没取）；
     // 没取过的（transcript_read）任何一轮都不在菜单上
     expect(ra.seen.some((s) => ["skill_create", "schedule_create", "tool_search"].every((n) => s.tools.includes(n)))).toBe(true);

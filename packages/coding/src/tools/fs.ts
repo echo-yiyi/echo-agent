@@ -13,6 +13,7 @@
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { toolError, toolOk, type ModelTool, type ToolExecutionContext } from "@echo-agent/core";
+import { isImagePath, loadImageFile } from "@echo-agent/base";
 
 /** 读回显的上限:超过就截断并标注——一个 50MB 的日志不该挤爆上下文。 */
 const READ_CAP = 50_000;
@@ -98,8 +99,11 @@ function readFileTool(seen: SeenFiles): ModelTool<{ path: string; offset?: numbe
     label: "读文件",
     // 只读：模型一口气读五个文件时同批同跑。`seen` 只按路径记一条 mtime，同批互不覆盖。
     concurrent: true,
+    // 自己会分页（行数 + `READ_CAP` 截断并教 offset/limit），不走 core 的外存——外存再读一遍是绕路（2026-11-02，同 Claude Code 的 Read）
+    maxInlineTokens: Infinity,
     description:
-      "Read a file with line numbers. Use offset/limit to read a large file in parts. Read a file before editing it.",
+      "Read a file with line numbers. Use offset/limit to read a large file in parts. Read a file before editing it. " +
+      "PNG, JPEG, GIF and WebP files are returned as images you can see; large ones are scaled down first.",
     parameters: {
       type: "object",
       properties: {
@@ -112,6 +116,19 @@ function readFileTool(seen: SeenFiles): ModelTool<{ path: string; offset?: numbe
     async execute({ path, offset, limit }, ctx) {
       const abs = await resolveSafe(ctx, path);
       if (abs === null) return toolError(`Path outside the workspace: '${path}'`);
+      // 图片按图片返回（2026-11-02，照 Claude Code 的 Read）：大了先缩放。文件不存在、或扩展名是图片但内容不是，
+      // 落到下面照文本读（不存在就报 File not found）
+      if (isImagePath(abs)) {
+        const loaded = await loadImageFile(abs);
+        if (loaded.ok) {
+          const { width, height } = loaded.info;
+          const scaled = loaded.original === undefined ? "" : `, scaled down from ${loaded.original.width}×${loaded.original.height}`;
+          return toolOk(`Image file ${path} (${width}×${height}${scaled})`, { path, width, height }, [loaded.image]);
+        }
+        if (loaded.reason === "too_large") {
+          return toolError(`Cannot read ${path} as an image: ${loaded.message}. Make a smaller copy (for example with ImageMagick via bash) and read that.`);
+        }
+      }
       let raw: string;
       try {
         raw = await readFile(abs, "utf8");

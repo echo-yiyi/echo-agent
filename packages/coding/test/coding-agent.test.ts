@@ -189,6 +189,39 @@ test("read/write/edit 整套:写 → 读(带行号)→ 精确替换", async () =
   expect(await readFile(join(root, "a.ts"), "utf8")).toBe("const a = 1;\nconst b = 3;");
 });
 
+/** 只有文件头的 PNG：1568 像素以内不缩放，core 只读头，够用。 */
+function pngHeader(w: number, h: number): Uint8Array {
+  const b = new Uint8Array(33);
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const v = new DataView(b.buffer);
+  v.setUint32(16, w);
+  v.setUint32(20, h);
+  b.set([8, 6, 0, 0, 0], 24);
+  return b;
+}
+
+test("read_file 读图片（2026-11-02，照 Claude Code 的 Read）：返回图片本身加一行说明；扩展名是图片但内容不是就按文本读；太大报错并教缩小", async () => {
+  const fs = makeFsTools();
+  await writeFile(join(root, "shot.png"), pngHeader(800, 600));
+  const r = await tool(fs, "read_file").execute({ path: "shot.png" }, ctx());
+  expect([r.isError, r.content]).toEqual([false, "Image file shot.png (800×600)"]);
+  expect(r.images?.length).toBe(1);
+  expect(r.images?.[0]?.mimeType).toBe("image/png");
+  // 声明了不外存：读文件自己会分页
+  expect(tool(fs, "read_file").maxInlineTokens).toBe(Infinity);
+
+  await writeFile(join(root, "not-really.png"), "just some text");
+  const text = await tool(fs, "read_file").execute({ path: "not-really.png" }, ctx());
+  expect([text.isError, text.content.includes("1\tjust some text"), text.images]).toEqual([false, true, undefined]);
+
+  // 长边超过接口上限、又缩不了（只有文件头，缩放工具解不出来）→ 报错，教先缩小再读
+  await writeFile(join(root, "huge.png"), pngHeader(9_000, 9_000));
+  const huge = await tool(fs, "read_file").execute({ path: "huge.png" }, ctx());
+  expect(huge.isError).toBe(true);
+  expect(huge.content).toContain("Cannot read huge.png as an image");
+  expect(huge.content).toContain("smaller copy");
+});
+
 test("edit_file:匹配 0 处 / 多处都拒,replace_all 放行", async () => {
   const fs = makeFsTools();
   await writeFile(join(root, "x.txt"), "aa aa", "utf8");
@@ -375,7 +408,8 @@ test("bash 工作目录跨调用保留：cd 之后下一次从那里起；cd 失
   // 输出超长也截不掉标记：cd 仍然记住
   await mkdir(join(root, "sub2"), { recursive: true });
   const huge = await bash.execute({ command: "cd sub2 && head -c 100000 /dev/zero | tr '\\0' 'x'" }, ctx());
-  expect([huge.isError, huge.content.includes("output truncated")]).toEqual([false, true]);
+  // 10 万字符原样收全：截断与外存归 core（2026-11-02），工具这里不再截到 30,000 丢掉后半
+  expect([huge.isError, huge.content.startsWith(`${"x".repeat(100_000)}\n(working directory is now`), huge.content.includes("truncated")]).toEqual([false, true, false]);
   expect((await bash.execute({ command: "basename \"$PWD\"" }, ctx())).content.trimEnd()).toBe("sub2");
 });
 

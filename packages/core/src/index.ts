@@ -83,6 +83,13 @@ export type {
   ModelTool,
   ToolExecutionContext,
 } from "./tools/types.ts";
+// 大工具结果的外存（2026-11-02）：工具用 `maxInlineTokens` 声明自己的上限；产品要点名读回工具时用这两个常量
+export { TOOL_OUTPUT_INLINE_TOKENS, TOOL_OUTPUT_READ } from "./tools/output.ts";
+
+/* ───────────── 图片：读文件、贴图、工具返回图片都走它（2026-11-02） ───────────── */
+
+export { imageFromBytes, imageTokens, sniffImage, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE } from "./image.ts";
+export type { ImageFormat, ImageFromBytes, ImageInfo } from "./image.ts";
 
 /* ───────────── hooks：`EchoAgentOptions.hooks` 收的就是它 ───────────── */
 

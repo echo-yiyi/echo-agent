@@ -78,6 +78,8 @@ flowchart TD
 
 形状定义与投影见 [`AgentMessage`](../../packages/core/src/messages.ts#symbol=AgentMessage) 和 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。自定义 role 缺省只进入 transcript 与 session，不送模型；这是忘记实现 projection 时的安全缺省。
 
+**大工具结果在入账时外存**（2026-11-02，照 Claude Code）：正文估计超过 [`TOOL_OUTPUT_INLINE_TOKENS`](../../packages/core/src/tools/output.ts#symbol=TOOL_OUTPUT_INLINE_TOKENS)（中日韩文字一字一 token，其余四字符一 token；工具可用 `maxInlineTokens` 声明自己的上限，`Infinity` = 自己管尺寸），全文写进会话目录的 `tool-outputs/`，账本里的 `toolResult` 记一段说明加开头 2 000、结尾 1 000 字符的预览，模型用 `tool_output_read` 按工具调用 id 分页读或按关键词查。`tool_execution_end` 事件与 `postToolUse` hook 拿到的仍是全文——外存只改「记进对话的是什么」。实现见 [`spillToolResult()`](../../packages/core/src/tools/output.ts#symbol=spillToolResult)，决策见 [大工具结果与图片](../decisions/implemented/2026-11-02-large-tool-results-and-images.md)。
+
 toolResult 与 environment 在账本中保留独立角色，provider 的角色限制只在投影时处理。相邻工具结果只在 projection 时合并，也保留了逐条审计能力。已有判据见 [toolResult 投影与相邻合并](../../packages/core/test/invariants.test.ts#test=投影toolresult-包回-user-角色的-toolresult-块相邻的合并成一条)。
 
 ### 2.2 消息来源与入站通道
@@ -130,6 +132,8 @@ readonly 是类型约束，不是运行时隔离。调用方修改原消息，�
 - 对未知自定义 role、空 assistant 和失败的 assistant 消息不生成 provider 消息。
 
 实现见 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。它每个 attempt 从 working context 重算，产物不持久化；provider 方言和模型切换通过投影处理。
+
+**图片**是 base64 内联的 `ImageBlock`，可以出现在用户消息里，也可以挂在 `toolResult.images` 上。产生图片的入口都走 [`imageFromBytes()`](../../packages/core/src/image.ts#symbol=imageFromBytes)：按魔数认 PNG / JPEG / GIF / WebP、从文件头读宽高，超过 5 MB 或长边 8 000 像素就拒，交调用方缩放（`@echo-agent/base` 的 `loadImageFile` 借 `sips` / ImageMagick 把长边缩到 1 568）。目录没标 `vision` 的模型：用户贴图在方言里本地报错，工具带回的图换成一句文字说明（见 `provider/openai.ts`）。
 
 但“投影绝不回写”当前只对缺省实现自己的代码成立，不对可替换的 `Agent.convertToLlm` 成立。它收到的仍是与 transcript 共享嵌套对象的数组。正式契约应把输入定义为不可变 working copy，并把返回值验到 provider context 所需的最小形状；否则第三方 converter 可以同时破坏账本并产出坏线上协议。
 

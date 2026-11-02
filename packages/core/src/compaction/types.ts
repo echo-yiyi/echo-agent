@@ -35,7 +35,12 @@ export function isEmptyCompaction(s: CompactionState): boolean {
 }
 
 /** 为什么压：轮边界超阈值 / provider 报 context_overflow 之后的应急 / 用户 `/compact`。 */
-export type CompactionReason = "auto" | "overflow" | "manual";
+/**
+ * 为什么压缩。`idle`（2026-11-02，照 Claude Code 的空闲清理）：上下文没满，但会话停了够久、provider 缓存
+ * 多半已经过期，而最近几批之前的旧工具结果又攒得够多——这时清掉它们不多付缓存的钱。只清工具结果，
+ * 折叠与摘要阶段对它返回 null（不调模型）。
+ */
+export type CompactionReason = "auto" | "overflow" | "manual" | "idle";
 
 /**
  * 本次压缩的预算，全是 token 估算值（provider usage 为基准、尾巴按字符估）。
@@ -118,3 +123,13 @@ export const DEFAULT_SECTION_TOKENS = 32_000;
 export const DEFAULT_KEEP_RECENT_TOOL_RESULTS = 3;
 /** auto / manual 压到 target 之下再留这么一截（占窗口比例），免得下一轮又碰线。 */
 export const COMPACTION_SLACK_RATIO = 0.1;
+/**
+ * 空闲清理（`reason: "idle"`）的两道门。**空闲**：上一条助手回复到此刻超过这么久——此时 provider 缓存多半已过期，
+ * 改写前缀不多付钱（清掉一条旧结果会让它之后的整段历史按未命中重付一次，缓存热的时候清往往是负收益）。
+ * 60 分钟是按常见 provider 缓存寿命取的保守值。
+ */
+export const DEFAULT_IDLE_CLEAR_MS = 60 * 60_000;
+/** **够量**：最近几批之前、还没清的旧工具结果估计至少这么多 token，才值得清一次。 */
+export const DEFAULT_IDLE_CLEAR_MIN_TOKENS = 10_000;
+/** 清旧工具结果的那个内建阶段的名字。空闲清理只在它注册着时触发（产品关掉内建压缩就不清）。 */
+export const TOOL_RESULTS_STAGE = "tool-results";

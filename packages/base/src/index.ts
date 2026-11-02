@@ -73,3 +73,6 @@ export { runObserve, parseObserveArgs, observeUsage, type ObserveCommand, type O
 
 /** 观测过期：规则给 `Product.observationExpiry`，时机由 `mainFor()` 定（启动时不等地跑一遍）。 */
 export { retainRecentDays, expireSessionObservations } from "./observe/expire.ts";
+
+/** 读图片文件（大了借 `sips` / ImageMagick 缩放）与从输入里认出图片路径：读文件工具与壳的贴图共用。 */
+export { loadImageFile, imagePathsIn, isImagePath, IMAGE_EXTENSIONS, RESIZE_LONG_EDGE, type LoadedImage } from "./image.ts";

@@ -89,6 +89,8 @@ export type LoopCompactionConfig = {
   getStages: () => readonly CompactionStage[];
   /** 本 run 拿到第一次 usage 之前用的校准比（真 token / 字符估）：Agent 从上一次 usage 记下来的；不给 = 1。 */
   calibration?: number;
+  /** 此刻（毫秒）：空闲清理判「停了多久」用。Agent 给的是它的 clock（测试可拨）；不给 = `Date.now()`。 */
+  now?: () => number;
 };
 
 export type TransformContext = (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -126,6 +128,11 @@ export interface AgentLoopConfig {
    * 缺省实现返回 harness 的工作集；渐进式披露落地时只改那边，这里的契约不变。
    */
   getTools: () => readonly AgentTool[];
+  /**
+   * 大工具结果的写盘口（2026-11-02）：结果超过内联上限时，全文经它落进会话目录，对话里只记头尾预览
+   * （`tools/output.ts` 的 `spillToolResult`）。循环不碰盘，所以由 Agent 注入。不给 = 不外存、原样入账。
+   */
+  saveToolOutput?: (file: string, text: string) => Promise<void>;
   /**
    * 本轮开始时池里**全部**名字（含被禁用的）。与 `getTools()` 同一拍取，一起冻成本轮工作集：
    * 执行只认 `getTools()` 给出的对象；不在里面的名字，**只有本轮开始时已知的**才去问 `resolveTool`
