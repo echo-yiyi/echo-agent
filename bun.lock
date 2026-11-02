@@ -14,7 +14,7 @@
     },
     "packages/base": {
       "name": "@echo-agent/base",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@echo-agent/core": "workspace:*",
       },
@@ -25,7 +25,7 @@
     },
     "packages/cli": {
       "name": "echo-agent",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "bin": {
         "echo-agent": "./bin/echo-agent.ts",
       },
@@ -41,7 +41,7 @@
     },
     "packages/coding": {
       "name": "@echo-agent/coding",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "bin": {
         "echo-coding": "./bin/echo-coding.ts",
       },
@@ -57,7 +57,7 @@
     },
     "packages/core": {
       "name": "@echo-agent/core",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "devDependencies": {
         "@types/bun": "latest",
         "typescript": "^5.7.0",
@@ -65,7 +65,7 @@
     },
     "packages/tui": {
       "name": "@echo-agent/tui",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@earendil-works/pi-tui": "^0.84.3",
         "@echo-agent/base": "workspace:*",

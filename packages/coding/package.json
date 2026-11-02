@@ -1,6 +1,6 @@
 {
   "name": "@echo-agent/coding",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "type": "module",
   "description": "Echo's coding agent: file, search, shell and web tools, its own identity and conduct. Installs the `echo-coding` command. Requires Bun.",
