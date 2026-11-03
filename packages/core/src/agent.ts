@@ -90,7 +90,7 @@ import { newSessionId } from "./session/types.ts";
 import { DEFAULT_AGENT_REF, type AgentRef } from "./agent-def/types.ts";
 import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
 import { activeTools, effectiveRestriction, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap, type ToolRestrictions } from "./tools/harness.ts";
-import { makeToolSearchTool, TOOL_SEARCH_NAME } from "./tools/tool-search.ts";
+import { loadedToolsIn, makeToolSearchTool, TOOL_SEARCH_NAME } from "./tools/tool-search.ts";
 import { makeAskUserTool } from "./question/tool.ts";
 import type { ScheduleResult } from "./extension/reload.ts";
 import { makeSubagentTool, makeReceiptBook, renderReceiptLine, finalStatusOf, SUBAGENT_NAME, REPORT_NAME, type Receipt, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
@@ -3762,6 +3762,7 @@ export class Agent {
         this._state.workspace = input.workspace;
         break;
       case "reset":
+        this.loadedTools.clear(); // 「取过 schema」是这段对话里的事实，对话清空它就跟着没了（与 transcript 同步）
         this.memorySystem.text = null; // 之前追加的记忆更新随 transcript 一起没了
         this.extractCursor = 0;
         this.extractEpoch += 1;
@@ -3776,6 +3777,9 @@ export class Agent {
         this._state.usage = { inputTokens: 0, outputTokens: 0 };
         break;
       case "session_restored":
+        // 已加载的延迟工具从 transcript 里收回来（2026-11-03）：菜单与上个进程最后一次请求的相同，缓存不断
+        this.loadedTools.clear();
+        for (const name of loadedToolsIn(input.messages)) this.loadedTools.add(name);
         this.memorySystem.text = null; // 换了一份 transcript：system 按此刻的记忆重取，历史里的旧更新由下一个 run 补齐
         // 续上的历史不再回头提取：上个进程已经看过（或在它收摊时没攒够、就此放下）
         this.extractCursor = input.messages.length;

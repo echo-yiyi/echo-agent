@@ -9,9 +9,25 @@
 // 实时池不能成为第二条解析路）。模型拿到 schema 之后本来也要再发一轮才会调它，没有损失。
 
 import type { ToolMap } from "./harness.ts";
+import type { AgentMessage } from "../messages.ts";
 import { isModelVisible, toolError, toolOk, toolSchemas, type AgentTool, type ModelTool } from "./types.ts";
 
 export const TOOL_SEARCH_NAME = "tool_search";
+
+/**
+ * transcript 里取过 schema 的延迟工具名（2026-11-03）：每条成功的 `tool_search` 结果都把它加载的名字记在
+ * `metadata.loaded` 里，随 transcript 落盘。续会话时用它重建「已加载」——不然新进程的菜单缩回去，模型再取一次，
+ * 菜单前后变两次，菜单之后的整段历史两次失去 provider 缓存。已经不在池里的名字无害：菜单只列池里有的。
+ */
+export function loadedToolsIn(messages: readonly AgentMessage[]): string[] {
+  const out = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "toolResult" || m.toolName !== TOOL_SEARCH_NAME || m.isError) continue;
+    const loaded = m.metadata?.["loaded"];
+    if (Array.isArray(loaded)) for (const n of loaded) if (typeof n === "string") out.add(n);
+  }
+  return [...out];
+}
 
 export type ToolSearchDeps = {
   readonly tools: ToolMap;

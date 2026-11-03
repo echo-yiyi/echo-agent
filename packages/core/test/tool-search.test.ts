@@ -3,6 +3,9 @@
 // 模型直接点名要被准确拒绝、取过之后下一轮真能调——只测 harness 的过滤函数证明不了循环那半边。
 
 import { expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { agentOf, createEcho } from "../src/create-echo.ts";
 import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
@@ -132,4 +135,71 @@ test("harness：visibleTools 按标记 + 已加载过滤，tool_search 只在还
   expect(resolveTool(tools, "ping", loaded)).toMatchObject({ ok: true });
   // 不给 loaded = 老行为：不过滤（低层调用方自己不做披露）
   expect(visibleTools(tools).map((t) => t.name).sort()).toEqual(["ping", "tool_search"]);
+});
+
+/* ───────────── 已加载的延迟工具跟着会话走（2026-11-03） ───────────── */
+
+// 此前「取过 schema」只记在进程内存里：续会话后菜单缩回去，模型再 tool_search 一次，菜单又变——
+// 每变一次，菜单之后的整段历史都失去 provider 缓存。已加载的名字本来就随 tool_search 结果的 metadata 落了盘，
+// 续会话时从 transcript 里收回来即可，不另存状态。
+
+/** 记下每次请求的菜单（工具名，按序）。 */
+function recordingProvider(turns: ScriptedTurn[], menus: string[][]): Provider {
+  const inner = scriptedDialect(turns);
+  return createProvider({
+    id: "scripted",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams({
+      api: inner.api,
+      request(model, context, options) {
+        menus.push(context.tools.map((t) => t.name));
+        return inner.request(model, context, options);
+      },
+    }),
+  });
+}
+
+test("续会话：上个进程取过 schema 的延迟工具，新进程第一次请求的菜单里照样有，不用再 tool_search", async () => {
+  const root = mkdtempSync(join(tmpdir(), "echo-loaded-"));
+  const base = { allowNetwork: false, withoutMemory: true, extensionDirs: [], sessionsRoot: root, agent: { tools: [lazyPing] } };
+  const before: string[][] = [];
+  const first = await createEcho({
+    ...base,
+    provider: recordingProvider([toolTurn("s1", "tool_search", { names: ["ping"] }), toolTurn("p1", "ping", {}), textTurn("ok")], before),
+  });
+  await first.start();
+  await first.agent.prompt("load ping and call it");
+  const id = first.agent.state.sessionId!;
+  await first.stop();
+  expect(before[before.length - 1]).toContain("ping"); // 前提：上个进程最后一次请求的菜单里有它
+
+  const after: string[][] = [];
+  const second = await createEcho({ ...base, sessionId: id, provider: recordingProvider([textTurn("still here")], after) });
+  await second.start();
+  await second.agent.prompt("again");
+  await second.stop();
+  expect(after[0]).toEqual(before[before.length - 1]); // 菜单逐项相同：前缀不变，缓存不断
+});
+
+test("reset 清空对话：已加载的延迟工具一起清掉，菜单回到只有常驻的那一份", async () => {
+  const menus: string[][] = [];
+  const echo = await createEcho({
+    provider: recordingProvider([toolTurn("s1", "tool_search", { names: ["ping"] }), textTurn("loaded"), textTurn("fresh")], menus),
+    store: new InMemoryDir(),
+    lock: new InMemoryStateLock(),
+    allowNetwork: false,
+    withoutMemory: true,
+    extensionDirs: [],
+    agent: { tools: [lazyPing] },
+  });
+  await echo.start();
+  await echo.agent.prompt("load ping");
+  expect(menus[menus.length - 1]).toContain("ping");
+  await echo.agent.reset();
+  await echo.agent.prompt("start over");
+  expect(menus[menus.length - 1]).not.toContain("ping");
+  expect(menus[menus.length - 1]).toContain("tool_search"); // 还有没取的延迟工具，入口回到菜单上
+  await echo.stop();
 });

@@ -123,7 +123,7 @@ _Avoid_：截断、清历史
 _Avoid_：菜单（口语可用）
 
 **延迟工具**：
-在池里但不上菜单、模型经 `tool_search` 取过 schema 才可调的工具。延迟是工具自己的标记。
+在池里但不上菜单、模型经 `tool_search` 取过 schema 才可调的工具。延迟是工具自己的标记。取过的随会话保留：名字记在 `tool_search` 结果的 metadata 里随 transcript 落盘，续会话从那里恢复、菜单不变；`reset` 清空对话时一起清掉。
 _Avoid_：懒加载工具、隐藏工具
 
 **skill**：
