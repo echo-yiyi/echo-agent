@@ -117,6 +117,11 @@ async function fixtureRun(): Promise<RunObservation> {
     return lookup.observation;
   } finally {
     await rt.dispose();
+    // 等收摊真的写完：每条用例都用同一个 runtimeId（"rt:fixed"，渲染输出要确定），而观测线程按 id 登记——
+    // 上一条的收摊在慢机器上还没完时，下一条的 open 先覆盖了登记，收摊完成时又把新登记删掉，
+    // 之后的 flush 找不到这个 id、不等写入就返回，getRun 读到 unknown（2026-11-03 macOS CI 连红两次）。
+    // dispose 不等（生产里收摊不该拖住谁）；收摊中的 runtime，flush 返回的就是收摊那一段。
+    await rt.flush();
   }
 }
 
