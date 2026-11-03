@@ -1,6 +1,6 @@
 # 记忆提取降频：用户说的话攒够才跑，只看上次提取之后的新内容
 
-> 状态:implemented · 提出 2026-10-30（用户反馈后台提取太频繁；对照 Claude Code 2.1.314 的提取门控）· 拍板 2026-10-30（用户，两步方案的第 1 步）· 落地 `packages/core/src/memory/extract.ts` / `agent.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [每条 reply 结束跑一次提取](2026-09-07-memory-extraction.md) 的触发与输入
+> 状态:implemented · 提出 2026-10-30（用户反馈后台提取太频繁；对照 Claude Code 2.1.314 的提取门控）· 拍板 2026-10-30（用户，两步方案的第 1 步）· 落地 `packages/core/src/memory/extract.ts` / `agent.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [每条 reply 结束跑一次提取](2026-09-07-memory-extraction.md) 的触发与输入 · **后续** 2026-11-03 [从主对话分叉、攒满三轮、退出前补一次](2026-11-03-memory-extraction-fork.md)：第 2 条的「会话结束时没攒够的那一截不提取」、第 3 条的「前台写过就推过游标」、第 5 条的「渲染成文本交给提取」与 Non-Goals 里的「不做每 N 轮」已被它修改
 
 **给谁看**：改记忆提取的触发、输入或成本的人。假设已知 [提取的原始决策](2026-09-07-memory-extraction.md) 与 [记忆设计](../../design/memory.md) §5。
 
@@ -39,12 +39,13 @@
 
 ## 验收
 
-- 计量：[只数用户正文](../../../packages/core/test/memory-extract.test.ts#test=计量只数-human-steer-用户正文中日韩文字一字一词其余按空白分词纯标点不算)
-- 致谢不触发、攒着不丢：[致谢不触发](../../../packages/core/test/memory-extract.test.ts#test=致谢确认不触发提取攒着不丢下一句有内容的话出现时一并看)
-- 只看游标之后：[只看新内容](../../../packages/core/test/memory-extract.test.ts#test=只看游标之后跑完一次下一次的材料里没有已经看过的那段)
-- 失败不推进：[失败重看](../../../packages/core/test/memory-extract.test.ts#test=提取没跑完模型出错游标不动下一次把那段重看一遍)
-- 前台写过则推过：[前台写过](../../../packages/core/test/memory-extract.test.ts#test=前台这轮自己写过记忆这一段算看过之后的提取不再带它)
-- `reset` 换代：[reset](../../../packages/core/test/memory-extract.test.ts#test=reset-清空-transcript游标归零在飞的那次提取不把游标推到旧下标上)
-- 续会话不回头：[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话提取不回头看上个进程的历史只看续上之后说的)
+判据随 2026-11-03 的修改改了名（同一件事，改为攒满三轮的版本）；「前台写过则推过」一条已被那次修改取代。
 
-六种变异（去门槛 / 不推游标 / 失败也推 / 不换代 / 前台写过不推 / 仍发整段）与续会话从零开始，各让至少一条判据变红。
+- 计量：[只数用户正文](../../../packages/core/test/memory-extract.test.ts#test=计量只数-human-steer-用户正文中日韩文字一字一词其余按空白分词纯标点不算轮数只数-human)
+- 致谢不触发、攒着不丢：[致谢不触发](../../../packages/core/test/memory-extract.test.ts#test=致谢确认凑满三轮也不触发攒着不丢下一句有内容的话出现时从第一句致谢看起)
+- 只看游标之后：[只看新内容](../../../packages/core/test/memory-extract.test.ts#test=只看游标之后跑完一次下一次从新的那一批看起)
+- 失败不推进：[失败重看](../../../packages/core/test/memory-extract.test.ts#test=提取没跑完模型出错游标不动下一轮就把那段连同新的一轮重看一遍攒着的已经够三轮)
+- `reset` 换代：[reset](../../../packages/core/test/memory-extract.test.ts#test=reset-清空-transcript游标归零在飞的那次提取不把游标推到旧下标上)
+- 续会话不回头：[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话提取不回头看上个进程的历史上个进程退出前已经补看过续上之后只从续上之后说的看起)
+
+六种变异（去门槛 / 不推游标 / 失败也推 / 不换代 / 前台写过不推 / 仍发整段）与续会话从零开始，各让至少一条判据变红（2026-10-30 当时的判据）。

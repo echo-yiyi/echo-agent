@@ -1021,7 +1021,7 @@ describe("判据跟着模块走", () => {
     expect(system).not.toContain("next month");
     expect(system).not.toContain("repository already states");
     expect(system).toContain("moments you shared");
-    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), "user: hi", "");
+    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), { messages: 2, firstUserText: "hi" }, "");
     expect(extract).not.toContain("next month");
     expect(extract).not.toContain("true only inside this conversation");
     expect(extract).toContain("moments you shared");

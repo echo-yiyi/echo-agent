@@ -17,6 +17,7 @@ import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams, type Dialect } from "../src/provider/dialect.ts";
 import type { Context } from "../src/messages.ts";
 import { scriptedDialect, textTurn, toolTurn } from "../src/testing.ts";
+import { EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
 import { defineExtension } from "../src/extension/abi.ts";
 import { AgentTools } from "../src/extension/registries.ts";
 import { definePromptPack } from "../src/extension/builtin.ts";
@@ -1100,14 +1101,15 @@ test("续上一段会话：system 按此刻的记忆重取；历史里那条更�
   expect(texts[texts.length - 1]).toBe("丙"); // 新的那条紧挨在本 run 的输入之前
 });
 
-test("续上一段会话：提取不回头看上个进程的历史，只看续上之后说的", async () => {
+test("续上一段会话：提取不回头看上个进程的历史——上个进程退出前已经补看过，续上之后只从续上之后说的看起", async () => {
+  // 记的是提取指令那一条（接在主对话后面）：分叉出来的提取上文里本来就有整段历史，判据是它被要求从哪句看起
   const extractPrompts: string[] = [];
   const dialect: Dialect = {
     api: "fake",
     async *request(_model, context) {
-      const seen = JSON.stringify(context.messages);
-      if (context.systemPrompt === null) extractPrompts.push(seen); // 提取子循环没有 system
-      for (const ev of textTurn(context.systemPrompt === null ? "Nothing to keep." : "好的")) yield structuredClone(ev);
+      const instruction = context.messages.find((m) => JSON.stringify(m).includes(EXTRACT_PROMPT_OPENING));
+      if (instruction !== undefined) extractPrompts.push(JSON.stringify(instruction));
+      for (const ev of textTurn(instruction !== undefined ? "Nothing to keep." : "好的")) yield structuredClone(ev);
     },
   };
   const provider = createProvider({
@@ -1123,19 +1125,17 @@ test("续上一段会话：提取不回头看上个进程的历史，只看续�
   await first.start();
   await first.agent.prompt("上个进程说的：我们的测试一律用 bun 跑");
   const id = first.agent.state.sessionId!;
-  await first.stop();
-  const before = extractPrompts.length;
+  await first.stop(); // 只说了一轮、没攒满：退出前补看一次
+  expect(extractPrompts).toHaveLength(1);
+  expect(extractPrompts[0]).toContain("«上个进程说的：我们的测试一律用 bun 跑»");
 
   const second = await createEcho({ ...base, sessionId: id });
-  running.push(second);
   await second.start();
   await second.agent.prompt("续上之后说的：提交信息一律写中文");
-  const deadline = Date.now() + 3_000;
-  while (extractPrompts.length === before && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+  await second.stop();
 
-  expect(extractPrompts.length).toBe(before + 1);
-  const last = extractPrompts[extractPrompts.length - 1]!;
-  expect(last).toContain("续上之后说的");
-  expect(last).not.toContain("上个进程说的");
+  expect(extractPrompts).toHaveLength(2);
+  expect(extractPrompts[1]).toContain("«续上之后说的：提交信息一律写中文»");
+  expect(extractPrompts[1]).toContain("the last 2 messages"); // 上个进程那两条不在要看的范围里
 });
 

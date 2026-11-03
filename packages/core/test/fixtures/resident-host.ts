@@ -101,8 +101,9 @@ function scriptedProvider(turns: ProviderEvent[][]): Provider {
     api: createProviderStreams({
       api: "resident",
       async *request(_model: Model, context: Context): AsyncGenerator<ProviderEvent> {
-        // 记忆提取的子循环（2026-09-14 起真的在跑）不是这份判据要看的：当场答掉，不记进 seen、不吃脚本
-        if (JSON.stringify(context.messages[0] ?? null).includes(EXTRACT_PROMPT_OPENING)) {
+        // 记忆提取的子循环（2026-09-14 起真的在跑）不是这份判据要看的：当场答掉，不记进 seen、不吃脚本。
+        // 2026-11-03 起提取从主对话分叉，指令接在整段对话**后面**（不再是第一条）；前台的 transcript 里永远没有这句
+        if (JSON.stringify(context.messages).includes(EXTRACT_PROMPT_OPENING)) {
           for (const ev of text("Nothing here is worth keeping.")) yield ev;
           return;
         }

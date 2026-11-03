@@ -18,8 +18,17 @@ import { memoryHostOf } from "./memory/host-wiring.ts";
 import { MemoryChannel } from "./memory/channel.ts";
 import { MEMORY_TOOL_NAME } from "./memory/tool.ts";
 import { agentMemory, notesMemory, userMemory } from "./memory/types.ts";
-import { renderTranscriptMessage } from "./compaction/tool.ts";
-import { DEFAULT_EXTRACT_MAX_TURNS, DEFAULT_EXTRACT_MIN_USER_WORDS, defaultExtractPrompt, userProseWords } from "./memory/extract.ts";
+import {
+  DEFAULT_EXTRACT_DRAIN_MS,
+  DEFAULT_EXTRACT_EVERY_TURNS,
+  DEFAULT_EXTRACT_MAX_TURNS,
+  DEFAULT_EXTRACT_MIN_USER_WORDS,
+  defaultExtractPrompt,
+  firstUserText,
+  humanTurns,
+  userProseWords,
+  type ExtractRange,
+} from "./memory/extract.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
 import { scheduleFactDescriptor } from "./schedule/observe.ts";
 import { loopFactDescriptor, loopProbeFor } from "./loop/observe.ts";
@@ -88,7 +97,7 @@ import { assembleSystem } from "./prompt/assemble.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
 import { newSessionId } from "./session/types.ts";
 import { DEFAULT_AGENT_REF, type AgentRef } from "./agent-def/types.ts";
-import { toolError, type AgentTool, type AgentToolResult } from "./tools/types.ts";
+import { isModelVisible, toolError, type AgentTool, type AgentToolResult, type ModelTool } from "./tools/types.ts";
 import { activeTools, effectiveRestriction, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap, type ToolRestrictions } from "./tools/harness.ts";
 import { loadedToolsIn, makeToolSearchTool, TOOL_SEARCH_NAME } from "./tools/tool-search.ts";
 import { makeAskUserTool } from "./question/tool.ts";
@@ -2149,18 +2158,24 @@ export class Agent {
   }
 
   /**
-   * 收摊：drain/abort 受管活动 → 等 pending durable write settle → 释放 lease。
+   * 收摊：把还没看过的那段记忆材料补提取一次（最多 `DEFAULT_EXTRACT_DRAIN_MS`）→ drain/abort 受管活动 →
+   * 等 pending durable write settle → 释放 lease。
    *
    * **Store 面上没有 flush**：`write()` resolve 即持久，所以这里等的是
    * 那些还没 settle 的 write，不是「调一个 flush 方法」。
    */
   async stop(): Promise<void> {
+    return this.stopWith(true);
+  }
+
+  /** `drainMemory`：收摊前补提取一次。handoff 让位传 false——有人在等这把锁（`watchHandoff`）。 */
+  private async stopWith(drainMemory: boolean): Promise<void> {
     // 外层只做同操作的 in-flight 共享；**幂等（phase === "stopped"）由 `doStop()` 在 actor 内判**——
     // 在外层判等于读入队那一刻的旧相位。共享同样要求「那次 stop 仍是队尾」（理由同 `start()`）。
     if (this.stopInFlight !== undefined && this.stopInFlight.ticket === this.lastQueuedTicket) {
       return this.stopInFlight.promise;
     }
-    const { ticket, promise } = this.enqueueLifecycle(() => this.doStop());
+    const { ticket, promise } = this.enqueueLifecycle(() => this.doStop(drainMemory));
     this.stopInFlight = { ticket, promise };
     this.syncAvailability();
     try {
@@ -2171,11 +2186,14 @@ export class Agent {
     }
   }
 
-  private async doStop(): Promise<void> {
+  private async doStop(drainMemory: boolean): Promise<void> {
     // **启动一定已经收干净了**：start / activate / pause / resume / stop 排在同一条 lifecycle actor 上，
     // 轮到 stop 时前面那个 transition 必然已经 settle。上一版靠 `await this.startInFlight` 自己等，
     // 那在「stop 先入队、start 后入队」时会死等一个还没轮到的 promise。
     if (this.phase === "stopped") return; // 等的过程中被别人停掉了
+    // 退出前补提取一次（2026-11-03）：**必须排在改相位之前**——理由见 `drainExtract`。
+    // 不补的话，最后一句答完就退出，那一轮永远不会被提取（续会话时游标直接设到末尾）。
+    if (drainMemory) await this.drainExtract();
     this.setPhase("stopping"); // 吸收态：从这里起任何在飞的 transition 都不许再写回 running
 
     // **收摊期间租约还在手上，`this.lease` 就不能提前清掉。**
@@ -2263,7 +2281,9 @@ export class Agent {
     const by = await requested;
     if (this.lease !== lease) return; // 已经正常 release 过了，这条信号过期
     this.reportDiagnostic({ code: "lease_handoff", message: `${by.by} 要这一段的写入权，让给它` });
-    await this.stop();
+    // 不补提取：人优先，后台让位（2026-09-07）——不为记忆让等锁的人多等。被叫醒的会话处理的是 inbox 消息，
+    // 没有用户亲口说的话，本来也过不了提取的门槛
+    await this.stopWith(false);
   }
 
   private async watchLease(lease: Lease): Promise<void> {
@@ -2961,59 +2981,94 @@ export class Agent {
   }
 
   /**
-   * reply 收尾时把材料定格、排进提取通道；真跑时用户说的话没攒够门槛就不起模型调用（`DEFAULT_EXTRACT_MIN_USER_WORDS`）。
+   * reply 收尾时把材料定格、排进提取通道。真跑时两道门（2026-10-30 / 2026-11-03）：游标之后用户说的话攒够
+   * `DEFAULT_EXTRACT_MIN_USER_WORDS`，且攒满 `DEFAULT_EXTRACT_EVERY_TURNS` 轮——任一没过就不起模型调用、游标不动。
+   * `force` = 退出前那次补跑（`drainExtract`）：不看攒了几轮，之后不会再有下一次了。
    * **不进 admission**，走自己的通道——为什么见 `memory/channel.ts` 头注。
    */
-  private enqueueExtract(): void {
+  private enqueueExtract(opts: { force?: boolean } = {}): void {
     const memory = this.memory;
     const scope = this.activeScope ?? this.lastScope;
     if (memory === undefined || !this.memoryWorkAllowed || scope === undefined) return;
     // 一个模块都没有（`memory.builtin: false` 且没有扩展注册）：没有地方可写，不为此起一次模型调用
     if (memory.memories.size === 0) return;
-    // **重叠保护**：这条 reply 里前台自己已经写过记忆就跳过——不然刚写完一条，
-    // 提取回头看见"这轮有值得记的"，又写一条几乎一样的。游标推过这一段：前台已经处理过它。
+    const force = opts.force === true;
+    // **重叠保护**：这条 reply 里前台自己已经写过记忆，这条 reply 就不单独起一次提取——不然刚写完一条，
+    // 提取回头看见"这轮有值得记的"，又写一条几乎一样的。**游标不动**（2026-11-03）：攒着的前几轮前台没看过，
+    // 下一次提取连同这一条一起看；分叉出来的那次在上文里看得见前台这次写入，prompt 里也有「此刻存着什么」。
     if (this.memoryWrittenThisReply) {
       this.memoryWrittenThisReply = false;
-      this.extractCursor = Math.max(this.extractCursor, this._state.messages.length);
-      return;
+      if (!force) return;
     }
     // 材料在 reply 边界上定格（不取跑的那一刻：那时前台可能正在下一条 reply 的半路上）。
-    // `_state.messages` 每次追加都换新数组，所以这两个引用就是此刻的快照。
+    // `_state.messages` 每次追加都换新数组，所以这两个引用就是此刻的快照。菜单同样此刻取：与主循环最后一次请求同一份。
     const epoch = this.extractEpoch;
     const messages = this._state.messages;
     const compaction = this._state.compaction;
+    const menu = visibleTools(this.tools, this.loadedTools, this.restriction());
     const end = messages.length;
     this.extractChannel.schedule(async (signal) => {
       if (epoch !== this.extractEpoch) return; // transcript 已被清空或换掉
       // 起点在跑的那一刻读：排队期间前一次提取可能已经看过一截
       const from = this.extractCursor;
       if (from >= end) return;
-      // **门槛**：用户亲口说的话没攒够就不跑、游标不动——攒着，等下一条有内容的话一并看
-      if (userProseWords(messages.slice(from, end)) < DEFAULT_EXTRACT_MIN_USER_WORDS) return;
-      // 只看游标之后：经压缩视图投影（被压掉的部分以摘要 / 占位出现），成本跟新内容走、不跟会话长度走
-      const transcript = projectRange(messages, compaction, from, end)
-        .map((m, i) => renderTranscriptMessage(m, i))
-        .join("\n");
-      const done = await this.runExtract(memory, scope, transcript, signal);
+      const fresh = messages.slice(from, end);
+      // **两道门**：用户亲口说的话没攒够、轮数没攒满就不跑、游标不动——攒着，等下一次一并看
+      if (userProseWords(fresh) < DEFAULT_EXTRACT_MIN_USER_WORDS) return;
+      if (!force && humanTurns(fresh) < DEFAULT_EXTRACT_EVERY_TURNS) return;
+      // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
+      const span = projectRange(messages, compaction, from, end);
+      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span) };
+      const done = await this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal);
       if (done && epoch === this.extractEpoch) this.extractCursor = Math.max(this.extractCursor, end);
     });
   }
 
   /**
-   * 一次提取：隔离子循环、**全套记忆工具**、`maxTurns` 限死。
+   * 退出前把还没看过的那段补看一次（2026-11-03）：不论攒了几轮（`force`），等它跑完，最多 `DEFAULT_EXTRACT_DRAIN_MS`。永不抛。
+   *
+   * 两个调用点：`createEcho()` 的 `stop()` **在卸 Extension 之前**调——记忆模块、记忆工具、prompt 段都是 builtin Extension
+   * 挂上来的，卸完再补，模块表是空的（提取直接不跑），菜单与 system 也不再是主循环那一份（前缀缓存对不上）；
+   * `doStop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底，前面补过了它就是空转（游标已在末尾）。
+   * **必须在改相位之前**：收摊一开始 `memoryWorkAllowed` 就是 false、业务写入随即关闸，提取起不来，起来了也写不进去。
+   * 到点没跑完就照常收摊——`dispose()` 里的 `settleDream()` 中止它、游标不动。
+   * 丢锁不走这里（一个字都不许再写）；handoff 让位也不走（有人在等这把锁，见 `watchHandoff`）。
+   */
+  async drainExtract(): Promise<void> {
+    if (!this.memoryWorkAllowed) return;
+    this.enqueueExtract({ force: true });
+    let cancel = (): void => {};
+    const deadline = new Promise<void>((resolve) => {
+      cancel = this.clock.setInterval(() => {
+        cancel();
+        resolve();
+      }, DEFAULT_EXTRACT_DRAIN_MS);
+    });
+    try {
+      await Promise.race([this.extractChannel.idle(), deadline]);
+    } finally {
+      cancel();
+    }
+  }
+
+  /**
+   * 一次提取：**从主对话分叉**（2026-11-03）——主循环那份 system、那份菜单、那段 working context，末尾接一条提取指令。
+   * 前缀与主循环最后一次请求逐字相同，厂商的前缀缓存接着用（此前另起一套没有 system 的 prompt、把对话拍平成文本重发，
+   * 一分缓存都吃不到：2026-11-03 三方对比，读过一个 35KB 文件之后的那次提取原价重发了约 1 万 token）。
+   * 菜单照原样摆（换掉一件，前缀就在工具那段断开），执行时只放行记忆工具，`maxTurns` 限死。
    * **绝不抛**（通道自己也兜一层）：后台活失败不该影响前台，结果体现在记忆文件上。
    * 返回这次是否**正常跑完**——只有跑完游标才推进（没起来、出错、轮数用完、被中止都是 false）。
    */
   private async runExtract(
     memory: AgentMemories,
     scope: AgentAdmissionExecuteScope,
-    transcript: string,
+    fork: { seed: readonly AgentMessage[]; menu: readonly AgentTool[]; range: ExtractRange },
     signal: AbortSignal,
   ): Promise<boolean> {
-    if (transcript === "" || !this.memoryWorkAllowed || signal.aborted) return false;
+    if (fork.range.messages === 0 || !this.memoryWorkAllowed || signal.aborted) return false;
     const table = memoryScopeTableOf(memory);
-    // 此刻存着什么由 prompt 自带：子循环没有 system prompt，不给它就只能一个个 view 去摸，轮数先用完（2026-09-14 实测）
-    const prompt = defaultExtractPrompt(listMemories(memory), table, transcript, await memoryManifest(memory));
+    // 此刻存着什么由 prompt 自带：system 里的记忆段是会话开头冻结的那一版，之后写的看不到；不给就只能一个个 view 去摸
+    const prompt = defaultExtractPrompt(listMemories(memory), table, fork.range, await memoryManifest(memory));
     const runId = `extract-${crypto.randomUUID()}`;
     const observe = this.memoryFactsFor(runId);
     const tool = memoryTool(memory, observe === undefined ? undefined : { observe });
@@ -3027,14 +3082,27 @@ export class Agent {
         return r;
       },
     };
+    // 菜单照主循环那份摆，只换执行：记忆工具换成这次的（同一个工厂、同一份 schema，事实记到这次 run 上、顺带数写了几条），
+    // 其余换成同名同 schema、一调就拒的替身（`refusedDuringExtract`）——循环按冻结菜单里的实例执行，
+    // 光在 `resolveTool` 上拦挡不住。主菜单上没有记忆工具（角色收紧掉了、低层装法没挂）就补在末尾：
+    // 前缀在工具那段断开，但提取照样写得了
+    const menu: AgentTool[] = fork.menu.flatMap((t) => {
+      if (t.name === MEMORY_TOOL_NAME) return [counted];
+      const stub = refusedDuringExtract(t);
+      return stub === null ? [] : [stub];
+    });
+    if (!menu.some((t) => t.name === MEMORY_TOOL_NAME)) menu.push(counted);
     const result = await this.runSubagent(
       {
         prompt,
-        systemPrompt: null,
-        tools: [counted],
+        // 主循环每个 run 装一次的那份（记忆段是冻结的那一版）：与主循环最后一次请求逐字相同
+        systemPrompt: await this.assemblePrompt(scope.modelBinding.model),
+        tools: menu,
+        seed: fork.seed,
         runId,
         source: { kind: "extract", parentRunId: scope.runId },
         maxIterations: DEFAULT_EXTRACT_MAX_TURNS,
+        // 每轮注入不带：它们拼在消息末尾、不进 transcript，本来就不在共享前缀里；带上只是多发一段激活 skill 正文
         turnInjections: "none",
       },
       scope,
@@ -4186,5 +4254,26 @@ function withUserText(m: AgentMessage, text: string): AgentMessage {
     else if (b.type !== "text") content.push(b);
   });
   return { ...m, content } as AgentMessage;
+}
+
+/**
+ * 提取从主对话分叉时，菜单上一件非记忆工具的替身（2026-11-03）：**同名、同 schema**（`toolSchemas` 只投影
+ * name / description / parameters），所以前缀与主循环逐字一致；一点名就在修参那一步拒掉——早于 preToolUse 与权限，
+ * 后台复盘不会因为模型试了一下 bash 就去问人、也不惊动 hook。internal 工具本来不上 schema，不摆（返回 null）。
+ */
+function refusedDuringExtract(tool: AgentTool): ModelTool | null {
+  if (!isModelVisible(tool)) return null;
+  const reason = `Tool '${tool.name}' is not available while reviewing memory: only ${MEMORY_TOOL_NAME} can run here`;
+  return {
+    kind: "model",
+    name: tool.name,
+    label: tool.label,
+    description: tool.description ?? "",
+    parameters: tool.parameters,
+    prepareArguments: () => {
+      throw new Error(reason);
+    },
+    execute: async () => toolError(reason),
+  };
 }
 

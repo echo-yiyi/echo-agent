@@ -71,6 +71,15 @@ export class MemoryChannel {
   }
 
   /**
+   * 等到手上没有活：在跑的与排着的都跑完。**不中止、不拦新排进来的**——退出前补跑那次提取用它等（`Agent.drainExtract`，
+   * 调用方自己给上限）；要中止并等它停是 `settle()`。
+   */
+  async idle(): Promise<void> {
+    // 跑完会接着起排着的那次（`start` 尾巴里），`inflight` 随之换成新的：等到它真为空
+    while (this.inflight !== null) await this.inflight;
+  }
+
+  /**
    * 中断并**等它真的收完**。`stop()` 用。
    *
    * 为什么必须等:lease 是跨进程的单写者保证,它不区分写者是主循环还是后台通道——

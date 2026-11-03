@@ -892,6 +892,9 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
      */
     let stopPromise: Promise<void> | null = null;
     const doStop = async (): Promise<void> => {
+      // 卸 Extension 之前先把没提取过的那段补提取一次（2026-11-03）：记忆模块、记忆工具、prompt 段都是 builtin 挂的，
+      // 卸完就没得提取了，菜单与 system 也不再是主循环那一份（前缀缓存对不上）。有上限、永不抛（`Agent.drainExtract`）。
+      await agent.drainExtract();
       // 逆序：先卸 Extension（它们的 disposer 要动 agent 的 tools / hooks / skills），再停 Agent。
       // **两步都要跑到**，各收各的错：上一版是 `try { unmount } finally { agent.stop() }`，
       // 两边同时失败时 finally 里那个抛会把前一个**顶掉**（实测只剩 agent-stop-failed，

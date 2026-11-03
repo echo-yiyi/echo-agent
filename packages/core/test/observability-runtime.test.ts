@@ -282,12 +282,17 @@ describe("send → getRun → render（completed）", () => {
     const echo = await echoWith({
       stateDir,
       withMemory: true,
+      // 前台三轮各取一条，攒满三轮之后提取取后两条（2026-11-03 起提取攒满三轮才跑）
       turns: [
+        textTurn("好"),
+        textTurn("好"),
         textTurn("好，记住了"),
         toolTurn("m1", "memory", { command: "create", path: "user/memory/obs-pref.md", file_text: "---\ndescription: 观测判据用的一条\n---\n\n内容" }),
         textTurn("记下了"),
       ],
     });
+    await echo.send("第一句：我们的测试一律用 bun 跑");
+    await echo.send("第二句：提交信息一律写中文");
     const user = await echo.send("以后回答简短一点");
     expect(user.outcome.kind).toBe("completed");
 

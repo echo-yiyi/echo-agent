@@ -27,7 +27,8 @@ class Agent extends RealAgent {
         : {
             ...opts,
             streamFunction: (model, context, options) =>
-              JSON.stringify(context.messages[0] ?? null).includes(EXTRACT_PROMPT_OPENING)
+              // 提取从主对话分叉（2026-11-03），指令接在整段对话后面；前台的 transcript 里永远没有这句
+              JSON.stringify(context.messages).includes(EXTRACT_PROMPT_OPENING)
                 ? scriptedStreamFn([textTurn("Nothing here is worth keeping.")])(model, context, options)
                 : inner(model, context, options),
           },

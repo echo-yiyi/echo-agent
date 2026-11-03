@@ -76,9 +76,9 @@ createEcho 完成装配，调用方随后显式 await echo.start()；模型输�
 
 ### 1.4 停止与资源所有权
 
-`stop()` 是生命周期级收摊：阻止新活动、等待存量工作和写入、关闭资源、封住 host write、撤销 write gate，最后释放 lease。清理步骤即使有一处失败也会继续，最终聚合错误，见 [`Agent.stop()`](../../packages/core/src/agent.ts#symbol=Agent.stop) 和 [`Agent.dispose()`](../../packages/core/src/agent.ts#symbol=Agent.dispose)。
+`stop()` 是生命周期级收摊：先给记忆提取一次补看没看过那段的机会（有上限，见 [Memory §5](memory.md#5-记忆怎样产生前台与提取)），再阻止新活动、等待存量工作和写入、关闭资源、封住 host write、撤销 write gate，最后释放 lease。清理步骤即使有一处失败也会继续，最终聚合错误，见 [`Agent.stop()`](../../packages/core/src/agent.ts#symbol=Agent.stop) 和 [`Agent.dispose()`](../../packages/core/src/agent.ts#symbol=Agent.dispose)。
 
-装配层的 `echo.stop()` 先逆序卸载外部与 builtin extensions，再调用 `agent.stop()`；多次调用共享同一个 promise，见 [`createEcho()`](../../packages/core/src/create-echo.ts#symbol=createEcho)。所以对 `createEcho()` 的使用者，正确的所有权出口是 `echo.stop()`。
+装配层的 `echo.stop()` 先补提取一次记忆（卸载之前：记忆模块与记忆工具是 builtin 挂的），再逆序卸载外部与 builtin extensions，最后调用 `agent.stop()`；多次调用共享同一个 promise，见 [`createEcho()`](../../packages/core/src/create-echo.ts#symbol=createEcho)。所以对 `createEcho()` 的使用者，正确的所有权出口是 `echo.stop()`。
 
 内部 Agent.dispose() 只清理资源，不替代 stop() 的相位迁移和 lease 释放。产品必须使用 echo.stop()，不能用 dispose() 代替完整收摊；该公开面限制见 §9。
 
