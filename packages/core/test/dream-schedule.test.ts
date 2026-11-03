@@ -462,6 +462,31 @@ test("整理以 error outcome 收场 → **不记成成功**，锁留给下次",
   expect(state.writes).toBeGreaterThan(0); // 计数也没被清掉
 });
 
+test("整理撞上轮数上限 → 按「做了一部分」记：锁放掉、记下时间、计数不清；下次按间隔接着做，不会一小时后锁过期就整套重跑", async () => {
+  // 2026-11-03：此前按失败记（不记时间、锁 1 小时后过期），门还满着——层大到一次做不完时每小时整套重跑一次
+  const mem = memories(new InMemoryDir(), { dream: { minWritesSinceLast: 2, minFiles: 2, minIntervalMs: 3_600_000 } });
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 第一条\n---\n\n甲");
+  await memoryCreate(mem, "session/memory/b.md", "---\ndescription: 第二条\n---\n\n乙");
+  const view = (id: string) => toolTurn(id, "memory", { command: "view", path: "session/memory/" });
+  const notices: string[] = [];
+  const hooks = new HookRuntime();
+  hooks.on("notification", (e) => {
+    notices.push(e.message);
+  });
+  // 前台一轮答完；整理一直在 view，第三轮要不到——上限是 2
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("前台答完"), view("v1"), view("v2"), view("v3")]), memory: mem, autoDream: true, maxIterations: 2, hooks });
+
+  await agent.prompt("干点活");
+  await settle();
+
+  const state = await readDreamState(mem.dir, "session");
+  expect(state.startedAt).toBeNull(); // 锁放了
+  expect(state.lastAt).not.toBeNull(); // 记了时间：间隔门从这里算
+  expect(state.writes).toBeGreaterThan(0); // 计数不清：还有没整理完的，间隔一到就该接着来
+  expect(await shouldDream(mem, "session")).toBe(false); // 间隔没到
+  expect(notices.some((m) => m.includes("dream_partial"))).toBe(true);
+});
+
 test("门控读盘失败 → 报诊断，不变成 unhandled rejection", async () => {
   // `finishRun()` 是同步的，调用点是 `void this.maybeDream()`——
   // `shouldDream()` / `dreamTask()` 抛出去就是未处理拒绝（Bun 测试直接红）。

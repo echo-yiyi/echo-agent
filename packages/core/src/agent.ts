@@ -74,6 +74,7 @@ import {
   dreamScopes,
   dreamTask,
   markDreamed,
+  markDreamPartial,
   listMemories,
   memoryObserver,
   memoryScopeTableOf,
@@ -3198,6 +3199,13 @@ export class Agent {
           // 无条件 `markDreamed()` 会让一次失败的整理被记成成功、下一次要等满 24 小时（实测过）。
           // 被中断同理不提交：startedAt 会在 DREAM_LOCK_STALE_MS 后过期，下次重来。
           if (signal.aborted) return;
+          // **轮数用完 = 做了一部分**（2026-11-03）：已提交的改动是真的，按「做了一部分」记——放锁、记时间、计数不清，
+          // 下次按正常节流接着做。当失败记的话，锁 1 小时后过期、门还满着，层大到一次做不完就每小时整套重跑一次
+          if (result.outcome.kind === "error" && result.outcome.error.code === "max_iterations") {
+            this.reportDiagnostic({ code: "dream_partial", message: `记忆整理轮数用完（${layer}/）：已提交的改动保留，下次按正常间隔接着整理` });
+            await markDreamPartial(memory, layer);
+            continue;
+          }
           if (result.outcome.kind !== "completed") {
             this.reportDiagnostic({ code: "dream_failed", message: `记忆整理没跑完（${layer}/：${result.outcome.kind}）：不记成成功，锁留给下次` });
             continue;

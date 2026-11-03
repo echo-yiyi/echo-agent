@@ -160,7 +160,7 @@
 
 [`defaultDreamPrompt()`](../../packages/core/src/memory/dream.ts#symbol=defaultDreamPrompt) 要求去重、把错放的内容重建到正确模块后从原处删掉、剪枝、保留无法裁决的冲突及控制预算。这些语义步骤不具备事务性，也没有机器判据证明模型真的完成了它们。
 
-[`Agent.runDreamPass()`](../../packages/core/src/agent.ts#symbol=Agent.runDreamPass) 仅在子循环 outcome 为 completed 且未 abort 时调用 [`markDreamed()`](../../packages/core/src/memory/harness.ts#symbol=markDreamed)，记录时间、清除标记及计数。失败不记成功，标记等过期再允许重来；单层错误报诊断后继续其他层。completed 仅说明循环完成，不说明记忆质量变好。
+[`Agent.runDreamPass()`](../../packages/core/src/agent.ts#symbol=Agent.runDreamPass) 仅在子循环 outcome 为 completed 且未 abort 时调用 [`markDreamed()`](../../packages/core/src/memory/harness.ts#symbol=markDreamed)，记录时间、清除标记及计数。失败不记成功，标记等过期再允许重来；**轮数用完例外**（2026-11-03）：已提交的改动是真的，按「做了一部分」记（[`markDreamPartial()`](../../packages/core/src/memory/harness.ts#symbol=markDreamPartial)：放锁、记时间、计数不清，报 `dream_partial`），下次按正常间隔接着做——当失败记的话，层大到一次做不完时锁每小时过期一次、门还满着，就每小时整套重跑。单层错误报诊断后继续其他层。completed 仅说明循环完成，不说明记忆质量变好。
 
 Dream 与提取都不带父的每轮注入（激活 skill 正文、任务清单；Dream 是 2026-11-03 起）；Dream 的迭代预算沿用父配置。
 

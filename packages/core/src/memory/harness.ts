@@ -790,6 +790,17 @@ export async function markDreamed(ctx: AgentMemories, scope: string): Promise<vo
   await updateDreamState(ctx, scope, () => ({ lastAt: Date.now(), startedAt: null, writes: 0, turns: 0 }));
 }
 
+/**
+ * 某一层整理**做了一部分**（轮数用完，2026-11-03）：记时间、放锁，**计数不清**。
+ *
+ * 为什么不当失败：失败不记时间、锁 1 小时后过期，门还满着，于是每小时整套重跑一次——层大到一次做不完时，
+ * 这就是一个按小时花钱的循环。而撞上限时已提交的改动是真的（合并、删掉的都已落盘），下一次是接着做、不是重来。
+ * 为什么计数不清：还有没整理完的，下一次照常节流（间隔）就该再来，不必等攒够新的写入。
+ */
+export async function markDreamPartial(ctx: AgentMemories, scope: string): Promise<void> {
+  await updateDreamState(ctx, scope, (s) => ({ ...s, lastAt: Date.now(), startedAt: null }));
+}
+
 /** 一层的整理状态（计数、startedAt）读改写用的短锁；与模块的提交锁同在那一层的字节面上。 */
 const DREAM_STATE_LOCK = ".dream/state";
 /** 一层「正在整理」的独占，整理跑多久就拿多久。 */
