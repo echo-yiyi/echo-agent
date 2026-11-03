@@ -121,6 +121,10 @@ export function defaultDreamPrompt(memories: readonly AnyMemory[], table: Memory
     "later refers back to.\n" +
     "6. Do not invent: only reorganize what is already there; add no facts that are not in memory.\n" +
     "If a file will not change — another session may be writing it right now — skip it and move on. Do not retry.\n" +
+    // 2026-11-03 实测（12 条笔记）：view 模型会自己并起来发，改写却是一条一轮——16 次请求里 11 次只调一次工具；
+    // 收尾那段总结占了全部输出的 17%，而整理的事件不外发、没人读它
+    "Batch the work: put independent calls in the same turn — several views at once, edits to different files together — instead of one call per turn.\n" +
+    "When you are done, reply with one short line. Nobody reads a longer summary.\n" +
     `Modules in this layer:\n${regions}`
   );
 }
