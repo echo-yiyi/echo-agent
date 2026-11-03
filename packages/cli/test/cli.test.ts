@@ -589,7 +589,7 @@ test("main:记住的模型已不在目录里 → 口信上屏、用缺省，**�
       ui,
       credentials,
     });
-    await waitFor(() => ui.screen().includes("模型 deepseek-v4-flash · deepseek"), "家记住了、模型回缺省");
+    await waitFor(() => ui.screen().includes("模型 deepseek-flash · deepseek"), "家记住了、模型回缺省");
     await waitFor(() => ui.screen().includes("[设置]"), "口信上屏");
     expect(ui.screen()).toContain("deepseek-v99-已下架");
     ui.feed(String.fromCharCode(4));

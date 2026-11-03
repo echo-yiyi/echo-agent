@@ -249,9 +249,8 @@ test("目录的 thinkingLevelMap 按官方文档：GLM / K3 两两折且关不�
     [zaiCodingProvider(opts), "glm-5.3-flash", "medium", "high", { type: "enabled", clear_thinking: false }], // thinking 来自 params
     [zaiCodingProvider(opts), "glm-5.3", "off", undefined, { type: "enabled", clear_thinking: false }], // 关不掉
     [deepseekProvider(opts), "deepseek-v4-pro", "xhigh", "high", undefined], // 官方兼容表：xhigh → high，不是 max
-    [deepseekProvider(opts), "deepseek-v4-flash", "medium", "high", undefined],
-    [deepseekProvider(opts), "deepseek-v4-flash", "off", undefined, OFF], // off 真关
-    [deepseekProvider(opts), "deepseek-v4-flash-vision-exp", "max", undefined, undefined], // 文档没点名，真 key 实测参数不按文档走
+    [deepseekProvider(opts), "deepseek-flash", "medium", "high", undefined],
+    [deepseekProvider(opts), "deepseek-flash", "off", undefined, OFF], // off 真关
     [kimiProvider(opts), "kimi-k2.7-code", "max", undefined, undefined], // 官方既没给深度也没给开关
     [kimiProvider(opts), "kimi-k2.6", "off", undefined, OFF], // 只有开关
     [kimiProvider(opts), "kimi-k2.6", "max", undefined, ON],
@@ -400,7 +399,7 @@ test("五家内置 provider 的**目录**：id / 缺省模型 / 方言 / 窗口�
   // 那是**声称验过而没验**（review 二轮 P2）。凭据归下面那条真调 resolve 的测试。
   const cases = [
     { p: kimiProvider(), id: "kimi", model: "kimi-k3", host: "api.moonshot.cn" },
-    { p: deepseekProvider(), id: "deepseek", model: "deepseek-v4-flash", host: "api.deepseek.com" },
+    { p: deepseekProvider(), id: "deepseek", model: "deepseek-flash", host: "api.deepseek.com" },
     { p: openaiProvider(), id: "openai", model: "gpt-5.6-sol", host: "api.openai.com" },
     { p: zaiCodingProvider(), id: "zai-coding-cn", model: "glm-5.3", host: "open.bigmodel.cn" },
     // MiniMax 2026-08-30 换成 M3 并回到 CLI 清单：M3 可以关 thinking（M2.x 关不掉，已从目录摘掉）
@@ -737,7 +736,7 @@ test("同一家但**换了模型**也算跨源：reasoner 的历史切到非 rea
   // 签名是按模型发的（review 点名的第二条反例）。
   const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
   const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
-  const target: Model = { provider: "deepseek", id: "deepseek-v4-flash", api: "openai-completions" };
+  const target: Model = { provider: "deepseek", id: "deepseek-flash", api: "openai-completions" };
 
   const ctx: Context = {
     ...CTX,

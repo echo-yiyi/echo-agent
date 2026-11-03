@@ -1704,7 +1704,7 @@ test("Ctrl+L：选择器顶替输入行，当前项 ✓ 且预选中；选另一
     const s = ui.screen();
     expect(s).toContain("选择模型");
     expect(s).toContain("→ 1. Kimi K3 ✓"); // 当前项标着、预选中
-    expect(s).toContain("DeepSeek V4 Flash"); // 跨家平铺（P3b-a）
+    expect(s).toContain("DeepSeek V4.1 Flash"); // 跨家平铺（P3b-a）
     expect(s).toContain("未配 key"); // deepseek 没配，标出来
     // 「Enter 发送 · Shift+Enter」欢迎头里恒有一句；选择器顶替输入行时**只剩那一句**（输入行下的短提示没了）
     expect(s.split("Enter 发送 · Shift+Enter").length - 1, "选择器打开时输入行不该在").toBe(1);
@@ -1973,16 +1973,16 @@ test("Ctrl+L 选 DeepSeek 的模型：换过去、onModelChange 拿到 provider 
 
     ui.feed(CTRL_L);
     await flush();
-    ui.feed("5"); // 平铺清单：1–4 是 kimi 的，5 = DeepSeek V4 Flash
+    ui.feed("5"); // 平铺清单：1–4 是 kimi 的，5 = DeepSeek V4.1 Flash
     await flush(100);
 
-    expect(ui.screen()).toContain("[模型] 已换到 deepseek-v4-flash（deepseek，下一轮生效）");
-    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" });
-    expect(changes).toEqual([{ provider: "deepseek", id: "deepseek-v4-flash" }]); // D7：cli 拿它写 settings.json
+    expect(ui.screen()).toContain("[模型] 已换到 deepseek-flash（deepseek，下一轮生效）");
+    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-flash" });
+    expect(changes).toEqual([{ provider: "deepseek", id: "deepseek-flash" }]); // D7：cli 拿它写 settings.json
     // deepseek 没配 key：不等第一句 prompt 撞 auth，配置段**这就**摆出来，而且对的是 DeepSeek
     expect(ui.screen()).toContain("DeepSeek 的 API key");
     // 状态栏跟着换
-    expect(ui.screen().split("\n").at(-1)!).toContain("deepseek-v4-flash");
+    expect(ui.screen().split("\n").at(-1)!).toContain("deepseek-flash");
 
     quit(ui);
     await done;
@@ -2119,11 +2119,11 @@ test("`/model` 开选择器（与 Ctrl+L 同一个）；`/model <id>` 跨家直�
     expect(ui.screen()).toContain("选择模型"); // 开的就是那个选择器
     ui.feed(ESC_KEY); // 收起
 
-    for (const ch of "/model deepseek-v4-flash") ui.feed(ch);
+    for (const ch of "/model deepseek-flash") ui.feed(ch);
     ui.feed(ENTER);
     await flush(100);
-    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" });
-    expect(changes).toEqual([{ provider: "deepseek", id: "deepseek-v4-flash" }]); // 写设置那条回调同样走到
+    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-flash" });
+    expect(changes).toEqual([{ provider: "deepseek", id: "deepseek-flash" }]); // 写设置那条回调同样走到
     expect(ui.screen()).toContain("DeepSeek 的 API key"); // deepseek 没配 key：主动弹配置段
 
     quit(ui);
@@ -2236,13 +2236,13 @@ test("`/model dee`：模型 id 参数补全弹出；Tab 补全整个 id；Enter 
 
     for (const ch of "/model dee") ui.feed(ch);
     await flush();
-    expect(ui.screen()).toContain("deepseek-v4-flash"); // 参数菜单在，fuzzy 首选
+    expect(ui.screen()).toContain("deepseek-flash"); // 参数菜单在，fuzzy 首选
 
     ui.feed(TAB);
     await flush();
     ui.feed(ENTER);
     await flush(100);
-    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-v4-flash" }); // 只敲了 dee，Tab 补全后直切成功
+    expect(echo.agent.state.model).toMatchObject({ provider: "deepseek", id: "deepseek-flash" }); // 只敲了 dee，Tab 补全后直切成功
     expect(ui.screen()).toContain("DeepSeek 的 API key"); // 未配 key 的家：主动弹配置段
 
     quit(ui);

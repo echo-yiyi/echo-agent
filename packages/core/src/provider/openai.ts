@@ -721,16 +721,17 @@ export function minimaxProvider(opts: BuiltinProviderOptions = {}): Provider {
 }
 
 /**
- * DeepSeek。key:`DEEPSEEK_API_KEY`。目录按 2026-09-01 官方文档（api-docs.deepseek.com）+ 实测 `GET /models`：只有 V4 三款。
+ * DeepSeek。key:`DEEPSEEK_API_KEY`。目录按 2026-11-03 官方定价页（api-docs.deepseek.com/quick_start/pricing）+ 实测
+ * `GET /models`：只列 `deepseek-flash`（DeepSeek-V4.1-Flash）与 `deepseek-v4-pro` 两款。
  *
- * `deepseek-chat` / `deepseek-reasoner` 官方 2026-04-24 宣布、2026-07-24 退役（分别路由到 v4-flash 的非思考 / 思考
- * 模式；实测今天还能打通，但 `/models` 已不列、文档已不提——没文档的余量不当正式 id）。
- * 三款都是 1M 上下文、思考缺省**开**（`thinking: { type: "enabled" }`，可传 `disabled` 关掉；深度 `reasoning_effort`
- * low / high / max，缺省 high），思考走 `reasoning_content`；只有 `-vision-exp` 收图，别的模型给图回 400。
+ * 旧名不当正式 id：`deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 官方写明是已退役模型的旧名，现由 V4.1 Flash 服务、
+ * 按 Flash 计价；`deepseek-chat` / `deepseek-reasoner` 2026-07-24 退役。2026-11-03 实测旧名 `deepseek-v4-flash` 连续回
+ * 503 "Service is too busy"，同一时刻 `deepseek-flash` 正常——旧名还能打通，但不保证跟新名走同一份容量。
+ * 两款都是 1M 上下文、思考缺省**开**（`thinking: { type: "enabled" }`，可传 `disabled` 关掉；深度 `reasoning_effort`
+ * low / high / max，缺省 high），思考走 `reasoning_content`。**只有 flash 收图**（`/models` 的 input_modalities；
+ * 2026-11-03 真 key 实测 chat completions 收 `image_url` 并答对了颜色），pro 给图回 400。
  *
- * **档位表只填 flash / pro**（`DEEPSEEK_THINKING_LEVELS`：三档深度 + `off` 真关，官方 thinking_mode 指南点名的就这两款）。`-vision-exp` 不填：
- * 文档没点名；2026-09-08 真 key 实测 4 组同题，`low` 的 reasoning_tokens 全部比 `max` 多（均值 321 对 88，flash 对照组
- * 方向正常 10 对 52）——参数在它身上不按文档走，填了就是「选的是 A、跑的是 B」。
+ * **档位表两款都填**（`DEEPSEEK_THINKING_LEVELS`：三档深度 + `off` 真关；`/models` 的 effort 两款都是 low / high / max）。
  *
  * **`alwaysSendReasoningField` 只在这一家开**：官方明文——带 `tools` 的请求，后续每一轮都必须把 `reasoning_content`
  * 原样回传（**包括没发生工具调用的轮次**），缺了回 400。自建网关指向 DeepSeek 的话，调用方要自己传这个选项——**我们不按 URL 猜**。
@@ -744,12 +745,11 @@ export function deepseekProvider(opts: BuiltinProviderOptions = {}): Provider {
     name: "DeepSeek",
     baseUrl,
     auth: envApiKey("DEEPSEEK_API_KEY"),
-    // 旧缺省 `deepseek-chat` 官方就是路由到 v4-flash，价格连续；pro 是 3 倍价，官方自己的 agent 配置把它当主模型、flash 给子代理
-    defaultModelId: "deepseek-v4-flash",
+    // flash 是官方的缺省名、价格是 pro 的四分之一左右；pro 官方自己的 agent 配置把它当主模型、flash 给子代理
+    defaultModelId: "deepseek-flash",
     models: [
-      { id: "deepseek-v4-flash", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Flash", capabilities: { reasoning: true, contextWindow: 1_000_000 }, thinkingLevelMap: DEEPSEEK_THINKING_LEVELS },
+      { id: "deepseek-flash", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4.1 Flash", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000 }, thinkingLevelMap: DEEPSEEK_THINKING_LEVELS },
       { id: "deepseek-v4-pro", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Pro", capabilities: { reasoning: true, contextWindow: 1_000_000 }, thinkingLevelMap: DEEPSEEK_THINKING_LEVELS },
-      { id: "deepseek-v4-flash-vision-exp", api: OPENAI_COMPLETIONS_API, name: "DeepSeek V4 Flash Vision (exp)", capabilities: { reasoning: true, vision: true, contextWindow: 1_000_000 } },
     ],
     api: createProviderStreams(
       openAiDialect({ baseUrl, alwaysSendReasoningField: true, ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}) }),
