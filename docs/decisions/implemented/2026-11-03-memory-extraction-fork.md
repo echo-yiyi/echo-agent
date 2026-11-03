@@ -1,10 +1,10 @@
-# 记忆提取从主对话分叉、攒满三轮才跑、退出前补一次
+# 记忆提取从主对话分叉、攒满三轮才跑、退出前补一次、游标落盘
 
-> 状态:implemented · 提出 2026-11-03（三方缓存对比：echo 未命中是 pi / dsh 的两倍多，约四成来自记忆提取；同时复现「最后一轮答完就退出、那一轮永远不被提取」）· 拍板 2026-11-03（用户：「这几个问题都要解决，多次记忆提取的问题也要解决」——即 [降频](2026-10-30-memory-extraction-gate.md) 那份两步方案的第 2 步，加降频与退出补跑）· 落地 `packages/core/src/memory/extract.ts` / `channel.ts` / `agent.ts` / `create-echo.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [降频](2026-10-30-memory-extraction-gate.md) 的第 2、3 条与 Non-Goals
+> 状态:implemented · 提出 2026-11-03（三方缓存对比：echo 未命中是 pi / dsh 的两倍多，约四成来自记忆提取；同时复现「最后一轮答完就退出、那一轮永远不被提取」）· 拍板 2026-11-03（用户：「这几个问题都要解决，多次记忆提取的问题也要解决」——即 [降频](2026-10-30-memory-extraction-gate.md) 那份两步方案的第 2 步，加降频与退出补跑）· 落地 `packages/core/src/memory/extract.ts` / `channel.ts` / `agent.ts` / `create-echo.ts` / `session/types.ts` / `session/service.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [降频](2026-10-30-memory-extraction-gate.md) 的第 2、3 条与 Non-Goals
 
 **给谁看**：改记忆提取的触发、输入、成本或收摊顺序的人。假设已知 [降频](2026-10-30-memory-extraction-gate.md)（门槛 + 游标）与 [记忆设计](../../design/memory.md) §5。
 
-**一句话**：提取不再另起一套 prompt、把对话拍平重发，而是接在主对话后面跑（前缀与主循环最后一次请求逐字相同，厂商缓存直接接着用）；攒满三轮用户输入才跑；退出前不论攒了几轮都补一次。
+**一句话**：提取不再另起一套 prompt、把对话拍平重发，而是接在主对话后面跑（前缀与主循环最后一次请求逐字相同，厂商缓存直接接着用）；攒满三轮用户输入才跑；退出前不论攒了几轮都补一次；复盘到哪落盘进会话，没提取的那截跨重启接着攒。
 
 ## 现状（拍板前）
 
@@ -20,10 +20,16 @@
 4. **退出前补一次**（`Agent.drainExtract`）：不看攒了几轮（仍过 8 词门槛），等它跑完，最多 `DEFAULT_EXTRACT_DRAIN_MS = 15_000`，到点照常收摊（提取被中止、游标不动）。两个调用点：`echo.stop()` **在卸 Extension 之前**（记忆模块、记忆工具、prompt 段都是 builtin 挂的，卸完就没得提取、前缀也对不上）；`Agent.doStop()` **在改相位之前**再调一次，给低层用法兜底，前面补过就空转。丢锁不补（一个字都不许再写）；handoff 让位不补（有人在等这把锁；被叫醒的会话处理的是 inbox 消息，本来也过不了门槛）。
 5. **重叠保护不再推游标**：前台这条 reply 自己写过记忆，这条 reply 不单独起提取，但游标不动。攒满三轮之后再推游标，会把前面攒着、前台没看过的几轮一起丢掉；分叉出来的提取在上文里看得见前台那次写入，指令里也有「此刻存着什么」，不靠跳过来防重复。
 
+同日第二批（用户转述的反馈：「读取记忆误判为写入，待提取内容不能跨重启累计，提取和整理成本优化」）：
+
+6. **读不算写**：重叠保护只认前台那把 memory 工具一次**非 view** 的调用成功（`Agent` 构造期包在那把工具上，判法与 `runExtract` 数写入条数同一条）。此前看的是「memory 工具成功结束」事件，前台 view 一下记忆，那一轮就被当成写过、提取被跳过。
+7. **游标落盘**：提取正常跑完，会话里记一条 `memory_reviewed { at, through }`（`SessionEntry` 新的一种，`through` 是**落盘消息**的下标）；续会话取最后一条（一条都没有 = 0，`SessionData.memoryReviewedThrough`）。`/clear` 只清内存、不写会话，续会话时 reset 之前的消息会回来，所以 Agent 记一个偏移，落盘下标 = 内存下标 + 偏移。**改的是持久化格式与公共类型**（`SessionEntry` / `SessionData` 从包入口导出）：只追加；旧会话没有这种 entry，续上后第一次提取从头看起（分叉跑，成本是一次普通请求）；旧版本读新会话会因为不认识的 kind 判红（pre-release，不留兼容）。
+8. **Dream 不带每轮注入**：激活 skill 正文、任务清单是前台这场对话的，整理只看已有记忆——此前 `turnInjections: "inherit"`，每轮多发一段。
+
 ## Non-Goals
 
 - 不做空闲补跑、「先问一句」：退出补跑已经兜住「没攒满就结束」，空闲补跑只多一个计时器。
-- 游标不落盘：进程被杀（没走 `stop()`）时，没提取的那截仍会丢——续会话照旧把游标设到末尾。
+- ~~游标不落盘~~（第 7 条改了：被杀、补跑没跑完的那截，续会话后接着攒）。
 - 不改提取的模型、轮数上限（5）。提取仍不进 admission、走自己的通道。
 - 门槛、轮数、补跑上限都不做成产品配置。
 - 不改 Dream。
@@ -35,7 +41,9 @@
 - 攒满三轮：[没攒满不跑](../../../packages/core/test/memory-extract.test.ts#test=没攒满三轮不跑两轮各自过了词数门槛也一次不起第三轮来了从第一轮看起)
 - 退出补跑与上限：[stop 先补一次](../../../packages/core/test/memory-extract.test.ts#test=最后一句答完就退出stop-先把没攒满的那段补提取一次再收摊此前直接中止那一轮永远不会被提取)、[卡住也只等上限](../../../packages/core/test/memory-extract.test.ts#test=退出前补跑那次卡住stop-最多等-defaultextractdrainms到点照常收摊提取被中止)、[`echo.stop()` 卸载前补、续会话只看续上之后的](../../../packages/core/test/create-echo.test.ts#test=续上一段会话提取不回头看上个进程的历史上个进程退出前已经补看过续上之后只从续上之后说的看起)
 - 重叠保护不推游标：[前台写过](../../../packages/core/test/memory-extract.test.ts#test=前台这轮自己写过记忆这一轮不单独起提取游标也不动下一次连它一起看批量之后再推游标就把攒着的几轮丢了)
+- 读不算写：[只 view](../../../packages/core/test/memory-extract.test.ts#test=前台这轮只-view-了记忆读不算写这一轮照常算进提取2026-11-03-用户报读记忆被当成写那一轮被跳过)
+- 游标跨重启：[上个进程没跑完的接着看](../../../packages/core/test/create-echo.test.ts#test=没提取过的那截跨重启接着攒上个进程的提取没跑完续上之后从上个进程那句看起此前续会话把游标直接设到末尾那截就丢了)、[`/clear` 之后的落盘下标](../../../packages/core/test/create-echo.test.ts#test=clear-之后再续会话复盘下标越过-reset-之前那几条它们还在会话里续上之后不把看过的再看一遍)
 
-五种变异（去掉退出补跑 / 去掉攒满三轮 / 替身换回原工具 / system 换回 null / 重叠保护改回推游标）各让对应判据变红。
+九种变异（去掉退出补跑 / 去掉攒满三轮 / 替身换回原工具 / system 换回 null / 重叠保护改回推游标 / view 也算写 / 续会话不按盘上恢复游标 / 落盘下标不加偏移 / 跑完不落盘）各让对应判据变红。Dream 不带注入没有专门判据（纪律）。
 
 真实 API 的对照（同一段脚本、`deepseek-flash`，改前改后各跑一次）记在提交说明里；它证明的是这一次的数，不是门。

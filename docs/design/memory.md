@@ -132,9 +132,9 @@
 
 当前 [`Agent.enqueueExtract()`](../../packages/core/src/agent.ts#symbol=Agent.enqueueExtract) 依次检查：记忆已绑定、生命周期允许工作且有运行 scope；**一个模块都没有就不跑**（不为提取起一次模型调用）；本 reply 的重叠保护标志——前台这轮写过记忆，这条 reply 就不单独起提取（游标不动，见下）。都过了就把 reply 结束时的 transcript 与菜单定格，排进提取通道。
 
-**游标、门槛与频率**（2026-10-30 / 2026-11-03，决策见 [记忆提取降频](../decisions/implemented/2026-10-30-memory-extraction-gate.md) 与 [从主对话分叉](../decisions/implemented/2026-11-03-memory-extraction-fork.md)）：Agent 记一个 transcript 下标，之前的部分算已看过。真跑的那一刻从游标读起，过两道门才起模型调用：游标之后**用户亲口说的话**攒够 [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)（[`userProseWords()`](../../packages/core/src/memory/extract.ts#symbol=userProseWords)：只数 `human` / `steer` 的用户正文，中日韩文字一字一词、其余按空白分词），且**用户输入**攒满 [`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) 轮（[`humanTurns()`](../../packages/core/src/memory/extract.ts#symbol=humanTurns)：一条 `human` 用户消息一轮）。任一没过就不跑、游标不动——攒着，下一次一并看。**正常跑完**才把游标推到这次材料的末尾，出错、轮数用完、被中止都不动。压缩不改 transcript 下标，游标照样有效；`reset` 归零，续会话设到末尾（上个进程的历史不再回头看——它退出前已补看过，见下）。
+**游标、门槛与频率**（2026-10-30 / 2026-11-03，决策见 [记忆提取降频](../decisions/implemented/2026-10-30-memory-extraction-gate.md) 与 [从主对话分叉](../decisions/implemented/2026-11-03-memory-extraction-fork.md)）：Agent 记一个 transcript 下标，之前的部分算已看过。真跑的那一刻从游标读起，过两道门才起模型调用：游标之后**用户亲口说的话**攒够 [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)（[`userProseWords()`](../../packages/core/src/memory/extract.ts#symbol=userProseWords)：只数 `human` / `steer` 的用户正文，中日韩文字一字一词、其余按空白分词），且**用户输入**攒满 [`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) 轮（[`humanTurns()`](../../packages/core/src/memory/extract.ts#symbol=humanTurns)：一条 `human` 用户消息一轮）。任一没过就不跑、游标不动——攒着，下一次一并看。**正常跑完**才把游标推到这次材料的末尾，并在会话里记一条 `memory_reviewed` entry（落盘消息的下标，见 [`SessionEntry`](../../packages/core/src/session/types.ts#symbol=SessionEntry)）；出错、轮数用完、被中止都不动。压缩不改 transcript 下标，游标照样有效；`reset` 归零（`/clear` 只清内存、不写会话，所以落盘下标要越过 reset 之前那几条，Agent 记着这个偏移）；**续会话取盘上最后一条 `memory_reviewed`**（一条都没有 = 0）——上个进程没提取的那截跨重启接着攒，被杀、退出前那次补跑没跑完都不丢（2026-11-03）。
 
-**退出前补一次**（[`Agent.drainExtract()`](../../packages/core/src/agent.ts#symbol=Agent.drainExtract)）：不看攒了几轮（仍过词数门槛），等它跑完，最多 [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS)，到点照常收摊（提取被中止、游标不动）。`echo.stop()` 在卸 Extension **之前**调它——记忆模块、记忆工具与 prompt 段都是 builtin 挂的，卸完就没得提取，前缀也对不上；`Agent.stop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底。丢锁与 handoff 让位不补。所以「没攒满就结束」的那一截也会被看到；**进程被杀**（没走 `stop()`）时那一截仍会丢，游标不落盘。
+**退出前补一次**（[`Agent.drainExtract()`](../../packages/core/src/agent.ts#symbol=Agent.drainExtract)）：不看攒了几轮（仍过词数门槛），等它跑完，最多 [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS)，到点照常收摊（提取被中止、游标不动）。`echo.stop()` 在卸 Extension **之前**调它——记忆模块、记忆工具与 prompt 段都是 builtin 挂的，卸完就没得提取，前缀也对不上；`Agent.stop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底。丢锁与 handoff 让位不补；本进程一个 run 都没跑过（只是续上来看一眼就退）也不补——没有运行 scope，`enqueueExtract` 直接返回。所以「没攒满就结束」的那一截通常当场就被看到；没赶上的（进程被杀、补跑到点）由盘上的游标留给下一次续会话。
 
 **提取从主对话分叉**（[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract)）：system 是主循环每个 run 装配的那一份（记忆段是冻结的那一版），菜单是 reply 收尾时主循环的菜单，消息是主循环的 working context（含最后那条回答），末尾接一条提取指令——前缀与主循环最后一次请求逐字相同，厂商的前缀缓存直接接着用。每轮注入（激活 skill 正文、任务清单）不带：它们拼在消息末尾、本来不在共享前缀里。菜单照原样摆，只换执行：记忆工具换成这次提取的实例（同一份 schema），其余换成同名同 schema、一点名就在修参那一步拒掉的替身——早于 preToolUse 与权限，后台复盘不会去问人。主菜单上没有记忆工具时补在末尾（前缀在工具那段断开，但照样能写）。
 
@@ -142,7 +142,7 @@
 
 提取不通过 admission，不抢前台许可；独立消息数组（分叉时复制的是 reply 收尾时的快照）、不消费前台 steer / followUp，子循环事件不发进主 transcript。但它复用父的循环配置与相关服务，不能笼统宣称与前台完全不共享可变状态。
 
-目前重叠保护是“本 reply 出现成功的 memory 工具结束事件”，并非已提交 mutation 事实。因此只读 view 也会让这条 reply 不单独起提取，别名工具的写入则未必触发。它**不推游标**（2026-11-03）：攒满几轮才跑之后，推过去会把前面攒着、前台没看过的几轮一起丢掉；分叉出来的提取在上文里看得见前台那次写入。**标志只在走到它那一步时复位**：前面两道任一挡住（比如这条 reply 收尾时刚丢锁，或一个模块都没有），标志会留到下一条 reply。提取还在跑时又结束的几条 reply 会折叠成一次：[`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel) 跑完只再跑最后排进来的那次，它从游标读起，看的是前一次没看过的全部；丢锁时还没开始的那次直接丢掉。所以不承诺每条 reply 各跑一次提取。
+目前重叠保护是“前台那把 memory 工具一次**非 view** 的调用成功结束”（2026-11-03：此前看的是工具结束事件，只读的 view 也算，用户报「读记忆被当成写、那一轮被跳过」），并非已提交 mutation 事实；别名工具的写入不触发。它**不推游标**（2026-11-03）：攒满几轮才跑之后，推过去会把前面攒着、前台没看过的几轮一起丢掉；分叉出来的提取在上文里看得见前台那次写入。**标志只在走到它那一步时复位**：前面两道任一挡住（比如这条 reply 收尾时刚丢锁，或一个模块都没有），标志会留到下一条 reply。提取还在跑时又结束的几条 reply 会折叠成一次：[`MemoryChannel`](../../packages/core/src/memory/channel.ts#symbol=MemoryChannel) 跑完只再跑最后排进来的那次，它从游标读起，看的是前一次没看过的全部；丢锁时还没开始的那次直接丢掉。所以不承诺每条 reply 各跑一次提取。
 
 ## 6. Dream 怎样整理
 
@@ -162,7 +162,7 @@
 
 [`Agent.runDreamPass()`](../../packages/core/src/agent.ts#symbol=Agent.runDreamPass) 仅在子循环 outcome 为 completed 且未 abort 时调用 [`markDreamed()`](../../packages/core/src/memory/harness.ts#symbol=markDreamed)，记录时间、清除标记及计数。失败不记成功，标记等过期再允许重来；单层错误报诊断后继续其他层。completed 仅说明循环完成，不说明记忆质量变好。
 
-当前 Dream 继承父的动态注入，而提取不继承；Dream 的迭代预算沿用父配置。这与“整理只看已有记忆”的语义需要分开：其工具只有记忆，不代表其输入绝无其他材料。
+Dream 与提取都不带父的每轮注入（激活 skill 正文、任务清单；Dream 是 2026-11-03 起）；Dream 的迭代预算沿用父配置。
 
 ## 7. 并发、收摊与可观测性
 
@@ -191,7 +191,7 @@
 
 [提取决策](../decisions/implemented/2026-09-07-memory-extraction.md)中的以下目标与当前实现（第 5 节）不同：
 
-- **重叠保护**：决策按本 reply 是否出现 `memory.mutation.committed` 事实判断；实现看的是 memory 工具成功结束的事件，只读 view 也会让这条 reply 不单独起提取。
+- **重叠保护**：决策按本 reply 是否出现 `memory.mutation.committed` 事实判断；实现看的是前台那把 memory 工具的非 view 调用是否成功，别名工具的写入不算。
 - **输入**：决策给「这次 reply 实际送给模型的那份」；实现给 reply 收尾时的 working context（经同一份循环配置的 transform 投影），外加最后那条回答，但不带每轮注入。
 - **模型档**：决策走产品配的便宜档；实现沿用父 scope 的模型绑定。
 

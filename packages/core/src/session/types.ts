@@ -38,6 +38,11 @@ export type SessionEntry = {
   | { kind: "error"; at: number; error: AgentError }
   /** 工作目录切换（2026-09-03，worktree 隔离）：过程事实，恢复取最后一条；一条都没有 = `SessionInfo.workspace`。 */
   | { kind: "workspace"; at: number; workspace: string }
+  /**
+   * 记忆提取复盘到了哪（2026-11-03）：这段会话**落盘的消息**里前 `through` 条已经被提取看过。过程事实，恢复取最后一条；
+   * 一条都没有 = 0（一条都没看过）。有了它，没提取过的那截跨重启接着攒——进程被杀、没走 `stop()` 也不丢。
+   */
+  | { kind: "memory_reviewed"; at: number; through: number }
 );
 
 export type SessionInfo = {
@@ -115,4 +120,6 @@ export type SessionData = {
   readonly compaction: CompactionState;
   /** 当前工作目录：最后一条 `workspace` entry；没切过 = `info.workspace`。文件工具的边界与起点、`{{workspace}}` 读它。 */
   readonly workspace: string;
+  /** 记忆提取已经看过 `messages` 的前几条：最后一条 `memory_reviewed` entry 的 `through`（不超过消息条数）；一条都没有 = 0。 */
+  readonly memoryReviewedThrough: number;
 };

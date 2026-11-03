@@ -228,6 +228,24 @@ test("前台这轮自己写过记忆：这一轮不单独起提取，游标也�
   expect(JSON.stringify(extracts[0]!.messages)).toContain("session/memory/test-runner.md"); // 前台那次写入就在上文里
 });
 
+test("前台这轮只 view 了记忆：读不算写，这一轮照常算进提取（2026-11-03 用户报：读记忆被当成写，那一轮被跳过）", async () => {
+  const foreground = scriptedStreamFn([
+    textTurn("好的"),
+    textTurn("好的"),
+    toolTurn("v1", "memory", { command: "view", path: "session/memory/" }),
+    textTurn("看过了，没有相关记录。"),
+  ]);
+  const { fn, extracts } = recording({ foreground });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()) });
+  await mountBuiltinTools(agent);
+
+  await say(agent, THREE[0]!, THREE[1]!, "我们之前记过分支命名的规矩吗？查一下");
+  await idleExtract(agent);
+
+  expect(extracts).toHaveLength(1); // 第三轮只读：照常攒满三轮就提取
+  expect(instructionOf(extracts[0]!)).toContain(`«${THREE[0]}»`);
+});
+
 test("提取还在跑时又攒满一批 → 跑完再跑的那次从新的一批看起，不是把旧材料再提取一遍", async () => {
   let release = (): void => {};
   const held = new Promise<void>((r) => {

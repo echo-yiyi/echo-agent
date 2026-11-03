@@ -69,7 +69,8 @@ export type SessionEntryInput =
   | { kind: "message"; message: AgentMessage }
   | { kind: "compaction"; at: number; reason: CompactionReason; compaction: CompactionState }
   | { kind: "error"; at: number; error: AgentError }
-  | { kind: "workspace"; at: number; workspace: string };
+  | { kind: "workspace"; at: number; workspace: string }
+  | { kind: "memory_reviewed"; at: number; through: number };
 
 /**
  * 会话的语义所有者。**一个实例管一段 session**（2026-09-03）：注入的 store 就是那一段的目录，
@@ -196,7 +197,7 @@ export class SessionService {
     this.cursors.set(sessionId, { nextSeq: 1, lastEntryId: null, info, metaWritten: true });
     this.openedId = sessionId;
     this.poisoned.delete(sessionId);
-    return { info, messages: [], compaction: EMPTY_COMPACTION, workspace: info.workspace };
+    return { info, messages: [], compaction: EMPTY_COMPACTION, workspace: info.workspace, memoryReviewedThrough: 0 };
   }
 
   /**
@@ -561,6 +562,10 @@ function assertEntryShape(entry: SessionEntry, where: string): void {
       if (typeof entry.workspace !== "string" || entry.workspace === "") throw new Error(`${where} 是 workspace 但缺 workspace`);
       if (typeof entry.at !== "number") throw new Error(`${where} 是 workspace 但缺 at`);
       return;
+    case "memory_reviewed":
+      if (!Number.isSafeInteger(entry.through) || entry.through < 0) throw new Error(`${where} 是 memory_reviewed 但 through 不是非负整数`);
+      if (typeof entry.at !== "number") throw new Error(`${where} 是 memory_reviewed 但缺 at`);
+      return;
     default:
       // 未知 kind：不猜、不跳过。多半是版本不匹配，接着写会写出更乱的东西。
       throw new Error(`${where} 的 kind 不认识：${String((entry as { kind?: unknown }).kind)}`);
@@ -610,20 +615,23 @@ function assertSessionInfoShape(info: unknown, where: string): void {
 
 /**
  * entries → 运行时视图。**恢复顺序在这里定死**：messages 按入账序，compaction 取最后一次压缩的状态，
- * workspace 取最后一次切换（没切过 = 开会话的目录）。
+ * workspace 取最后一次切换（没切过 = 开会话的目录），记忆复盘到哪取最后一条（没有 = 0）。
  * 状态的下标必须在这份 messages 上成立（切点合法、不越界）——不成立就是坏档，判红不修。
+ * 复盘下标例外：它只决定「从哪看起」，多出来的截到消息条数（写它的那一刻消息已经入账，越界只可能是档被手改过）。
  */
 function project(loaded: Loaded): SessionData {
   const messages: AgentMessage[] = [];
   let compaction: CompactionState = EMPTY_COMPACTION;
   let workspace = loaded.info.workspace;
+  let reviewed = 0;
   for (const e of loaded.entries) {
     if (e.kind === "message") messages.push(e.message);
     else if (e.kind === "compaction") compaction = e.compaction;
     else if (e.kind === "workspace") workspace = e.workspace;
+    else if (e.kind === "memory_reviewed") reviewed = e.through;
   }
   assertCompactionFits(messages, compaction, `会话 ${loaded.info.id} 的 compaction`);
-  return { info: loaded.info, messages, compaction, workspace };
+  return { info: loaded.info, messages, compaction, workspace, memoryReviewedThrough: Math.min(reviewed, messages.length) };
 }
 
 const COMPACTION_REASONS: ReadonlySet<unknown> = new Set<CompactionReason>(["auto", "overflow", "manual", "idle"]);

@@ -730,16 +730,22 @@ export class Agent {
   private readonly extractChannel = new MemoryChannel("extract", (d) => this.reportDiagnostic(d));
   private readonly dreamChannel = new MemoryChannel("dream", (d) => this.reportDiagnostic(d));
   /**
-   * 这条 reply 里前台自己写过记忆没有。**提取的重叠保护**:写过就跳过这次提取——
-   * 不然前台刚记完一条,提取回头看见"这轮有值得记的",又写一条几乎一样的。
+   * 这条 reply 里前台自己**改过**记忆没有（只读的 `view` 不算，2026-11-03）。**提取的重叠保护**：改过，这条 reply
+   * 就不单独起提取——不然前台刚记完一条，提取回头看见"这轮有值得记的"，又写一条几乎一样的。
    */
   private memoryWrittenThisReply = false;
   /**
-   * 提取的**游标**（2026-10-30）：transcript 里 `[0, extractCursor)` 已经被看过（提取跑完，或前台自己写过记忆）。
+   * 提取的**游标**（2026-10-30）：transcript 里 `[0, extractCursor)` 已经被提取看过。
    * 下标是原始 transcript 的——压缩只改视图、不动 transcript，所以压缩后照样有效。
-   * 只在提取**正常跑完**时推进；出错 / 轮数用完 / 被中止都不动，下次重看。`reset` 归零，续会话设到末尾。
+   * 只在提取**正常跑完**时推进，同时落一条 `memory_reviewed` 进会话（2026-11-03）；出错 / 轮数用完 / 被中止都不动，下次重看。
+   * `reset` 归零；续会话取盘上最后一条 `memory_reviewed`——没提取过的那截跨重启接着攒，进程被杀也不丢。
    */
   private extractCursor = 0;
+  /**
+   * 内存 transcript 前面还有几条**已落盘、却不在内存里**的消息：`reset`（`/clear`）只清内存、不写会话，
+   * 续会话时那些会一起回来。`memory_reviewed` 记的是落盘消息的下标 = 内存下标 + 这个数。续会话归零。
+   */
+  private persistedOffset = 0;
   /** transcript 被清空或换掉的代数：在飞的提取认出自己看的是旧的那份，就不推游标（推了会对不上新的下标）。 */
   private extractEpoch = 0;
   /** 当前 run 的稳定身份；permission ask 与事件关联引用它。 */
@@ -872,7 +878,22 @@ export class Agent {
     if (this.memory !== undefined) {
       this.memory.report = report;
       // 无特权通道：与第三方扩展同一条注册路（见 `extension/builtin.ts`）。
-      memoryTools = [memoryTool(this.memory)];
+      // 前台这把**只有改了东西才置重叠保护的标志**（2026-11-03 用户报：读记忆被当成写，那一轮的提取被跳过）——
+      // 此前看的是「memory 工具成功结束」事件，`view` 也算。判法与 `runExtract` 数写入条数同一条：非 view 且没报错
+      const foreground = memoryTool(this.memory);
+      const markWritten = (): void => {
+        this.memoryWrittenThisReply = true;
+      };
+      memoryTools = [
+        {
+          ...foreground,
+          async execute(params, ctx) {
+            const r = await foreground.execute(params, ctx);
+            if (params.command !== "view" && r.isError !== true) markWritten();
+            return r;
+          },
+        },
+      ];
       // **轮次门的唯一进料口**。没有这一行时 `turnsSinceDream` 恒为 0，
       // `minTurnsSinceLast` 这道门永远不满足，而且**静默**——看起来配了，实际从没起过作用。
       // 装配方「记得订阅」不是契约，装了记忆就该自动接上。
@@ -880,8 +901,6 @@ export class Agent {
       // **提取挂在 reply 收尾**(2026-09-07):reply 是"agent 对一条输入的完整回应",
       // 是"这轮有结论了"的自然边界。不按 turn——那会在工具执行到一半时插进来,提出来的是半截。
       this.subscribe((event) => {
-        // 前台这轮动过记忆:置位,供提取的重叠保护读
-        if (event.type === "tool_execution_end" && event.toolName === MEMORY_TOOL_NAME && event.result.isError !== true) this.memoryWrittenThisReply = true;
         if (event.type === "reply_end") this.enqueueExtract();
       });
     }
@@ -1895,6 +1914,9 @@ export class Agent {
           compaction: data.compaction,
           workspace: data.workspace,
         });
+        // 记忆提取从上次复盘到的地方接着看（2026-11-03）：上个进程没提取的那截跨重启接着攒——
+        // 它没走 `stop()`（被杀）、或退出前那次补跑没跑完，都不丢。下标与这份 messages 同一套（`project()` 已截到条数）
+        this.extractCursor = data.memoryReviewedThrough;
         // **记忆的作用域在这里第一次解析并绑定**（2026-09-07）：workspace、角色、产品都是
         // session 级事实，权威值就是上面刚从盘上读回来的那几个——`--resume` 一段在别的目录、
         // 别的角色下建的会话时，装配期知道的那些是错的。位置卡在这里：恢复刚落定、任何自主
@@ -3003,6 +3025,7 @@ export class Agent {
     // 材料在 reply 边界上定格（不取跑的那一刻：那时前台可能正在下一条 reply 的半路上）。
     // `_state.messages` 每次追加都换新数组，所以这两个引用就是此刻的快照。菜单同样此刻取：与主循环最后一次请求同一份。
     const epoch = this.extractEpoch;
+    const offset = this.persistedOffset;
     const messages = this._state.messages;
     const compaction = this._state.compaction;
     const menu = visibleTools(this.tools, this.loadedTools, this.restriction());
@@ -3020,8 +3043,26 @@ export class Agent {
       const span = projectRange(messages, compaction, from, end);
       const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span) };
       const done = await this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal);
-      if (done && epoch === this.extractEpoch) this.extractCursor = Math.max(this.extractCursor, end);
+      if (done && epoch === this.extractEpoch) {
+        this.extractCursor = Math.max(this.extractCursor, end);
+        await this.recordReviewed(end + offset);
+      }
     });
+  }
+
+  /**
+   * 游标落盘（2026-11-03）：会话里记一条 `memory_reviewed`，续会话从这里接着看。在提取通道里 await——
+   * `settleDream()` 等通道收完，所以收摊不会抢在这笔写之前交出 lease。落盘失败只留诊断：
+   * 这次提取写的记忆已经在盘上了，最坏是续会话后把这段再看一遍。
+   */
+  private async recordReviewed(through: number): Promise<void> {
+    const id = this._state.sessionId;
+    if (id === null || this.sessionService === undefined) return;
+    try {
+      await this.sessionService.append(id, [{ kind: "memory_reviewed", at: this.clock.now(), through }]);
+    } catch (e) {
+      this.reportDiagnostic({ code: "memory_extract_cursor_persist_failed", message: errText(e) });
+    }
   }
 
   /**
@@ -3146,8 +3187,9 @@ export class Agent {
           const task = await dreamTask(memory, layer, observe === undefined ? undefined : { observe });
           // 只给这一层的那把记忆工具。不是「过滤掉危险的」，是**只给这一件**，而且够不到别的层。
           // **事件不外发**：整理的中间过程不该混进对外事件流。
+          // 每轮注入不带（2026-11-03）：激活 skill 正文、任务清单是前台这场对话的，整理只看已有记忆——带上只是每轮多发一段
           const result = await this.runSubagent(
-            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "inherit" },
+            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "none" },
             scope,
             signal,
             async () => {},
@@ -3834,6 +3876,7 @@ export class Agent {
         this.memorySystem.text = null; // 之前追加的记忆更新随 transcript 一起没了
         this.extractCursor = 0;
         this.extractEpoch += 1;
+        this.persistedOffset += this._state.messages.length; // 这些还在会话里（reset 不写会话），之后的落盘下标要越过它们
         this._state.messages = [];
         this._state.streamingMessage = undefined;
         this._state.pendingToolCalls = new Set();
@@ -3849,9 +3892,10 @@ export class Agent {
         this.loadedTools.clear();
         for (const name of loadedToolsIn(input.messages)) this.loadedTools.add(name);
         this.memorySystem.text = null; // 换了一份 transcript：system 按此刻的记忆重取，历史里的旧更新由下一个 run 补齐
-        // 续上的历史不再回头提取：上个进程已经看过（或在它收摊时没攒够、就此放下）
+        // 游标先设到末尾（这个事件不带复盘下标）；经会话恢复时 `start()` 紧接着按盘上的 `memory_reviewed` 改回去
         this.extractCursor = input.messages.length;
         this.extractEpoch += 1;
+        this.persistedOffset = 0;
         this._state.messages = [...input.messages];
         this._state.compaction = input.compaction;
         this._state.sessionId = input.sessionId;

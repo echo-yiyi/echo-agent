@@ -1139,3 +1139,78 @@ test("续上一段会话：提取不回头看上个进程的历史——上个�
   expect(extractPrompts[1]).toContain("the last 2 messages"); // 上个进程那两条不在要看的范围里
 });
 
+/** 记忆提取的脚本化 provider：提取指令那条记下来；`failExtract()` 为真时提取以 provider 错误收场（循环不抛，游标不动）。 */
+function extractRecordingProvider(failExtract: () => boolean): { provider: ReturnType<typeof createProvider>; extractPrompts: string[] } {
+  const extractPrompts: string[] = [];
+  const dialect: Dialect = {
+    api: "fake",
+    async *request(_model, context) {
+      const instruction = context.messages.find((m) => JSON.stringify(m).includes(EXTRACT_PROMPT_OPENING));
+      if (instruction !== undefined) {
+        extractPrompts.push(JSON.stringify(instruction));
+        if (failExtract()) {
+          yield { type: "error", error: { source: "provider", code: "protocol", retryable: false, message: "提取那次挂了" } };
+          return;
+        }
+      }
+      for (const ev of textTurn(instruction !== undefined ? "Nothing to keep." : "好的")) yield structuredClone(ev);
+    },
+  };
+  const provider = createProvider({
+    id: "scripted",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams(dialect),
+  });
+  return { provider, extractPrompts };
+}
+
+test("没提取过的那截跨重启接着攒：上个进程的提取没跑完，续上之后从上个进程那句看起（此前续会话把游标直接设到末尾，那截就丢了）", async () => {
+  let fail = true;
+  const { provider, extractPrompts } = extractRecordingProvider(() => fail);
+  const base = { provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [] };
+
+  const first = await createEcho(base);
+  await first.start();
+  await first.agent.prompt("上个进程说的：我们的测试一律用 bun 跑");
+  const id = first.agent.state.sessionId!;
+  await first.stop(); // 退出前补跑那次挂了：这段没被看过
+  expect(extractPrompts).toHaveLength(1);
+
+  fail = false;
+  const second = await createEcho({ ...base, sessionId: id });
+  await second.start();
+  await second.agent.prompt("续上之后说的：提交信息一律写中文");
+  await second.stop();
+
+  expect(extractPrompts).toHaveLength(2);
+  expect(extractPrompts[1]).toContain("«上个进程说的：我们的测试一律用 bun 跑»"); // 从盘上记的那里接着看
+  expect(extractPrompts[1]).toContain("the last 4 messages");
+});
+
+test("/clear 之后再续会话：复盘下标越过 reset 之前那几条（它们还在会话里），续上之后不把看过的再看一遍", async () => {
+  const { provider, extractPrompts } = extractRecordingProvider(() => false);
+  const base = { provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [] };
+
+  const first = await createEcho(base);
+  await first.start();
+  await first.agent.prompt("旧话题：我们的测试一律用 bun 跑");
+  await first.agent.reset(); // 只清内存、不写会话：续会话时这两条会回来
+  await first.agent.prompt("新话题：提交信息一律写中文");
+  const id = first.agent.state.sessionId!;
+  await first.stop();
+  expect(extractPrompts).toHaveLength(1);
+  expect(extractPrompts[0]).toContain("«新话题：提交信息一律写中文»");
+
+  const second = await createEcho({ ...base, sessionId: id });
+  await second.start();
+  expect(second.agent.state.messages).toHaveLength(4); // reset 前后的四条都回来了
+  await second.agent.prompt("续上之后：发版前先看 CI");
+  await second.stop();
+
+  expect(extractPrompts).toHaveLength(2);
+  expect(extractPrompts[1]).toContain("«续上之后：发版前先看 CI»");
+  expect(extractPrompts[1]).toContain("the last 2 messages"); // 记的是落盘下标 4，不是内存下标 2
+});
+
