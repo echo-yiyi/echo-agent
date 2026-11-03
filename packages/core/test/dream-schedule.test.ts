@@ -487,6 +487,48 @@ test("整理撞上轮数上限 → 按「做了一部分」记：锁放掉、记
   expect(notices.some((m) => m.includes("dream_partial"))).toBe(true);
 });
 
+/* 2026-11-03：水位门单独成立、不看间隔——整理跑完占用仍在线上（内容都值得留）时，此前每次回到 idle 都再整理一次 */
+
+/**
+ * 水位门开在一半，agent.md 写到 1500 / 2200 字符：一上来就过线。节流那条路用一道够不着的写入门关住——
+ * 一道节流门都不配的话，那条路是空的、恒开（缺省有三道），测不出水位门自己。
+ */
+async function overWatermark(): Promise<AgentMemories> {
+  const mem = memories(new InMemoryDir(), { dream: { budgetRatio: 0.5, minWritesSinceLast: 99 } });
+  await memoryCreate(mem, "session/agent.md", "习".repeat(1500));
+  return mem;
+}
+
+test("水位到线、整理跑完占用仍在线上：没有新写入就不再整理；写进一条之后才按水位再来", async () => {
+  const mem = await overWatermark();
+  expect(await shouldDream(mem, "session")).toBe(true);
+  const agent = agentWith(mem, [textTurn("前台答完"), textTurn("都值得留，不动")]);
+
+  await agent.prompt("干点活");
+  await settle();
+
+  expect((await readDreamState(mem.dir, "session")).lastAt).not.toBeNull(); // 整理跑完了
+  expect(await shouldDream(mem, "session")).toBe(false); // 占用还在线上，但没有新写入：再整理也是同一份
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 新的一条\n---\n\n甲");
+  expect(await shouldDream(mem, "session")).toBe(true);
+});
+
+test("水位到线、整理撞上轮数上限：做了一部分之后同样要等新写入才按水位再来（计数不清，光看写入数 > 0 挡不住）", async () => {
+  const mem = await overWatermark();
+  const view = (id: string) => toolTurn(id, "memory", { command: "view", path: "session/" });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("前台答完"), view("v1"), view("v2"), view("v3")]), memory: mem, autoDream: true, maxIterations: 2 });
+
+  await agent.prompt("干点活");
+  await settle();
+
+  const state = await readDreamState(mem.dir, "session");
+  expect(state.lastAt).not.toBeNull(); // 按「做了一部分」记了
+  expect(state.writes).toBeGreaterThan(0); // 计数没清
+  expect(await shouldDream(mem, "session")).toBe(false);
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 新的一条\n---\n\n甲");
+  expect(await shouldDream(mem, "session")).toBe(true);
+});
+
 test("门控读盘失败 → 报诊断，不变成 unhandled rejection", async () => {
   // `finishRun()` 是同步的，调用点是 `void this.maybeDream()`——
   // `shouldDream()` / `dreamTask()` 抛出去就是未处理拒绝（Bun 测试直接红）。

@@ -714,8 +714,10 @@ export async function shouldDream(ctx: AgentMemories, scope: string): Promise<bo
   const now = Date.now();
   if (state.startedAt !== null && now - state.startedAt < DREAM_LOCK_STALE_MS) return false; // 这一层有一次整理进行中
   const g = ctx.gates;
-  // 水位:告警,单独成立
-  if (g.budgetRatio !== undefined && (await budgetPressure(ctx, scope)) >= g.budgetRatio) return true;
+  // 水位:告警,单独成立——只要上次整理之后有过新写入(2026-11-03):没有的话再整理一遍看到的还是同一份,
+  // 占用压不下去时每次回到 idle 都会再来一次
+  const writtenSincePass = state.lastAt === null || state.writes > state.writesAtLastPass;
+  if (g.budgetRatio !== undefined && writtenSincePass && (await budgetPressure(ctx, scope)) >= g.budgetRatio) return true;
   // 节流:四道全满足
   if (g.minIntervalMs !== undefined && state.lastAt !== null && now - state.lastAt < g.minIntervalMs) return false;
   if (g.minWritesSinceLast !== undefined && state.writes < g.minWritesSinceLast) return false;
@@ -787,7 +789,7 @@ function dreamOnlyTool(ctx: AgentMemories, tool: ModelTool<MemoryToolParams>): M
 /** 某一层整理成功后:记时间、放锁、清计数。整理失败不调它——锁 1 小时后自动过期。 */
 export async function markDreamed(ctx: AgentMemories, scope: string): Promise<void> {
   // 清零同样走串行链:不然「读到 5 → markDreamed 清 0 → 写回 6」会把计数复活
-  await updateDreamState(ctx, scope, () => ({ lastAt: Date.now(), startedAt: null, writes: 0, turns: 0 }));
+  await updateDreamState(ctx, scope, () => ({ lastAt: Date.now(), startedAt: null, writes: 0, turns: 0, writesAtLastPass: 0 }));
 }
 
 /**
@@ -798,7 +800,8 @@ export async function markDreamed(ctx: AgentMemories, scope: string): Promise<vo
  * 为什么计数不清：还有没整理完的，下一次照常节流（间隔）就该再来，不必等攒够新的写入。
  */
 export async function markDreamPartial(ctx: AgentMemories, scope: string): Promise<void> {
-  await updateDreamState(ctx, scope, (s) => ({ ...s, lastAt: Date.now(), startedAt: null }));
+  // 记下这一刻的写入数：水位门要涨过它才再开（`DreamState.writesAtLastPass`）——计数不清，光看 writes > 0 挡不住
+  await updateDreamState(ctx, scope, (s) => ({ ...s, lastAt: Date.now(), startedAt: null, writesAtLastPass: s.writes }));
 }
 
 /** 一层的整理状态（计数、startedAt）读改写用的短锁；与模块的提交锁同在那一层的字节面上。 */

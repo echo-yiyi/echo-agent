@@ -151,7 +151,7 @@
 [`dreamScopes()`](../../packages/core/src/memory/harness.ts#symbol=dreamScopes) 选出 dream 模块涉及的层，按作用域顺序逐层处理。每层的 [`shouldDream()`](../../packages/core/src/memory/harness.ts#symbol=shouldDream) 判据为：
 
 1. 有未过期 startedAt 标记时不启动。
-2. 否则，任一参与整理模块达到配置水位即可启动。
+2. 否则，任一参与整理模块达到配置水位即可启动——前提是**上次整理之后有过新写入**（或从没整理过；[`DreamState`](../../packages/core/src/memory/dream.ts#symbol=DreamState) 的 `writesAtLastPass`，2026-11-03）。占用压不下去（内容都值得留）时，没有新写入就再整理一遍看到的是同一份内容；不加这一条，每次回到 idle 都会再整理一次。
 3. 未达水位时，所有**已配置**的节流条件都满足才启动：间隔、写入数、轮数、indexed 文件数——缺省门里没有轮数这一条（见第 3 节的缺省值表），没配的条件不参与。
 
 缺省阈值以 [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) 为准。水位对 resident 看全文，对 indexed 看索引，不看 indexed 单个正文是否快满。轮次来自前台 turn_end 并向各参与层计数；状态存于各层 `.dream/state.json`。

@@ -30,6 +30,9 @@ export type DreamGates = {
    * **它不与上面四道做 AND,而是单独成立**:那四道是节流("没必要太频繁"),水位是告警
    * ("再不整理,下一次写入就要被拒了")。AND 连起来等于让节流否决告警——恰好在最需要整理
    * 的时候不整理,模型只好在前台自己收拾,而那正是我们想用后台换掉的事。
+   *
+   * 唯一的附加条件(2026-11-03):**上次整理之后有过新写入**(或从没整理过,见 `DreamState.writesAtLastPass`)。
+   * 占用压不下去(内容都值得留)时,没有新写入就再整理一遍,看到的是同一份内容——否则每次回到 idle 都整理一次。
    */
   budgetRatio?: number;
 };
@@ -66,9 +69,15 @@ export type DreamState = {
    */
   writes: number;
   turns: number;
+  /**
+   * 上一次整理结束（跑完或做了一部分）那一刻的 `writes`（2026-11-03）。水位门要 `writes` 涨过它才再开：
+   * 没有新写入，再整理一遍看到的还是同一份内容——占用压不下去时（内容都值得留），否则每次回到 idle 都会再整理一次。
+   * 跑完时 `writes` 清零，它也是 0；做了一部分时计数不清，它记下当时的值。旧状态文件没有这个字段 = 0。
+   */
+  writesAtLastPass: number;
 };
 
-const EMPTY_STATE: DreamState = { lastAt: null, startedAt: null, writes: 0, turns: 0 };
+const EMPTY_STATE: DreamState = { lastAt: null, startedAt: null, writes: 0, turns: 0, writesAtLastPass: 0 };
 
 function count(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
@@ -84,6 +93,7 @@ export async function readDreamState(dir: MemoryDir, scope: string): Promise<Dre
       startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : null,
       writes: count(parsed.writes),
       turns: count(parsed.turns),
+      writesAtLastPass: count(parsed.writesAtLastPass),
     };
   } catch {
     return { ...EMPTY_STATE }; // 坏档当空:Dream 是 best-effort,不为它硬失败
