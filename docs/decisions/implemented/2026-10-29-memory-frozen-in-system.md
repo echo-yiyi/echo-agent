@@ -1,6 +1,6 @@
 # 记忆段会话内冻结：system 不随记忆变，变化以一条追加消息送到
 
-> 状态:implemented · 提出 2026-10-28（用户报缓存命中率低，实测定位到记忆段）· 拍板 2026-10-29（用户，选项 A）· 落地 `packages/core/src/memory/harness.ts` / `agent.ts`，判据 `packages/core/test/memory.test.ts`、`packages/core/test/create-echo.test.ts`
+> 状态:implemented · 提出 2026-10-28（用户报缓存命中率低，实测定位到记忆段）· 拍板 2026-10-29（用户，选项 A）· 落地 `packages/core/src/memory/harness.ts` / `agent.ts`，判据 `packages/core/test/memory.test.ts`、`packages/core/test/create-echo.test.ts` · **后续** 2026-11-03 [变化只发路径通知](2026-11-03-memory-change-notice-and-reads.md)：第 3 条追加的不再是整段新记忆，而是「哪些文件变了」；「比模型最后看到的那一版」改为比冻结时（或上一条通知时）记下的文件基线
 
 **给谁看**：改 system 装配、记忆注入或 provider 缓存相关代码的人。假设已知 [Prompt 的刷新语义](../../design/prompt.md)（§4）与 [记忆的模块与召回](../../design/memory.md)（§3）。
 
@@ -39,9 +39,11 @@
 
 ## 验收
 
-- system 跨 run 逐字不变、变化以一条消息追加在输入之前：[会话内冻结](../../../packages/core/test/memory.test.ts#test=会话内冻结run-内写记忆本-run-system-不变下个-run-system-仍逐字不变新内容以一条环境消息追加在输入之前)
+判据随 2026-11-03 的修改改了名（同一件事，通知只列路径的版本）：
+
+- system 跨 run 逐字不变、变化以一条消息追加在输入之前：[会话内冻结](../../../packages/core/test/memory.test.ts#test=会话内冻结run-内写记忆本-run-system-不变下个-run-system-仍逐字不变变化以一条只列路径的通知追加在输入之前)
 - 记忆没变不追加：[记忆没变](../../../packages/core/test/memory.test.ts#test=记忆没变下个-run-什么都不追加system-逐字不变消息只在末尾长)
 - 一次变化只送一次：[只送一次](../../../packages/core/test/memory.test.ts#test=一次变化只送一次之后记忆不变就不再追加再变一次再送一条)
-- 压缩后重取、并压过历史里更旧的更新：[压缩后重取](../../../packages/core/test/memory.test.ts#test=压缩落地后-system-重取一次记忆历史里还看得见的旧更新比它旧就再补一条新的)
+- 压缩后重取（2026-11-03 起不再补通知：完整内容已在 system）：[压缩后重取](../../../packages/core/test/memory.test.ts#test=压缩落地后-system-重取一次记忆完整的现行内容回到-system基线跟着重记不再补通知)
 - `reset` 后重取、不追加：[reset 后重取](../../../packages/core/test/memory.test.ts#test=清空-transcriptreset后-system-重取记忆不追加更新)
-- 续会话：system 按此刻重取，第一个 run 补一条压过历史里的旧更新：[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话system-按此刻的记忆重取历史里那条更早的记忆更新比它旧第一个-run-就补一条新的)
+- 续会话：system 按此刻重取（2026-11-03 起不再补通知）：[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话system-按此刻的记忆重取完整内容回到-system上个进程那条变化通知原样留在历史里续上不再补)

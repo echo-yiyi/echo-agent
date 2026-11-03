@@ -479,12 +479,15 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
  *
  * 为什么不每个 run 重组：provider 的缓存按前缀命中，记忆段之后是工具定义与整段对话——两次 run
  * 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低）。所以第一次组装时
- * 取一次，之后原样复用；记忆的变化改由 `memoryUpdateMessage` 在下一个 run 开头追加一条消息送到。
+ * 取一次，之后原样复用；记忆的变化由 `memoryUpdateMessage` 在下一个 run 开头追加一条**通知**——
+ * 只列哪些文件变了，不带内容（2026-11-03；此前每次都追加整段新记忆，长会话里堆着几十份几乎一样的全量快照）。
  *
- * 由 Agent 持有：只有它知道何时作废——压缩改写了历史、transcript 被清空或换掉，`text` 置回 null，
- * 下一次组装重取。
+ * `files`：冻结那一刻每个记忆文件的内容，通知按它比出变化；发过一次通知就换成那一刻的。
+ *
+ * 由 Agent 持有：只有它知道何时作废——压缩改写了历史、transcript 被清空或换掉，两样都置回 null，
+ * 下一次组装重取（完整内容随之重新进 system）。
  */
-export type MemorySystemFreeze = { text: string | null };
+export type MemorySystemFreeze = { text: string | null; files: ReadonlyMap<string, string> | null };
 
 /** 记忆更新消息的 `source`（环境消息的开放来源字符串）。 */
 export const MEMORY_UPDATE_SOURCE = "memory";
@@ -499,7 +502,10 @@ export function memoryPromptSections(ctx: AgentMemories, frozen: MemorySystemFre
         if (frozen.text !== null) return frozen.text;
         const text = await renderMemorySystem(ctx);
         // 作用域没绑之前组装出来的没有内容（读不到盘），不能冻结——否则整段会话都看不到记忆
-        if (ctx.binding.bound()) frozen.text = text;
+        if (ctx.binding.bound()) {
+          frozen.text = text;
+          frozen.files = await memoryFileVersions(ctx);
+        }
         return text;
       },
     },
@@ -507,46 +513,72 @@ export function memoryPromptSections(ctx: AgentMemories, frozen: MemorySystemFre
 }
 
 /**
- * 本 run 开头要不要追加一条记忆更新：此刻的记忆段与**模型最后看到的那一版**不同，就返回一条环境消息，
- * 正文是整段新记忆。模型最后看到的 = `visible`（本次送模的投影）里最后一条记忆更新；没有就是 system
- * 里冻结的那份。
+ * 本 run 开头要不要追加一条记忆变化**通知**（2026-11-03）：此刻的记忆文件与上次的基线（冻结那一刻，或上一条通知那一刻）
+ * 不同，就返回一条环境消息，**只列路径**——哪些改了、新增了、删掉了，不带内容；模型要用就 view。发完基线换成此刻的。
  *
- * 看投影而不是原始 transcript：被压缩摘要掉的更新模型已经看不到了。看最后一条而不是只比 system：
- * 续上的会话（或作废后重取过的 system）里，历史中较早的更新可能比 system 旧，不补一条新的，
- * 模型会把那条旧的当成最新。
+ * 为什么不带内容（参照物也只列路径）：提取写的东西本来就出自这场对话，再贴一遍是重复；此前整段重贴，
+ * 每变一次就在 transcript 里多一份全量快照，长会话里堆着几十份。完整内容在下一次作废（压缩 / reset / 续会话）后
+ * 随重新冻结的 system 回来。
  *
- * `frozen.text === null` = 记忆段这一轮没进 system（没装 `echo:memory`、或刚作废），不发。
+ * `frozen.files === null` = 记忆段这一轮没进 system（没装 `echo:memory`、或刚作废），不发。
  */
-export async function memoryUpdateMessage(
-  ctx: AgentMemories,
-  frozen: MemorySystemFreeze,
-  visible: readonly AgentMessage[],
-): Promise<AgentMessage | null> {
-  if (frozen.text === null) return null;
-  const current = await renderMemorySystem(ctx);
-  if (current === "") return null;
-  const text = memoryUpdateText(current);
-  const last = lastMemoryUpdate(visible);
-  if (last !== undefined ? last === text : frozen.text === current) return null;
-  return environmentMessage(text, MEMORY_UPDATE_SOURCE);
-}
-
-function memoryUpdateText(section: string): string {
-  return (
-    "Your memory changed since it was last shown to you. Its current contents follow; " +
-    "they replace the Memory section of the system prompt and any earlier memory update.\n\n" +
-    section
-  );
-}
-
-function lastMemoryUpdate(messages: readonly AgentMessage[]): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.role !== "environment" || m.source !== MEMORY_UPDATE_SOURCE) continue;
-    const first = m.content[0];
-    return first !== undefined && first.type === "text" ? first.text : "";
+export async function memoryUpdateMessage(ctx: AgentMemories, frozen: MemorySystemFreeze): Promise<AgentMessage | null> {
+  if (frozen.text === null || frozen.files === null) return null;
+  const current = await memoryFileVersions(ctx);
+  const changed: string[] = [];
+  const added: string[] = [];
+  const removed: string[] = [];
+  for (const [path, text] of current) {
+    const before = frozen.files.get(path);
+    if (before === undefined) added.push(path);
+    else if (before !== text) changed.push(path);
   }
-  return undefined;
+  for (const path of frozen.files.keys()) if (!current.has(path)) removed.push(path);
+  if (changed.length + added.length + removed.length === 0) return null;
+  frozen.files = current;
+  return environmentMessage(memoryChangeNotice(changed, added, removed), MEMORY_UPDATE_SOURCE);
+}
+
+/** 一类最多列几条路径：再多就只说还有几条——通知要短，模型要细看自己去 view 目录。 */
+const NOTICE_PATHS_MAX = 20;
+
+function memoryChangeNotice(changed: readonly string[], added: readonly string[], removed: readonly string[]): string {
+  const line = (label: string, paths: readonly string[]): string[] => {
+    if (paths.length === 0) return [];
+    const shown = paths.slice(0, NOTICE_PATHS_MAX).join(", ");
+    return [`- ${label}: ${shown}${paths.length > NOTICE_PATHS_MAX ? ` (and ${paths.length - NOTICE_PATHS_MAX} more)` : ""}`];
+  };
+  return [
+    "Memory files changed since your Memory section was assembled (by you, a background memory review, or another session):",
+    ...line("changed", changed),
+    ...line("added", added),
+    ...line("removed", removed),
+    "The Memory section above still shows the earlier version. View a file to read its current content.",
+  ].join("\n");
+}
+
+/**
+ * 此刻每个记忆文件的内容：路径 → 原文。常驻模块是那一个文件；indexed 模块是目录下的每个文件（`INDEX.md` 与点开头的
+ * 簿记文件除外——索引是派生物，变化已经体现在文件的增删改上）。通知的基线与比对都用它。
+ */
+async function memoryFileVersions(ctx: AgentMemories): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const table = ctx.binding.table();
+  for (const m of ctx.memories.values()) {
+    for (const { path } of memoryPaths(table, m)) {
+      if (!path.endsWith("/")) {
+        const text = await ctx.dir.read(path);
+        if (text !== null) out.set(path, text);
+        continue;
+      }
+      for (const file of await ctx.dir.list(path)) {
+        if (file.endsWith(`/${MEMORY_INDEX_FILE}`) || file.slice(path.length).split("/").some((seg) => seg.startsWith("."))) continue;
+        const text = await ctx.dir.read(file);
+        if (text !== null) out.set(file, text);
+      }
+    }
+  }
+  return out;
 }
 
 /* ───────────── 给 prompt 组装层的数据面(只读) ───────────── */
@@ -565,9 +597,36 @@ export async function composeMemoryRegion(ctx: AgentMemories, memory: AnyMemory)
   }
 }
 
-/** 缺省 memory 工具(六动词薄壳,逐个调上面的方法)。Agent 构造时注册(source "memory")。 */
-export function memoryTool(ctx: AgentMemories, opts?: { observe?: CapabilityFactSink<MemoryFact> }): ModelTool<MemoryToolParams> {
-  return createMemoryTool(ctx, opts?.observe === undefined ? ctx.toolOpts : { ...ctx.toolOpts, observe: opts.observe });
+/**
+ * 缺省 memory 工具(六动词薄壳,逐个调上面的方法)。Agent 构造时注册(source "memory")。
+ * `reads`：这把工具起步时的已读账（见 `CreateMemoryToolOptions.reads`），不给 = 空账。
+ */
+export function memoryTool(ctx: AgentMemories, opts?: { observe?: CapabilityFactSink<MemoryFact>; reads?: MemoryReads }): ModelTool<MemoryToolParams> {
+  return createMemoryTool(ctx, {
+    ...ctx.toolOpts,
+    ...(opts?.observe === undefined ? {} : { observe: opts.observe }),
+    ...(opts?.reads === undefined ? {} : { reads: opts.reads }),
+  });
+}
+
+/**
+ * 记忆段里**全文展示过**的常驻文件：路径 → 原文（2026-11-03）。提取从主对话分叉时拿它给自己那把工具的账预记上——
+ * 它在指令的「此刻存着什么」里看过全文，再要它 view 一遍是白花一轮（提取只有 5 轮）。
+ * 只认缺省组装（`defaultComposeMemory` 整份展示常驻文件）：产品换了组装，展示的是什么这里不知道，不预记。
+ * 超了预算的会被截尾展示，也不预记——它没看到全文。
+ */
+export async function shownResidentContents(ctx: AgentMemories): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (ctx.composeFn !== defaultComposeMemory) return out;
+  const table = ctx.binding.table();
+  for (const m of ctx.memories.values()) {
+    if (m.mode !== "resident") continue;
+    for (const { path } of memoryPaths(table, m)) {
+      const text = await ctx.dir.read(path);
+      if (text !== null && text.trim().length <= m.budget) out.set(path, text);
+    }
+  }
+  return out;
 }
 
 /**
@@ -872,25 +931,36 @@ function committed(chars: number | undefined, indexOutcome: MemoryIndexOutcome, 
 }
 
 /**
+ * 拒的时候顺带交出的现行内容最多多长。记忆文件本来受预算约束（常驻几千字符、indexed 单文件 4096），
+ * 超过的只可能是人手放进来的——那种不带正文、也不记成看过，让模型自己 view。
+ */
+const REFUSAL_CONTENT_MAX = 8_000;
+
+/** 写这一版的除了别的 session，还可能是本 session 自己的后台复盘（提取 / 整理）——文案别只说一种。 */
+const OTHER_WRITER = "another writer changed it (a background memory review in this session, or another session)";
+
+/**
  * 覆写前核对：这个读写方上次看到的，是不是现在这一版（见 `MemoryReads`）。不给 `reads` 不核对。
  * `current === null` = 文件现在不存在：没看过 = 新建，放行；看过 = 看完之后被别人删了，拒——
  * 凭旧内容重建，会把别人整理掉的东西复活。
+ *
+ * **拒的时候把现行内容一起交出去，并记成看过**（2026-11-03）：模型拿着这一版直接重做，不必再单独 view 一轮——
+ * 拒本来就是让它看最新的，这一步合进拒绝里。提取只有 5 轮，多一轮 view 就可能撞上限。太长的不交、不记。
  */
 function checkRead(reads: MemoryReads | undefined, path: string, current: string | null): Prepared | null {
   if (reads === undefined) return null;
   const seen = reads.get(path);
   if (current === null) {
-    return seen === undefined
-      ? null
-      : reject("stale_read", `'${path}' was deleted by another session after you viewed it; nothing was written. View the directory again before recreating it.`);
+    if (seen === undefined) return null;
+    reads.delete(path);
+    return reject("stale_read", `'${path}' was deleted after you viewed it — ${OTHER_WRITER}; nothing was written. View the directory again before recreating it.`);
   }
-  if (seen === undefined) {
-    return reject("not_read", `'${path}' already exists and you have not viewed it; nothing was written. View it first, then redo the change.`);
-  }
-  if (seen !== current) {
-    return reject("stale_read", `'${path}' changed since you viewed it (another session wrote to it); nothing was written. View it again and redo the change.`);
-  }
-  return null;
+  if (seen !== undefined && seen === current) return null;
+  const why = seen === undefined ? `'${path}' already exists and you have not viewed it; nothing was written.` : `'${path}' changed since you viewed it — ${OTHER_WRITER}; nothing was written.`;
+  const code = seen === undefined ? "not_read" : "stale_read";
+  if (current.length > REFUSAL_CONTENT_MAX) return reject(code, `${why} View it, then redo the change.`);
+  reads.set(path, current);
+  return reject(code, `${why} Its current content follows and now counts as viewed — redo the change against it.\n\n${current}`);
 }
 
 /**

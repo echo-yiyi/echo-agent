@@ -1,6 +1,6 @@
 # 记忆写回前核对读到的版本，而不是把锁拉长到整个处理过程
 
-> 状态:implemented · 提出 2026-09-11（用户指出提交锁没覆盖「读完 → 思考 → 写回」）· 拍板 2026-09-11（用户：「按照你的想法来改」）· 实现 2026-09-11 · 补 [记忆并发](2026-09-07-memory-concurrency.md) 的读改写保证
+> 状态:implemented · 提出 2026-09-11（用户指出提交锁没覆盖「读完 → 思考 → 写回」）· 拍板 2026-09-11（用户：「按照你的想法来改」）· 实现 2026-09-11 · 补 [记忆并发](2026-09-07-memory-concurrency.md) 的读改写保证 · **后续** 2026-11-03 [拒绝带回现行内容、提取继承前台的账](2026-11-03-memory-change-notice-and-reads.md)：`not_read` / `stale_read` 的拒绝附上现行内容并记成看过，不必再单独 view；提取的账从前台克隆
 
 ## 现状(拍板前)
 
@@ -32,4 +32,4 @@
 
 ## 验收
 
-判据在 `packages/core/test/memory.test.ts`：[用户给的场景](../../../packages/core/test/memory.test.ts#test=a-读完去想b-写了一笔a-凭旧内容整份写回被拒b-那一笔还在a-重看之后再写两边都在)；[没看过的已有文件不许覆写、插、删](../../../packages/core/test/memory.test.ts#test=没看过的已有文件不许整份覆写不许按行插不许删新建文件不用先看)；[一层同时只有一个整理者](../../../packages/core/test/memory.test.ts#test=同一层已有整理在跑再来一个试拿不到当场跳过不等放手之后能拿到两个-filedir-实例跨实例算数)；[多个实例同时记数不丢](../../../packages/core/test/memory.test.ts#test=两个实例同时往同一层的两个模块写两把提交锁互不相干这一层的写入计数一个不少)。
+判据在 `packages/core/test/memory.test.ts`：[用户给的场景](../../../packages/core/test/memory.test.ts#test=a-读完去想b-写了一笔a-凭旧内容整份写回被拒b-那一笔还在a-重看之后再写两边都在)；[没看过的已有文件不许覆写、插、删](../../../packages/core/test/memory.test.ts#test=没看过的已有文件整份覆写-按行插-删都先被拒一次拒绝里带着现行内容并记成看过照着重做就放行不必再-view新建文件不用先看)（2026-11-03 起拒绝带回现行内容并算作看过，见下方状态行的后续）；[一层同时只有一个整理者](../../../packages/core/test/memory.test.ts#test=同一层已有整理在跑再来一个试拿不到当场跳过不等放手之后能拿到两个-filedir-实例跨实例算数)；[多个实例同时记数不丢](../../../packages/core/test/memory.test.ts#test=两个实例同时往同一层的两个模块写两把提交锁互不相干这一层的写入计数一个不少)。

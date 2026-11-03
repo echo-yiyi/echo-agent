@@ -32,7 +32,7 @@ import { hostname as hostLock, tmpdir as tmpLock } from "node:os";
 import { inspectStateLock as inspectLock } from "../src/storage/file-lock.ts";
 import { join as joinLock } from "node:path";
 import { FileDir as FileDirLock } from "../src/storage/file-dir.ts";
-import { defaultExtractPrompt as extractPromptText } from "../src/memory/extract.ts";
+import { defaultExtractPrompt as extractPromptText, EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
 import { defaultDreamPrompt as dreamPromptText } from "../src/memory/dream.ts";
 import { registerTool, unregisterTool, listTools } from "../src/tools/harness.ts";
 import { Agent } from "../src/agent.ts";
@@ -61,7 +61,7 @@ import {
 } from "../src/memory/scope.ts";
 import { agentMemory, notesMemory, userMemory, indexedMemory, memoryOwns, memoryPaths, residentMemory } from "../src/memory/types.ts";
 import type { MemoryDir } from "../src/memory/types.ts";
-import type { ToolExecutionContext } from "../src/tools/types.ts";
+import type { AgentToolResult, ToolExecutionContext } from "../src/tools/types.ts";
 
 
 /* ── 测试脚手架:作用域现在由产品声明、session 加载完才绑定,所以每个 harness 都要先 bind ── */
@@ -675,21 +675,22 @@ describe("Agent 接线", () => {
 
   // 记忆段会话内冻结（2026-10-29）。此前每个 run 重组 system：两次 run 之间记忆一变，记忆段之后的
   // 工具定义与整段对话全部失去 provider 缓存（实测 98% → 38%）。现在 system 逐字不变，变化以一条
-  // 环境消息追加在下一个 run 的输入之前——请求只在末尾长。
+  // 环境消息追加在下一个 run 的输入之前——请求只在末尾长。2026-11-03 起那条消息**只列哪些文件变了**，不带内容。
 
-  /** 主循环的请求记下来；提取子循环（没有 system）一律回一句空话，不吃主循环的脚本、不进 `seen`。 */
+  /** 主循环的请求记下来；提取子循环（消息里有提取指令）一律回一句空话，不吃主循环的脚本、不进 `seen`。 */
   function routedStream(turns: ScriptedTurn[]): { fn: StreamFn; seen: Context[] } {
     const seen: Context[] = [];
     const main = scriptedStreamFn(turns);
     const fn: StreamFn = (m, c, o) => {
-      if (c.systemPrompt === null) return scriptedStreamFn([textTurn("Nothing to keep.")])(m, c, o);
+      // 提取从主对话分叉（2026-11-03），带着主循环的 system——按提取指令认，不按「没有 system」认
+      if (JSON.stringify(c.messages).includes(EXTRACT_PROMPT_OPENING)) return scriptedStreamFn([textTurn("Nothing to keep.")])(m, c, o);
       seen.push(c);
       return main(m, c, o);
     };
     return { fn, seen };
   }
   const textOfMessage = (m: Context["messages"][number]): string => m.content.map((b) => (b.type === "text" ? b.text : "")).join("");
-  const memoryUpdates = (c: Context): string[] => c.messages.map(textOfMessage).filter((t) => t.startsWith("Your memory changed"));
+  const memoryUpdates = (c: Context): string[] => c.messages.map(textOfMessage).filter((t) => t.startsWith("Memory files changed"));
 
   async function memoryAgent(dir: InMemoryDir, fn: StreamFn, opts: { compaction?: { builtin: false } } = {}): Promise<Agent> {
     const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memories(dir), ...opts });
@@ -697,7 +698,7 @@ describe("Agent 接线", () => {
     return agent;
   }
 
-  test("会话内冻结：run 内写记忆本 run system 不变；下个 run system 仍逐字不变，新内容以一条环境消息追加在输入之前", async () => {
+  test("会话内冻结：run 内写记忆本 run system 不变；下个 run system 仍逐字不变，变化以一条只列路径的通知追加在输入之前", async () => {
     const dir = new InMemoryDir();
     await dir.write("user/user.md", "旧偏好");
     const { fn, seen } = routedStream([
@@ -719,7 +720,9 @@ describe("Agent 接线", () => {
     const msgs = seen[2]!.messages;
     expect(textOfMessage(msgs[msgs.length - 1]!)).toBe("下一个任务");
     expect(memoryUpdates(seen[2]!)).toHaveLength(1);
-    expect(textOfMessage(msgs[msgs.length - 2]!)).toContain("新偏好"); // 更新紧挨在本 run 的输入之前
+    const notice = textOfMessage(msgs[msgs.length - 2]!); // 通知紧挨在本 run 的输入之前
+    expect(notice).toContain("changed: user/user.md");
+    expect(notice).not.toContain("新偏好"); // 只列路径，不带内容（2026-11-03：此前整段重贴，长会话里堆着几十份全量快照）
     // 落进 transcript 的是一条 environment 消息，来源 memory
     const env = agent.state.messages.filter((m) => m.role === "environment");
     expect(env.map((m) => (m.role === "environment" ? m.source : ""))).toEqual([MEMORY_UPDATE_SOURCE]);
@@ -756,11 +759,31 @@ describe("Agent 接线", () => {
     await agent.prompt("丁");
     const updates = memoryUpdates(seen[3]!);
     expect(updates).toHaveLength(2);
-    expect(updates[1]).toContain("更新");
+    expect(updates[1]).toContain("changed: user/user.md");
+    expect(updates[1]).not.toContain("更新");
     expect(seen[3]!.systemPrompt).toBe(seen[0]!.systemPrompt);
   });
 
-  test("压缩落地后 system 重取一次记忆；历史里还看得见的旧更新比它旧，就再补一条新的", async () => {
+  test("通知分得清改了、新增、删掉：indexed 模块的文件增删也报，索引本身不报", async () => {
+    const dir = new InMemoryDir();
+    await dir.write("user/user.md", "旧");
+    await dir.write("user/memory/a.md", "---\ndescription: 甲\n---\n\n甲");
+    const { fn, seen } = routedStream([textTurn("一"), textTurn("二")]);
+    const agent = await memoryAgent(dir, fn);
+    await agent.prompt("甲");
+    await dir.write("user/user.md", "新");
+    await dir.remove("user/memory/a.md");
+    await dir.write("user/memory/b.md", "---\ndescription: 乙\n---\n\n乙");
+    await dir.write("user/memory/INDEX.md", "- user/memory/b.md — 乙");
+    await agent.prompt("乙");
+    const [notice] = memoryUpdates(seen[1]!);
+    expect(notice).toContain("- changed: user/user.md");
+    expect(notice).toContain("- added: user/memory/b.md");
+    expect(notice).toContain("- removed: user/memory/a.md");
+    expect(notice).not.toContain("INDEX.md");
+  });
+
+  test("压缩落地后 system 重取一次记忆：完整的现行内容回到 system，基线跟着重记，不再补通知", async () => {
     const dir = new InMemoryDir();
     await dir.write("user/user.md", "旧");
     const { fn, seen } = routedStream([textTurn("一"), textTurn("二"), textTurn("三")]);
@@ -781,9 +804,8 @@ describe("Agent 接线", () => {
     await agent.prompt("丙");
     expect(seen[2]!.systemPrompt).toContain("更新"); // 重取：system 是此刻的记忆
     expect(seen[2]!.systemPrompt).not.toBe(seen[0]!.systemPrompt);
-    const updates = memoryUpdates(seen[2]!);
-    expect(updates).toHaveLength(2); // 乙之前那条（新）还看得见，所以补一条（更新）压过它
-    expect(updates[1]).toContain("更新");
+    // 乙之前那条通知还在历史里；system 已是此刻的记忆，基线也重记了——没有新变化，不补第二条
+    expect(memoryUpdates(seen[2]!)).toHaveLength(1);
   });
 
   test("清空 transcript（reset）后 system 重取记忆，不追加更新", async () => {
@@ -1065,25 +1087,40 @@ describe("覆写前核对读到的版本", () => {
     expect(await raw.read("note.md")).toBe("AA BB");
   });
 
-  test("没看过的已有文件：不许整份覆写、不许按行插、不许删；新建文件不用先看", async () => {
+  test("没看过的已有文件：整份覆写 / 按行插 / 删都先被拒一次，拒绝里带着现行内容并记成看过——照着重做就放行，不必再 view；新建文件不用先看", async () => {
     const raw = new InMemoryDir();
     const h = bindCas(raw);
     const r: MemoryCaller = { reads: new Map() };
     expect((await createCas(h, "project/notes/a.md", "---\ndescription: a\n---\n", r)).isError).toBe(false);
     await raw.write("note.md", "别人写的");
-    await raw.write("notes/b.md", "---\ndescription: b\n---\n");
-    for (const res of [
-      await createCas(h, "project/note.md", "x", r),
-      await insertCas(h, "project/note.md", 0, "x", r),
-      await deleteCas(h, "project/notes/b.md", r),
-    ]) {
-      expect(res.isError).toBe(true);
-      expect(res.content).toContain("have not viewed it");
+    await raw.write("notes/b.md", "---\ndescription: b\n---\n\n乙");
+    await raw.write("notes/c.md", "---\ndescription: c\n---\n\n丙");
+    const attempts: [() => Promise<AgentToolResult>, string][] = [
+      [() => createCas(h, "project/note.md", "x", r), "别人写的"],
+      [() => insertCas(h, "project/notes/b.md", 0, "x", r), "乙"],
+      [() => deleteCas(h, "project/notes/c.md", r), "丙"],
+    ];
+    for (const [attempt, current] of attempts) {
+      const refused = await attempt();
+      expect(refused.isError).toBe(true);
+      expect(refused.content).toContain("have not viewed it");
+      expect(refused.content).toContain(current); // 现行内容随拒绝交出
     }
-    expect(await raw.read("note.md")).toBe("别人写的");
-    expect(await raw.read("notes/b.md")).not.toBeNull();
-    await viewCas(h, "project/notes/b.md", r);
-    expect((await deleteCas(h, "project/notes/b.md", r)).isError).toBe(false);
+    expect(await raw.read("note.md")).toBe("别人写的"); // 被拒的那几次一个字没写
+    for (const [attempt] of attempts) expect((await attempt()).isError).toBe(false); // 拒绝算看过：直接重做就放行
+    expect(await raw.read("note.md")).toBe("x");
+    expect(await raw.read("notes/c.md")).toBeNull();
+  });
+
+  test("拒绝只交得起短文件：超过上限的不带正文、也不记成看过（模型得自己 view 全文）", async () => {
+    const raw = new InMemoryDir();
+    const h = bindCas(raw);
+    const r: MemoryCaller = { reads: new Map() };
+    await raw.write("note.md", "长".repeat(9_000)); // 人手放进来的超长文件
+    const refused = await createCas(h, "project/note.md", "x", r);
+    expect(refused.isError).toBe(true);
+    expect(refused.content).not.toContain("长长长");
+    expect((await createCas(h, "project/note.md", "x", r)).isError).toBe(true); // 还没看过
   });
 
   test("看完之后文件被别人删了：凭旧内容重建被拒（不把别人整理掉的东西复活）", async () => {
@@ -1095,7 +1132,7 @@ describe("覆写前核对读到的版本", () => {
     await raw.remove("note.md");
     const res = await createCas(h, "project/note.md", "旧的", r);
     expect(res.isError).toBe(true);
-    expect(res.content).toContain("deleted by another session");
+    expect(res.content).toContain("deleted after you viewed it");
     expect(await raw.read("note.md")).toBeNull();
   });
 

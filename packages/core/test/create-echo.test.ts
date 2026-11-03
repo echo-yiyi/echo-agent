@@ -1052,17 +1052,18 @@ test("缺省（builtin 不给）：扩展注册的模块是**追加**，内建�
 
 /* ───────────── 记忆段会话内冻结 × 续会话（2026-10-29） ───────────── */
 
-test("续上一段会话：system 按此刻的记忆重取；历史里那条更早的记忆更新比它旧，第一个 run 就补一条新的", async () => {
-  // 风险在续上之后：system 是新的，可历史里还留着上个进程追加的那条旧更新——它排在 system 后面，
-  // 不补一条新的，模型会把旧的当成最新。
+test("续上一段会话：system 按此刻的记忆重取（完整内容回到 system）；上个进程那条变化通知原样留在历史里，续上不再补", async () => {
+  // 2026-11-03 起变化只发路径通知、不带内容：续上之后 system 就是此刻的全文，基线也重记了——
+  // 历史里那条旧通知只说「那时变过」，不会被当成内容；没有新变化就不补。
   const seen: Context[] = [];
   const replies = ["一", "二", "三"];
   let next = 0;
   const dialect: Dialect = {
     api: "fake",
     async *request(_model, context) {
-      // 提取子循环没有 system：回一句空话，不吃主循环的脚本
-      const turn = context.systemPrompt === null ? textTurn("Nothing to keep.") : (seen.push(context), textTurn(replies[next++] ?? "多余"));
+      // 提取从主对话分叉（带着 system）：按提取指令认，回一句空话，不吃主循环的脚本
+      const extracting = JSON.stringify(context.messages).includes(EXTRACT_PROMPT_OPENING);
+      const turn = extracting ? textTurn("Nothing to keep.") : (seen.push(context), textTurn(replies[next++] ?? "多余"));
       for (const ev of turn) yield structuredClone(ev);
     },
   };
@@ -1081,7 +1082,7 @@ test("续上一段会话：system 按此刻的记忆重取；历史里那条更�
   await first.start();
   await first.agent.prompt("甲");
   await shared.write("memory/user.md", "偏好A");
-  await first.agent.prompt("乙"); // 追加一条更新（偏好A）
+  await first.agent.prompt("乙"); // 追加一条通知（user/user.md 变了）
   const id = first.agent.state.sessionId!;
   await first.stop();
 
@@ -1092,13 +1093,13 @@ test("续上一段会话：system 按此刻的记忆重取；历史里那条更�
   await second.agent.prompt("丙");
 
   const last = seen[seen.length - 1]!;
-  expect(last.systemPrompt).toContain("偏好B");
+  expect(last.systemPrompt).toContain("偏好B"); // 完整的现行内容在 system 里
   const texts = last.messages.map((m) => m.content.map((b) => (b.type === "text" ? b.text : "")).join(""));
-  const updates = texts.filter((t) => t.startsWith("Your memory changed"));
-  expect(updates).toHaveLength(2);
-  expect(updates[0]).toContain("偏好A"); // 上个进程追加的那条，续上之后原样还在
-  expect(updates[1]).toContain("偏好B");
-  expect(texts[texts.length - 1]).toBe("丙"); // 新的那条紧挨在本 run 的输入之前
+  const notices = texts.filter((t) => t.startsWith("Memory files changed"));
+  expect(notices).toHaveLength(1); // 上个进程那条，原样还在；续上没有新变化，不补
+  expect(notices[0]).toContain("added: user/user.md"); // 冻结那一刻它还不存在
+  expect(notices[0]).not.toContain("偏好A"); // 通知不带内容
+  expect(texts[texts.length - 1]).toBe("丙");
 });
 
 test("续上一段会话：提取不回头看上个进程的历史——上个进程退出前已经补看过，续上之后只从续上之后说的看起", async () => {

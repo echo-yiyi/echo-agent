@@ -99,7 +99,7 @@
 
 [`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections) 把规则和内容接进 system，**会话内冻结**：第一次组装时取一次，之后每个 run 原样复用；压缩落地、transcript 被清空（`reset`）或从盘上换掉（续会话）时作废，下一次组装重取。冻结的是生成后的字符串，不是多个记忆文件的事务快照。
 
-两次 run 之间记忆变了（提取、Dream、模型自己写、别的 session 写），system 不动，改由 [`memoryUpdateMessage()`](../../packages/core/src/memory/harness.ts#symbol=memoryUpdateMessage) 在下一个前台 run 的输入之前追加一条 environment 消息（`source` 为 `memory`），正文是整段新记忆。判断「变没变」比的是**模型最后看到的那一版**：本次送模投影里最后一条记忆更新，没有就是 system 里那份——所以续会话后历史里较早的更新不会被当成最新。run 内写记忆本 run 看不到（system 与已发的消息都不变），模型仍可用 `view` 主动读取。续跑（被打断的 run 接着跑）不追加。
+两次 run 之间记忆变了（提取、Dream、模型自己写、别的 session 写），system 不动，改由 [`memoryUpdateMessage()`](../../packages/core/src/memory/harness.ts#symbol=memoryUpdateMessage) 在下一个前台 run 的输入之前追加一条 environment 消息（`source` 为 `memory`），**只列哪些文件变了**（changed / added / removed，每类最多 20 条），不带内容——要看就 `view`（2026-11-03，决策见 [变化只发路径通知](../decisions/implemented/2026-11-03-memory-change-notice-and-reads.md)；此前每次追加整段新记忆，长会话里堆着几十份全量快照）。「变没变」比的是冻结那一刻记下的每个文件内容（[`MemorySystemFreeze`](../../packages/core/src/memory/harness.ts#symbol=MemorySystemFreeze) 的 `files`；indexed 模块的 `INDEX.md` 与点开头的簿记文件不算），发完一条就换成那一刻的。完整内容在作废后随重新冻结的 system 回来，基线一起重记——所以续会话、压缩之后历史里留着的旧通知只说「那时变过」，不会被当成内容。run 内写记忆本 run 看不到（system 与已发的消息都不变），模型仍可用 `view` 主动读取。续跑（被打断的 run 接着跑）不追加。
 
 为什么这样：provider 的缓存按前缀命中，记忆段之后是工具定义与整段对话。每个 run 重组时，两次 run 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低）。决策见 [记忆段会话内冻结](../decisions/implemented/2026-10-29-memory-frozen-in-system.md)。
 
@@ -170,7 +170,8 @@ Dream 与提取都不带父的每轮注入（激活 skill 正文、任务清单�
 
 - **提交锁**：同一层、同一个记忆模块的一次提交（读、改、预算校验、落盘、重建索引）整段独占，锁挂在那一层的**字节面**上，名字 `.locks/<模块>`（[`withMemoryRegionLock()`](../../packages/core/src/memory/lock.ts#symbol=withMemoryRegionLock)）。字节面有 `lock` 原语时——`FileDir` 的锁目录（带递增编号的锁，与 lease 同一个实现）、`InMemoryDir` 的实例内互斥，经前缀视图与写入闸视图一路转发——跨实例、跨进程都互斥；没有时按字节面对象在进程内互斥。等不到（缺省 10 秒）返回 `busy`，一个字节都不写。
 - **持有者崩溃后自动接管**（与 lease 同一个实现，[决策](../decisions/implemented/2026-09-10-generation-lock-takeover.md)）：持有者崩在持锁窗口里，下一个写者确认它已死（同一台机器、pid 查无此号）就接管，不会一直 `busy`。确认不了死活（别的机器、pid 被复用）或记录被写坏时，照旧等到超时返回 `busy`，报错里带锁的位置与持有者。
-- **覆写前核对读到的版本**（[决策](../decisions/implemented/2026-09-11-memory-read-version-check.md)）：提交锁只罩住一次工具调用，而模型「读完 → 思考 → 写回」横跨好几次调用。每把记忆工具记一本 [`MemoryReads`](../../packages/core/src/memory/harness.ts#symbol=MemoryReads)（view 看到的全文）；整份覆写已有文件、insert、delete 之前核对它还是不是现在这一版，不是就拒（`not_read` / `stale_read`），让模型重看。str_replace 不核对（old_str 在最新内容上找得到本身就是核对），rename 搬的就是最新内容。前台那把工具、每次提取、每次整理各一本账；程序直接调写方法、不给账，就不核对。
+- **覆写前核对读到的版本**（[决策](../decisions/implemented/2026-09-11-memory-read-version-check.md)）：提交锁只罩住一次工具调用，而模型「读完 → 思考 → 写回」横跨好几次调用。每把记忆工具记一本 [`MemoryReads`](../../packages/core/src/memory/harness.ts#symbol=MemoryReads)（view 看到的全文）；整份覆写已有文件、insert、delete 之前核对它还是不是现在这一版，不是就拒（`not_read` / `stale_read`）——**拒绝里附上现行内容并记成看过**，模型照着重做就放行，不必再单独 view 一轮（超过 8000 字符的不附、不记；2026-11-03）。str_replace 不核对（old_str 在最新内容上找得到本身就是核对），rename 搬的就是最新内容。前台那把工具、每次提取、每次整理各一本账；**提取那本从前台克隆**（上文里前台 view 过的，提取也算看过），并预记指令里全文展示过的常驻文件（缺省组装、没被截尾时）；两本之后各记各的。程序直接调写方法、不给账，就不核对。
+- **本进程里后台改记忆排成一条**（2026-11-03）：提取与整理各走各的通道、都不挡前台，但同一时刻只有一个在改记忆（[`Agent.oneBackgroundWriter()`](../../packages/core/src/agent.ts#symbol=Agent.oneBackgroundWriter)）——此前同一次空闲里二者能并发改同一层，互相 `stale_read`。
 - [`assertFresh()`](../../packages/core/src/memory/lock.ts#symbol=assertFresh) 仍在落盘前重读旧内容，挡的是**不守提交锁**的写者（人手改文件）。
 - **一层同时只有一个整理者**：每层先判一次门，过了才按层试拿一次 `.dream/pass`（[`claimDreamPass()`](../../packages/core/src/memory/harness.ts#symbol=claimDreamPass)，只试一次、不等）；拿不到（别的 session 正在整理这一层）就跳过这一层，拿到之后**再判一次门**——刚放手的那个 session 可能已经整理完、把计数清零了。startedAt 仍是状态文件里的标记，管的是失败之后的退避。
 - 正文、预算、索引在同一把提交锁里；Dream 状态（计数、startedAt）的读改写在这一层另一把短锁（`.dream/state`）里，多个 session 同时记数不丢增量。

@@ -15,7 +15,7 @@
 import type { AgentToolResult, ModelTool, ToolExecutionContext } from "../tools/types.ts";
 import {
   memoryCreate, memoryDelete, memoryInsert, memoryRename, memoryStrReplace, memoryView,
-  type AgentMemories, type MemoryCaller,
+  type AgentMemories, type MemoryCaller, type MemoryReads,
 } from "./harness.ts";
 import type { MemoryScope } from "./scope.ts";
 import type { CapabilityFactSink } from "../observability/fact-sink.ts";
@@ -102,6 +102,11 @@ export type CreateMemoryToolOptions = {
    * 提取 / 整理的子循环给自己的——事实挂在那个循环实例的 run 上。
    */
   observe?: CapabilityFactSink<MemoryFact>;
+  /**
+   * 这把工具起步时的「读到过的版本」账（2026-11-03）。不给 = 空账。**给的就是它自己用的那一本**（不复制）：
+   * Agent 留着前台那本的引用，提取从主对话分叉时克隆一份交给提取那把——上文里前台看过的，提取也算看过。
+   */
+  reads?: MemoryReads;
 };
 
 const DEFAULT_DESCRIPTION =
@@ -133,7 +138,7 @@ const PARAMETERS: Record<string, unknown> = {
 };
 
 export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolOptions): ModelTool<MemoryToolParams> {
-  const caller: MemoryCaller = { reads: new Map(), ...(opts?.observe === undefined ? {} : { observe: opts.observe }) };
+  const caller: MemoryCaller = { reads: opts?.reads ?? new Map(), ...(opts?.observe === undefined ? {} : { observe: opts.observe }) };
   return {
     kind: "model",
     name: MEMORY_TOOL_NAME,

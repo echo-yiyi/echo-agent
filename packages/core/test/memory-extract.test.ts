@@ -246,6 +246,85 @@ test("前台这轮只 view 了记忆：读不算写，这一轮照常算进提�
   expect(instructionOf(extracts[0]!)).toContain(`«${THREE[0]}»`);
 });
 
+/* ───────── 2026-11-03：stale_read 冲突——提取那把工具的账、提取与整理排成一条 ───────── */
+
+test("前台 view 过的文件，分叉出来的提取直接覆写就放行：账从前台克隆过来（此前空账起步，一覆写就是 not_read，5 轮白花一轮）", async () => {
+  const dir = new InMemoryDir();
+  const mem = memoriesOn(dir);
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 测试怎么跑\n---\n\n测试用 npm 跑。");
+  const foreground = scriptedStreamFn([toolTurn("v1", "memory", { command: "view", path: "session/memory/a.md" }), textTurn("看过了"), textTurn("好的"), textTurn("好的")]);
+  const extract = scriptedStreamFn([
+    toolTurn("w1", "memory", { command: "create", path: "session/memory/a.md", file_text: "---\ndescription: 测试怎么跑\n---\n\n测试一律用 bun 跑。" }),
+    textTurn("改好了。"),
+  ]);
+  const { fn, extracts } = recording({ foreground, extract });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: mem });
+  await mountBuiltinTools(agent);
+
+  await say(agent, "我们的测试是怎么跑的？查一下记忆", "改成一律用 bun 跑，别再用 npm 了", "好，就这样定了吧");
+  await idleExtract(agent);
+
+  expect(extracts.length).toBeGreaterThan(0);
+  expect(await dir.read("memory/a.md")).toContain("一律用 bun 跑");
+  expect(JSON.stringify(extracts)).not.toContain("have not viewed it");
+});
+
+test("提取指令里全文展示过的常驻文件，提取直接覆写就放行：账上预记了那一版", async () => {
+  const dir = new InMemoryDir();
+  const mem = memoriesOn(dir);
+  await memoryCreate(mem, "session/user.md", "用户偏好长回答。");
+  const extract = scriptedStreamFn([toolTurn("w1", "memory", { command: "create", path: "session/user.md", file_text: "用户偏好三句以内的回答。" }), textTurn("改好了。")]);
+  const { fn } = recording({ extract });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: mem });
+
+  await say(agent, ...THREE);
+  await idleExtract(agent);
+
+  expect(await dir.read("user.md")).toBe("用户偏好三句以内的回答。");
+});
+
+test("提取与整理排成一条：提取还在跑时整理不起模型调用，提取跑完它才开始（同一层并发写会互相 stale_read）", async () => {
+  const dir = new InMemoryDir();
+  const mem = createAgentMemories({ memories: [agentMemory, userMemory, notesMemory], dream: { minWritesSinceLast: 1 } });
+  bindMemoryScopes(mem, memoryScopeTable(ONE_LAYER.map((def) => ({ def, dir }))));
+  const order: string[] = [];
+  let release = (): void => {};
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  let reached = (): void => {};
+  const extractStarted = new Promise<void>((r) => {
+    reached = r;
+  });
+  const fn: StreamFn = async (model, context, options) => {
+    const seen = JSON.stringify(context.messages);
+    if (seen.includes(EXTRACT_PROMPT_OPENING)) {
+      order.push("extract:start");
+      reached();
+      await held;
+      order.push("extract:end");
+      return scriptedStreamFn([textTurn("没什么可记的。")])(model, context, options);
+    }
+    if (seen.includes("Consolidate the")) {
+      order.push("dream");
+      return scriptedStreamFn([textTurn("整理完了。")])(model, context, options);
+    }
+    return scriptedStreamFn([textTurn("好的")])(model, context, options);
+  };
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: mem, autoDream: true });
+
+  await say(agent, THREE[0]!, THREE[1]!);
+  await memoryCreate(mem, "session/memory/a.md", "---\ndescription: 甲\n---\n\n甲"); // 第三轮回到 idle 时整理的门才满
+  await say(agent, THREE[2]!);
+  await extractStarted;
+  await new Promise((r) => setTimeout(r, 50)); // 给整理抢跑的机会
+  expect(order).toEqual(["extract:start"]);
+
+  release();
+  expect(await until(async () => order.includes("dream")), "整理一直没起来").toBe(true);
+  expect(order).toEqual(["extract:start", "extract:end", "dream"]);
+});
+
 test("提取还在跑时又攒满一批 → 跑完再跑的那次从新的一批看起，不是把旧材料再提取一遍", async () => {
   let release = (): void => {};
   const held = new Promise<void>((r) => {

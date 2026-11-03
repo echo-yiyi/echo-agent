@@ -82,7 +82,9 @@ import {
   memoryTool,
   memoryUpdateMessage,
   shouldDream,
+  shownResidentContents,
   type AgentMemories,
+  type MemoryReads,
   type MemorySystemFreeze,
 } from "./memory/harness.ts";
 import {
@@ -702,7 +704,7 @@ export class Agent {
    * system 里那份记忆段，会话内冻结（`MemorySystemFreeze`）。压缩落地、transcript 清空或从盘上换掉时
    * 置回 null（`processEvents` 里），下一次组装重取。
    */
-  private readonly memorySystem: MemorySystemFreeze = { text: null };
+  private readonly memorySystem: MemorySystemFreeze = { text: null, files: null };
   /** 大工具结果的外存目录（`AgentOptions.toolOutputStore`，不给就是进程内存）。 */
   private readonly toolOutputs: StorageDir;
 
@@ -735,6 +737,16 @@ export class Agent {
    * 就不单独起提取——不然前台刚记完一条，提取回头看见"这轮有值得记的"，又写一条几乎一样的。
    */
   private memoryWrittenThisReply = false;
+  /**
+   * 前台那把记忆工具的「读到过的版本」账（2026-11-03 从工具内部提到这里）：提取从主对话分叉时克隆一份交给提取那把——
+   * 上文里前台 view 过的，提取也算看过（参照物的 fork 同样克隆父的已读状态）。reset / 续会话清空：那段对话没了。
+   */
+  private readonly foregroundReads: MemoryReads = new Map();
+  /**
+   * 本进程里后台改记忆的一次只一个（2026-11-03，`oneBackgroundWriter`）：提取与整理各走各的通道、谁也不挡前台，
+   * 但彼此会撞——同一次空闲里一个刚改完 user.md，另一个拿着旧版本覆写，就是一次 stale_read。排成一条，谁先来谁先跑。
+   */
+  private backgroundWriterTail: Promise<void> = Promise.resolve();
   /**
    * 提取的**游标**（2026-10-30）：transcript 里 `[0, extractCursor)` 已经被提取看过。
    * 下标是原始 transcript 的——压缩只改视图、不动 transcript，所以压缩后照样有效。
@@ -881,7 +893,7 @@ export class Agent {
       // 无特权通道：与第三方扩展同一条注册路（见 `extension/builtin.ts`）。
       // 前台这把**只有改了东西才置重叠保护的标志**（2026-11-03 用户报：读记忆被当成写，那一轮的提取被跳过）——
       // 此前看的是「memory 工具成功结束」事件，`view` 也算。判法与 `runExtract` 数写入条数同一条：非 view 且没报错
-      const foreground = memoryTool(this.memory);
+      const foreground = memoryTool(this.memory, { reads: this.foregroundReads });
       const markWritten = (): void => {
         this.memoryWrittenThisReply = true;
       };
@@ -3000,7 +3012,7 @@ export class Agent {
   private enqueueDream(): void {
     const scope = this.lastScope;
     if (!this.memoryWorkAllowed || scope === undefined) return;
-    this.dreamChannel.schedule((signal) => this.runDreamPass(scope, signal));
+    this.dreamChannel.schedule((signal) => this.oneBackgroundWriter(() => this.runDreamPass(scope, signal)));
   }
 
   /**
@@ -3043,7 +3055,10 @@ export class Agent {
       // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
       const span = projectRange(messages, compaction, from, end);
       const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span) };
-      const done = await this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal);
+      // 与整理排成一条：等的这段里被中止（stop / 丢锁）或 transcript 换了代，就不跑
+      const done = await this.oneBackgroundWriter(async () =>
+        signal.aborted || epoch !== this.extractEpoch ? false : this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal),
+      );
       if (done && epoch === this.extractEpoch) {
         this.extractCursor = Math.max(this.extractCursor, end);
         await this.recordReviewed(end + offset);
@@ -3063,6 +3078,24 @@ export class Agent {
       await this.sessionService.append(id, [{ kind: "memory_reviewed", at: this.clock.now(), through }]);
     } catch (e) {
       this.reportDiagnostic({ code: "memory_extract_cursor_persist_failed", message: errText(e) });
+    }
+  }
+
+  /**
+   * 后台改记忆排成一条（`backgroundWriterTail`）：等前一个跑完再跑 `fn`。永不卡死——前一个无论成败都会放手；
+   * 被中止的那个也一样（`settle()` 中止它，它收尾时放手，排在后面的看见自己的 signal 已中止就不跑）。
+   */
+  private async oneBackgroundWriter<T>(fn: () => Promise<T>): Promise<T> {
+    const before = this.backgroundWriterTail;
+    let release = (): void => {};
+    this.backgroundWriterTail = new Promise<void>((r) => {
+      release = r;
+    });
+    await before;
+    try {
+      return await fn();
+    } finally {
+      release();
     }
   }
 
@@ -3113,7 +3146,11 @@ export class Agent {
     const prompt = defaultExtractPrompt(listMemories(memory), table, fork.range, await memoryManifest(memory));
     const runId = `extract-${crypto.randomUUID()}`;
     const observe = this.memoryFactsFor(runId);
-    const tool = memoryTool(memory, observe === undefined ? undefined : { observe });
+    // 账（2026-11-03）：前台看过的克隆过来——上文里有那些 view 的结果；再记上指令里全文展示过的常驻文件。
+    // 空账起步时，模型以为看过（上文、指令里都有），一覆写就被拒成 not_read，5 轮白花一轮
+    const reads: MemoryReads = new Map(this.foregroundReads);
+    for (const [path, text] of await shownResidentContents(memory)) reads.set(path, text);
+    const tool = memoryTool(memory, { ...(observe === undefined ? {} : { observe }), reads });
     // 数这次写成了几条：没跑完时诊断要说清已经落盘几条——那几条是真的写进去了，不是失败
     let written = 0;
     const counted: typeof tool = {
@@ -3437,14 +3474,20 @@ export class Agent {
     };
   }
 
+  /** 冻结的记忆段作废：段与通知基线一起清，下一次组装重取（`MemorySystemFreeze`）。 */
+  private invalidateMemorySystem(): void {
+    this.memorySystem.text = null;
+    this.memorySystem.files = null;
+  }
+
   /**
-   * 两次 run 之间记忆变了：给本 run 追加的那条更新消息（`memoryUpdateMessage`）。没变 / 没装记忆段 = null。
+   * 两次 run 之间记忆变了：给本 run 追加的那条变化通知（`memoryUpdateMessage`，只列路径）。没变 / 没装记忆段 = null。
    * 与段 `render()` 抛错同一个档位：失败只留诊断、不挡这个 run——模型仍可用 `view` 读到新内容。
    */
   private async memoryUpdate(): Promise<AgentMessage | null> {
     if (this.memory === undefined || !this.promptSections.has("memory")) return null;
     try {
-      return await memoryUpdateMessage(this.memory, this.memorySystem, buildWorkingMessages(this._state.messages, this._state.compaction));
+      return await memoryUpdateMessage(this.memory, this.memorySystem);
     } catch (e) {
       this.reportDiagnostic({ code: "memory_update_failed", message: errText(e) });
       return null;
@@ -3846,8 +3889,8 @@ export class Agent {
         this._state.status = "generating";
         if (input.stages.length > 0) {
           this._state.compaction = input.compaction;
-          // 历史被改写，缓存本来就断了：顺势让 system 重取一次记忆，之前追加的更新可能已被摘要掉
-          this.memorySystem.text = null;
+          // 历史被改写，缓存本来就断了：顺势让 system 重取一次记忆——完整的现行内容随之回来，之前的变化通知不再需要
+          this.invalidateMemorySystem();
         }
         this._state.contextTokens = input.contextTokens;
         break;
@@ -3881,7 +3924,8 @@ export class Agent {
         break;
       case "reset":
         this.loadedTools.clear(); // 「取过 schema」是这段对话里的事实，对话清空它就跟着没了（与 transcript 同步）
-        this.memorySystem.text = null; // 之前追加的记忆更新随 transcript 一起没了
+        this.invalidateMemorySystem(); // 之前追加的变化通知随 transcript 一起没了
+        this.foregroundReads.clear(); // 前台「看过」的那些随对话一起没了：账不能替一段已经清掉的对话作保
         this.extractCursor = 0;
         this.extractEpoch += 1;
         this.persistedOffset += this._state.messages.length; // 这些还在会话里（reset 不写会话），之后的落盘下标要越过它们
@@ -3899,7 +3943,8 @@ export class Agent {
         // 已加载的延迟工具从 transcript 里收回来（2026-11-03）：菜单与上个进程最后一次请求的相同，缓存不断
         this.loadedTools.clear();
         for (const name of loadedToolsIn(input.messages)) this.loadedTools.add(name);
-        this.memorySystem.text = null; // 换了一份 transcript：system 按此刻的记忆重取，历史里的旧更新由下一个 run 补齐
+        this.invalidateMemorySystem(); // 换了一份 transcript：system 按此刻的记忆重取（完整内容），基线跟着重记
+        this.foregroundReads.clear();
         // 游标先设到末尾（这个事件不带复盘下标）；经会话恢复时 `start()` 紧接着按盘上的 `memory_reviewed` 改回去
         this.extractCursor = input.messages.length;
         this.extractEpoch += 1;
