@@ -44,11 +44,11 @@ createEcho 的挂载顺序为：
 
 1. builtin：由内建能力表生成，不从安装目录搜脚本。
 2. inline：显式工具包以及启用时的会话工具。
-3. discovered：盘上扩展按入口路径各自一代。
-4. explicit：`opts.extensions` 一代，包含产品内容与壳。
+3. explicit：`opts.extensions` 一代，包含产品内容与壳。
+4. discovered：盘上扩展按入口路径各自一代。
 5. role：角色覆盖最后挂载，确保产品 identity 已存在。
 
-每代内部另按依赖图拓扑排序。盘上扩展不能因为“以后会装产品”就依赖那个尚不存在的 service；独立代也不会合并成一张等待未来 provider 的图。发现的坏文件或失败 apply 记诊断后跳过；显式装配失败则整体构造失败并尝试清理先前已挂代。
+每代内部另按依赖图拓扑排序。盘上扩展排在 explicit 之后：它与产品撞名（工具、段）时失败落在它自己那一代、记诊断，产品照常启动；它启动时就能 inject 产品 provide 的 service、replace 产品的段，与热部署之后看到的一致。反过来，产品不能依赖盘上扩展提供的 service。发现的坏文件或失败 apply 记诊断后跳过；显式装配失败则整体构造失败并尝试清理先前已挂代。判据：[盘上扩展占了产品要用的工具名](../../packages/core/test/create-echo.test.ts#test=盘上扩展占了产品要用的工具名只废它自己那代产品照常起来d6)。
 
 装配与启动分开：createEcho 返回不等于已经恢复 session 或开始自主工作，调用方仍需 `echo.start()`。但扩展 apply 已在 mount 时执行，因此“装配不启动 Agent”不等于“装配期无扩展副作用”。生命周期见 [Lifecycle 与 Run Loop](lifecycle-and-run-loop.md)。
 

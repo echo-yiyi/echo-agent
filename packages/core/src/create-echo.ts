@@ -185,7 +185,7 @@ export type Echo = Readonly<{
   /** live 查询面：`getRun(result.runId)` → `renderRunObservation()`。只有 `createEcho()` 出来的 Runtime 承诺 canonical persistence。 */
   observations: EchoObservations;
   /**
-   * 现在装着的全部 Extension：内建 → inline → 盘上发现的（按入口路径）→ 产品自带的 → 角色。
+   * 现在装着的全部 Extension：内建 → inline → 产品自带的 → 盘上发现的（按入口路径）→ 角色。
    * **被跳过的坏扩展不在这里**——在 `diagnostics`。**每次读现算**（2026-09-14）：热部署会增删盘上那一段。
    */
   readonly extensions: readonly LoadedExtension[];
@@ -707,12 +707,19 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     const role: ExtensionEntry[] = isEmptyDefinition(agentRef.definition)
       ? []
       : [{ entryId: INLINE_AGENT_ENTRY, definition: inlineAgentExtension(), config: agentRef.definition }];
-    // 顺序：inline → 盘上发现的 → extra → 角色。差别只在**代的划分**：
+    // 顺序：inline → extra → 盘上发现的 → 角色。差别在**代的划分**：
     //   · inline / extra / 角色是显式装配 → 各自一代、fail-loud；
     //   · 盘上发现的每个一代 → 坏 apply 只回滚它自己，记诊断继续（D6）。
+    // **盘上的排在 extra 之后**：撞名（工具、段）只会落在盘上那一代、成一条诊断，产品照常起来——
+    // 反过来的话，用户 `extensions/` 里一个同名工具就让产品那代 fail-loud、整个 createEcho 抛（D6 不成立）。
+    // 也因此盘上扩展启动时就能 inject 产品 provide 的 Service、replace 产品的段，与热部署之后看到的一致。
     if (inline.length > 0) {
       await host.mount(INLINE_GENERATION, inline);
       mountedGens.push(INLINE_GENERATION);
+    }
+    if (extra.length > 0) {
+      await host.mount(BOOT_GENERATION, extra);
+      mountedGens.push(BOOT_GENERATION);
     }
     for (const d of loaded) {
       const gen = `${BOOT_GENERATION}:${d.entry.entryId}`;
@@ -724,24 +731,20 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
         diagnostics.push({ code: "extension_mount_failed", message: errText(e), path: d.file });
       }
     }
-    if (extra.length > 0) {
-      await host.mount(BOOT_GENERATION, extra);
-      mountedGens.push(BOOT_GENERATION);
-    }
     if (role.length > 0) {
       await host.mount(ROLE_GENERATION, role);
       mountedGens.push(ROLE_GENERATION);
     }
 
-    /** 清单**现算**（2026-09-14）：热部署会增删盘上那一段，冻结一份就是第二份会漂的真相。顺序：内建 → inline → 盘上（按入口路径）→ 产品自带 → 角色。 */
+    /** 清单**现算**（2026-09-14）：热部署会增删盘上那一段，冻结一份就是第二份会漂的真相。顺序同 mount：内建 → inline → 产品自带 → 盘上（按入口路径）→ 角色。 */
     const listExtensions = (): readonly LoadedExtension[] =>
       Object.freeze([
         ...builtin.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
         ...inline.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
+        ...extra.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
         ...[...discovered.values()]
           .filter((d): d is DiscoveredState & { name: string } => d.generation !== null && d.name !== null)
           .map((d) => ({ entryId: d.root.entry, name: d.name, file: d.root.entry })),
-        ...extra.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
         ...role.map((e) => ({ entryId: e.entryId, name: e.definition.name, file: undefined })),
       ]);
 

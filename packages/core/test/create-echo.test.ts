@@ -371,6 +371,55 @@ test("盘上扩展 `apply()` 抛：只废它自己那代——跳过 + mount 诊
   }
 });
 
+test("盘上扩展占了产品要用的工具名：只废它自己那代，产品照常起来（D6）", async () => {
+  // 产品自带的 extension 先于盘上发现的 mount：撞名落在盘上那一代，成一条诊断；
+  // 反过来的话产品那代 fail-loud，整个 createEcho 抛，报错还指向产品
+  const root = await tmp();
+  const dir = join(root, "extensions");
+  await mkdir(dir, { recursive: true });
+  const toolsPath = join(import.meta.dir, "..", "src", "tools", "types.ts");
+  await writeFile(
+    join(dir, "mine.ts"),
+    `import { defineExtension, AgentTools } from ${JSON.stringify(ABI_PATH)};\n` +
+      `import { toolOk } from ${JSON.stringify(toolsPath)};\n` +
+      `export default defineExtension({ name: "mine", hostAbiVersion: 1, inject: { tools: { service: AgentTools, required: true } },\n` +
+      `  apply(ctx) { const t = ctx.get(AgentTools);\n` +
+      `    void ctx.effect({ boundary: "agent", start: () => ({ value: 0, dispose: t.register({ kind: "model", name: "bash", label: "b", description: "user's bash",\n` +
+      `      parameters: { type: "object", properties: {} }, execute: async () => toolOk("mine") }) }) }); } });\n`,
+  );
+  const productBash: ModelTool = {
+    kind: "model",
+    name: "bash",
+    label: "b",
+    description: "product bash",
+    parameters: { type: "object", properties: {} },
+    execute: async () => toolOk("product"),
+  };
+  const productShell = defineExtension({
+    name: "product-shell",
+    hostAbiVersion: 1,
+    inject: { tools: { service: AgentTools, required: true } },
+    apply(ctx) {
+      const tools = ctx.get(AgentTools);
+      void ctx.effect({ boundary: "agent", start: () => ({ value: 0, dispose: tools.register(productBash) }) });
+    },
+  });
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(root, "state"),
+    extensionDirs: [dir],
+    extensions: [{ entryId: "product-shell", definition: productShell as never }],
+  });
+  try {
+    expect(echo.extensions.map((e) => e.name)).toContain("product-shell");
+    expect(echo.extensions.map((e) => e.name)).not.toContain("mine");
+    expect(echo.diagnostics.map((d) => [d.code, d.path])).toEqual([["extension_mount_failed", join(dir, "mine.ts")]]);
+  } finally {
+    await echo.stop();
+  }
+});
+
 test("盘上扩展分代之后，`stop()` 仍要把**每一代**都卸掉：它的 disposer 必须真的跑（D6）", async () => {
   // D6 把盘上扩展拆成每个一代——收摊清单要是漏了这些代，Fiber 的 disposer 一次都不跑，
   // watcher / 连接 / 子进程就是真泄漏。全局计数器是 tmp 生成的 fixture 与测试之间唯一的通道。
