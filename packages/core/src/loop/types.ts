@@ -58,6 +58,12 @@ export type TurnResult = {
   result: AttemptResult;
   /** 只有 landed 才非空。 */
   toolResults: ToolResultMessage[];
+  /**
+   * 执行前就因**调用本身无效**被拒的工具调用，一个调用一项：点了不存在 / 不可调的工具（`not_found`），
+   * 或参数没过工具自己的校验（`bad_params`）。hook 拦、授权拒、执行失败都不算——那不是调用本身无效。
+   * reply 据此判「连续几轮全是无效调用」（`run-loop.ts` 的 `INVALID_TOOL_TURNS_LIMIT`）。
+   */
+  invalidToolCalls: ("not_found" | "bad_params")[];
   /** `closeTurn` 交出的插话：由 reply 决定吸收；没吸收的随 run 关门报出。 */
   steers: AgentMessage[];
 };

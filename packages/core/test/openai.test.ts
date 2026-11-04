@@ -14,7 +14,7 @@ import {
 import { createProviderStreams, type Dialect } from "../src/provider/dialect.ts";
 import { Models } from "../src/provider/models.ts";
 import type { Model, ThinkingLevel } from "../src/provider/types.ts";
-import type { Context } from "../src/messages.ts";
+import type { ContentBlock, Context } from "../src/messages.ts";
 import type { ProviderEvent } from "../src/events.ts";
 import { agentError } from "../src/errors.ts";
 
@@ -111,7 +111,7 @@ test("reasoning_content → thinking 事件，**并进 content**（订正：多�
   ]);
 });
 
-test("参数 JSON 坏掉:warning + 块丢弃,不塞半截参数", async () => {
+test("参数 JSON 坏掉:warning + 块丢弃,不塞半截参数；一个能执行的都没剩 → 可重试的协议错误（不交一个空的 tool_use 让循环空转）", async () => {
   const { fn } = fakeFetch(() =>
     new Response(
       sse([
@@ -123,8 +123,149 @@ test("参数 JSON 坏掉:warning + 块丢弃,不塞半截参数", async () => {
   const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
   const events = await collect(d.request(MODEL, CTX, {}));
   expect(events.some((e) => e.type === "warning" && e.code === "tool_call_dropped")).toBe(true);
+  // 2026-11-03：此前以 done{stopReason: tool_use, content: []} 收尾——循环拿着空消息再来一轮，空转到迭代上限、一直没有回复
+  const last = events.at(-1) as Extract<ProviderEvent, { type: "error" }>;
+  expect(last.type).toBe("error");
+  expect(last.error).toMatchObject({ source: "provider", code: "protocol", retryable: true });
+  expect(last.error.message).toContain("1 个工具调用无效");
+  expect(events.some((e) => e.type === "done")).toBe(false);
+});
+
+/* ── 2026-11-03 用户报：服务端每个参数段都带 id（或 id: null、arguments: null），每段被当成一个新调用、段段解析不了、全被丢弃 ── */
+
+/** 一次请求的定稿（最后一条事件必须是 done）。 */
+async function doneOf(chunks: unknown[]): Promise<Extract<ProviderEvent, { type: "done" }>["message"]> {
+  const { fn } = fakeFetch(() => new Response(sse(chunks)));
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, {}));
+  const last = events.at(-1)!;
+  if (last.type !== "done") throw new Error(`最后一条不是 done：${JSON.stringify(last)}`);
+  return last.message;
+}
+
+test("每段都重发同一个 id（带 index）：还是一个调用，参数拼完整", async () => {
+  const message = await doneOf([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "read_file", arguments: "" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { arguments: '{"path":' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { arguments: '"a.ts"}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  expect(message.stopReason).toBe("tool_use");
+  expect(message.content).toEqual([{ type: "tool_use", id: "c1", name: "read_file", input: { path: "a.ts" } }]);
+});
+
+test("后续分片是 id: null / arguments: null / name: null：接着上一个调用，null 不当成参数、不当成新调用", async () => {
+  const message = await doneOf([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "read_file", arguments: null } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: null, function: { name: null, arguments: '{"path":' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: null, function: { name: null, arguments: null } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: null, function: { name: null, arguments: '"a.ts"}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  expect(message.content).toEqual([{ type: "tool_use", id: "c1", name: "read_file", input: { path: "a.ts" } }]);
+});
+
+test("没有 index：同一个 id 重发算同一个调用，出现不同的 id 才是新调用（两个并行调用分得开）；名字晚一段到也认", async () => {
+  const message = await doneOf([
+    { choices: [{ delta: { tool_calls: [{ id: "c1", function: { arguments: "" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ id: "c1", function: { name: "read_file", arguments: '{"path":"a.ts"}' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ id: "c2", function: { name: "read_file", arguments: '{"path":' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ id: "c2", function: { arguments: '"b.ts"}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  expect(message.content).toEqual([
+    { type: "tool_use", id: "c1", name: "read_file", input: { path: "a.ts" } },
+    { type: "tool_use", id: "c2", name: "read_file", input: { path: "b.ts" } },
+  ]);
+});
+
+test("两个调用的片段交错到达（index 0、1、0、1，后续段 id: null）：各自拼完整，按第一次出现的顺序；事件一个调用一组、不互相打断", async () => {
+  const chunks = [
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "read_file", arguments: "" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 1, id: "c2", function: { name: "grep", arguments: '{"pat' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: null, function: { name: null, arguments: '{"path":' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 1, id: null, function: { name: null, arguments: 'tern":"x"}' } }] } }] },
+    // 同一个分片里两个调用各带一段
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: null, function: { arguments: '"a.ts"}' } }, { index: 1, id: null, function: { arguments: null } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ];
+  const expected: ContentBlock[] = [
+    { type: "tool_use", id: "c1", name: "read_file", input: { path: "a.ts" } },
+    { type: "tool_use", id: "c2", name: "grep", input: { pattern: "x" } },
+  ];
+  const { fn } = fakeFetch(() => new Response(sse(chunks)));
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, {}));
   const done = events.at(-1) as Extract<ProviderEvent, { type: "done" }>;
-  expect(done.message.content).toEqual([]);
+  expect(done.type).toBe("done");
+  expect(done.message.content).toEqual(expected);
+  expect(events.map((e) => e.type)).toEqual([
+    "start",
+    "toolcall_start", "toolcall_delta", "toolcall_end",
+    "toolcall_start", "toolcall_delta", "toolcall_end",
+    "done",
+  ]);
+  // 壳（MessageAccumulator）只看事件拼出来的 partial 也与定稿一致：事件流本身就对，不靠 done 兜底
+  const items: { type: string; partial: { content: unknown[] } }[] = [];
+  const shell = createProviderStreams(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }));
+  for await (const item of shell.stream(MODEL, CTX, {}) as AsyncIterable<{ type: string; partial: { content: unknown[] } }>) items.push(item);
+  expect(items.some((i) => i.type === "warning")).toBe(false);
+  expect(items.findLast((i) => i.type === "toolcall_end")!.partial.content).toEqual(expected);
+});
+
+test("id、name 都是 null 的片段不开新调用：没有 index、前面也没有可接的调用 → 丢掉并告警；之后的正常调用不受影响", async () => {
+  const { fn } = fakeFetch(() =>
+    new Response(
+      sse([
+        { choices: [{ delta: { tool_calls: [{ id: null, function: { name: null, arguments: '{"stray":1}' } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "read_file", arguments: '{"path":"a.ts"}' } }] } }] },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+      ]),
+    ),
+  );
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, {}));
+  expect(events.some((e) => e.type === "warning" && e.code === "tool_call_fragment_dropped")).toBe(true);
+  const done = events.at(-1) as Extract<ProviderEvent, { type: "done" }>;
+  expect(done.message.content).toEqual([{ type: "tool_use", id: "c1", name: "read_file", input: { path: "a.ts" } }]);
+});
+
+test("到最后都没有名字的调用丢掉并告警，不交给循环；同一轮里有名字的照常", async () => {
+  const { fn } = fakeFetch(() =>
+    new Response(
+      sse([
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: null, arguments: "{}" } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 1, id: "c2", function: { name: "read_file", arguments: '{"path":"a.ts"}' } }] } }] },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+      ]),
+    ),
+  );
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, {}));
+  expect(events.some((e) => e.type === "warning" && e.code === "tool_call_dropped" && e.message.includes("没有名字"))).toBe(true);
+  const done = events.at(-1) as Extract<ProviderEvent, { type: "done" }>;
+  expect(done.message.content).toEqual([{ type: "tool_use", id: "c2", name: "read_file", input: { path: "a.ts" } }]);
+});
+
+test("真 id 晚一段才到：换上真 id（结果要按这个 id 回传）；先按 id 认上的、后来才带 index 的，之后只带 index 的片段也找得回来", async () => {
+  const message = await doneOf([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: null, function: { name: "read_file", arguments: '{"path":' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c9", function: { arguments: '"a.ts"}' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ id: "c2", function: { name: "grep", arguments: "" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 1, id: "c2", function: { arguments: '{"pattern":' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: null, function: { arguments: null } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 1, id: null, function: { arguments: '"x"}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  expect(message.content).toEqual([
+    { type: "tool_use", id: "c9", name: "read_file", input: { path: "a.ts" } },
+    { type: "tool_use", id: "c2", name: "grep", input: { pattern: "x" } },
+  ]);
+});
+
+test("finish_reason 是 tool_calls 却一个调用都没发：可重试的协议错误", async () => {
+  const { fn } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "我来查一下" } }] }, { choices: [{ delta: {}, finish_reason: "tool_calls" }] }])));
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, {}));
+  const last = events.at(-1) as Extract<ProviderEvent, { type: "error" }>;
+  expect(last.type).toBe("error");
+  expect(last.error).toMatchObject({ code: "protocol", retryable: true });
+  expect(last.error.message).toContain("响应里没有工具调用");
 });
 
 test("usage 上游没报 → null,不填 0 冒充报了账", async () => {

@@ -17,7 +17,7 @@ import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { RunIntakeGate } from "../src/loop/intake.ts";
 import { defaultConvertToLlm, userMessage, type Context } from "../src/messages.ts";
-import { runAgentLoop } from "../src/loop/run-loop.ts";
+import { INVALID_TOOL_TURNS_LIMIT, runAgentLoop } from "../src/loop/run-loop.ts";
 import { turnNumberOf } from "../src/loop/ids.ts";
 import type { AgentLoopConfig, AttemptResult } from "../src/loop/types.ts";
 import { DEFAULT_RETRY_POLICY } from "../src/provider/dialect.ts";
@@ -732,6 +732,85 @@ test("maxIterations 按 reply 计：第一条 reply 撞闸不影响同一 run �
   expect(validate(events)).toEqual([]);
   const end = events.find((e) => e.type === "reply_end");
   expect(end?.type === "reply_end" && end.turns).toBe(2);
+});
+
+/* ── 空转闸（2026-11-03 用户报：工具调用全被丢弃、状态还是「要工具」，循环一直转、始终没有回复） ── */
+
+/** 参数里必须有字符串 `path`，没有就在执行前被拒（bad_params）。 */
+function strictTool(name: string): ModelTool {
+  return {
+    ...tool(name, async () => toolOk("ok")),
+    prepareArguments(raw: unknown) {
+      if (typeof (raw as { path?: unknown }).path !== "string") throw new Error("path is required");
+      return raw as Record<string, unknown>;
+    },
+  };
+}
+
+test(`工具调用连续 ${INVALID_TOOL_TURNS_LIMIT} 轮全部无效（点的都是不存在的工具）：停下、报 tool_not_found，不跑到迭代上限`, async () => {
+  const script = Array.from({ length: INVALID_TOOL_TURNS_LIMIT }, (_, i) => toolTurn(`c${i}`, "nope", {}));
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: scriptedStreamFn([...script, textTurn("不该到")]),
+    tools: [tool("t", async () => toolOk("ok"))],
+  });
+  const events = collect(agent);
+  const r = await agent.prompt("go");
+  expect(r.outcome).toMatchObject({ kind: "error", error: { source: "tool", code: "tool_not_found", retryable: false } });
+  expect(validate(events)).toEqual([]);
+  const end = events.find((e) => e.type === "reply_end");
+  expect(end?.type === "reply_end" && end.turns).toBe(INVALID_TOOL_TURNS_LIMIT);
+});
+
+test("无效里混着参数不合法 → 报 tool_bad_params；中间有一轮调用有效就重新数", async () => {
+  const bad = (id: string): ScriptedTurn => toolTurn(id, "strict", {}); // 缺 path：执行前被拒
+  const good = (id: string): ScriptedTurn => toolTurn(id, "strict", { path: "a" });
+  const missing = (id: string): ScriptedTurn => toolTurn(id, "nope", {});
+  const limit = INVALID_TOOL_TURNS_LIMIT;
+  // 无效 limit-1 轮、有效一轮（归零）、再无效 limit 轮（前面参数不合法、最后一轮是工具不存在）→ 停在最后一轮；
+  // 错误码按这几轮合起来判，不是只看最后一轮
+  const script = [
+    ...Array.from({ length: limit - 1 }, (_, i) => bad(`a${i}`)),
+    good("g"),
+    ...Array.from({ length: limit - 1 }, (_, i) => bad(`b${i}`)),
+    missing("m"),
+    textTurn("不该到"),
+  ];
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn(script), tools: [strictTool("strict")] });
+  const events = collect(agent);
+  const r = await agent.prompt("go");
+  expect(r.outcome).toMatchObject({ kind: "error", error: { source: "tool", code: "tool_bad_params" } });
+  expect(validate(events)).toEqual([]);
+  const end = events.find((e) => e.type === "reply_end");
+  expect(end?.type === "reply_end" && end.turns).toBe(2 * limit);
+});
+
+test("执行失败的调用不算无效：工具连着报错也照常往下跑", async () => {
+  const script = Array.from({ length: INVALID_TOOL_TURNS_LIMIT + 1 }, (_, i) => toolTurn(`c${i}`, "t", {}));
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: scriptedStreamFn([...script, textTurn("done")]),
+    tools: [tool("t", async () => ({ content: "boom", isError: true, metadata: null }))],
+  });
+  const r = await agent.prompt("go");
+  expect(r.outcome.kind).toBe("completed");
+});
+
+test("stopReason 是 tool_use、消息里却没有工具调用：当场报 protocol，不再开下一轮", async () => {
+  const empty: ScriptedTurn = [
+    { type: "start" },
+    { type: "text_start" },
+    { type: "text_delta", text: "我来查一下" },
+    { type: "text_end" },
+    { type: "done", message: { role: "assistant", content: [{ type: "text", text: "我来查一下" }], stopReason: "tool_use", usage: null } },
+  ];
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([empty, textTurn("不该到")]) });
+  const events = collect(agent);
+  const r = await agent.prompt("go");
+  expect(r.outcome).toMatchObject({ kind: "error", error: { source: "provider", code: "protocol", retryable: false } });
+  expect(validate(events)).toEqual([]);
+  const end = events.find((e) => e.type === "reply_end");
+  expect(end?.type === "reply_end" && end.turns).toBe(1);
 });
 
 test("streamFn 抛出（违约）：折成 attempt_end{failed, internal}，层层关门，outcome error", async () => {

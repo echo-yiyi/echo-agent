@@ -51,7 +51,7 @@
 
 - **开**：`reply_start{source}`，随后把这条输入吸收进 transcript（每条 `message_end`）。续跑（`resume`）没有新输入，只发 `reply_start`。
 - **每个 turn 之前**：三道硬闸（abort / `maxIterations` / deadline）与 `maybeCompact()`。硬闸命中 → 不开 turn，reply 以该 outcome 结束。
-- **turn 之后**（顺序即 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply) 里的顺序）：落地消息 `tool_use` / `max_tokens` → 直接下一 turn（**先短路**：工具链的每一轮都不问下面两个钩）；否则 `shouldStopAfterTurn` → 结束（`completed`）；`prepareNextTurn` 换装；turn 交出的 steer 有货 → 吸收、下一 turn（`steer`）；否则 settle，结束（`completed`）。turn 未落地 → 以 turn 的结果结束。
+- **turn 之后**（顺序即 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply) 里的顺序）：先过**空转闸**——落地消息说 `tool_use` 却一个工具调用都没有 → 结束（`error{protocol}`，下一轮没有任何新输入，只会原样再来）；连续 [`INVALID_TOOL_TURNS_LIMIT`](../../packages/core/src/loop/run-loop.ts#symbol=INVALID_TOOL_TURNS_LIMIT)（3）轮工具调用**全部无效**（[`TurnResult.invalidToolCalls`](../../packages/core/src/loop/types.ts#symbol=TurnResult)：工具不存在 / 不可调、参数没过工具自己的校验；hook 拦、授权拒、执行失败不算）→ 结束（这几轮全是工具不存在为 `error{tool_not_found}`，否则 `error{tool_bad_params}`），有一个调用有效或这轮不要工具就重新数。然后落地消息 `tool_use` / `max_tokens` → 直接下一 turn（**先短路**：工具链的每一轮都不问下面两个钩）；否则 `shouldStopAfterTurn` → 结束（`completed`）；`prepareNextTurn` 换装；turn 交出的 steer 有货 → 吸收、下一 turn（`steer`）；否则 settle，结束（`completed`）。turn 未落地 → 以 turn 的结果结束。
 - **关**：`reply_end{outcome, final, turns}`；`final` 是最后一条落地消息，未落地时为 `null`。
 
 ### 2.3 turn
@@ -128,7 +128,7 @@ run-turn.ts
 | 谁 | 发什么事件 | 开关哪扇门 | 判什么 |
 |---|---|---|---|
 | `runLoop` | `agent_start / agent_end` | `closeRun` / `tryCloseRun` | reply 之间：`maxReplies`、followUp、stop hook |
-| `runReply` | `reply_start / reply_end`、输入与 steer 的 `message_end` | — | 硬闸、`maybeCompact`、`tool_use` / `max_tokens` 短路、`shouldStopAfterTurn`、`prepareNextTurn`、下一 turn 的 cause |
+| `runReply` | `reply_start / reply_end`、输入与 steer 的 `message_end` | — | 硬闸、`maybeCompact`、空转闸、`tool_use` / `max_tokens` 短路、`shouldStopAfterTurn`、`prepareNextTurn`、下一 turn 的 cause |
 | `runTurn` | `turn_start / turn_end`、`retry_scheduled`、toolResult 的 `message_end`、`tool_execution_*` | `openTurn` / `closeTurn` | 重试预算、撞窗应急 |
 | `runAttempt` | `attempt_start / attempt_end`、assistant 的 `message_*`、`usage` | — | `contextBeforeBuild` 的 block |
 
@@ -183,6 +183,7 @@ agent_end{completed}
 | attempt 结果 | turn | reply | run |
 |---|---|---|---|
 | landed | 跑工具 → `landed` | 判决：继续 / settle / 叫停 | — |
+| landed，但要工具却没有能跑的调用（§2.2 空转闸） | 跑工具 → `landed` | `error{protocol}` / `error{tool_not_found}` / `error{tool_bad_params}` | 同 reply |
 | failed，可重试且有预算 | 下一个 attempt | — | — |
 | failed，撞窗且应急成功 | 下一个 attempt | — | — |
 | failed（终） | `failed` | `error` | `error` |
@@ -204,7 +205,7 @@ agent_end{completed}
 
 ## 8. 验证
 
-loop-layers 测试使用栈式校验器检查四层嵌套、输入入账位置、失败配对与重试计数；工具结果的入账顺序（按 tool_use 出现顺序，不按完成顺序）由 `packages/core/test/parallel-tools.test.ts` 守。覆盖正常文本、工具批、重试、block、abort、deadline、followUp 与 reply 预算路径；其断言不扩展到任意第三方工具的副作用。
+loop-layers 测试使用栈式校验器检查四层嵌套、输入入账位置、失败配对与重试计数；工具结果的入账顺序（按 tool_use 出现顺序，不按完成顺序）由 `packages/core/test/parallel-tools.test.ts` 守。覆盖正常文本、工具批、重试、block、abort、deadline、followUp、reply 预算与空转闸路径；其断言不扩展到任意第三方工具的副作用。
 
 ```bash
 bun test packages/core/test/loop-layers.test.ts packages/core/test/invariants.test.ts packages/core/test/intake.test.ts packages/core/test/prompt.test.ts packages/core/test/compaction.test.ts

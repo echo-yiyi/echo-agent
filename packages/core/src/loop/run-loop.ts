@@ -26,6 +26,9 @@ import type { StreamFn } from "../provider/types.ts";
 /** stop hook 最多把 agent 拉回来几次（决策记录 docs/decisions/implemented/2026-09-01-stop-continuation-limit.md）。 */
 const MAX_STOP_CONTINUATIONS = 3;
 
+/** 一条 reply 里连续几轮工具调用全部无效就停下（reply 的 ⓪ 空转闸，`TurnResult.invalidToolCalls`）。 */
+export const INVALID_TOOL_TURNS_LIMIT = 3;
+
 type ReplyInput = { source: ReplySource; input: readonly AgentMessage[] };
 
 export async function runAgentLoop(
@@ -176,6 +179,8 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
   let stopped = false;
   const unconsumedSteers: AgentMessage[] = [];
   let cause: TurnCause = "input";
+  /** 连续几轮工具调用全部无效（⓪ 空转闸），以及这几轮是不是全是「工具不存在」。有一个调用有效、或这轮不是要工具，就归零。 */
+  let invalidStreak = { turns: 0, onlyNotFound: true };
   let ended = false;
   try {
     // 输入消息的 message_end 紧挨在它引发的 turn_start 之前（中间只可能有轮首压缩的 compaction_*）
@@ -221,10 +226,33 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
         break;
       }
       final = turn.result.message;
+      const stop = final.stopReason;
+
+      /* ⓪ 空转闸：说要工具、却没有一个能跑的调用，接着转只会原地打圈到迭代上限、用户始终等不到回复。
+         - 消息里一个工具调用都没有（方言丢光了、或自定义 provider 违约）：没有任何新输入，下一轮必然一样 → 当场报错；
+         - 连续 INVALID_TOOL_TURNS_LIMIT 轮，工具调用全部无效（`TurnResult.invalidToolCalls`）：错误结果已经回给模型几次了、
+           它还是改不过来 → 报错收手。 */
+      if (stop === "tool_use" && turn.toolResults.length === 0) {
+        unconsumedSteers.push(...turn.steers);
+        outcome = { kind: "error", error: agentError("provider", "protocol", "模型说要调用工具（stopReason: tool_use），消息里却一个工具调用都没有", false) };
+        break;
+      }
+      if (stop === "tool_use" && turn.invalidToolCalls.length === turn.toolResults.length) {
+        invalidStreak.turns += 1;
+        invalidStreak.onlyNotFound &&= turn.invalidToolCalls.every((c) => c === "not_found");
+      } else {
+        invalidStreak = { turns: 0, onlyNotFound: true };
+      }
+      if (invalidStreak.turns >= INVALID_TOOL_TURNS_LIMIT) {
+        unconsumedSteers.push(...turn.steers);
+        const code = invalidStreak.onlyNotFound ? "tool_not_found" : "tool_bad_params";
+        const what = invalidStreak.onlyNotFound ? "点的都是不存在或不可调的工具" : "工具不存在、不可调，或参数没过校验";
+        outcome = { kind: "error", error: agentError("tool", code, `连续 ${invalidStreak.turns} 轮工具调用全部无效（${what}），已停下`, false) };
+        break;
+      }
 
       /* ① 模型还要工具 / ①b 输出被截断（截断不是失败，让模型接着写）→ 继续。
          本 turn 交出的 steer 一并并入——「跑的中途插话 → 下一圈开头」 */
-      const stop = final.stopReason;
       if (stop === "tool_use" || stop === "max_tokens") {
         await absorb(context, turn.steers, emit, probe);
         cause = stop;
