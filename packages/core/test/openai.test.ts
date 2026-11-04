@@ -1,7 +1,7 @@
 // OpenAI 兼容方言 + kimi/deepseek provider 的契约门。
 // 全程假 fetch(喂 SSE 字符串),零网络、零 key 泄漏风险。
 
-import { test, expect, beforeEach, afterEach } from "bun:test";
+import { test, expect, beforeEach, afterEach, jest } from "bun:test";
 import {
   openAiDialect,
   kimiProvider,
@@ -10,13 +10,15 @@ import {
   zaiCodingProvider,
   minimaxProvider,
   OPENAI_COMPLETIONS_API,
+  STREAM_IDLE_TIMEOUT_MS,
 } from "../src/provider/openai.ts";
 import { createProviderStreams, type Dialect } from "../src/provider/dialect.ts";
 import { Models } from "../src/provider/models.ts";
 import type { Model, ThinkingLevel } from "../src/provider/types.ts";
-import type { ContentBlock, Context } from "../src/messages.ts";
+import type { AssistantMessage, ContentBlock, Context } from "../src/messages.ts";
 import type { ProviderEvent } from "../src/events.ts";
-import { agentError } from "../src/errors.ts";
+import { AbortReason, agentError, type AgentError } from "../src/errors.ts";
+import { Agent } from "../src/agent.ts";
 
 const MODEL: Model = { provider: "kimi", id: "kimi-k3", api: "openai-completions" };
 /** 与 `MODEL` 对应的来源三元组：thinking 块要带着它，回放判「同源」看的就是这个。 */
@@ -306,7 +308,7 @@ test("请求体:system / tool_result→role:tool / assistant tool_calls / tools 
   expect(body.tools[0]!.function.name).toBe("read");
 });
 
-test("tool_result 的失败前缀全英文；目录没标 vision 的模型带图本地抛、标了才发 image_url（review 2026-09-07）", async () => {
+test("tool_result 的失败前缀全英文；目录标了 vision 才发 image_url（review 2026-09-07；没标时的省略见下面 2026-11-03 那条）", async () => {
   const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
   const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
   const failed: Context = { systemPrompt: null, messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "boom", is_error: true }] }], tools: [] };
@@ -314,9 +316,6 @@ test("tool_result 的失败前缀全英文；目录没标 vision 的模型带图
   const body = calls[0]!.body as { messages: { role: string; tool_call_id?: string; content: unknown }[] };
   expect(body.messages[0]).toEqual({ role: "tool", tool_call_id: "c1", content: "[tool execution failed]\nboom" });
   const withImage: Context = { systemPrompt: null, messages: [{ role: "user", content: [{ type: "image", mimeType: "image/png", data: "AAAA" }] }], tools: [] };
-  const refused = await collect(d.request(MODEL, withImage, { apiKey: "k" })); // 方言把构造请求的异常折成 error 事件
-  expect(JSON.stringify(refused)).toContain("does not accept image input");
-  expect(calls.length).toBe(1); // 没发出去
   await collect(d.request({ ...MODEL, capabilities: { vision: true } }, withImage, { apiKey: "k" }));
   const sent = calls[1]!.body as { messages: { content: { type: string }[] }[] };
   expect(sent.messages[0]!.content[0]!.type).toBe("image_url");
@@ -843,8 +842,8 @@ test("跨模型：GLM 的历史切到 gpt-4.1，请求体里**不许**出现 rea
   const assistant = body.messages.find((m) => m["role"] === "assistant")!;
 
   expect(Object.hasOwn(assistant, "reasoning_content")).toBe(false); // 上一版这里带着别家的思考
-  // 降级不是丢弃：内容并进正文，下一家仍看得到上下文，只是不再是「可回放的不透明数据」
-  expect(String(assistant["content"])).toContain("上一家模型的思考");
+  // 2026-11-03 起也不并进正文（照 pi）：可读的思考当正文发过去，下一家会把它当成自己说过的可见回复
+  expect(assistant["content"]).toBe("上一家的正文");
 });
 
 test("跨模型的 redacted 块**直接丢弃**：正文本来就没有，签名对别家一个字节的意义都没有", async () => {
@@ -885,7 +884,10 @@ test("同一家但**换了模型**也算跨源：reasoner 的历史切到非 rea
       ...CTX.messages,
       {
         role: "assistant",
-        content: [{ type: "thinking", thinking: "reasoner 的思考", signature: "reasoning_content", origin: { provider: "deepseek", api: "openai-completions", model: "deepseek-v4-pro" } }],
+        content: [
+          { type: "thinking", thinking: "reasoner 的思考", signature: "reasoning_content", origin: { provider: "deepseek", api: "openai-completions", model: "deepseek-v4-pro" } },
+          { type: "text", text: "reasoner 的正文" },
+        ],
       },
     ],
   };
@@ -893,6 +895,7 @@ test("同一家但**换了模型**也算跨源：reasoner 的历史切到非 rea
   const body = calls[0]!.body as { messages: Record<string, unknown>[] };
   const assistant = body.messages.find((m) => m["role"] === "assistant")!;
   expect(Object.hasOwn(assistant, "reasoning_content")).toBe(false);
+  expect(assistant["content"]).toBe("reasoner 的正文");
 });
 
 test("没有 origin 的老会话按**跨源**处理：不赌它同源", async () => {
@@ -900,14 +903,17 @@ test("没有 origin 的老会话按**跨源**处理：不赌它同源", async ()
   const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
   const ctx: Context = {
     ...CTX,
-    messages: [...CTX.messages, { role: "assistant", content: [{ type: "thinking", thinking: "老会话的思考", signature: "reasoning_content" }] }],
+    messages: [
+      ...CTX.messages,
+      { role: "assistant", content: [{ type: "thinking", thinking: "老会话的思考", signature: "reasoning_content" }, { type: "text", text: "老会话的正文" }] },
+    ],
   };
   await collect(d.request(MODEL, ctx, { apiKey: "k" })); // 目标就是产它的那家，但块上没标来源
   const body = calls[0]!.body as { messages: Record<string, unknown>[] };
   const assistant = body.messages.find((m) => m["role"] === "assistant")!;
-  // 赌错的代价是把别家的不透明数据发出去，所以宁可降级
+  // 赌错的代价是把别家的不透明数据发出去，所以宁可不回放
   expect(Object.hasOwn(assistant, "reasoning_content")).toBe(false);
-  expect(String(assistant["content"])).toContain("老会话的思考");
+  expect(assistant["content"]).toBe("老会话的正文");
 });
 
 test("thinking 流到一半就报错：失败消息里**仍带着已经流出的思考**", async () => {
@@ -939,10 +945,11 @@ test("thinking 流到一半就报错：失败消息里**仍带着已经流出的
   const d2 = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn2 });
   const next: Context = { ...CTX, messages: [...CTX.messages, { role: "assistant", content: msg.content }] };
   await collect(d2.request(MODEL, next, { apiKey: "k" }));
-  const assistant = (calls[0]!.body as { messages: Record<string, unknown>[] }).messages.find((m) => m["role"] === "assistant")!;
+  const sentMessages = (calls[0]!.body as { messages: Record<string, unknown>[] }).messages;
 
-  expect(Object.hasOwn(assistant, "reasoning_content")).toBe(false); // 不可回放就一个字段都不发
-  expect(String(assistant["content"])).toContain("想了一半"); // 但内容不丢：降级进正文，下一轮仍有上下文
+  // 不可回放就一个字段都不发，也不并进正文（2026-11-03 照 pi）；这条除了半截思考什么都没有，整条不发
+  expect(sentMessages.some((m) => m["role"] === "assistant")).toBe(false);
+  expect(JSON.stringify(sentMessages)).not.toContain("想了一半");
 });
 
 /* ─────────────── 缓存命中（2026-09-01：状态栏要看到缓存情况） ─────────────── */
@@ -987,4 +994,242 @@ test("DeepSeek 的 prompt_cache_hit_tokens 也认；两种都没报 → **字段
   const none = (await collect(d.request(MODEL, CTX, { apiKey: "k" }))).at(-1) as Extract<ProviderEvent, { type: "done" }>;
   expect(none.message.usage).toEqual({ inputTokens: 7, outputTokens: 1 });
   expect(Object.hasOwn(none.message.usage!, "cachedInputTokens"), "没报却带了字段——0 冒充报了账").toBe(false);
+});
+
+/* ══════════ 2026-11-03 provider 适配修复（用户拍板「按推荐修」） ══════════ */
+
+const okSse = (): Response => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]));
+
+test("用户贴图遇上不收图的模型：图省掉、换一句英文标签，请求照发——不再本地抛（输入已经入账，抛了就每次都炸）", async () => {
+  const { fn, calls } = fakeFetch(okSse);
+  const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
+  const ctx: Context = {
+    systemPrompt: null,
+    messages: [{ role: "user", content: [{ type: "text", text: "看图" }, { type: "image", mimeType: "image/png", data: "AAAA" }] }],
+    tools: [],
+  };
+  const events = await collect(d.request(MODEL, ctx, { apiKey: "k" }));
+  expect(events.at(-1)?.type).toBe("done");
+  expect(calls.length).toBe(1);
+  const body = calls[0]!.body as { messages: { role: string; content: unknown }[] };
+  expect(body.messages[0]).toEqual({ role: "user", content: "看图\n\n[image omitted: model does not accept image input]" });
+});
+
+test("收图模型上贴过图、换成不收图的模型：之后的 prompt 照常完成，每次都真发了请求（此前每个 run 重试到上限后失败，会话卡死）", async () => {
+  let sent = 0;
+  const fetchFn = (async () => {
+    sent += 1;
+    return okSse();
+  }) as unknown as typeof fetch;
+  const streams = createProviderStreams(openAiDialect({ baseUrl: "https://x/v1", fetchFn }));
+  const vision: Model = { provider: "p", id: "flash", api: OPENAI_COMPLETIONS_API, capabilities: { vision: true, contextWindow: 100_000 } };
+  const plain: Model = { provider: "p", id: "pro", api: OPENAI_COMPLETIONS_API, capabilities: { contextWindow: 100_000 } };
+  const agent = new Agent({ model: vision, streamFunction: (m, c, o) => streams.stream(m, c, o) });
+  const r1 = await agent.prompt("看图", [{ type: "image", mimeType: "image/png", data: "AAAA" }]);
+  agent.model = plain;
+  const r2 = await agent.prompt("你好");
+  const r3 = await agent.prompt("再试一次");
+  expect([r1.outcome.kind, r2.outcome.kind, r3.outcome.kind]).toEqual(["completed", "completed", "completed"]);
+  expect(sent).toBe(3);
+});
+
+test("请求体构造失败：不发请求，以不可重试的 internal 错误收场（此前在 fetch 的 try 里求值，被归成 network 可重试）", async () => {
+  const { fn, calls } = fakeFetch(okSse);
+  const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
+  // BigInt 进不了 JSON：构造请求体必然抛——同样的输入每次都一样，重试没有意义
+  const ctx: Context = { ...CTX, tools: [{ name: "t", description: "d", input_schema: { type: "object", default: 1n } as never }] };
+  const events = await collect(d.request(MODEL, ctx, { apiKey: "k" }));
+  expect(calls.length).toBe(0);
+  expect(events).toEqual([{ type: "error", error: expect.objectContaining({ source: "provider", code: "internal", retryable: false }) }] as never);
+});
+
+test("finish_reason 是 stop、却带着能执行的工具调用：定成 tool_use（此前 end_turn——工具执行了，结果不回模型）", async () => {
+  const done = await doneOf([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "t", arguments: '{"a":1}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
+  ]);
+  expect(done.stopReason).toBe("tool_use");
+  expect(done.content).toEqual([{ type: "tool_use", id: "c1", name: "t", input: { a: 1 } }]);
+});
+
+test("finish_reason 的异常值不当正常结束：内容过滤 → 不可重试的 error（带说明、已流出的正文留在失败消息里）；推理异常 → 可重试；未知值仍是 end_turn", async () => {
+  const finishWith = async (reason: string) => {
+    const { fn } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "部分" } }] }, { choices: [{ delta: {}, finish_reason: reason }] }])));
+    return createProviderStreams(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn })).stream(MODEL, CTX, { apiKey: "k" }).result();
+  };
+  for (const reason of ["content_filter", "sensitive"]) {
+    const msg = await finishWith(reason);
+    expect(msg.stopReason).toBe("error");
+    expect(msg.error).toMatchObject({ source: "provider", retryable: false });
+    expect(msg.error!.message).toContain(reason);
+    expect(msg.content).toEqual([{ type: "text", text: "部分" }]);
+  }
+  for (const reason of ["network_error", "error"]) {
+    const msg = await finishWith(reason);
+    expect(msg.stopReason).toBe("error");
+    expect(msg.error).toMatchObject({ source: "provider", code: "server", retryable: true });
+    expect(msg.error!.message).toContain(reason);
+  }
+  for (const reason of ["stop", "end", "something_new"]) expect((await finishWith(reason)).stopReason).toBe("end_turn");
+  const legacy = await doneOf([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "t", arguments: "{}" } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "function_call" }] },
+  ]);
+  expect(legacy.stopReason).toBe("tool_use");
+});
+
+test("Kimi 把 usage 放在 choices[0].usage：顶层没有时从那里读", async () => {
+  const { fn } = fakeFetch(() =>
+    new Response(sse([{ choices: [{ delta: { content: "嗯" }, finish_reason: "stop", usage: { prompt_tokens: 12, completion_tokens: 3 } }] }])),
+  );
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, { apiKey: "k" }));
+  expect((events.at(-1) as Extract<ProviderEvent, { type: "done" }>).message.usage).toEqual({ inputTokens: 12, outputTokens: 3 });
+});
+
+test("跨源的思考不回放、也不并进正文（照 pi：可读的思考当正文发给下一家，会被当成可见回复的一部分）；多个 text 块之间有分隔", async () => {
+  const { fn, calls } = fakeFetch(okSse);
+  const d = openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn });
+  const glm: Model = { provider: "zai", id: "glm-5.3", api: OPENAI_COMPLETIONS_API };
+  const deepseek = { provider: "deepseek", api: OPENAI_COMPLETIONS_API, model: "deepseek-flash" };
+  const ctx: Context = {
+    systemPrompt: null,
+    tools: [],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "q" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "用户想要X，我先想想。", signature: "reasoning_content", origin: deepseek },
+          { type: "text", text: "第一段" },
+          { type: "thinking", thinking: "再想想", signature: "reasoning_content", origin: deepseek },
+          { type: "text", text: "第二段" },
+        ],
+      },
+      // 只有跨源思考的那条：什么都不剩，整条不发（不发一条 content: null 的空 assistant）
+      { role: "assistant", content: [{ type: "thinking", thinking: "只有思考", signature: "reasoning_content" }] },
+      { role: "user", content: [{ type: "text", text: "q2" }] },
+    ],
+  };
+  await collect(d.request(glm, ctx, { apiKey: "k" }));
+  const body = calls[0]!.body as { messages: Record<string, unknown>[] };
+  expect(body.messages).toEqual([
+    { role: "user", content: "q" },
+    { role: "assistant", content: "第一段\n\n第二段" },
+    { role: "user", content: "q2" },
+  ]);
+});
+
+/* ── 重试分类：Retry-After、408 / 413、流内错误、撞窗判定收窄 ── */
+
+async function errorOf(make: () => Response): Promise<AgentError> {
+  const { fn } = fakeFetch(make);
+  const events = await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn }).request(MODEL, CTX, { apiKey: "k" }));
+  const last = events.at(-1) as Extract<ProviderEvent, { type: "error" }>;
+  expect(last.type).toBe("error");
+  return last.error;
+}
+
+test("Retry-After（秒 / HTTP 日期）、retry-after-ms、限流 reset 头：AgentError 带上服务端要求的等待时长；没给就没有这个字段", async () => {
+  expect(await errorOf(() => new Response("slow down", { status: 429, headers: { "retry-after": "7" } }))).toMatchObject({ code: "rate_limit", retryable: true, retryAfterMs: 7000 });
+  expect(await errorOf(() => new Response("busy", { status: 503, headers: { "retry-after": "2" } }))).toMatchObject({ code: "server", retryable: true, retryAfterMs: 2000 });
+  expect(await errorOf(() => new Response("x", { status: 429, headers: { "retry-after-ms": "1500" } }))).toMatchObject({ retryAfterMs: 1500 });
+  const dated = await errorOf(() => new Response("x", { status: 429, headers: { "retry-after": new Date(Date.now() + 30_000).toUTCString() } }));
+  expect(dated.retryAfterMs).toBeGreaterThan(25_000);
+  expect(dated.retryAfterMs).toBeLessThanOrEqual(30_000);
+  expect(await errorOf(() => new Response("x", { status: 429, headers: { "x-ratelimit-reset-requests": "1s", "x-ratelimit-reset-tokens": "6m0s" } }))).toMatchObject({ retryAfterMs: 360_000 });
+  const bare = await errorOf(() => new Response("x", { status: 429 }));
+  expect(Object.hasOwn(bare, "retryAfterMs")).toBe(false);
+});
+
+test("408 → 可重试的 timeout；413 → 撞窗（应急压缩）；400 只认明确的上下文超限短语，「string too long」不算撞窗", async () => {
+  expect(await errorOf(() => new Response("request timeout", { status: 408 }))).toMatchObject({ code: "timeout", retryable: true });
+  expect(await errorOf(() => new Response("payload too large", { status: 413 }))).toMatchObject({ code: "context_overflow", retryable: false });
+  for (const text of [
+    "This model's maximum context length is 131072 tokens. However, you requested 140000 tokens",
+    '{"error":{"code":"1261","message":"Prompt exceeds max length"}}',
+    "Your request exceeded model token limit: 262144 (requested: 300000)",
+    "invalid params, context window exceeds limit",
+    '{"error":{"code":"context_length_exceeded"}}',
+  ]) {
+    expect((await errorOf(() => new Response(text, { status: 400 }))).code, text).toBe("context_overflow");
+  }
+  for (const text of [
+    "Invalid 'messages[3].content': string too long. Expected a string with maximum length 10485760, but got a string with length 12000000 instead.",
+    "max_tokens is too large: 200000. This model supports at most 32768 completion tokens",
+    "Invalid parameter: token",
+  ]) {
+    expect((await errorOf(() => new Response(text, { status: 400 }))).code, text).toBe("protocol");
+  }
+});
+
+test("流内 chunk.error 按 code / type 分：限流、过载类可重试，上下文超限是撞窗，其余仍是不可重试的协议错误", async () => {
+  const inStream = (error: unknown) => errorOf(() => new Response(sse([{ choices: [{ delta: { content: "半" } }] }, { error }])));
+  expect(await inStream({ type: "overloaded_error", message: "Overloaded" })).toMatchObject({ code: "server", retryable: true });
+  expect(await inStream({ code: "rate_limit_exceeded", message: "slow" })).toMatchObject({ code: "rate_limit", retryable: true });
+  expect(await inStream({ code: 429, message: "Too Many Requests" })).toMatchObject({ code: "rate_limit", retryable: true });
+  expect(await inStream({ code: 502, message: "upstream" })).toMatchObject({ code: "server", retryable: true });
+  expect(await inStream({ code: "context_length_exceeded", message: "too long" })).toMatchObject({ code: "context_overflow", retryable: false });
+  expect(await inStream({ message: "bad request" })).toMatchObject({ code: "protocol", retryable: false });
+});
+
+/* ── 流空闲超时：连着但不再吐字节，不能永远等 ── */
+
+/** 先吐一段、之后再也不吐的流；`waiting` 在方言第二次读（开始干等）时 resolve。 */
+function stalledBody(): { body: ReadableStream<Uint8Array>; waiting: Promise<void> } {
+  let markWaiting!: () => void;
+  const waiting = new Promise<void>((r) => (markWaiting = r));
+  const first = new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "hel" } }] })}\n\n`);
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(c) {
+        c.enqueue(first);
+      },
+      pull() {
+        markWaiting();
+        return new Promise<void>(() => {}); // 再也不吐
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { body, waiting };
+}
+
+test("流空闲 300s 没收到任何字节：中止这次请求，以可重试的 timeout 收场（已流出的正文留在失败消息里）", async () => {
+  expect(STREAM_IDLE_TIMEOUT_MS).toBe(300_000); // codex-rs 的 stream idle timeout 缺省
+  const { body, waiting } = stalledBody();
+  const fetchFn = (async () => new Response(body)) as unknown as typeof fetch;
+  // 假时钟下 bun 的用例超时也不走了：只靠微任务推进，等不到就判红，不会挂住
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 1000; i++) await Promise.resolve();
+  };
+  jest.useFakeTimers();
+  try {
+    let msg: AssistantMessage | undefined;
+    void createProviderStreams(openAiDialect({ baseUrl: "https://x/v1", fetchFn }))
+      .stream(MODEL, CTX, { apiKey: "k" })
+      .result()
+      .then((m) => (msg = m));
+    await waiting;
+    jest.advanceTimersByTime(STREAM_IDLE_TIMEOUT_MS - 1);
+    await flush();
+    expect(msg).toBeUndefined(); // 还没到点
+    jest.advanceTimersByTime(1);
+    await flush();
+    expect(msg?.stopReason).toBe("error");
+    expect(msg?.error).toMatchObject({ source: "provider", code: "timeout", retryable: true });
+    expect(msg?.content).toEqual([{ type: "text", text: "hel" }]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("流空闲期间外层 signal 中止：以 aborted 收场，不等空闲计时", async () => {
+  const { body, waiting } = stalledBody();
+  const fetchFn = (async () => new Response(body)) as unknown as typeof fetch;
+  const ac = new AbortController();
+  const result = createProviderStreams(openAiDialect({ baseUrl: "https://x/v1", fetchFn })).stream(MODEL, CTX, { apiKey: "k", signal: ac.signal }).result();
+  await waiting;
+  ac.abort(new AbortReason("user"));
+  const msg = await result;
+  expect(msg.stopReason).toBe("aborted");
 });

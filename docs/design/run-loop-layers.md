@@ -10,7 +10,7 @@
 
 **设计主线。** run 包含 reply，reply 包含 turn，turn 包含 attempt；工具批在 attempt 落地后、turn 结束前执行。每层负责自己的起止事件，重试只增加 attempt，不增加 turn。预算分别限制 reply 内迭代、run 内回复及 turn 内请求次数。
 
-**边界。** 本文不定义 provider 的线协议或 TUI 展示。命名与取舍见 [reply](../decisions/implemented/2026-09-05-reply-layer.md)、[重试](../decisions/implemented/2026-09-05-retry-owned-by-loop.md)、[失败消息](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md)、[迭代预算](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)。
+**边界。** 本文不定义 provider 的线协议或 TUI 展示（§6 只列 OpenAI 兼容方言怎么标 `retryable`——它决定 loop 重不重试）。命名与取舍见 [reply](../decisions/implemented/2026-09-05-reply-layer.md)、[重试](../decisions/implemented/2026-09-05-retry-owned-by-loop.md)、[失败消息](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md)、[迭代预算](../decisions/implemented/2026-09-05-iteration-budget-per-reply.md)、[截断续写](../decisions/implemented/2026-11-03-max-tokens-continuation.md)、[流空闲超时](../decisions/implemented/2026-11-03-stream-idle-timeout.md)。
 
 ## 1. 术语
 
@@ -51,14 +51,14 @@
 
 - **开**：`reply_start{source}`，随后把这条输入吸收进 transcript（每条 `message_end`）。续跑（`resume`）没有新输入，只发 `reply_start`。
 - **每个 turn 之前**：三道硬闸（abort / `maxIterations` / deadline）与 `maybeCompact()`。硬闸命中 → 不开 turn，reply 以该 outcome 结束。
-- **turn 之后**（顺序即 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply) 里的顺序）：先过**空转闸**——落地消息说 `tool_use` 却一个工具调用都没有 → 结束（`error{protocol}`，下一轮没有任何新输入，只会原样再来）；连续 [`INVALID_TOOL_TURNS_LIMIT`](../../packages/core/src/loop/run-loop.ts#symbol=INVALID_TOOL_TURNS_LIMIT)（3）轮工具调用**全部无效**（[`TurnResult.invalidToolCalls`](../../packages/core/src/loop/types.ts#symbol=TurnResult)：工具不存在 / 不可调、参数没过工具自己的校验；hook 拦、授权拒、执行失败不算）→ 结束（这几轮全是工具不存在为 `error{tool_not_found}`，否则 `error{tool_bad_params}`），有一个调用有效或这轮不要工具就重新数。然后落地消息 `tool_use` / `max_tokens` → 直接下一 turn（**先短路**：工具链的每一轮都不问下面两个钩）；否则 `shouldStopAfterTurn` → 结束（`completed`）；`prepareNextTurn` 换装；turn 交出的 steer 有货 → 吸收、下一 turn（`steer`）；否则 settle，结束（`completed`）。turn 未落地 → 以 turn 的结果结束。
+- **turn 之后**（顺序即 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply) 里的顺序）：先过**空转闸**——落地消息说 `tool_use` 却一个工具调用都没有 → 结束（`error{protocol}`，下一轮没有任何新输入，只会原样再来）；连续 [`INVALID_TOOL_TURNS_LIMIT`](../../packages/core/src/loop/run-loop.ts#symbol=INVALID_TOOL_TURNS_LIMIT)（3）轮工具调用**全部无效**（[`TurnResult.invalidToolCalls`](../../packages/core/src/loop/types.ts#symbol=TurnResult)：工具不存在 / 不可调、参数没过工具自己的校验；hook 拦、授权拒、执行失败不算；这几轮的 stopReason 不论）→ 结束（这几轮全是工具不存在为 `error{tool_not_found}`，否则 `error{tool_bad_params}`），有一个调用有效或这轮没执行工具就重新数。然后**这一轮执行了工具**（`toolResults` 非空，不论 stopReason——与 turn 执行工具的判据同一条：落地消息里有 `tool_use` 就执行，结果入了账就得回给模型）或落地消息 `tool_use` / `max_tokens` → 直接下一 turn（**先短路**：工具链的每一轮都不问下面两个钩）。`max_tokens` 先追加一条 harness 来源的 user 消息 [`MAX_TOKENS_CONTINUATION`](../../packages/core/src/loop/run-loop.ts#symbol=MAX_TOKENS_CONTINUATION)（从断点接着写、不要重复；截在工具调用里的那个调用参数不完整已被丢弃，重发并缩小参数），再吸收 steer，cause 记 `max_tokens`；其余记 `tool_use`（[决策](../decisions/implemented/2026-11-03-max-tokens-continuation.md)）。否则 `shouldStopAfterTurn` → 结束（`completed`）；`prepareNextTurn` 换装；turn 交出的 steer 有货 → 吸收、下一 turn（`steer`）；否则 settle，结束（`completed`）。turn 未落地 → 以 turn 的结果结束。
 - **关**：`reply_end{outcome, final, turns}`；`final` 是最后一条落地消息，未落地时为 `null`。
 
 ### 2.3 turn
 
 - **开**：冻结工作集（工具、已知名、hooks）→ [`openTurn`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate.openTurn) → `turn_start{cause}`。**一个 turn 只开一次**，重试不重开。
-- **attempt 循环**：落地 → 出循环；失败且 `error.retryable` 且 `attempt < maxAttempts` → `retry_scheduled` → 等待 → 下一个 attempt；失败且 `code === "context_overflow"` 且应急压缩成功 → 下一个 attempt（不发 `retry_scheduled`，压缩事件已说明原因）；其余失败 / block / abort → 出循环。**一个 turn 最多 `maxAttempts` 个 attempt，不分原因。** 退避受 run 的 signal 管：abort / deadline 一到就提前结束等待，不再发起 attempt，turn 以 `aborted` 收场（reply 据 deadline 折成 `error{timeout}`）。
-- **工具批**：只在落地后。响应里**连续的**可并行调用（工具自己声明 `concurrent`）切成一批同跑，碰到没标的就断批、它自己一批；批与批之间仍是顺序的。批内每个工具走各自的 [`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool)，`tool_execution_*` 交错、按 `toolCallId` 配对，**toolResult 入账按 tool_use 出现顺序**（不按完成顺序），授权询问批内串行。signal 中止：已起跑的那一批各自收 signal 结束、结果照样入账，**剩下的批不跑**。为什么是声明制、为什么询问要串行，见 [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)。
+- **attempt 循环**：落地 → 出循环；失败时 run 的 signal 已中止 → 不排重试、不发 `retry_scheduled`，turn 以 `aborted` 收场（provider 没认出中止、报成可重试错误时也是这样）；失败且 `error.retryable` 且 `attempt < maxAttempts` → `retry_scheduled` → 等待 → 下一个 attempt；失败且 `code === "context_overflow"` 且应急压缩成功 → 下一个 attempt（不发 `retry_scheduled`，压缩事件已说明原因）；其余失败 / block / abort → 出循环。**一个 turn 最多 `maxAttempts` 个 attempt，不分原因。** 等待时长 = max(`backoffMs(attempt)`, 服务端要求的 [`AgentError.retryAfterMs`](../../packages/core/src/errors.ts#symbol=AgentError)，后者封顶 [`MAX_SERVER_RETRY_DELAY_MS`](../../packages/core/src/loop/run-turn.ts#symbol=MAX_SERVER_RETRY_DELAY_MS) 60 s)，再经 `maxRetryDelayMs` 封顶。退避受 run 的 signal 管：abort / deadline 一到就提前结束等待，不再发起 attempt，turn 以 `aborted` 收场（reply 据 deadline 折成 `error{timeout}`）。
+- **工具批**：只在落地后。响应里**连续的**可并行调用（工具自己声明 `concurrent`）切成一批同跑，碰到没标的就断批、它自己一批；批与批之间仍是顺序的。批内每个工具走各自的 [`runOneTool`](../../packages/core/src/loop/run-turn.ts#symbol=runOneTool)，`tool_execution_*` 交错、按 `toolCallId` 配对，**toolResult 入账按 tool_use 出现顺序**（不按完成顺序），授权询问批内串行。signal 中止：已起跑的那一批各自收 signal 结束、结果照样入账，**剩下的批不跑**。批内某个调用没能交出结果（`runOneTool` 只在 emit / hook / intake 自身违约时抛）：同批其余交出了结果的**照样按序入账**，再补抛第一个违约、turn 由本层关成 failed——它们已经执行过，丢掉结果会让投影给它们补「没有结果」、模型把有副作用的工具再跑一遍；没入账的那个，投影补的说法是「没有结果入账、可能跑过」，不是「没执行」。为什么是声明制、为什么询问要串行，见 [并行工具](../decisions/implemented/2026-09-07-parallel-tools.md)。
 - **关**：`closeTurn` 交出 steer → `turn_end{result, toolResults}`。gate 的 turn 边界与事件的 turn 边界重合。
 
 ### 2.4 attempt
@@ -128,8 +128,8 @@ run-turn.ts
 | 谁 | 发什么事件 | 开关哪扇门 | 判什么 |
 |---|---|---|---|
 | `runLoop` | `agent_start / agent_end` | `closeRun` / `tryCloseRun` | reply 之间：`maxReplies`、followUp、stop hook |
-| `runReply` | `reply_start / reply_end`、输入与 steer 的 `message_end` | — | 硬闸、`maybeCompact`、空转闸、`tool_use` / `max_tokens` 短路、`shouldStopAfterTurn`、`prepareNextTurn`、下一 turn 的 cause |
-| `runTurn` | `turn_start / turn_end`、`retry_scheduled`、toolResult 的 `message_end`、`tool_execution_*` | `openTurn` / `closeTurn` | 重试预算、撞窗应急 |
+| `runReply` | `reply_start / reply_end`、输入、截断提示与 steer 的 `message_end` | — | 硬闸、`maybeCompact`、空转闸、执行了工具 / `tool_use` / `max_tokens` 短路、`shouldStopAfterTurn`、`prepareNextTurn`、下一 turn 的 cause |
+| `runTurn` | `turn_start / turn_end`、`retry_scheduled`、toolResult 的 `message_end`、`tool_execution_*` | `openTurn` / `closeTurn` | 重试预算、中止后不重试、服务端要求的等待、撞窗应急 |
 | `runAttempt` | `attempt_start / attempt_end`、assistant 的 `message_*`、`usage` | — | `contextBeforeBuild` 的 block |
 
 reply 内的继续判决归 [`runReply`](../../packages/core/src/loop/run-loop.ts#symbol=runReply)；context block 由 [`runAttempt`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt) 返回的 `AttemptResult.blocked`。压缩器仍由 `runLoop` 建一次，经 deps 传给下面两层。
@@ -176,6 +176,23 @@ agent_end{completed}
 
 **attempt 是唯一的重试单位。** dialect 只做协议翻译：一次请求、一条流、流断了就以 `error` 收场并标 `retryable`；它自己不重试，也没有 `retry` 一类的 provider 事件。压缩摘要器的模型调用（[`modelCallFor`](../../packages/core/src/compaction/pipeline.ts#symbol=modelCallFor)）不是 attempt，但同一份 `retryPolicy`、同一个受 signal 管的退避（[`loop/backoff.ts`](../../packages/core/src/loop/backoff.ts#symbol=sleep)）：retryable 错误重试到 `maxAttempts`，只发 hook 侧的 `modelCallFailed` / `retryScheduled`，不发 loop 事件（它不在任何 turn 里）。重试由 `runTurn` 按 `retryPolicy` 做：`retryable && attempt < maxAttempts` → `retry_scheduled` → `backoffMs(attempt)` → 下一个 attempt（完整重建，§2.4）。撞窗（`context_overflow`）→ 应急压缩一次 → 下一个 attempt；压不动 → `failed`。hook 侧 `modelCallFailed`（每次 `attempt_end{failed}`）与 `retryScheduled`（每次 `retry_scheduled`）由 `runTurn` 在同一位置 notify，attempt 计数与事件一致。
 
+**`retryable` 由方言标。** OpenAI 兼容方言（[`openAiDialect`](../../packages/core/src/provider/openai.ts#symbol=openAiDialect)）的归类：
+
+| 情形 | code | 可重试 |
+|---|---|---|
+| 401 / 403 | `auth` | 否 |
+| 408；流空闲超过 [`STREAM_IDLE_TIMEOUT_MS`](../../packages/core/src/provider/openai.ts#symbol=STREAM_IDLE_TIMEOUT_MS)（5 分钟没收到任何字节，[决策](../decisions/implemented/2026-11-03-stream-idle-timeout.md)） | `timeout` | 是 |
+| 429；流内 `error` 段的 code / type 是限流类 | `rate_limit` | 是 |
+| 5xx；流内 `error` 段是过载 / 5xx 类；finish_reason 是服务端推理异常（`network_error`、`error`） | `server` | 是 |
+| 连接失败；流在 finish_reason 与 `[DONE]` 之前断开 | `network` | 是 |
+| 413；400 且正文是明确的上下文超限说法（各家原文的短语表，不认裸的 context / length / token）；流内 `error` 段的 code 是上下文超限 | `context_overflow` | 否（走应急压缩） |
+| finish_reason 是内容过滤（`content_filter`、`sensitive`） | `protocol` | 否 |
+| 构造请求体失败（请求没发出去） | `internal` | 否 |
+| 外层 signal 已中止（调用方取消、run 超时） | `aborted` | 否 |
+| 其余 4xx、其余流内 `error` 段 | `protocol` | 否 |
+
+响应带了 `retry-after-ms` / `Retry-After`（秒或 HTTP 日期），429 还认 OpenAI 系的 `x-ratelimit-reset-*`，方言把它记进 `AgentError.retryAfterMs`，等多久见 §2.3。认不出的 finish_reason 仍按 `end_turn`；`stop` 却带着能执行的工具调用按 `tool_use` 交。
+
 **失败消息的去向。** 失败 attempt 的定稿（`stopReason: "error"`）与中止的半截回复（`stopReason: "aborted"`）都进 transcript 当事实；`convertToLlm` 投影时把 `stopReason` 为 `error | aborted` 的 assistant 消息整条丢掉——它们不是模型说完的话，不该作为上文送回去（范围从 `error` 扩到 `error | aborted` 的修订见[失败消息](../decisions/implemented/2026-09-05-failed-attempt-in-transcript.md)记录的 2026-09-07 一节）。
 
 **outcome 自内向外传，外层不发明内层没报的结果**：
@@ -184,7 +201,8 @@ agent_end{completed}
 |---|---|---|---|
 | landed | 跑工具 → `landed` | 判决：继续 / settle / 叫停 | — |
 | landed，但要工具却没有能跑的调用（§2.2 空转闸） | 跑工具 → `landed` | `error{protocol}` / `error{tool_not_found}` / `error{tool_bad_params}` | 同 reply |
-| failed，可重试且有预算 | 下一个 attempt | — | — |
+| failed，可重试且有预算，signal 未中止 | 下一个 attempt | — | — |
+| failed，signal 已中止 | `aborted`（不排重试） | `aborted{reason}` / `error{timeout}` | 同 reply |
 | failed，撞窗且应急成功 | 下一个 attempt | — | — |
 | failed（终） | `failed` | `error` | `error` |
 | blocked | `blocked` | `aborted{reason}` | `aborted{reason}` |
@@ -193,7 +211,7 @@ agent_end{completed}
 | — | — | 轮首硬闸：`aborted` / `error{max_iterations}` / `error{timeout}` | 同 reply |
 | — | — | — | reply 之间：达 `maxReplies` 且仍有待办 → `error{max_replies}` |
 
-**abort 的 reason 一路带到 outcome**（[决策](../decisions/implemented/2026-09-01-abort-reason.md)）：`Agent.abort(reason)` 把 reason 装进 `AbortSignal.reason`（[`AbortReason`](../../packages/core/src/errors.ts#symbol=AbortReason)——必须是 `AbortError` 形状的 `DOMException`，provider 靠 `name` 识别「被中止」，裸字符串会被当成别的错误），reply 在收场时从调用方 signal 取回，落在 `agent_end` 与 `LoopResult` 的 `{ kind: "aborted", reason }` 里。宿主传的 reason 是自由字符串原样透传；core 自己发起的中断用 [`ABORT_REASON`](../../packages/core/src/errors.ts#symbol=ABORT_REASON) 里的常量：`lease-lost`（丢锁）、`dispose`（收摊）。没给理由的裸 `abort()` 与 admission 的抢占 / 收摊仍是不带 reason 的 `{ kind: "aborted" }`；run 超时不是 aborted，是 `error{timeout}`。
+**abort 的 reason 一路带到 outcome**（[决策](../decisions/implemented/2026-09-01-abort-reason.md)）：`Agent.abort(reason)` 把 reason 装进 `AbortSignal.reason`（[`AbortReason`](../../packages/core/src/errors.ts#symbol=AbortReason)——必须是 `AbortError` 形状的 `DOMException`，provider 靠 `name` 识别「被中止」，裸字符串会被当成别的错误），reply 在收场时从调用方 signal 取回，落在 `agent_end` 与 `LoopResult` 的 `{ kind: "aborted", reason }` 里。宿主传的 reason 是自由字符串原样透传；core 自己发起的中断用 [`ABORT_REASON`](../../packages/core/src/errors.ts#symbol=ABORT_REASON) 里的常量：`lease-lost`（丢锁）、`dispose`（收摊）。没给理由的裸 `abort()` 与 admission 的抢占 / 收摊仍是不带 reason 的 `{ kind: "aborted" }`；run 超时不是 aborted，是 `error{timeout}`——deadline 的 signal 里装的是 `AbortReason(run-timeout)`，只为让轮内的等待（fetch、读流、授权）认出「被中止」而不是网络故障，它不进 outcome。
 
 ## 7. 使用边界
 
@@ -205,10 +223,10 @@ agent_end{completed}
 
 ## 8. 验证
 
-loop-layers 测试使用栈式校验器检查四层嵌套、输入入账位置、失败配对与重试计数；工具结果的入账顺序（按 tool_use 出现顺序，不按完成顺序）由 `packages/core/test/parallel-tools.test.ts` 守。覆盖正常文本、工具批、重试、block、abort、deadline、followUp、reply 预算与空转闸路径；其断言不扩展到任意第三方工具的副作用。
+loop-layers 测试使用栈式校验器检查四层嵌套、输入入账位置、失败配对与重试计数；工具结果的入账顺序（按 tool_use 出现顺序，不按完成顺序）由 `packages/core/test/parallel-tools.test.ts` 守。覆盖正常文本、工具批、重试、block、abort、deadline、followUp、reply 预算、空转闸、截断续写、执行了工具就续、中止后不重试与服务端要求的等待路径；批内违约时其余结果照样入账由 `parallel-tools.test.ts` 守；§6 的归类表由 `packages/core/test/openai.test.ts` 守。其断言不扩展到任意第三方工具的副作用。
 
 ```bash
-bun test packages/core/test/loop-layers.test.ts packages/core/test/invariants.test.ts packages/core/test/intake.test.ts packages/core/test/prompt.test.ts packages/core/test/compaction.test.ts
+bun test packages/core/test/loop-layers.test.ts packages/core/test/invariants.test.ts packages/core/test/intake.test.ts packages/core/test/prompt.test.ts packages/core/test/compaction.test.ts packages/core/test/parallel-tools.test.ts packages/core/test/openai.test.ts
 ```
 
 历史变更前后的探针见 [复核记录](../code-review/2026-09-15-doc-probes.md)。本文只维护当前事件契约，不保留旧实现对照表。

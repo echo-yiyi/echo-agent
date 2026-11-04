@@ -32,6 +32,13 @@ import type { Model, Provider, ProviderAuth, StreamOptions, ThinkingLevel } from
 
 export const OPENAI_COMPLETIONS_API = "openai-completions";
 
+/**
+ * 流空闲上限（毫秒）：等字节的那一段——等响应头、每一次读流——超过它就中止这次请求，归成可重试的 timeout
+ * （决策 docs/decisions/implemented/2026-11-03-stream-idle-timeout.md）。取 codex 的 stream idle timeout 缺省。
+ * 模块常量，不是选项；不进包的公共导出。
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 300_000;
+
 /** 思考通道的字段名。**顺序即优先级**，与 pi 的 `OPENAI_COMPLETIONS_REASONING_FIELDS` 同一份。 */
 const REASONING_FIELDS = ["reasoning_content", "reasoning", "reasoning_text"] as const;
 type ReasoningField = (typeof REASONING_FIELDS)[number];
@@ -87,21 +94,33 @@ export function openAiDialect(opts: OpenAiDialectOptions): Dialect {
     api: opts.api ?? OPENAI_COMPLETIONS_API,
 
     async *request(model: Model, context: Context, options?: StreamOptions): AsyncIterable<ProviderEvent> {
+      // 请求体在 fetch 之前成形：构造失败是本地的确定性错误（同样的输入每次都一样），不是传输故障——不可重试
+      let body: string;
+      try {
+        body = JSON.stringify(buildRequest(model, context, opts.alwaysSendReasoningField === true, options?.thinkingLevel));
+      } catch (e) {
+        yield { type: "error", error: agentError("provider", "internal", `构造请求体失败：${errText(e)}`, false) };
+        return;
+      }
+
+      const idle = new IdleWatch(STREAM_IDLE_TIMEOUT_MS, options?.signal);
       let res: Response;
       try {
-        res = await doFetch(url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(options?.apiKey !== undefined ? { authorization: `Bearer ${options.apiKey}` } : {}),
-            ...options?.headers,
-          },
-          body: JSON.stringify(buildRequest(model, context, opts.alwaysSendReasoningField === true, options?.thinkingLevel)),
-          ...(options?.signal !== undefined ? { signal: options.signal } : {}),
-        });
+        res = await idle.wait(
+          doFetch(url, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(options?.apiKey !== undefined ? { authorization: `Bearer ${options.apiKey}` } : {}),
+              ...options?.headers,
+            },
+            body,
+            signal: idle.signal,
+          }),
+        );
       } catch (e) {
         // 预期失败编码成 error 事件,不 throw(throw 只留给 bug)
-        yield { type: "error", error: classifyThrown(e) };
+        yield { type: "error", error: classifyThrown(e, options?.signal, idle) };
         return;
       }
 
@@ -119,7 +138,7 @@ export function openAiDialect(opts: OpenAiDialectOptions): Dialect {
       let sawDone = false;
 
       try {
-        for await (const data of sseLines(res.body)) {
+        for await (const data of sseLines(res.body, idle)) {
           if (data === "[DONE]") {
             sawDone = true;
             break;
@@ -132,14 +151,14 @@ export function openAiDialect(opts: OpenAiDialectOptions): Dialect {
             continue;
           }
           // 部分网关把错误塞在流里发
-          if (chunk.error !== undefined) {
-            yield { type: "error", error: agentError("provider", "protocol", chunk.error.message ?? "上游在流中报错", false) };
+          if (chunk.error != null) {
+            yield { type: "error", error: classifyStreamError(chunk.error) };
             return;
           }
           yield* turn.feed(chunk);
         }
       } catch (e) {
-        yield { type: "error", error: classifyThrown(e) };
+        yield { type: "error", error: classifyThrown(e, options?.signal, idle) };
         return;
       }
 
@@ -192,32 +211,35 @@ function isSameOrigin(origin: ThinkingBlock["origin"], model: Model): boolean {
   return origin.provider === model.provider && origin.api === model.api && origin.model === model.id;
 }
 
+/** 一条消息里多个 text 块拼成一个字符串时的分隔：块与块之间本来就隔着思考或工具调用，不能首尾相粘。 */
+const TEXT_BLOCK_SEPARATOR = "\n\n";
+
+/** 不收图的模型上，一张用户贴图换成的那句话（模型面，英文）。 */
+const USER_IMAGE_OMITTED = "[image omitted: model does not accept image input]";
+
 function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningField: boolean): Record<string, unknown>[] {
   if (m.role === "assistant") {
-    let text = "";
+    const texts: string[] = [];
     const toolCalls: Record<string, unknown>[] = [];
     // 思考按**来源字段**分组回传：同一轮里理论上只有一个字段，但分组比假设更稳
     const reasoning = new Map<ReasoningField, string[]>();
     for (const b of m.content) {
-      if (b.type === "text") text += b.text;
-      else if (b.type === "thinking") {
+      if (b.type === "text") {
+        if (b.text !== "") texts.push(b.text);
+      } else if (b.type === "thinking") {
         // **回放要两个条件同时成立**（review 三轮 P1 + 四轮 P1）：
         //   ① **同源**——`signature` 是 provider 不透明数据，只对同 provider + 同 api + 同 model 有意义。
         //      跨源回放实测会把上一家的 `reasoning_content` 原样发给下一家（DeepSeek/GLM 的历史切到
         //      gpt-4.1 就是这样），轻则 400，重则违反签名不得跨家使用的契约。判据照 pi 的
         //      `transform-messages.ts`：三元组全等才算同源。
-        //   ② **有合法签名**——上一版只判 ①，同源而没签名时**兜底成 `reasoning_content`**，
-        //      于是「未收口就报错」留下的半截思考（那时签名还没到）会在下一次同模型调用里被发出去，
-        //      与本文件自己写的「没签名 ⇒ 不可回放」正好相反（review 四轮实测复现）。
-        //      **兜底字段名这件事本身就是错的**：不知道该写回哪个字段，就说明它不是可回放数据。
+        //   ② **有合法签名**——同源而没签名（「未收口就报错」留下的半截思考，签名还没到）不知道该写回哪个字段，
+        //      就说明它不是可回放数据；兜底成某个字段名等于把半截思考发出去。
         // 两个条件写在**同一个** if 里而不是先存进 `const replayable`：
         // `isReasoningField` 是类型守卫，存成布尔值之后 TS 的窄化就丢了，
         // 下面那行 `const field = b.signature` 会退回 `string | undefined`（tsc 当场判红）。
         if (!isSameOrigin(b.origin, model) || !isReasoningField(b.signature)) {
-          // 不可回放就降级，分两种：
-          //  · `redacted`：正文本来就没有、只剩签名——**直接丢弃**，它对别家一个字节的意义都没有；
-          //  · 普通思考：**降级成正文**（保留内容给下一家当上下文），但**不带签名回传**。
-          if (b.redacted !== true && b.thinking !== "") text += b.thinking;
+          // 不可回放就**丢掉**，也不并进正文（与 pi 的 `transform-messages.ts` 同一取舍）：
+          // 可读的思考当正文发过去，下一家会把它当成自己说过的可见回复，往下接着「想出声」。
           continue;
         }
         const field = b.signature;
@@ -228,6 +250,9 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
         toolCalls.push({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } });
       }
     }
+    // 什么都不剩（只有被丢掉的思考）：整条不发——`content: null` 又没有 `tool_calls` 的 assistant 消息各家会拒
+    if (texts.length === 0 && toolCalls.length === 0 && reasoning.size === 0) return [];
+    const text = texts.join(TEXT_BLOCK_SEPARATOR);
     const out: Record<string, unknown> = { role: "assistant", content: text === "" ? null : text };
     // **原样带回上一轮的思考**：Z.AI Coding Plan、MiniMax M2.x 这类开着 preserved thinking 的家，
     // 工具结果回来时缺了它，服务端的 tool loop 就不闭合（2026-08-28 review P0 的根因）。
@@ -244,13 +269,14 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
   // user:tool_result 块 → role:"tool" 消息(OpenAI 的格式);其余合成一条 user
   const out: Record<string, unknown>[] = [];
   const parts: Record<string, unknown>[] = [];
-  // 目录说这款不收图就本地 fail-loud，不把 image_url 发出去等服务端 400（review 2026-09-07：`vision` 此前无人读）
-  const imagePart = (img: { mimeType: string; data: string }): Record<string, unknown> => {
-    if (model.capabilities?.vision !== true) {
-      throw new Error(`Model '${model.provider}/${model.id}' does not accept image input (capabilities.vision is not true)`);
-    }
-    return { type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.data}` } };
-  };
+  // **目录说这款不收图，图就省掉、换一句话告诉模型，不抛**——用户贴的、工具带回的同一做法。
+  // 抛不得：图进来的那一刻已经入账（用户输入在调模型之前就 message_end 落盘了），之后每次请求都带着它，
+  // 抛一次就每次都抛，换个不收图的模型会话就卡死，压缩摘要走同一方言也一样。
+  const vision = model.capabilities?.vision === true;
+  const imagePart = (img: { mimeType: string; data: string }): Record<string, unknown> => ({
+    type: "image_url",
+    image_url: { url: `data:${img.mimeType};base64,${img.data}` },
+  });
   for (const b of m.content) {
     if (b.type === "tool_result") {
       out.push({
@@ -261,11 +287,9 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
       });
       // 工具带回的图（`ProviderToolResultBlock.images`）：OpenAI 的 role:"tool" 只收文本，图走紧随其后的那条 user 消息，
       // 编码与用户贴图同一条路，并标一句它来自哪次调用（2026-09-09 拍板接上；此前静默丢弃）。
-      // 目录说这款不收图时**不抛、只省略并告诉模型**：这里抛会被归成可重试的 provider 错误，而带图的 tool_result 已经入账，
-      // 之后每次请求都同样炸、直到压缩把图清掉（review 2026-09-09 复现）。用户贴图仍然本地抛——那条没入账，改一下就能重发。
       if (b.images !== undefined && b.images.length > 0) {
         const noun = `${b.images.length} image${b.images.length === 1 ? "" : "s"} returned by tool call ${b.tool_use_id}`;
-        if (model.capabilities?.vision !== true) {
+        if (!vision) {
           parts.push({ type: "text", text: `[${noun} omitted: model does not accept image input]` });
         } else {
           parts.push({ type: "text", text: `[${noun}]` });
@@ -275,12 +299,12 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
     } else if (b.type === "text") {
       parts.push({ type: "text", text: b.text });
     } else if (b.type === "image") {
-      parts.push(imagePart(b));
+      parts.push(vision ? imagePart(b) : { type: "text", text: USER_IMAGE_OMITTED });
     }
   }
   if (parts.length > 0) {
     const textOnly = parts.every((p) => p.type === "text");
-    out.push({ role: "user", content: textOnly ? parts.map((p) => p.text as string).join("") : parts });
+    out.push({ role: "user", content: textOnly ? parts.map((p) => p.text as string).join(TEXT_BLOCK_SEPARATOR) : parts });
   }
   return out;
 }
@@ -304,17 +328,24 @@ type OpenAiChunk = {
       tool_calls?: { index?: number | null; id?: string | null; function?: { name?: string | null; arguments?: string | null } | null }[];
     };
     finish_reason?: string | null;
+    /** Kimi（moonshot）把 usage 报在这里，不在顶层。 */
+    usage?: OpenAiUsage | null;
   }[];
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    /** OpenAI 系：缓存命中的输入。 */
-    prompt_tokens_details?: { cached_tokens?: number } | null;
-    /** DeepSeek：缓存命中的输入（miss 那半就是普通输入，不另记）。 */
-    prompt_cache_hit_tokens?: number;
-  } | null;
-  error?: { message?: string };
+  usage?: OpenAiUsage | null;
+  /** 网关在流里发的错误。形状各家不一：`code` 可能是字符串（`rate_limit_exceeded`）也可能是 HTTP 状态数（`429`）。 */
+  error?: OpenAiStreamError | null;
 };
+
+type OpenAiUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  /** OpenAI 系：缓存命中的输入。 */
+  prompt_tokens_details?: { cached_tokens?: number } | null;
+  /** DeepSeek：缓存命中的输入（miss 那半就是普通输入，不另记）。 */
+  prompt_cache_hit_tokens?: number;
+};
+
+type OpenAiStreamError = { message?: string | null; type?: string | null; code?: string | number | null };
 
 /**
  * 一轮响应的状态机 + 定稿累积。
@@ -341,6 +372,8 @@ class Turn {
   private pendingWarnings: ProviderEvent[] = [];
   private usage: Usage | null = null;
   private stop: StopReason = "end_turn";
+  /** finish_reason 说这一轮不是正常收尾（内容过滤、服务端推理异常）：`finish` 交这个错误，不交定稿。 */
+  private stopError: AgentError | null = null;
   /** 上游报过 finish_reason：内容已经完整，之后即便没等到 `[DONE]` 也算正常收尾。 */
   finished = false;
 
@@ -402,15 +435,18 @@ class Turn {
       this.lastCall = call;
     }
     if (choice?.finish_reason != null) {
-      this.stop = mapStop(choice.finish_reason);
+      const mapped = mapStop(choice.finish_reason);
+      if (typeof mapped === "string") this.stop = mapped;
+      else this.stopError = mapped.error;
       this.finished = true;
     }
-    if (chunk.usage != null) {
+    const usage = chunk.usage ?? choice?.usage; // 顶层没有再看 choice 里（Kimi）
+    if (usage != null) {
       // 缓存命中：两种上报形状择一（OpenAI 系 / DeepSeek）。没报就不带字段——不冒充报了账。
-      const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? chunk.usage.prompt_cache_hit_tokens;
+      const cached = usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens;
       this.usage = {
-        inputTokens: chunk.usage.prompt_tokens ?? 0,
-        outputTokens: chunk.usage.completion_tokens ?? 0,
+        inputTokens: usage.prompt_tokens ?? 0,
+        outputTokens: usage.completion_tokens ?? 0,
         ...(typeof cached === "number" ? { cachedInputTokens: cached } : {}),
       };
     }
@@ -422,6 +458,11 @@ class Turn {
    */
   *finish(): Generator<ProviderEvent> {
     yield* this.close();
+    // 上游以异常原因收尾：已流出的正文由壳留进失败消息，工具调用不交出去（这一轮不算数，不该执行）
+    if (this.stopError !== null) {
+      yield { type: "error", error: this.stopError };
+      return;
+    }
     for (const call of this.calls) {
       const parsed = call.name === "" ? null : parseArgs(call.args);
       if (parsed === null) {
@@ -439,6 +480,9 @@ class Turn {
       this.blocks.push({ type: "tool_use", id: call.id, name: call.name, input: parsed });
     }
     yield* this.takeWarnings();
+    // 有能执行的工具调用、上游却说 stop：照 tool_use 交（pi 同样兜底）。工具一定会被执行，
+    // 交 end_turn 的话结果入了账却不回给模型，这条 reply 以 completed 收场、模型从没看到结果。
+    if (this.stop === "end_turn" && this.blocks.some((b) => b.type === "tool_use")) this.stop = "tool_use";
     // 上游说「要调工具」（finish_reason: tool_calls），却一个能执行的调用都没有（参数全不可解析、或压根没发）：
     // 不能当成 tool_use 交出去——循环会拿着一条空的助手消息再来一轮，模型再要、再丢，空转到迭代上限，用户始终看不到回复。
     // 当成可重试的协议错误：重试大概率拿到完整的调用；重试用完就把错误交给用户。
@@ -496,10 +540,28 @@ class Turn {
   }
 }
 
-function mapStop(reason: string): StopReason {
-  if (reason === "tool_calls") return "tool_use";
-  if (reason === "length") return "max_tokens";
-  return "end_turn"; // "stop" 与其余未知值
+/**
+ * finish_reason → 收尾方式。异常原因不当正常结束（映射照 pi 的 `mapStopReason`）：
+ *   · 内容过滤类（`content_filter`；GLM 的 `sensitive`）→ 不可重试的错误——同样的输入多半还会被拦；
+ *   · 服务端推理异常类（GLM 的 `network_error`；OpenRouter 的 `error`）→ 可重试的 server 错误。
+ * 认不出的值仍按 `end_turn`：新出现的「正常收尾」叫法比新出现的故障常见，判成错误会把能用的回复丢掉。
+ */
+function mapStop(reason: string): StopReason | { error: AgentError } {
+  switch (reason) {
+    case "tool_calls":
+    case "function_call":
+      return "tool_use";
+    case "length":
+      return "max_tokens";
+    case "content_filter":
+    case "sensitive":
+      return { error: agentError("provider", "protocol", `上游以 finish_reason: ${reason} 收尾：输出被内容安全过滤拦下`, false) };
+    case "network_error":
+    case "error":
+      return { error: agentError("provider", "server", `上游以 finish_reason: ${reason} 收尾：服务端推理异常`, true) };
+    default:
+      return "end_turn"; // "stop"、"end" 与其余未知值
+  }
 }
 
 function parseArgs(raw: string): Record<string, unknown> | null {
@@ -515,13 +577,13 @@ function parseArgs(raw: string): Record<string, unknown> | null {
 
 /* ─────────────── SSE 解析(逐行,跨 chunk 缓冲) ─────────────── */
 
-async function* sseLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* sseLines(body: ReadableStream<Uint8Array>, idle: IdleWatch): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await idle.wait(reader.read());
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       let nl: number;
@@ -534,28 +596,175 @@ async function* sseLines(body: ReadableStream<Uint8Array>): AsyncGenerator<strin
     const tail = buf.trimEnd();
     if (tail.startsWith("data:")) yield tail.slice(5).trim();
   } finally {
+    // 被掐掉（空闲到点 / 外层中止）时挂着的那次 read 还没回来：先 cancel 让它收场、放掉连接，再解锁
+    if (idle.signal.aborted) await reader.cancel(idle.signal.reason).catch(() => {});
     reader.releaseLock();
+  }
+}
+
+/**
+ * 一次请求的空闲计时（`STREAM_IDLE_TIMEOUT_MS`）。**只在等字节的时候计**——等响应头、每一次 `read()`：
+ * 消费方处理事件（emit、渲染）花的时间不算，否则慢的订阅者会让一条好好的流被当成空闲掐掉。
+ * 到点就 abort 自己的 controller；`signal` 是它与外层 signal 的合并，交给 fetch，也是 `wait` 赛跑的对手——
+ * 假的或不认 signal 的 body 也掐得断。
+ */
+class IdleWatch {
+  private readonly own = new AbortController();
+  readonly signal: AbortSignal;
+
+  constructor(
+    private readonly ms: number,
+    outer: AbortSignal | undefined,
+  ) {
+    this.signal = outer === undefined ? this.own.signal : AbortSignal.any([outer, this.own.signal]);
+  }
+
+  /** 空闲计时到点过（与外层中止区分：外层中止归 aborted，这个归可重试的 timeout）。 */
+  get fired(): boolean {
+    return this.own.signal.aborted;
+  }
+
+  /** 等 `p`，最多等 `ms`；合并的 signal 先到就以它的 reason 拒绝。 */
+  wait<T>(p: Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        reject(this.signal.reason);
+      };
+      const timer = setTimeout(() => this.own.abort(new DOMException("stream idle timeout", "TimeoutError")), this.ms);
+      if (this.signal.aborted) onAbort();
+      else this.signal.addEventListener("abort", onAbort, { once: true });
+      // 输掉赛跑之后 p 的结局也要有人接（晚到的 rejection 不能变成 unhandled），所以总是挂两个处理
+      p.then(
+        (v) => {
+          clearTimeout(timer);
+          this.signal.removeEventListener("abort", onAbort);
+          resolve(v);
+        },
+        (e: unknown) => {
+          clearTimeout(timer);
+          this.signal.removeEventListener("abort", onAbort);
+          reject(e);
+        },
+      );
+    });
   }
 }
 
 /* ─────────────── 错误归类 ─────────────── */
 
+/**
+ * 明确的「上下文超限」说法（照 pi 的 `utils/overflow.ts` 收集的各家原文，只留 OpenAI 兼容生态里会遇到的）。
+ * **只认这些短语**：裸的 context / length / token 会把「string too long」「max_tokens is too large」这类参数错误
+ * 当成撞窗，触发一次白压缩还照样失败。
+ */
+const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
+  /prompt (?:is )?too long/i, // Anthropic 系、z.ai
+  /prompt exceeds max length/i, // z.ai 国内站（code 1261）
+  /exceeds the context window/i, // OpenAI
+  /maximum context length/i, // OpenAI 兼容网关、DeepSeek、OpenRouter、Mistral
+  /context[_ ]length[_ ]exceeded/i, // OpenAI 的错误码、通用说法
+  /context window exceed/i, // MiniMax（exceeds limit）、LiteLLM（exceeded）
+  /exceeded model token limit/i, // Kimi
+  /model_context_window_exceeded/i, // z.ai
+  /maximum prompt length is \d+/i, // xAI
+  /reduce the length of the messages/i, // Groq
+  /exceeds (?:the )?maximum allowed input length/i, // OpenRouter
+  /is longer than the model'?s context length/i, // Together
+  /exceeds the available context size/i, // llama.cpp
+  /greater than the context length/i, // LM Studio
+  /range of input length should be/i, // DashScope / Qwen
+];
+
+/** 限流的说法偶尔也带 token 字样（「too many tokens per minute」），先排除。 */
+const NOT_OVERFLOW = /rate.?limit|too many requests/i;
+
+function isContextOverflowText(text: string): boolean {
+  return !NOT_OVERFLOW.test(text) && CONTEXT_OVERFLOW_PATTERNS.some((p) => p.test(text));
+}
+
 async function classifyHttp(res: Response): Promise<AgentError> {
   const text = await res.text().catch(() => "");
   const msg = `HTTP ${res.status}:${text.slice(0, 500)}`;
+  const waitHint = (e: AgentError): AgentError => {
+    const ms = retryAfterMs(res.headers, res.status === 429);
+    return ms === undefined ? e : { ...e, retryAfterMs: ms };
+  };
   if (res.status === 401 || res.status === 403) return agentError("provider", "auth", msg, false);
-  if (res.status === 429) return agentError("provider", "rate_limit", msg);
-  if (res.status >= 500) return agentError("provider", "server", msg);
-  if (res.status === 400 && /context|length|token/i.test(text)) return agentError("provider", "context_overflow", msg, false);
+  if (res.status === 408) return waitHint(agentError("provider", "timeout", msg));
+  // 413：请求体太大，与上下文超限同一种处理——应急压缩一次再来
+  if (res.status === 413) return agentError("provider", "context_overflow", msg, false);
+  if (res.status === 429) return waitHint(agentError("provider", "rate_limit", msg));
+  if (res.status >= 500) return waitHint(agentError("provider", "server", msg));
+  if (res.status === 400 && isContextOverflowText(text)) return agentError("provider", "context_overflow", msg, false);
   return agentError("provider", "protocol", msg, false);
 }
 
-function classifyThrown(e: unknown): AgentError {
-  if (isAbort(e)) return agentError("provider", "aborted", "请求被中止", false);
-  // fetch 的连接失败是 TypeError——「再试一次可能就好了」
+/**
+ * 服务端要求的等待（毫秒）。按优先级：`retry-after-ms`（OpenAI 系）、`retry-after`（秒数或 HTTP 日期）；
+ * 都没有且是 429 时，取 OpenAI 系限流 reset 头（`x-ratelimit-reset-requests` / `-tokens`，形如 `1s`、`6m0s`、`20ms`）里较晚的那个。
+ * 认不出或已过期返回 undefined——不编一个等待时长。封顶归 loop。
+ */
+function retryAfterMs(headers: Headers, rateLimited: boolean): number | undefined {
+  const ms = headers.get("retry-after-ms");
+  if (ms !== null && /^\s*\d+(?:\.\d+)?\s*$/.test(ms)) return positive(Number.parseFloat(ms));
+  const after = headers.get("retry-after");
+  if (after !== null) {
+    if (/^\s*\d+(?:\.\d+)?\s*$/.test(after)) return positive(Number.parseFloat(after) * 1000);
+    const at = Date.parse(after);
+    if (!Number.isNaN(at)) return positive(at - Date.now());
+  }
+  if (!rateLimited) return undefined;
+  const resets = ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]
+    .map((h) => headers.get(h))
+    .map((v) => (v === null ? undefined : durationMs(v)))
+    .filter((v): v is number => v !== undefined);
+  return resets.length === 0 ? undefined : positive(Math.max(...resets));
+}
+
+const positive = (ms: number): number | undefined => (Number.isFinite(ms) && ms > 0 ? Math.ceil(ms) : undefined);
+
+/** `1h2m3.5s`、`6m0s`、`20ms` 这类时长串 → 毫秒；不是这个形状返回 undefined。 */
+function durationMs(s: string): number | undefined {
+  const text = s.trim();
+  if (!/^(?:\d+(?:\.\d+)?(?:ms|h|m|s))+$/.test(text)) return undefined;
+  const unit = { h: 3_600_000, m: 60_000, s: 1000, ms: 1 } as const;
+  let total = 0;
+  for (const [, n, u] of text.matchAll(/(\d+(?:\.\d+)?)(ms|h|m|s)/g)) total += Number.parseFloat(n!) * unit[u as keyof typeof unit];
+  return total;
+}
+
+/**
+ * 流里的 `error` 段：按 `code` / `type` 分。限流、过载、5xx 类可重试；上下文超限是撞窗；其余是不可重试的协议错误。
+ * 不看 `message` 的措辞猜可不可重试——那是给人看的，各家写法不一。
+ */
+function classifyStreamError(err: OpenAiStreamError): AgentError {
+  const msg = err.message ?? "上游在流中报错";
+  const tag = `${err.type ?? ""} ${typeof err.code === "string" ? err.code : ""}`;
+  const status = typeof err.code === "number" ? err.code : undefined;
+  if (isContextOverflowText(tag)) return agentError("provider", "context_overflow", msg, false);
+  if (status === 429 || /rate.?limit|too.?many.?requests/i.test(tag)) return agentError("provider", "rate_limit", msg);
+  if (status === 408) return agentError("provider", "timeout", msg);
+  if ((status !== undefined && status >= 500) || /overload|server.?error|server.?busy|unavailable|internal.?error/i.test(tag)) {
+    return agentError("provider", "server", msg);
+  }
+  return agentError("provider", "protocol", msg, false);
+}
+
+/**
+ * fetch / 读流抛出的归类。**先看 signal，不看异常长什么样**：被中止时各运行时拒绝的值不一
+ * （`signal.reason` 原样、或包一层 AbortError），按异常类型猜会把中止当成网络故障去重试。
+ *   · 外层 signal 中止了 → aborted（调用方取消、run 超时都走这条，后者由 loop 折成 `error{timeout}`）；
+ *   · 只是空闲计时到点 → 可重试的 timeout（连接当作已断）；
+ *   · 其余 → network，可重试（fetch 的连接失败是 TypeError——「再试一次可能就好了」）。
+ */
+function classifyThrown(e: unknown, outer?: AbortSignal, idle?: IdleWatch): AgentError {
+  if (outer?.aborted === true || isAbort(e)) return agentError("provider", "aborted", "请求被中止", false);
+  if (idle?.fired === true) return agentError("provider", "timeout", `流空闲 ${STREAM_IDLE_TIMEOUT_MS / 1000}s 没有收到任何数据，已中止这次请求`);
   return agentError("provider", "network", errText(e));
 }
 
+/** AbortError 形状的中止（含 `AbortReason`）。 */
 function isAbort(e: unknown): boolean {
   return e instanceof DOMException && e.name === "AbortError";
 }

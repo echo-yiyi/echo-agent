@@ -13,7 +13,7 @@
 //
 // 预算两把：maxIterations 是每条 reply 的 turn 上限，maxReplies 是每个 run 的 reply 上限；timeoutMs 是可选的墙钟，不承担总闸。
 
-import { abortReasonOf, agentError, errText } from "../errors.ts";
+import { ABORT_REASON, AbortReason, abortReasonOf, agentError, errText } from "../errors.ts";
 import type { AgentOutcome } from "../events.ts";
 import { userMessage, type AgentMessage, type AssistantMessage } from "../messages.ts";
 import { createCompactor } from "../compaction/pipeline.ts";
@@ -28,6 +28,16 @@ const MAX_STOP_CONTINUATIONS = 3;
 
 /** 一条 reply 里连续几轮工具调用全部无效就停下（reply 的 ⓪ 空转闸，`TurnResult.invalidToolCalls`）。 */
 export const INVALID_TOOL_TURNS_LIMIT = 3;
+
+/**
+ * 输出在 `max_tokens` 处被截断后、续轮之前追加的那条 harness 消息（模型面，英文；
+ * 决策 docs/decisions/implemented/2026-11-03-max-tokens-continuation.md）。
+ * 截在工具调用里时，那个调用参数不完整、已被方言丢掉，模型看不到任何结果——所以要明说重发、并把参数缩小。
+ */
+export const MAX_TOKENS_CONTINUATION =
+  "Your previous response hit the output token limit and was cut off. Continue exactly where it stopped, without repeating anything you already wrote. " +
+  "If it was cut off inside a tool call, that call was discarded because its arguments were incomplete: issue it again with smaller arguments " +
+  "(for example, split one large write into several smaller calls).";
 
 type ReplyInput = { source: ReplySource; input: readonly AgentMessage[] };
 
@@ -67,9 +77,10 @@ export async function runLoop(deps: LoopDeps, first: ReplyInput): Promise<LoopRe
   // **run deadline 是一个 signal，不只是轮首的一次比较。** 轮首那道闸管不到正在 turn 里等的东西——
   // 等人授权的 ask、卡住的 authorizer——`timeoutMs:10` 配上不超时的 ask，run 会永远回不到轮首（实测）。
   // 所以把 deadline 做成 AbortSignal，与调用方的 signal 合并后交给每一轮：轮内一切等待都受同一个 signal 控制。
+  // reason 是 `AbortReason`：fetch 以它拒绝，provider 才认得出「被中止」，而不是当成网络故障去重试。
   const deadline = config.timeoutMs !== undefined ? new AbortController() : undefined;
   const deadlineTimer =
-    deadline !== undefined ? setTimeout(() => deadline.abort(new Error(`run 超时 ${config.timeoutMs}ms`)), config.timeoutMs) : undefined;
+    deadline !== undefined ? setTimeout(() => deadline.abort(new AbortReason(ABORT_REASON.runTimeout)), config.timeoutMs) : undefined;
   const merged = deadline !== undefined ? AbortSignal.any([signal, deadline.signal]) : signal;
   const runDeps: RunDeps = {
     ...deps,
@@ -237,7 +248,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
         outcome = { kind: "error", error: agentError("provider", "protocol", "模型说要调用工具（stopReason: tool_use），消息里却一个工具调用都没有", false) };
         break;
       }
-      if (stop === "tool_use" && turn.invalidToolCalls.length === turn.toolResults.length) {
+      if (turn.toolResults.length > 0 && turn.invalidToolCalls.length === turn.toolResults.length) {
         invalidStreak.turns += 1;
         invalidStreak.onlyNotFound &&= turn.invalidToolCalls.every((c) => c === "not_found");
       } else {
@@ -251,11 +262,14 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
         break;
       }
 
-      /* ① 模型还要工具 / ①b 输出被截断（截断不是失败，让模型接着写）→ 继续。
-         本 turn 交出的 steer 一并并入——「跑的中途插话 → 下一圈开头」 */
-      if (stop === "tool_use" || stop === "max_tokens") {
+      /* ① 这一轮执行了工具（不论 stopReason——与 run-turn 执行工具的判据同一条：落地消息里有 tool_use 就执行）/
+         模型还要工具 / ①b 输出被截断（截断不是失败，让模型接着写）→ 继续。结果入了账就得回给模型，否则它从没看到。
+         截断先追加一条 harness 提示，说清楚接着写、截在工具调用里就重发；本 turn 交出的 steer 排在它后面一并并入
+         ——「跑的中途插话 → 下一圈开头」，后到的话说了算 */
+      if (turn.toolResults.length > 0 || stop === "tool_use" || stop === "max_tokens") {
+        if (stop === "max_tokens") await absorb(context, [userMessage(MAX_TOKENS_CONTINUATION, "harness")], emit, probe);
         await absorb(context, turn.steers, emit, probe);
-        cause = stop;
+        cause = stop === "max_tokens" ? "max_tokens" : "tool_use";
         continue;
       }
 

@@ -36,7 +36,10 @@ export type Emit = (event: AgentEventInput) => Promise<void>;
 /** 这条 reply 在回应谁：prompt / followUp / stop hook 注入之一，或从 transcript 续跑（没有新输入）。 */
 export type ReplySource = "prompt" | "follow_up" | "stop_hook" | "resume";
 
-/** 为什么开这一 turn：`input` 是 reply 的第一轮；其余三个是「上一轮没干完」。 */
+/**
+ * 为什么开这一 turn：`input` 是 reply 的第一轮；其余三个是「上一轮没干完」——`tool_use` 是上一轮执行了工具
+ * （不论它的 stopReason），`max_tokens` 是上一轮输出被截断（截断那轮也执行了工具时仍记 `max_tokens`）。
+ */
 export type TurnCause = "input" | "tool_use" | "max_tokens" | "steer";
 
 /**
@@ -154,8 +157,8 @@ export interface AgentLoopConfig {
   resolveTool: (name: string) => ToolResolution;
 
   /* ── 轮末的决策钩（turn_end 之后、下一次模型调用之前），契约均为绝不抛。`iteration` 是该 turn 在它的 reply 里的序号。
-     **stopReason 是 tool_use / max_tokens 的 turn 不问它们**：工具链的每一轮先短路、直接下一 turn（run-loop-layers.md §2.2），
-     `shouldStopAfterTurn` 只在落地消息是 end_turn 之后才有发言权 ── */
+     **执行了工具、或 stopReason 是 tool_use / max_tokens 的 turn 不问它们**：工具链的每一轮先短路、直接下一 turn
+     （run-loop-layers.md §2.2），`shouldStopAfterTurn` 只在落地消息是 end_turn 且没有执行工具之后才有发言权 ── */
   shouldStopAfterTurn?: (ctx: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
   prepareNextTurn?: (
     ctx: PrepareNextTurnContext,

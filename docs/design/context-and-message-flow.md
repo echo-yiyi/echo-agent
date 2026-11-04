@@ -84,7 +84,7 @@ toolResult 与 environment 在账本中保留独立角色，provider 的角色�
 
 ### 2.2 消息来源与入站通道
 
-`UserMessage.source` 只有 `human | steer | harness`，见 [`UserMessage`](../../packages/core/src/messages.ts#symbol=UserMessage)。`Agent.followUp("next")` 用 `userMessage(..., "human")` 建消息，见 [`Agent.followUp()`](../../packages/core/src/agent.ts#symbol=Agent.followUp)；之后 `userPromptSubmit` hook 单独收到 `source: "followUp"`，但 admission 不会修正消息本身。
+`UserMessage.source` 只有 `human | steer | harness`，见 [`UserMessage`](../../packages/core/src/messages.ts#symbol=UserMessage)。core 自己放进来的记 `harness`，例如 stop hook 的注入、压缩摘要，以及输出在 `max_tokens` 截断后、续轮前的那条续写提示（[Run Loop](run-loop-layers.md) §2.2）。`Agent.followUp("next")` 用 `userMessage(..., "human")` 建消息，见 [`Agent.followUp()`](../../packages/core/src/agent.ts#symbol=Agent.followUp)；之后 `userPromptSubmit` hook 单独收到 `source: "followUp"`，但 admission 不会修正消息本身。
 
 来源字段当前不能单独区分初始 prompt 和 followUp；后者的入站通道另在 hook 中表达。使用它做 UI 或评测归因时，应先区分内容作者与入站通道，不把 hook 的来源枚举当成消息的来源枚举。
 
@@ -131,9 +131,11 @@ readonly 是类型约束，不是运行时隔离。调用方修改原消息，�
 - 合并相邻的纯 tool-result provider messages；
 - 对未知自定义 role、空 assistant 和失败的 assistant 消息不生成 provider 消息。
 
-实现见 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。它每个 attempt 从 working context 重算，产物不持久化；provider 方言和模型切换通过投影处理。
+实现见 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。它每个 attempt 从 working context 重算，产物不持久化；provider 方言和模型切换通过投影处理。落单的 `tool_use`（没有配对结果入账的）补一条 error 结果，说法是「没有结果入账、可能跑过」——不说「没执行」：同批别的调用违约时，跑完了却没交出结果的也落在这里。
 
-**图片**是 base64 内联的 `ImageBlock`，可以出现在用户消息里，也可以挂在 `toolResult.images` 上。产生图片的入口都走 [`imageFromBytes()`](../../packages/core/src/image.ts#symbol=imageFromBytes)：按魔数认 PNG / JPEG / GIF / WebP、从文件头读宽高，超过 5 MB 或长边 8 000 像素就拒，交调用方缩放（`@echo-agent/base` 的 `loadImageFile` 借 `sips` / ImageMagick 把长边缩到 1 568）。目录没标 `vision` 的模型：用户贴图在方言里本地报错，工具带回的图换成一句文字说明（见 `provider/openai.ts`）。
+方言再翻一道（OpenAI 兼容方言见 `provider/openai.ts`）：思考块只回放给产它的那个模型（provider + api + model 全等、且带合法签名），别家的或没标来源的**直接丢掉、不并进正文**——可读的思考当正文发过去，下一家会把它当成自己说过的可见回复；丢完什么都不剩的 assistant 消息整条不发。同一条消息里的多个 text 块以空行隔开拼成一个字符串。
+
+**图片**是 base64 内联的 `ImageBlock`，可以出现在用户消息里，也可以挂在 `toolResult.images` 上。产生图片的入口都走 [`imageFromBytes()`](../../packages/core/src/image.ts#symbol=imageFromBytes)：按魔数认 PNG / JPEG / GIF / WebP、从文件头读宽高，超过 5 MB 或长边 8 000 像素就拒，交调用方缩放（`@echo-agent/base` 的 `loadImageFile` 借 `sips` / ImageMagick 把长边缩到 1 568）。目录没标 `vision` 的模型：用户贴的图与工具带回的图都换成一句文字说明、请求照发（见 `provider/openai.ts`）——图在调模型之前就已入账落盘，方言里抛错会让之后每次请求都失败，换到不收图的模型会话就卡死（[修订](../decisions/implemented/2026-09-09-tool-result-images.md#2026-11-03-修订用户贴图也不抛)）。
 
 但“投影绝不回写”当前只对缺省实现自己的代码成立，不对可替换的 `Agent.convertToLlm` 成立。它收到的仍是与 transcript 共享嵌套对象的数组。正式契约应把输入定义为不可变 working copy，并把返回值验到 provider context 所需的最小形状；否则第三方 converter 可以同时破坏账本并产出坏线上协议。
 

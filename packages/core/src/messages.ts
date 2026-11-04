@@ -327,10 +327,11 @@ function projectOne(m: AgentMessage): ProviderMessage | null {
 }
 
 /**
- * 落单 `tool_use` 的补齐正文。模型据此知道那次调用**没跑过**（不是跑了没结果），可以重发。
+ * 落单 `tool_use` 的补齐正文。**只说账本知道的**：没有结果入账，不等于没跑过——批中途被中止时没轮到的确实没跑，
+ * 但同批别的调用违约时，跑完了、副作用发生了、结果却没交出来的也落在这里。说「从没执行」会让模型放心重跑有副作用的工具。
  * 不导出：`index.ts` 是 `export * from "./messages.ts"`，导出就等于进公共面，而它今天没有仓外消费者。
  */
-const NO_TOOL_RESULT = "No result: this tool call was never executed.";
+const NO_TOOL_RESULT = "No result was recorded for this tool call; it may or may not have run.";
 
 /**
  * 给没有配对结果的 `tool_use` 补一条 error `tool_result`
