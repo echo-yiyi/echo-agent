@@ -460,21 +460,6 @@ export function mainFor(product: Product, shell: Shell): Main {
 }
 
 
-/** 管道形态：`run()` 自己会 `echo.stop()`（它的 `finally`），所以这里不重复收摊。 */
-/**
- * 容器怎么让一段会话跑起来（`SessionRunner`，2026-09-07）：**spawn 一个自己的副本**，
- * 让它以 `--serve --resume <id>` 无界面地当那一段的宿主。
- *
- * 契约是「resolve = 那一段已经持有自己的 lease」，所以这里等的是**我起的那个进程持有一把合法的锁**——
- * 不是等进程起来（进程起来了但装配失败、或者锁被别人占着，都不算跑起来了），也不是「锁文件在」
- * （review 2026-09-07：盘上残留一把崩在写一半的坏锁时，第一拍就被当成子进程拿到了锁，消息投进一个没人读的目录）。
- *
- * 为什么起独立进程而不是在自己进程里多跑一段：**一段 session 一个宿主**是这条线的原话。
- * 起在自己进程里的话，你关掉这个终端就把别人的会话一起带走了；而独立进程会一直活到
- * 它自己空闲退出，或者你 `--resume` 它、它让开为止（那条让位协议就是为它准备的）。
- *
- * 子进程 `unref()`：它不该拖着本进程不退。stdio 全丢——没人看，写出来的东西只会污染终端。
- */
 /**
  * 叫醒一段会话时给副本的 argv（导出只为判据）：与父进程**同一家、同一模型**、同状态根、同扩展目录
  * （review 2026-09-07：此前只传后两样，副本按设置文件另选一家、缺 key 就根本起不来）。
@@ -492,16 +477,41 @@ export function wakeArgs(self: string, opts: CliOptions, providerName: string | 
   return args;
 }
 
-function sessionRunner(opts: CliOptions, providerName: string | undefined): SessionRunner {
+/** `sessionRunner` 起副本用的 spawn 选项：stdio 全丢，`detached` = 副本自成一个进程组。 */
+type WakeSpawnOptions = { stdin: "ignore"; stdout: "ignore"; stderr: "ignore"; detached: true };
+/** `sessionRunner` 的注入点（只给测试）：起副本的方式与等锁的上限。生产一个都不给。 */
+export type SessionRunnerDeps = Readonly<{
+  spawn?: (cmd: string[], opts: WakeSpawnOptions) => ReturnType<typeof Bun.spawn>;
+  timeoutMs?: number;
+}>;
+
+/**
+ * 容器怎么让一段会话跑起来（`SessionRunner`，2026-09-07）：**spawn 一个自己的副本**，
+ * 让它以 `--serve --resume <id>` 无界面地当那一段的宿主。
+ *
+ * 契约是「resolve = 那一段已经持有自己的 lease」，所以这里等的是**我起的那个进程持有一把合法的锁**——
+ * 不是等进程起来（进程起来了但装配失败、或者锁被别人占着，都不算跑起来了），也不是「锁文件在」
+ * （review 2026-09-07：盘上残留一把崩在写一半的坏锁时，第一拍就被当成子进程拿到了锁，消息投进一个没人读的目录）。
+ *
+ * 为什么起独立进程而不是在自己进程里多跑一段：**一段 session 一个宿主**是这条线的原话。
+ * 起在自己进程里的话，你关掉这个终端就把别人的会话一起带走了；而独立进程会一直活到
+ * 它自己空闲退出，或者你 `--resume` 它、它让开为止（那条让位协议就是为它准备的）。
+ *
+ * 子进程 `unref()`：它不该拖着本进程不退。stdio 全丢——没人看，写出来的东西只会污染终端。
+ * `detached`：自成一个进程组，终端里的 Ctrl-C 不连带它；等锁超时时整组杀掉。
+ */
+export function sessionRunner(opts: CliOptions, providerName: string | undefined, deps: SessionRunnerDeps = {}): SessionRunner {
   const self = process.argv[1];
+  const spawn = deps.spawn ?? ((cmd: string[], o: WakeSpawnOptions) => Bun.spawn(cmd, o));
+  const timeoutMs = deps.timeoutMs ?? WAKE_TIMEOUT_MS;
   return async (row) => {
     if (self === undefined) throw new Error("认不出自己的可执行文件路径，起不了会话宿主");
     const args = wakeArgs(self, opts, providerName, row.id);
-    const child = Bun.spawn([process.execPath, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const child = spawn([process.execPath, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
     child.unref();
 
     const lock = join(expandHome(opts.stateDir ?? resolveSessionsRoot()), row.id, ".lock");
-    const deadline = Date.now() + WAKE_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       // 先看进程：它退了就是没跑起来——哪怕盘上留着一把别人的 / 坏的锁
       if (child.exitCode !== null) throw new Error(`会话 ${row.id} 的容器进程退了（exit ${child.exitCode}），没跑起来`);
@@ -509,8 +519,22 @@ function sessionRunner(opts: CliOptions, providerName: string | undefined): Sess
       if (cur.state === "valid" && cur.record.pid === child.pid) return; // 我起的那个进程持有一把合法的锁 = 真的跑起来了
       await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
     }
-    throw new Error(`会话 ${row.id} 的容器 ${WAKE_TIMEOUT_MS}ms 内没拿到锁`);
+    // 超时 = 判它没跑起来，core 随后把这一段置 closed、模型照这个结论重试。所以副本必须**当场死透**：
+    // 活下来的话它稍后照样拿到锁、恢复 inbox 开干，与重试出来的那一段干同一件事。杀整个进程组
+    // （`detached` 让它自成一组），连它已经起的子进程一起；等它真的退了再报错。
+    killGroup(child.pid);
+    await child.exited;
+    throw new Error(`会话 ${row.id} 的容器 ${timeoutMs}ms 内没拿到锁，已杀掉`);
   };
+}
+
+/** SIGKILL 一个进程组（组长 pid 取负）。组已经不在了（ESRCH）不算错。 */
+function killGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (e) {
+    if ((e as { code?: string }).code !== "ESRCH") throw e;
+  }
 }
 
 /**
@@ -566,6 +590,7 @@ async function runServe(
   }
 }
 
+/** 管道形态：`run()` 自己会 `echo.stop()`（它的 `finally`），所以这里不重复收摊。 */
 async function runPiped(
   product: Product,
   form: PresetForm,
