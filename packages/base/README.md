@@ -21,7 +21,7 @@ export const main = mainFor(MY_PRODUCT, terminalShell);
 
 所以做 web 界面的产品依赖本包，不必装一个终端库。
 
-自己实现壳，就实现 `Shell` 这个端口的两件事：`open()`（界面本体）与 `firstRun()`（缺凭据时的引导设置）。
+自己实现壳，就实现 `Shell` 这个端口的三件事：`open()`（界面本体）、`firstRun()`（缺凭据时的引导设置）与 `trustWorkspace()`（工作目录的 `extensions/` 里有扩展、而这个工作区还不受信时，装配前问一次信不信任）。
 
 想完全不要这一层、把 agent 嵌进自己的程序里，用 `@echo-agent/core` 的 `createEcho()`。
 

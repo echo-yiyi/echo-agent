@@ -40,8 +40,8 @@ test("写 → 读一轮；合并写不丢别的键；写完不留临时文件", 
   const after = JSON.parse(readFileSync(settingsPath(), "utf8")) as Record<string, unknown>;
   expect(after["model"]).toEqual({ provider: "kimi", id: "kimi-k3" });
   // 认不出的键读的时候不进 settings，但**写的时候不该被抹掉**……的前提是读得回来——
-  // 现在 readSettings 只认 model，所以 futureKey 会丢。这是已知取舍：合并基于「读得懂的那份」，
-  // 宁可丢未知键也不把坏内容原样并回去。等有第二个键时再把 raw 透传做进去。
+  // readSettings 只认 model 与 trustedWorkspaces，所以 futureKey 会丢。这是已知取舍：合并基于「读得懂的那份」，
+  // 宁可丢未知键也不把坏内容原样并回去。
   expect(readdirSync(home).filter((n) => n.endsWith(".tmp"))).toEqual([]);
 });
 
@@ -57,6 +57,21 @@ test("model 那条形状不对：口信 + 空缺省", async () => {
   const r = await readSettings();
   expect(r.settings).toEqual({});
   expect(r.problem).toContain("认不出来");
+});
+
+test("信任的工作区（2026-11-03）：写 → 读回；与 model 互不覆盖", async () => {
+  await writeSettings({ model: { provider: "kimi", id: "kimi-k3" } });
+  await writeSettings({ trustedWorkspaces: ["/work/a", "/work/b"] });
+  expect((await readSettings()).settings).toEqual({ model: { provider: "kimi", id: "kimi-k3" }, trustedWorkspaces: ["/work/a", "/work/b"] });
+  await writeSettings({ model: { provider: "deepseek", id: "deepseek-v4-pro" } });
+  expect((await readSettings()).settings.trustedWorkspaces).toEqual(["/work/a", "/work/b"]);
+});
+
+test("trustedWorkspaces 形状不对：口信 + 空缺省（不是字符串列表就一条都不信）", async () => {
+  writeFileSync(settingsPath(), JSON.stringify({ trustedWorkspaces: ["/ok", 42] }));
+  const r = await readSettings();
+  expect(r.settings).toEqual({});
+  expect(r.problem).toContain("trustedWorkspaces");
 });
 
 test("写失败：口信、不抛——记住上次选择是便利不是承诺，不打断正在切换的用户", async () => {

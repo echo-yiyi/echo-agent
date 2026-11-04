@@ -65,7 +65,7 @@ echo-agent --help
 
 MiniMax adapter 目前有 fixture 覆盖，但还没有用真实服务验证。
 
-重复传入 `--extensions <directory>` 可以指定 extension 搜索目录；未传时默认搜索 `./extensions`。用 `--no-memory` 关闭 Memory 与 Dream，或用 `--observe content` 把模型文本与工具参数结果也记进观测库（缺省是 `metadata`：只记形状与计数）。
+重复传入 `--extensions <directory>` 可以指定 extension 搜索目录；未传时默认搜索 `./extensions`，但只在受信的工作区里加载，因为加载 extension 就是执行它的代码。交互界面第一次在不受信的目录里遇到 extension 时会列出文件问一次，答信任就记进 `$ECHO_HOME/settings.json`；管道与 `--serve` 跳过它们，并在 stderr 说明。用 `--extensions` 点名这个目录即视为信任。用 `--no-memory` 关闭 Memory 与 Dream，或用 `--observe content` 把模型文本与工具参数结果也记进观测库（缺省是 `metadata`：只记形状与计数）。
 
 每次启动都是新的一段会话。`--continue` 续本命令在当前目录的最近一段；`--resume <id>` 续指定的那一段。会话归属于「目录 + 命令」，所以 `echo-agent` 与 `echo-coding` 即使在同一目录里也不会共用一段对话；续上的会话会说明带回了多少条消息。
 

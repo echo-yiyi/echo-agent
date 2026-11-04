@@ -1,6 +1,7 @@
 // CLI 的设置文件：`$ECHO_HOME/settings.json`（D7，2026-09-01 用户拍板「切换了之后重启还要能用」）。
 //
-// 现在只有一个键：上次选的模型。**显式 `--provider` / `--model` 永远赢**——设置只是「没说就用上次的」。
+// 两个键：上次选的模型（**显式 `--provider` / `--model` 永远赢**——设置只是「没说就用上次的」），
+// 与受信的工作区（2026-11-03：约定目录 `<cwd>/extensions` 只在受信的工作区里才加载）。
 // 为什么在 cli 不在 core：记住哪个模型是**壳的启动策略**（选装配入参），core 没有对应的端口；
 // 凭据不同——`CredentialStore` 端口在 core，所以它的文件实现在 core。
 //
@@ -17,6 +18,11 @@ export const SETTINGS_FILE = "settings.json";
 export type CliSettings = Readonly<{
   /** 上次选的模型（Ctrl+L 或首次运行引导设置里选的）。provider 存的是 `--provider` 短名。 */
   model?: Readonly<{ provider: string; id: string }>;
+  /**
+   * 受信的工作区：realpath 的列表。在这些目录里起来时，约定目录 `<cwd>/extensions` 交给装配、里面的代码会被执行；
+   * 不在列表里的工作区不加载约定目录（交互形态问一次，信任就记进来）。显式 `--extensions` 不看它。
+   */
+  trustedWorkspaces?: readonly string[];
 }>;
 
 export type SettingsReadResult = Readonly<{
@@ -49,7 +55,7 @@ export async function readSettings(): Promise<SettingsReadResult> {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return { settings: {}, problem: `设置文件的顶层应当是一个对象：${path}——先用缺省` };
   }
-  const raw = parsed as { model?: unknown };
+  const raw = parsed as { model?: unknown; trustedWorkspaces?: unknown };
   let model: CliSettings["model"];
   if (raw.model !== undefined) {
     const m = raw.model as { provider?: unknown; id?: unknown };
@@ -59,7 +65,15 @@ export async function readSettings(): Promise<SettingsReadResult> {
       return { settings: {}, problem: `设置文件里 model 那条认不出来：${path}——先用缺省` };
     }
   }
-  return { settings: model === undefined ? {} : { model } };
+  let trustedWorkspaces: CliSettings["trustedWorkspaces"];
+  if (raw.trustedWorkspaces !== undefined) {
+    const t = raw.trustedWorkspaces;
+    if (!Array.isArray(t) || !t.every((w): w is string => typeof w === "string")) {
+      return { settings: {}, problem: `设置文件里 trustedWorkspaces 那条认不出来（应是路径字符串的列表）：${path}——先用缺省` };
+    }
+    trustedWorkspaces = t;
+  }
+  return { settings: { ...(model === undefined ? {} : { model }), ...(trustedWorkspaces === undefined ? {} : { trustedWorkspaces }) } };
 }
 
 /**

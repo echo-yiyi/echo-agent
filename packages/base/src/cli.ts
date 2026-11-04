@@ -27,7 +27,9 @@
 import {
   createEcho,
   deepseekProvider,
+  discoverExtensionFiles,
   errText,
+  EXTENSIONS_DIR,
   expandHome,
   FileCredentialStore,
   FileDir,
@@ -43,6 +45,7 @@ import {
   type Provider,
   type SessionRunner,
 } from "@echo-agent/core";
+import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { instructionsEntry } from "./instructions.ts";
 import { pipeSurfaceEntry } from "./prompt.ts";
@@ -67,7 +70,7 @@ export type CliOptions = {
   model?: string;
   /** `--no-memory`：不装记忆，也就不开 Dream 自调度。一次性跑用得上。 */
   withoutMemory: boolean;
-  /** 可重复。一条都不给 = 走约定目录 `<cwd>/extensions`。 */
+  /** 可重复。一条都不给 = 走约定目录 `<cwd>/extensions`——只在工作区受信时（见 `echoOptions` 的 `workspaceTrusted`）。给了一律视为受信。 */
   extensionDirs: string[];
   /**
    * 会话（2026-09-01 用户拍板：**缺省每次启动新建一段**，续上次是显式动作）：
@@ -131,7 +134,7 @@ export function usage(name: string): string {
   --resume <id>        续指定的那一段会话
   --serve              无界面地把那一段跑起来（配 --resume）：消费收件箱，空闲就退出。
                        给容器叫醒会话用的，人不必敲它
-  --extensions <目录>  去哪里找扩展，可重复（缺省 ./extensions）
+  --extensions <目录>  去哪里找扩展，可重复（缺省 ./extensions，只在受信的工作区里加载；显式给出视为受信）
   --no-memory          不装记忆与 Dream
   --observe <档>       观测采集档：metadata（缺省，只记形状与计数）| content（带模型文本、工具参数与结果正文，明文落盘）| off
   -h, --help           显示本帮助
@@ -143,6 +146,10 @@ export function usage(name: string): string {
 
 **每次启动都是新的一段会话**，续上次是显式动作（--continue / --resume）。会话按「目录 + 命令」归属：
 在同一个目录里，${name} 与别的命令各有各的对话，互不相续；续上时界面会说明续了多少条。
+
+**工作区信任**：没给 --extensions 时，./extensions 里的扩展只在受信的工作区里加载——装配会执行它们的代码。
+交互形态第一次遇到会列出文件问一次，信任就按目录记进 $ECHO_HOME/settings.json；管道与 --serve 没人可问，
+不受信就不加载，并在 stderr 说一行怎么信任。
 
 上次在界面里选的模型记在 $ECHO_HOME/settings.json（D7）：**显式 --provider / --model 永远赢**，
 设置只是「没说就用上次的」；文件坏了不挡启动，如实说一句然后用缺省。
@@ -263,6 +270,11 @@ export function echoOptions(
   credentials: CredentialStore,
   /** 要续的那一段（`--continue` / `--resume` 解析出来的 id）；不给 = 新建一段。 */
   sessionId: string | undefined,
+  /**
+   * 工作区受不受信（2026-11-03）：没给 `--extensions` 时，约定目录 `<cwd>/extensions` 只在受信时交给 createEcho，
+   * 不受信就显式给 `extensionDirs: []`（不发现）。给了 `--extensions` 时不看它。
+   */
+  workspaceTrusted: boolean,
 ): Parameters<typeof createEcho>[0] {
   // **产品层的装配片段**（`product.ts`）：`agent`（权限策略等）、`extensions`（产品自带的，含它的 prompt 段）
   // 与 `memory`（记忆的形状）。能来自产品的只有这三个字段——`Product.preset` 的返回类型就这么窄——所以它盖不掉下面任何一项，
@@ -291,8 +303,9 @@ export function echoOptions(
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     ...(opts.observe !== undefined ? { observation: { capture: opts.observe } } : {}),
     // **一条 `--extensions` 都不给就走约定目录**（`<cwd>/extensions`）——给了就只用给的，
-    // 所以这里区分「空数组」与「不传」，不能无脑展开。
-    ...(opts.extensionDirs.length > 0 ? { extensionDirs: opts.extensionDirs } : {}),
+    // 所以这里区分「空数组」与「不传」，不能无脑展开。约定目录只在工作区受信时才交：装配会执行里面的代码，
+    // 不受信就给 `[]`（core 的 `resolveExtensionDirs` 对空数组就是不发现，热部署也不会去那儿找）。
+    ...(opts.extensionDirs.length > 0 ? { extensionDirs: opts.extensionDirs } : workspaceTrusted ? {} : { extensionDirs: [] }),
     // 提问（`ask_user`，2026-09-05）：有人坐在终端前就 `host`（壳子摆出来等答），管道 / CI 没人可答就 `none`——
     // 工具当场如实回话、不等人。与权限策略是两条通道：那条由产品 preset 定，这条由形态定。
     // 产品 preset 自己定了 questions 就用它的（类型允许，不能静默盖掉）；没定才按形态给
@@ -305,6 +318,55 @@ export function echoOptions(
     // 读 workspace 的文件是宿主能力，core 是纯 JS 够不着（`docs/design/prompt.md` 的所有权表）。
     extensions: [instructionsEntry(), ...(preset.extensions ?? [])],
   };
+}
+
+/**
+ * 约定目录 `<cwd>/extensions` 交不交给装配（工作区信任，2026-11-03 拍板）。返回 `true` = 交。
+ *
+ * 装配会 import 约定目录里的文件、执行里面的代码：克隆一个陌生仓库、在里面起来，不能就这么跑了仓库作者写的东西。
+ * 行为参照 codex 的 trusted projects 与 Claude Code 公开文档里「信任这个文件夹」那一步：第一次问，信任就记住。
+ *
+ *   · 给了 `--extensions`：一律视为受信（用户点了名），约定目录本来也不参与——不问；
+ *   · 工作区的 realpath 在 `settings.json` 的 `trustedWorkspaces` 里：交；
+ *   · 约定目录里没有扩展文件：不问、不交（这次会话里新放进去的，热部署也不会装上，下次启动再问）；
+ *   · 交互形态：问壳一次（列出将加载的文件），信任就记进设置；不信任这次不加载，界面里说一行；
+ *   · 管道与 `--serve`：没人可问，不加载，stderr 一行说怎么信任。
+ *
+ * 记设置写不进去不挡启动（D7 同一原则），如实说一句、这次照样加载。
+ */
+async function trustConventionDir(
+  product: Product,
+  shell: Shell,
+  opts: CliOptions,
+  interactive: boolean,
+  trustedWorkspaces: readonly string[],
+  notices: string[],
+  signal: AbortSignal,
+  deps: MainDeps,
+): Promise<boolean> {
+  if (opts.extensionDirs.length > 0) return true;
+  const cwd = process.cwd();
+  const workspace = await realpath(cwd).catch(() => cwd);
+  if (trustedWorkspaces.includes(workspace)) return true;
+  const dir = join(cwd, EXTENSIONS_DIR);
+  const files = await discoverExtensionFiles(dir);
+  if (files.length === 0) return false;
+  if (!interactive || opts.serve) {
+    process.stderr.write(
+      `[扩展] 没有加载 ${dir} 下的 ${files.length} 个扩展：这个工作区不受信。要加载就显式给 --extensions ./extensions，或在交互界面里信任一次\n`,
+    );
+    return false;
+  }
+  const trusted = await shell.trustWorkspace({ product, workspace, files, signal, ...(deps.ui !== undefined ? { ui: deps.ui } : {}) });
+  if (!trusted) {
+    notices.push(`[扩展] 这次没有加载 ${dir} 下的 ${files.length} 个扩展（没有信任这个文件夹）`);
+    return false;
+  }
+  // 写之前再读一次：别的进程可能刚记进去别的工作区，拿启动时读到的那份去盖会把它丢掉
+  const current = (await readSettings()).settings.trustedWorkspaces ?? [];
+  const w = await writeSettings({ trustedWorkspaces: current.includes(workspace) ? current : [...current, workspace] });
+  if (w.problem !== undefined) notices.push(`[设置] ${w.problem}`);
+  return true;
 }
 
 /**
@@ -453,6 +515,8 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
         if (w.problem !== undefined) notices.push(`[设置] ${w.problem}`);
       }
 
+      // 工作区信任（2026-11-03）：约定目录里的扩展只在受信的工作区里加载。交互形态要问人，所以在装配之前定。
+      const trusted = await trustConventionDir(product, shell, opts, interactive, settingsRead.settings.trustedWorkspaces ?? [], notices, controller.signal, deps);
       const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
@@ -464,10 +528,10 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
         void expireSessionObservations({ sessionsRoot: expandHome(effective.stateDir ?? resolveSessionsRoot()), rule: product.observationExpiry });
       }
       // 无界面形态排在最前：它既不是交互也不是管道——不装壳、不读 stdin，跑完就退。
-      if (effective.serve) return await runServe(product, form, effective, provider, choices, credentials, sessionId, controller.signal);
+      if (effective.serve) return await runServe(product, form, effective, provider, choices, credentials, sessionId, trusted, controller.signal);
       return interactive
-        ? await runInteractive(shell, product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, sessionId, notices, controller.signal, deps)
-        : await runPiped(product, form, effective, provider, choices, credentials, sessionId, notices, controller.signal);
+        ? await runInteractive(shell, product, form, effective, chosen === undefined ? choices[0]! : { name: chosen.name, provider }, choices, credentials, sessionId, trusted, notices, controller.signal, deps)
+        : await runPiped(product, form, effective, provider, choices, credentials, sessionId, trusted, notices, controller.signal);
     } catch (e) {
       // 装配失败（锁被别的进程占着、状态根不可写、目录为空）一律**明说**并非零退出。
       process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
@@ -576,9 +640,10 @@ async function runServe(
   choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
   sessionId: string | undefined,
+  workspaceTrusted: boolean,
   signal: AbortSignal,
 ): Promise<number> {
-  const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId);
+  const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId, workspaceTrusted);
   const echo = await createEcho({ ...base, preemptible: true });
   try {
     // 退出只认两件事（review 2026-09-07，#6 拍板：不开新公共面）：**让位 / 丢锁**——Agent 在这两条路上各发一条诊断
@@ -619,6 +684,7 @@ async function runPiped(
   choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
   sessionId: string | undefined,
+  workspaceTrusted: boolean,
   notices: readonly string[],
   signal: AbortSignal,
 ): Promise<number> {
@@ -630,7 +696,7 @@ async function runPiped(
     return 1;
   }
   // **唯一 composition root**：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
-  const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId);
+  const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId, workspaceTrusted);
   // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥
   const echo = await createEcho({ ...base, extensions: [...(base.extensions ?? []), pipeSurfaceEntry()] });
   // 启动口信（设置读不动等）与装配诊断（坏扩展被跳过，D6）都走 stderr：说了才算没静默，但不挡启动、不改退出码
@@ -660,6 +726,7 @@ async function runInteractive(
   choices: readonly FirstRunChoice[],
   credentials: CredentialStore,
   sessionId: string | undefined,
+  workspaceTrusted: boolean,
   notices: readonly string[],
   signal: AbortSignal,
   deps: MainDeps,
@@ -687,7 +754,7 @@ async function runInteractive(
         ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
       },
     });
-    const base = echoOptions(product, form, opts, chosen.provider, choices, credentials, toOpen);
+    const base = echoOptions(product, form, opts, chosen.provider, choices, credentials, toOpen, workspaceTrusted);
     const echo = await createEcho({
       ...base,
       // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的

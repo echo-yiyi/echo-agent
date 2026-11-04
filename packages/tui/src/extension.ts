@@ -21,6 +21,7 @@ import { runTui, type TuiConfigureOptions } from "./app.ts";
 import type { Product } from "@echo-agent/base";
 import { terminalSurfaceSection } from "./prompt.ts";
 import { runFirstRunSetup } from "./first-run.ts";
+import { runTrustPrompt } from "./trust.ts";
 import type { Shell } from "@echo-agent/base";
 
 /**
@@ -178,7 +179,7 @@ export function tuiShell(
 }
 
 /**
- * 终端那份 `Shell` 实现（2026-09-09）：装配层只认端口，这里把界面本体与引导设置打成一件东西。
+ * 终端那份 `Shell` 实现（2026-09-09）：装配层只认端口，这里把界面本体、引导设置与工作区信任确认打成一件东西。
  *
  * `ui` 在端口上是 `unknown`（端口不认识任何界面技术），到这里收窄回 pi-tui 的 `TUI`——
  * 注入假界面是测试的事，谁实现壳谁认识自己的假件。
@@ -192,4 +193,5 @@ export const terminalShell: Shell = {
       ...(opts.configure !== undefined ? { configure: opts.configure } : {}),
     }),
   firstRun: ({ ui, ...rest }) => runFirstRunSetup({ ...rest, ...(ui !== undefined ? { ui: ui as TUI } : {}) }),
+  trustWorkspace: ({ ui, ...rest }) => runTrustPrompt({ ...rest, ...(ui !== undefined ? { ui: ui as TUI } : {}) }),
 };

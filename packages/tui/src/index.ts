@@ -10,7 +10,7 @@
 //
 // 协议里没有 `start` / `stop`：进程级启停归装配层，壳子碰不到也不该碰。
 
-/** 交给 `mainFor(product, shell)` 的终端实现：界面本体 + 缺凭据时的引导设置。 */
+/** 交给 `mainFor(product, shell)` 的终端实现：界面本体 + 缺凭据时的引导设置 + 工作区信任确认。 */
 export { terminalShell, tuiShell, type TuiShell } from "./extension.ts";
 
 /** 渲染循环本体。自己写壳、或要换一套终端实现时用得上。 */

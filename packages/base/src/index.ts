@@ -38,6 +38,7 @@ export type {
   ShellFirstRunOptions,
   ShellHandle,
   ShellOpenOptions,
+  ShellTrustOptions,
 } from "./shell.ts";
 
 /**

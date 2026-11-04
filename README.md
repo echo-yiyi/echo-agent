@@ -65,7 +65,7 @@ Select a provider with `--provider`; override its default model with `--model`.
 
 The MiniMax adapter is covered by fixtures but has not yet been exercised against the live service.
 
-Use repeatable `--extensions <directory>` flags to choose the extension search directories; with no flag, the CLI searches `./extensions`. Pass `--no-memory` to omit Memory and Dream, or `--observe content` to record model text and tool payloads in the observation database (it defaults to `metadata`: shapes and counts only).
+Use repeatable `--extensions <directory>` flags to choose the extension search directories; with no flag, the CLI searches `./extensions` but loads what it finds only in a trusted workspace, because loading an extension runs its code. The first time the interactive UI meets extensions in an untrusted directory it lists the files and asks once, and remembers a yes in `$ECHO_HOME/settings.json`; piped and `--serve` runs skip them and say so on stderr. Naming the directory with `--extensions` counts as trusting it. Pass `--no-memory` to omit Memory and Dream, or `--observe content` to record model text and tool payloads in the observation database (it defaults to `metadata`: shapes and counts only).
 
 Every launch starts a new session. `--continue` resumes the latest session of this command in the current directory; `--resume <id>` resumes a specific one. A session belongs to a directory and a command, so `echo-agent` and `echo-coding` never share a conversation even in the same directory, and a resumed session announces how many messages it brought back.
 

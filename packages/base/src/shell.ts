@@ -67,15 +67,29 @@ export type ShellFirstRunOptions = Readonly<{
   ui?: unknown;
 }>;
 
+export type ShellTrustOptions = Readonly<{
+  product?: Pick<Product, "name" | "version">;
+  /** 问的是哪个工作区（realpath）。 */
+  workspace: string;
+  /** 信任了就会被加载、执行的扩展文件（绝对路径，已排序）。 */
+  files: readonly string[];
+  signal?: AbortSignal;
+  ui?: unknown;
+}>;
+
 /**
- * 交互形态的壳。装配层只认这两件事：
+ * 交互形态的壳。装配层只认这三件事：
  *   · `open()` —— 界面本体；
  *   · `firstRun()` —— 缺凭据时的引导设置。它在**装配之前**跑：选哪家、哪个模型本来就得在装配前定。
+ *   · `trustWorkspace()` —— 工作区信任（2026-11-03）：约定目录 `<cwd>/extensions` 里有扩展、而这个工作区还不受信时，
+ *     **装配之前**问一次。`true` = 信任（装配层记住并加载），`false` = 不信任（这次不加载）；被中止也是 `false`。
+ *     装配会 import 这些文件、执行里面的代码，所以只能在装配前问。
  *
- * 不做成一件事，是因为两者的时机不同：引导设置发生在还没有 agent 的时候，界面发生在装配之后。
+ * 不做成一件事，是因为时机不同：引导设置与信任确认发生在还没有 agent 的时候，界面发生在装配之后。
  * 合成一个「界面」接口会让实现方必须先造出一个没有 agent 可显示的界面。
  */
 export type Shell = Readonly<{
   open(opts: ShellOpenOptions): ShellHandle;
   firstRun(opts: ShellFirstRunOptions): Promise<FirstRunOutcome>;
+  trustWorkspace(opts: ShellTrustOptions): Promise<boolean>;
 }>;
