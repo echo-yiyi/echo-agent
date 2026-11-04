@@ -624,7 +624,7 @@ type   McpHost
 type   McpServerSnapshot
 
 == 入口 "./observability" → src/observability/public.ts ==
-符号 78（value 15 · type 61 · both 2）
+符号 77（value 15 · type 61 · both 1）
 
 -- src/admission/types.ts (1) --
 type   RunSource
@@ -654,9 +654,8 @@ value  buildRunObservationViewModel
 value  RENDERER_VERSION
 value  renderRunObservation
 
--- src/observability/store.ts (2) --
+-- src/observability/store.ts (1) --
 both   ObservationCorruptionError
-both   ObservationStoreUnavailableError
 
 -- src/observability/types.ts (58) --
 type   ActiveEntrySnapshot

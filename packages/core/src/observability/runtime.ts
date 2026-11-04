@@ -203,8 +203,8 @@ export class ObservationRuntime {
     });
   }
 
-  /** 真正进入 loop 的那一拍（permit executor，或派出隔离子循环的 Agent），带 run 开头的状态。 */
-  startRun(runId: string, identity: RunIdentity, startedBy: "permit-executor" | "subloop", state: ObservableStateInput): void {
+  /** 真正进入 loop 的那一拍（permit executor，或派出隔离子循环的 Agent），带 run 开头的状态（`off` 档不拍，是 null）。 */
+  startRun(runId: string, identity: RunIdentity, startedBy: "permit-executor" | "subloop", state: ObservableStateInput | null): void {
     this.post({ t: "run-started", rt: this.runtimeId, at: this.clock.now(), runId, identity, startedBy, state });
   }
 

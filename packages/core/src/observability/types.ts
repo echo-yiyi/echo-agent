@@ -237,7 +237,6 @@ export type EchoObservableState = Readonly<{
     status: EchoRuntimeStatus;
     observationPersistence: ObservationPersistenceStatus;
     generation: string;
-    activeEntryCount: number;
   }>;
   agent: Readonly<{
     status: string;

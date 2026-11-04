@@ -257,8 +257,7 @@ function projectObservableState(raw: unknown, kept: readonly CapabilityEntry[], 
   const status = takeEnum(r.status, RUNTIME_STATUSES);
   const persistence = takeEnum(r.observationPersistence, PERSISTENCE_STATUSES);
   const generation = takeIdentifier(r.generation);
-  const activeEntryCount = takeCount(r.activeEntryCount);
-  if (phase === undefined || status === undefined || persistence === undefined || generation === undefined || activeEntryCount === undefined) return undefined;
+  if (phase === undefined || status === undefined || persistence === undefined || generation === undefined) return undefined;
 
   const ag = st.agent;
   if (ag === null || typeof ag !== "object" || Array.isArray(ag)) return undefined;
@@ -279,7 +278,6 @@ function projectObservableState(raw: unknown, kept: readonly CapabilityEntry[], 
       status: status as EchoObservableState["runtime"]["status"],
       observationPersistence: persistence as EchoObservableState["runtime"]["observationPersistence"],
       generation,
-      activeEntryCount,
     }),
     agent: Object.freeze({
       status: agentStatus,

@@ -96,7 +96,7 @@
 
 | 档 | 记什么 | 典型用途 |
 |---|---|---|
-| `off` | 不生成任何记录 | 不想要账本 |
+| `off` | 探针一律不生成记录，只剩 run 的边界与装配快照（run 在不在、用什么装的、怎么结束）；主线程连 run 开头 / 结尾的状态快照都不拍 | 不想要账本 |
 | `metadata` | 形状与计数：块数、字符数、工具调用数、token 用量、耗时、错误码 | 缺省。够回答「哪步慢、哪步失败」 |
 | `content` | 上面全部，**加**模型文本、思考、工具参数与结果、错误消息，明文落盘 | 要回答「模型到底说了 / 想了什么」 |
 
@@ -132,7 +132,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 **过期：产品自己调，agent 里没有**。[`expireObservations({ stateRoot | store, rule, now? })`](../../packages/core/src/observability/expiry.ts#symbol=expireObservations)：规则拿到全部 run 的 header（新的在前）与此刻，返回 `{ runs?, activityBefore? }`。什么时候、在哪儿调归产品（定时器、另起进程、空闲时）；不调就一条不删。执行只凭**盘上的事实**，不取锁、不问写入端，所以能在活着的 agent 旁边调：
 
 - 只删盘上**已封口**的 run（RunIndex 有终态记录）：封口之后写者不再写这个 run 的任何文件。没封口的列进结果的 `openRuns`。删了之后 `getRun()` 是 `unknown`。
-- 批文件只在 `nextCommittedPrefix ≤ head`、里面出现过的 run 都已不在 `runs/`、run 之外的记录都早于 `activityBefore` 时回收。
+- 批文件只在 `nextCommittedPrefix ≤ head`、里面出现过的 run 都已不在 `runs/`、run 之外的记录都早于 `activityBefore` 时回收。扫描**先读每个 runtime 的 head、再拿 `runs/` 的清单**：按派生文件的写入顺序，读 head 时那之前每一批的 run 已经在 `runs/` 里，之后拿的清单一定看得见它；反过来的顺序，活着的写者在两步之间提交的新 run 会被当成无主、它的第一批被删（[`DocumentObservationExpiry.remove`](../../packages/core/src/observability/document-store.ts#symbol=DocumentObservationExpiry.remove)）。
 - 订阅回放跨过被删的批，交付 `retention-gap`（传输通知，不进 journal、不改 integrity）。
 
 **今天两个产品怎么调**（2026-09-15 拍板）：`echo-agent` 与 `echo-coding` 各自在自己的 `Product` 上声明 [`observationExpiry: retainRecentDays(30)`](../../packages/base/src/observe/expire.ts#symbol=retainRecentDays)——两个产品平级，规则各写各的。时机归装配层：[`mainFor()`](../../packages/base/src/cli.ts#symbol=mainFor) 启动时**不等地**跑一遍 [`expireSessionObservations`](../../packages/base/src/observe/expire.ts#symbol=expireSessionObservations)，失败不报——观测的任何功能都不许让启动多等一拍。扫的是**会话根下每一段**，不是当前这一段：缺省每次启动都新建一段，只清自己那一段等于什么都不清。某一段的观测坏了只跳过那一段。

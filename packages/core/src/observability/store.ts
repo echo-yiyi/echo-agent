@@ -7,7 +7,7 @@
 //   · 同 recordId 不同 bytes、部分存在、index digest 漂移 → corruption，立即抛，调用方 seal writer。
 
 import { canonicalDigest, encodeCanonical } from "./normalize.ts";
-import type { ObservationPersistenceState, RunIndexEntryV1 } from "./types.ts";
+import type { RunIndexEntryV1 } from "./types.ts";
 
 /** canonical store 的不变量被破坏（同 ID 不同 bytes、半批可见、index digest 漂移…）：writer 立即 seal，reader 不「修复」。 */
 export class ObservationCorruptionError extends Error {
@@ -15,17 +15,6 @@ export class ObservationCorruptionError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ObservationCorruptionError";
-  }
-}
-
-/** admission 时 canonical store 不可写 / writer 已 sealed。 */
-export class ObservationStoreUnavailableError extends Error {
-  readonly code = "observation_store_unavailable";
-  readonly persistence: ObservationPersistenceState;
-  constructor(message: string, persistence: ObservationPersistenceState) {
-    super(message);
-    this.name = "ObservationStoreUnavailableError";
-    this.persistence = persistence;
   }
 }
 
