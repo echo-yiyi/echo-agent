@@ -57,6 +57,21 @@ function waitFor<T>(probe: () => Promise<T | null>): { readonly promise: Promise
   };
 }
 
+/**
+ * 盘上的让位请求是不是冲着这一把租约来的：`at` 不早于认领时刻才算（两边取的都是同一台机器的墙钟）。
+ * 早于的，是上一轮请求方没清掉的；读不出 `at` 的（正写到一半、或文件坏了）这一次也不算——
+ * 写到一半的下一轮轮询就读全了，真坏了的说明写它的人已经不在等了。
+ */
+function liveRequest(raw: string, claimedAt: number): { by: string } | null {
+  try {
+    const req = JSON.parse(raw) as { by?: unknown; at?: unknown };
+    if (typeof req.at !== "number" || req.at < claimedAt) return null;
+    return { by: typeof req.by === "string" ? req.by : "（没说是谁）" };
+  } catch {
+    return null;
+  }
+}
+
 /** 这把锁此刻空着吗：没人持有，或持有者确认已死（下一次 acquire 会接管）。 */
 function isFree(cur: StateLockInspection): boolean {
   return cur.state === "missing" || (cur.state === "valid" && holderGone(cur.record));
@@ -72,24 +87,20 @@ export function fileStateLock(path: string): StateLock {
   const handoffPath = `${path}.handoff`;
   return {
     async acquire(opts: { holder: string; preemptible?: boolean }): Promise<Lease | null> {
+      // 认领**之前**取时刻：请求方要先在盘上看到这一代的认领记录才会发请求，所以冲着这一把来的请求，`at` 都不早于它
+      const claimedAt = Date.now();
       const got = await claimGeneration(path, { holder: opts.holder, ...(opts.preemptible === true ? { preemptible: true } : {}) });
       if (!got.ok) return null;
-      // 上一轮别人留下的请求不该算在这一把头上：**拿到锁之后**才把旧请求擦掉。放在认领之前的话，
-      // 任何一次拿不到锁的 acquire 都会先删掉别人正在等的 `.handoff`——人的让位请求被第三方的失败尝试抹掉（review 2026-09-07）
-      await rm(handoffPath, { force: true }).catch(() => undefined);
 
       // **只有可让位的持有者才盯这个文件**：别人不该被请走，也就不该为此每秒读一次盘。
+      // 上一轮留下的请求靠时间戳排除（`liveRequest`），**这里一律不删 `.handoff`**：删在认领之后，人在「锁已上盘、
+      // 还没删」之间发来的请求会被当成旧的擦掉，干等到超时（serve.test 偶红的根因）；删在认领之前，拿不到锁的
+      // acquire 又会擦掉别人正在等的请求。请求文件由请求方自己清（`requestHandoff` 的 finally）
       const handoff =
         opts.preemptible === true
           ? waitFor(async () => {
               const raw = await readFile(handoffPath, "utf8").catch(() => null);
-              if (raw === null) return null;
-              try {
-                const by = (JSON.parse(raw) as { by?: unknown }).by;
-                return { by: typeof by === "string" ? by : "（没说是谁）" };
-              } catch {
-                return { by: "（请求文件是坏的）" }; // 坏了也算有人在等：宁可让出去，不要卡住人
-              }
+              return raw === null ? null : liveRequest(raw, claimedAt);
             })
           : null;
 
@@ -132,7 +143,8 @@ export function fileStateLock(path: string): StateLock {
         }
         return isFree(await inspectGeneration(path));
       } finally {
-        // 请求是一次性的：让没让成都不该留在盘上，否则下一个持有者一上来就以为有人在等
+        // 请求是一次性的：让没让成都清掉。留着也骗不到下一个持有者（它只认认领之后的请求，`liveRequest`），
+        // 但盘上的请求只有请求方自己清——持有者那边一律不删
         await rm(handoffPath, { force: true }).catch(() => undefined);
       }
     },
