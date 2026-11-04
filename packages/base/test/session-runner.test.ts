@@ -78,3 +78,19 @@ test("等锁超时：runner 报没跑起来，并且那个副本连同它起的�
   await Bun.sleep(2_000);
   expect(existsSync(marker), "被判没跑起来的副本之后照样干了活").toBe(false);
 }, 15_000);
+
+test("副本起来就被信号杀死：runner 当场报没跑起来，不白等到超时", async () => {
+  const standIn = join(dir, "dies.ts");
+  writeFileSync(standIn, `await Bun.sleep(50);\nprocess.kill(process.pid, "SIGTERM");\nawait Bun.sleep(10_000);\n`);
+  const opts: CliOptions = { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false, stateDir: join(dir, "sessions") };
+  const runner = sessionRunner(opts, "kimi", { spawn: (_cmd, spawnOpts) => Bun.spawn(["bun", standIn], spawnOpts), timeoutMs: 8_000 });
+  const t0 = Date.now();
+  let error: unknown;
+  try {
+    await runner({ id: "s-dies" } as SessionRow);
+  } catch (e) {
+    error = e;
+  }
+  expect(String(error)).toContain("signal SIGTERM");
+  expect(Date.now() - t0).toBeLessThan(3_000);
+}, 15_000);

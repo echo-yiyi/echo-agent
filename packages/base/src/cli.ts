@@ -328,13 +328,16 @@ export function echoOptions(
  *
  *   · 给了 `--extensions`：一律视为受信（用户点了名），约定目录本来也不参与——不问；
  *   · 工作区的 realpath 在 `settings.json` 的 `trustedWorkspaces` 里：交；
- *   · 约定目录里没有扩展文件：不问、不交（这次会话里新放进去的，热部署也不会装上，下次启动再问）；
+ *   · 约定目录里没有扩展文件（含目录不存在）：不问、照交——仓库没带来任何要执行的代码；之后在这次会话里写进去的
+ *     （模型现写现装，2026-09-14 热部署）与模型跑 bash 是同一个信任级别，热部署照常发现；
  *   · 交互形态：问壳一次（列出将加载的文件），信任就记进设置；不信任这次不加载，界面里说一行；
  *   · 管道与 `--serve`：没人可问，不加载，stderr 一行说怎么信任。
  *
  * 记设置写不进去不挡启动（D7 同一原则），如实说一句、这次照样加载。
+ *
+ * 模块级导出只给测试（与 `sessionRunner` 同例）；包入口不转出。
  */
-async function trustConventionDir(
+export async function trustConventionDir(
   product: Product,
   shell: Shell,
   opts: CliOptions,
@@ -350,7 +353,7 @@ async function trustConventionDir(
   if (trustedWorkspaces.includes(workspace)) return true;
   const dir = join(cwd, EXTENSIONS_DIR);
   const files = await discoverExtensionFiles(dir);
-  if (files.length === 0) return false;
+  if (files.length === 0) return true;
   if (!interactive || opts.serve) {
     process.stderr.write(
       `[扩展] 没有加载 ${dir} 下的 ${files.length} 个扩展：这个工作区不受信。要加载就显式给 --extensions ./extensions，或在交互界面里信任一次\n`,
@@ -598,7 +601,11 @@ export function sessionRunner(opts: CliOptions, providerName: string | undefined
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       // 先看进程：它退了就是没跑起来——哪怕盘上留着一把别人的 / 坏的锁
-      if (child.exitCode !== null) throw new Error(`会话 ${row.id} 的容器进程退了（exit ${child.exitCode}），没跑起来`);
+      // 被信号杀死时 exitCode 是 null、signalCode 才有值——只看 exitCode 会白等到超时
+      if (child.exitCode !== null || child.signalCode !== null) {
+        const how = child.exitCode !== null ? `exit ${child.exitCode}` : `signal ${child.signalCode}`;
+        throw new Error(`会话 ${row.id} 的容器进程退了（${how}），没跑起来`);
+      }
       const cur = await inspectStateLock(lock);
       if (cur.state === "valid" && cur.record.pid === child.pid) return; // 我起的那个进程持有一把合法的锁 = 真的跑起来了
       await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
