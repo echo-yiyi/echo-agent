@@ -282,7 +282,7 @@ function writeFileTool(seen: SeenFiles): ModelTool<{ path: string; content: stri
     label: "写文件",
     description:
       "Write a whole file (created if missing, parent directories created). To change an existing file prefer edit_file; overwriting loses whatever you did not notice. " +
-      "An existing file must have been read with read_file in this session and be unchanged on disk since.",
+      "An existing file must have been read with read_file in this session and be unchanged on disk since; an existing binary or non-UTF-8 file is refused.",
     parameters: {
       type: "object",
       properties: {
