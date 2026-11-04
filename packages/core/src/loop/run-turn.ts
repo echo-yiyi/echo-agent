@@ -79,6 +79,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
   await emit({ type: "turn_start", turnId, replyId, cause });
 
   const toolResults: ToolResultMessage[] = [];
+  const invalidToolCalls: TurnResult["invalidToolCalls"] = [];
   let ended = false;
   try {
     /* ① attempt 循环：落地或放弃。一个 turn 最多 maxAttempts 个 attempt，不分原因 */
@@ -124,7 +125,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
         /* **allSettled 而不是 all**：`runOneTool` 只在 emit / hook / intake 自身违约时抛，
            用 `Promise.all` 时第一个 rejection 会让同批其余的 rejection 无人接管（unhandled rejection，
            本文件的 raceAbort 已栽过一次）。这里全部消费掉，再按顺序补抛第一个。 */
-        const settled = await Promise.allSettled(batch.map((use) => runOneTool(use, deps, turnId, n, workset, askGate)));
+        const settled = await Promise.allSettled(batch.map((use) => runOneTool(use, deps, turnId, n, workset, askGate, invalidToolCalls)));
         // **入账顺序 = tool_use 出现顺序，不是完成顺序**（`context.messages` 与 message_end 都按这个序）
         for (const one of settled) {
           if (one.status === "rejected") throw one.reason; // 与逐个 await 时一样：turn 由外层 catch 关成 failed
@@ -144,7 +145,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
     ended = true;
     probe({ kind: "turn_ended", turnId, result, toolResultCount: toolResults.length }, turnId);
     await emit({ type: "turn_end", turnId, result, toolResults });
-    return { turnId, result, toolResults, steers };
+    return { turnId, result, toolResults, invalidToolCalls, steers };
   } catch (e) {
     // emit / hook / intake 自身坏了：turn 仍由本层关——turn_end 不靠外层补。gate 里的 turn 不在这关，
     // 留给 run 关门（closeRun）连同它 accepted 的 steer 一起报出
@@ -327,6 +328,8 @@ async function runOneTool(
   iteration: number,
   workset: TurnWorkset,
   askGate: AskGate,
+  /** 调用本身无效、执行前被拒时记一项（`TurnResult.invalidToolCalls`）。 */
+  invalid: TurnResult["invalidToolCalls"],
 ): Promise<AgentMessage> {
   const { config, emit, signal } = deps;
   const { probe } = deps;
@@ -337,6 +340,7 @@ async function runOneTool(
     const reason = explainMissingTool(config, workset.knownToolNames, use.name);
     probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "lookup", cause: "not_found", reason }, turnId);
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "not_found", message: reason });
+    invalid.push("not_found");
     return toolResultMessage(use.id, use.name, reason, true);
   }
   if (!isModelVisible(tool)) {
@@ -345,6 +349,7 @@ async function runOneTool(
     // 给壳的事件把它并进 not_found；观测分开记——「不存在」与「存在但模型不该点」是两件事
     probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "lookup", cause: "not_visible", reason }, turnId);
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "not_found", message: reason });
+    invalid.push("not_found");
     return toolResultMessage(use.id, use.name, reason, true);
   }
 
@@ -360,6 +365,7 @@ async function runOneTool(
     const message = `Invalid arguments: ${errText(e)}`;
     probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "arguments", cause: "bad_params", reason: message }, turnId);
     await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "bad_params", message });
+    invalid.push("bad_params");
     return toolResultMessage(use.id, use.name, message, true);
   }
 

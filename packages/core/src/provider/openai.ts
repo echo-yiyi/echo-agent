@@ -300,7 +300,8 @@ type OpenAiChunk = {
       reasoning_content?: string | null;
       reasoning?: string | null;
       reasoning_text?: string | null;
-      tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
+      /** 后续分片里各家会发 `id: null`、`arguments: null`、或者每段都重发同一个 `id`——字段都可能是 null（`Turn.feed`）。 */
+      tool_calls?: { index?: number | null; id?: string | null; function?: { name?: string | null; arguments?: string | null } | null }[];
     };
     finish_reason?: string | null;
   }[];
@@ -320,14 +321,23 @@ type OpenAiChunk = {
  * 块不变量(dialect.ts ①②)由 `ensure`/`close` 保证:同一时刻至多一个块打开,end 必配 start。
  */
 class Turn {
-  private open: "text" | "thinking" | "tool" | null = null;
+  private open: "text" | "thinking" | null = null;
   private blocks: ContentBlock[] = [];
   private textBuf = "";
   /** 思考也要**缓冲**：只转发事件而不攒起来，定稿里就没有这一块，下一轮也就带不回去。 */
   private thinkingBuf = "";
   /** 这一轮的思考来自哪个字段。缺省用最通行的那个。 */
   private reasoningField: ReasoningField = "reasoning_content";
-  private tool: { id: string; name: string; args: string } | null = null;
+  /**
+   * 这一轮的工具调用，按**第一次出现**的顺序。片段按归属键累积（`feed`），流结束时才解析、才发事件（`finish`）——
+   * 多个调用的片段可以交错到达（index 0、1、0、1），切到下一个调用时前一个还没收全。
+   * `synthetic`：上游没给 id，先用自造的占位；之后的片段带来真 id 就换上（事件在 finish 才发，换得了）。
+   */
+  private calls: { id: string; synthetic: boolean; index: number | undefined; name: string; args: string }[] = [];
+  /** 最近一次收到片段的调用：既没 index 也没 id 的片段接在它后面。 */
+  private lastCall: Turn["calls"][number] | null = null;
+  /** 这一轮无效（参数不可解析、到最后都没有名字）、被丢掉的工具调用数（`finish` 判「要工具却一个都没有」时报出来）。 */
+  private dropped = 0;
   private pendingWarnings: ProviderEvent[] = [];
   private usage: Usage | null = null;
   private stop: StopReason = "end_turn";
@@ -355,19 +365,41 @@ class Turn {
       yield { type: "text_delta", text: delta.content };
     }
     for (const tc of delta?.tool_calls ?? []) {
-      if (tc.id !== undefined && tc.id !== "") {
-        // 新的一个调用:换块
-        yield* this.close();
-        this.open = "tool";
-        this.tool = { id: tc.id, name: tc.function?.name ?? "", args: "" };
-        yield { type: "toolcall_start", toolCallId: tc.id, name: this.tool.name };
+      const id = typeof tc.id === "string" && tc.id !== "" ? tc.id : undefined;
+      const index = typeof tc.index === "number" ? tc.index : undefined;
+      const name = typeof tc.function?.name === "string" && tc.function.name !== "" ? tc.function.name : undefined;
+      // **这一段归哪个调用**。各家服务端的分片形状不一：每段都重发同一个 id、后续段发 `id: null` / `name: null` /
+      // `arguments: null`、多个调用的片段交错（index 0、1、0、1）。所以：
+      //   · 有 `index` 按 index（OpenAI 流式协议的归属键），找不到再按 id；
+      //   · 没有 index 按非空 id；
+      //   · 两样都没有：接在最近收到片段的那个调用后面。
+      // **新调用只由新的 index、新的非空 id 开**；两样都没有、前面也没有可接的调用时，带名字的片段才开一个，
+      // id 与 name 都是 null 的无主片段丢掉并告警。
+      const lastCall = index === undefined && id === undefined ? (this.lastCall ?? undefined) : undefined;
+      let call =
+        (index !== undefined ? this.calls.find((c) => c.index === index) : undefined) ??
+        (id !== undefined ? this.calls.find((c) => c.id === id) : undefined) ??
+        lastCall;
+      if (call === undefined) {
+        if (index === undefined && id === undefined && name === undefined) {
+          this.pendingWarnings.push({ type: "warning", code: "tool_call_fragment_dropped", message: "收到一段没有 index、id、name 的工具调用片段，前面也没有可接的调用：已丢弃" });
+          yield* this.takeWarnings();
+          continue;
+        }
+        call = { id: id ?? `call_${crypto.randomUUID()}`, synthetic: id === undefined, index, name: name ?? "", args: "" };
+        this.calls.push(call);
+      } else {
+        if (call.name === "" && name !== undefined) call.name = name; // 名字晚一段才到
+        if (call.index === undefined && index !== undefined) call.index = index; // 先按 id 认上的，记下 index，后续只带 index 的片段才找得回来
+        if (call.synthetic && id !== undefined) {
+          call.id = id; // 真 id 晚一段才到
+          call.synthetic = false;
+        }
       }
+      // `arguments: null` 是「这段没有参数」，不是字面量 "null"
       const args = tc.function?.arguments;
-      if (args !== undefined && args !== "") {
-        if (this.tool === null) continue; // 违约:没 start 就来参数,丢弃这段
-        this.tool.args += args;
-        yield { type: "toolcall_delta", argsText: args };
-      }
+      if (typeof args === "string" && args !== "") call.args += args;
+      this.lastCall = call;
     }
     if (choice?.finish_reason != null) {
       this.stop = mapStop(choice.finish_reason);
@@ -384,10 +416,37 @@ class Turn {
     }
   }
 
-  /** 收尾:关掉未收口的块,发定稿。 */
+  /**
+   * 收尾:关掉未收口的块;工具调用到这时才定稿——按第一次出现的顺序,每个发一组 start / delta / end(参数已收全),
+   * 无效的(参数不可解析、到最后都没有名字)只告警、不发事件、不进定稿;最后发 done。
+   */
   *finish(): Generator<ProviderEvent> {
     yield* this.close();
+    for (const call of this.calls) {
+      const parsed = call.name === "" ? null : parseArgs(call.args);
+      if (parsed === null) {
+        this.dropped += 1;
+        yield {
+          type: "warning",
+          code: "tool_call_dropped",
+          message: call.name === "" ? "工具调用到最后都没有名字,已丢弃(未执行)" : `工具调用 '${call.name}' 的参数 JSON 不可解析,已丢弃(未执行)`,
+        };
+        continue;
+      }
+      yield { type: "toolcall_start", toolCallId: call.id, name: call.name };
+      if (call.args !== "") yield { type: "toolcall_delta", argsText: call.args };
+      yield { type: "toolcall_end" };
+      this.blocks.push({ type: "tool_use", id: call.id, name: call.name, input: parsed });
+    }
     yield* this.takeWarnings();
+    // 上游说「要调工具」（finish_reason: tool_calls），却一个能执行的调用都没有（参数全不可解析、或压根没发）：
+    // 不能当成 tool_use 交出去——循环会拿着一条空的助手消息再来一轮，模型再要、再丢，空转到迭代上限，用户始终看不到回复。
+    // 当成可重试的协议错误：重试大概率拿到完整的调用；重试用完就把错误交给用户。
+    if (this.stop === "tool_use" && !this.blocks.some((b) => b.type === "tool_use")) {
+      const why = this.dropped > 0 ? `${this.dropped} 个工具调用无效（参数不可解析或没有名字），已丢弃` : "响应里没有工具调用";
+      yield { type: "error", error: agentError("provider", "protocol", `上游说要调用工具（finish_reason: tool_calls），但${why}`, true) };
+      return;
+    }
     const message: AssistantMessage = {
       role: "assistant",
       content: this.blocks,
@@ -426,22 +485,6 @@ class Turn {
       }
       this.thinkingBuf = "";
       yield { type: "thinking_end", signature: this.reasoningField };
-    } else if (open === "tool") {
-      const t = this.tool;
-      this.tool = null;
-      if (t !== null) {
-        const parsed = parseArgs(t.args);
-        if (parsed === null) {
-          this.pendingWarnings.push({
-            type: "warning",
-            code: "tool_call_dropped",
-            message: `工具调用 '${t.name}' 的参数 JSON 不可解析,已丢弃(未执行)`,
-          });
-        } else {
-          this.blocks.push({ type: "tool_use", id: t.id, name: t.name, input: parsed });
-        }
-      }
-      yield { type: "toolcall_end" };
     }
     yield* this.takeWarnings();
   }
