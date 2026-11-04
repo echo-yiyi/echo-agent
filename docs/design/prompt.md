@@ -166,13 +166,13 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 - **结构卫生**：单行化、围栏、截断是否让格式与体积可控。
 - **安全隔离**：不可信文字是否无法改变更高层指令的含义。
 
-[`singleLine()`](../../packages/core/src/prompt/sanitize.ts#symbol=singleLine)、[`fenceSafe()`](../../packages/core/src/prompt/sanitize.ts#symbol=fenceSafe) 与 [`truncateMarked()`](../../packages/core/src/prompt/sanitize.ts#symbol=truncateMarked) 只提供第二项：折叠换行、替换反引号、截取前缀并留下标记。它们不提供第三项，也不应该叫 sanitizer 或“安全边界”。
+[`singleLine()`](../../packages/core/src/prompt/sanitize.ts#symbol=singleLine)、[`fenceSafe()`](../../packages/core/src/prompt/sanitize.ts#symbol=fenceSafe) 与 [`truncateMarked()`](../../packages/core/src/prompt/sanitize.ts#symbol=truncateMarked) 只提供第二项：折叠换行、替换反引号、截取前缀并留下标记。它们不提供第三项，也不应该叫 sanitizer 或“安全边界”。`fenceSafe()` 只给放进反引号围栏的内容用；项目指令与 skill 正文用标签或标记行定界、没有围栏要保护，反引号原样保留——换掉它们只会把正文里的命令与代码改坏。
 
 | 来源 | authority | 当前卫生措施 | 必须如实说明的限制 |
 | --- | --- | --- | --- |
 | 产品 / extension 字面量 | 产品代码 | 无；视为受信 | 改文案就是改模型行为，应与代码一起 review |
-| workspace 的 AGENTS.md / CLAUDE.md | 作为用户自己的项目指令执行 | 反引号替换、正文前缀 65 536 字符、XML-like 标记 | 标记可被正文自行闭合；第三方仓库本身不可信时，靠 prompt 包装无法授权它 |
-| skill 正文与激活参数 | 被激活后作为工作指令执行 | 围栏字符替换、单条和总预算、参数单行化 | 起止标记不是安全沙箱；skill 的安装 / 激活就是信任决定 |
+| workspace 的 AGENTS.md / CLAUDE.md | 作为用户自己的项目指令执行 | 正文前缀 65 536 字符、XML-like 标签定界、正文里冒充闭合标签的字样中和；段头写实际加载的文件名 | 第三方仓库本身不可信时，靠 prompt 包装无法授权它 |
+| skill 正文与激活参数 | 被激活后作为工作指令执行 | 与起止标记同形的行转义、单条和总预算、参数单行化 | 起止标记不是安全沙箱；skill 的安装 / 激活就是信任决定 |
 | memory | 跨 run 的持久背景 | resident / index 各自有预算；索引描述单行化 | 正文有意保留多行并直接影响模型，旧记忆可能陈旧或被污染 |
 | task title / executor | 只应是清单数据 | 只有条数上限 | 当前可换行、可无界增长，能伪装成额外指令段 |
 | prompt variables | section 引用的运行事实 | 无转义，替换值不重扫 | workspace 等字符串原样进入 system；它们不是模板代码，但仍能包含换行 |
