@@ -12,8 +12,8 @@
 //
 // ## 形态怎么选：看 stdin 是不是终端
 //
-//   · **不是**（管道、重定向、CI、`echo x | echo-agent`）→ 管道形态：一行输入一次 prompt，
-//     正文进 stdout、旁白进 stderr，读完收摊。
+//   · **不是**（管道、重定向、CI、`cat task.md | echo-agent`）→ 管道形态：**整段 stdin 是一条 prompt**，
+//     跑一个 run，正文进 stdout、旁白进 stderr，跑完收摊（2026-11-03，照 `claude -p` / `codex exec`）。
 //   · **是** → 交互形态：起 TUI。
 //
 // 不给 `--pipe` 这种开关：形态由「有没有人坐在终端前」决定，那件事进程自己看得见，
@@ -54,7 +54,7 @@ import type { FirstRunChoice } from "./shell.ts";
 // （FirstRunChoice 同时是装配与选择器的「一家」形状：name = --provider 短名，provider = 实例）
 import { readSettings, writeSettings } from "./settings.ts";
 import { isConfigured, type VerifyFn } from "./setup.ts";
-import { linesOf } from "./stdin.ts";
+import { readAll } from "./stdin.ts";
 import type { PresetForm, Product } from "./product.ts";
 
 export type ProviderName = "kimi" | "deepseek" | "openai" | "zai" | "minimax";
@@ -119,8 +119,9 @@ const PROVIDERS: Record<ProviderName, () => Provider> = {
 export function usage(name: string): string {
   return `用法：${name} [选项]
 
-  stdin 是终端 → 起交互界面；是管道/重定向 → 一行输入跑一轮，
-  正文进 stdout、工具旁白进 stderr，读完就干净收摊。Ctrl-C 也是干净收摊。
+  stdin 是终端 → 起交互界面；是管道/重定向 → 读完整段 stdin 当一条 prompt 跑一次
+  （cat task.md | ${name}），正文进 stdout、工具旁白进 stderr，跑完就干净收摊。
+  stdin 是空的报错、以 1 退出。Ctrl-C 也是干净收摊。
 
 选项：
   --state-dir <路径>   会话目录的上一层（缺省：$ECHO_HOME/sessions，再退到 ~/.echo/sessions）
@@ -138,7 +139,7 @@ export function usage(name: string): string {
 子命令：
   observe <last|show <run-id>|export <run-id>|health|serve>
                        看已落盘的 run 观测记录：不启动 agent、不取锁（详见 ${name} observe --help）。
-                       管道形态每轮结束会在 stderr 打一行 \`[run] <run-id> …\`，拿它去 observe show。
+                       管道形态跑完会在 stderr 打一行 \`[run] <run-id>\`，拿它去 observe show。
 
 **每次启动都是新的一段会话**，续上次是显式动作（--continue / --resume）。会话按「目录 + 命令」归属：
 在同一个目录里，${name} 与别的命令各有各的对话，互不相续；续上时界面会说明续了多少条。
@@ -602,6 +603,13 @@ async function runPiped(
   notices: readonly string[],
   signal: AbortSignal,
 ): Promise<number> {
+  // **整段 stdin 是一条 prompt**，先读完再装配：空输入不该拿锁、建状态根（codex exec 也是先读 stdin 再起会话）。
+  const prompt = await readAll(process.stdin, signal);
+  if (signal.aborted) return 0; // 读到一半被叫停：半截输入不当 prompt，干净收摊
+  if (prompt.trim() === "") {
+    process.stderr.write(`stdin 是空的：管道形态把整段 stdin 当一条 prompt，例如 cat task.md | ${product.name}\n`);
+    return 1;
+  }
   // **唯一 composition root**：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
   const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId);
   // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥
@@ -610,7 +618,7 @@ async function runPiped(
   if (sessionId !== undefined) process.stderr.write(`[会话] 续 ${sessionId}\n`); // 续了就说，无声恢复是禁止的
   for (const n of notices) process.stderr.write(`${n}\n`);
   for (const d of echo.diagnostics) process.stderr.write(`[扩展] [${d.code}] ${d.message}${d.path !== undefined ? `（${d.path}）` : ""}\n`);
-  return await run({ echo, input: linesOf(process.stdin, signal), signal });
+  return await run({ echo, input: [prompt], signal });
 }
 
 /**

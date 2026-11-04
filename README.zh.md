@@ -15,7 +15,7 @@ bun add -g echo-agent
 MOONSHOT_API_KEY=sk-... echo-agent
 ```
 
-在终端中运行会打开交互界面。stdin 被重定向时，每一行输入是一轮对话；模型正文写入 stdout，运行信息写入 stderr。
+在终端中运行会打开交互界面。stdin 被重定向时，整段 stdin 是一条 prompt，只跑一个 run，所以 `cat task.md | echo-agent` 是把任务整份交过去；模型正文写入 stdout，运行信息写入 stderr。stdin 为空时报错，以 1 退出。
 
 ```bash
 printf 'Introduce yourself in one sentence.\n' |
@@ -88,7 +88,7 @@ echo-agent observe health        # where the observation store is, and how much 
 echo-agent observe serve         # local read-only panel, Ctrl+C to stop
 ```
 
-`observe serve` 会开一个面板，在 agent 跑着的时候轮询数据库。不给 `--session <id>` 时每个子命令都覆盖全部会话，所以一个面板就能看整个集群。管道形态每轮结束会在 stderr 打一行 `[run] <run-id> …`，那个 id 就是拿去 `observe show` 的。
+`observe serve` 会开一个面板，在 agent 跑着的时候轮询数据库。不给 `--session <id>` 时每个子命令都覆盖全部会话，所以一个面板就能看整个集群。管道形态跑完会在 stderr 打一行 `[run] <run-id>`，那个 id 就是拿去 `observe show` 的。
 
 观测永远拦不住 run：数据库写不动时 run 照跑，结果里会如实报出来。记录格式、两条 lane、失败语义与尚未做的部分，详见 [`docs/design/observability.md`](docs/design/observability.md)。
 

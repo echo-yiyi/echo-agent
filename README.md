@@ -15,7 +15,7 @@ bun add -g echo-agent
 MOONSHOT_API_KEY=sk-... echo-agent
 ```
 
-In a terminal, the command opens the interactive UI. With redirected stdin, each input line is one turn; model text goes to stdout and operational output goes to stderr.
+In a terminal, the command opens the interactive UI. With redirected stdin, the whole of stdin is one prompt and the command makes one run, so `cat task.md | echo-agent` hands over the task in one piece; model text goes to stdout and operational output goes to stderr. Empty stdin is an error and exits with 1.
 
 ```bash
 printf 'Introduce yourself in one sentence.\n' |
@@ -88,7 +88,7 @@ echo-agent observe health        # where the observation store is, and how much 
 echo-agent observe serve         # local read-only panel, Ctrl+C to stop
 ```
 
-`observe serve` opens a panel that polls the database while the agent runs. With no `--session <id>` every subcommand covers all sessions at once, so one panel watches the whole cluster. In piped mode each turn prints `[run] <run-id> …` to stderr; that is the id to pass to `observe show`.
+`observe serve` opens a panel that polls the database while the agent runs. With no `--session <id>` every subcommand covers all sessions at once, so one panel watches the whole cluster. In piped mode the run ends by printing `[run] <run-id>` to stderr; that is the id to pass to `observe show`.
 
 Observation never blocks a run: if the database cannot be written the run still completes, and the result says so. [`docs/design/observability.md`](docs/design/observability.md) covers the record format, the two lanes, the failure semantics, and what is not built yet.
 
