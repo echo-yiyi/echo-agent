@@ -741,6 +741,16 @@ describe("Agent 接线", () => {
     expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("旧偏好"));
   });
 
+  test("记忆正文里写着 `{{ user.name }}` / `${{ secrets.X }}`：原样进 system，run 照常跑完（记忆段不插值）", async () => {
+    const dir = new InMemoryDir();
+    await dir.write("user/user.md", "User's project uses Handlebars like {{ user.name }} and CI reads ${{ secrets.NPM_TOKEN }}.");
+    const { fn, seen } = routedStream([textTurn("好")]);
+    const agent = await memoryAgent(dir, fn);
+    const r = await agent.prompt("hi");
+    expect(r.outcome.kind).toBe("completed");
+    expect(seen[0]?.systemPrompt).toContain("Handlebars like {{ user.name }} and CI reads ${{ secrets.NPM_TOKEN }}.");
+  });
+
   test("记忆没变：下个 run 什么都不追加，system 逐字不变、消息只在末尾长", async () => {
     const dir = new InMemoryDir();
     await dir.write("user/user.md", "偏好");

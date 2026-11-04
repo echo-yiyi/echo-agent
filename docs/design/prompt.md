@@ -50,7 +50,7 @@ flowchart LR
 
 外部 extension 真正需要学习的接口只有两层：
 
-- [`PromptSection`](../../packages/core/src/prompt/types.ts#symbol=PromptSection)：稳定名字、数值 `order`、一个从 `AssembleContext` 渲染字符串的函数。
+- [`PromptSection`](../../packages/core/src/prompt/types.ts#symbol=PromptSection)：稳定名字、数值 `order`、一个从 `AssembleContext` 渲染字符串的函数，以及可选的 `interpolate`（声明了才按变量插值，见 §3.2）。
 - [`AgentPromptRegistry`](../../packages/core/src/extension/registries.ts#symbol=AgentPromptRegistry)：注册 section 或 variable，取得由 Fiber 持有的 disposer；同名默认判红。
 
 [`definePromptPack()`](../../packages/core/src/extension/builtin.ts#symbol=definePromptPack) 把一组纯 prompt sections 变成 extension；[`defineToolPack()`](../../packages/core/src/extension/builtin.ts#symbol=defineToolPack) 把工具与它们的跨调用提示放进同一个 effect。两者共用原子注册：中途任何一项失败，已经注册的项逆序撤回；卸载也按所有权撤回。内建 `echo:*`、两个产品和第三方 extension 走同一个 registry，没有 core 私道。
@@ -97,12 +97,14 @@ flowchart LR
 1. 复制 sections 并按 `order` 稳定排序。
 2. 在渲染任何 section 前，一次性执行**全部已注册** variable providers；即使某变量没有被任何段引用也会执行。
 3. 逐段调用 `render(ctx)`；抛错的段省略并交给 `onFailure` 留诊断。
-4. 对成功结果做严格 `{{name}}` 插值，再 `trim()`；空结果不占位。
+4. 声明了 `interpolate: true` 的段对成功结果做严格 `{{name}}` 插值，其余段原样；再 `trim()`；空结果不占位。
 5. 非空段用两个换行连接；全空返回 `null`。
 
-完整的 `{{name}}` 必须名字合法、已经注册且本次有值，否则抛 `PromptVariableError`；孤立且没有 `}}` 的 `{{` 作为普通文本保留；替换值不二次扫描。现有门见 [排序与空段](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null) 和 [严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名)。
+**插值只在段自己声明时做**（2026-11-03，决策见 [插值由段声明](../decisions/implemented/2026-11-03-prompt-interpolation-opt-in.md)）。声明的只有作者有意写变量的段：内建环境段（[`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection)）与产品导入的 md 段（`sectionFromMarkdown()`）。装进第三方或模型写的文本的段——项目指令、记忆、skill 目录、角色 identity——不声明，正文里的 `${{ secrets.X }}`、`{{ .Values.x }}` 是普通字符；此前对所有段插值，这样一行就让每个 run 在调用模型前失败，连记忆提取都起不来。
 
-[`sectionFromMarkdown()`](../../packages/core/src/prompt/import.ts#symbol=sectionFromMarkdown) 接受极简 frontmatter：`name`、整数 `order`，缺 order 为 0；`tier`、缺名字、非整数 order 判红。正文去掉首尾空白，不保证字节级原样保留。
+声明了插值的段里，完整的 `{{name}}` 必须名字合法、已经注册且本次有值，否则抛 `PromptVariableError`；孤立且没有 `}}` 的 `{{` 作为普通文本保留；替换值不二次扫描。现有门见 [排序与空段](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null)、[严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名) 和 [未声明的段原样](../../packages/core/test/prompt.test.ts#test=没声明-interpolate-的段原样第三方文本里的-secretsx-valuesx-workspace-都不当变量)。
+
+[`sectionFromMarkdown()`](../../packages/core/src/prompt/import.ts#symbol=sectionFromMarkdown) 接受极简 frontmatter：`name`、整数 `order`，缺 order 为 0；`tier`、缺名字、非整数 order 判红。正文去掉首尾空白，不保证字节级原样保留；导入的段声明插值。
 
 ### 3.3 角色只替换 identity
 
@@ -187,7 +189,7 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 | --- | --- | --- |
 | `PromptSection.render()` 抛错 | 省略该段；异步发 `[prompt_section_failed]` 通知；run 继续 | 对增强段合理；对 identity 等关键段没有表达力 |
 | variable provider 抛错 | 整次装配失败；即使变量未被引用也会发生 | 接口 未写清 provider 必须纯且不抛 |
-| 变量未注册 / 无值 / 引用畸形 | `PromptVariableError`；模型不被调用，run 以 error 收场 | 作者错误 fail-loud，应该保留 |
+| 声明插值的段里变量未注册 / 无值 / 引用畸形 | `PromptVariableError`；模型不被调用，run 以 error 收场 | 作者错误 fail-loud，应该保留；未声明的段不解析 `{{…}}`，第三方文本不会触发它 |
 | attempt injection / transform / projection / key 抛错 | attempt 记 internal failure，run 以 error 收场 | 实现 fail-loud，但多处注释仍写“绝不抛、失败回退” |
 | `contextBeforeBuild` 返回 block | 不调用 provider，不合成 assistant 消息；reply / run 以 aborted 收场 | 已与 hook 接口 对齐 |
 | extension 注册撞名或 role 替不到 identity | mount 失败并回滚该 generation | 所有权清楚，应该保留 |
@@ -203,7 +205,6 @@ PromptSection 不区分 required / optional，render 异常统一省略。产品
 - **生命周期命名有历史差异。** getTurnInjections 实际每个 attempt 调用，重试时会重算。这是已确认的上下文重建行为，不应改回每 turn 只算一次；PromptSource 仍是公开但没有外部注册入口的内部来源类型。
 - **上下文字段含义需按实现读取。** AssembleContext.agentId 当前赋值为 product，不代表角色身份。
 - **预算与信任有限。** task 标题和 executor 未建立注入字符总上界；格式定界与反引号替换不能证明外部文本不会影响模型指令理解。
-- **正文也参与模板解析。** assembleSystem 对整个 render 结果插值，项目文件或记忆里的完整双花括号可能被当成变量引用，未注册时装配失败。当前没有独立的原文通道。
 
 角色替换顺序已由 createEcho 的产品先、角色后挂载解决，不再列作当前缺陷。历史审阅命令见 [复核记录](../code-review/2026-09-15-doc-probes.md)；其中旧失败输出不代表当前行为。
 
@@ -215,6 +216,7 @@ PromptSection 不区分 required / optional，render 异常统一省略。产品
 | --- | --- |
 | section 排序、空段、render 失败 | [prompt 装配测试](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null) |
 | 严格变量引用使错误 run 在调用模型前结束 | [变量错误测试](../../packages/core/test/prompt.test.ts#test=变量错-run-以-error-收场不静默发一份错的-system) |
+| 项目指令与记忆里的 `{{…}}` 原样进 system，run 照常 | [项目指令](../../packages/cli/test/prompt.test.ts#test=instructionsagentsmd-里一行-github-actions-的-secretsx-原样进-systemrun-照常跑完项目指令不插值)、[记忆](../../packages/core/test/memory.test.ts#test=记忆正文里写着-username-secretsx-原样进-systemrun-照常跑完记忆段不插值) |
 | prompt / tool pack 原子注册、卸载、撞名回滚 | [pack 测试](../../packages/core/test/prompt.test.ts#test=definepromptpack-definetoolpack-带段mount-进表unmount-撤走撞名整包回滚) |
 | role identity 的受控替换与复原 | [agent definition 测试](../../packages/core/test/agent-def.test.ts#test=identity-被替换工具收成子集unmount-两样都复原) |
 | skill / task 动态材料不进 transcript，system 在 run 内不随其变化 | [主接线测试](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)、[task 测试](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |

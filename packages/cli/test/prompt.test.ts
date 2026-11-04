@@ -82,6 +82,14 @@ test("instructions：没有文件不出段；有 AGENTS.md 出段并定界；CLA
   expect(await loadInstructions(join(dir, "nope"))).toBeNull();
 });
 
+test("instructions：AGENTS.md 里一行 GitHub Actions 的 `${{ secrets.X }}` 原样进 system，run 照常跑完（项目指令不插值）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "echo-instr-"));
+  cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "AGENTS.md"), "# Release\nCI publishes with `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`.\n", "utf8");
+  const { systemPrompt } = await echoIn(dir, [instructionsEntry()]);
+  expect(await systemPrompt()).toContain("CI publishes with `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`.");
+});
+
 test("instructions：反引号原样保留（标签定界，没有围栏要保护）、超 64 KB 截断留标记、闭合标签中和", () => {
   const out = renderInstructions("AGENTS.md", "Run `bun test` first.\n```bash\nbun install\n```\n" + "x".repeat(INSTRUCTIONS_CAP + 10));
   expect(out).toContain("Run `bun test` first.\n```bash\nbun install\n```");
