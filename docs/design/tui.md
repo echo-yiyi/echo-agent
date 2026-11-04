@@ -92,7 +92,7 @@ Markdown 使用固定 [MARKDOWN_THEME](../../packages/tui/src/theme.ts#symbol=MA
 
 ## 六、交互能力
 
-命令派发由 runTui 中的命令表负责，补全使用同一命令集合。
+命令派发由 runTui 中的命令表负责，补全使用同一命令集合。一行输入算不算命令由 [parseSlashCommand()](../../packages/tui/src/slash.ts#symbol=parseSlashCommand) 判：以 `/` 开头、且 `/` 后的第一个词不含 `/`。以绝对路径开头的一行（终端里拖入文件后接着打字）是消息，照常发送并附图；不认识的命令报一句并把原文放回输入行，不发给模型。
 
 | 交互 | 所有者与边界 |
 | --- | --- |
