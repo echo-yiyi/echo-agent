@@ -35,7 +35,7 @@ test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 w
     // 思考档 medium（2026-11-03 拍板）：两种形态都开，管道形态没有 Shift+Tab 可按
     expect(preset.agent).toEqual({ maxIterations: 200, thinkingLevel: "medium" });
     // 缺省全放行（2026-09-01 用户拍板）：不装策略，bash / write_file / edit_file 不问直接跑。
-    // 「动手先问」仍在 `permission.ts`，是给评测 / 别的宿主自己传的，本产品不缺省开。
+    // 「动手先问」（`permission.ts` 的 `DEFAULT_PERMISSION`）是 `codingPreset()` 不传 permission 时的缺省（评测 / 别的宿主），本产品传 false 不用它。
     expect([interactive, preset.agent?.permission]).toEqual([interactive, undefined]);
   }
 });

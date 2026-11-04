@@ -37,7 +37,10 @@ import { permissionPolicyFor, type PermissionPolicy } from "./permission.ts";
 import { codingConductSection, codingIdentitySection, shellToolsSection, workspaceToolsSection } from "./prompt.ts";
 
 export type CodingPresetOptions = {
-  /** 权限策略;false = 全放行(评测/CI)。缺省「读随便,动手先问」——没配裁决人时动手会被拒。 */
+  /**
+   * 权限策略；false = 不装策略、全放行（出厂 echo-coding 就是这一档，见 `cli.ts`）。不给 = `DEFAULT_PERMISSION`
+   * （`permission.ts`：bash / write_file / edit_file 先问）——没配裁决人时这三件会被拒。
+   */
   permission?: PermissionPolicy | false;
   /**
    * 已经扫好的 skill。**本函数不扫盘**——它是同步的一份配置，读盘是调用方的事

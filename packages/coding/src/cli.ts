@@ -7,11 +7,11 @@
 // 装配、收摊全在 base 的 `mainFor()` 里，这里一行都不复制；交互形态起哪个壳由本文件挑
 // （`terminalShell`），装配层不写死。
 //
-// **权限：缺省全放行**（2026-09-01 用户拍板，两种形态都是）。`permission: false` = 不装策略，
+// **权限：出厂的 echo-coding 全放行**（2026-09-01 用户拍板，两种形态都是）。这里传 `permission: false` = 不装策略，
 // bash / write_file / edit_file 不问直接跑。理由：这是用户自己在自己的仓库里开的 coding agent，
-// 每一步都问只会让人按到麻木；管道形态更是没人可问。要「动手先问」的策略仍在
-// `permission.ts`（`DEFAULT_PERMISSION` + `responder: "host"`，壳会摆出来问 y/n），
-// 评测或别的宿主可以自己传——本产品不缺省开它。
+// 每一步都问只会让人按到麻木；管道形态更是没人可问。
+// `permission.ts` 的 `DEFAULT_PERMISSION`（三件先问的黑名单）**不是这条命令的行为**：它只在嵌入方调 `codingPreset()`
+// 而不传 `permission` 时生效（评测、别的宿主）；要在交互壳里问 y/n，再给 `responder: "host"`。
 
 import { readFileSync } from "node:fs";
 import { conductEntry, mainFor, retainRecentDays, type Product } from "@echo-agent/base";
