@@ -313,14 +313,9 @@ export type { PeekedLockRecord, StateLockInspection } from "./storage/file-lock.
  */
 export { resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "./create-agent.ts";
 export type { EchoAgentOptions } from "./create-agent.ts";
-export {
-  createEcho,
-  discoverExtensionFiles,
-  loadExtensionFile,
-  resolveExtensionDirs,
-  ExtensionLoadError,
-  EXTENSIONS_DIR,
-} from "./create-echo.ts";
+// 扩展的发现与加载（`discoverExtensionFiles` / `loadExtensionFile` / `resolveExtensionDirs` / `EXTENSIONS_DIR` /
+// `ExtensionLoadError`）是 `createEcho()` 内部的步骤，不在这里（2026-11-03）：坏扩展在装配里记成诊断，不往外抛。
+export { createEcho } from "./create-echo.ts";
 export type { CreateEchoOptions, Echo, LoadedExtension } from "./create-echo.ts";
 /** 热部署的结果形状（2026-09-14）：`Echo.reloadExtensions()` 返回的就是它。 */
 export type { ReloadChange, ReloadReport, ReloadResult } from "./extension/reload.ts";

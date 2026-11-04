@@ -69,7 +69,7 @@ scope 是依赖寿命的校验信息，不会自动生成跨所有容器共享�
 
 ## 4. 作者怎样交还资源
 
-公共导入面是 `@echo-agent/core/extension`。下面是只提供一段 prompt、能在 run 间重载的最小定义；由产品放入 extensions entry，或作为盘上文件的默认导出：
+公共导入面是 `@echo-agent/core/extension`：定义扩展、service token、registry 类型、`registerAll` / `defineToolPack` / `definePromptPack` 与壳协议。Host 本身（`ExtensionHost`）、内建 `echo:*` 定义、`mountBuiltinTools` / `builtinEntries` / `unmountGenerations`、`agentRegistries`，以及根入口上的发现与加载函数都不在公共面上——装 extension 的只有 `createEcho()` 一处（[决策](../decisions/implemented/2026-11-03-assembly-parts-internal.md)）。下面是只提供一段 prompt、能在 run 间重载的最小定义；由产品放入 extensions entry，或作为盘上文件的默认导出：
 
 ```ts
 import { defineExtension, AgentPrompt } from "@echo-agent/core/extension";

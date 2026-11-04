@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 357（value 129 · type 210 · both 18）
+符号 352（value 125 · type 210 · both 17）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -129,16 +129,11 @@ value  resolveSessionsRoot
 value  resolveSharedDir
 value  resolveStateDir
 
--- src/create-echo.ts (9) --
+-- src/create-echo.ts (4) --
 value  createEcho
 type   CreateEchoOptions
-value  discoverExtensionFiles
 type   Echo
-both   ExtensionLoadError
-value  EXTENSIONS_DIR
 type   LoadedExtension
-value  loadExtensionFile
-value  resolveExtensionDirs
 
 -- src/errors.ts (9) --
 value  ABORT_REASON
@@ -505,7 +500,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 82（value 35 · type 43 · both 4）
+符号 62（value 20 · type 40 · both 2）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -523,43 +518,22 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (20) --
-value  BUILTIN_GENERATION
-value  builtinEntries
+-- src/extension/builtin.ts (7) --
 type   BuiltinToolGroup
 type   BuiltinToolGroups
 type   BuiltinToolsConfig
 value  definePromptPack
 value  defineToolPack
-value  ECHO_AGENT
-value  ECHO_ASK
-value  ECHO_COMPACTION
-value  ECHO_MEMORY
-value  ECHO_RELOAD
-value  ECHO_SCHEDULER
-value  ECHO_SKILLS
-value  ECHO_SUBAGENT
-value  ECHO_TASKS
-value  ECHO_TOOL_SEARCH
-value  mountBuiltinTools
 type   PromptPackConfig
 value  registerAll
-
--- src/extension/cleanup.ts (2) --
-value  unmountGenerations
-type   UnmountTarget
 
 -- src/extension/fiber.ts (1) --
 type   FiberStatus
 
--- src/extension/host.ts (5) --
+-- src/extension/host.ts (1) --
 type   ExtensionEntry
-both   ExtensionHost
-both   ExtensionMountError
-type   FiberInfo
-type   ReplaceResult
 
--- src/extension/registries.ts (18) --
+-- src/extension/registries.ts (17) --
 value  AgentBackgroundService
 value  AgentCompaction
 type   AgentCompactionRegistry
@@ -572,7 +546,6 @@ value  AgentPolicies
 type   AgentPoliciesRegistry
 value  AgentPrompt
 type   AgentPromptRegistry
-value  agentRegistries
 value  AgentSessionsService
 value  AgentSkills
 type   AgentSkillsRegistry

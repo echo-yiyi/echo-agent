@@ -9,9 +9,6 @@ import {
   AgentTools,
   ExtensionAbiError,
   ExtensionDisposedError,
-  ExtensionHost,
-  ExtensionMountError,
-  agentRegistries,
   defineExtension,
   defineService,
   registerAll,
@@ -21,6 +18,8 @@ import {
   type ExtensionEntry,
   type ReloadBoundary,
 } from "../src/extension/public.ts";
+import { ExtensionHost, ExtensionMountError } from "../src/extension/host.ts";
+import { agentRegistries } from "../src/extension/registries.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { defineToolPack, mountBuiltinTools } from "../src/extension/builtin.ts";
 import { Agent } from "../src/agent.ts";
