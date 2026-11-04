@@ -2,10 +2,11 @@
 //
 // 锁的不变量:
 //   ① 装配:按 order 升序(同数保注册序);空段丢弃;render 抛错 = 隐形 + 留痕;全空 = null
-//   ② 变量:{{name}} 严格插值——未注册 / 无值 / 畸形都**抛**(作者错误要响);孤立 `{{` 原样;替换值不重扫
+//   ② 变量:声明了 `interpolate` 的段才插值,其余原样;插值严格——未注册 / 无值 / 畸形都**抛**(作者错误要响);
+//      孤立 `{{` 原样;替换值不重扫
 //   ③ registry:段与变量只经 AgentPrompt 进;同名抛;disposer 只卸自己;内建 echo:* 走同一条路
 //   ④ 通道 B:激活正文每轮注入(消息末尾、不进 transcript),启用「下一轮起可见」、停用下一轮消失;
-//      反引号中和、instructions 单行化;任务清单同款
+//      正文反引号原样、instructions 单行化;任务清单同款
 //   ⑤ 导入:frontmatter 定 name/order,order 缺省 0;没名字 / 写 tier / 非整数 order 都 fail-loud
 //   ⑥ 缓存:run 内 system 逐字节不变(冻结时刻);激活 skill 不动 system(只动注入)
 //   ⑦ 变量错让 run 以 error 收场,不静默发一份错的 system
@@ -81,10 +82,17 @@ describe("assembleSystem", () => {
   test("render 拿到 AssembleContext;变量从表里取值,同名同值", async () => {
     const vars = new Map<string, PromptVariable>([["workspace", (c) => c.workspace], ["model", (c) => c.model.id]]);
     const sections: PromptSection[] = [
-      { name: "env", order: 300, render: (c) => `Workspace: {{workspace}} / ${c.model.provider}` },
-      sec("again", 301, "{{workspace}} {{model}}"),
+      { name: "env", order: 300, interpolate: true, render: (c) => `Workspace: {{workspace}} / ${c.model.provider}` },
+      { ...sec("again", 301, "{{workspace}} {{model}}"), interpolate: true },
     ];
     expect(await assembleSystem(sections, vars, CTX)).toBe("Workspace: /repo / fake\n\n/repo m1");
+  });
+
+  test("没声明 interpolate 的段原样:第三方文本里的 `${{ secrets.X }}` / `{{ .Values.x }}` / `{{workspace}}` 都不当变量", async () => {
+    const vars = new Map<string, PromptVariable>([["workspace", (c) => c.workspace]]);
+    const raw = "CI: `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`; Helm: {{ .Values.x }}; literal {{workspace}}";
+    const sections: PromptSection[] = [sec("instructions", 400, raw), { ...sec("env", 300, "W={{workspace}}"), interpolate: true }];
+    expect(await assembleSystem(sections, vars, CTX)).toBe(`W=/repo\n\n${raw}`);
   });
 });
 
@@ -249,7 +257,7 @@ describe("toolSchemasOf(确定性投影)", () => {
 });
 
 describe("renderSkillInjections", () => {
-  test("激活出注入(带起止标记),停用即消失;instructions 单行化;反引号中和", () => {
+  test("激活出注入(带起止标记),停用即消失;instructions 单行化;正文反引号原样", () => {
     const skills = attachedSkills({ skills: [skill("h5", "做 H5 页", "步骤:\n```html\n<div>\n```")] });
     expect(renderSkillInjections(skills.skills, skills.active)).toEqual([]);
 
@@ -260,8 +268,8 @@ describe("renderSkillInjections", () => {
     expect(text).toContain("# Skill: h5 (instructions begin)");
     expect(text).toContain("# Skill: h5 (instructions end)");
     expect(text).toContain("For this task: 这次做 落地页"); // 换行折叠
-    expect(text).not.toContain("```"); // 围栏被中和
-    expect(fenceSafe("```")).toBe("ˋˋˋ");
+    expect(text).toContain("步骤:\n```html\n<div>\n```"); // 标记行定界，没有围栏要保护：正文原样
+    expect(fenceSafe("```")).toBe("ˋˋˋ"); // fenceSafe 本身仍在，给放进围栏的内容用
 
     deactivateSkill(skills.active, "h5");
     expect(renderSkillInjections(skills.skills, skills.active)).toEqual([]);
@@ -365,7 +373,7 @@ describe("Agent 接线", () => {
     const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy });
     const host = await mountBuiltinTools(agent);
     await host.mount("product", [
-      { entryId: "p:bad", definition: definePromptPack("p:bad") as never, config: { sections: [sec("identity", 0, "I am {{modle}}")] } },
+      { entryId: "p:bad", definition: definePromptPack("p:bad") as never, config: { sections: [{ ...sec("identity", 0, "I am {{modle}}"), interpolate: true }] } },
     ]);
     const r = await agent.prompt("hi");
     expect(r.outcome.kind).toBe("error");

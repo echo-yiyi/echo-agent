@@ -6,15 +6,15 @@
 //   name: company-policy
 //   order: 10          ← 可省,缺省 0(产品的 md 多半就是 identity)
 //   ---
-//   正文…(原样进 system,这是产品自己的受信文本,不消毒——消毒的是第三方/模型可控数据;
-//        可以写 {{workspace}} 之类的变量,装配时插值)
+//   正文…(进 system,这是产品自己的受信文本,不消毒——消毒的是第三方/模型可控数据;
+//        导入的段声明 `interpolate`:可以写 {{workspace}} 之类的变量,装配时插值)
 
 import { parseFrontmatter } from "./markdown.ts";
 import type { PromptSection } from "./types.ts";
 
 /**
  * 把一个 markdown 文本变成一段 prompt：frontmatter 给 `name`（可用 `fallbackName` 兜底，通常是文件名）
- * 与 `order`（整数，缺省 0），正文原样进 system（可含 `{{变量}}`）。产品层读完文件喂进来，
+ * 与 `order`（整数，缺省 0），正文进 system 并按 `{{变量}}` 插值（`interpolate: true`）。产品层读完文件喂进来，
  * 再经 `AgentPrompt.section()` 注册——与代码字面量的段同一条路。缺名字、写 `tier:`、非整数 order 都抛。
  */
 export function sectionFromMarkdown(markdown: string, fallbackName?: string): PromptSection {
@@ -35,5 +35,6 @@ export function sectionFromMarkdown(markdown: string, fallbackName?: string): Pr
     }
   }
   const content = body.trim();
-  return { name, order, render: () => content }; // 内容在导入时定死:导入的段天然字节稳定(变量除外)
+  // 内容在导入时定死:导入的段天然字节稳定(变量除外)。产品自己写的文件,作者有意写变量,所以插值
+  return { name, order, interpolate: true, render: () => content };
 }

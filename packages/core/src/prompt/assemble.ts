@@ -22,10 +22,11 @@ export class PromptVariableError extends Error {
 }
 
 /**
- * 按 order 升序(同数保数组序 = 注册序)→ 逐段 `render(ctx)` → `{{name}}` 插值 → 空段丢弃 → "\n\n" join。
+ * 按 order 升序(同数保数组序 = 注册序)→ 逐段 `render(ctx)` → 声明了 `interpolate` 的段做 `{{name}}` 插值
+ * (其余原样) → 空段丢弃 → "\n\n" join。
  * 两种失败两种档位:
  *   · `render()` 抛错 = 该段隐形 + onFailure 留痕——段是增强面,运行时数据坏一段不许击穿整个 run;
- *   · 变量错 = **抛** {@link PromptVariableError}——作者错误要响。
+ *   · 插值段的变量错 = **抛** {@link PromptVariableError}——作者错误要响。
  * 全空返回 null(与「没有 systemPrompt」同义,不发空字符串)。
  */
 export async function assembleSystem(
@@ -45,7 +46,7 @@ export async function assembleSystem(
       onFailure?.({ section: s.name, error });
       continue;
     }
-    const text = interpolate(raw, values, s.name).trim();
+    const text = (s.interpolate === true ? interpolate(raw, values, s.name) : raw).trim();
     if (text !== "") blocks.push(text);
   }
   return blocks.length > 0 ? blocks.join("\n\n") : null;

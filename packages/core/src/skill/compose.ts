@@ -3,7 +3,7 @@
 // 消毒原语从 prompt/sanitize.ts 同源消费(公共防线,不自持第二份)。
 
 import { environmentMessage, type AgentMessage } from "../messages.ts";
-import { fenceSafe, singleLine, truncateMarked } from "../prompt/sanitize.ts";
+import { singleLine, truncateMarked } from "../prompt/sanitize.ts";
 import type { ActiveSkillMap, SkillMap } from "./harness.ts";
 import type { ActiveSkill } from "./types.ts";
 
@@ -47,8 +47,8 @@ export function renderSkillCatalog(skills: SkillMap): string {
  * 拼在本轮消息末尾、**不进 transcript**。生命周期零状态,全是「每轮从工作集现算」的结果:
  * 激活 → 下一轮出现;工作集不变 → 每轮都在;停用 → 下一轮消失。
  * 缓存:注入在消息最末尾,真实对话前缀字节不动。
- * 消毒:正文与 instructions 都是第三方 / 模型可控文本——正文中和反引号 + 截断,
- * instructions 单行化(它被行内嵌进标记行)。
+ * 卫生:正文与 instructions 都是第三方 / 模型可控文本——正文截断、与起止标记同形的行转义(反引号原样:
+ * 定界靠的是标记行,没有围栏要保护),instructions 单行化(它被行内嵌进标记行)。
  */
 export function renderSkillInjections(skills: SkillMap, active: ActiveSkillMap): AgentMessage[] {
   const out: AgentMessage[] = [];
@@ -63,11 +63,10 @@ export function renderSkillInjections(skills: SkillMap, active: ActiveSkillMap):
 function renderOneSkill(active: ActiveSkill, content: string): string {
   const head = `# Skill: ${active.name} (instructions begin)`;
   const tail = `# Skill: ${active.name} (instructions end)`;
-  // 起止标记自己也要消毒（review 2026-09-07）：`fenceSafe` 护的是围栏，护不住这两行——第三方 SKILL.md 正文里
-  // 写一行字面的 tail 就能提前收尾。正文里与标记同形的行，把行首的 `#` 转成 markdown 字面量 `\#`：
-  // 模型照样读得懂，但它不再是标记。
+  // 定界靠这两行标记：第三方 SKILL.md 正文里写一行字面的 tail 就能提前收尾。正文里与标记同形的行，
+  // 把行首的 `#` 转成 markdown 字面量 `\#`：模型照样读得懂，但它不再是标记。
   const marker = new RegExp(`^#(?= Skill: ${escapeRegExp(active.name)} \\(instructions (?:begin|end)\\)\\s*$)`, "gm");
-  const body = truncateMarked(fenceSafe(content).replace(marker, "\\#"), SKILL_BODY_CAP);
+  const body = truncateMarked(content.replace(marker, "\\#"), SKILL_BODY_CAP);
   const ask =
     active.instructions !== undefined && active.instructions !== ""
       ? `\nFor this task: ${truncateMarked(singleLine(active.instructions), 500)}`

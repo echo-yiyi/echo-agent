@@ -58,9 +58,16 @@ export type PromptSection = {
   readonly order: number;
   /**
    * 渲染本段(从自己闭包的数据出发)。"" = 本次不出段(空段丢弃,不留空行)。
-   * 文本可含 `{{name}}`,装配时从本次变量表取值——严格:引用了没有的变量,整次装配失败。
+   * 文本原样进 system;声明了 `interpolate` 的段才按 `{{name}}` 插值。
    */
   render(ctx: AssembleContext): Promise<string> | string;
+  /**
+   * `true` = 渲染结果按 `{{name}}` 从本次变量表插值,严格:引用了没有的变量、无值或畸形,整次装配失败。
+   * 不给 = 原样,文本里的 `{{…}}` 是普通字符。只给作者有意写变量的段(环境段、产品导入的 md 段);
+   * 装进第三方或模型写的文本(项目指令、记忆、skill、角色正文)的段不声明——否则一行 `${{ secrets.X }}`
+   * 就让每个 run 失败。
+   */
+  readonly interpolate?: boolean;
 };
 
 /**

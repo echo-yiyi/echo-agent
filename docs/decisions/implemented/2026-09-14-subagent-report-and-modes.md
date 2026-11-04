@@ -15,7 +15,7 @@
 1. **角色文件不套 subagent。** CONTEXT.md 的定义不变：由模型在调用时定形。角色是 session 的事，角色定义那条的待拍板关闭为「不做」。
 2. **回执工具 `report`。** 只挂在子循环的菜单上（`makeReceiptBook`，每次子循环一份），父没有它。**不停循环、允许多次提交**：工具结果只回一句「记下了」，子自己 end_turn 或用完 `max_iterations` 才停；不给 loop 开「工具批次后硬停」的口（`shouldStopAfterTurn` 只在 end_turn 后有发言权，这是有意的）。每条回执 `{ seq, status, summary, details? }`，`status` 四档**封闭**：`working | done | blocked | failed`——扩第五档要改工具 schema 与父的解读，按公共面集合的规矩另拍。最后一条的 status 就是这次委派的终态；一条没交 = `reported: false`、退回末条正文；末条仍是 `working` = 标注「没有终态回执」并附末条正文。`blocked` 是子向父提问的通道。前台：回执累在槽里、每条推一行进度，工具结果 = 全部回执按序，metadata 带 `receipts` / `finalStatus`；后台：每条当场投一条环境消息进父的 inbox（ref 带 seq，去重按 source + ref），结束再投一条收尾（终态与条数；没交过回执才带末条正文）。**不另加节流**：父空闲时每条回执都会唤醒一轮，这是「允许多次提交」自带的。失败 / 中断也把已交的回执带回父手里。
 3. **模式 `mode: "fresh" | "fork"`。** fresh 是原来的形。fork：子继承父这次 run 的 system（同一份装配、同一个冻结的模型，前缀一样）、父的 working context（压缩后的视图，**截到最后一条 assistant 之前**——那条正是派出它的这一轮，tool_use 还没结果，不给子看半截；同批兄弟的结果也一并截掉）、父此刻可委派的整套工具，每轮注入照父的来；任务追加成一条 user 消息。fork 不收 `system` / `tools`，给了判红不静默忽略。种子在派出那一刻定格：后台子跑起来之后父的 transcript 还在长，子看到的是派它时的那份。
-4. **并行扇出。** `subagent` 声明 `concurrent: true`：同一条 assistant 消息里连续的委派同批同跑（切批规则归并行工具那条）。前置是把共享实例的门立起来：`ToolBase.delegable?: boolean`，与 `deferred` / `concurrent` 同一条规矩（状态住在工具身上），**只有显式 `false` 才挡**；可委派清单（fresh 点名）与 fork 的整套继承都过滤它。coding 的 `worktree_enter` / `worktree_exit` 标 `false`——它们切的是父的 workspace，子调一下父就跟着换了目录。
+4. **并行扇出。** `subagent` 声明 `concurrent: true`：同一条 assistant 消息里连续的委派同批同跑（切批规则归并行工具那条）。前置是把共享实例的门立起来：`ToolBase.delegable?: boolean`，与 `deferred` / `concurrent` 同一条规矩（状态住在工具身上），**只有显式 `false` 才挡**；可委派清单（fresh 点名）与 fork 的整套继承都过滤它。**2026-11-03 订正**：fork 的菜单改为与父逐项相同（厂商前缀缓存接得上），交不出去的几件（`subagent`、`tool_search`、`delegable: false`）摆同名同 schema 的替身、点名就在修参那一步拒，原工具不会跑；`report` 接在末尾（`Agent.forkMenu`）。挡住的仍是「调用」，只是不再从菜单上拿掉。coding 的 `worktree_enter` / `worktree_exit` 标 `false`——它们切的是父的 workspace，子调一下父就跟着换了目录。
 5. **登记、本条不做。** 续聊已派出的子（改的是「一次性」的定义，不是参数）；bash 的 cwd 是父子共享的一份 `ShellState`，工具 ctx 里没有 runId、bash 分不清父子——先登记，不在本条修；子指定模型、子指定工作目录是参数不是模式，等模式落了再看。
 
 为什么回执优先于末条正文：回执是子**主动交**的，末条正文是子**停下来时恰好在说**的；两者都在时前者才是它的交付。为什么 fork 截到最后一条 assistant 之前而不是把 tool_use 剥掉：剥掉是造一条模型没说过的消息，截掉是少看一句。
@@ -30,4 +30,4 @@
 - 后台：两条回执各投一条环境消息、收尾一条带条数与终态，父后续的请求里三条都出现，收尾不带末条正文。
 - fork：子的 system 与父同一次 run 的相同；子看得到父之前的 user 消息、看不到派它的那条 assistant 的 tool_use；工具集 = 父菜单去掉 subagent / tool_search、加上 report；fork 带 system / tools 判红。
 - 并行：同一条 assistant 消息里两个 `subagent`，第二个子的请求在第一个子结束之前发出（门控超时即红）。
-- `delegable: false` 的工具：fresh 点名判红、清单里没有；fork 不带它；coding 的两件 worktree 工具标了 `false`，`bash` 没标。
+- `delegable: false` 的工具：fresh 点名判红、清单里没有；fork 摆替身、点名被拒（2026-11-03 订正，此前不带它，见 [fork 菜单](../../../packages/core/test/subagent.test.ts#test=fork-的工具菜单与父逐字节相同report-接在末尾厂商前缀缓存接得上交不出去的几件摆的是替身点名就被拒不会真跑)）；coding 的两件 worktree 工具标了 `false`，`bash` 没标。

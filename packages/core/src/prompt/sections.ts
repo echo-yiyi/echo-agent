@@ -13,6 +13,7 @@ export function environmentSection(): PromptSection {
   return {
     name: "environment",
     order: PROMPT_ORDER.environment,
+    interpolate: true,
     render: () => "# Environment\nWorkspace: {{workspace}}\nModel: {{model}} ({{provider}})",
   };
 }

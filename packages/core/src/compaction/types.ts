@@ -15,7 +15,8 @@ export type CompactionSpan = {
 
 /**
  * 压缩状态。运行时（`AgentState.compaction` / `AgentContext.compaction`）与盘上（session 的
- * compaction entry）**同一个形状、同一套下标**——恢复不需要换算。
+ * compaction entry）**同一个形状**；下标是各自那份 transcript 的。两者只在 `reset` 之后差一个偏移
+ * （内存从 0 数起，会话里前面还留着 reset 之前的消息），落盘时加上；恢复出来的就是盘上那份，不换算。
  *
  *   · `spans`：按 `from` 升序、互不重叠；每个边界都在**合法切点**上（见 `view.ts` 的 `isLegalCut`）；
  *   · `clearedBefore`：下标 < 它、且不在任何 span 内的 `toolResult`，投影时正文换成占位——
@@ -47,7 +48,8 @@ export type CompactionReason = "auto" | "overflow" | "manual" | "idle";
  *   · `window`：模型窗口；目录没标时为 null（auto 在未知窗口下不触发，overflow / manual 仍能跑）；
  *   · `used`：阶段跑之前的估算；
  *   · `target`：触发线 = window − reserve；
- *   · `goal`：这次要压到哪——auto / manual 是 target 再减一截（免得下一轮又触发），overflow 是半窗。
+ *   · `goal`：这次要压到哪——auto / manual 是 target 再减一截（免得下一轮又触发），且不超过 `COMPACTION_GOAL_MAX_TOKENS`；
+ *     overflow 是半窗。
  */
 export type CompactionBudget = {
   readonly window: number | null;
@@ -57,11 +59,18 @@ export type CompactionBudget = {
 };
 
 /**
- * 阶段能用的模型调用：**一次、无工具、不进 transcript、不发 message_\* 事件**，
- * 用本 run 冻结的 model 与 streamFn。失败以 rejection 返回（带 provider 的 AgentError code），阶段自己决定兜底。
+ * 阶段能用的模型调用：**一次、不执行工具、不进 transcript、不发 message_\* 事件**，
+ * 用本 run 冻结的 model 与 streamFn。失败以 rejection 返回（带 provider 的 AgentError code），阶段自己决定兜底；
+ * 回复撞上输出上限（`max_tokens`）也是失败——半截的正文不交给阶段。只取回复里的文本。
+ *
+ * 两种形状（2026-11-03）：
+ *   · **不给 `systemPrompt`** = 从这条循环分叉：同一份 system、同一份工具菜单（只摆 schema、不执行）、同一个 thinking 档位，
+ *     `messages` 是阶段给的（通常是视图的一段前缀 + 末尾一条指令）——前缀与循环上一次请求逐字相同，吃得到 provider 的前缀缓存。
+ *     内建阶段都用这一种；
+ *   · **给了**（含 `null`）= 独立调用：就用这份 system、不带工具、thinking 关。
  */
 export type CompactionModelCall = (
-  input: { systemPrompt: string | null; messages: readonly AgentMessage[] },
+  input: { systemPrompt?: string | null; messages: readonly AgentMessage[] },
   signal: AbortSignal,
 ) => Promise<string>;
 
@@ -123,6 +132,11 @@ export const DEFAULT_SECTION_TOKENS = 32_000;
 export const DEFAULT_KEEP_RECENT_TOOL_RESULTS = 3;
 /** auto / manual 压到 target 之下再留这么一截（占窗口比例），免得下一轮又碰线。 */
 export const COMPACTION_SLACK_RATIO = 0.1;
+/**
+ * auto / manual 的压缩目标（`goal`）的绝对上限（2026-11-03）。按窗口比例算的 goal 对大窗口太宽：百万窗口的模型
+ * 压完仍长期带着约 90 万 token，每轮都按这个量付钱、等延迟。触发线不变，只是压的时候压到这里。
+ */
+export const COMPACTION_GOAL_MAX_TOKENS = 200_000;
 /**
  * 空闲清理（`reason: "idle"`）的两道门。**空闲**：上一条助手回复到此刻超过这么久——此时 provider 缓存多半已过期，
  * 改写前缀不多付钱（清掉一条旧结果会让它之后的整段历史按未命中重付一次，缓存热的时候清往往是负收益）。

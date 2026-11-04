@@ -47,7 +47,7 @@ import { DEFAULT_DREAM_GATES } from "../src/memory/dream.ts";
 import {
   createAgentMemories, addMemory, removeMemoryRegion, listMemories, getMemory, memoryFor,
   memoryView, memoryCreate, memoryStrReplace, memoryInsert, memoryDelete, memoryRename,
-  memoryPromptSections, composeMemoryRegion, memoryTool, memoryObserver, bindMemoryScopes, memoryScopeTableOf, dreamScopes,
+  memoryPromptSections, memoryUpdateMessage, composeMemoryRegion, memoryTool, memoryObserver, bindMemoryScopes, memoryScopeTableOf, dreamScopes,
   shouldDream, dreamTask, markDreamed, disposeMemory, MEMORY_KIND, MEMORY_UPDATE_SOURCE, type AgentMemories, type MemoryHarnessOptions,
 } from "../src/memory/harness.ts";
 import type { CompactionStage } from "../src/compaction/types.ts";
@@ -413,6 +413,15 @@ describe("memory 工具六动词", () => {
     expect(await shouldDream(h, "session")).toBe(true); // 计数没断
   });
 
+  test("str_replace:new_str 原样写进去，$$ / $& / $' 不被当成替换模式", async () => {
+    const dir = new InMemoryDir();
+    const h = memories(dir);
+    await call(h, { command: "create", path: "user/agent.md", file_text: "- shell tip: TODO\n- other line\n" });
+    const newStr = "use $$ for the PID, $& echoes, $' and $` are literal";
+    expect((await call(h, { command: "str_replace", path: "user/agent.md", old_str: "TODO", new_str: newStr })).isError).toBe(false);
+    expect(await dir.read("user/agent.md")).toBe(`- shell tip: ${newStr}\n- other line\n`);
+  });
+
   test("str_replace:零命中与多义都拒", async () => {
     const h = memories(new InMemoryDir());
     await call(h, { command: "create", path: "user/agent.md", file_text: "aa aa" });
@@ -519,6 +528,28 @@ describe("Dream 门控", () => {
     expect(task.prompt).toContain("- memory (session/memory/");
     expect(task.prompt).not.toContain("user/memory/"); // 上两层不进整理的视野
     expect(await shouldDream(h, "session")).toBe(false); // 锁住了
+  });
+
+  test("dream 那把工具的描述不指向 system 的 Memory 段：整理跑在 systemPrompt: null 下，模块与层在任务指令里", async () => {
+    const h = memories(new InMemoryDir(), { dream: {} });
+    const [tool] = (await dreamTask(h, "session")).tools;
+    const schema = JSON.stringify({ description: tool!.kind === "model" ? tool!.description : "", parameters: tool!.kind === "model" ? tool!.parameters : null });
+    expect(schema).not.toContain("Memory section");
+    expect(schema).not.toContain("system prompt");
+    expect(schema).toContain("task");
+    // 前台那把照旧指向 system 的记忆段
+    const fg = memoryTool(h);
+    expect(fg.description).toContain("Memory section of the system prompt");
+  });
+
+  test("提取 prompt：第一次复盘（从对话开头看起）不说「上次复盘到对话中途」；之后才说", () => {
+    const table = memoryScopeTableOf(memories(new InMemoryDir()));
+    const mods = listMemories(memories(new InMemoryDir()));
+    const first = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: true }, "");
+    expect(first).not.toContain("partway");
+    expect(first).toContain("not been reviewed");
+    const later = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: false }, "");
+    expect(later).toContain("last reviewed partway through this conversation");
   });
 
   test("dream 那把工具够不到上两层(不是靠 prompt 里说一句,是门)", async () => {
@@ -732,6 +763,16 @@ describe("Agent 接线", () => {
     expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("旧偏好"));
   });
 
+  test("记忆正文里写着 `{{ user.name }}` / `${{ secrets.X }}`：原样进 system，run 照常跑完（记忆段不插值）", async () => {
+    const dir = new InMemoryDir();
+    await dir.write("user/user.md", "User's project uses Handlebars like {{ user.name }} and CI reads ${{ secrets.NPM_TOKEN }}.");
+    const { fn, seen } = routedStream([textTurn("好")]);
+    const agent = await memoryAgent(dir, fn);
+    const r = await agent.prompt("hi");
+    expect(r.outcome.kind).toBe("completed");
+    expect(seen[0]?.systemPrompt).toContain("Handlebars like {{ user.name }} and CI reads ${{ secrets.NPM_TOKEN }}.");
+  });
+
   test("记忆没变：下个 run 什么都不追加，system 逐字不变、消息只在末尾长", async () => {
     const dir = new InMemoryDir();
     await dir.write("user/user.md", "偏好");
@@ -781,6 +822,36 @@ describe("Agent 接线", () => {
     expect(notice).toContain("- added: user/memory/b.md");
     expect(notice).toContain("- removed: user/memory/a.md");
     expect(notice).not.toContain("INDEX.md");
+  });
+
+  test("冻结那一刻的正文与变化基线出自同一份读：后台恰好在两次读之间写入，下个 run 照样收到通知", async () => {
+    const inner = new InMemoryDir();
+    await inner.write("user/user.md", "旧偏好");
+    // 第一次读 user.md 之后立刻有人写一笔（后台提取恰好落在组装途中）
+    let raced = false;
+    const racing: MemoryDir = {
+      read: async (p) => {
+        const text = await inner.read(p);
+        if (p === "user/user.md" && !raced) {
+          raced = true;
+          await inner.write(p, "新偏好");
+        }
+        return text;
+      },
+      write: (p, c) => inner.write(p, c),
+      remove: (p) => inner.remove(p),
+      list: (p) => inner.list(p),
+    };
+    const h = memories(racing);
+    const frozen = { text: null, files: null } as { text: string | null; files: ReadonlyMap<string, string> | null };
+    const [section] = memoryPromptSections(h, frozen);
+    const text = await section!.render({ workspace: "/", model: { provider: "p", id: "m" }, agentId: "a", sessionId: null });
+    expect(raced).toBe(true);
+    expect(text).toContain("旧偏好");
+    expect(text).not.toContain("新偏好");
+    const notice = await memoryUpdateMessage(h, frozen);
+    expect(notice).not.toBeNull();
+    expect(JSON.stringify(notice)).toContain("changed: user/user.md");
   });
 
   test("压缩落地后 system 重取一次记忆：完整的现行内容回到 system，基线跟着重记，不再补通知", async () => {
@@ -1043,7 +1114,7 @@ describe("判据跟着模块走", () => {
     expect(system).not.toContain("next month");
     expect(system).not.toContain("repository already states");
     expect(system).toContain("moments you shared");
-    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), { messages: 2, firstUserText: "hi" }, "");
+    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), { messages: 2, firstUserText: "hi", fromStart: false }, "");
     expect(extract).not.toContain("next month");
     expect(extract).not.toContain("true only inside this conversation");
     expect(extract).toContain("moments you shared");

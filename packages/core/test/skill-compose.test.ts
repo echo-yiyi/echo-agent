@@ -33,3 +33,12 @@ test("正文里写一行字面的结束标记不能提前收尾：与起止标�
   expect(dt.match(/^# Skill: a\.b\+c \(instructions begin\)$/gm)).toHaveLength(1);
   expect(dt).toContain("\\# Skill: a.b+c (instructions begin)");
 });
+
+test("正文里的反引号原样保留：起止标记是行，没有围栏要保护", () => {
+  const s = attached([skill("cmd", "跑命令", "Run `bun test` first.\n```bash\nbun install\n```")]);
+  activateSkill(s.skills, s.active, "cmd");
+  const [msg] = renderSkillInjections(s.skills, s.active);
+  const text = (msg as { content: { type: string; text: string }[] }).content[0]?.text ?? "";
+  expect(text).toContain("Run `bun test` first.\n```bash\nbun install\n```");
+  expect(text).not.toContain("ˋ");
+});

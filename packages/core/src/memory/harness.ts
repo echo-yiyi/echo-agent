@@ -32,7 +32,7 @@ import {
   type DreamGates,
   type DreamState,
 } from "./dream.ts";
-import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
+import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, TASK_MEMORY_TOOL_DESCRIPTION, TASK_MEMORY_TOOL_PARAMETERS, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
 import { lateBoundMemoryDir, safeScopeSegment, splitScopePath, type LateBoundMemoryDir, type MemoryScopeTable } from "./scope.ts";
 import { acquireMemoryLock, assertFresh, withMemoryRegionLock } from "./lock.ts";
 import { StorageLockBusy } from "../storage/name-lock.ts";
@@ -316,7 +316,8 @@ export async function memoryStrReplace(ctx: AgentMemories, rawPath: string, oldS
       const hits = content.split(oldStr).length - 1;
       if (hits === 0) return reject("old_str_not_found", `old_str not found (view '${path}' first and copy the exact text)`);
       if (hits > 1) return reject("old_str_ambiguous", `old_str occurs ${hits} times; it must be unique, include more context`);
-      return { ok: true, content: content.replace(oldStr, newStr), basedOn: content };
+      // 函数替换：new_str 里的 `$$` / `$&` / `$'` 原样写进去，不当替换模式
+      return { ok: true, content: content.replace(oldStr, () => newStr), basedOn: content };
     },
     (path, n) => `Replaced one occurrence in ${path} (now ${n} characters)`,
     caller,
@@ -500,12 +501,15 @@ export function memoryPromptSections(ctx: AgentMemories, frozen: MemorySystemFre
       order: PROMPT_ORDER.memory,
       render: async () => {
         if (frozen.text !== null) return frozen.text;
-        const text = await renderMemorySystem(ctx);
         // 作用域没绑之前组装出来的没有内容（读不到盘），不能冻结——否则整段会话都看不到记忆
-        if (ctx.binding.bound()) {
-          frozen.text = text;
-          frozen.files = await memoryFileVersions(ctx);
-        }
+        if (!ctx.binding.bound()) return await renderMemorySystem(ctx);
+        // 正文与变化基线出自**同一份读**：每个文件只读一次，基线先读、组装复用同一份内容。分两次读盘的话，
+        // 后台写入恰好落在两次之间，基线已是新版、正文还是旧版，这次变化就永远不通知
+        const once = readOnce(ctx.dir);
+        const files = await memoryFileVersions(ctx, once);
+        const text = await renderMemorySystem(ctx, once);
+        frozen.text = text;
+        frozen.files = files;
         return text;
       },
     },
@@ -561,19 +565,19 @@ function memoryChangeNotice(changed: readonly string[], added: readonly string[]
  * 此刻每个记忆文件的内容：路径 → 原文。常驻模块是那一个文件；indexed 模块是目录下的每个文件（`INDEX.md` 与点开头的
  * 簿记文件除外——索引是派生物，变化已经体现在文件的增删改上）。通知的基线与比对都用它。
  */
-async function memoryFileVersions(ctx: AgentMemories): Promise<Map<string, string>> {
+async function memoryFileVersions(ctx: AgentMemories, dir: MemoryDir = ctx.dir): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   const table = ctx.binding.table();
   for (const m of ctx.memories.values()) {
     for (const { path } of memoryPaths(table, m)) {
       if (!path.endsWith("/")) {
-        const text = await ctx.dir.read(path);
+        const text = await dir.read(path);
         if (text !== null) out.set(path, text);
         continue;
       }
-      for (const file of await ctx.dir.list(path)) {
+      for (const file of await dir.list(path)) {
         if (file.endsWith(`/${MEMORY_INDEX_FILE}`) || file.slice(path.length).split("/").some((seg) => seg.startsWith("."))) continue;
-        const text = await ctx.dir.read(file);
+        const text = await dir.read(file);
         if (text !== null) out.set(file, text);
       }
     }
@@ -581,12 +585,50 @@ async function memoryFileVersions(ctx: AgentMemories): Promise<Map<string, strin
   return out;
 }
 
+/**
+ * 只读一次的视图：同一路径的 read / list 第一次落到底下、之后复用那次的结果。冻结记忆段用它让正文与基线出自同一份读。
+ * 索引文件只有组装读、基线不读，它在基线之后才读——中途落下的写入至多让下一次通知多报一条，不会漏报。
+ */
+function readOnce(dir: MemoryDir): MemoryDir {
+  const reads = new Map<string, Promise<string | null>>();
+  const lists = new Map<string, Promise<string[]>>();
+  return {
+    read(path) {
+      let r = reads.get(path);
+      if (r === undefined) {
+        r = dir.read(path);
+        reads.set(path, r);
+      }
+      return r;
+    },
+    async list(prefix) {
+      let r = lists.get(prefix);
+      if (r === undefined) {
+        r = dir.list(prefix);
+        lists.set(prefix, r);
+      }
+      return [...(await r)];
+    },
+    // 写穿透到底下，并作废这条路径的读与所有列举（组装函数可替换，不假设它只读）
+    write(path, content) {
+      reads.delete(path);
+      lists.clear();
+      return dir.write(path, content);
+    },
+    remove(path) {
+      reads.delete(path);
+      lists.clear();
+      return dir.remove(path);
+    },
+  };
+}
+
 /* ───────────── 给 prompt 组装层的数据面(只读) ───────────── */
 
 /** 一个模块怎么呈现,走可替换的组装分发。绝不 throw:坏模块隐形 + report 留痕。 */
-export async function composeMemoryRegion(ctx: AgentMemories, memory: AnyMemory): Promise<string> {
+export async function composeMemoryRegion(ctx: AgentMemories, memory: AnyMemory, dir: MemoryDir = ctx.dir): Promise<string> {
   try {
-    return await ctx.composeFn(memory, ctx.dir, ctx.binding.table());
+    return await ctx.composeFn(memory, dir, ctx.binding.table());
   } catch (e) {
     ctx.report?.({
       code: "memory_compose_failed",
@@ -813,7 +855,13 @@ export async function dreamTask(
   await updateDreamState(ctx, scope, (s) => ({ ...s, startedAt: Date.now() }));
   return {
     prompt: defaultDreamPrompt(listMemories(ctx), ctx.binding.table(), scope),
-    tools: [dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, scope, ...(opts?.observe === undefined ? {} : { observe: opts.observe }) }))],
+    // 整理跑在 `systemPrompt: null` 下：描述与参数说明不指向 system 的记忆段（产品自己给了描述就用它的）
+    tools: [
+      {
+        ...dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, description: ctx.toolOpts?.description ?? TASK_MEMORY_TOOL_DESCRIPTION, scope, ...(opts?.observe === undefined ? {} : { observe: opts.observe }) })),
+        parameters: TASK_MEMORY_TOOL_PARAMETERS,
+      },
+    ],
   };
 }
 

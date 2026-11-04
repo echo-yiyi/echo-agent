@@ -54,7 +54,7 @@ import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTi
 import type { AgentContext, AgentLoopConfig, AttemptResult, LoopProbes, LoopResult, TransformContext, Emit } from "./loop/types.ts";
 import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
-import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
+import { calibrationFrom, fixedOverhead, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
 import { buildWorkingMessages, estimateText, estimateTokens, projectRange } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
@@ -3112,7 +3112,7 @@ export class Agent {
       if (!force && humanTurns(fresh) < DEFAULT_EXTRACT_EVERY_TURNS) return;
       // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
       const span = projectRange(messages, compaction, from, end);
-      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span) };
+      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0 };
       // 与整理排成一条：等的这段里被中止（stop / 丢锁）或 transcript 换了代，就不跑
       const done = await this.oneBackgroundWriter(async () =>
         signal.aborted || epoch !== this.extractEpoch ? false : this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal),
@@ -3268,6 +3268,7 @@ export class Agent {
         maxIterations: DEFAULT_EXTRACT_MAX_TURNS,
         // 每轮注入不带：它们拼在消息末尾、不进 transcript，本来就不在共享前缀里；带上只是多发一段激活 skill 正文
         turnInjections: "none",
+        compaction: "none",
       },
       scope,
       signal,
@@ -3312,7 +3313,7 @@ export class Agent {
           // **事件不外发**：整理的中间过程不该混进对外事件流。
           // 每轮注入不带（2026-11-03）：激活 skill 正文、任务清单是前台这场对话的，整理只看已有记忆——带上只是每轮多发一段
           const result = await this.runSubagent(
-            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "none" },
+            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "none", compaction: "none" },
             scope,
             signal,
             async () => {},
@@ -3363,6 +3364,12 @@ export class Agent {
       runId?: string;
       maxIterations?: number;
       turnInjections: "inherit" | "none";
+      /**
+       * `"none"` = 这条子循环不压缩（不注册阶段：auto、撞窗应急都不跑）。提取与整理用——提取接在主对话后面，
+       * 自己压一遍会把指令折进摘要、主循环下一轮还要再压一遍；整理只看记忆。subagent 用 `"inherit"`：跑得长，要能压。
+       * 两种都不经主循环的 hooks 发压缩通知（`LoopCompactionConfig.notifyHooks`）。
+       */
+      compaction: "inherit" | "none";
       seed?: readonly AgentMessage[];
     },
     scope: AgentAdmissionExecuteScope,
@@ -3391,6 +3398,7 @@ export class Agent {
             return tool === undefined ? { ok: false as const, reason: "not_found" as const } : { ok: true as const, tool };
           },
           ...(spec.turnInjections === "none" ? { getTurnInjections: () => [] } : {}),
+          compaction: { ...base.compaction, ...(spec.compaction === "none" ? { getStages: () => [] } : {}), notifyHooks: false },
           // 不吃 steering / followUp：那些是给前台 run 的（gate 只认前台 run）
           intake: undefined,
         },
@@ -3415,10 +3423,23 @@ export class Agent {
    * 父此刻能交给子 agent 的工具 = 菜单上的（没被禁用、过了角色收紧、延迟的已取过 schema），去掉三类不能交出去的：
    * `subagent`（只扇一层）；`tool_search`（它闭包着父的 loadedTools，子调它等于替父取 schema——正是「没取过的延迟工具
    * 不许委派」要挡的事；review 2026-09-09）；标了 `delegable: false` 的（子拿的是父池里同一个实例，调一次就改父的常驻状态；
-   * 2026-09-14 拍板）。fresh 模式从这里点名，fork 模式整套继承。
+   * 2026-09-14 拍板）。fresh 模式从这里点名；fork 模式用 `forkMenu()`。
    */
   private delegableTools(): AgentTool[] {
-    return visibleTools(this.tools, this.loadedTools, this.restriction()).filter((t) => t.name !== SUBAGENT_NAME && t.name !== TOOL_SEARCH_NAME && t.delegable !== false);
+    return visibleTools(this.tools, this.loadedTools, this.restriction()).filter((t) => delegable(t));
+  }
+
+  /**
+   * fork 的工具菜单（2026-11-03）：父此刻的菜单**逐项照摆**，交不出去的那几件（见 `delegableTools`）换成同名同 schema、
+   * 一点名就拒的替身——菜单字节与父最后一次请求相同，厂商的前缀缓存接得上（`report` 由调用方接在末尾）。
+   * 只摆不交：替身在修参那一步就拒，早于 hook 与权限，原工具一次都不会跑。
+   */
+  private forkMenu(): AgentTool[] {
+    return visibleTools(this.tools, this.loadedTools, this.restriction()).flatMap((t) => {
+      if (delegable(t)) return [t];
+      const stub = refusingStub(t, `Tool '${t.name}' is not available to a forked subagent`);
+      return stub === null ? [] : [stub];
+    });
   }
 
   /** 模型点名的工具 → 父池里的实例。不认识的名字整组判红（不静默少给）；不可委派的同一句话里报明原因。 */
@@ -3438,7 +3459,7 @@ export class Agent {
 
   /**
    * 模型给的 spec → 子循环的入参（同步的那部分）。fresh：点名的工具、模型给的 system、空白种子、不带每轮注入。
-   * fork：父此刻可委派的整套工具、父的 system（跑之前再装配，见 `subagentSystem`）、父的 working context 截到最后一条
+   * fork：父此刻的菜单（交不出去的换成替身，见 `forkMenu`）、父的 system（跑之前再装配，见 `subagentSystem`）、父的 working context 截到最后一条
    * assistant 之前（那条正是派出它的这一轮：tool_use 还没有结果，不该让子看见半截；同批的兄弟结果也一并截掉）、每轮注入照父的来。
    * 种子在派出那一刻定格：后台子 agent 跑起来之后父的 transcript 还在长，子看到的是派它时的那份。
    */
@@ -3456,10 +3477,10 @@ export class Agent {
         break;
       }
     }
-    return { ok: true, system: { kind: "parent" }, tools: this.delegableTools(), seed: view.slice(0, cut), turnInjections: "inherit" };
+    return { ok: true, system: { kind: "parent" }, tools: this.forkMenu(), seed: view.slice(0, cut), turnInjections: "inherit" };
   }
 
-  /** fork 的 system = 父这次 run 的那份装配（同一批段、同一个冻结的模型），前缀与父一样，厂商缓存能接着用。 */
+  /** fork 的 system = 父这次 run 的那份装配（同一批段、同一个冻结的模型）；连同逐项照摆的菜单，前缀与父一样，厂商缓存能接着用。 */
   private subagentSystem(system: SubagentSystem, scope: AgentAdmissionExecuteScope): Promise<string | null> {
     return system.kind === "given" ? Promise.resolve(system.prompt) : this.assemblePrompt(scope.modelBinding.model);
   }
@@ -3480,6 +3501,7 @@ export class Agent {
         seed: prepared.seed,
         source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: ctx.toolCallId, background: false },
         turnInjections: prepared.turnInjections,
+        compaction: "inherit",
         ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
       },
       scope,
@@ -3521,6 +3543,7 @@ export class Agent {
             seed: prepared.seed,
             source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: toolCallId, background: true },
             turnInjections: prepared.turnInjections,
+            compaction: "inherit",
             ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
           },
           scope,
@@ -3986,10 +4009,16 @@ export class Agent {
         // 这一轮送模的上下文有多大，provider 说了算（输入 + 它自己的输出 = 下一轮至少这么大）
         const tokens = input.usage.inputTokens + input.usage.outputTokens;
         this._state.contextTokens = tokens;
-        // 校准比：真值 / 同一份视图（system + 到这条 assistant 为止的投影；usage 事件紧跟它的 message_end）的字符估。
+        // 校准比：真值扣掉固定开销（工具 schema、每轮注入），与同一份视图（system + 到这条 assistant 为止的投影；
+        // usage 事件紧跟它的 message_end）的字符估之比——与压缩流水线同一个算法（`calibrationFrom`）。
         // 记下来给手动压缩与下一个 run 的首轮用——那两处没有 usage 基准
         const raw = this.lastSystemEstimate + estimateTokens(buildWorkingMessages(this._state.messages, this._state.compaction));
-        if (raw > 0) this.lastCalibration = clampCalibration(tokens / raw);
+        if (raw > 0) {
+          const menu = visibleTools(this.tools, this.loadedTools, this.restriction());
+          const names = new Set(menu.map((t) => t.name));
+          const injections = this.promptSources((n) => names.has(n)).flatMap((src) => src.turnInjections?.() ?? []);
+          this.lastCalibration = calibrationFrom(tokens, raw, fixedOverhead(menu, injections));
+        }
         this._state.usage = {
           inputTokens: this._state.usage.inputTokens + input.usage.inputTokens,
           outputTokens: this._state.usage.outputTokens + input.usage.outputTokens,
@@ -4300,8 +4329,11 @@ export class Agent {
     if (input.type === "message_end") {
       parts.push({ kind: "message", message: input.message });
     } else if (input.type === "compaction_end") {
-      // 没压动的不入账：账本只记事实，一条「什么都没变」的 entry 只会让恢复多验一次同样的状态
-      if (input.stages.length > 0) parts.push({ kind: "compaction", at: Date.now(), reason: input.reason, compaction: input.compaction });
+      // 没压动的不入账：账本只记事实，一条「什么都没变」的 entry 只会让恢复多验一次同样的状态。
+      // 记**盘上下标**（与 `recordReviewed` 同一个偏移）：`reset` 之后内存从 0 数起，会话里前面还有那几条
+      if (input.stages.length > 0) {
+        parts.push({ kind: "compaction", at: Date.now(), reason: input.reason, compaction: persistedCompaction(input.compaction, this.persistedOffset) });
+      }
     } else if (input.type === "agent_end" && input.outcome.kind === "error") {
       parts.push({ kind: "error", at: Date.now(), error: input.outcome.error });
     } else if (input.type === "workspace_changed") {
@@ -4359,6 +4391,18 @@ function validatePermissionPolicy(policy: PermissionPolicy | undefined): Permiss
   }
   if (typeof policy.authorize !== "function") throw new Error("permission.authorize 必须是函数");
   return policy;
+}
+
+/**
+ * 内存里的压缩状态 → 盘上的：下标整体越过 `offset`（`reset` 之后仍在会话里、却不在内存里的那几条）。
+ * `clearedBefore` 为 0 = 没清过，照旧是 0（不替那几条做主）。
+ */
+function persistedCompaction(state: CompactionState, offset: number): CompactionState {
+  if (offset === 0) return state;
+  return {
+    spans: state.spans.map((s) => ({ from: s.from + offset, to: s.to + offset, summary: s.summary })),
+    clearedBefore: state.clearedBefore === 0 ? 0 : state.clearedBefore + offset,
+  };
 }
 
 /** 子 agent 的 system 从哪来：fresh 是模型给的那段（可为 null）；fork 是父这次 run 的装配（跑之前现装）。 */
@@ -4439,14 +4483,23 @@ function withUserText(m: AgentMessage, text: string): AgentMessage {
   return { ...m, content } as AgentMessage;
 }
 
-/**
- * 提取从主对话分叉时，菜单上一件非记忆工具的替身（2026-11-03）：**同名、同 schema**（`toolSchemas` 只投影
- * name / description / parameters），所以前缀与主循环逐字一致；一点名就在修参那一步拒掉——早于 preToolUse 与权限，
- * 后台复盘不会因为模型试了一下 bash 就去问人、也不惊动 hook。internal 工具本来不上 schema，不摆（返回 null）。
- */
+/** 能不能交给子 agent：`subagent`、`tool_search`、标了 `delegable: false` 的不能（理由见 `Agent.delegableTools`）。 */
+function delegable(t: AgentTool): boolean {
+  return t.name !== SUBAGENT_NAME && t.name !== TOOL_SEARCH_NAME && t.delegable !== false;
+}
+
+/** 提取从主对话分叉时，菜单上一件非记忆工具的替身（2026-11-03），见 `refusingStub`。 */
 function refusedDuringExtract(tool: AgentTool): ModelTool | null {
+  return refusingStub(tool, `Tool '${tool.name}' is not available while reviewing memory: only ${MEMORY_TOOL_NAME} can run here`);
+}
+
+/**
+ * 分叉的子循环（提取、fork 子 agent）菜单上一件不许它执行的工具的替身：**同名、同 schema**（`toolSchemas` 只投影
+ * name / description / parameters），所以前缀与父循环逐字一致；一点名就在修参那一步拒掉——早于 preToolUse 与权限，
+ * 不会因为模型试了一下就去问人、也不惊动 hook。internal 工具本来不上 schema，不摆（返回 null）。
+ */
+function refusingStub(tool: AgentTool, reason: string): ModelTool | null {
   if (!isModelVisible(tool)) return null;
-  const reason = `Tool '${tool.name}' is not available while reviewing memory: only ${MEMORY_TOOL_NAME} can run here`;
   return {
     kind: "model",
     name: tool.name,

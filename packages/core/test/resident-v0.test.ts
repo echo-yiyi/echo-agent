@@ -90,17 +90,18 @@ test(
     // `skill_create` 2026-08-24 起在面上（OSS-1c）：默认装配有了落盘的 `onCreate`
     //（写状态根 `skills/<name>/SKILL.md`，`start()` 时发现回来），
     // 「返回成功、重启即消失」那个反对理由不再成立。
-    // 2026-09-02 渐进式披露：第一眼的菜单只有常驻的 + `tool_search`；`TaskGet` / `schedule_*` / `skill_create` /
-    // `transcript_read`（`echo:compaction`）标了 `deferred`，模型经 tool_search 取过 schema 才上菜单——
+    // 2026-09-02 渐进式披露：第一眼的菜单只有常驻的 + `tool_search`；`TaskGet` / `schedule_*` / `skill_create`
+    // 标了 `deferred`，模型经 tool_search 取过 schema 才上菜单——
     // 宿主脚本里第一轮就是 tool_search，所以后面的轮次能调 skill_create / schedule_create（上面 `called` 已证）
     // 2026-09-05 `ask_user`（提问）常驻：菜单上多它一件
     // 2026-09-09 `ask_user` 只在「有人能答」时才装：这个 fixture 没给 questions 策略，所以菜单上没有它
     // 2026-11-02 `tool_output_read`（大工具结果的读回）恒装、常驻菜单
-    expect(ra.seen[0]!.tools).toEqual(["TaskCreate", "TaskList", "TaskUpdate", "memory", "skill_activate", "subagent", "tool_output_read", "tool_search"].sort());
+    // 2026-11-03 `transcript_read`（`echo:compaction`）改常驻：压缩通知让模型直接调它
+    expect([...ra.seen[0]!.tools].sort()).toEqual(["TaskCreate", "TaskList", "TaskUpdate", "memory", "skill_activate", "subagent", "tool_output_read", "tool_search", "transcript_read"].sort());
     // 取过之后：后面某一轮的菜单里延迟的两件已经在，tool_search 仍在（还有别的延迟工具没取）；
-    // 没取过的（transcript_read）任何一轮都不在菜单上
+    // 没取过的（TaskGet）任何一轮都不在菜单上
     expect(ra.seen.some((s) => ["skill_create", "schedule_create", "tool_search"].every((n) => s.tools.includes(n)))).toBe(true);
-    expect(ra.seen.every((s) => !s.tools.includes("transcript_read"))).toBe(true);
+    expect(ra.seen.every((s) => !s.tools.includes("TaskGet"))).toBe(true);
 
     // 落盘是真的：记忆文件、索引、闹钟、会话 entries
     // 缺省作用域 user / project / role（2026-09-08：session 那一层退场，作用域改由产品声明）。

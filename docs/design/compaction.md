@@ -3,7 +3,7 @@
 > 状态：当前实现说明；估算与摘要质量的限制见 §9<br>
 > 读者：要调压缩参数、换一套压缩策略、写自己的压缩 extension，或排查「模型为什么看不到那一段」的人<br>
 > 假设已读：[Context 与 Message Flow](context-and-message-flow.md) 的术语表——transcript、working context、provider context、projection 在本文按那里的含义用<br>
-> 决策记录（六条，本文只指向，不复述论证）：[策略是 extension](../decisions/implemented/2026-09-02-compaction-as-extension.md) · [状态是视图](../decisions/implemented/2026-09-02-compaction-state-is-a-view.md) · [四段阶梯与应急](../decisions/implemented/2026-09-02-compaction-ladder.md) · [摘要的送模形态](../decisions/implemented/2026-09-02-compaction-summary-message.md) · [阈值以 usage 为准](../decisions/implemented/2026-09-02-compaction-threshold.md) · [手动压缩与状态面](../decisions/implemented/2026-09-02-compaction-manual-and-state.md)
+> 决策记录（七条，本文只指向，不复述论证）：[策略是 extension](../decisions/implemented/2026-09-02-compaction-as-extension.md) · [状态是视图](../decisions/implemented/2026-09-02-compaction-state-is-a-view.md) · [四段阶梯与应急](../decisions/implemented/2026-09-02-compaction-ladder.md) · [摘要的送模形态](../decisions/implemented/2026-09-02-compaction-summary-message.md) · [阈值以 usage 为准](../decisions/implemented/2026-09-02-compaction-threshold.md) · [手动压缩与状态面](../decisions/implemented/2026-09-02-compaction-manual-and-state.md) · [压缩目标封顶、校准扣固定开销](../decisions/implemented/2026-11-03-compaction-goal-cap.md)
 
 ## 导读
 
@@ -24,7 +24,7 @@
 ## 1. 不变量
 
 1. **transcript 只增不改。** 压缩不删消息、不改消息；`Agent.messages` 与 session 的 message entries 永远是全量原文。
-2. **压缩是视图状态。** `CompactionState` 描述「怎么看 transcript」；运行时（`AgentState.compaction`、`AgentContext.compaction`）与盘上（session 的 compaction entry）**同一个形状、同一套下标**，恢复不换算。
+2. **压缩是视图状态。** `CompactionState` 描述「怎么看 transcript」；运行时（`AgentState.compaction`、`AgentContext.compaction`）与盘上（session 的 compaction entry）**同一个形状**，恢复不换算。下标是各自那份 transcript 的：`reset`（`/clear`）只清内存、不写会话，之后内存从 0 数起而会话里前面还留着那几条，所以落盘时下标整体越过它们（与 `memory_reviewed` 同一个偏移；`clearedBefore` 为 0 时照旧是 0）。
 3. **配对不破。** 切点永远不落在 tool_use 与它的 tool_result 之间；清理只换 `content` 不删消息、`toolCallId` 不动。这两条只在 core 的 [`normalizeCompaction()`](../../packages/core/src/compaction/view.ts#symbol=normalizeCompaction) 与 [`projectRange()`](../../packages/core/src/compaction/view.ts#symbol=projectRange) 里守，策略产出再离谱也过不了它。
 4. **策略只产状态。** 阶段（`CompactionStage`）不碰消息数组、不发事件、不写盘；要调模型就用 core 给的 `callModel`。
 5. **核心文案不提工具。** `summary === null` 的省略说明、被清工具结果的占位，都是 core 的固定英文文案，不提 `transcript_read`——怎么取回原文由拥有那个工具的 extension 出 prompt 段说明。
@@ -79,13 +79,16 @@ system                       不变，每 run 装配一次，不含摘要
 | `manual` | `Agent.compact(instructions?)`（TUI `/compact`） | 无视阈值；走 admission 拿 permit（忙时 rejected），但不是一个 run：没有 agent_start / agent_end |
 | `idle` | 每轮轮首，`auto` 没触发时（2026-11-02，照 Claude Code 的空闲清理） | 两道门都过才跑（[`idleClearDue()`](../../packages/core/src/compaction/pipeline.ts#symbol=idleClearDue)）：上一条助手回复到此刻超过 `DEFAULT_IDLE_CLEAR_MS`（60 分钟，provider 缓存多半已过期），且最近 3 批之前还没清的旧工具结果估计至少 `DEFAULT_IDLE_CLEAR_MIN_TOKENS`（1 万）。只有 `tool-results` 阶段注册着才看。缓存热的时候不清：清掉一条旧结果，它之后的整段历史要按未命中重付一次 |
 
+**子循环**（[`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)）各压各的 context，主 transcript 不动。记忆提取与 Dream 不压缩（不注册阶段，auto 与撞窗应急都不跑）：提取接在主对话后面，自己压一遍会把提取指令折进摘要，主循环下一轮还要再压一遍；Dream 只看记忆。subagent（fresh / fork）照常自动压缩。所有子循环的压缩都不经主循环的 hooks——不问 `preCompact`，不发 `postCompact` / `compactionFailed` / 压缩失败通知（`LoopCompactionConfig.notifyHooks: false`）：子循环共用主循环的 hook 运行时，自己那份 context 的压缩却不是主会话的事。判据见 [提取不压缩](../../packages/core/test/memory-extract.test.ts#test=提取子循环不做自动压缩主对话在最后那条回答之后越过触发线分叉出来的提取照样只发一次请求不先压一遍压缩通知也不进主-hooks)、[子 agent 的 hook](../../packages/core/test/subagent.test.ts#test=子-agent-自己的-context-照样自动压缩但压缩的-hookprecompact-postcompact-compactionfailed不进主循环的-hooks)。
+
 **预算**（`compactionBudget()`）：
 
-- `used`：以本 run 最近一次 `usage` 的 `inputTokens + outputTokens` 为基准（它量的是那条 assistant 之前的视图加它自己的输出），之后入账的消息按字符估；压缩一发生基准作废，回到「system + 视图」字符估，直到下一轮 usage 回来。provider 没报 usage 的路径（FakeProvider、测试）只有字符估。
-- **校准比**：字符估（4 字符 ≈ 1 token）对中文低 2–4 倍，而阶段之间只能重新字符估——两个量纲直接比，中文会话会在第一段就「够了」。所以每次 usage 到达时算一次 `真 token / 同一份视图的字符估`，之后流水线里的 `used`、给阶段的 `input.estimate`、压完报出去的 `contextTokens` 都乘它（范围夹在 0.2–10）。Agent 记住最近一次算出的比值：手动压缩（run 之外）与新 run 的首轮没有 usage 基准，就沿用它；`reset()` 归 1。判据：同一段对话的 ASCII 版与中文版，跑过的阶段一致；手动压缩报出的值明显高于裸字符估。
+- `used`：以本 run 最近一次 `usage` 的 `inputTokens + outputTokens` 为基准（它量的是那条 assistant 之前的视图加它自己的输出，含工具 schema 与每轮注入），之后入账的消息按字符估；压缩一发生基准作废，回到「system + 视图」字符估加固定开销，直到下一轮 usage 回来。provider 没报 usage 的路径（FakeProvider、测试）只有字符估。
+- **固定开销**（[`fixedOverhead()`](../../packages/core/src/compaction/pipeline.ts#symbol=fixedOverhead)）：本轮菜单的工具 schema 与每轮注入。usage 里有它们、消息字符估里没有，所以单独估（JSON 按字符、不乘校准比）、单独加。
+- **校准比**：字符估（4 字符 ≈ 1 token）对中文低 2–4 倍，而阶段之间只能重新字符估——两个量纲直接比，中文会话会在第一段就「够了」。所以每次 usage 到达时算一次 `(真 token − 固定开销) / 同一份视图（system + 消息）的字符估`（[`calibrationFrom()`](../../packages/core/src/compaction/pipeline.ts#symbol=calibrationFrom)），之后流水线里 system 与消息的字符估、给阶段的 `input.estimate`、压完报出去的 `contextTokens` 都按它换算（范围夹在 0.2–10）。不扣固定开销的话，会话早期工具定义占了大头，比值被抬到 3–4，之后每个大工具结果都被放大，真实占用约 1/3 窗口就触发压缩（2026-11-03，[固定开销](../../packages/core/test/compaction.test.ts#test=校准比不把固定开销当乘数usage-里的工具-schema-每轮注入单独算会话早期读几个大文件不会在真实占用约-13-窗口时就触发压缩)）。Agent 记住最近一次算出的比值（同一个算法）：手动压缩（run 之外）与新 run 的首轮没有 usage 基准，就沿用它；`reset()` 归 1。判据：同一段对话的 ASCII 版与中文版，跑过的阶段一致；手动压缩报出的值明显高于裸字符估。
 - 图片按尺寸估（[`imageTokens()`](../../packages/core/src/image.ts#symbol=imageTokens)：宽 × 高 ÷ 750，从 base64 的文件头读尺寸），认不出尺寸按 `IMAGE_TOKEN_ESTIMATE`（1 200），绝不按 base64 长度；`toolResult.images` 也算进去。
 - `target = contextWindow − reserveTokens`，`reserveTokens` 缺省 `max(maxOutputTokens, 16 000)`。
-- `goal`：auto / manual 是 `target − 10% window`（免得下一轮又碰线），overflow 是半窗。
+- `goal`：auto / manual 是 `min(target − 10% window, COMPACTION_GOAL_MAX_TOKENS)`（减一截免得下一轮又碰线；20 万封顶，百万窗口的模型压完不再长期带着约 90 万 token），overflow 是半窗。决策见 [压缩目标封顶](../decisions/implemented/2026-11-03-compaction-goal-cap.md)。
 
 **怎么跑。** 阶段按 `order` 升序（`AgentLoopConfig.compaction.getStages()` **每次重取**）：
 
@@ -110,16 +113,28 @@ system                       不变，每 run 装配一次，不含摘要
 
 | order | 阶段 | 只在 | 做什么 | 模型调用 |
 | --- | --- | --- | --- | --- |
-| 10 | `tool-results` | 四种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`）；清掉的用 `tool_output_read` 按工具调用 id 读回原文 | 0 |
-| 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；`used ≤ goal` 就停；一次最多 8 段 | 每段 1 次 |
-| 30 | `summary` | auto / overflow / manual | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
-| 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`），作为有损的应急保底 | 0 |
+| 10 | `tool-results` | 四种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`）；overflow 时那一批的结果合计超过 `OVERFLOW_KEEP_TOKENS`（2k）就连它也清；清掉的用 `tool_output_read` 按工具调用 id 读回原文 | 0 |
+| 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；绕开用户最新的请求；`used ≤ goal` 就停；一次最多 8 段 | 每段 1 次 |
+| 30 | `summary` | auto / overflow / manual | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点，再放不下也留着在飞那一批。用户最新的请求落在要折的范围里时拆成前后两段（见下）。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
+| 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`），作为有损的应急保底；同样绕开用户最新的请求 | 0 |
 
-**摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，由本模块维护）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节：goal、ground rules、touched files、failures and fixes、findings、the user's messages（逐字）、open work、in progress、resume with；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。
+**三条底线**（2026-11-03）。此前尾巴放不下在飞那一轮时 `chooseTailStart()` 返回 n（不留尾）：应急时摘要拿着几乎同样大的前缀再撞窗、snip 把 `[0, n)` 整段省略，下一次请求里连用户要干什么都没了；自动压缩时最后一批超过 `keepRecentTokens` 也会把刚拿到的工具结果折进摘要。现在：
 
-**框定**：`frameFull()` 给整段摘要加来历（这段对话被压缩过）、范围（`#0–#k`）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
+1. **在飞那一批永远在尾巴里**（[`inflightStart()`](../../packages/core/src/compaction/builtin.ts#symbol=inflightStart)：最后一个合法切点，以工具批收尾时是那条带 tool_use 的 assistant）。尾巴预算放不下时尾巴就是它。
+2. **用户最新的请求不折不省**（[`latestUserRequest()`](../../packages/core/src/compaction/builtin.ts#symbol=latestUserRequest)：最后一条非 harness 的 user 消息）。它落在要折的范围里时，[`foldRanges()`](../../packages/core/src/compaction/builtin.ts#symbol=foldRanges) 把范围拆成它前后两段：summary 的正文放第一段、第二段只留一句指回它的说明（`frameCovered()`），snip 两段都省略。它本身比窗口还大时没有阶段能动它，run 以 `context_overflow` 收场。
+3. **那一批自己就放不下时清掉它的结果**：overflow 的 `tool-results` 连在飞那一批也清（占位带工具调用 id，模型用 `tool_output_read` 分段读回），而不是整段省略。
 
-**`transcript_read({ from, to?, query? })`**（[`transcriptReadTool()`](../../packages/core/src/compaction/tool.ts#symbol=transcriptReadTool)）：按下标读**内存里的完整 transcript**——不走磁盘、不进 workspace jail，没有文件工具的通用 agent 也能用；下标与压缩通知里的 `#12–#40` 同一套；单条 4 000 字符、一次 24 000 字符封顶，超了告诉模型从哪续。同组还有一个 prompt 段（`compactionSection()`，order 150）告诉模型压缩之后细节去哪拿。
+做法参照：pi 的切点在尾巴放不下工具结果时退到前面那条 tool call、不退回第一条消息（`findCutPoint`）；codex 压缩后留着用户消息原文、只把其余换成摘要。判据见 [在飞那一批](../../packages/core/test/compaction.test.ts#test=choosetailstart预算够就从最早的轮起点留起预算只够半轮就退到合法切点连一条都放不下也留着在飞那一批)、[请求不折](../../packages/core/test/compaction.test.ts#test=summary在飞的一轮比尾巴预算大要从轮中途切-用户最新的请求原文留在视图里摘要放它前面它后面那段只留一句指回摘要的说明)、[应急清那一批](../../packages/core/test/compaction.test.ts#test=撞窗应急在飞那一批比应急尾巴大清掉它的结果按-id-读回用户的请求原文还在下一次请求里不再整段省略成一句消息被省略了)。
+
+**调用形状：从主对话分叉**（2026-11-03，[`CompactionModelCall`](../../packages/core/src/compaction/types.ts#symbol=CompactionModelCall)）。内建阶段调模型时不给 `systemPrompt`：core 用这条循环的 system、本轮工具菜单（只摆 schema、不执行）与 thinking 档位，`messages` 是视图的一段（summary 从头到尾巴之前，collapse 是这一段）加末尾一条 harness 指令——前缀与循环上一次请求逐字相同，吃得到 provider 的前缀缓存（此前另起一份 system、不带工具，一分缓存都吃不到）。角色与「只回文本、不调工具」写在指令开头（`SUMMARY_PROMPT_OPENING` / `COLLAPSE_PROMPT_OPENING`）；模型仍调了工具也只取文本。第三方阶段给了 `systemPrompt`（含 `null`）就是独立调用：那份 system、不带工具、thinking 关。collapse 只在从最旧那段折起时与上一次请求同前缀；之后的段只共享 system 与菜单。判据见 [分叉](../../packages/core/test/compaction.test.ts#test=摘要调用从主对话分叉同一份-system同一份工具菜单同一个-thinking-档位消息是上一次请求的前缀指令接在末尾吃得到前缀缓存)。
+
+**摘要 prompt**（全英文，`SUMMARY_INSTRUCTION`，由本模块维护）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节，接着干活最离不开的在前：goal、open work、in progress、resume with、ground rules、failures and fixes、findings、touched files、the user's messages（逐字；超长的一条只留头尾几行，缺口注明可用 `transcript_read` 读回原文）；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`），引用用户消息的要求相同。节序参照 pi 的 checkpoint（Goal → Progress → Next Steps 在前）与 codex 的 handoff 摘要。
+
+**截断即失败**：摘要调用撞上输出上限（`stopReason: "max_tokens"`）时 [`modelCallFor()`](../../packages/core/src/compaction/pipeline.ts#symbol=modelCallFor) 抛（不重试），`<summary>` 或草稿打开了没闭合时 `extractSummary()` 返回空、阶段抛——都按这一阶段失败处理（记 `compactionFailed`，阶梯往下走 / 走应急），不拿半截的摘要顶替原文。判据见 [截断](../../packages/core/test/compaction.test.ts#test=摘要调用撞上输出上限stopreason-maxtokens-这一阶段失败截断的摘要不采用记-compactionfailed阶梯往下走)。
+
+**框定**：`frameFull()` 给整段摘要加来历（这段对话被压缩过）、范围（`#0–#k`，拆成两段时两段都列、并说明用户最新的请求原文紧跟其后）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
+
+**`transcript_read({ from, to?, query? })`**（[`transcriptReadTool()`](../../packages/core/src/compaction/tool.ts#symbol=transcriptReadTool)）：按下标读**内存里的完整 transcript**——不走磁盘、不进 workspace jail，没有文件工具的通用 agent 也能用；下标与压缩通知里的 `#12–#40` 同一套；单条 4 000 字符、一次 24 000 字符封顶，超了告诉模型从哪续。它**常驻菜单**（不 deferred）：摘要框定、折叠说明与 compaction 段都让模型直接调它，延迟的话模型手边没有它（[常驻](../../packages/core/test/compaction.test.ts#test=echocompaction-装上之后-transcriptread-常驻菜单摘要框定与-compaction-段让模型直接调它不用先-toolsearch读的是活的-transcript)）。同组还有一个 prompt 段（`compactionSection()`，order 150）告诉模型压缩之后细节去哪拿。
 
 ## 6. 扩展与热插拔
 
@@ -176,9 +191,9 @@ void echo;
 
 ## 8. 落盘与恢复
 
-session entry：`{ kind: "compaction", at, reason, compaction: CompactionState }`——每次压缩之后的**整个**状态，不是增量；没压动的不入账。恢复（[`SessionService.project()`](../../packages/core/src/session/service.ts#symbol=project)）取最后一条的状态，再用 `assertCompactionFits()` 在恢复出来的 messages 上验：越界、重叠、切在配对中间都判红、不修——transcript 只增不改，写下去时合法的状态永远合法，不合法就是坏档。
+session entry：`{ kind: "compaction", at, reason, compaction: CompactionState }`——每次压缩之后的**整个**状态，不是增量，下标是盘上的（见 §1 第 2 条）；没压动的不入账。恢复（[`SessionService.project()`](../../packages/core/src/session/service.ts#symbol=project)）取最后一条的状态，再用 `assertCompactionFits()` 在恢复出来的 messages 上验：越界、重叠、切在配对中间都判红、不修——transcript 只增不改，写下去时合法的状态永远合法，不合法就是坏档。
 
-判据：压缩后立即续跑与重启恢复后续跑，下一次 provider 请求的 messages 深度相等（`at` 在投影时剥掉，所以逐字节相同）。
+判据：压缩后立即续跑与重启恢复后续跑，下一次 provider 请求的 messages 深度相等（`at` 在投影时剥掉，所以逐字节相同）；`/clear` 之后再压缩，续会话不判坏档、折掉的是同一段（[reset 之后的下标](../../packages/core/test/compaction.test.ts#test=clear-之后再压缩compaction-entry-记盘上下标越过-reset-前那几条续会话不判坏档折的还是同一段)）。
 
 ## 9. 当前限制与验证
 

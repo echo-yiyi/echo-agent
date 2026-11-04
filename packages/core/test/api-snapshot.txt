@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 354（value 127 · type 210 · both 17）
+符号 355（value 128 · type 210 · both 17）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -67,7 +67,7 @@ value  MESSAGE_CARRYING_EVENTS
 value  chooseTailStart
 value  COLLAPSE_INSTRUCTION
 value  COLLAPSE_MAX_SECTIONS
-value  COLLAPSE_SYSTEM
+value  COLLAPSE_PROMPT_OPENING
 value  collapseStage
 type   CompactionPackConfig
 value  defaultCompactionStages
@@ -77,7 +77,7 @@ value  frameSection
 value  OVERFLOW_KEEP_TOKENS
 value  snipStage
 value  SUMMARY_INSTRUCTION
-value  SUMMARY_SYSTEM
+value  SUMMARY_PROMPT_OPENING
 value  summaryStage
 value  toolResultsStage
 
@@ -87,7 +87,8 @@ value  TRANSCRIPT_READ_TOOL
 type   TranscriptReadParams
 value  transcriptReadTool
 
--- src/compaction/types.ts (15) --
+-- src/compaction/types.ts (16) --
+value  COMPACTION_GOAL_MAX_TOKENS
 value  COMPACTION_SLACK_RATIO
 type   CompactionBudget
 type   CompactionInput

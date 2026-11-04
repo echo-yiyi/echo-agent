@@ -100,6 +100,11 @@ export type LoopCompactionConfig = {
   calibration?: number;
   /** 此刻（毫秒）：空闲清理判「停了多久」用。Agent 给的是它的 clock（测试可拨）；不给 = `Date.now()`。 */
   now?: () => number;
+  /**
+   * `false` = 这条循环的压缩不经 hooks：不问 preCompact，不发 postCompact / compactionFailed / 压缩失败的通知。
+   * 子循环（提取、整理、subagent）用：它们共用主循环的 hook 运行时，自己那份 context 的压缩却不是主会话的事。不给 = 经 hooks。
+   */
+  notifyHooks?: boolean;
 };
 
 export type TransformContext = (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;

@@ -56,7 +56,7 @@ export {
   neutralizeClosingTag,
   INSTRUCTION_FILES,
   INSTRUCTIONS_CAP,
-  INSTRUCTIONS_HEADER,
+  instructionsHeader,
 } from "./instructions.ts";
 
 /** 凭据的判据与验证（不碰界面）：这家配好了没、这把 key 能不能用。 */

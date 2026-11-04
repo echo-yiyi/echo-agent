@@ -42,15 +42,15 @@ flowchart LR
 
 另有三条刻意不走主 Agent 装配器的调用路径，各自定义 system 的来源与刷新规则：
 
-- `subagent` 的任务、system 与工具集由父模型在调用时给出（fresh），或整套继承父这次 run 的装配（fork），见 [`SubagentSpec`](../../packages/core/src/subagent/tool.ts#symbol=SubagentSpec) 与 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。
-- compaction 的 collapse / summary 使用自己的固定 prompt，归压缩策略所有，见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages)。
+- `subagent` 的任务、system 与工具集由父模型在调用时给出（fresh），或整套继承父这次 run 的装配（fork），见 [`SubagentSpec`](../../packages/core/src/subagent/tool.ts#symbol=SubagentSpec) 与 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。fork 的工具菜单与父逐项相同（交不出去的几件是同名同 schema、点名就拒的替身，`report` 接在末尾），前缀缓存接得上。
+- compaction 的 collapse / summary 从主对话分叉：同一份 system 与工具菜单，压缩指令（归压缩策略所有）作为末尾一条 harness 消息，见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages) 与 [Compaction](compaction.md) §5。
 - Dream 复用隔离循环但 system 为 `null`；它的整理指令由 memory模块提供，见 [`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask)。
 
 ## 2. 注册接口与所有权
 
 外部 extension 真正需要学习的接口只有两层：
 
-- [`PromptSection`](../../packages/core/src/prompt/types.ts#symbol=PromptSection)：稳定名字、数值 `order`、一个从 `AssembleContext` 渲染字符串的函数。
+- [`PromptSection`](../../packages/core/src/prompt/types.ts#symbol=PromptSection)：稳定名字、数值 `order`、一个从 `AssembleContext` 渲染字符串的函数，以及可选的 `interpolate`（声明了才按变量插值，见 §3.2）。
 - [`AgentPromptRegistry`](../../packages/core/src/extension/registries.ts#symbol=AgentPromptRegistry)：注册 section 或 variable，取得由 Fiber 持有的 disposer；同名默认判红。
 
 [`definePromptPack()`](../../packages/core/src/extension/builtin.ts#symbol=definePromptPack) 把一组纯 prompt sections 变成 extension；[`defineToolPack()`](../../packages/core/src/extension/builtin.ts#symbol=defineToolPack) 把工具与它们的跨调用提示放进同一个 effect。两者共用原子注册：中途任何一项失败，已经注册的项逆序撤回；卸载也按所有权撤回。内建 `echo:*`、两个产品和第三方 extension 走同一个 registry，没有 core 私道。
@@ -90,6 +90,8 @@ flowchart LR
 
 数值越小越靠前；同数保注册序。排序意图是把更稳定的字节留在前缀，不代表 core 提供或承诺 provider cache。`order` 也不决定刷新频率：刷新由 system / turn / attempt 所在的生命周期决定。
 
+约定带分两半（2026-11-03 复核）：0–199 是只随产品 / 角色变的静态段（身份、纪律、交互面、工具习惯），300 起是随项目或会话变的段（环境里的 workspace、项目指令、skill 目录、记忆）。前一半整段在后一半之前，换项目或换会话时 system 只从环境段起变；内建与两个产品的段都落在各自的带里，当前实现不需要调序。工具 schema 不在 system 里：在把工具渲染在 system 之后的 provider 上，环境段一变，其后的工具定义同样吃不到缓存，这不是段排序能解决的（实测换项目后首次调用只命中约 1.1k，正是环境段之前的静态段）。
+
 ### 3.2 精确装配语义
 
 [`assembleSystem()`](../../packages/core/src/prompt/assemble.ts#symbol=assembleSystem) 的顺序固定为：
@@ -97,12 +99,14 @@ flowchart LR
 1. 复制 sections 并按 `order` 稳定排序。
 2. 在渲染任何 section 前，一次性执行**全部已注册** variable providers；即使某变量没有被任何段引用也会执行。
 3. 逐段调用 `render(ctx)`；抛错的段省略并交给 `onFailure` 留诊断。
-4. 对成功结果做严格 `{{name}}` 插值，再 `trim()`；空结果不占位。
+4. 声明了 `interpolate: true` 的段对成功结果做严格 `{{name}}` 插值，其余段原样；再 `trim()`；空结果不占位。
 5. 非空段用两个换行连接；全空返回 `null`。
 
-完整的 `{{name}}` 必须名字合法、已经注册且本次有值，否则抛 `PromptVariableError`；孤立且没有 `}}` 的 `{{` 作为普通文本保留；替换值不二次扫描。现有门见 [排序与空段](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null) 和 [严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名)。
+**插值只在段自己声明时做**（2026-11-03，决策见 [插值由段声明](../decisions/implemented/2026-11-03-prompt-interpolation-opt-in.md)）。声明的只有作者有意写变量的段：内建环境段（[`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection)）与产品导入的 md 段（`sectionFromMarkdown()`）。装进第三方或模型写的文本的段——项目指令、记忆、skill 目录、角色 identity——不声明，正文里的 `${{ secrets.X }}`、`{{ .Values.x }}` 是普通字符；此前对所有段插值，这样一行就让每个 run 在调用模型前失败，连记忆提取都起不来。
 
-[`sectionFromMarkdown()`](../../packages/core/src/prompt/import.ts#symbol=sectionFromMarkdown) 接受极简 frontmatter：`name`、整数 `order`，缺 order 为 0；`tier`、缺名字、非整数 order 判红。正文去掉首尾空白，不保证字节级原样保留。
+声明了插值的段里，完整的 `{{name}}` 必须名字合法、已经注册且本次有值，否则抛 `PromptVariableError`；孤立且没有 `}}` 的 `{{` 作为普通文本保留；替换值不二次扫描。现有门见 [排序与空段](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null)、[严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名) 和 [未声明的段原样](../../packages/core/test/prompt.test.ts#test=没声明-interpolate-的段原样第三方文本里的-secretsx-valuesx-workspace-都不当变量)。
+
+[`sectionFromMarkdown()`](../../packages/core/src/prompt/import.ts#symbol=sectionFromMarkdown) 接受极简 frontmatter：`name`、整数 `order`，缺 order 为 0；`tier`、缺名字、非整数 order 判红。正文去掉首尾空白，不保证字节级原样保留；导入的段声明插值。
 
 ### 3.3 角色只替换 identity
 
@@ -125,9 +129,9 @@ flowchart LR
 
 因此“每轮注入”只是历史名字，不是准确生命周期。重试属于同一个 turn 的下一个 attempt，[`callModel()`](../../packages/core/src/loop/run-turn.ts#symbol=callModel) 会重新取 injection、重新 transform、重新过 hook 与 projection。任何有副作用的回调都必须自行幂等。
 
-system 的“冻结”只指主 Agent 从 registry 装配的快照。内部 loop 边界 的 `prepareNextTurn` 仍能直接替换 `AgentContext.systemPrompt`，但 Agent 没有把它暴露为产品或 extension 的 prompt 写入口。子 agent 和 compaction 调用也各自使用独立 system，不能据此声称“进程里所有模型调用的 system 每 run 都不变”。
+system 的“冻结”只指主 Agent 从 registry 装配的快照。内部 loop 边界 的 `prepareNextTurn` 仍能直接替换 `AgentContext.systemPrompt`，但 Agent 没有把它暴露为产品或 extension 的 prompt 写入口。fresh 子 agent 与 Dream 使用独立 system（fork 子 agent、记忆提取与内建压缩调用沿用这次 run 的那份），不能据此声称“进程里所有模型调用的 system 每 run 都不变”。
 
-缓存层面只承诺仓库自己的确定性：sections 稳定排序、工具 schema 按名排序、时间戳不进固定 prompt、injection 追加在消息尾部。是否命中、命中多少以及 tools / system / messages 在厂商缓存里的相对位置，都是 provider 行为，不是 core 契约。
+缓存层面只承诺仓库自己的确定性：sections 稳定排序、时间戳不进固定 prompt、injection 追加在消息尾部，以及工具菜单的顺序（[`visibleTools()`](../../packages/core/src/tools/harness.ts#symbol=visibleTools)，`toolSchemas()` 按给定顺序投影）：常驻工具按名排，已加载的延迟工具按加载顺序追加在后，`tool_search` 垫底（它的描述随加载变）。加载一件延迟工具只动菜单尾巴——此前全体按名排，新加载的一件插进中间，它之后的工具、system 与整段对话一起失去缓存（本机会话实测命中从 9 600 掉到 896）；判据见 [菜单顺序](../../packages/core/test/tool-search.test.ts#test=菜单顺序常驻工具按名排已加载的延迟工具按加载顺序追加在后toolsearch-垫底加载一件只动菜单尾巴前面的字节与-provider-缓存不动)。是否命中、命中多少以及 tools / system / messages 在厂商缓存里的相对位置，都是 provider 行为，不是 core 契约。
 
 ## 5. 工具与 prompt 必须同真同假
 
@@ -166,13 +170,13 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 - **结构卫生**：单行化、围栏、截断是否让格式与体积可控。
 - **安全隔离**：不可信文字是否无法改变更高层指令的含义。
 
-[`singleLine()`](../../packages/core/src/prompt/sanitize.ts#symbol=singleLine)、[`fenceSafe()`](../../packages/core/src/prompt/sanitize.ts#symbol=fenceSafe) 与 [`truncateMarked()`](../../packages/core/src/prompt/sanitize.ts#symbol=truncateMarked) 只提供第二项：折叠换行、替换反引号、截取前缀并留下标记。它们不提供第三项，也不应该叫 sanitizer 或“安全边界”。
+[`singleLine()`](../../packages/core/src/prompt/sanitize.ts#symbol=singleLine)、[`fenceSafe()`](../../packages/core/src/prompt/sanitize.ts#symbol=fenceSafe) 与 [`truncateMarked()`](../../packages/core/src/prompt/sanitize.ts#symbol=truncateMarked) 只提供第二项：折叠换行、替换反引号、截取前缀并留下标记。它们不提供第三项，也不应该叫 sanitizer 或“安全边界”。`fenceSafe()` 只给放进反引号围栏的内容用；项目指令与 skill 正文用标签或标记行定界、没有围栏要保护，反引号原样保留——换掉它们只会把正文里的命令与代码改坏。
 
 | 来源 | authority | 当前卫生措施 | 必须如实说明的限制 |
 | --- | --- | --- | --- |
 | 产品 / extension 字面量 | 产品代码 | 无；视为受信 | 改文案就是改模型行为，应与代码一起 review |
-| workspace 的 AGENTS.md / CLAUDE.md | 作为用户自己的项目指令执行 | 反引号替换、正文前缀 65 536 字符、XML-like 标记 | 标记可被正文自行闭合；第三方仓库本身不可信时，靠 prompt 包装无法授权它 |
-| skill 正文与激活参数 | 被激活后作为工作指令执行 | 围栏字符替换、单条和总预算、参数单行化 | 起止标记不是安全沙箱；skill 的安装 / 激活就是信任决定 |
+| workspace 的 AGENTS.md / CLAUDE.md | 作为用户自己的项目指令执行 | 正文前缀 65 536 字符、XML-like 标签定界、正文里冒充闭合标签的字样中和；段头写实际加载的文件名 | 第三方仓库本身不可信时，靠 prompt 包装无法授权它 |
+| skill 正文与激活参数 | 被激活后作为工作指令执行 | 与起止标记同形的行转义、单条和总预算、参数单行化 | 起止标记不是安全沙箱；skill 的安装 / 激活就是信任决定 |
 | memory | 跨 run 的持久背景 | resident / index 各自有预算；索引描述单行化 | 正文有意保留多行并直接影响模型，旧记忆可能陈旧或被污染 |
 | task title / executor | 只应是清单数据 | 只有条数上限 | 当前可换行、可无界增长，能伪装成额外指令段 |
 | prompt variables | section 引用的运行事实 | 无转义，替换值不重扫 | workspace 等字符串原样进入 system；它们不是模板代码，但仍能包含换行 |
@@ -187,7 +191,7 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 | --- | --- | --- |
 | `PromptSection.render()` 抛错 | 省略该段；异步发 `[prompt_section_failed]` 通知；run 继续 | 对增强段合理；对 identity 等关键段没有表达力 |
 | variable provider 抛错 | 整次装配失败；即使变量未被引用也会发生 | 接口 未写清 provider 必须纯且不抛 |
-| 变量未注册 / 无值 / 引用畸形 | `PromptVariableError`；模型不被调用，run 以 error 收场 | 作者错误 fail-loud，应该保留 |
+| 声明插值的段里变量未注册 / 无值 / 引用畸形 | `PromptVariableError`；模型不被调用，run 以 error 收场 | 作者错误 fail-loud，应该保留；未声明的段不解析 `{{…}}`，第三方文本不会触发它 |
 | attempt injection / transform / projection / key 抛错 | attempt 记 internal failure，run 以 error 收场 | 实现 fail-loud，但多处注释仍写“绝不抛、失败回退” |
 | `contextBeforeBuild` 返回 block | 不调用 provider，不合成 assistant 消息；reply / run 以 aborted 收场 | 已与 hook 接口 对齐 |
 | extension 注册撞名或 role 替不到 identity | mount 失败并回滚该 generation | 所有权清楚，应该保留 |
@@ -203,7 +207,6 @@ PromptSection 不区分 required / optional，render 异常统一省略。产品
 - **生命周期命名有历史差异。** getTurnInjections 实际每个 attempt 调用，重试时会重算。这是已确认的上下文重建行为，不应改回每 turn 只算一次；PromptSource 仍是公开但没有外部注册入口的内部来源类型。
 - **上下文字段含义需按实现读取。** AssembleContext.agentId 当前赋值为 product，不代表角色身份。
 - **预算与信任有限。** task 标题和 executor 未建立注入字符总上界；格式定界与反引号替换不能证明外部文本不会影响模型指令理解。
-- **正文也参与模板解析。** assembleSystem 对整个 render 结果插值，项目文件或记忆里的完整双花括号可能被当成变量引用，未注册时装配失败。当前没有独立的原文通道。
 
 角色替换顺序已由 createEcho 的产品先、角色后挂载解决，不再列作当前缺陷。历史审阅命令见 [复核记录](../code-review/2026-09-15-doc-probes.md)；其中旧失败输出不代表当前行为。
 
@@ -215,6 +218,7 @@ PromptSection 不区分 required / optional，render 异常统一省略。产品
 | --- | --- |
 | section 排序、空段、render 失败 | [prompt 装配测试](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null) |
 | 严格变量引用使错误 run 在调用模型前结束 | [变量错误测试](../../packages/core/test/prompt.test.ts#test=变量错-run-以-error-收场不静默发一份错的-system) |
+| 项目指令与记忆里的 `{{…}}` 原样进 system，run 照常 | [项目指令](../../packages/cli/test/prompt.test.ts#test=instructionsagentsmd-里一行-github-actions-的-secretsx-原样进-systemrun-照常跑完项目指令不插值)、[记忆](../../packages/core/test/memory.test.ts#test=记忆正文里写着-username-secretsx-原样进-systemrun-照常跑完记忆段不插值) |
 | prompt / tool pack 原子注册、卸载、撞名回滚 | [pack 测试](../../packages/core/test/prompt.test.ts#test=definepromptpack-definetoolpack-带段mount-进表unmount-撤走撞名整包回滚) |
 | role identity 的受控替换与复原 | [agent definition 测试](../../packages/core/test/agent-def.test.ts#test=identity-被替换工具收成子集unmount-两样都复原) |
 | skill / task 动态材料不进 transcript，system 在 run 内不随其变化 | [主接线测试](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)、[task 测试](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |

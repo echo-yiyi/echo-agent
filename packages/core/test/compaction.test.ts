@@ -16,7 +16,7 @@ import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { SessionService } from "../src/session/service.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
-import { EMPTY_COMPACTION, type CompactionInput, type CompactionStage, type CompactionState } from "../src/compaction/types.ts";
+import { COMPACTION_GOAL_MAX_TOKENS, EMPTY_COMPACTION, type CompactionInput, type CompactionStage, type CompactionState } from "../src/compaction/types.ts";
 import {
   IMAGE_TOKEN_ESTIMATE,
   buildWorkingMessages,
@@ -33,7 +33,11 @@ import {
   chooseTailStart,
   collapseStage,
   extractSummary,
+  foldRanges,
   frameFull,
+  COLLAPSE_INSTRUCTION,
+  SUMMARY_INSTRUCTION,
+  SUMMARY_PROMPT_OPENING,
   snipStage,
   summaryStage,
   toolResultsStage,
@@ -43,6 +47,8 @@ import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import { AgentCompaction, defineExtension, type ExtensionEntry } from "../src/extension/public.ts";
 import { ExtensionHost } from "../src/extension/host.ts";
 import { agentRegistries } from "../src/extension/registries.ts";
+import { compactionBudget, fixedOverhead } from "../src/compaction/pipeline.ts";
+import { visibleTools } from "../src/tools/harness.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 
 /* ─────────────── 夹具 ─────────────── */
@@ -97,7 +103,7 @@ function stage(name: string, order: number, run: (input: CompactionInput) => Com
   return { name, order, run };
 }
 
-function fakeCall(reply: string, seen: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = []): CompactionInput["callModel"] {
+function fakeCall(reply: string, seen: { systemPrompt?: string | null; messages: readonly AgentMessage[] }[] = []): CompactionInput["callModel"] {
   return async (input) => {
     seen.push(input);
     return reply;
@@ -204,6 +210,15 @@ test("估算：图片按固定值不按 base64 长度；toolResult 挂在 images
 
 /* ═══════════════ 阶梯层 ═══════════════ */
 
+test("预算：auto / manual 的压缩目标是 target 再减一成窗口，大窗口封顶 COMPACTION_GOAL_MAX_TOKENS；触发线不变；overflow 仍是半窗", () => {
+  const huge = { window: 1_048_576, maxOutputTokens: undefined, reserveTokens: undefined, used: 1_040_000 };
+  expect(compactionBudget({ ...huge, reason: "auto" })).toEqual({ window: 1_048_576, used: 1_040_000, target: 1_048_576 - 16_000, goal: COMPACTION_GOAL_MAX_TOKENS });
+  expect(compactionBudget({ ...huge, reason: "manual" }).goal).toBe(200_000);
+  expect(compactionBudget({ ...huge, reason: "overflow" }).goal).toBe(524_288);
+  // 常见窗口不受影响：128k → 112k − 12.8k
+  expect(compactionBudget({ window: 128_000, maxOutputTokens: undefined, reserveTokens: undefined, used: 120_000, reason: "auto" }).goal).toBe(99_200);
+});
+
 test("tool-results：保留最近 K 批，之前的 toolResult 标清；没有更旧的可清就 null；overflow 只留 1 批", () => {
   const m = twoTurns();
   expect(toolResultsStage(1).run(input(m), SIG)).toEqual({ spans: [], clearedBefore: 5 });
@@ -218,21 +233,77 @@ function tokensOf(list: readonly AgentMessage[]): number {
   return list.reduce((acc, x) => acc + estimateTokens([x]), 0);
 }
 
-test("chooseTailStart：预算够就从最早的轮起点留起；预算只够半轮就退到合法切点；连一条都放不下就不留尾", () => {
+test("chooseTailStart：预算够就从最早的轮起点留起；预算只够半轮就退到合法切点；连一条都放不下也留着在飞那一批", () => {
   const m = twoTurns();
   expect(chooseTailStart(m, EMPTY_COMPACTION, 100_000, 0)).toBe(0);
   expect(chooseTailStart(m, EMPTY_COMPACTION, tokensOf(m.slice(4)), 0)).toBe(4);
   // 只够最后三条（asst tool_use + toolResult + asst）：在飞的一轮放不下，退到合法切点 5（不是 6，那会拆开 c2 的配对）
   expect(chooseTailStart(m, EMPTY_COMPACTION, tokensOf(m.slice(5)), 0)).toBe(5);
-  expect(chooseTailStart(m, EMPTY_COMPACTION, 0, 0)).toBe(8);
+  // 一条都放不下：最后那条回答照样留着（此前返回 8 = 不留尾，整段折进摘要）
+  expect(chooseTailStart(m, EMPTY_COMPACTION, 0, 0)).toBe(7);
+  // 以工具批收尾、那一批比预算大：tool_use 与它的结果一起留着，不折刚拿到的结果
+  const batch = [userMessage("read it"), assistantMessage([{ type: "tool_use", id: "r1", name: "echo", input: {} }], "tool_use"), toolResultMessage("r1", "echo", "x".repeat(4000), false)];
+  expect(chooseTailStart(batch, EMPTY_COMPACTION, 10, 0)).toBe(1);
+});
+
+test("foldRanges：用户最新的请求落在要折的范围里就拆成前后两段、它自己不折；harness 插话不算用户请求", () => {
+  const m = [
+    userMessage("old ask"),
+    assistantMessage([{ type: "text", text: "ok" }], "end_turn"),
+    userMessage("LATEST ask"),
+    assistantMessage([{ type: "tool_use", id: "c1", name: "echo", input: {} }], "tool_use"),
+    toolResultMessage("c1", "echo", "r", false),
+    assistantMessage([{ type: "tool_use", id: "c2", name: "echo", input: {} }], "tool_use"),
+    toolResultMessage("c2", "echo", "r", false),
+    userMessage("stop hook says keep going", "harness"),
+  ];
+  expect(foldRanges(m, 0, 2)).toEqual([[0, 2]]);
+  expect(foldRanges(m, 0, 5)).toEqual([[0, 2], [3, 5]]);
+  expect(foldRanges(m, 0, 3)).toEqual([[0, 2]]);
+  expect(foldRanges(m, 2, 5)).toEqual([[3, 5]]);
+  expect(foldRanges(m, 0, 0)).toEqual([]);
+});
+
+test("summary：在飞的一轮比尾巴预算大、要从轮中途切 → 用户最新的请求原文留在视图里，摘要放它前面、它后面那段只留一句指回摘要的说明", async () => {
+  const m = [
+    userMessage("first question"),
+    assistantMessage([{ type: "text", text: "answer one" }], "end_turn"),
+    userMessage("LATEST: refactor retry.ts to honour Retry-After"),
+    assistantMessage([{ type: "tool_use", id: "c1", name: "echo", input: {} }], "tool_use"),
+    toolResultMessage("c1", "echo", "y".repeat(800), false),
+    assistantMessage([{ type: "tool_use", id: "c2", name: "echo", input: {} }], "tool_use"),
+    toolResultMessage("c2", "echo", "z".repeat(40), false),
+  ];
+  const s = await summaryStage({ keepRecentTokens: 30 }).run(input(m, { callModel: fakeCall("<summary>S</summary>") }), SIG);
+  expect(s!.spans.map((x) => [x.from, x.to])).toEqual([[0, 2], [3, 5]]);
+  expect(s!.spans[0]!.summary).toContain("message #2, follows this summary verbatim");
+  expect(s!.spans[1]!.summary).toContain("transcript_read from=3 to=5");
+  const view = buildWorkingMessages(m, s!);
+  expect(JSON.stringify(view)).toContain("LATEST: refactor retry.ts to honour Retry-After");
+  expect(view.map((x) => x.role)).toEqual(["user", "user", "user", "assistant", "toolResult"]);
+  // 应急时省略也一样绕开它（在飞的一轮比应急尾巴大）
+  const heavy = m.map((x) => (x.role === "toolResult" && x.toolCallId === "c1" ? toolResultMessage("c1", "echo", "y".repeat(12_000), false) : x));
+  const snipped = (await snipStage().run(input(heavy, { reason: "overflow" }), SIG))!;
+  expect(snipped.spans.map((x) => [x.from, x.to, x.summary])).toEqual([[0, 2, null], [3, 5, null]]);
+  expect(JSON.stringify(buildWorkingMessages(heavy, snipped))).toContain("LATEST: refactor retry.ts");
+});
+
+test("tool-results：应急时在飞那一批的结果自己就超过应急尾巴 → 连它也清掉（按 id 读回），不留着再撞窗", () => {
+  const m = [userMessage("read it"), assistantMessage([{ type: "tool_use", id: "r1", name: "echo", input: {} }], "tool_use"), toolResultMessage("r1", "echo", "x".repeat(12_000), false)];
+  expect(toolResultsStage().run(input(m, { reason: "overflow" }), SIG)).toEqual({ spans: [], clearedBefore: 3 });
+  // 自动压缩不清在飞那一批（只有应急才动它）
+  expect(toolResultsStage(1).run(input(m), SIG)).toBeNull();
+  // 应急、那一批小：照旧只留它
+  const small = [...m.slice(0, 2), toolResultMessage("r1", "echo", "small", false)];
+  expect(toolResultsStage().run(input(small, { reason: "overflow" }), SIG)).toBeNull();
 });
 
 test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提示）；模型收到的是投影后的前缀 + harness 指令；manual 的指令追加在末尾", async () => {
   const m = twoTurns();
-  const seen: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
+  const seen: { systemPrompt?: string | null; messages: readonly AgentMessage[] }[] = [];
   const keep = tokensOf(m.slice(4));
   const s = await summaryStage({ keepRecentTokens: keep }).run(input(m, { callModel: fakeCall("<scratchpad>think</scratchpad><summary>THE SUMMARY</summary>", seen) }), new AbortController().signal);
-  expect(s).toEqual({ spans: [{ from: 0, to: 4, summary: frameFull(0, 4, "THE SUMMARY") }], clearedBefore: 0 });
+  expect(s).toEqual({ spans: [{ from: 0, to: 4, summary: frameFull([[0, 4]], "THE SUMMARY") }], clearedBefore: 0 });
   expect(s!.spans[0]!.summary).toContain("transcript_read");
   expect(s!.spans[0]!.summary).not.toContain("think");
   expect(seen[0]!.messages.map((x) => x.role)).toEqual(["user", "assistant", "toolResult", "assistant", "user"]);
@@ -244,7 +315,7 @@ test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提�
   expect(askText).toContain("#7 [assistant] answer two");
   expect(askText).not.toContain("#3 [assistant] answer one");
   // manual + 指令
-  const seen2: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
+  const seen2: { systemPrompt?: string | null; messages: readonly AgentMessage[] }[] = [];
   await summaryStage({ keepRecentTokens: keep }).run(input(m, { reason: "manual", instructions: "keep only TODOs", callModel: fakeCall("<summary>x</summary>", seen2) }), new AbortController().signal);
   const ask = seen2[0]!.messages[4]!;
   expect(ask.role === "user" && ask.content[0]!.type === "text" && ask.content[0]!.text).toContain("keep only TODOs");
@@ -256,7 +327,7 @@ test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提�
 
 test("collapse：只服务 auto；从最旧原文起一段一段折，够了就停；每段一次模型调用", async () => {
   const m = twoTurns();
-  const calls: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
+  const calls: { systemPrompt?: string | null; messages: readonly AgentMessage[] }[] = [];
   const keep = tokensOf(m.slice(4));
   // 段大小 1 token → 段在下一个轮起点收口（一轮比段大就整轮一段）；goal 定得很低 → 一直折到只剩尾巴
   const s = await collapseStage({ sectionTokens: 1, keepRecentTokens: keep }).run(
@@ -280,10 +351,35 @@ test("snip：只在 overflow；产物是 summary=null 的一段；整个 transcr
   expect(snipStage().run(input(m, { reason: "overflow" }), SIG)).toEqual({ spans: [{ from: 0, to: 1, summary: null }], clearedBefore: 0 });
 });
 
-test("extractSummary：剥 scratchpad、取 summary 里面的；都没有就整段", () => {
+test("extractSummary：剥 scratchpad、取 summary 里面的；都没有就整段；<summary> 或草稿没闭合（输出被截断）= 没有摘要", () => {
   expect(extractSummary("<scratchpad>a</scratchpad>\n<summary>\nS\n</summary>")).toBe("S");
   expect(extractSummary("plain")).toBe("plain");
   expect(extractSummary("<scratchpad>only</scratchpad>")).toBe("");
+  expect(extractSummary("<scratchpad>a</scratchpad>\n<summary>\n1. Goal: refactor the ret")).toBe("");
+  expect(extractSummary("<scratchpad>walking through the conversation, stretch one")).toBe("");
+});
+
+test("摘要提示：未完成的工作 / 进行中 / 接着做什么排在前面；逐字引用用户消息时超长的只留头尾并指向 transcript_read（collapse 同样）", () => {
+  const order = ["Goal", "Open work", "In progress", "Resume with", "Ground rules", "The user's messages"].map((h) => SUMMARY_INSTRUCTION.indexOf(h));
+  expect(order.every((i) => i >= 0)).toBe(true);
+  expect([...order].sort((a, b) => a - b)).toEqual(order);
+  expect(SUMMARY_INSTRUCTION).toContain("first and last few lines");
+  expect(COLLAPSE_INSTRUCTION).toContain("first and last few lines");
+  expect(SUMMARY_INSTRUCTION).toContain("transcript_read");
+});
+
+test("摘要调用撞上输出上限（stopReason max_tokens）= 这一阶段失败：截断的摘要不采用、记 compactionFailed，阶梯往下走", async () => {
+  const truncated = (text: string): ScriptedTurn => textTurn(text, "max_tokens");
+  for (const answer of ["<summary>1. Goal: refactor", "<summary>looks closed</summary>"]) {
+    const agent = await agentWithBuiltins(scriptedStreamFn([textTurn("hi"), textTurn("hi again"), truncated(answer)]), { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
+    const { lifecycle } = collect(agent);
+    await agent.prompt("hello");
+    await agent.prompt("again");
+    const r = await agent.compact();
+    expect(r.kind === "done" && r.stages).toEqual([]);
+    expect(agent.state.compaction.spans).toEqual([]);
+    expect(lifecycle.some((e) => e.type === "compactionFailed" && e.stage === "summary")).toBe(true);
+  }
 });
 
 /* ═══════════════ 循环层 ═══════════════ */
@@ -308,6 +404,16 @@ async function agentWithBuiltins(
   return agent;
 }
 
+/**
+ * `agentWithBuiltins` 那份菜单的固定开销（工具 schema 的字符估）：估算把它算进上下文占用（2026-11-03），
+ * 按窗口定触发线的测试把窗口加上它，才是「对话本身占多少」的那个意思。
+ */
+async function menuOverhead(): Promise<number> {
+  const probe = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]), tools: [echoTool()] });
+  await mountBuiltinTools(probe);
+  return fixedOverhead(visibleTools(probe.tools, new Set()), []);
+}
+
 /** 从盘上把那一段读回来——测试要验的是「落盘了什么」，所以每次新开一个 Service。 */
 async function loadSession(store: InMemoryDir, id: string): Promise<{ compaction: CompactionState }> {
   return await new SessionService(store).createOrResume(id);
@@ -321,18 +427,22 @@ function collect(agent: Agent): { events: AgentEvent[]; lifecycle: LifecycleEven
   return { events, lifecycle };
 }
 
-test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含摘要不含原文；压完下一轮不重复压；状态与 session 都记下", async () => {
+test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含摘要与这次的请求、不含原文；压完下一轮不重复压；状态与 session 都记下", async () => {
   const store = new InMemoryDir();
-  const { fn, requests } = capturing([reply("<summary>S1</summary>"), toolTurn("t1", "echo", {}), textTurn("done")]);
-  const agent = await agentWithBuiltins(fn, { session: { store, id: "s1" } });
+  const { fn, requests } = capturing([textTurn(BIG_TEXT), reply("<summary>S1</summary>"), toolTurn("t1", "echo", {}), textTurn("done")]);
+  const model: Model = { ...SMALL, capabilities: { contextWindow: 400 + (await menuOverhead()) } };
+  const agent = await agentWithBuiltins(fn, { model, session: { store, id: "s1" } });
+  await agent.prompt("first"); // 上一个 run 的回答很长：这个 run 轮首就过线
   const { events, lifecycle } = collect(agent);
-  const result = await agent.prompt(BIG_TEXT);
+  const result = await agent.prompt("second");
   expect(result.outcome.kind).toBe("completed");
-  // 请求 0 是摘要调用（无工具、末尾一条 harness 指令），请求 1 是真正的那一轮
-  expect(requests[0]!.tools).toEqual([]);
-  expect(requests[1]!.messages.length).toBe(1);
-  expect(textOf(requests[1]!, 0)).toContain("S1");
-  expect(textOf(requests[1]!, 0)).not.toContain(BIG_TEXT);
+  // 请求 1 是折叠调用（从主对话分叉：同一份菜单，末尾一条 harness 指令），请求 2 是真正的那一轮：摘要 + 这次的请求原文
+  expect(requests[1]!.tools).toEqual(requests[0]!.tools);
+  expect(JSON.stringify(requests[1]!.messages.at(-1))).toContain("Condense the stretch above");
+  expect(requests[2]!.messages.length).toBe(2);
+  expect(textOf(requests[2]!, 0)).toContain("S1");
+  expect(textOf(requests[2]!, 0)).not.toContain(BIG_TEXT);
+  expect(textOf(requests[2]!, 1)).toContain("second");
   // 第二轮（工具结果回来之后）没有再压：compaction_start 只有一次
   expect(events.filter((e) => e.type === "compaction_start").length).toBe(1);
   const end = events.find((e) => e.type === "compaction_end");
@@ -341,25 +451,73 @@ test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含�
   expect(agent.state.contextTokens).not.toBeNull();
   expect(lifecycle.some((e) => e.type === "postCompact")).toBe(true);
   // transcript 原文还在
-  expect(agent.messages[0]!.role === "user" && JSON.stringify(agent.messages[0]!.content)).toContain(BIG_TEXT);
+  expect(agent.messages[1]!.role === "assistant" && JSON.stringify(agent.messages[1]!.content)).toContain(BIG_TEXT);
   // session 里有一条 compaction entry，状态与运行时同一份
   const loaded = await loadSession(store, "s1");
   expect(loaded.compaction).toEqual(agent.state.compaction);
 });
 
+test("摘要调用从主对话分叉：同一份 system、同一份工具菜单、同一个 thinking 档位，消息是上一次请求的前缀、指令接在末尾（吃得到前缀缓存）", async () => {
+  const seen: { context: Context; thinking: unknown }[] = [];
+  const base = scriptedStreamFn([textTurn("hi"), textTurn("hi again"), reply("<summary>S</summary>")]);
+  const fn: StreamFn = (m, c, o) => {
+    seen.push({ context: structuredClone(c), thinking: o?.thinkingLevel });
+    return base(m, c, o);
+  };
+  const agent = await agentWithBuiltins(fn, { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
+  await agent.prompt("hello");
+  await agent.prompt("again");
+  const r = await agent.compact();
+  expect(r.kind === "done" && r.stages).toEqual(["summary"]);
+  const [, main, summary] = seen;
+  expect(summary!.context.systemPrompt).toBe(main!.context.systemPrompt);
+  expect(JSON.stringify(summary!.context.tools)).toBe(JSON.stringify(main!.context.tools));
+  expect(summary!.thinking).toBe(main!.thinking);
+  // 尾巴（最后那条回答）之前的视图 = 上一次请求的消息，原样在前；末尾一条 summary 指令
+  expect(summary!.context.messages.slice(0, main!.context.messages.length)).toEqual(main!.context.messages);
+  expect(JSON.stringify(summary!.context.messages.at(-1))).toContain(SUMMARY_PROMPT_OPENING);
+  expect(SUMMARY_INSTRUCTION).toContain("do not call any tools");
+});
+
 test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐字节相同", async () => {
   const store = new InMemoryDir();
-  const a = capturing([reply("<summary>S1</summary>"), textTurn("one"), textTurn("two")]);
+  const a = capturing([textTurn(BIG_TEXT), reply("<summary>S1</summary>"), textTurn("one"), textTurn("two")]);
   const agentA = await agentWithBuiltins(a.fn, { session: { store, id: "s1" } });
-  await agentA.prompt(BIG_TEXT);
-  // 另一个进程在这一刻恢复同一段（transcript 两条 + 一条 compaction entry）
+  await agentA.prompt("first");
+  await agentA.prompt("second"); // 轮首压缩：上一轮折成摘要
+  // 另一个进程在这一刻恢复同一段（transcript 四条 + 一条 compaction entry）
   const b = capturing([textTurn("two")]);
   const agentB = await agentWithBuiltins(b.fn, { session: { store, id: "s1" } });
   expect(agentB.state.compaction).toEqual(agentA.state.compaction);
   await agentA.prompt("next");
   await agentB.prompt("next");
-  expect(b.requests[0]!.messages).toEqual(a.requests[2]!.messages);
-  expect(b.requests[0]!.messages.length).toBe(3); // 摘要 · one · next
+  expect(b.requests[0]!.messages).toEqual(a.requests[3]!.messages);
+  expect(b.requests[0]!.messages.length).toBe(4); // 摘要 · second · one · next
+});
+
+test("/clear 之后再压缩：compaction entry 记盘上下标（越过 reset 前那几条），续会话不判坏档、折的还是同一段", async () => {
+  const store = new InMemoryDir();
+  const turns = [toolTurn("c1", "echo", {}), toolTurn("c2", "echo", {}), textTurn("done"), textTurn("x-ok"), textTurn("y-ok"), reply("<summary>S</summary>")];
+  const big: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000_000 } };
+  const a = await agentWithBuiltins(scriptedStreamFn(turns), { model: big, session: { store, id: "s1" } });
+  await a.prompt("hi"); // 盘上 #0 u · #1 a(tool) · #2 tr · #3 a(tool) · #4 tr · #5 a
+  a.reset(); // /clear：内存清空，会话不写
+  await a.prompt("x".repeat(400)); // 内存 #0 #1，盘上 #6 #7
+  await a.prompt("y"); // 内存 #2 #3，盘上 #8 #9
+  const r = await a.compact();
+  expect(r.kind === "done" && r.stages).toEqual(["summary"]);
+  expect(a.state.compaction.spans.map((s) => [s.from, s.to])).toEqual([[0, 2]]); // 内存下标
+  await a.stop();
+  // 盘上那条是盘上下标
+  const disk = await loadSession(store, "s1");
+  expect(disk.compaction.spans.map((s) => [s.from, s.to])).toEqual([[6, 8]]);
+  expect(disk.compaction.clearedBefore).toBe(0);
+  // 续会话：不判坏档，折掉的是 reset 之后那条长消息与它的回答
+  const b = await agentWithBuiltins(scriptedStreamFn([textTurn("ok")]), { model: big, session: { store, id: "s1" } });
+  const view = buildWorkingMessages(b.messages, b.state.compaction);
+  expect(JSON.stringify(view)).not.toContain("x".repeat(400));
+  expect(view[6]?.role === "user" && view[6].source).toBe("harness"); // #6–#7 折成一条摘要
+  await b.stop();
 });
 
 test("摘要器的模型调用带退避重试：摘要请求撞 429 一次，同一份 retryPolicy 再来一次，压缩照常完成（2026-09-07 拍板）", async () => {
@@ -450,14 +608,42 @@ test("撞窗应急：context_overflow → 同一条流水线以 overflow 跑一�
  * 不校准的话中文会话清完第一段就「够了」，collapse / summary 永远轮不到；英文会话恰好对得上所以看不出来。
  * 判据：同一段对话的 ASCII 版与中文版，usage 一样，压缩跑过的阶段必须一样。
  */
+test("撞窗应急、在飞那一批比应急尾巴大：清掉它的结果（按 id 读回），用户的请求原文还在下一次请求里——不再整段省略成一句「消息被省略了」", async () => {
+  const bigRead: ModelTool = { kind: "model", name: "read", label: "read", description: "read", maxInlineTokens: Infinity, parameters: { type: "object", properties: {} }, execute: async () => toolOk("line of a big file\n".repeat(700)) }; // ≈ 3 300 token
+  const model: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 8_000 } };
+  const requests: Context[] = [];
+  const providerWindow = 3_000; // provider 的真实上限比目录标的小：自动压缩没触发，请求撞窗
+  const fn: StreamFn = (m, c, o) => {
+    requests.push(structuredClone(c));
+    const size = JSON.stringify(c.messages).length / 4;
+    const turn: ScriptedTurn = size > providerWindow ? errorTurn("context_overflow", "too long", false) : requests.length === 1 ? toolTurn("r1", "read", {}) : textTurn(JSON.stringify(c.messages.at(-1)).includes(SUMMARY_PROMPT_OPENING) ? "<summary>S</summary>" : "ok");
+    return scriptedStreamFn([turn])(m, c, o);
+  };
+  const agent = new Agent({ model, streamFunction: fn, tools: [bigRead] });
+  await mountBuiltinTools(agent);
+  const r = await agent.prompt("Please refactor src/payment/retry.ts so that the backoff honours the Retry-After header, then run the tests.");
+  expect(r.outcome.kind).toBe("completed");
+  const last = JSON.stringify(requests.at(-1)!.messages);
+  expect(last).toContain("Retry-After header");
+  expect(last).toContain('tool call \\"r1\\"'); // 在飞那一批的结果换成了带 id 的占位
+  expect(last).not.toContain("line of a big file");
+  // 没折、没省略：只清了那一批的结果（撞窗那次失败的 attempt 也在 transcript 里，所以切点在它之后）
+  expect(agent.state.compaction.spans).toEqual([]);
+  expect(agent.state.compaction.clearedBefore).toBeGreaterThan(2);
+});
+
 test("校准比：ASCII 与中文同一段对话、同一份 usage，压缩跑过的阶段一致（中文不会在第一段就停）", async () => {
-  const window: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000 } };
+  // usage 与窗口都带上工具 schema 的固定开销 oh：校准比只作用于 system 与消息，下面的数说的都是那一部分
+  const oh = await menuOverhead();
+  const window: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000 + oh } };
   const run = async (text: string): Promise<readonly string[]> => {
-    // 轮 1 usage 300（不触发）；轮 2 usage 950（> target 900）→ 轮 3 轮首触发；之后每次模型调用都回同一段摘要
-    const { fn } = capturing([toolTurnUsage("t1", { inputTokens: 300, outputTokens: 0 }), toolTurnUsage("t2", { inputTokens: 950, outputTokens: 0 }), ...Array.from({ length: 4 }, () => reply("<summary>S</summary>"))]);
+    // 第一个 run：长文本、轮 1 usage 300（不触发）。第二个 run：轮 1 usage 950（> target 900）→ 轮 2 轮首触发；
+    // 之后每次模型调用都回同一段摘要。长文本在上一个 run 里：这次的请求不折，折的是它
+    const { fn } = capturing([toolTurnUsage("t1", { inputTokens: 300 + oh, outputTokens: 0 }), reply("ok"), toolTurnUsage("t2", { inputTokens: 950 + oh, outputTokens: 0 }), ...Array.from({ length: 4 }, () => reply("<summary>S</summary>"))]);
     const agent = await agentWithBuiltins(fn, { model: window, compaction: { reserveTokens: 100, keepRecentTokens: 40, keepRecentToolResults: 1 } });
-    const { events } = collect(agent);
     await agent.prompt(text);
+    const { events } = collect(agent);
+    await agent.prompt("continue");
     const ends = events.filter((e): e is Extract<AgentEvent, { type: "compaction_end" }> => e.type === "compaction_end");
     expect(ends.length).toBe(1);
     return ends[0]!.stages;
@@ -471,13 +657,47 @@ test("校准比：ASCII 与中文同一段对话、同一份 usage，压缩跑�
   expect(cjk).toEqual(ascii);
 });
 
+test("校准比不把固定开销当乘数：usage 里的工具 schema / 每轮注入单独算，会话早期读几个大文件不会在真实占用约 1/3 窗口时就触发压缩", async () => {
+  const FILE = "const x = 1; // some code line here\n".repeat(1400); // ≈ 12 600 token（英文代码，chars/4 是准的）
+  const read: ModelTool = { kind: "model", name: "read", label: "read", description: "read", concurrent: true, maxInlineTokens: Infinity, parameters: { type: "object", properties: {} }, execute: async () => toolOk(FILE) };
+  // 几件 schema 很大的工具：固定开销是 system 的好几倍（coding 产品实测工具定义约 3.8k token、system 约 1.35k）
+  const heavy: ModelTool[] = ["a", "b", "c", "d"].map((n) => ({ kind: "model", name: `tool_${n}`, label: n, description: "Does a thing. ".repeat(300), parameters: { type: "object", properties: {} }, execute: async () => toolOk("") }));
+  const uses = ["r1", "r2", "r3"].map((id) => ({ type: "tool_use" as const, id, name: "read", input: {} }));
+  let first = true;
+  const requests: Context[] = [];
+  const fn: StreamFn = (m, c, o) => {
+    requests.push(structuredClone(c));
+    if (!first) return scriptedStreamFn([textTurn("done reading")])(m, c, o);
+    first = false;
+    // provider 的真值：system 与消息按字符估是准的，再加上工具定义（同样按 JSON 字符估）
+    const inputTokens = Math.ceil((c.systemPrompt ?? "").length / 4) + 6 + Math.ceil(JSON.stringify(c.tools).length / 4);
+    return scriptedStreamFn([
+      [
+        { type: "start" },
+        ...uses.flatMap((u) => [{ type: "toolcall_start" as const, toolCallId: u.id, name: "read" }, { type: "toolcall_delta" as const, argsText: "{}" }, { type: "toolcall_end" as const }]),
+        { type: "done", message: { role: "assistant", content: uses, stopReason: "tool_use", usage: { inputTokens, outputTokens: 30 } } },
+      ],
+    ])(m, c, o);
+  };
+  const agent = new Agent({ model: { ...FAKE_MODEL, capabilities: { contextWindow: 128_000 } }, streamFunction: fn, tools: [read, ...heavy] });
+  await mountBuiltinTools(agent);
+  const { events } = collect(agent);
+  await agent.prompt("read these three files");
+  // 真实占用 ≈ 首轮输入 + 三个文件 ≈ 4.5 万，远低于触发线 11.2 万：不该压
+  expect(events.filter((e) => e.type === "compaction_start")).toEqual([]);
+  expect(JSON.stringify(requests.at(-1)!.messages)).toContain("some code line here");
+  // Agent 记下的校准比（给下一个 run 首轮与手动压缩用）同样扣掉固定开销：英文内容约 1，不是 4 以上
+  expect((agent as unknown as { lastCalibration: number }).lastCalibration).toBeLessThan(1.5);
+});
+
 test("手动压缩沿用上一次 usage 的校准比：中文会话压完报出的 contextTokens 不是裸字符估", async () => {
   const withUsage: ScriptedTurn = [
     { type: "start" },
     { type: "done", message: { role: "assistant", content: [{ type: "text", text: "好" }], stopReason: "end_turn", usage: { inputTokens: 900, outputTokens: 50 } } },
   ];
-  const agent = await agentWithBuiltins(scriptedStreamFn([withUsage, reply("<summary>S</summary>")]), { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
+  const agent = await agentWithBuiltins(scriptedStreamFn([withUsage, reply("好的"), reply("<summary>S</summary>")]), { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
   await agent.prompt("汉字".repeat(600)); // 字符估 300，provider 说 950 → 校准比 ≈ 2
+  await agent.prompt("下一个"); // 这次的请求不折：折的是上面那一轮
   const r = await agent.compact();
   expect(r.kind === "done" && r.stages).toEqual(["summary"]);
   const rawAfter = estimateText(await agent.assemblePrompt()) + estimateTokens(buildWorkingMessages(agent.messages, agent.state.compaction));
@@ -620,10 +840,12 @@ test("transcript_read：按下标读原文（含被压掉的）、query 过滤�
   expect(r.content).toBe("#4 [user] second question");
 });
 
-test("echo:compaction 装上之后 transcript_read 在工具面上，读的是活的 transcript", async () => {
-  const agent = await agentWithBuiltins(scriptedStreamFn([textTurn("hi")]), { model: FAKE_MODEL });
+test("echo:compaction 装上之后 transcript_read 常驻菜单（摘要框定与 compaction 段让模型直接调它，不用先 tool_search），读的是活的 transcript", async () => {
+  const { fn, requests } = capturing([textTurn("hi")]);
+  const agent = await agentWithBuiltins(fn, { model: FAKE_MODEL });
   expect(agent.tools.has("transcript_read")).toBe(true);
   await agent.prompt("hello there");
+  expect(requests[0]!.tools.map((t) => t.name)).toContain("transcript_read");
   const tool = agent.tools.get("transcript_read")!;
   const r = await tool.execute({ from: 0 }, { toolCallId: "x", workspace: "/", sessionId: null, iteration: 1 });
   expect(r.content).toContain("#0 [user] hello there");
@@ -634,13 +856,14 @@ test("echo:compaction 装上之后 transcript_read 在工具面上，读的是�
 
 test("Agent.compact：走同一条流水线（manual，无视阈值，指令交给摘要）；忙时 rejected；没阶段 rejected", async () => {
   const store = new InMemoryDir();
-  const { fn, requests } = capturing([textTurn("hi"), reply("<summary>MANUAL</summary>")]);
+  const { fn, requests } = capturing([textTurn("hi"), textTurn("hi again"), reply("<summary>MANUAL</summary>")]);
   const agent = await agentWithBuiltins(fn, { session: { store, id: "s1" }, model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
   await agent.prompt("hello");
+  await agent.prompt("again");
   const { events } = collect(agent);
   const r = await agent.compact("only the TODOs");
   expect(r.kind === "done" && r.stages).toEqual(["summary"]);
-  expect(JSON.stringify(requests[1]!.messages)).toContain("only the TODOs");
+  expect(JSON.stringify(requests[2]!.messages)).toContain("only the TODOs");
   expect(agent.state.compaction.spans[0]!.summary).toContain("MANUAL");
   expect(agent.state.status).toBe("idle");
   // 不是一个 run：没有 agent_start / agent_end；但 status 的两条边照样发（开门 generating、收尾 idle）
