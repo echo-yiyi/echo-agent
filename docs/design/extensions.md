@@ -114,7 +114,9 @@ mount / unmount / replace 在同一条 Host 队列里按调用顺序串行，一
 
 ACTIVE 后新建 effect 的失败与 mount 期不同：不会回滚 Fiber，也不自动进入诊断，登记者应 await 并处理。卸载后的旧 ctx.get/provide/effect 会拒绝，但以前拿到的原始 service 引用不会被统一撤销；异步回调停止使用它仍需遵守 signal 和 disposer 协议。
 
-没有通用 start/dispose 超时或强制中止。忽略 abort 的 start、永不结束的 disposer 都可能让卸载及后续 Host 事务一直等待。Host 保证尝试清理的顺序，不保证不合作的扩展能被强制回收。
+Host 没有通用 start/dispose 超时或强制中止。忽略 abort 的 start、永不结束的 disposer 都可能让卸载及后续 Host 事务一直等待。Host 保证尝试清理的顺序，不保证不合作的扩展能被强制回收。
+
+装配层在两处给等待设了上限，事务本身仍在 Host 队列上跑：热部署里每个扩展的装载等 [`RELOAD_APPLY_LIMIT_MS`](../../packages/core/src/create-echo.ts#symbol=RELOAD_APPLY_LIMIT_MS)，到点按 `failed`（新文件）或 `lost`（换代）报、诊断 `extension_apply_timeout`、交还 admission permit，迟到的结果补记进账；`echo.stop()` 卸 extension 等 [`STOP_UNMOUNT_LIMIT_MS`](../../packages/core/src/create-echo.ts#symbol=STOP_UNMOUNT_LIMIT_MS)，到点不再等、照常停 Agent 并交还 lease，`stop()` 以这条错误 reject。`echo.stop()` 卸 extension 之前先让 Agent 停止接活、中止在跑的 run，卸载期间不会冒出跑在缺了产品工具与段的 agent 上的新 run。启动时盘上扩展的 apply 挂住仍会让 `createEcho()` 一直等（显式与角色那两代排在同一条 Host 队列上）。判据：[热部署 apply 挂住](../../packages/core/test/extension-reload.test.ts#test=热部署时新版-apply-挂住到时限报-lost放开-admissionstop-卸载限时照常停-agent)、[卸 extension 期间不接新工作](../../packages/core/test/create-echo.test.ts#test=stop-卸-extension-期间不接新工作先停接活中止在跑的-run再卸)。
 
 ## 6. 热重载：时机与范围
 

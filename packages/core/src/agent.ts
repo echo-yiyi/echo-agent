@@ -535,6 +535,8 @@ export class Agent {
   private inboxFailure: Error | null = null;
   /** 正在让位（`watchHandoff` 收到请求之后）：被中止的 inbox run 不 ack，整批放回待接手的一方重投。 */
   private handingOff = false;
+  /** 装配层的收摊已经开始（`quiesce()`）：不接新工作，相位与 lease 照旧，直到 `stop()`。 */
+  private quiescing = false;
   /** 一次 `consumeInbox()` 从 reserve 到 ack 裁决的整段；让位排空要等它（run 结束之后还有一次 ack 写）。 */
   private inboxConsumeInFlight: Promise<void> | undefined;
   /** standalone 没有 catalog：model 换一次 revision +1，binding 固定到它。 */
@@ -1363,7 +1365,8 @@ export class Agent {
     if (this.leaseLostError !== null) return { kind: "rejected", reason: "lease-lost" };
     // **stopping 先判**：`stop()` 内部一定会调 `dispose()`，先判 disposeInFlight 就会把整个收摊过程报成
     // runtime-disposed（实测）。完全 stopped / 直接 dispose 才是 runtime-disposed。
-    if (this.stopInFlight !== undefined || this.phase === "stopping") return { kind: "rejected", reason: "stopping" };
+    // `quiescing`：装配层的收摊已经开始（`quiesce()`），与 stopping 同口径——与 `refuseWorkReason` 一致
+    if (this.quiescing || this.stopInFlight !== undefined || this.phase === "stopping") return { kind: "rejected", reason: "stopping" };
     if (this.disposeInFlight !== undefined || this.phase === "stopped") return { kind: "rejected", reason: "runtime-disposed" };
     // 账本没恢复就发号会盖掉盘上已有的 record；restore 后半段失败时 `ready` 仍为 false，这里照样挡住
     if (!this.inbox.ready) return { kind: "rejected", reason: "runtime-not-ready" };
@@ -2816,7 +2819,7 @@ export class Agent {
     // 这正好破了这个 API 自己承诺的「与 `prompt()` 同真同假」（review 六轮 P1 实测）。
     // 顺序与 `ingressGate()` 一致：**stopping 先判**，因为 `stop()` 内部一定会调 `dispose()`，
     // 先判 disposeInFlight 会把整个收摊过程报成 runtime-disposed。
-    if (this.stopInFlight !== undefined || this.phase === "stopping") {
+    if (this.quiescing || this.stopInFlight !== undefined || this.phase === "stopping") {
       return "Agent 正在停止（stopping），不接受新工作";
     }
     if (this.disposeInFlight !== undefined || this.phase === "stopped") {
@@ -3164,6 +3167,23 @@ export class Agent {
    * 到点没跑完就照常收摊——`dispose()` 里的 `settleDream()` 中止它、游标不动。
    * 丢锁不走这里（一个字都不许再写）；handoff 让位也不走（有人在等这把锁，见 `watchHandoff`）。
    */
+  /**
+   * 收摊的第一步（Host-internal：`createEcho` 的 `stop()` 在卸 extension 之前调）：从此不接新工作——prompt、
+   * inbox、闹钟一律拒；中止在跑的前台 run（理由 `dispose`）并等它与它那批 inbox 的 ack 收尾。
+   * 不改相位、不释放 lease、不关存储，那些仍是 `stop()` 的事；它只保证卸 extension 的这段时间里不会冒出
+   * 一个跑在「产品的工具与身份段已经卸掉」的 agent 上的新 run。记忆补提取不受影响（不经 admission）。
+   */
+  async quiesce(): Promise<void> {
+    this.quiescing = true;
+    this.autoConsumeInbox = false;
+    this.autoDream = false;
+    this.stopInboxPoll();
+    this.syncAvailability();
+    this.activeRun?.abortController.abort(new AbortReason(ABORT_REASON.dispose));
+    await this.activeRun?.promise;
+    await this.inboxConsumeInFlight;
+  }
+
   async drainExtract(): Promise<void> {
     if (!this.memoryWorkAllowed) return;
     this.enqueueExtract({ force: true });

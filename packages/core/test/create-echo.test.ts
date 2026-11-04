@@ -420,6 +420,31 @@ test("盘上扩展占了产品要用的工具名：只废它自己那代，产�
   }
 });
 
+test("stop() 卸 extension 期间不接新工作：先停接活、中止在跑的 run，再卸", async () => {
+  const root = await tmp();
+  const dir = join(root, "extensions");
+  await mkdir(dir, { recursive: true });
+  // disposer 要 300ms（关连接、杀子进程之类）：卸载这段时间就是窗口
+  await writeFile(
+    join(dir, "slow.ts"),
+    `import { defineExtension } from ${JSON.stringify(ABI_PATH)};\n` +
+      `export default defineExtension({ name: "slow", hostAbiVersion: 1, apply(ctx) {\n` +
+      `  void ctx.effect({ boundary: "agent", start: () => ({ value: 0, dispose: () => new Promise((r) => setTimeout(r, 300)) }) });\n` +
+      `} });\n`,
+  );
+  const echo = await createEcho({ provider: scripted([textTurn("answer")]), allowNetwork: false, stateDir: join(root, "state"), extensionDirs: [dir] });
+  await echo.start();
+  const stopping = echo.stop();
+  await new Promise((r) => setTimeout(r, 100));
+  expect(echo.agent.acceptsWork).toBe(false);
+  const during = await echo.agent.prompt("hello").then(
+    (x) => x.outcome.kind,
+    () => "rejected",
+  );
+  await stopping;
+  expect(during).toBe("rejected");
+});
+
 test("盘上扩展分代之后，`stop()` 仍要把**每一代**都卸掉：它的 disposer 必须真的跑（D6）", async () => {
   // D6 把盘上扩展拆成每个一代——收摊清单要是漏了这些代，Fiber 的 disposer 一次都不跑，
   // watcher / 连接 / 子进程就是真泄漏。全局计数器是 tmp 生成的 fixture 与测试之间唯一的通道。

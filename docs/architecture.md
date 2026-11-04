@@ -28,7 +28,7 @@
 1. **先扫盘、后造 Agent**：发现 `<cwd>/extensions/` 下的文件，此时一行用户代码都不执行。
 2. **`createAgent()`**：解析模型并准备存储与观测资源（凭据失败按运行态处理）、定 session id 与状态根、`store` 与 `lock` 必须成对、开观测库、经所有权账本（`packages/core/src/assembly/ledger.ts`，adopt / borrow 二分）造各内建能力的存储视图与容器（adopt slot 按 `echo:memory` / `echo:schedule` / `echo:inbox` / `echo:session` 这些名字记账，skill 的视图跟着上一层走、不单独占 slot；这是按 dispose 所有权切的，与 §4 按「机制 / 缺省内容」切的五件不是同一个集合）、`new Agent()`、把写入闸与观测 runtime 经 WeakMap 侧挂（`packages/core/src/state/host-wiring.ts`、`packages/core/src/observability/host-wiring.ts`——它们不进 `AgentOptions`）。
 3. **mount**，按代：`builtin`（`echo:*` 表，`packages/core/src/extension/builtin.ts`）→ `boot:inline`（`agent.tools` 转成的 `echo:inline-tools`，加容器开了会话面时的 `echo:sessions`）→ `boot`（显式传入的 opts.extensions，含壳；失败则整体构造失败）→ 盘上发现的每个扩展**各一代**（坏一个只回滚它自己、记一条 `Echo.diagnostics`，agent 照起；与产品撞名也只废它自己）→ role（最后应用角色 identity 与工具限制）。
-4. 返回 `Echo` 句柄：`agent`、`send()`、`observations`、`extensions`、`diagnostics`、`sessions`、`stop()`。`stop()` single-flight，按 mount 的逆序卸所有代再停 Agent。
+4. 返回 `Echo` 句柄：`agent`、`send()`、`observations`、`extensions`、`diagnostics`、`sessions`、`stop()`。`stop()` single-flight：先让 Agent 停止接活并中止在跑的 run，补提取一次，再按 mount 的逆序卸所有代（限时 `STOP_UNMOUNT_LIMIT_MS`，到点不再等），最后停 Agent、交还 lease。
 
 容器随后显式 `await echo.start()`：取单写者 lease、恢复 session / skill / tasks / schedule / inbox、打开 intake 与自主活动。装配不启动，启动不装配。
 

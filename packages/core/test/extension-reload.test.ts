@@ -16,6 +16,8 @@ import { scriptedDialect, textTurn, toolTurn, type ScriptedTurn } from "../src/t
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { ReloadReport } from "../src/extension/reload.ts";
+import { FakeClock } from "../src/schedule/clock.ts";
+import { RELOAD_APPLY_LIMIT_MS, STOP_UNMOUNT_LIMIT_MS } from "../src/create-echo.ts";
 
 process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
@@ -370,4 +372,43 @@ test("没有扩展目录的装配（extensionDirs: []）reload 照样能调：�
   await echo.start();
   const r = await echo.reloadExtensions();
   expect(r).toEqual({ kind: "done", report: { changes: [] } });
+});
+
+test("热部署时新版 apply 挂住：到时限报 lost、放开 admission；stop() 卸载限时，照常停 Agent", async () => {
+  const dir = join(await tmp(), "extensions");
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, "x.ts");
+  const source = (apply: string): string =>
+    `import { defineExtension } from ${JSON.stringify(ABI_PATH)};\n` +
+    `export default defineExtension({ name: "x", hostAbiVersion: 1, reload: "run", apply: ${apply} });\n`;
+  await writeFile(file, source("() => {}"));
+  const clock = new FakeClock();
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    extensionDirs: [dir],
+    withoutMemory: true,
+    clock,
+  });
+  await echo.start();
+  await writeFile(file, source("() => new Promise(() => {})"));
+  const reload = echo.reloadExtensions();
+  await new Promise((r) => setTimeout(r, 100));
+  clock.advance(RELOAD_APPLY_LIMIT_MS);
+  const r = await reload;
+  expect(r.kind).toBe("done");
+  if (r.kind === "done") expect(kinds(r.report)).toEqual({ [file]: "lost" });
+  expect(echo.diagnostics.map((d) => d.code)).toContain("extension_apply_timeout");
+  // admission 放开了：热部署不再握着 permit
+  expect((await echo.send("hi")).outcome.kind).toBe("completed");
+  // 收摊：卸载排在挂住的那次装载后面，到时限不再等，照常停 Agent、交还 lease
+  const stopping = echo.stop().then(
+    () => "resolved",
+    (e: unknown) => String(e),
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  clock.advance(STOP_UNMOUNT_LIMIT_MS);
+  expect(await stopping).toContain("卸 extension 超过");
+  expect(agentOf(echo).acceptsWork).toBe(false);
 });
