@@ -14,8 +14,9 @@
 // await loadTasks(agent.tasks, store);   // 跨会话：上次的清单回来了
 // ```
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { writeFileAtomic } from "../storage/atomic-write.ts";
 import type { TaskStore } from "./types.ts";
 
 export function fileTaskStore(path: string): TaskStore {
@@ -32,11 +33,9 @@ export function fileTaskStore(path: string): TaskStore {
 
     async write(text: string): Promise<void> {
       await mkdir(dirname(path), { recursive: true });
-      // 先写临时文件再 rename：**这就是本 Store 对「要么整份生效」的兑现**。
-      // 中途崩掉留下的是 .tmp，不是半份清单。
-      const tmp = `${path}.tmp`;
-      await writeFile(tmp, text, "utf8");
-      await rename(tmp, path);
+      // 唯一临时名 → fsync → rename：**这就是本 Store 对「要么整份生效」的兑现**。
+      // 中途崩掉留下的是 .tmp，不是半份清单；断电也不会留下零长的清单。
+      await writeFileAtomic(path, text);
     },
   };
 }

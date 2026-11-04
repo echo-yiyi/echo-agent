@@ -205,7 +205,7 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 以下限制影响容量规划、公开 API 与诊断覆盖：
 
-1. **不 fsync，没有崩溃恢复**：rename 保证不留半截文件，但掉电可能丢最后几批；进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端封口之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
+1. **没有崩溃恢复**：缺省存储（`FileDir`）每次写都是 fsync 临时文件 → rename → fsync 父目录（[原子写](../decisions/implemented/2026-11-03-atomic-write-fsync.md)），掉电不会留下零长或半截的批文件；`observation.store` 注入的存储持久到什么程度由它自己定。进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端封口之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
 2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性。两个产品的 30 天规则把它压在「最近 30 天的 run 数」上，不是彻底解决——单段会话在 30 天内堆出足够多的 run 仍然会慢。
 3. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
 4. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
