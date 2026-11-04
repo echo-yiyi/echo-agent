@@ -139,21 +139,26 @@ export const SUMMARY_SYSTEM =
   "Preserve what the work depends on: the user's words, decisions, identifiers, paths, commands, numbers, and error output, quoted exactly. " +
   "Do not add opinions, advice, or anything the conversation does not contain.";
 
-/** summary 阶段末尾那条 harness 指令：先 `<scratchpad>` 草稿再 `<summary>` 正文（九个小节）；manual 的附加要求接在它后面。 */
+/**
+ * summary 阶段末尾那条 harness 指令：先 `<scratchpad>` 草稿再 `<summary>` 正文（九个小节）；manual 的附加要求接在它后面。
+ * 节序：接着干活最离不开的（目标、没做完的、正在做的、下一步）在前，细节在后——输出越写越长，越往后越可能被压缩掉注意力。
+ */
 export const SUMMARY_INSTRUCTION =
   "Write the compaction summary for the conversation above.\n\n" +
   "Draft first inside <scratchpad></scratchpad>: walk through the conversation in order and note, for each stretch, " +
   "what the user asked for, what happened, which files and tools were involved, and what was learned or decided. The scratchpad is discarded.\n\n" +
   "Then write the summary inside <summary></summary>, in the language the user has mostly been writing in, with these headings in this order:\n" +
   "1. Goal: what the user wants, in full.\n" +
-  "2. Ground rules: constraints, conventions, and technical context the work must respect.\n" +
-  "3. Touched files: files read or changed, why, and the snippets that matter, quoted exactly.\n" +
-  "4. Failures and fixes: every error that came up, how it was resolved, and any correction the user gave.\n" +
-  "5. Findings: what was established, what was ruled out, what is still being investigated.\n" +
-  "6. The user's messages: every message from the user, quoted exactly and in order (tool output excluded).\n" +
-  "7. Open work: requested but not finished.\n" +
-  "8. In progress: precisely what was happening at the moment of compaction, with file names and snippets.\n" +
-  "9. Resume with: the very next action, only if the latest user request calls for it; quote that request.\n\n" +
+  "2. Open work: requested but not finished.\n" +
+  "3. In progress: precisely what was happening at the moment of compaction, with file names and snippets.\n" +
+  "4. Resume with: the very next action, only if the latest user request calls for it; quote that request.\n" +
+  "5. Ground rules: constraints, conventions, and technical context the work must respect.\n" +
+  "6. Failures and fixes: every error that came up, how it was resolved, and any correction the user gave.\n" +
+  "7. Findings: what was established, what was ruled out, what is still being investigated.\n" +
+  "8. Touched files: files read or changed, why, and the snippets that matter, quoted exactly.\n" +
+  "9. The user's messages: every message from the user, quoted exactly and in order (tool output excluded). " +
+  "For a very long one (a pasted log, file, or document), quote only its first and last few lines and mark the gap as " +
+  "[… cut; the full message can be read back with transcript_read].\n\n" +
   "If the conversation already contains a compaction summary or condensed stretches, fold them in: keep what still holds, " +
   "drop what has been superseded, and never paste them back verbatim.";
 
@@ -198,13 +203,19 @@ export const COLLAPSE_INSTRUCTION =
   "Condense the stretch above. Use <scratchpad></scratchpad> first if it helps; it is discarded. " +
   "Then write inside <summary></summary>, in the language the user has mostly been writing in, a tight account in order: " +
   "what was asked, what was done and with which files or tools, what came out of it, what was decided. " +
-  "Quote the user's messages exactly. Drop dead ends unless they rule something out.";
+  "Quote the user's messages exactly; for a very long one, quote only its first and last few lines and mark the gap as " +
+  "[… cut; the full message can be read back with transcript_read]. Drop dead ends unless they rule something out.";
 
-/** 摘要调用的回复 → 正文：剥掉 `<scratchpad>`，取 `<summary>` 里面的；都没有就整段。 */
+/**
+ * 摘要调用的回复 → 正文：剥掉 `<scratchpad>`，取 `<summary>` 里面的；两种标签都没有就整段。
+ * `<summary>` 打开了没闭合、或草稿没闭合又没有正文 = 输出被截断，返回 ""（阶段据此判失败），不拿半截当摘要。
+ */
 export function extractSummary(text: string): string {
   const withoutScratch = text.replace(/<scratchpad>[\s\S]*?<\/scratchpad>/gi, "");
   const m = /<summary>([\s\S]*?)<\/summary>/i.exec(withoutScratch);
-  return (m !== null ? m[1]! : withoutScratch).trim();
+  if (m !== null) return m[1]!.trim();
+  if (/<summary>|<scratchpad>/i.test(withoutScratch)) return "";
+  return withoutScratch.trim();
 }
 
 /**

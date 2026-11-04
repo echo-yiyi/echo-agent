@@ -35,6 +35,8 @@ import {
   extractSummary,
   foldRanges,
   frameFull,
+  COLLAPSE_INSTRUCTION,
+  SUMMARY_INSTRUCTION,
   SUMMARY_SYSTEM,
   snipStage,
   summaryStage,
@@ -336,10 +338,35 @@ test("snip：只在 overflow；产物是 summary=null 的一段；整个 transcr
   expect(snipStage().run(input(m, { reason: "overflow" }), SIG)).toEqual({ spans: [{ from: 0, to: 1, summary: null }], clearedBefore: 0 });
 });
 
-test("extractSummary：剥 scratchpad、取 summary 里面的；都没有就整段", () => {
+test("extractSummary：剥 scratchpad、取 summary 里面的；都没有就整段；<summary> 或草稿没闭合（输出被截断）= 没有摘要", () => {
   expect(extractSummary("<scratchpad>a</scratchpad>\n<summary>\nS\n</summary>")).toBe("S");
   expect(extractSummary("plain")).toBe("plain");
   expect(extractSummary("<scratchpad>only</scratchpad>")).toBe("");
+  expect(extractSummary("<scratchpad>a</scratchpad>\n<summary>\n1. Goal: refactor the ret")).toBe("");
+  expect(extractSummary("<scratchpad>walking through the conversation, stretch one")).toBe("");
+});
+
+test("摘要提示：未完成的工作 / 进行中 / 接着做什么排在前面；逐字引用用户消息时超长的只留头尾并指向 transcript_read（collapse 同样）", () => {
+  const order = ["Goal", "Open work", "In progress", "Resume with", "Ground rules", "The user's messages"].map((h) => SUMMARY_INSTRUCTION.indexOf(h));
+  expect(order.every((i) => i >= 0)).toBe(true);
+  expect([...order].sort((a, b) => a - b)).toEqual(order);
+  expect(SUMMARY_INSTRUCTION).toContain("first and last few lines");
+  expect(COLLAPSE_INSTRUCTION).toContain("first and last few lines");
+  expect(SUMMARY_INSTRUCTION).toContain("transcript_read");
+});
+
+test("摘要调用撞上输出上限（stopReason max_tokens）= 这一阶段失败：截断的摘要不采用、记 compactionFailed，阶梯往下走", async () => {
+  const truncated = (text: string): ScriptedTurn => textTurn(text, "max_tokens");
+  for (const answer of ["<summary>1. Goal: refactor", "<summary>looks closed</summary>"]) {
+    const agent = await agentWithBuiltins(scriptedStreamFn([textTurn("hi"), textTurn("hi again"), truncated(answer)]), { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
+    const { lifecycle } = collect(agent);
+    await agent.prompt("hello");
+    await agent.prompt("again");
+    const r = await agent.compact();
+    expect(r.kind === "done" && r.stages).toEqual([]);
+    expect(agent.state.compaction.spans).toEqual([]);
+    expect(lifecycle.some((e) => e.type === "compactionFailed" && e.stage === "summary")).toBe(true);
+  }
 });
 
 /* ═══════════════ 循环层 ═══════════════ */

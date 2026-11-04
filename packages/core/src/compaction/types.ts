@@ -59,7 +59,8 @@ export type CompactionBudget = {
 
 /**
  * 阶段能用的模型调用：**一次、无工具、不进 transcript、不发 message_\* 事件**，
- * 用本 run 冻结的 model 与 streamFn。失败以 rejection 返回（带 provider 的 AgentError code），阶段自己决定兜底。
+ * 用本 run 冻结的 model 与 streamFn。失败以 rejection 返回（带 provider 的 AgentError code），阶段自己决定兜底；
+ * 回复撞上输出上限（`max_tokens`）也是失败——半截的正文不交给阶段。
  */
 export type CompactionModelCall = (
   input: { systemPrompt: string | null; messages: readonly AgentMessage[] },

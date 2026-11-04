@@ -125,7 +125,9 @@ system                       不变，每 run 装配一次，不含摘要
 
 做法参照：pi 的切点在尾巴放不下工具结果时退到前面那条 tool call、不退回第一条消息（`findCutPoint`）；codex 压缩后留着用户消息原文、只把其余换成摘要。判据见 [在飞那一批](../../packages/core/test/compaction.test.ts#test=choosetailstart预算够就从最早的轮起点留起预算只够半轮就退到合法切点连一条都放不下也留着在飞那一批)、[请求不折](../../packages/core/test/compaction.test.ts#test=summary在飞的一轮比尾巴预算大要从轮中途切-用户最新的请求原文留在视图里摘要放它前面它后面那段只留一句指回摘要的说明)、[应急清那一批](../../packages/core/test/compaction.test.ts#test=撞窗应急在飞那一批比应急尾巴大清掉它的结果按-id-读回用户的请求原文还在下一次请求里不再整段省略成一句消息被省略了)。
 
-**摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，由本模块维护）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节：goal、ground rules、touched files、failures and fixes、findings、the user's messages（逐字）、open work、in progress、resume with；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。
+**摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，由本模块维护）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节，接着干活最离不开的在前：goal、open work、in progress、resume with、ground rules、failures and fixes、findings、touched files、the user's messages（逐字；超长的一条只留头尾几行，缺口注明可用 `transcript_read` 读回原文）；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`），引用用户消息的要求相同。节序参照 pi 的 checkpoint（Goal → Progress → Next Steps 在前）与 codex 的 handoff 摘要。
+
+**截断即失败**：摘要调用撞上输出上限（`stopReason: "max_tokens"`）时 [`modelCallFor()`](../../packages/core/src/compaction/pipeline.ts#symbol=modelCallFor) 抛（不重试），`<summary>` 或草稿打开了没闭合时 `extractSummary()` 返回空、阶段抛——都按这一阶段失败处理（记 `compactionFailed`，阶梯往下走 / 走应急），不拿半截的摘要顶替原文。判据见 [截断](../../packages/core/test/compaction.test.ts#test=摘要调用撞上输出上限stopreason-maxtokens-这一阶段失败截断的摘要不采用记-compactionfailed阶梯往下走)。
 
 **框定**：`frameFull()` 给整段摘要加来历（这段对话被压缩过）、范围（`#0–#k`，拆成两段时两段都列、并说明用户最新的请求原文紧跟其后）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
 

@@ -85,6 +85,8 @@ export function modelCallFor(deps: LoopDeps): CompactionModelCall {
       }
       const final = await stream.result();
       if (final.stopReason === "aborted") throw new Error("model call aborted");
+      // 撞上输出上限 = 正文是半截：当这一阶段失败（阶梯往下走 / 走应急），不拿截断的摘要顶替原文。不重试——同样的输入多半同样长
+      if (final.stopReason === "max_tokens") throw Object.assign(new Error("model call hit its output limit; the reply is incomplete"), { code: "max_tokens" });
       if (final.stopReason !== "error") {
         return final.content
           .filter((b): b is { type: "text"; text: string } => b.type === "text")
