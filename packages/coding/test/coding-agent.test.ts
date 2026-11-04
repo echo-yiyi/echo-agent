@@ -773,7 +773,8 @@ test("web_fetch：HTML 剥成文本（标题、标题级、链接、列表）；
   });
   let served = 0;
   try {
-    const [fetchTool] = makeWebTools() as [ModelTool<{ url: string; max_chars?: number }>];
+    // 假服务在 127.0.0.1：把它解析成公网地址才发得出去（缺省拒绝内网地址，判据在 web.test.ts）
+    const [fetchTool] = makeWebTools({ resolveHost: async () => ["203.0.113.7"] }) as [ModelTool<{ url: string; max_chars?: number }>];
     const base = `http://127.0.0.1:${server.port}`;
     const big = await fetchTool.execute({ url: `${base}/big`, max_chars: 10 }, ctx());
     expect([big.isError, big.content]).toEqual([false, expect.stringContaining("over 4000000 bytes, cut")]);
