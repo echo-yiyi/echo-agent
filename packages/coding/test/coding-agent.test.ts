@@ -600,9 +600,9 @@ test("装配面:四类工具都在(fs/bash/搜索/任务清单);skill 目录空�
 });
 
 test("两件 worktree 工具交不给子 agent（2026-09-14：切工作目录改的是父 agent 的状态）；bash 与取过的延迟工具照常交", async () => {
-  // 看子 agent 的模型实际收到的菜单：fork 模式整套继承父此刻可委派的工具。
-  // 先 tool_search 把 worktree_exit / web_fetch 取上菜单——这样 worktree_exit 不在子菜单上只能是因为不可委派，
-  // 而 web_fetch 在，证明「取过的延迟工具」这条路本身是通的。
+  // 看子 agent 的模型实际收到的菜单：fork 模式与父逐项相同（2026-11-03，前缀缓存接得上），
+  // 交不出去的两件 worktree 工具摆的是同名同 schema 的替身、点名就被拒（替身的判据在 core 的 subagent.test.ts）。
+  // 先 tool_search 把 worktree_exit / web_fetch 取上菜单，证明「取过的延迟工具」这条路本身是通的。
   const { echo, seen } = await echoWith({
     permission: false,
     turns: [
@@ -619,8 +619,8 @@ test("两件 worktree 工具交不给子 agent（2026-09-14：切工作目录改
   expect(parentMenus[1]).toEqual(expect.arrayContaining(["worktree_enter", "worktree_exit", "web_fetch", "subagent"]));
   expect(childMenus.length).toBe(1);
   const child = childMenus[0]!;
-  expect(child).toEqual(expect.arrayContaining(["bash", "read_file", "web_fetch"]));
-  for (const n of ["worktree_enter", "worktree_exit"]) expect(child).not.toContain(n);
+  expect(child).toEqual(expect.arrayContaining(["bash", "read_file", "web_fetch", "worktree_enter", "worktree_exit"]));
+  expect(child).toEqual([...parentMenus[1]!, "report"]);
   await echo.stop();
 });
 

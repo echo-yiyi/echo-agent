@@ -3338,10 +3338,23 @@ export class Agent {
    * 父此刻能交给子 agent 的工具 = 菜单上的（没被禁用、过了角色收紧、延迟的已取过 schema），去掉三类不能交出去的：
    * `subagent`（只扇一层）；`tool_search`（它闭包着父的 loadedTools，子调它等于替父取 schema——正是「没取过的延迟工具
    * 不许委派」要挡的事；review 2026-09-09）；标了 `delegable: false` 的（子拿的是父池里同一个实例，调一次就改父的常驻状态；
-   * 2026-09-14 拍板）。fresh 模式从这里点名，fork 模式整套继承。
+   * 2026-09-14 拍板）。fresh 模式从这里点名；fork 模式用 `forkMenu()`。
    */
   private delegableTools(): AgentTool[] {
-    return visibleTools(this.tools, this.loadedTools, this.restriction()).filter((t) => t.name !== SUBAGENT_NAME && t.name !== TOOL_SEARCH_NAME && t.delegable !== false);
+    return visibleTools(this.tools, this.loadedTools, this.restriction()).filter((t) => delegable(t));
+  }
+
+  /**
+   * fork 的工具菜单（2026-11-03）：父此刻的菜单**逐项照摆**，交不出去的那几件（见 `delegableTools`）换成同名同 schema、
+   * 一点名就拒的替身——菜单字节与父最后一次请求相同，厂商的前缀缓存接得上（`report` 由调用方接在末尾）。
+   * 只摆不交：替身在修参那一步就拒，早于 hook 与权限，原工具一次都不会跑。
+   */
+  private forkMenu(): AgentTool[] {
+    return visibleTools(this.tools, this.loadedTools, this.restriction()).flatMap((t) => {
+      if (delegable(t)) return [t];
+      const stub = refusingStub(t, `Tool '${t.name}' is not available to a forked subagent`);
+      return stub === null ? [] : [stub];
+    });
   }
 
   /** 模型点名的工具 → 父池里的实例。不认识的名字整组判红（不静默少给）；不可委派的同一句话里报明原因。 */
@@ -3361,7 +3374,7 @@ export class Agent {
 
   /**
    * 模型给的 spec → 子循环的入参（同步的那部分）。fresh：点名的工具、模型给的 system、空白种子、不带每轮注入。
-   * fork：父此刻可委派的整套工具、父的 system（跑之前再装配，见 `subagentSystem`）、父的 working context 截到最后一条
+   * fork：父此刻的菜单（交不出去的换成替身，见 `forkMenu`）、父的 system（跑之前再装配，见 `subagentSystem`）、父的 working context 截到最后一条
    * assistant 之前（那条正是派出它的这一轮：tool_use 还没有结果，不该让子看见半截；同批的兄弟结果也一并截掉）、每轮注入照父的来。
    * 种子在派出那一刻定格：后台子 agent 跑起来之后父的 transcript 还在长，子看到的是派它时的那份。
    */
@@ -3379,10 +3392,10 @@ export class Agent {
         break;
       }
     }
-    return { ok: true, system: { kind: "parent" }, tools: this.delegableTools(), seed: view.slice(0, cut), turnInjections: "inherit" };
+    return { ok: true, system: { kind: "parent" }, tools: this.forkMenu(), seed: view.slice(0, cut), turnInjections: "inherit" };
   }
 
-  /** fork 的 system = 父这次 run 的那份装配（同一批段、同一个冻结的模型），前缀与父一样，厂商缓存能接着用。 */
+  /** fork 的 system = 父这次 run 的那份装配（同一批段、同一个冻结的模型）；连同逐项照摆的菜单，前缀与父一样，厂商缓存能接着用。 */
   private subagentSystem(system: SubagentSystem, scope: AgentAdmissionExecuteScope): Promise<string | null> {
     return system.kind === "given" ? Promise.resolve(system.prompt) : this.assemblePrompt(scope.modelBinding.model);
   }
@@ -4384,14 +4397,23 @@ function withUserText(m: AgentMessage, text: string): AgentMessage {
   return { ...m, content } as AgentMessage;
 }
 
-/**
- * 提取从主对话分叉时，菜单上一件非记忆工具的替身（2026-11-03）：**同名、同 schema**（`toolSchemas` 只投影
- * name / description / parameters），所以前缀与主循环逐字一致；一点名就在修参那一步拒掉——早于 preToolUse 与权限，
- * 后台复盘不会因为模型试了一下 bash 就去问人、也不惊动 hook。internal 工具本来不上 schema，不摆（返回 null）。
- */
+/** 能不能交给子 agent：`subagent`、`tool_search`、标了 `delegable: false` 的不能（理由见 `Agent.delegableTools`）。 */
+function delegable(t: AgentTool): boolean {
+  return t.name !== SUBAGENT_NAME && t.name !== TOOL_SEARCH_NAME && t.delegable !== false;
+}
+
+/** 提取从主对话分叉时，菜单上一件非记忆工具的替身（2026-11-03），见 `refusingStub`。 */
 function refusedDuringExtract(tool: AgentTool): ModelTool | null {
+  return refusingStub(tool, `Tool '${tool.name}' is not available while reviewing memory: only ${MEMORY_TOOL_NAME} can run here`);
+}
+
+/**
+ * 分叉的子循环（提取、fork 子 agent）菜单上一件不许它执行的工具的替身：**同名、同 schema**（`toolSchemas` 只投影
+ * name / description / parameters），所以前缀与父循环逐字一致；一点名就在修参那一步拒掉——早于 preToolUse 与权限，
+ * 不会因为模型试了一下就去问人、也不惊动 hook。internal 工具本来不上 schema，不摆（返回 null）。
+ */
+function refusingStub(tool: AgentTool, reason: string): ModelTool | null {
   if (!isModelVisible(tool)) return null;
-  const reason = `Tool '${tool.name}' is not available while reviewing memory: only ${MEMORY_TOOL_NAME} can run here`;
   return {
     kind: "model",
     name: tool.name,

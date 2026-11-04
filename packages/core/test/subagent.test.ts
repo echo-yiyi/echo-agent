@@ -253,7 +253,7 @@ test("委派也不绕过渐进披露：父没 tool_search 过的延迟工具不�
   await agent.dispose();
 });
 
-test("不可委派（2026-09-14 拍板）：标了 delegable: false 的工具 fresh 点名判红、清单里也没有；fork 整套继承时同样不带它", async () => {
+test("不可委派（2026-09-14 拍板）：标了 delegable: false 的工具 fresh 点名判红、清单里也没有；fork 整套继承时摆的是替身", async () => {
   const pinned: ModelTool = { ...ping, name: "pinned", label: "pinned", delegable: false };
   const { fn, parentSeen, childSeen } = routedByTask(
     [toolTurn("c1", "subagent", { prompt: "x", tools: ["pinned"] }), toolTurn("c2", "subagent", { prompt: "FORK-TASK look around", mode: "fork" }), textTurn("done")],
@@ -266,11 +266,12 @@ test("不可委派（2026-09-14 拍板）：标了 delegable: false 的工具 fr
   expect(rs[0]!.content).toContain("Unknown tools: pinned");
   expect(rs[0]!.content).not.toMatch(/Available:.*\bpinned\b/);
   expect(parentSeen[0]!.tools).toContain("pinned"); // 父自己照常有它
-  expect(childSeen[0]!.tools).not.toContain("pinned");
+  // fork 的菜单与父逐项相同（前缀缓存接得上）：pinned 摆着的是同名同 schema 的替身，点名就被拒（见下一条）
+  expect(childSeen[0]!.tools).toContain("pinned");
   expect(childSeen[0]!.tools).toContain("ping");
 });
 
-test("fork（2026-09-14 拍板）：子继承父的 system、父的对话（截到派它的那条 assistant 之前）与父的可委派工具集；父只拿到子的回复", async () => {
+test("fork（2026-09-14 拍板）：子继承父的 system、父的对话（截到派它的那条 assistant 之前）与父的工具菜单；父只拿到子的回复", async () => {
   const { fn, parentSeen, childSeen } = routedByTask(
     [toolTurn("c1", "subagent", { prompt: "FORK-TASK check the tail", mode: "fork" }), textTurn("parent done")],
     [toolTurn("k1", "report", { status: "done", summary: "tail is fine" }), textTurn("forked reply")],
@@ -286,9 +287,8 @@ test("fork（2026-09-14 拍板）：子继承父的 system、父的对话（截�
   expect(first.body).toContain("PARENT-ONLY-TOKEN");
   expect(first.body).not.toContain("tool_use");
   expect(first.body).toContain("FORK-TASK check the tail");
-  // 工具集 = 父菜单上的，去掉 subagent / tool_search，加上 report
-  const expected = [...parentSeen[0]!.tools.filter((n) => n !== "subagent" && n !== "tool_search"), "report"].sort();
-  expect(first.tools).toEqual(expected);
+  // 工具菜单 = 父菜单逐项照摆（subagent / tool_search 是替身），末尾加上 report
+  expect(first.tools).toEqual([...parentSeen[0]!.tools, "report"].sort());
   // 父的 transcript 一字不掺子的
   expect(agent.state.messages.filter((m) => m.role === "assistant").length).toBe(2);
 });
@@ -418,4 +418,48 @@ test("子 agent 自己的 context 照样自动压缩，但压缩的 hook（preCo
   expect(childSeen[0]).not.toContain("line of a big file");
   expect(childSeen[1]).not.toContain(BIG.slice(0, 2000)); // 子的第二次请求之前压过：大结果不再整段在
   expect(seen).toEqual([]);
+});
+
+test("fork 的工具菜单与父逐字节相同、report 接在末尾（厂商前缀缓存接得上）；交不出去的几件摆的是替身，点名就被拒、不会真跑", async () => {
+  const pinnedRuns: string[] = [];
+  const pinned: ModelTool = { ...ping, name: "pinned", label: "pinned", delegable: false, execute: async () => (pinnedRuns.push("ran"), toolOk("pinned ran")) };
+  const lazy: ModelTool = { ...ping, name: "lazy", deferred: true };
+  const parentTools: string[] = [];
+  const childTools: string[] = [];
+  const childBodies: string[] = [];
+  const p = scriptedStreamFn([toolTurn("c1", "subagent", { prompt: "FORK-TASK try things", mode: "fork" }), textTurn("parent done")]);
+  const c = scriptedStreamFn([
+    // 连着两轮全是无效调用循环会收手（INVALID_TOOL_TURNS_LIMIT），中间夹一次能跑的 ping
+    toolTurn("k1", "pinned", {}),
+    toolTurn("p1", "ping", {}),
+    toolTurn("k2", "subagent", { prompt: "nested", mode: "fork" }),
+    toolTurn("p2", "ping", {}),
+    toolTurn("k3", "tool_search", { names: ["lazy"] }),
+    toolTurn("k4", "report", { status: "done", summary: "tried" }),
+    textTurn("child done"),
+  ]);
+  const fn: StreamFn = (model, context, options) => {
+    if (context.messages.some((m) => m.role === "user" && JSON.stringify(m).includes("FORK-TASK"))) {
+      childTools.push(JSON.stringify(context.tools));
+      childBodies.push(JSON.stringify(context.messages));
+      return c(model, context, options);
+    }
+    parentTools.push(JSON.stringify(context.tools));
+    return p(model, context, options);
+  };
+  const agent = await agentWith(fn, { tools: [ping, pinned, lazy] });
+  await agent.prompt("go");
+  const parentMenu = JSON.parse(parentTools[0]!) as { name: string }[];
+  const childMenu = JSON.parse(childTools[0]!) as { name: string }[];
+  // 逐字节：父那份是子那份的前缀，后面只多一件 report
+  expect(JSON.stringify(childMenu.slice(0, parentMenu.length))).toBe(parentTools[0]!);
+  expect(childMenu.map((t) => t.name).slice(parentMenu.length)).toEqual(["report"]);
+  expect(parentMenu.map((t) => t.name)).toEqual(expect.arrayContaining(["pinned", "subagent", "tool_search"]));
+  // 替身：点名就被拒，原工具一次都没跑；嵌套 subagent、替父取 schema 同样被拒
+  expect(pinnedRuns).toEqual([]);
+  const last = childBodies.at(-1)!;
+  expect(last).toContain("Tool 'pinned' is not available to a forked subagent");
+  expect(last).toContain("Tool 'subagent' is not available to a forked subagent");
+  expect(last).toContain("Tool 'tool_search' is not available to a forked subagent");
+  expect(toolResults(agent)).toEqual([{ name: "subagent", content: "#1 [done] tried", isError: false }]);
 });
