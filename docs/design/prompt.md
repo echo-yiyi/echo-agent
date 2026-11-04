@@ -90,6 +90,8 @@ flowchart LR
 
 数值越小越靠前；同数保注册序。排序意图是把更稳定的字节留在前缀，不代表 core 提供或承诺 provider cache。`order` 也不决定刷新频率：刷新由 system / turn / attempt 所在的生命周期决定。
 
+约定带分两半（2026-11-03 复核）：0–199 是只随产品 / 角色变的静态段（身份、纪律、交互面、工具习惯），300 起是随项目或会话变的段（环境里的 workspace、项目指令、skill 目录、记忆）。前一半整段在后一半之前，换项目或换会话时 system 只从环境段起变；内建与两个产品的段都落在各自的带里，当前实现不需要调序。工具 schema 不在 system 里：在把工具渲染在 system 之后的 provider 上，环境段一变，其后的工具定义同样吃不到缓存，这不是段排序能解决的（实测换项目后首次调用只命中约 1.1k，正是环境段之前的静态段）。
+
 ### 3.2 精确装配语义
 
 [`assembleSystem()`](../../packages/core/src/prompt/assemble.ts#symbol=assembleSystem) 的顺序固定为：
