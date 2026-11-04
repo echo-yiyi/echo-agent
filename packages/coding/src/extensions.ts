@@ -12,7 +12,7 @@
 // 复制一份实现就是复制一份将来会漏修的地方。
 
 import { AgentBackgroundService, AgentPrompt, AgentRuntimeService, AgentTools, defineExtension, defineToolPack, registerAll } from "@echo-agent/core/extension";
-import { makeShellTools } from "./tools/bash.ts";
+import { detectShellEnvironment, makeShellTools } from "./tools/bash.ts";
 import { makeWorktreeTools } from "./tools/worktree.ts";
 import { shellToolsSection } from "./prompt.ts";
 
@@ -79,12 +79,14 @@ export const ECHO_SHELL = defineExtension({
     const prompt = ctx.get(AgentPrompt);
     // bash + job_output / job_stop：同一张后台任务表（`agent.background`），一起装、一起撤
     const tools = makeShellTools({ background: ctx.get(AgentBackgroundService) });
+    // 运行环境（平台、bash 版本）装配时取一次，写进段里；不是每轮现问
+    const section = shellToolsSection(detectShellEnvironment());
     void ctx.effect({
       // 与 `defineToolPack` 同一档：工具面每轮都可能变，声明得比实际需要强会挡住热重载
       boundary: "turn",
       // 工具与它们的习惯段（`tool:shell`）同一个 effect：一起装、一起撤。
       // 中途撞名要把已注册的撤回去——半组工具在、半组不在，比整组不在更难排查（`registerAll`，与内建同一份）
-      start: () => registerAll([...tools.map((tool) => () => registry.register(tool)), () => prompt.section(shellToolsSection())]),
+      start: () => registerAll([...tools.map((tool) => () => registry.register(tool)), () => prompt.section(section)]),
     });
   },
 });

@@ -36,7 +36,11 @@ export type PermissionPolicy = {
 };
 
 /**
- * 缺省策略：读随便；**bash / write_file / edit_file 先问**，其余放行——与 Claude Code 的缺省一个精神。
+ * `codingPreset()` 的缺省策略：读随便；**bash / write_file / edit_file 先问**，其余放行——与 Claude Code 的缺省一个精神。
+ *
+ * **适用范围**：只在嵌入方调 `codingPreset()` 而不传 `permission` 时生效（评测、别的宿主）。出厂的 `echo-coding`
+ * 命令不用它——`cli.ts` 的 `ECHO_CODING` 传 `permission: false`，全放行（2026-09-01 用户拍板，理由写在那里）。
+ *
  * 这是一张黑名单而不是白名单（2026-09-09 拍板，`docs/decisions/implemented/2026-09-09-default-permission-blacklist.md`）：
  * 「其余」里也有动东西的，各有各的不问的理由——worktree_enter 开的是新分支与新目录，可逆；worktree_exit 的删除
  * 由 git 自己挡（有未提交改动就拒，分支保留）；web_fetch / web_search 出网不问（2026-09-03 拍板）；core 内建的

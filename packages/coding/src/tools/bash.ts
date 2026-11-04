@@ -8,9 +8,28 @@
 // 结果「以后作为通知送达」,模型中途看不到输出、也停不掉——「跑起来看日志再改」这条最常见的循环走不通。
 
 import { getBackground, killBackground, listBackground, startBackground } from "@echo-agent/core/background";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { toolError, toolOk, type AgentBackground, type AgentToolResult, type ModelTool } from "@echo-agent/core";
+
+/** 命令跑在什么环境里：`tool:shell` 段据此写明平台与 bash 版本（macOS 的 BSD 工具链、bash 3.2 的缺口）。 */
+export type ShellEnvironment = { platform: NodeJS.Platform; bashVersion: string | null };
+
+/**
+ * 取一次运行环境：平台读 `process.platform`，bash 版本问一次 `bash` 自己（`$BASH_VERSION` 去掉括号后缀）。
+ * 装配时调（`echo:shell` 的 apply），不是每轮——段在 run 之间不变，前缀缓存才接得上。问不出来版本 = null。
+ */
+export function detectShellEnvironment(): ShellEnvironment {
+  let bashVersion: string | null = null;
+  try {
+    const r = spawnSync("bash", ["-c", 'printf %s "$BASH_VERSION"'], { encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] });
+    const v = /^\d+(\.\d+)*/.exec(r.stdout ?? "")?.[0];
+    if (r.status === 0 && v !== undefined) bashVersion = v;
+  } catch {
+    // 没有 bash：段里只写平台
+  }
+  return { platform: process.platform, bashVersion };
+}
 
 /**
  * 前台命令最多收这么多字符（2026-11-02）：不再在这里截到 30,000 丢掉后半——报错多在末尾。
@@ -25,10 +44,35 @@ const JOB_TAIL_DEFAULT = 4_000;
 /**
  * 工作目录跨调用保留（2026-09-03，照 Claude Code：cd 保留、shell 变量不保留）。
  * 每次前台命令包一层——命令跑完打印 `$PWD` 标记再以原退出码退出；解析到的目录就是下一次的起点（后台命令也从那里起）。
- * 标记用 RS（0x1e）包着,普通输出里不会出现;它只在末尾几百字节里找,输出再长也截不掉它。
+ * 标记用 RS（0x1e）包着,普通输出里不会出现。找**最后一个**标记、不要求它在末尾：`cmd &` 起的后台进程可能在标记之后
+ * 还写了几行。正文被截断时标记在截断点之后，另在末尾几百字节里留了一份。
  */
 const CWD_TAIL_KEEP = 512;
-const CWD_MARK_RE = /\u001e__ECHO_CWD__([^\u001e]*)\u001e\n?$/;
+const CWD_MARK = "\u001e__ECHO_CWD__";
+
+/**
+ * 主 shell 退出之后等输出管道关的时间：管道里剩下的输出读完就关（通常几毫秒）；关不上说明命令起的后台进程
+ * （`cmd &`）还攥着它——那就不等了，收尾返回已有输出并说明，后台进程不杀。窗口在有输出到达时顺延（主进程退出前
+ * 写进管道的最后一截还在路上），但总共不超过 `DRAIN_MAX_MS`，一直在写的后台进程拖不住这一次调用。
+ */
+const DRAIN_IDLE_MS = 100;
+const DRAIN_MAX_MS = 1_000;
+
+/**
+ * 子进程的环境：继承父进程（`bash -c`，不读 profile），再关掉会等人的东西——没有 TTY、stdin 已关，
+ * 编辑器 / 分页器 / 凭据提示只会挂到超时、什么也不输出。取舍照 codex 给子进程设的非交互变量：
+ * - `GIT_EDITOR=true`：commit / merge / rebase --continue 不开编辑器——带着现成的消息走，没有消息就因空消息中止；
+ * - `GIT_PAGER` / `PAGER` / `GH_PAGER` = `cat`：输出直接出来，不进分页器；
+ * - `GIT_TERMINAL_PROMPT=0`：要账号密码时直接失败，不等输入。
+ * `EDITOR` / `VISUAL` 不动：git 先认 `GIT_EDITOR`，别的程序要编辑器时失败比被换成 `true` 静默「编辑成功」更好懂。
+ */
+const NON_INTERACTIVE_ENV = {
+  GIT_EDITOR: "true",
+  GIT_PAGER: "cat",
+  PAGER: "cat",
+  GH_PAGER: "cat",
+  GIT_TERMINAL_PROMPT: "0",
+} as const;
 
 export type BashDeps = {
   /** 给了才支持 background: true(接 agent.background);job_output / job_stop 也读同一张表。 */
@@ -68,10 +112,13 @@ export function makeBashTool(
     name: "bash",
     label: "跑命令",
     description:
-      "Run one bash command and return stdout and stderr (merged). The working directory carries over between calls " +
-      "(it starts at the workspace root; cd persists), shell variables and functions do not. " +
+      "Run one bash command (bash -c, not a login shell; it inherits this process's environment) and return stdout and stderr (merged). " +
+      "There is no terminal and stdin is closed: use non-interactive flags (git commit -m, --yes); git's editor and pager are turned off. " +
+      "The working directory carries over between calls (it starts at the workspace root; cd persists), shell variables and functions do not. " +
       "Times out after 120 s by default; for long-running work (dev servers, watchers) pass background: true — " +
-      "read its output with job_output, stop it with job_stop, and you are notified when it ends.",
+      "read its output with job_output, stop it with job_stop, and you are notified when it ends. Do not use a trailing & for that: " +
+      "the call returns once the command exits and the background process's later output is lost. " +
+      "For files in the workspace use read_file, edit_file / write_file, grep and glob instead of cat, sed, echo >, find or rg.",
     parameters: {
       type: "object",
       properties: {
@@ -137,9 +184,33 @@ function withCwdMarker(command: string): string {
 /**
  * 起 shell 时自成一个进程组（detached）：杀的时候按组杀（{@link killTree}）。
  * 不然 `sleep 10`、dev server 这类由 bash 再起的子进程会活过 bash，攥着输出管道不放——超时/中止要等它自己结束，job_stop 也留孤儿。
+ *
+ * `bash -c`，不是登录 shell：登录 shell 会读 profile，macOS 上 `path_helper` 还会把系统目录排到 PATH 前面，
+ * 用户装的 git / ruby / node 就变成了系统那一份。命令看到的环境与启动 echo-coding 的那个 shell 一致。
+ * `PWD` 例外，设成本次的起点：继承来的是父进程的目录，bash 发现它不指向当前目录就改用物理路径——
+ * 工作区经软链时（macOS 的 `/var` → `/private/var`）`$PWD` 成了展开后的路径，第一条命令就被当成「cd 过了」。
  */
 function spawnShell(command: string, cwd: string): ChildProcess {
-  return spawn("bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true });
+  return spawn("bash", ["-c", command], {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+    env: { ...process.env, ...NON_INTERACTIVE_ENV, PWD: cwd },
+  });
+}
+
+/** 输出里摘掉最后一个 cwd 标记（连同它前后各一个换行），返回标记里的目录。没有标记 = 命令没跑到末尾（exec / 被杀 / 语法错）。 */
+function takeCwdMarker(text: string): { cwd?: string; body: string } {
+  const at = text.lastIndexOf(CWD_MARK);
+  if (at < 0) return { body: text };
+  const end = text.indexOf("\u001e", at + CWD_MARK.length);
+  if (end < 0) return { body: text };
+  const before = text.slice(0, at);
+  const after = text.slice(end + 1);
+  return {
+    cwd: text.slice(at + CWD_MARK.length, end),
+    body: (before.endsWith("\n") ? before.slice(0, -1) : before) + (after.startsWith("\n") ? after.slice(1) : after),
+  };
 }
 
 function killTree(child: ChildProcess): void {
@@ -228,11 +299,24 @@ function runForeground(
       }
       out += chunk;
     };
+    // 主 shell 退出之后的排空窗口（见 `DRAIN_IDLE_MS`）：有输出到达就顺延，总长封顶
+    let exited = false;
+    let exitCode: number | null = null;
+    let drainIdle: ReturnType<typeof setTimeout> | undefined;
+    let drainMax: ReturnType<typeof setTimeout> | undefined;
+    const armDrain = (): void => {
+      clearTimeout(drainIdle);
+      drainIdle = setTimeout(() => finish(exitCode, { held: true }), DRAIN_IDLE_MS);
+    };
     // 每条流一只流式 decoder：跨 chunk 的多字节字符不再被解成替换符（review 2026-09-07：此前逐块 toString）
     const outDec = new TextDecoder();
     const errDec = new TextDecoder();
-    child.stdout!.on("data", (d: Buffer) => append(outDec.decode(d, { stream: true })));
-    child.stderr!.on("data", (d: Buffer) => append(errDec.decode(d, { stream: true })));
+    const onData = (dec: TextDecoder) => (d: Buffer): void => {
+      append(dec.decode(d, { stream: true }));
+      if (exited) armDrain();
+    };
+    child.stdout!.on("data", onData(outDec));
+    child.stderr!.on("data", onData(errDec));
 
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -244,20 +328,35 @@ function runForeground(
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
-    const finish = (code: number | null, spawnError?: string): void => {
+    let settled = false;
+    const finish = (code: number | null, how: { spawnError?: string; held?: boolean } = {}): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(drainIdle);
+      clearTimeout(drainMax);
       signal?.removeEventListener("abort", onAbort);
+      if (how.held === true) {
+        // 后台进程还攥着管道：我们这头不读了。进程本身不杀——它是命令有意起的
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      }
       append(outDec.decode()); // 冲残余
       append(errDec.decode());
-      // 先把 cwd 标记摘出来（在 tail 里），再从正文里剥掉——正文没被截断时标记就在正文末尾
-      const marked = CWD_MARK_RE.exec(tail);
-      const newCwd = marked?.[1];
-      const body = marked === null ? out : out.replace(CWD_MARK_RE, "").replace(/\n$/, "");
+      // cwd 标记：正文里有就从正文摘（连同它前后各一个换行）；正文被截断、标记落在截断点之后，就从末尾那份里找
+      const taken = takeCwdMarker(out);
+      const newCwd = taken.cwd ?? takeCwdMarker(tail).cwd;
+      const body = taken.body;
       let text = body.slice(0, CAPTURE_CAP);
       if (truncated || body.length > CAPTURE_CAP) text += `\n…[output truncated: over ${CAPTURE_CAP} characters]`;
+      if (how.held === true) {
+        text +=
+          "\n(a background process started by this command is still running and holding the output; what it prints from now on is not captured. " +
+          "Use background: true for long-running processes.)";
+      }
       const withCwd = (r: AgentToolResult): AgentToolResult & { cwd?: string } => (newCwd === undefined ? r : { ...r, cwd: newCwd });
-      if (spawnError !== undefined) {
-        resolvePromise(toolError(`The command could not start: ${spawnError}`));
+      if (how.spawnError !== undefined) {
+        resolvePromise(toolError(`The command could not start: ${how.spawnError}`));
       } else if (timedOut) {
         resolvePromise(toolError(`Timed out after ${timeoutMs} ms and was killed. Output:\n${text}`));
       } else if (signal?.aborted === true) {
@@ -269,7 +368,15 @@ function runForeground(
         resolvePromise(withCwd(toolOk(text === "" ? "(no output)" : text, { exitCode: 0 })));
       }
     };
-    child.on("error", (e) => finish(null, String(e)));
-    child.on("close", (code) => finish(code));
+    child.on("error", (e) => finish(null, { spawnError: String(e) }));
+    child.on("exit", (code) => {
+      // 命令本身结束了：超时不再适用（剩下的只可能是它起的后台进程），进入排空窗口
+      exited = true;
+      exitCode = code;
+      clearTimeout(timer);
+      armDrain();
+      drainMax = setTimeout(() => finish(code, { held: true }), DRAIN_MAX_MS);
+    });
+    child.on("close", (code) => finish(code ?? exitCode));
   });
 }
