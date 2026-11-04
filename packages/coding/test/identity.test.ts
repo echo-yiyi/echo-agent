@@ -152,6 +152,16 @@ test("identity 稳定:同一份代码两次调用完全相等(digest 才可复�
   expect(codingAgentIdentity()).toEqual(codingAgentIdentity());
 });
 
+test("纪律段写明 git 不许丢弃用户未提交的改动、动手前先看 git status；文件段写明互不依赖的读取与搜索同一轮并发", () => {
+  const text = (name: string): string => codingAgentIdentity().sections.find((s) => s.name === name)!.text;
+  const conduct = text("conduct:coding");
+  expect(conduct).toContain("git status");
+  for (const cmd of ["git reset --hard", "git checkout -- .", "git clean -f", "git stash drop", "git push --force"]) expect(conduct).toContain(cmd);
+  const workspace = text("tool:workspace");
+  expect(workspace).toContain("together in one reply");
+  expect(workspace).toContain("run in parallel");
+});
+
 test("状态根不在被测仓库里 → 仓库预置的 tasks 进不来(review 八轮 P1:仓库不能悄悄改被测行为)", async () => {
   // 被测仓库里埋一条任务:它会被逐轮注入模型,而 identity/digest 纹丝不动。
   //

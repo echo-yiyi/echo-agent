@@ -384,7 +384,8 @@ test("bash 工作目录跨调用保留：cd 之后下一次从那里起；cd 失
   const bash = makeBashTool();
   const first = await bash.execute({ command: "cd sub && pwd" }, ctx());
   expect([first.isError, first.content]).toEqual([false, expect.stringContaining("(working directory is now ")]);
-  expect(first.content.startsWith(await realpath(join(root, "sub")))).toBe(true);
+  // `$PWD` 是工作区那一种写法（逻辑路径），不是 realpath：工作区经软链（macOS 的 /var）时也不会展开
+  expect(first.content.startsWith(join(root, "sub"))).toBe(true);
   // 下一次从 sub 起；标记不漏进正文
   const second = await bash.execute({ command: "basename \"$PWD\"; X=1" }, ctx());
   expect([second.isError, second.content.trimEnd()]).toEqual([false, "sub"]);

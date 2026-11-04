@@ -27,7 +27,7 @@
 import { DEFAULT_MAX_ITERATIONS, type AssembleContext } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
 import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extension";
 import type { CredentialStore, PermissionPolicy as CorePermissionPolicy, PromptSection, Skill } from "@echo-agent/core";
-import { makeBashTool, makeShellTools } from "./tools/bash.ts";
+import { detectShellEnvironment, makeBashTool, makeShellTools } from "./tools/bash.ts";
 import { makeFsTools } from "./tools/fs.ts";
 import { makeSearchTools } from "./tools/search.ts";
 import { makeWebTools } from "./tools/web.ts";
@@ -110,9 +110,15 @@ const AGENT_BUILTIN_TOOLS = [
   // 「这个产品自己带什么」——把容器的选择写进产品身份，换个宿主就对不上了。
 ] as const;
 
-/** 产品自己出的四段（identity / conduct:coding / tool:workspace / tool:shell），按 order 排。 */
+/**
+ * 产品自己出的四段（identity / conduct:coding / tool:workspace / tool:shell），按 order 排。
+ * `tool:shell` 末尾那句运行环境与 `echo:shell` 装配时取的是同一个来源（`detectShellEnvironment`），
+ * 所以 digest 随机器的平台与 bash 版本变——同一台机器上两次调用仍相等。
+ */
 function productSections(): PromptSection[] {
-  return [codingIdentitySection(), codingConductSection(), workspaceToolsSection(), shellToolsSection()].sort((a, b) => a.order - b.order);
+  return [codingIdentitySection(), codingConductSection(), workspaceToolsSection(), shellToolsSection(detectShellEnvironment())].sort(
+    (a, b) => a.order - b.order,
+  );
 }
 
 /** digest 用的固定装配上下文：产品四段都不引用变量，所以值无关紧要，只求确定。 */
