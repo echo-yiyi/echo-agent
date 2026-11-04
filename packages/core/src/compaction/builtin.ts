@@ -15,7 +15,7 @@
 // **算字节一律用 `input.estimate`**（已按 usage 校准），不直接调 `estimateTokens`——量纲要与 `budget` 一致。
 //
 // 提示词是**自己写的**（措辞、节名、框定），不抄任何专有产品的文案；结构上的「先草稿再正文」「按固定小节写」
-// 是通用做法。全英文（2026-09-01 模型面全英文），但要求摘要**用用户主要使用的语言写**——用户说中文就得到中文摘要。
+// 是通用做法。摘要与折叠的调用从主对话分叉（同一份 system 与工具菜单、指令接在末尾），吃得到前缀缓存。全英文（2026-09-01 模型面全英文），但要求摘要**用用户主要使用的语言写**——用户说中文就得到中文摘要。
 
 import { userMessage, type AgentMessage } from "../messages.ts";
 import type { PromptSection } from "../prompt/types.ts";
@@ -132,18 +132,23 @@ function inSpan(state: CompactionState, i: number): boolean {
 
 /* ───────────────────────── prompt ───────────────────────── */
 
-/** summary 阶段的 system prompt：写给「要接着干活的那个 agent」，只保真、不发挥。 */
-export const SUMMARY_SYSTEM =
-  "You are writing a compaction summary for an agent whose conversation no longer fits its context window. " +
-  "The summary takes the place of the original messages, and the same agent will carry on from it. " +
-  "Preserve what the work depends on: the user's words, decisions, identifiers, paths, commands, numbers, and error output, quoted exactly. " +
-  "Do not add opinions, advice, or anything the conversation does not contain.";
+/**
+ * summary 指令的开头一段：叫停手上的活、定角色（写给「要接着干活的那个 agent」，只保真、不发挥）。
+ * 摘要调用从主对话分叉（同一份 system、同一份工具菜单，见 `CompactionModelCall`），指令是接在末尾的一条 harness 消息，
+ * 所以角色说在这里、不在 system 里。脚本化模型的测试也靠它认出一次模型调用是 summary 阶段发的。
+ */
+export const SUMMARY_PROMPT_OPENING =
+  "Pause the task above: this conversation no longer fits the context window, and you are now writing its compaction summary, not continuing the work.";
 
 /**
  * summary 阶段末尾那条 harness 指令：先 `<scratchpad>` 草稿再 `<summary>` 正文（九个小节）；manual 的附加要求接在它后面。
  * 节序：接着干活最离不开的（目标、没做完的、正在做的、下一步）在前，细节在后——输出越写越长，越往后越可能被压缩掉注意力。
  */
 export const SUMMARY_INSTRUCTION =
+  `${SUMMARY_PROMPT_OPENING} ` +
+  "The summary takes the place of the original messages, and the same agent will carry on from it. " +
+  "Preserve what the work depends on: the user's words, decisions, identifiers, paths, commands, numbers, and error output, quoted exactly. " +
+  "Do not add opinions, advice, or anything the conversation does not contain. Reply with text only; do not call any tools.\n\n" +
   "Write the compaction summary for the conversation above.\n\n" +
   "Draft first inside <scratchpad></scratchpad>: walk through the conversation in order and note, for each stretch, " +
   "what the user asked for, what happened, which files and tools were involved, and what was learned or decided. The scratchpad is discarded.\n\n" +
@@ -192,14 +197,15 @@ export function renderRecent(messages: readonly AgentMessage[], state: Compactio
   return lines.join("\n");
 }
 
-/** collapse 阶段的 system prompt：只折一段，其余对话还在，所以只留后续会依赖的东西。 */
-export const COLLAPSE_SYSTEM =
-  "You are condensing one stretch of an agent's conversation so the agent keeps working with less context. " +
-  "Only this stretch is replaced; everything after it stays. Keep what later work may need, quoted exactly: " +
-  "the user's words, decisions, paths, identifiers, commands, results, error output. No opinions, no advice.";
+/** collapse 指令的开头一段：只折一段，其余对话还在，所以只留后续会依赖的东西。与 summary 同理放在指令里、不在 system 里。 */
+export const COLLAPSE_PROMPT_OPENING =
+  "Pause the task: you are now condensing the stretch of conversation above so that the agent keeps working with less context, not continuing the work.";
 
 /** collapse 阶段末尾那条 harness 指令。 */
 export const COLLAPSE_INSTRUCTION =
+  `${COLLAPSE_PROMPT_OPENING} ` +
+  "Only this stretch is replaced; everything after it stays. Keep what later work may need, quoted exactly: " +
+  "the user's words, decisions, paths, identifiers, commands, results, error output. No opinions, no advice. Reply with text only; do not call any tools.\n\n" +
   "Condense the stretch above. Use <scratchpad></scratchpad> first if it helps; it is discarded. " +
   "Then write inside <summary></summary>, in the language the user has mostly been writing in, a tight account in order: " +
   "what was asked, what was done and with which files or tools, what came out of it, what was decided. " +
@@ -338,7 +344,8 @@ export function collapseStage(opts: { sectionTokens?: number; keepRecentTokens?:
         if (start < request && cut > request) cut = request;
         if (cut <= start) break;
         const section = projectRange(messages, state, start, cut);
-        const text = await input.callModel({ systemPrompt: COLLAPSE_SYSTEM, messages: [...section, userMessage(COLLAPSE_INSTRUCTION, "harness")] }, signal);
+        // 从主对话分叉（不给 systemPrompt）：同一份 system 与工具菜单，从最旧那段折起时前缀与上一次请求逐字相同
+        const text = await input.callModel({ messages: [...section, userMessage(COLLAPSE_INSTRUCTION, "harness")] }, signal);
         const body = extractSummary(text);
         if (body === "") throw new Error(`collapse: model returned no summary for #${start}–#${cut - 1}`);
         const summary = frameSection(start, cut, body);
@@ -375,7 +382,8 @@ export function summaryStage(opts: { keepRecentTokens?: number } = {}): Compacti
         SUMMARY_INSTRUCTION +
         (recent !== "" ? `\n\n${RECENT_PREAMBLE}\n<recent>\n${recent}\n</recent>` : "") +
         (input.instructions !== undefined ? `\n\nThe user also asks, for this summary:\n${input.instructions}` : "");
-      const text = await input.callModel({ systemPrompt: SUMMARY_SYSTEM, messages: [...prefix, userMessage(ask, "harness")] }, signal);
+      // 从主对话分叉（不给 systemPrompt）：同一份 system 与工具菜单，前缀（视图从头到尾巴之前）与上一次请求逐字相同
+      const text = await input.callModel({ messages: [...prefix, userMessage(ask, "harness")] }, signal);
       const body = extractSummary(text);
       if (body === "") throw new Error("summary: model returned no summary");
       return { spans: summarySpans(ranges, body), clearedBefore: state.clearedBefore };

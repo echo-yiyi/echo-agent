@@ -37,7 +37,7 @@ import {
   frameFull,
   COLLAPSE_INSTRUCTION,
   SUMMARY_INSTRUCTION,
-  SUMMARY_SYSTEM,
+  SUMMARY_PROMPT_OPENING,
   snipStage,
   summaryStage,
   toolResultsStage,
@@ -101,7 +101,7 @@ function stage(name: string, order: number, run: (input: CompactionInput) => Com
   return { name, order, run };
 }
 
-function fakeCall(reply: string, seen: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = []): CompactionInput["callModel"] {
+function fakeCall(reply: string, seen: { systemPrompt?: string | null; messages: readonly AgentMessage[] }[] = []): CompactionInput["callModel"] {
   return async (input) => {
     seen.push(input);
     return reply;
@@ -298,7 +298,7 @@ test("tool-results：应急时在飞那一批的结果自己就超过应急尾�
 
 test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提示）；模型收到的是投影后的前缀 + harness 指令；manual 的指令追加在末尾", async () => {
   const m = twoTurns();
-  const seen: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
+  const seen: { systemPrompt?: string | null; messages: readonly AgentMessage[] }[] = [];
   const keep = tokensOf(m.slice(4));
   const s = await summaryStage({ keepRecentTokens: keep }).run(input(m, { callModel: fakeCall("<scratchpad>think</scratchpad><summary>THE SUMMARY</summary>", seen) }), new AbortController().signal);
   expect(s).toEqual({ spans: [{ from: 0, to: 4, summary: frameFull([[0, 4]], "THE SUMMARY") }], clearedBefore: 0 });
@@ -313,7 +313,7 @@ test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提�
   expect(askText).toContain("#7 [assistant] answer two");
   expect(askText).not.toContain("#3 [assistant] answer one");
   // manual + 指令
-  const seen2: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
+  const seen2: { systemPrompt?: string | null; messages: readonly AgentMessage[] }[] = [];
   await summaryStage({ keepRecentTokens: keep }).run(input(m, { reason: "manual", instructions: "keep only TODOs", callModel: fakeCall("<summary>x</summary>", seen2) }), new AbortController().signal);
   const ask = seen2[0]!.messages[4]!;
   expect(ask.role === "user" && ask.content[0]!.type === "text" && ask.content[0]!.text).toContain("keep only TODOs");
@@ -325,7 +325,7 @@ test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提�
 
 test("collapse：只服务 auto；从最旧原文起一段一段折，够了就停；每段一次模型调用", async () => {
   const m = twoTurns();
-  const calls: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
+  const calls: { systemPrompt?: string | null; messages: readonly AgentMessage[] }[] = [];
   const keep = tokensOf(m.slice(4));
   // 段大小 1 token → 段在下一个轮起点收口（一轮比段大就整轮一段）；goal 定得很低 → 一直折到只剩尾巴
   const s = await collapseStage({ sectionTokens: 1, keepRecentTokens: keep }).run(
@@ -434,8 +434,9 @@ test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含�
   const { events, lifecycle } = collect(agent);
   const result = await agent.prompt("second");
   expect(result.outcome.kind).toBe("completed");
-  // 请求 1 是摘要调用（无工具、末尾一条 harness 指令），请求 2 是真正的那一轮：摘要 + 这次的请求原文
-  expect(requests[1]!.tools).toEqual([]);
+  // 请求 1 是折叠调用（从主对话分叉：同一份菜单，末尾一条 harness 指令），请求 2 是真正的那一轮：摘要 + 这次的请求原文
+  expect(requests[1]!.tools).toEqual(requests[0]!.tools);
+  expect(JSON.stringify(requests[1]!.messages.at(-1))).toContain("Condense the stretch above");
   expect(requests[2]!.messages.length).toBe(2);
   expect(textOf(requests[2]!, 0)).toContain("S1");
   expect(textOf(requests[2]!, 0)).not.toContain(BIG_TEXT);
@@ -452,6 +453,28 @@ test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含�
   // session 里有一条 compaction entry，状态与运行时同一份
   const loaded = await loadSession(store, "s1");
   expect(loaded.compaction).toEqual(agent.state.compaction);
+});
+
+test("摘要调用从主对话分叉：同一份 system、同一份工具菜单、同一个 thinking 档位，消息是上一次请求的前缀、指令接在末尾（吃得到前缀缓存）", async () => {
+  const seen: { context: Context; thinking: unknown }[] = [];
+  const base = scriptedStreamFn([textTurn("hi"), textTurn("hi again"), reply("<summary>S</summary>")]);
+  const fn: StreamFn = (m, c, o) => {
+    seen.push({ context: structuredClone(c), thinking: o?.thinkingLevel });
+    return base(m, c, o);
+  };
+  const agent = await agentWithBuiltins(fn, { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
+  await agent.prompt("hello");
+  await agent.prompt("again");
+  const r = await agent.compact();
+  expect(r.kind === "done" && r.stages).toEqual(["summary"]);
+  const [, main, summary] = seen;
+  expect(summary!.context.systemPrompt).toBe(main!.context.systemPrompt);
+  expect(JSON.stringify(summary!.context.tools)).toBe(JSON.stringify(main!.context.tools));
+  expect(summary!.thinking).toBe(main!.thinking);
+  // 尾巴（最后那条回答）之前的视图 = 上一次请求的消息，原样在前；末尾一条 summary 指令
+  expect(summary!.context.messages.slice(0, main!.context.messages.length)).toEqual(main!.context.messages);
+  expect(JSON.stringify(summary!.context.messages.at(-1))).toContain(SUMMARY_PROMPT_OPENING);
+  expect(SUMMARY_INSTRUCTION).toContain("do not call any tools");
 });
 
 test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐字节相同", async () => {
@@ -591,7 +614,7 @@ test("撞窗应急、在飞那一批比应急尾巴大：清掉它的结果（�
   const fn: StreamFn = (m, c, o) => {
     requests.push(structuredClone(c));
     const size = JSON.stringify(c.messages).length / 4;
-    const turn: ScriptedTurn = size > providerWindow ? errorTurn("context_overflow", "too long", false) : requests.length === 1 ? toolTurn("r1", "read", {}) : textTurn(c.systemPrompt === SUMMARY_SYSTEM ? "<summary>S</summary>" : "ok");
+    const turn: ScriptedTurn = size > providerWindow ? errorTurn("context_overflow", "too long", false) : requests.length === 1 ? toolTurn("r1", "read", {}) : textTurn(JSON.stringify(c.messages.at(-1)).includes(SUMMARY_PROMPT_OPENING) ? "<summary>S</summary>" : "ok");
     return scriptedStreamFn([turn])(m, c, o);
   };
   const agent = new Agent({ model, streamFunction: fn, tools: [bigRead] });

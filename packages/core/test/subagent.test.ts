@@ -14,7 +14,7 @@ import { disableTools, restrictTools, visibleTools } from "../src/tools/harness.
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import type { Model, StreamFn } from "../src/provider/types.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
-import { COLLAPSE_SYSTEM, SUMMARY_SYSTEM } from "../src/compaction/builtin.ts";
+import { COLLAPSE_PROMPT_OPENING, SUMMARY_PROMPT_OPENING } from "../src/compaction/builtin.ts";
 import { estimateText } from "../src/compaction/view.ts";
 import { fixedOverhead } from "../src/compaction/pipeline.ts";
 
@@ -393,7 +393,8 @@ test("子 agent 自己的 context 照样自动压缩，但压缩的 hook（preCo
   const parent = scriptedStreamFn([toolTurn("c1", "subagent", { prompt: "CHILD-TASK read it", system: "CHILD", tools: ["big"] }), textTurn("parent done")]);
   const childSeen: string[] = [];
   const fn: StreamFn = (model, context, options) => {
-    if (context.systemPrompt === COLLAPSE_SYSTEM || context.systemPrompt === SUMMARY_SYSTEM) return scriptedStreamFn([textTurn("<summary>S</summary>")])(model, context, options);
+    const last = JSON.stringify(context.messages.at(-1));
+    if (last.includes(COLLAPSE_PROMPT_OPENING) || last.includes(SUMMARY_PROMPT_OPENING)) return scriptedStreamFn([textTurn("<summary>S</summary>")])(model, context, options);
     if (context.systemPrompt === "CHILD") {
       childSeen.push(JSON.stringify(context.messages));
       return child(model, context, options);

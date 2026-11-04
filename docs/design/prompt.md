@@ -43,7 +43,7 @@ flowchart LR
 另有三条刻意不走主 Agent 装配器的调用路径，各自定义 system 的来源与刷新规则：
 
 - `subagent` 的任务、system 与工具集由父模型在调用时给出（fresh），或整套继承父这次 run 的装配（fork），见 [`SubagentSpec`](../../packages/core/src/subagent/tool.ts#symbol=SubagentSpec) 与 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。fork 的工具菜单与父逐项相同（交不出去的几件是同名同 schema、点名就拒的替身，`report` 接在末尾），前缀缓存接得上。
-- compaction 的 collapse / summary 使用自己的固定 prompt，归压缩策略所有，见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages)。
+- compaction 的 collapse / summary 从主对话分叉：同一份 system 与工具菜单，压缩指令（归压缩策略所有）作为末尾一条 harness 消息，见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages) 与 [Compaction](compaction.md) §5。
 - Dream 复用隔离循环但 system 为 `null`；它的整理指令由 memory模块提供，见 [`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask)。
 
 ## 2. 注册接口与所有权
@@ -127,7 +127,7 @@ flowchart LR
 
 因此“每轮注入”只是历史名字，不是准确生命周期。重试属于同一个 turn 的下一个 attempt，[`callModel()`](../../packages/core/src/loop/run-turn.ts#symbol=callModel) 会重新取 injection、重新 transform、重新过 hook 与 projection。任何有副作用的回调都必须自行幂等。
 
-system 的“冻结”只指主 Agent 从 registry 装配的快照。内部 loop 边界 的 `prepareNextTurn` 仍能直接替换 `AgentContext.systemPrompt`，但 Agent 没有把它暴露为产品或 extension 的 prompt 写入口。子 agent 和 compaction 调用也各自使用独立 system，不能据此声称“进程里所有模型调用的 system 每 run 都不变”。
+system 的“冻结”只指主 Agent 从 registry 装配的快照。内部 loop 边界 的 `prepareNextTurn` 仍能直接替换 `AgentContext.systemPrompt`，但 Agent 没有把它暴露为产品或 extension 的 prompt 写入口。fresh 子 agent 与 Dream 使用独立 system（fork 子 agent、记忆提取与内建压缩调用沿用这次 run 的那份），不能据此声称“进程里所有模型调用的 system 每 run 都不变”。
 
 缓存层面只承诺仓库自己的确定性：sections 稳定排序、时间戳不进固定 prompt、injection 追加在消息尾部，以及工具菜单的顺序（[`visibleTools()`](../../packages/core/src/tools/harness.ts#symbol=visibleTools)，`toolSchemas()` 按给定顺序投影）：常驻工具按名排，已加载的延迟工具按加载顺序追加在后，`tool_search` 垫底（它的描述随加载变）。加载一件延迟工具只动菜单尾巴——此前全体按名排，新加载的一件插进中间，它之后的工具、system 与整段对话一起失去缓存（本机会话实测命中从 9 600 掉到 896）；判据见 [菜单顺序](../../packages/core/test/tool-search.test.ts#test=菜单顺序常驻工具按名排已加载的延迟工具按加载顺序追加在后toolsearch-垫底加载一件只动菜单尾巴前面的字节与-provider-缓存不动)。是否命中、命中多少以及 tools / system / messages 在厂商缓存里的相对位置，都是 provider 行为，不是 core 契约。
 

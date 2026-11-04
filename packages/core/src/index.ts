@@ -240,10 +240,10 @@ export type { ContextAnchor } from "./compaction/view.ts";
 export {
   COLLAPSE_INSTRUCTION,
   COLLAPSE_MAX_SECTIONS,
-  COLLAPSE_SYSTEM,
+  COLLAPSE_PROMPT_OPENING,
   OVERFLOW_KEEP_TOKENS,
   SUMMARY_INSTRUCTION,
-  SUMMARY_SYSTEM,
+  SUMMARY_PROMPT_OPENING,
   chooseTailStart,
   collapseStage,
   defaultCompactionStages,

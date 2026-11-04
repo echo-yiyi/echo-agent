@@ -20,7 +20,7 @@ import { FakeClock } from "../src/schedule/clock.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { errorTurn, FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
 import type { Model } from "../src/provider/types.ts";
-import { COLLAPSE_SYSTEM, SUMMARY_SYSTEM } from "../src/compaction/builtin.ts";
+import { COLLAPSE_PROMPT_OPENING, SUMMARY_PROMPT_OPENING } from "../src/compaction/builtin.ts";
 import { estimateText } from "../src/compaction/view.ts";
 import { fixedOverhead } from "../src/compaction/pipeline.ts";
 import { visibleTools } from "../src/tools/harness.ts";
@@ -528,7 +528,8 @@ test("提取子循环不做自动压缩：主对话在最后那条回答之后�
   const longAnswer = "word ".repeat(400); // ≈ 500 token
   let foreground = 0;
   const fn: StreamFn = (model, context, options) => {
-    const kind = context.systemPrompt === COLLAPSE_SYSTEM ? "collapse" : context.systemPrompt === SUMMARY_SYSTEM ? "summary" : isExtract(context) ? "extract" : "foreground";
+    const last = JSON.stringify(context.messages.at(-1));
+    const kind = last.includes(COLLAPSE_PROMPT_OPENING) ? "collapse" : last.includes(SUMMARY_PROMPT_OPENING) ? "summary" : isExtract(context) ? "extract" : "foreground";
     kinds.push(kind);
     if (kind === "collapse" || kind === "summary") return scriptedStreamFn([textTurn("<summary>S</summary>")])(model, context, options);
     if (kind === "extract") return scriptedStreamFn([textTurn("没什么可记的。")])(model, context, options);

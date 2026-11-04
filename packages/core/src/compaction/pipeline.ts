@@ -3,7 +3,7 @@
 //
 // core 在这里拥有四件事：**触发判断、阶段的校验吸附、事件与 hook、状态落到 context**。
 // 阶段（内建的、扩展的）只产 `CompactionState`。摘要要调模型，所以给阶段一个 `callModel`——
-// 用本 run 冻结的 model 与 streamFn，一次、无工具、不进 transcript。
+// 用本 run 冻结的 model 与 streamFn，一次、不执行工具、不进 transcript；缺省从这条循环分叉（同一份 system 与菜单）。
 //
 // **量纲**：触发以 provider usage 为准，阶段之间只能重新字符估——两者不是一个尺子（中文会话字符估低 2–4 倍）。
 // 所以从 usage 算一个校准比（真 token / 字符估），之后 system 与消息的字符估都乘它：流水线里的 `used`、给阶段的 `estimate`、
@@ -94,16 +94,19 @@ export function compactionBudget(input: {
  * retryable 错误重试到 `maxAttempts`；只发 hook 侧的 modelCallFailed / retryScheduled，不发 loop 事件（它不在任何 turn 里）。
  */
 export function modelCallFor(deps: LoopDeps): CompactionModelCall {
-  const { config, streamFn } = deps;
+  const { config, streamFn, context } = deps;
   return async ({ systemPrompt, messages }, signal) => {
+    // 不给 system = 从这条循环分叉（见 `CompactionModelCall`）：system、菜单、thinking 档位都与循环的请求相同，前缀缓存接得上
+    const fork = systemPrompt === undefined;
     const llm = await config.convertToLlm([...messages]);
+    const tools = fork ? toolSchemas(config.getTools()) : [];
     const { maxAttempts } = config.retryPolicy;
     for (let attempt = 1; ; attempt++) {
       const apiKey = await config.getApiKey?.(config.model.provider);
       const stream = await streamFn(
         config.model,
-        { systemPrompt, messages: llm, tools: [] },
-        { signal, apiKey, thinkingLevel: "off" },
+        { systemPrompt: fork ? context.systemPrompt : systemPrompt, messages: llm, tools },
+        { signal, apiKey, thinkingLevel: fork ? config.thinkingLevel : "off" },
       );
       for await (const _item of stream) {
         /* 只要定稿；流式增量不外发 */

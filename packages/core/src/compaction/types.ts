@@ -59,12 +59,18 @@ export type CompactionBudget = {
 };
 
 /**
- * 阶段能用的模型调用：**一次、无工具、不进 transcript、不发 message_\* 事件**，
+ * 阶段能用的模型调用：**一次、不执行工具、不进 transcript、不发 message_\* 事件**，
  * 用本 run 冻结的 model 与 streamFn。失败以 rejection 返回（带 provider 的 AgentError code），阶段自己决定兜底；
- * 回复撞上输出上限（`max_tokens`）也是失败——半截的正文不交给阶段。
+ * 回复撞上输出上限（`max_tokens`）也是失败——半截的正文不交给阶段。只取回复里的文本。
+ *
+ * 两种形状（2026-11-03）：
+ *   · **不给 `systemPrompt`** = 从这条循环分叉：同一份 system、同一份工具菜单（只摆 schema、不执行）、同一个 thinking 档位，
+ *     `messages` 是阶段给的（通常是视图的一段前缀 + 末尾一条指令）——前缀与循环上一次请求逐字相同，吃得到 provider 的前缀缓存。
+ *     内建阶段都用这一种；
+ *   · **给了**（含 `null`）= 独立调用：就用这份 system、不带工具、thinking 关。
  */
 export type CompactionModelCall = (
-  input: { systemPrompt: string | null; messages: readonly AgentMessage[] },
+  input: { systemPrompt?: string | null; messages: readonly AgentMessage[] },
   signal: AbortSignal,
 ) => Promise<string>;
 
