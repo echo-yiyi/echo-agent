@@ -26,6 +26,7 @@ import type { Diagnostic } from "../src/errors.ts";
 import type { ScheduleDeps } from "../src/schedule/harness.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { FileDir } from "../src/storage/file-dir.ts";
+import type { StorageDir } from "../src/storage/types.ts";
 import { cronMatches, nextMatchAfter, validateCron } from "../src/schedule/cron.ts";
 import type { ScheduleFact } from "../src/schedule/observe.ts";
 import {
@@ -46,7 +47,7 @@ function fakeHost() {
   return { host, delivered, reports };
 }
 
-function harness(dir = new InMemoryDir()) {
+function harness(dir: StorageDir = new InMemoryDir()) {
   const { host, delivered, reports } = fakeHost();
   const h = createAgentSchedule(dir);
   Object.assign(h, host);
@@ -104,6 +105,18 @@ describe("cron 子集", () => {
     expect(nextMatchAfter("0 0 29 2 *", Date.parse("2026-08-05T09:00:00"))).toBe(Date.parse("2028-02-29T00:00:00"));
     expect(nextMatchAfter("0 0 30 2 *", Date.parse("2026-08-05T09:00:00"))).toBeNull();
   });
+
+  test("夏令时(America/New_York,cronie 语义):固定时刻在回拨的那一小时只触发一次、拨快跳过的补在间隙之后第一刻;通配时刻照真实时间走", async () => {
+    // 换时区要单独一个进程(fixtures/cron-dst.ts 头注);`bun test` 自己缺省 UTC,没有夏令时
+    const child = Bun.spawn(["bun", "test", join(import.meta.dir, "fixtures/cron-dst.ts")], {
+      env: { ...process.env, TZ: "America/New_York" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    expect(code, out + err).toBe(0);
+    expect(out + err).toContain(" 6 pass");
+  }, 60_000);
 
   test("校验:坏表达式给人话拒因", () => {
     expect(validateCron("0 9 * * *")).toBeNull();
@@ -182,6 +195,29 @@ describe("tick", () => {
     expect(await dir.read(SCHEDULE_FILE)).not.toContain("once"); // 删除已落盘
     await tickSchedule(h, T0 + 65_000); // 下一分钟:cron 再触发
     expect(delivered.length).toBe(3);
+  });
+
+  test("一次性任务投递后落盘失败:先不从内存删,下次 tick 再投一次并重试落盘;写成之后才删", async () => {
+    // 此前触发即删:内存里没了、盘上还在,下次 tick 什么都不做,要等重启才又提醒一次
+    const inner = new InMemoryDir();
+    let diskDown = false;
+    const dir: StorageDir = {
+      read: (p) => inner.read(p),
+      write: (p, c) => (diskDown ? Promise.reject(new Error("EIO write")) : inner.write(p, c)),
+      remove: (p) => inner.remove(p),
+      list: (p) => inner.list(p),
+    };
+    const { h, delivered } = harness(dir);
+    await addSchedule(h, sched({ kind: "at", at: T0 + 5_000 } as never, "once"), T0);
+    diskDown = true;
+    await expect(tickSchedule(h, T0 + 6_000)).rejects.toThrow("EIO write");
+    expect(delivered.length).toBe(1);
+    expect((await listSchedules(h)).map((e) => e.schedule.id)).toEqual(["once"]);
+    diskDown = false;
+    await tickSchedule(h, T0 + 7_000);
+    expect(delivered.length).toBe(2);
+    expect((await listSchedules(h)).map((e) => e.schedule.id)).toEqual([]);
+    expect(await inner.read(SCHEDULE_FILE)).not.toContain("once");
   });
 
   test("单条坏不杀 tick:前一条投递炸了,后一条照常", async () => {
