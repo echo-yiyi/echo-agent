@@ -47,7 +47,7 @@ import { DEFAULT_DREAM_GATES } from "../src/memory/dream.ts";
 import {
   createAgentMemories, addMemory, removeMemoryRegion, listMemories, getMemory, memoryFor,
   memoryView, memoryCreate, memoryStrReplace, memoryInsert, memoryDelete, memoryRename,
-  memoryPromptSections, composeMemoryRegion, memoryTool, memoryObserver, bindMemoryScopes, memoryScopeTableOf, dreamScopes,
+  memoryPromptSections, memoryUpdateMessage, composeMemoryRegion, memoryTool, memoryObserver, bindMemoryScopes, memoryScopeTableOf, dreamScopes,
   shouldDream, dreamTask, markDreamed, disposeMemory, MEMORY_KIND, MEMORY_UPDATE_SOURCE, type AgentMemories, type MemoryHarnessOptions,
 } from "../src/memory/harness.ts";
 import type { CompactionStage } from "../src/compaction/types.ts";
@@ -411,6 +411,15 @@ describe("memory 工具六动词", () => {
     expect((await remember("用户偏好 tab")).isError).toBe(false);
     expect(await dir.read("session/memory/INDEX.md")).toContain("note.md"); // 索引重建没断
     expect(await shouldDream(h, "session")).toBe(true); // 计数没断
+  });
+
+  test("str_replace:new_str 原样写进去，$$ / $& / $' 不被当成替换模式", async () => {
+    const dir = new InMemoryDir();
+    const h = memories(dir);
+    await call(h, { command: "create", path: "user/agent.md", file_text: "- shell tip: TODO\n- other line\n" });
+    const newStr = "use $$ for the PID, $& echoes, $' and $` are literal";
+    expect((await call(h, { command: "str_replace", path: "user/agent.md", old_str: "TODO", new_str: newStr })).isError).toBe(false);
+    expect(await dir.read("user/agent.md")).toBe(`- shell tip: ${newStr}\n- other line\n`);
   });
 
   test("str_replace:零命中与多义都拒", async () => {
@@ -781,6 +790,36 @@ describe("Agent 接线", () => {
     expect(notice).toContain("- added: user/memory/b.md");
     expect(notice).toContain("- removed: user/memory/a.md");
     expect(notice).not.toContain("INDEX.md");
+  });
+
+  test("冻结那一刻的正文与变化基线出自同一份读：后台恰好在两次读之间写入，下个 run 照样收到通知", async () => {
+    const inner = new InMemoryDir();
+    await inner.write("user/user.md", "旧偏好");
+    // 第一次读 user.md 之后立刻有人写一笔（后台提取恰好落在组装途中）
+    let raced = false;
+    const racing: MemoryDir = {
+      read: async (p) => {
+        const text = await inner.read(p);
+        if (p === "user/user.md" && !raced) {
+          raced = true;
+          await inner.write(p, "新偏好");
+        }
+        return text;
+      },
+      write: (p, c) => inner.write(p, c),
+      remove: (p) => inner.remove(p),
+      list: (p) => inner.list(p),
+    };
+    const h = memories(racing);
+    const frozen = { text: null, files: null } as { text: string | null; files: ReadonlyMap<string, string> | null };
+    const [section] = memoryPromptSections(h, frozen);
+    const text = await section!.render({ workspace: "/", model: { provider: "p", id: "m" }, agentId: "a", sessionId: null });
+    expect(raced).toBe(true);
+    expect(text).toContain("旧偏好");
+    expect(text).not.toContain("新偏好");
+    const notice = await memoryUpdateMessage(h, frozen);
+    expect(notice).not.toBeNull();
+    expect(JSON.stringify(notice)).toContain("changed: user/user.md");
   });
 
   test("压缩落地后 system 重取一次记忆：完整的现行内容回到 system，基线跟着重记，不再补通知", async () => {

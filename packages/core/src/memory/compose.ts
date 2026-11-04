@@ -111,8 +111,9 @@ export const defaultComposeMemory: ComposeMemory = async (m, dir, table) => {
  * 记忆整段进 system 的**占位**拼法:使用规则 + 各模块块。
  * 怎么拼 prompt 是 prompt 组装层的设计(专门一轮);在那之前 agent 用这个缺省顶着,
  * 那轮落地后由组装管线接管——MemoryHarness 只出数据(list/composeRegion),不拥有拼法。
+ * `dir`:从哪读，缺省 `ctx.dir`；冻结记忆段时给一份只读一次的快照，正文与变化基线出自同一份读。
  */
-export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
+export async function renderMemorySystem(ctx: AgentMemories, dir: MemoryDir = ctx.dir): Promise<string> {
   const regions = listMemories(ctx);
   if (regions.length === 0) return "";
   const table = memoryScopeTableOf(ctx);
@@ -124,7 +125,7 @@ export async function renderMemorySystem(ctx: AgentMemories): Promise<string> {
     });
   const blocks: string[] = [];
   for (const m of regions) {
-    const block = await composeMemoryRegion(ctx, m);
+    const block = await composeMemoryRegion(ctx, m, dir);
     if (block !== "") blocks.push(block);
   }
   // compose counts：这次组装出的记忆段（进 system 或进一条记忆更新）的模块数 / 非空块数 / 字符数（sink 永不抛，兜一层不让观测影响 prompt）
