@@ -83,8 +83,11 @@ export const DEFAULT_EXTRACT_MAX_TURNS = 5;
 /** 提取 prompt 的第一句。脚本化模型的测试靠它认出一次模型调用是提取子循环发的。 */
 export const EXTRACT_PROMPT_OPENING = "A reply just finished.";
 
-/** 这次要看的那一段：在主对话末尾占几条消息，以及从哪句用户原话开始（没有用户原话就是 null）。 */
-export type ExtractRange = Readonly<{ messages: number; firstUserText: string | null }>;
+/**
+ * 这次要看的那一段：在主对话末尾占几条消息，从哪句用户原话开始（没有用户原话就是 null），
+ * 以及是不是从这场对话的开头看起（游标为 0：这场对话还没复盘过）。
+ */
+export type ExtractRange = Readonly<{ messages: number; firstUserText: string | null; fromStart: boolean }>;
 
 /** 引用用户原话时最多带多少字：够模型在上文里认出那一句，又不把长消息整段重抄一遍。 */
 const QUOTE_CHARS = 120;
@@ -111,8 +114,12 @@ export function defaultExtractPrompt(memories: readonly AnyMemory[], table: Memo
     .filter((l): l is string => l !== null)
     .join("\n");
   const quote = range.firstUserText === null ? "" : ` It begins with the user message that starts: «${quoteStart(range.firstUserText)}».`;
+  const last = `the last ${range.messages} message${range.messages === 1 ? "" : "s"} above`;
+  const scope = range.fromStart
+    ? `Memory has not been reviewed in this conversation yet; review it from the start — ${last}.`
+    : `Memory was last reviewed partway through this conversation; review only what came after that — ${last}.`;
   return [
-    `${EXTRACT_PROMPT_OPENING} Pause the task above: you are now reviewing memory, not continuing the work. Memory was last reviewed partway through this conversation; review only what came after that — the last ${range.messages} message${range.messages === 1 ? "" : "s"} above.${quote} Decide whether anything in it is worth keeping after this session ends.`,
+    `${EXTRACT_PROMPT_OPENING} Pause the task above: you are now reviewing memory, not continuing the work. ${scope}${quote} Decide whether anything in it is worth keeping after this session ends.`,
     "Only the memory tool works here. Calls to any other tool are refused — do not try them.",
     "Work in this order:\n" +
       "1. Check what is already stored — it is listed under \"Stored now\" below (resident modules in full, indexed modules by their index). Most of what feels new is already there in some form.\n" +

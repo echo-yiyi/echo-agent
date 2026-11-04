@@ -131,7 +131,7 @@ system                       不变，每 run 装配一次，不含摘要
 
 **框定**：`frameFull()` 给整段摘要加来历（这段对话被压缩过）、范围（`#0–#k`，拆成两段时两段都列、并说明用户最新的请求原文紧跟其后）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
 
-**`transcript_read({ from, to?, query? })`**（[`transcriptReadTool()`](../../packages/core/src/compaction/tool.ts#symbol=transcriptReadTool)）：按下标读**内存里的完整 transcript**——不走磁盘、不进 workspace jail，没有文件工具的通用 agent 也能用；下标与压缩通知里的 `#12–#40` 同一套；单条 4 000 字符、一次 24 000 字符封顶，超了告诉模型从哪续。同组还有一个 prompt 段（`compactionSection()`，order 150）告诉模型压缩之后细节去哪拿。
+**`transcript_read({ from, to?, query? })`**（[`transcriptReadTool()`](../../packages/core/src/compaction/tool.ts#symbol=transcriptReadTool)）：按下标读**内存里的完整 transcript**——不走磁盘、不进 workspace jail，没有文件工具的通用 agent 也能用；下标与压缩通知里的 `#12–#40` 同一套；单条 4 000 字符、一次 24 000 字符封顶，超了告诉模型从哪续。它**常驻菜单**（不 deferred）：摘要框定、折叠说明与 compaction 段都让模型直接调它，延迟的话模型手边没有它（[常驻](../../packages/core/test/compaction.test.ts#test=echocompaction-装上之后-transcriptread-常驻菜单摘要框定与-compaction-段让模型直接调它不用先-toolsearch读的是活的-transcript)）。同组还有一个 prompt 段（`compactionSection()`，order 150）告诉模型压缩之后细节去哪拿。
 
 ## 6. 扩展与热插拔
 

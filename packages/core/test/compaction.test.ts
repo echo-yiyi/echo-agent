@@ -758,10 +758,12 @@ test("transcript_read：按下标读原文（含被压掉的）、query 过滤�
   expect(r.content).toBe("#4 [user] second question");
 });
 
-test("echo:compaction 装上之后 transcript_read 在工具面上，读的是活的 transcript", async () => {
-  const agent = await agentWithBuiltins(scriptedStreamFn([textTurn("hi")]), { model: FAKE_MODEL });
+test("echo:compaction 装上之后 transcript_read 常驻菜单（摘要框定与 compaction 段让模型直接调它，不用先 tool_search），读的是活的 transcript", async () => {
+  const { fn, requests } = capturing([textTurn("hi")]);
+  const agent = await agentWithBuiltins(fn, { model: FAKE_MODEL });
   expect(agent.tools.has("transcript_read")).toBe(true);
   await agent.prompt("hello there");
+  expect(requests[0]!.tools.map((t) => t.name)).toContain("transcript_read");
   const tool = agent.tools.get("transcript_read")!;
   const r = await tool.execute({ from: 0 }, { toolCallId: "x", workspace: "/", sessionId: null, iteration: 1 });
   expect(r.content).toContain("#0 [user] hello there");

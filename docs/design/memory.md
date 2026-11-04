@@ -136,7 +136,7 @@
 
 **退出前补一次**（[`Agent.drainExtract()`](../../packages/core/src/agent.ts#symbol=Agent.drainExtract)）：不看攒了几轮（仍过词数门槛），等它跑完，最多 [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS)，到点照常收摊（提取被中止、游标不动）。`echo.stop()` 在卸 Extension **之前**调它——记忆模块、记忆工具与 prompt 段都是 builtin 挂的，卸完就没得提取，前缀也对不上；`Agent.stop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底。丢锁与 handoff 让位不补；本进程一个 run 都没跑过（只是续上来看一眼就退）也不补——没有运行 scope，`enqueueExtract` 直接返回。所以「没攒满就结束」的那一截通常当场就被看到；没赶上的（进程被杀、补跑到点）由盘上的游标留给下一次续会话。
 
-**提取从主对话分叉**（[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract)）：system 是主循环每个 run 装配的那一份（记忆段是冻结的那一版），菜单是 reply 收尾时主循环的菜单，消息是主循环的 working context（含最后那条回答），末尾接一条提取指令——前缀与主循环最后一次请求逐字相同，厂商的前缀缓存直接接着用。每轮注入（激活 skill 正文、任务清单）不带：它们拼在消息末尾、本来不在共享前缀里。提取与 Dream 的子循环不做压缩（见 [压缩](compaction.md) §4）。菜单照原样摆，只换执行：记忆工具换成这次提取的实例（同一份 schema），其余换成同名同 schema、一点名就在修参那一步拒掉的替身——早于 preToolUse 与权限，后台复盘不会去问人。主菜单上没有记忆工具时补在末尾（前缀在工具那段断开，但照样能写）。
+**提取从主对话分叉**（[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract)）：system 是主循环每个 run 装配的那一份（记忆段是冻结的那一版），菜单是 reply 收尾时主循环的菜单，消息是主循环的 working context（含最后那条回答），末尾接一条提取指令——前缀与主循环最后一次请求逐字相同，厂商的前缀缓存直接接着用。每轮注入（激活 skill 正文、任务清单）不带：它们拼在消息末尾、本来不在共享前缀里。提取与 Dream 的子循环不做压缩（见 [压缩](compaction.md) §4）。菜单照原样摆，只换执行：记忆工具换成这次提取的实例（同一份 schema），其余换成同名同 schema、一点名就在修参那一步拒掉的替身——早于 preToolUse 与权限，后台复盘不会去问人。主菜单上没有记忆工具时补在末尾（前缀在工具那段断开，但照样能写）。指令按游标分两种说法：游标为 0（这场对话还没复盘过）说「从头看起」，否则说「上次复盘到对话中途，只看之后的」（[`ExtractRange.fromStart`](../../packages/core/src/memory/extract.ts#symbol=ExtractRange)）。
 
 [`defaultExtractPrompt()`](../../packages/core/src/memory/extract.ts#symbol=defaultExtractPrompt) 只说清看哪一段——上文的最后几条、从哪句用户原话开始（两样都给：provider 换算消息时会拆合，单给条数模型数不准）——连同作用域与模块说明，要求**先对照指令自带的已存清单**（`Stored now` 一节：system 里的记忆段是会话开头那一版，之后写的看不到，所以由 [`memoryManifest()`](../../packages/core/src/memory/harness.ts#symbol=memoryManifest) 现取，与前台记忆段同一种呈现：常驻模块全文、indexed 模块给索引）、只在要改某个文件之前 `view`、避免重复、只保留以后有用的事实，允许什么都不写；并说明 INDEX.md 由系统重建。上限来自 [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS)。模型绑定仍来自父 scope，**没有单独实现“便宜模型档”选择**；轮数上限也不等于费用或墙钟时间的硬上界。
 
@@ -156,7 +156,7 @@
 
 缺省阈值以 [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) 为准。水位对 resident 看全文，对 indexed 看索引，不看 indexed 单个正文是否快满。轮次来自前台 turn_end 并向各参与层计数；状态存于各层 `.dream/state.json`。
 
-[`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask) 写 startedAt 并生成限定该层的 memory 工具；写操作还会拒绝同层 dream:false 的模块。读取不受该模块整理开关限制。同一层同时只有一个整理者，靠的是第 7 节那把 `.dream/pass` 的试拿；startedAt 管的是失败之后的退避。
+[`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask) 写 startedAt 并生成限定该层的 memory 工具；写操作还会拒绝同层 dream:false 的模块。整理跑在 `systemPrompt: null` 下，所以这把工具的描述与 `path` 参数说明用 [`TASK_MEMORY_TOOL_DESCRIPTION`](../../packages/core/src/memory/tool.ts#symbol=TASK_MEMORY_TOOL_DESCRIPTION) 那一版：模块与层在任务指令里，不指向 system 的记忆段（产品给了自己的描述就用它的）。读取不受该模块整理开关限制。同一层同时只有一个整理者，靠的是第 7 节那把 `.dream/pass` 的试拿；startedAt 管的是失败之后的退避。
 
 [`defaultDreamPrompt()`](../../packages/core/src/memory/dream.ts#symbol=defaultDreamPrompt) 要求去重、把错放的内容重建到正确模块后从原处删掉、剪枝、保留无法裁决的冲突及控制预算。这些语义步骤不具备事务性，也没有机器判据证明模型真的完成了它们。
 

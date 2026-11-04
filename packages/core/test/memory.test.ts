@@ -530,6 +530,28 @@ describe("Dream 门控", () => {
     expect(await shouldDream(h, "session")).toBe(false); // 锁住了
   });
 
+  test("dream 那把工具的描述不指向 system 的 Memory 段：整理跑在 systemPrompt: null 下，模块与层在任务指令里", async () => {
+    const h = memories(new InMemoryDir(), { dream: {} });
+    const [tool] = (await dreamTask(h, "session")).tools;
+    const schema = JSON.stringify({ description: tool!.kind === "model" ? tool!.description : "", parameters: tool!.kind === "model" ? tool!.parameters : null });
+    expect(schema).not.toContain("Memory section");
+    expect(schema).not.toContain("system prompt");
+    expect(schema).toContain("task");
+    // 前台那把照旧指向 system 的记忆段
+    const fg = memoryTool(h);
+    expect(fg.description).toContain("Memory section of the system prompt");
+  });
+
+  test("提取 prompt：第一次复盘（从对话开头看起）不说「上次复盘到对话中途」；之后才说", () => {
+    const table = memoryScopeTableOf(memories(new InMemoryDir()));
+    const mods = listMemories(memories(new InMemoryDir()));
+    const first = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: true }, "");
+    expect(first).not.toContain("partway");
+    expect(first).toContain("not been reviewed");
+    const later = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: false }, "");
+    expect(later).toContain("last reviewed partway through this conversation");
+  });
+
   test("dream 那把工具够不到上两层(不是靠 prompt 里说一句,是门)", async () => {
     const dir = new InMemoryDir();
     const h = memories(dir, { dream: {} });
@@ -1092,7 +1114,7 @@ describe("判据跟着模块走", () => {
     expect(system).not.toContain("next month");
     expect(system).not.toContain("repository already states");
     expect(system).toContain("moments you shared");
-    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), { messages: 2, firstUserText: "hi" }, "");
+    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), { messages: 2, firstUserText: "hi", fromStart: false }, "");
     expect(extract).not.toContain("next month");
     expect(extract).not.toContain("true only inside this conversation");
     expect(extract).toContain("moments you shared");

@@ -32,7 +32,7 @@ import {
   type DreamGates,
   type DreamState,
 } from "./dream.ts";
-import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
+import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, TASK_MEMORY_TOOL_DESCRIPTION, TASK_MEMORY_TOOL_PARAMETERS, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
 import { lateBoundMemoryDir, safeScopeSegment, splitScopePath, type LateBoundMemoryDir, type MemoryScopeTable } from "./scope.ts";
 import { acquireMemoryLock, assertFresh, withMemoryRegionLock } from "./lock.ts";
 import { StorageLockBusy } from "../storage/name-lock.ts";
@@ -855,7 +855,13 @@ export async function dreamTask(
   await updateDreamState(ctx, scope, (s) => ({ ...s, startedAt: Date.now() }));
   return {
     prompt: defaultDreamPrompt(listMemories(ctx), ctx.binding.table(), scope),
-    tools: [dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, scope, ...(opts?.observe === undefined ? {} : { observe: opts.observe }) }))],
+    // 整理跑在 `systemPrompt: null` 下：描述与参数说明不指向 system 的记忆段（产品自己给了描述就用它的）
+    tools: [
+      {
+        ...dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, description: ctx.toolOpts?.description ?? TASK_MEMORY_TOOL_DESCRIPTION, scope, ...(opts?.observe === undefined ? {} : { observe: opts.observe }) })),
+        parameters: TASK_MEMORY_TOOL_PARAMETERS,
+      },
+    ],
   };
 }
 

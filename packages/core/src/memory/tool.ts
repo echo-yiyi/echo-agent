@@ -109,33 +109,53 @@ export type CreateMemoryToolOptions = {
   reads?: MemoryReads;
 };
 
-const DEFAULT_DESCRIPTION =
-  "Read and write your persistent memory (kept across sessions). The modules, the layers, their paths and what goes in each are in the Memory section of the system prompt. " +
-  "Every path starts with the layer that decides who sees it (the layers for this session are listed there, widest first), followed by the module's path — e.g. <layer>/agent.md, <layer>/memory/x.md. " +
+/** 描述里讲「模块与层在哪」的那一句之后的部分：两种描述共用。 */
+const DESCRIPTION_COMMANDS =
   "Commands: view (a directory — path ending in / or empty for everything — or a file), create (create or overwrite a whole file), " +
   "str_replace (replace the single occurrence of old_str with new_str), insert (insert after line insert_line), " +
   "delete, rename. Some modules support only some of these; a refused command says which ones it supports. " +
   "A write that exceeds a module's budget is refused with the current numbers: consolidate (merge, delete stale entries) first, then write. " +
   "View a file before overwriting it with create, inserting into it or deleting it: other sessions may write to the same memory, and a change based on a version you have not seen (or one that changed since you viewed it) is refused — view it again and redo the change.";
 
-const PARAMETERS: Record<string, unknown> = {
-  type: "object",
-  properties: {
-    command: {
-      type: "string",
-      enum: ["view", "create", "str_replace", "insert", "delete", "rename"],
-      description: "The operation to perform",
+const DEFAULT_DESCRIPTION =
+  "Read and write your persistent memory (kept across sessions). The modules, the layers, their paths and what goes in each are in the Memory section of the system prompt. " +
+  "Every path starts with the layer that decides who sees it (the layers for this session are listed there, widest first), followed by the module's path — e.g. <layer>/agent.md, <layer>/memory/x.md. " +
+  DESCRIPTION_COMMANDS;
+
+/**
+ * 跑在没有记忆段的 system 下时的描述（Dream 的 `systemPrompt: null`）：模块、层与路径由任务指令列出，不指向 system。
+ * 前台与提取用缺省那份——它们的 system 里有记忆段。
+ */
+export const TASK_MEMORY_TOOL_DESCRIPTION =
+  "Read and write your persistent memory (kept across sessions). The modules, the layer and their paths for this task are listed in the task instructions. " +
+  "Every path starts with the layer, followed by the module's path — e.g. <layer>/agent.md, <layer>/memory/x.md. " +
+  DESCRIPTION_COMMANDS;
+
+/** `path` 参数的说明：指向哪里列着这次的层。 */
+function parameters(layersAt: string): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      command: {
+        type: "string",
+        enum: ["view", "create", "str_replace", "insert", "delete", "rename"],
+        description: "The operation to perform",
+      },
+      path: { type: "string", description: `Target path, layer first (see ${layersAt}): <layer>/agent.md, <layer>/memory/x.md; for view, '' shows everything` },
+      file_text: { type: "string", description: "create: the full file content" },
+      old_str: { type: "string", description: "str_replace: the exact text to replace (must occur exactly once)" },
+      new_str: { type: "string", description: "str_replace: the replacement text" },
+      insert_line: { type: "number", description: "insert: insert after this line number (0 = start of file)" },
+      insert_text: { type: "string", description: "insert: the text to insert" },
+      new_path: { type: "string", description: "rename: the new path (must stay in the same region)" },
     },
-    path: { type: "string", description: "Target path, layer first (see the Memory section for this session's layers): <layer>/agent.md, <layer>/memory/x.md; for view, '' shows everything" },
-    file_text: { type: "string", description: "create: the full file content" },
-    old_str: { type: "string", description: "str_replace: the exact text to replace (must occur exactly once)" },
-    new_str: { type: "string", description: "str_replace: the replacement text" },
-    insert_line: { type: "number", description: "insert: insert after this line number (0 = start of file)" },
-    insert_text: { type: "string", description: "insert: the text to insert" },
-    new_path: { type: "string", description: "rename: the new path (must stay in the same region)" },
-  },
-  required: ["command", "path"],
-};
+    required: ["command", "path"],
+  };
+}
+
+const PARAMETERS = parameters("the Memory section for this session's layers");
+/** 与 `TASK_MEMORY_TOOL_DESCRIPTION` 配套的参数 schema。 */
+export const TASK_MEMORY_TOOL_PARAMETERS = parameters("the task instructions for the layer");
 
 export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolOptions): ModelTool<MemoryToolParams> {
   const caller: MemoryCaller = { reads: opts?.reads ?? new Map(), ...(opts?.observe === undefined ? {} : { observe: opts.observe }) };

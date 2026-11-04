@@ -104,7 +104,7 @@ test("tool_search：description 每轮现算列出延迟层（取过的标 loade
     [lazyPing, lazyOther],
   );
   const search = agentOf(echo).tools.get("tool_search") as unknown as { description: string };
-  // core 自己那几件缺省延迟的（schedule_* / skill_create / TaskGet / transcript_read）也在名单里
+  // core 自己那几件缺省延迟的（schedule_* / skill_create / TaskGet）也在名单里
   expect(search.description).toContain("other, ping, schedule_cancel, schedule_create, schedule_list, skill_create");
 
   await echo.agent.prompt("试试");

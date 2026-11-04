@@ -3054,7 +3054,7 @@ export class Agent {
       if (!force && humanTurns(fresh) < DEFAULT_EXTRACT_EVERY_TURNS) return;
       // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
       const span = projectRange(messages, compaction, from, end);
-      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span) };
+      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0 };
       // 与整理排成一条：等的这段里被中止（stop / 丢锁）或 transcript 换了代，就不跑
       const done = await this.oneBackgroundWriter(async () =>
         signal.aborted || epoch !== this.extractEpoch ? false : this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal),
