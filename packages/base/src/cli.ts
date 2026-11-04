@@ -353,11 +353,30 @@ export type Main = (argv: readonly string[], interactive?: boolean, deps?: MainD
  * 第三个参数 `deps` 是注入点。生产一个都不给：真凭据文件、真终端、真 HTTP 验证。
  */
 export function mainFor(product: Product, shell: Shell): Main {
-  return async (
-    argv: readonly string[],
-    interactive: boolean = process.stdin.isTTY === true,
-    deps: MainDeps = {},
-  ): Promise<number> => {
+  const main = launcher(product, shell);
+  // **进程级 rejection 兜底**（2026-11-03 拍板）：扩展里一个没接住的 rejection，缺省会让 Bun 以 1 退出——
+  // `--serve` 常驻宿主、正跑着的对话跟着没了。装在每个产品入口都走的这一处：stderr 一行（消息 + 栈的第一帧，
+  // 看得出是哪个文件），进程继续。`uncaughtException` 保持缺省：同步抛出来的没人接，状态已经说不清了。
+  return async (argv, interactive = process.stdin.isTTY === true, deps = {}) => {
+    process.on("unhandledRejection", reportUnhandledRejection);
+    try {
+      return await main(argv, interactive, deps);
+    } finally {
+      process.off("unhandledRejection", reportUnhandledRejection);
+    }
+  };
+}
+
+/** 一行：`[unhandledRejection] <消息> <栈的第一帧>`。不是 Error 的就 `String()` 它。 */
+function reportUnhandledRejection(reason: unknown): void {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  const frame = reason instanceof Error ? reason.stack?.split("\n").find((l) => l.trim().startsWith("at "))?.trim() : undefined;
+  process.stderr.write(`[unhandledRejection] ${message}${frame === undefined ? "" : ` ${frame}`}\n`);
+}
+
+/** `mainFor` 的实质：启动逻辑本身。 */
+function launcher(product: Product, shell: Shell): (argv: readonly string[], interactive: boolean, deps: MainDeps) => Promise<number> {
+  return async (argv, interactive, deps) => {
     // `observe` 是只读子命令：不装配、不取锁、不看凭据——在一切启动逻辑之前分走
     if (argv[0] === "observe") return runObserve(argv.slice(1), product.name);
     let opts: CliOptions | null;

@@ -167,6 +167,7 @@ replace 在卸旧前验证新代 config 和依赖图；PREPARE 失败保留旧�
 - 已拿到的原始 service 引用不会统一撤销，回调须遵守 signal 与 disposer 协议。
 - start / dispose 不合作时，Host 没有通用强制回收和超时保证。
 - 多文件重载逐项执行，不是整批原子替换；模块求值后的内存也不能由删除快照释放。
+- 扩展里没接住的 Promise rejection 不归 Host 管：库调用方（直接 `createEcho()`）自己决定进程怎么办。产品命令行的入口（[`mainFor()`](../../packages/base/src/cli.ts#symbol=mainFor)）装了进程级 `unhandledRejection` 处理器，stderr 打一行（消息与栈的第一帧）、进程继续；同步抛出、没人接的 `uncaughtException` 保持缺省，进程退出（[记录](../decisions/implemented/2026-11-03-process-unhandled-rejection.md)）。
 
 历史复核探针见 [记录](../code-review/2026-09-15-doc-probes.md)，本文只维护现行契约与测试入口。
 

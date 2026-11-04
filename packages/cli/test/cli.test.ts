@@ -613,6 +613,27 @@ test("bin:管道形态 + 坏扩展 → 照样跑，诊断进 stderr，退出码�
   }
 }, 30_000);
 
+test("bin:扩展里一个没接住的 rejection 不让进程退出——stderr 一行说清是什么、在哪个文件，run 照常跑完", async () => {
+  const ext = join(dir, "extensions");
+  mkdirSync(ext, { recursive: true });
+  // 装上 10ms 后丢一个没人接的 rejection；模型的回答 800ms 后才到——缺省的 Bun 在这之前就以 1 退出了
+  writeFileSync(
+    join(ext, "leaky.ts"),
+    'export default { name: "leaky", hostAbiVersion: 1, apply() { setTimeout(() => { Promise.reject(new Error("扩展里没接住的错")); }, 10); } };\n',
+  );
+  const server = fakeModelServer("回答到了", 800);
+  try {
+    const r = await runBin(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], { env: fakeModelEnv(server.url), stdin: "说一句" });
+    expect([r.code, r.out]).toEqual([0, expect.stringContaining("回答到了")]);
+    const line = r.err.split("\n").find((l) => l.startsWith("[unhandledRejection]"));
+    expect(line, `stderr 里没有那一行：${r.err}`).toBeDefined();
+    expect(line).toContain("扩展里没接住的错");
+    expect(line).toContain("leaky.ts"); // 栈的第一帧：看得出是哪个文件
+  } finally {
+    server.stop();
+  }
+}, 30_000);
+
 /* ══════════════ 记住上次的选择（D7）：切换了之后，重启还要能用 ══════════════ */
 
 test("main:向导里选的家和模型，**下一次启动直接生效**——不再进向导、欢迎头印着上次选的", async () => {
