@@ -671,6 +671,8 @@ export async function setSessionStatus(store: SessionStore, sessionId: string, s
  * **一句话没说过的段不在清单里**：新建时不落 meta（见 `createOrResume`），所以启动即退出不留痕。
  *
  * 坏 meta **判红**，与恢复同一姿态——清单里静默少一条比整个报错更危险：少的那条正好可能是用户要续的。
+ * **列出来之后、读之前 meta 没了的那一段跳过**（与 `InboxStore.restore` 同口径）：那是别的进程里一段空会话正好收摊、
+ * 撤掉了 meta，不是坏档。零长 / 解不开的 meta 仍是坏档。
  */
 export async function listSessions(root: SessionStore): Promise<SessionInfo[]> {
   const out: SessionInfo[] = [];
@@ -678,17 +680,26 @@ export async function listSessions(root: SessionStore): Promise<SessionInfo[]> {
     if (!p.endsWith(`/${META_FILE}`)) continue;
     const id = p.slice(0, -(META_FILE.length + 1));
     if (id.includes("/")) continue; // 只认 <id>/meta.json 这一层
-    const raw = await root.read(p);
-    if (raw === null) throw new Error(`会话 ${id} 的 ${META_FILE} 在 list 里有、read 却为空`);
-    let info: SessionInfo;
-    try {
-      info = JSON.parse(raw) as SessionInfo;
-    } catch (e) {
-      throw new Error(`会话 ${id} 的 ${META_FILE} 解不开：${(e as Error).message}`);
-    }
-    assertSessionInfoShape(info, `会话 ${id} 的 ${META_FILE}`);
-    if (info.id !== id) throw new Error(`会话目录 ${id} 的 ${META_FILE} 里 id 是 '${info.id}'，与目录名对不上`);
-    out.push(info);
+    const info = await readSessionInfo(root, id);
+    if (info !== null) out.push(info);
   }
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/**
+ * 读 `root`（session 目录的上一层）里 `<id>/meta.json` 这一段的 meta。没有 = null（一句话没说过、或已撤掉）；
+ * 解不开、形状不对、id 与目录名对不上都判红。只读这一个文件——给一段发消息不用列全部会话。
+ */
+export async function readSessionInfo(root: SessionStore, id: string): Promise<SessionInfo | null> {
+  const raw = await root.read(`${id}/${META_FILE}`);
+  if (raw === null) return null;
+  let info: SessionInfo;
+  try {
+    info = JSON.parse(raw) as SessionInfo;
+  } catch (e) {
+    throw new Error(`会话 ${id} 的 ${META_FILE} 解不开：${(e as Error).message}`);
+  }
+  assertSessionInfoShape(info, `会话 ${id} 的 ${META_FILE}`);
+  if (info.id !== id) throw new Error(`会话目录 ${id} 的 ${META_FILE} 里 id 是 '${info.id}'，与目录名对不上`);
+  return info;
 }
