@@ -360,28 +360,72 @@ function compactionRegistry(stages: Map<string, CompactionStage>): AgentCompacti
   };
 }
 
+/**
+ * 每张段表上、每个段名的替代层：`[原段, 第一层替代, 第二层, …]`，原段卸掉后那一位是 `null`。
+ * 生效的永远是还在的最上一层；disposer 只摘自己那一层——几个扩展叠着 replace 同一段、再按任意顺序卸掉，
+ * 都不会把已经卸掉的那层放回去。挂在段表上（WeakMap），同一张表的各个 registry 实例看到的是同一份。
+ */
+const REPLACE_LAYERS = new WeakMap<Map<string, PromptSection>, Map<string, (PromptSection | null)[]>>();
+
+function replaceLayersOf(sections: Map<string, PromptSection>): Map<string, (PromptSection | null)[]> {
+  let layers = REPLACE_LAYERS.get(sections);
+  if (layers === undefined) {
+    layers = new Map();
+    REPLACE_LAYERS.set(sections, layers);
+  }
+  return layers;
+}
+
 /** 两张表上的 registry：先查后写、fail-loud；disposer 认对象身份（O1a exact-reference 契约）。 */
 function promptRegistry(sections: Map<string, PromptSection>, variables: Map<string, PromptVariable>): AgentPromptRegistry {
+  const layers = replaceLayersOf(sections);
   return {
     section: (section, opts) => {
       if (typeof section.name !== "string" || section.name === "") throw new Error("prompt 段缺 name");
       if (!Number.isFinite(section.order)) throw new Error(`prompt 段 '${section.name}' 的 order 必须是有限数`);
-      const existing = sections.get(section.name);
+      const name = section.name;
+      const existing = sections.get(name);
       if (opts?.replace === true) {
         // **替代要有被替代的那一段**：同名不存在时抛，而不是退化成 register——
         // 角色写错段名（比如产品把 identity 段改了名）会静默变成「多出一段」，
         // 而人看到的是「角色没生效」，查起来毫无线索。
-        if (existing === undefined) throw new Error(`prompt 段 '${section.name}' 不存在：replace 无从替起`);
-        sections.set(section.name, section);
+        if (existing === undefined) throw new Error(`prompt 段 '${name}' 不存在：replace 无从替起`);
+        let stack = layers.get(name);
+        // 层与表对不上（表被别处直接改过、或这是第一层替代）：以表上现在那段为底重建
+        if (stack === undefined || stack.at(-1) !== existing) {
+          stack = [existing];
+          layers.set(name, stack);
+        }
+        stack.push(section);
+        sections.set(name, section);
         return () => {
-          // 认对象身份：中途又被别人替过就什么都不做（与 `registerTool` 的卸载器同一条规矩）
-          if (sections.get(section.name) === section) sections.set(section.name, existing);
+          const s = layers.get(name);
+          const i = s?.lastIndexOf(section) ?? -1;
+          if (s === undefined || i < 1) {
+            // 不在层里（层被重建过）：退回老规矩——还是自己才放回原段
+            if (sections.get(name) === section) sections.set(name, existing);
+            return;
+          }
+          s.splice(i, 1);
+          // 只在表上显示的还是自己时才改表（中途被别处直接替过就不动它）
+          if (sections.get(name) === section) {
+            const top = [...s].reverse().find((x): x is PromptSection => x !== null);
+            if (top === undefined) sections.delete(name);
+            else sections.set(name, top);
+          }
+          if (s.length === 1) layers.delete(name);
         };
       }
-      if (existing !== undefined) throw new Error(`prompt 段 '${section.name}' 已存在`);
-      sections.set(section.name, section);
+      if (existing !== undefined) throw new Error(`prompt 段 '${name}' 已存在`);
+      sections.set(name, section);
       return () => {
-        if (sections.get(section.name) === section) sections.delete(section.name);
+        const s = layers.get(name);
+        if (s !== undefined && s[0] === section) {
+          // 上面还叠着替代层：它们照旧生效，只把底那一位腾空——之后最后一层卸掉时不再把这段放回去
+          s[0] = null;
+          return;
+        }
+        if (sections.get(name) === section) sections.delete(name);
       };
     },
     variable: (name, provider) => {

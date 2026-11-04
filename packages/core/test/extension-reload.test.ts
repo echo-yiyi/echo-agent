@@ -374,6 +374,64 @@ test("没有扩展目录的装配（extensionDirs: []）reload 照样能调：�
   expect(r).toEqual({ kind: "done", report: { changes: [] } });
 });
 
+test("后台子 agent 还在跑时热部署推迟：它拿着的是现在这一代的工具，换掉就是在调已经 dispose 的资源", async () => {
+  const g = globalThis as { __bgGate?: { wait: Promise<void>; release: () => void }; __bgSaw?: string[] };
+  let release = (): void => {};
+  g.__bgGate = { wait: new Promise<void>((r) => (release = r)), release: () => release() };
+  g.__bgSaw = [];
+  const dir = join(await tmp(), "extensions");
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, "conn.ts");
+  const source = (ver: string): string =>
+    `import { defineExtension, AgentTools } from ${JSON.stringify(ABI_PATH)};\n` +
+    `import { toolOk } from ${JSON.stringify(TOOLS_PATH)};\n` +
+    `export default defineExtension({ name: "conn", hostAbiVersion: 1, reload: "run", inject: { tools: { service: AgentTools, required: true } },\n` +
+    `  apply(ctx) { const tools = ctx.get(AgentTools); const conn = { open: true };\n` +
+    `    void ctx.effect({ boundary: "run", start: () => ({ value: 0, dispose: () => { conn.open = false; } }) });\n` +
+    `    void ctx.effect({ boundary: "run", start: () => ({ value: 0, dispose: tools.register({ kind: "model", name: "conn_query", label: "q", description: "q",\n` +
+    `      parameters: { type: "object", properties: {} }, execute: async () => { await globalThis.__bgGate.wait; const r = "${ver} open=" + conn.open; globalThis.__bgSaw.push(r); return toolOk(r); } }) }) }); } });\n`;
+  await writeFile(file, source("v1"));
+  const dialect = {
+    api: "fake",
+    async *request(_m: unknown, ctx: { messages: readonly { role: string; content?: unknown }[] }) {
+      const first = JSON.stringify(ctx.messages.find((m) => m.role === "user")?.content ?? "");
+      const sawResult = JSON.stringify(ctx.messages).includes("tool_result");
+      const lastIsGo = JSON.stringify(ctx.messages.at(-1)?.content ?? "").includes("go");
+      const turn = first.includes("CHILD")
+        ? sawResult
+          ? textTurn("child done")
+          : toolTurn("k1", "conn_query", {})
+        : lastIsGo
+          ? toolTurn("p1", "subagent", { prompt: "CHILD", mode: "fresh", tools: ["conn_query"], background: true })
+          : textTurn("parent done");
+      for (const ev of turn) yield structuredClone(ev);
+    },
+  };
+  const echo = await createEcho({
+    provider: createProvider({ id: "s", auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } }, defaultModelId: "only", models: [{ id: "only", api: "fake" }], api: createProviderStreams(dialect as never) }),
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    extensionDirs: [dir],
+    withoutMemory: true,
+  });
+  running.push(echo);
+  await echo.start();
+  const parent = await echo.send("go");
+  if (parent.outcome.kind !== "completed") release();
+  expect(parent.outcome).toEqual({ kind: "completed" });
+  await new Promise((r) => setTimeout(r, 100)); // 子 agent 已经卡在 conn_query 里
+  await writeFile(file, source("v2"));
+  const deferred = await echo.reloadExtensions();
+  expect(deferred.kind).toBe("rejected");
+  if (deferred.kind === "rejected") expect(deferred.reason).toContain("后台子 agent");
+  release();
+  for (let i = 0; i < 50 && g.__bgSaw.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+  expect(g.__bgSaw).toEqual(["v1 open=true"]); // 它用的那一代还活着
+  await new Promise((r) => setTimeout(r, 100)); // 子 agent 收尾
+  const later = await echo.reloadExtensions();
+  expect(later.kind === "done" ? kinds(later.report) : later).toEqual({ [file]: "replaced" });
+});
+
 test("热部署时新版 apply 挂住：到时限报 lost、放开 admission；stop() 卸载限时，照常停 Agent", async () => {
   const dir = join(await tmp(), "extensions");
   await mkdir(dir, { recursive: true });

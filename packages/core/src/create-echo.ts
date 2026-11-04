@@ -798,6 +798,12 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
      * **只管盘上发现的**：builtin / inline / extra / 角色四代不在 `discovered` 表里，这里碰不到它们。
      */
     const reloadExtensions = async (): Promise<ReloadResult> => {
+      // 后台子 agent 不占 admission，却拿着现在这一代的工具实例：此刻换代，它们接着调的就是已经 dispose 的资源。
+      // 推迟（rejected 带原因），等它们结束再来——与「忙就 rejected」同一个口径
+      const subagents = agent.runningBackgroundSubagents;
+      if (subagents > 0) {
+        return { kind: "rejected", reason: `有 ${subagents} 个后台子 agent 还在跑（它们用着现在这一代的工具），等它们结束再热部署` };
+      }
       const admitted = await agent.betweenRuns(async (signal) => {
         const changes: ReloadChange[] = [];
         const current = new Map((await discoverRoots(dirs)).map((r) => [r.entry, r]));

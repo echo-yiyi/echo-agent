@@ -3184,6 +3184,16 @@ export class Agent {
     await this.inboxConsumeInFlight;
   }
 
+  /**
+   * 还在跑的后台子 agent 有几个（Host-internal：热部署用）。它们在派出那一刻拿走了父池里的工具实例，
+   * 不占 admission——热部署此时换掉那件工具所属的扩展，它们接着调的就是已经 dispose 的旧代。
+   */
+  get runningBackgroundSubagents(): number {
+    let n = 0;
+    for (const t of this.background.tasks.values()) if (t.kind === "subagent" && t.status === "running") n++;
+    return n;
+  }
+
   async drainExtract(): Promise<void> {
     if (!this.memoryWorkAllowed) return;
     this.enqueueExtract({ force: true });

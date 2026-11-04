@@ -153,6 +153,35 @@ describe("AgentPrompt registry", () => {
     expect(r.sections.get("identity")).toBe(original); // 复原,不是删掉
   });
 
+  test("两层 replace 叠在同一段上、按任意顺序卸:生效的永远是还在的最上一层,不复活已卸的那层", () => {
+    // 两个盘上扩展都替产品的 identity：P → A → B。热部署先删 A 再删 B，此前 B 的 disposer 把它记下的 A 放了回去——
+    // A 已经不在 echo.extensions 里，它的段却回到了 system，P 直到重启都回不来
+    for (const order of [["a", "b"], ["b", "a"]] as const) {
+      const r = registryOf();
+      const product = sec("identity", 0, "P");
+      void r.svc.section(product);
+      const offs = {
+        a: r.svc.section(sec("identity", 0, "A"), { replace: true }),
+        b: r.svc.section(sec("identity", 0, "B"), { replace: true }),
+      };
+      expect(r.sections.get("identity")!.render({} as AssembleContext)).toBe("B");
+      offs[order[0]]();
+      expect(r.sections.get("identity")!.render({} as AssembleContext)).toBe(order[0] === "a" ? "B" : "A");
+      offs[order[1]]();
+      expect(r.sections.get("identity")).toBe(product);
+    }
+  });
+
+  test("原段先卸、替代层后卸:不把已卸的原段复活", () => {
+    const r = registryOf();
+    const offProduct = r.svc.section(sec("identity", 0, "P"));
+    const offRole = r.svc.section(sec("identity", 0, "R"), { replace: true });
+    offProduct();
+    expect(r.sections.get("identity")!.render({} as AssembleContext)).toBe("R"); // 替代层还在：它照旧生效
+    offRole();
+    expect(r.sections.has("identity")).toBe(false);
+  });
+
   test("replace 不给时行为一个字没变:同名照旧 fail-loud", () => {
     const r = registryOf();
     void r.svc.section(sec("identity", 0, "产品的身份"));

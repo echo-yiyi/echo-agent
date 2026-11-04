@@ -122,7 +122,9 @@ Host 没有通用 start/dispose 超时或强制中止。忽略 abort 的 start�
 
 三部分各有归属：[`Agent.betweenRuns()`](../../packages/core/src/agent.ts#symbol=Agent.betweenRuns) 获取前台 run 之间的执行许可；createEcho 发现和加载新代码；[`ExtensionHost.replace()`](../../packages/core/src/extension/host.ts#symbol=ExtensionHost.replace) 先 PREPARE 新代（config 解析、依赖图，把旧代当作已不在来算跨代 provider），过了才卸旧、装新，装不上再重装旧代。Host 本身不会探测 Agent 是否 idle，safePoint 是调用方给出的事实。
 
-人经壳的 reload 命令、程序经 `echo.reloadExtensions()`，走同一入口。忙时 rejected，不排队。实际替换点是两次 run 之间：turn / run 声明可换，缺省 agent 和 process 声明拒绝。这不是 turn 边界热换，也不证明所有独立后台任务和外部回调均已静止。
+人经壳的 reload 命令、程序经 `echo.reloadExtensions()`，走同一入口。忙时 rejected，不排队。还有后台子 agent 在跑时同样 rejected（原因里写明个数）：它们不占 admission，却在派出那一刻拿走了父池里的工具实例，此刻换代它们接着调的就是已经 dispose 的旧代（判据：[后台子 agent 还在跑时热部署推迟](../../packages/core/test/extension-reload.test.ts#test=后台子-agent-还在跑时热部署推迟它拿着的是现在这一代的工具换掉就是在调已经-dispose-的资源)）。实际替换点是两次 run 之间：turn / run 声明可换，缺省 agent 和 process 声明拒绝。这不是 turn 边界热换，也不证明其他独立后台任务（进程、外部回调）均已静止。
+
+几个扩展叠着 `replace` 同一个 prompt 段时，每层的 disposer 只摘自己那一层，生效的永远是还在的最上一层；原段先卸、替代层后卸也不会把原段放回去（判据：[两层 replace 按任意顺序卸](../../packages/core/test/prompt.test.ts#test=两层-replace-叠在同一段上按任意顺序卸生效的永远是还在的最上一层不复活已卸的那层)）。
 
 当前只重扫盘上发现的扩展；builtin、显式产品扩展、壳和角色定义不在重载账上。没有文件 watcher，也不做依赖方连带重装。若另一代仍绑定旧 provider，替换被 refused。
 
