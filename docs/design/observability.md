@@ -21,7 +21,10 @@
 - **语义层的 canonical store 不是用户可换的端口**，只开字节面：`observation.store?: StorageDir` 决定文档放在哪（内存 / 别处），格式与提交语义仍是 core 的（§5）。in-memory 的 `CanonicalObservationStore` 只供参考一致性测试。「换成另一种数据库」的注入等真有使用方再拍（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)决定 4）。
 - 面板长什么样归 UI，本文只说它读什么。
 
-**待拍板。** 一条，本文只指过去、不复述：[观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)——B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部），**未实现**；本文按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
+**待拍板。** 两条，本文只指过去、不复述：
+
+- [观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)——B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部），**未实现**；本文按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
+- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——上下文（送进模型的 system prompt、消息视图、注入、工具菜单）、决定点的原因码、因果链今天都看不见；提案的五条待拍板在那条记录里，**未拍板**。
 
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
