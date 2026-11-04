@@ -58,6 +58,11 @@ export const ABORT_REASON = Object.freeze({
   dispose: "dispose",
   /** 让位时手上的活在时限内没做完：中止它、交出 lease（被中止的 inbox 消息不 ack，留给接手的一方重投）。 */
   handoff: "handoff",
+  /**
+   * run 到了 `timeoutMs`。只装进 deadline 的 signal，让轮内的等待（fetch、读流、授权）认出「被中止」而不是网络故障；
+   * 它不进 outcome——run 超时的 outcome 是 `error{timeout}`，不是 aborted。
+   */
+  runTimeout: "run-timeout",
 } as const);
 
 export type AgentError = {
@@ -66,6 +71,11 @@ export type AgentError = {
   /** 「再试一次可能就好了」——重试闸只认这一位，不猜异常类型。 */
   retryable: boolean;
   message: string;
+  /**
+   * 服务端要求至少等多久再试（毫秒）：`Retry-After` 一类响应头给的。没给就没有这个字段。
+   * loop 排重试时取它与退避的较大者，再封顶（`run-turn.ts`）。
+   */
+  retryAfterMs?: number;
 };
 
 const RETRYABLE: ReadonlySet<ErrorCode> = new Set<ErrorCode>([

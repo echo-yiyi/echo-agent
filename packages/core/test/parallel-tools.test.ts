@@ -15,7 +15,7 @@ import { Agent } from "../src/agent.ts";
 import { FAKE_MODEL, scriptedStreamFn, textTurn, type ScriptedTurn } from "../src/testing.ts";
 import { toolError, toolOk, type ModelTool } from "../src/tools/types.ts";
 import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
-import type { AgentMessage } from "../src/messages.ts";
+import { defaultConvertToLlm, userMessage, type AgentMessage } from "../src/messages.ts";
 import type { PermissionPolicy } from "../src/permission/types.ts";
 
 type ToolResultEntry = Extract<AgentMessage, { role: "toolResult" }>;
@@ -373,4 +373,39 @@ test("批中 abort，后面还有一批：起跑过的那批全员入账，没�
   expect(result.outcome.kind).toBe("aborted");
   expect(laterRan).toBe(0); // 「剩下的不跑」——批与批之间的老规矩没变
   expect(toolResults(result.messages).map((m) => m.toolCallId)).toEqual(["c1", "c2"]);
+});
+
+test("批里一个调用没能交出结果（订阅者违约）：同批其余已执行的结果照样按序入账、再补抛；没入账的那个，投影说「可能跑过」而不是「没执行」", async () => {
+  const ran: string[] = [];
+  const done = (name: string, ms: number): ModelTool =>
+    tool(
+      name,
+      async () => {
+        await sleep(ms);
+        ran.push(name);
+        return toolOk(`${name} done (side effect happened)`);
+      },
+      true,
+    );
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: scriptedStreamFn([toolsTurn([["A", "a"], ["B", "b"]]), textTurn("不该到")]),
+    tools: [done("a", 5), done("b", 20)],
+  });
+  agent.subscribe((e) => {
+    if (e.type === "tool_execution_end" && e.toolCallId === "A") throw new Error("subscriber bug");
+  });
+  const r = await agent.prompt("go");
+
+  expect(r.outcome.kind).toBe("error");
+  expect([...ran].sort()).toEqual(["a", "b"]); // 两个都真跑了
+  expect(toolResults(agent.messages).map((m) => m.toolCallId)).toEqual(["B"]); // 此前一个都没入账
+  const projected = await defaultConvertToLlm([...agent.messages, userMessage("next")]);
+  const results = new Map(
+    projected.flatMap((m) => m.content.flatMap((b) => (b.type === "tool_result" ? [[b.tool_use_id, b.content] as const] : []))),
+  );
+  expect(results.get("B")).toBe("b done (side effect happened)");
+  // A 跑没跑过、副作用发没发生，账本说不清：不能告诉模型「从没执行」让它放心重跑
+  expect(results.get("A")).not.toContain("never executed");
+  expect(results.get("A")).toContain("may or may not have run");
 });

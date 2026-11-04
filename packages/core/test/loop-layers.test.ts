@@ -17,10 +17,14 @@ import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { RunIntakeGate } from "../src/loop/intake.ts";
 import { defaultConvertToLlm, userMessage, type Context } from "../src/messages.ts";
-import { INVALID_TOOL_TURNS_LIMIT, runAgentLoop } from "../src/loop/run-loop.ts";
+import { INVALID_TOOL_TURNS_LIMIT, MAX_TOKENS_CONTINUATION, runAgentLoop } from "../src/loop/run-loop.ts";
+import { MAX_SERVER_RETRY_DELAY_MS } from "../src/loop/run-turn.ts";
 import { turnNumberOf } from "../src/loop/ids.ts";
 import type { AgentLoopConfig, AttemptResult } from "../src/loop/types.ts";
-import { DEFAULT_RETRY_POLICY } from "../src/provider/dialect.ts";
+import { createProviderStreams, DEFAULT_RETRY_POLICY, type Dialect } from "../src/provider/dialect.ts";
+import { openAiDialect } from "../src/provider/openai.ts";
+import { ABORT_REASON, AbortReason, agentError } from "../src/errors.ts";
+import type { ProviderEvent } from "../src/events.ts";
 import { EMPTY_COMPACTION } from "../src/compaction/types.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import type { Model, StreamFn } from "../src/provider/types.ts";
@@ -827,4 +831,188 @@ test("streamFn 抛出（违约）：折成 attempt_end{failed, internal}，层�
   // deadline timer 已清：run 立刻收场，不等 timeoutMs
   expect(Date.now() - started).toBeLessThan(1_000);
   expect(agent.status).toBe("idle");
+});
+
+/* ── 2026-11-03 主循环修复（用户拍板「按推荐修」） ── */
+
+function causes(events: readonly AgentEvent[]): string[] {
+  return events.flatMap((e) => (e.type === "turn_start" ? [e.cause] : []));
+}
+
+test("落地消息 stopReason 是 end_turn、却带着工具调用：工具执行了就续一轮，结果回给模型（续轮判据与执行判据一致）", async () => {
+  let ran = 0;
+  const t = tool("t", async () => {
+    ran += 1;
+    return toolOk("RESULT");
+  });
+  const endTurnWithTool: ScriptedTurn = [
+    { type: "start" },
+    { type: "toolcall_start", toolCallId: "c1", name: "t" },
+    { type: "toolcall_delta", argsText: "{}" },
+    { type: "toolcall_end" },
+    { type: "done", message: { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "t", input: {} }], stopReason: "end_turn", usage: null } },
+  ];
+  const { fn, requests } = capturing([endTurnWithTool, textTurn("after")]);
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, tools: [t] });
+  const events = collect(agent);
+  const r = await agent.prompt("go");
+  expect(r.outcome.kind).toBe("completed");
+  expect(validate(events)).toEqual([]);
+  expect(ran).toBe(1);
+  expect(requests).toHaveLength(2); // 此前只有 1：工具跑了、结果入了账，模型却从没看到
+  expect(JSON.stringify(requests[1]!.messages)).toContain("RESULT");
+  expect(causes(events)).toEqual(["input", "tool_use"]);
+});
+
+test("end_turn 却带着无效工具调用：同样计入空转闸，连续 3 轮就停（不因续轮判据放宽而转到迭代上限）", async () => {
+  expect(INVALID_TOOL_TURNS_LIMIT).toBe(3);
+  const bogus = (id: string): ScriptedTurn => [
+    { type: "start" },
+    { type: "done", message: { role: "assistant", content: [{ type: "tool_use", id, name: "nope", input: {} }], stopReason: "end_turn", usage: null } },
+  ];
+  const script = Array.from({ length: INVALID_TOOL_TURNS_LIMIT + 2 }, (_, i) => bogus(`c${i}`));
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn(script), tools: [tool("t", async () => toolOk("ok"))], maxIterations: INVALID_TOOL_TURNS_LIMIT + 2 });
+  const events = collect(agent);
+  const r = await agent.prompt("go");
+  expect(r.outcome).toMatchObject({ kind: "error", error: { code: "tool_not_found" } });
+  expect(validate(events)).toEqual([]);
+  const end = events.find((e) => e.type === "reply_end");
+  expect(end?.type === "reply_end" && end.turns).toBe(INVALID_TOOL_TURNS_LIMIT);
+});
+
+test("max_tokens 截断：续轮前追加一条 harness 来源的 user 消息，让模型从断点接着写、截在工具调用里就重发（此前续写请求以 assistant 半句结尾，没有任何指示）", async () => {
+  const { fn, requests } = capturing([textTurn("前半句被截", "max_tokens"), textTurn("后半句")]);
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn });
+  const events = collect(agent);
+  const r = await agent.prompt("go");
+  expect(r.outcome.kind).toBe("completed");
+  expect(validate(events)).toEqual([]);
+  expect(causes(events)).toEqual(["input", "max_tokens"]);
+  const second = requests[1]!.messages;
+  expect(second.at(-2)?.role).toBe("assistant");
+  expect(second.at(-1)).toEqual({ role: "user", content: [{ type: "text", text: MAX_TOKENS_CONTINUATION }] });
+  expect(agent.messages.filter((m) => m.role === "user").map((m) => (m as { source: string }).source)).toEqual(["human", "harness"]);
+  expect(MAX_TOKENS_CONTINUATION).toContain("tool call");
+
+  // 截断的那条里还有完整的工具调用：工具照常执行，提示排在工具结果之后
+  const t = tool("t", async () => toolOk("RESULT"));
+  const toolThenCut: ScriptedTurn = [
+    { type: "start" },
+    { type: "done", message: { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "t", input: {} }], stopReason: "max_tokens", usage: null } },
+  ];
+  const withTool = capturing([toolThenCut, textTurn("done")]);
+  const agent2 = new Agent({ model: FAKE_MODEL, streamFunction: withTool.fn, tools: [t] });
+  const events2 = collect(agent2);
+  expect((await agent2.prompt("go")).outcome.kind).toBe("completed");
+  expect(validate(events2)).toEqual([]);
+  expect(agent2.messages.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "user", "assistant"]);
+  expect(withTool.requests[1]!.messages.at(-1)).toEqual({ role: "user", content: [{ type: "text", text: MAX_TOKENS_CONTINUATION }] });
+});
+
+/** 吐半句就卡住的真 HTTP 服务：deadline / abort 必须经 signal 掐断真 fetch。 */
+function stallingServer(): ReturnType<typeof Bun.serve> {
+  return Bun.serve({
+    port: 0,
+    fetch() {
+      const enc = new TextEncoder();
+      const body = new ReadableStream({
+        async start(c) {
+          c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "hel" } }] })}\n\n`));
+          await Bun.sleep(5_000);
+          c.close();
+        },
+      });
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+}
+
+test("timeoutMs 到点：真 fetch 被 deadline 掐断，认成中止、不当网络错误重试，run 以 error{timeout} 收场；对照：调用方 abort 照旧是 aborted{reason}", async () => {
+  const server = stallingServer();
+  try {
+    const model: Model = { provider: "p", id: "m", api: "openai-completions", capabilities: { contextWindow: 100_000 } };
+    const streams = createProviderStreams(openAiDialect({ baseUrl: `http://localhost:${server.port}` }));
+    const agent = new Agent({ model, streamFunction: (m, c, o) => streams.stream(m, c, o), timeoutMs: 300, retryPolicy: FAST_RETRY });
+    const events = collect(agent);
+    const r = await agent.prompt("go");
+    expect(r.outcome).toMatchObject({ kind: "error", error: { code: "timeout" } });
+    expect(validate(events)).toEqual([]);
+    expect(events.filter((e) => e.type === "retry_scheduled")).toHaveLength(0); // 此前：network 可重试，重试到上限
+    expect(events.flatMap((e) => (e.type === "attempt_end" ? [e.result.kind] : []))).toEqual(["aborted"]);
+
+    const caller = new Agent({ model, streamFunction: (m, c, o) => streams.stream(m, c, o), retryPolicy: FAST_RETRY });
+    const callerEvents = collect(caller);
+    setTimeout(() => caller.abort("user"), 300);
+    expect((await caller.prompt("go")).outcome).toEqual({ kind: "aborted", reason: "user" });
+    expect(callerEvents.filter((e) => e.type === "retry_scheduled")).toHaveLength(0);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("deadline 的 signal 装的是 AbortReason（run-timeout）：只认 AbortError 的 provider 也认得出被中止", async () => {
+  let seen: unknown;
+  const waits: Dialect = {
+    api: "fake",
+    async *request(_m, _c, o): AsyncGenerator<ProviderEvent> {
+      yield { type: "start" };
+      await new Promise<void>((r) => o?.signal?.addEventListener("abort", () => r(), { once: true }));
+      seen = o?.signal?.reason;
+      yield { type: "error", error: agentError("provider", "aborted", "请求被中止", false) };
+    },
+  };
+  const streams = createProviderStreams(waits);
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: (m, c, o) => streams.stream(m, c, o), timeoutMs: 30 });
+  const r = await agent.prompt("go");
+  expect(r.outcome).toMatchObject({ kind: "error", error: { code: "timeout" } });
+  expect(seen).toBeInstanceOf(AbortReason);
+  expect((seen as AbortReason).reason).toBe(ABORT_REASON.runTimeout);
+});
+
+test("signal 已中止时 provider 仍报可重试错误（没认出中止）：不排重试、不发 retry_scheduled，直接按中止 / 超时收场", async () => {
+  const lying = (): Dialect => ({
+    api: "fake",
+    async *request(_m, _c, o): AsyncGenerator<ProviderEvent> {
+      yield { type: "start" };
+      await new Promise<void>((r) => o?.signal?.addEventListener("abort", () => r(), { once: true }));
+      yield { type: "error", error: agentError("provider", "network", "socket closed") }; // retryable
+    },
+  });
+  const a = createProviderStreams(lying());
+  const aborted = new Agent({ model: FAKE_MODEL, streamFunction: (m, c, o) => a.stream(m, c, o), retryPolicy: FAST_RETRY });
+  const abortedEvents = collect(aborted);
+  setTimeout(() => aborted.abort("user"), 20);
+  expect((await aborted.prompt("go")).outcome).toEqual({ kind: "aborted", reason: "user" });
+  expect(validate(abortedEvents)).toEqual([]);
+  expect(abortedEvents.filter((e) => e.type === "retry_scheduled")).toHaveLength(0);
+
+  const d = createProviderStreams(lying());
+  const timed = new Agent({ model: FAKE_MODEL, streamFunction: (m, c, o) => d.stream(m, c, o), retryPolicy: FAST_RETRY, timeoutMs: 20 });
+  const timedEvents = collect(timed);
+  expect((await timed.prompt("go")).outcome).toMatchObject({ kind: "error", error: { code: "timeout" } });
+  expect(validate(timedEvents)).toEqual([]);
+  expect(timedEvents.filter((e) => e.type === "retry_scheduled")).toHaveLength(0);
+});
+
+test("服务端要求的等待（retryAfterMs）：退避取 max(自己的退避, 服务端要求)，服务端那份封顶 60s", async () => {
+  const delayFor = async (retryAfterMs: number | undefined, backoff: number): Promise<number> => {
+    const failing: ScriptedTurn = [
+      { type: "start" },
+      { type: "error", error: { source: "provider", code: "rate_limit", retryable: true, message: "slow down", ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } },
+    ];
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([failing, textTurn("不该到")]), retryPolicy: { maxAttempts: 2, backoffMs: () => backoff } });
+    let delay = -1;
+    agent.subscribe((e) => {
+      if (e.type === "retry_scheduled") {
+        delay = e.delayMs;
+        agent.abort("看完就停"); // 不真等
+      }
+    });
+    await agent.prompt("go");
+    return delay;
+  };
+  expect(await delayFor(7_000, 0)).toBe(7_000);
+  expect(await delayFor(50, 100)).toBe(100);
+  expect(await delayFor(600_000, 0)).toBe(MAX_SERVER_RETRY_DELAY_MS);
+  expect(await delayFor(undefined, 250)).toBe(250);
 });

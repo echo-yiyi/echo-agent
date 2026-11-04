@@ -39,6 +39,12 @@ import type { AgentLoopConfig, AttemptResult, Emit, LoopDeps, TurnCause, TurnRes
 
 type Compactor = ReturnType<typeof createCompactor>;
 
+/**
+ * 服务端要求的等待（`AgentError.retryAfterMs`）最多听多久。再长的要求（配额按小时重置之类）按这个封顶照常重试，
+ * 重试预算用完就把错误交给调用方——不让一个响应头把 run 挂上几十分钟。
+ */
+export const MAX_SERVER_RETRY_DELAY_MS = 60_000;
+
 /** run 内三层共用的依赖：LoopDeps 之外多了 run 级的东西（由 runLoop 建一次）。`signal` 已与 deadline 合并。 */
 export type RunDeps = LoopDeps & {
   /** 本循环实例的探针函数：runId 在 runLoop 开头钉住，节点调用时给 turnId。 */
@@ -97,6 +103,12 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
       if (result.kind !== "failed") break;
       const err = result.error;
       await workset.hooks.notify({ type: "modelCallFailed", error: err, attempt }, config.hookContext);
+      // signal 已中止（调用方取消或 run 超时）：这次失败多半就是中止本身，只是 provider 没认出来、报成了可重试的错——
+      // 不排重试、不发 retry_scheduled，按中止收场（reply 再据 deadline 区分超时）
+      if (signal.aborted) {
+        result = { kind: "aborted" };
+        break;
+      }
       if (attempt >= maxAttempts) break;
       // 撞窗（provider 说上下文超了）：**应急压缩一次**再来一个 attempt。压不动 / 第二次撞 → 按失败收场。
       // 它不是重试（上下文变了），所以不发 retry_scheduled——压缩事件已说明原因
@@ -106,7 +118,9 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
       }
       if (!err.retryable) break;
       const next = attempt + 1;
-      const delayMs = clampDelay(config.retryPolicy.backoffMs(attempt), config.maxRetryDelayMs);
+      // 服务端说了至少等多久（Retry-After 一类），就不早于它再试；它那份封顶 MAX_SERVER_RETRY_DELAY_MS
+      const serverAsk = Math.min(err.retryAfterMs ?? 0, MAX_SERVER_RETRY_DELAY_MS);
+      const delayMs = clampDelay(Math.max(config.retryPolicy.backoffMs(attempt), serverAsk), config.maxRetryDelayMs);
       probe({ kind: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code }, turnId);
       await emit({ type: "retry_scheduled", turnId, attempt: next, maxAttempts, delayMs, cause: err.code });
       await workset.hooks.notify({ type: "retryScheduled", attempt: next, maxAttempts, delayMs, cause: err.code }, config.hookContext);
@@ -126,15 +140,22 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
            用 `Promise.all` 时第一个 rejection 会让同批其余的 rejection 无人接管（unhandled rejection，
            本文件的 raceAbort 已栽过一次）。这里全部消费掉，再按顺序补抛第一个。 */
         const settled = await Promise.allSettled(batch.map((use) => runOneTool(use, deps, turnId, n, workset, askGate, invalidToolCalls)));
-        // **入账顺序 = tool_use 出现顺序，不是完成顺序**（`context.messages` 与 message_end 都按这个序）
+        // **入账顺序 = tool_use 出现顺序，不是完成顺序**（`context.messages` 与 message_end 都按这个序）。
+        // 同批其余的调用已经执行完、副作用已经发生：**先把交出了结果的全部入账，再补抛**——
+        // 跟着第一个 rejection 一起丢掉的话，投影会给它们补「没有结果」，模型会把有副作用的工具再跑一遍。
+        let rejected: { reason: unknown } | null = null;
         for (const one of settled) {
-          if (one.status === "rejected") throw one.reason; // 与逐个 await 时一样：turn 由外层 catch 关成 failed
+          if (one.status === "rejected") {
+            rejected ??= { reason: one.reason };
+            continue;
+          }
           const msg = one.value;
           context.messages.push(msg);
           probe({ kind: "message_committed", message: msg }, turnId);
           await emit({ type: "message_end", message: msg });
           toolResults.push(msg as ToolResultMessage);
         }
+        if (rejected !== null) throw rejected.reason; // 与逐个 await 时一样：turn 由外层 catch 关成 failed
         // 批中断：**已起跑的这一批各自收 signal 结束、结果照样入账**，剩下的批不跑
         if (signal.aborted) break;
       }
