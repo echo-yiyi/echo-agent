@@ -152,6 +152,14 @@ test("identity 稳定:同一份代码两次调用完全相等(digest 才可复�
   expect(codingAgentIdentity()).toEqual(codingAgentIdentity());
 });
 
+test("codingPreset 缺省开思考（medium），装出来的 agent 生效值就是它；调用方显式给的档位照用", async () => {
+  expect(codingPreset().agent.thinkingLevel).toBe("medium");
+  expect(codingPreset({ thinkingLevel: "off" }).agent.thinkingLevel).toBe("off");
+  const { echo } = await echoFor({ workspace: freshDir("ca-think-"), stateDir: freshDir("ca-think-state-") });
+  expect(echo.agent.state.thinkingLevel).toBe("medium"); // core 缺省是 off：preset 不给就不思考
+  await echo.stop();
+});
+
 test("纪律段写明 git 不许丢弃用户未提交的改动、动手前先看 git status；文件段写明互不依赖的读取与搜索同一轮并发", () => {
   const text = (name: string): string => codingAgentIdentity().sections.find((s) => s.name === name)!.text;
   const conduct = text("conduct:coding");

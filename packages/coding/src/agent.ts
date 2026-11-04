@@ -26,7 +26,7 @@
 
 import { DEFAULT_MAX_ITERATIONS, type AssembleContext } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
 import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extension";
-import type { CredentialStore, PermissionPolicy as CorePermissionPolicy, PromptSection, Skill } from "@echo-agent/core";
+import type { CredentialStore, PermissionPolicy as CorePermissionPolicy, PromptSection, Skill, ThinkingLevel } from "@echo-agent/core";
 import { detectShellEnvironment, makeBashTool, makeShellTools } from "./tools/bash.ts";
 import { makeFsTools } from "./tools/fs.ts";
 import { makeSearchTools } from "./tools/search.ts";
@@ -45,6 +45,8 @@ export type CodingPresetOptions = {
    */
   skills?: Skill[];
   maxIterations?: number;
+  /** 思考档位。缺省 {@link CODING_DEFAULT_THINKING}；给了就用给的（`"off"` 照样是关）。 */
+  thinkingLevel?: ThinkingLevel;
   /**
    * 凭据来源：`web_search` 从这里读搜索服务的 key（`brave`），排在环境变量 `BRAVE_API_KEY` 之后。
    * 不给 = 只认环境变量（评测、低层装配）。宿主给的是与模型 key 同一个 store（`PresetForm.credentials`）。
@@ -65,12 +67,20 @@ export type CodingPreset = {
     // 自己另定一份「更严格」的类型只会在 spread 进 `createEcho()` 时打架。
     skills?: Skill[];
     maxIterations?: number;
+    thinkingLevel?: ThinkingLevel;
   };
   extensions: readonly ExtensionEntry[];
 };
 
 /** 缺省模型的**唯一**出处:identity 与调用方都读它,不各手抄一份(review 五轮 #3)。 */
 export const CODING_DEFAULT_MODEL = { provider: "kimi", model: "kimi-k3" } as const;
+
+/**
+ * 缺省思考档（2026-11-03 拍板，`docs/decisions/implemented/2026-11-03-coding-default-thinking-medium.md`）：
+ * core 新建 agent 缺省 `"off"`，能真关思考的模型（DeepSeek、Kimi K2.6）一起来就不思考，管道形态又没有档位可切。
+ * coding 要多步推理，缺省开 medium（codex 的缺省 reasoning effort 也是 medium）；各家怎么映射见模型目录的 `thinkingLevelMap`。
+ */
+const CODING_DEFAULT_THINKING: ThinkingLevel = "medium";
 
 /** 产品的身份 + 编码纪律，一条 prompt pack。 */
 const ECHO_CODING_PROMPT = definePromptPack("echo:coding");
@@ -165,6 +175,7 @@ export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
       ...(opts.permission !== false ? { permission: permissionPolicyFor(opts.permission) } : {}),
       ...(opts.skills !== undefined && opts.skills.length > 0 ? { skills: opts.skills } : {}),
       ...(opts.maxIterations !== undefined ? { maxIterations: opts.maxIterations } : {}),
+      thinkingLevel: opts.thinkingLevel ?? CODING_DEFAULT_THINKING,
     },
     extensions: [
       // 产品的身份与编码纪律
