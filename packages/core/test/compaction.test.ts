@@ -360,6 +360,31 @@ test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐�
   expect(b.requests[0]!.messages.length).toBe(3); // 摘要 · one · next
 });
 
+test("/clear 之后再压缩：compaction entry 记盘上下标（越过 reset 前那几条），续会话不判坏档、折的还是同一段", async () => {
+  const store = new InMemoryDir();
+  const turns = [toolTurn("c1", "echo", {}), toolTurn("c2", "echo", {}), textTurn("done"), textTurn("x-ok"), textTurn("y-ok"), reply("<summary>S</summary>")];
+  const big: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000_000 } };
+  const a = await agentWithBuiltins(scriptedStreamFn(turns), { model: big, session: { store, id: "s1" } });
+  await a.prompt("hi"); // 盘上 #0 u · #1 a(tool) · #2 tr · #3 a(tool) · #4 tr · #5 a
+  a.reset(); // /clear：内存清空，会话不写
+  await a.prompt("x".repeat(400)); // 内存 #0 #1，盘上 #6 #7
+  await a.prompt("y"); // 内存 #2 #3，盘上 #8 #9
+  const r = await a.compact();
+  expect(r.kind === "done" && r.stages).toEqual(["summary"]);
+  expect(a.state.compaction.spans.map((s) => [s.from, s.to])).toEqual([[0, 2]]); // 内存下标
+  await a.stop();
+  // 盘上那条是盘上下标
+  const disk = await loadSession(store, "s1");
+  expect(disk.compaction.spans.map((s) => [s.from, s.to])).toEqual([[6, 8]]);
+  expect(disk.compaction.clearedBefore).toBe(0);
+  // 续会话：不判坏档，折掉的是 reset 之后那条长消息与它的回答
+  const b = await agentWithBuiltins(scriptedStreamFn([textTurn("ok")]), { model: big, session: { store, id: "s1" } });
+  const view = buildWorkingMessages(b.messages, b.state.compaction);
+  expect(JSON.stringify(view)).not.toContain("x".repeat(400));
+  expect(view[6]?.role === "user" && view[6].source).toBe("harness"); // #6–#7 折成一条摘要
+  await b.stop();
+});
+
 test("摘要器的模型调用带退避重试：摘要请求撞 429 一次，同一份 retryPolicy 再来一次，压缩照常完成（2026-09-07 拍板）", async () => {
   const big: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000_000 } };
   const { fn, requests } = capturing([

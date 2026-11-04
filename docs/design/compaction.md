@@ -24,7 +24,7 @@
 ## 1. 不变量
 
 1. **transcript 只增不改。** 压缩不删消息、不改消息；`Agent.messages` 与 session 的 message entries 永远是全量原文。
-2. **压缩是视图状态。** `CompactionState` 描述「怎么看 transcript」；运行时（`AgentState.compaction`、`AgentContext.compaction`）与盘上（session 的 compaction entry）**同一个形状、同一套下标**，恢复不换算。
+2. **压缩是视图状态。** `CompactionState` 描述「怎么看 transcript」；运行时（`AgentState.compaction`、`AgentContext.compaction`）与盘上（session 的 compaction entry）**同一个形状**，恢复不换算。下标是各自那份 transcript 的：`reset`（`/clear`）只清内存、不写会话，之后内存从 0 数起而会话里前面还留着那几条，所以落盘时下标整体越过它们（与 `memory_reviewed` 同一个偏移；`clearedBefore` 为 0 时照旧是 0）。
 3. **配对不破。** 切点永远不落在 tool_use 与它的 tool_result 之间；清理只换 `content` 不删消息、`toolCallId` 不动。这两条只在 core 的 [`normalizeCompaction()`](../../packages/core/src/compaction/view.ts#symbol=normalizeCompaction) 与 [`projectRange()`](../../packages/core/src/compaction/view.ts#symbol=projectRange) 里守，策略产出再离谱也过不了它。
 4. **策略只产状态。** 阶段（`CompactionStage`）不碰消息数组、不发事件、不写盘；要调模型就用 core 给的 `callModel`。
 5. **核心文案不提工具。** `summary === null` 的省略说明、被清工具结果的占位，都是 core 的固定英文文案，不提 `transcript_read`——怎么取回原文由拥有那个工具的 extension 出 prompt 段说明。
@@ -176,9 +176,9 @@ void echo;
 
 ## 8. 落盘与恢复
 
-session entry：`{ kind: "compaction", at, reason, compaction: CompactionState }`——每次压缩之后的**整个**状态，不是增量；没压动的不入账。恢复（[`SessionService.project()`](../../packages/core/src/session/service.ts#symbol=project)）取最后一条的状态，再用 `assertCompactionFits()` 在恢复出来的 messages 上验：越界、重叠、切在配对中间都判红、不修——transcript 只增不改，写下去时合法的状态永远合法，不合法就是坏档。
+session entry：`{ kind: "compaction", at, reason, compaction: CompactionState }`——每次压缩之后的**整个**状态，不是增量，下标是盘上的（见 §1 第 2 条）；没压动的不入账。恢复（[`SessionService.project()`](../../packages/core/src/session/service.ts#symbol=project)）取最后一条的状态，再用 `assertCompactionFits()` 在恢复出来的 messages 上验：越界、重叠、切在配对中间都判红、不修——transcript 只增不改，写下去时合法的状态永远合法，不合法就是坏档。
 
-判据：压缩后立即续跑与重启恢复后续跑，下一次 provider 请求的 messages 深度相等（`at` 在投影时剥掉，所以逐字节相同）。
+判据：压缩后立即续跑与重启恢复后续跑，下一次 provider 请求的 messages 深度相等（`at` 在投影时剥掉，所以逐字节相同）；`/clear` 之后再压缩，续会话不判坏档、折掉的是同一段（[reset 之后的下标](../../packages/core/test/compaction.test.ts#test=clear-之后再压缩compaction-entry-记盘上下标越过-reset-前那几条续会话不判坏档折的还是同一段)）。
 
 ## 9. 当前限制与验证
 

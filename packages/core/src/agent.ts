@@ -4214,8 +4214,11 @@ export class Agent {
     if (input.type === "message_end") {
       parts.push({ kind: "message", message: input.message });
     } else if (input.type === "compaction_end") {
-      // 没压动的不入账：账本只记事实，一条「什么都没变」的 entry 只会让恢复多验一次同样的状态
-      if (input.stages.length > 0) parts.push({ kind: "compaction", at: Date.now(), reason: input.reason, compaction: input.compaction });
+      // 没压动的不入账：账本只记事实，一条「什么都没变」的 entry 只会让恢复多验一次同样的状态。
+      // 记**盘上下标**（与 `recordReviewed` 同一个偏移）：`reset` 之后内存从 0 数起，会话里前面还有那几条
+      if (input.stages.length > 0) {
+        parts.push({ kind: "compaction", at: Date.now(), reason: input.reason, compaction: persistedCompaction(input.compaction, this.persistedOffset) });
+      }
     } else if (input.type === "agent_end" && input.outcome.kind === "error") {
       parts.push({ kind: "error", at: Date.now(), error: input.outcome.error });
     } else if (input.type === "workspace_changed") {
@@ -4273,6 +4276,18 @@ function validatePermissionPolicy(policy: PermissionPolicy | undefined): Permiss
   }
   if (typeof policy.authorize !== "function") throw new Error("permission.authorize 必须是函数");
   return policy;
+}
+
+/**
+ * 内存里的压缩状态 → 盘上的：下标整体越过 `offset`（`reset` 之后仍在会话里、却不在内存里的那几条）。
+ * `clearedBefore` 为 0 = 没清过，照旧是 0（不替那几条做主）。
+ */
+function persistedCompaction(state: CompactionState, offset: number): CompactionState {
+  if (offset === 0) return state;
+  return {
+    spans: state.spans.map((s) => ({ from: s.from + offset, to: s.to + offset, summary: s.summary })),
+    clearedBefore: state.clearedBefore === 0 ? 0 : state.clearedBefore + offset,
+  };
 }
 
 /** 子 agent 的 system 从哪来：fresh 是模型给的那段（可为 null）；fork 是父这次 run 的装配（跑之前现装）。 */
