@@ -3,7 +3,7 @@
 // 这些是**产品层工具**(对外部世界动手),所以住这儿不住 core(判据 2026-08-04 拍定)。
 // 路径纪律:相对路径以 ctx.workspace 解析,**解析结果必须落在 workspace 之内**——
 // 越界一律拒绝(`../../etc/passwd` 这类,不管是模型手滑还是注入)。workspace 是 session 级事实（2026-09-01），
-// 既是起点也是边界,一个字段。这道边界是**六件工作区工具共用的一条**（`resolveSafe`，search.ts 也走它），
+// 既是起点也是边界,一个字段。这道边界是**六件工作区工具共用的一条**（`resolveInWorkspace`，search.ts 也走它），
 // 解 symlink（review 2026-09-07：此前只比字符串前缀，工作区里一条软链就能读写外面）。bash 不在这道边界内——
 // 它是有意留的出口，像 Claude Code 的 Bash 一样能 cd 到任何地方，看着它的是 permission 策略，不是路径。
 //
@@ -95,6 +95,15 @@ async function markSeen(seen: SeenFiles, abs: string): Promise<void> {
 export type SafePath = { ok: true; abs: string } | { ok: false; error: string };
 
 /**
+ * 公共面上的那一份：判据与 {@link resolveInWorkspace} 相同，只回路径或 null（越界）。
+ * 六件工具自己用 `resolveInWorkspace`——它多带一句给模型看的拒绝理由。
+ */
+export async function resolveSafe(ctx: ToolExecutionContext, path: string): Promise<string | null> {
+  const r = await resolveInWorkspace(ctx, path);
+  return r.ok ? r.abs : null;
+}
+
+/**
  * 解析 + 越界守卫：六件工作区工具（read_file / write_file / edit_file / list_dir / glob / grep）共用的**唯一**边界。
  *
  * 判据是**两边都取 realpath 再比**：目标的真实位置（**最近的已存在祖先** realpath 之后接上余下的段）
@@ -110,7 +119,7 @@ export type SafePath = { ok: true; abs: string } | { ok: false; error: string };
  * 字面在工作区内、真实位置在外（monorepo 里 `node_modules` 软链到工作区外的兄弟包）：仍拒，拒绝理由说明是软链、
  * 指到哪，并指向 bash——文件工具守着工作区，读工作区外的东西是 bash 的事。
  */
-export async function resolveSafe(ctx: ToolExecutionContext, path: string): Promise<SafePath> {
+export async function resolveInWorkspace(ctx: ToolExecutionContext, path: string): Promise<SafePath> {
   const root = resolve(ctx.workspace);
   const abs = isAbsolute(path) ? resolve(path) : resolve(root, path);
   const literalInside = abs === root || abs.startsWith(root + sep);
@@ -177,7 +186,7 @@ function readFileTool(seen: SeenFiles): ModelTool<{ path: string; offset?: numbe
       required: ["path"],
     },
     async execute({ path, offset, limit }, ctx) {
-      const safe = await resolveSafe(ctx, path);
+      const safe = await resolveInWorkspace(ctx, path);
       if (!safe.ok) return toolError(safe.error);
       const abs = safe.abs;
       // 图片按图片返回（2026-11-02，照 Claude Code 的 Read）：大了先缩放。文件不存在、或扩展名是图片但内容不是，
@@ -283,7 +292,7 @@ function writeFileTool(seen: SeenFiles): ModelTool<{ path: string; content: stri
       required: ["path", "content"],
     },
     async execute({ path, content }, ctx) {
-      const safe = await resolveSafe(ctx, path); // 必须在 mkdir 之前：递归建目录会顺着软链把目录建到外面
+      const safe = await resolveInWorkspace(ctx, path); // 必须在 mkdir 之前：递归建目录会顺着软链把目录建到外面
       if (!safe.ok) return toolError(safe.error);
       const abs = safe.abs;
       const refused = await assertFreshlyRead(seen, abs, path); // 新建不用先读；覆盖已有的必须
@@ -324,7 +333,7 @@ function editFileTool(seen: SeenFiles): ModelTool<{ path: string; old_string: st
       required: ["path", "old_string", "new_string"],
     },
     async execute({ path, old_string, new_string, replace_all }, ctx) {
-      const safe = await resolveSafe(ctx, path);
+      const safe = await resolveInWorkspace(ctx, path);
       if (!safe.ok) return toolError(safe.error);
       const abs = safe.abs;
       if (old_string === new_string) return toolError("old_string and new_string are identical; nothing to change");

@@ -15,14 +15,14 @@
 // **结果路径一律相对工作区**：read_file / edit_file 收的是工作区相对路径，搜索若按 `path` 相对报
 // （在 `packages/core/src` 里搜到 `agent.ts:260`），模型拿着 `agent.ts` 去读就找不到。
 //
-// **边界与文件三件套同一条**（review 2026-09-07）：`path` 经 fs.ts 的 `resolveSafe` 解析，越界（含经软链）一律拒。
+// **边界与文件三件套同一条**（review 2026-09-07）：`path` 经 fs.ts 的 `resolveInWorkspace` 解析，越界（含经软链）一律拒。
 // 此前这三件没有任何边界，而 system 段对模型说的是「工作区之外的路径会被拒」——契约与实现两张皮，
 // 且凡是把 bash 设成 ask 的策略，grep 都是绕开那道门读整块盘的路。
 
 import { lstat, readdir, readFile, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { toolError, toolOk, type ModelTool, type ToolExecutionContext } from "@echo-agent/core";
-import { resolveSafe } from "./fs.ts";
+import { resolveInWorkspace } from "./fs.ts";
 
 const GLOB_CAP = 500;
 /** grep 最多回这么多条（content 是行，另两种是文件）。 */
@@ -56,7 +56,7 @@ type Target = { ok: true; kind: "file" | "dir"; abs: string } | { ok: false; err
 
 /** `path` → 搜索起点。越界、不存在、是文件、是目录分开说，错误文案要让模型知道下一步怎么办。 */
 async function resolveTarget(ctx: ToolExecutionContext, path?: string): Promise<Target> {
-  const safe = path === undefined || path === "" ? { ok: true as const, abs: resolve(ctx.workspace) } : await resolveSafe(ctx, path);
+  const safe = path === undefined || path === "" ? { ok: true as const, abs: resolve(ctx.workspace) } : await resolveInWorkspace(ctx, path);
   if (!safe.ok) return { ok: false, error: safe.error };
   const abs = safe.abs;
   const st = await stat(abs).catch(() => null);

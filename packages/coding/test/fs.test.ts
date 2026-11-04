@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelTool, ToolExecutionContext } from "@echo-agent/core";
-import { makeFsTools } from "../src/tools/fs.ts";
+import { makeFsTools, resolveSafe } from "../src/tools/fs.ts";
 import { makeSearchTools } from "../src/tools/search.ts";
 
 let root: string;
@@ -179,6 +179,9 @@ test("工作区路径本身经软链：realpath 形式的绝对路径照常读�
   expect(e.isError).toBe(false);
   const g = await tool(makeSearchTools(), "grep").execute({ pattern: "ho", path: realFile }, ctxAt(ws));
   expect([g.isError, g.content]).toEqual([false, "a.txt:1:ho"]);
+  // 公共面的 `resolveSafe` 形状不变（路径或 null），判据同一条：换算回工作区形式
+  expect(await resolveSafe(ctxAt(ws), realFile)).toBe(join(ws, "a.txt"));
+  expect(await resolveSafe(ctxAt(ws), "../outside.txt")).toBeNull();
 });
 
 test("经软链出工作区仍拒（monorepo 里 node_modules 指到兄弟包），报错说清是软链、指到哪、建议用 bash 读", async () => {
