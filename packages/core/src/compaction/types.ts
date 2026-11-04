@@ -48,7 +48,8 @@ export type CompactionReason = "auto" | "overflow" | "manual" | "idle";
  *   · `window`：模型窗口；目录没标时为 null（auto 在未知窗口下不触发，overflow / manual 仍能跑）；
  *   · `used`：阶段跑之前的估算；
  *   · `target`：触发线 = window − reserve；
- *   · `goal`：这次要压到哪——auto / manual 是 target 再减一截（免得下一轮又触发），overflow 是半窗。
+ *   · `goal`：这次要压到哪——auto / manual 是 target 再减一截（免得下一轮又触发），且不超过 `COMPACTION_GOAL_MAX_TOKENS`；
+ *     overflow 是半窗。
  */
 export type CompactionBudget = {
   readonly window: number | null;
@@ -125,6 +126,11 @@ export const DEFAULT_SECTION_TOKENS = 32_000;
 export const DEFAULT_KEEP_RECENT_TOOL_RESULTS = 3;
 /** auto / manual 压到 target 之下再留这么一截（占窗口比例），免得下一轮又碰线。 */
 export const COMPACTION_SLACK_RATIO = 0.1;
+/**
+ * auto / manual 的压缩目标（`goal`）的绝对上限（2026-11-03）。按窗口比例算的 goal 对大窗口太宽：百万窗口的模型
+ * 压完仍长期带着约 90 万 token，每轮都按这个量付钱、等延迟。触发线不变，只是压的时候压到这里。
+ */
+export const COMPACTION_GOAL_MAX_TOKENS = 200_000;
 /**
  * 空闲清理（`reason: "idle"`）的两道门。**空闲**：上一条助手回复到此刻超过这么久——此时 provider 缓存多半已过期，
  * 改写前缀不多付钱（清掉一条旧结果会让它之后的整段历史按未命中重付一次，缓存热的时候清往往是负收益）。

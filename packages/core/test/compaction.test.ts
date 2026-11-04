@@ -16,7 +16,7 @@ import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { SessionService } from "../src/session/service.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
-import { EMPTY_COMPACTION, type CompactionInput, type CompactionStage, type CompactionState } from "../src/compaction/types.ts";
+import { COMPACTION_GOAL_MAX_TOKENS, EMPTY_COMPACTION, type CompactionInput, type CompactionStage, type CompactionState } from "../src/compaction/types.ts";
 import {
   IMAGE_TOKEN_ESTIMATE,
   buildWorkingMessages,
@@ -44,6 +44,8 @@ import {
 } from "../src/compaction/builtin.ts";
 import { renderTranscript, transcriptReadTool } from "../src/compaction/tool.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
+import { compactionBudget, fixedOverhead } from "../src/compaction/pipeline.ts";
+import { visibleTools } from "../src/tools/harness.ts";
 import { AgentCompaction, ExtensionHost, agentRegistries, defineExtension, type ExtensionEntry } from "../src/extension/public.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 
@@ -205,6 +207,15 @@ test("估算：图片按固定值不按 base64 长度；toolResult 挂在 images
 });
 
 /* ═══════════════ 阶梯层 ═══════════════ */
+
+test("预算：auto / manual 的压缩目标是 target 再减一成窗口，大窗口封顶 COMPACTION_GOAL_MAX_TOKENS；触发线不变；overflow 仍是半窗", () => {
+  const huge = { window: 1_048_576, maxOutputTokens: undefined, reserveTokens: undefined, used: 1_040_000 };
+  expect(compactionBudget({ ...huge, reason: "auto" })).toEqual({ window: 1_048_576, used: 1_040_000, target: 1_048_576 - 16_000, goal: COMPACTION_GOAL_MAX_TOKENS });
+  expect(compactionBudget({ ...huge, reason: "manual" }).goal).toBe(200_000);
+  expect(compactionBudget({ ...huge, reason: "overflow" }).goal).toBe(524_288);
+  // 常见窗口不受影响：128k → 112k − 12.8k
+  expect(compactionBudget({ window: 128_000, maxOutputTokens: undefined, reserveTokens: undefined, used: 120_000, reason: "auto" }).goal).toBe(99_200);
+});
 
 test("tool-results：保留最近 K 批，之前的 toolResult 标清；没有更旧的可清就 null；overflow 只留 1 批", () => {
   const m = twoTurns();
@@ -391,6 +402,16 @@ async function agentWithBuiltins(
   return agent;
 }
 
+/**
+ * `agentWithBuiltins` 那份菜单的固定开销（工具 schema 的字符估）：估算把它算进上下文占用（2026-11-03），
+ * 按窗口定触发线的测试把窗口加上它，才是「对话本身占多少」的那个意思。
+ */
+async function menuOverhead(): Promise<number> {
+  const probe = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]), tools: [echoTool()] });
+  await mountBuiltinTools(probe);
+  return fixedOverhead(visibleTools(probe.tools, new Set()), []);
+}
+
 /** 从盘上把那一段读回来——测试要验的是「落盘了什么」，所以每次新开一个 Service。 */
 async function loadSession(store: InMemoryDir, id: string): Promise<{ compaction: CompactionState }> {
   return await new SessionService(store).createOrResume(id);
@@ -407,7 +428,8 @@ function collect(agent: Agent): { events: AgentEvent[]; lifecycle: LifecycleEven
 test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含摘要与这次的请求、不含原文；压完下一轮不重复压；状态与 session 都记下", async () => {
   const store = new InMemoryDir();
   const { fn, requests } = capturing([textTurn(BIG_TEXT), reply("<summary>S1</summary>"), toolTurn("t1", "echo", {}), textTurn("done")]);
-  const agent = await agentWithBuiltins(fn, { session: { store, id: "s1" } });
+  const model: Model = { ...SMALL, capabilities: { contextWindow: 400 + (await menuOverhead()) } };
+  const agent = await agentWithBuiltins(fn, { model, session: { store, id: "s1" } });
   await agent.prompt("first"); // 上一个 run 的回答很长：这个 run 轮首就过线
   const { events, lifecycle } = collect(agent);
   const result = await agent.prompt("second");
@@ -586,11 +608,13 @@ test("撞窗应急、在飞那一批比应急尾巴大：清掉它的结果（�
 });
 
 test("校准比：ASCII 与中文同一段对话、同一份 usage，压缩跑过的阶段一致（中文不会在第一段就停）", async () => {
-  const window: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000 } };
+  // usage 与窗口都带上工具 schema 的固定开销 oh：校准比只作用于 system 与消息，下面的数说的都是那一部分
+  const oh = await menuOverhead();
+  const window: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000 + oh } };
   const run = async (text: string): Promise<readonly string[]> => {
     // 第一个 run：长文本、轮 1 usage 300（不触发）。第二个 run：轮 1 usage 950（> target 900）→ 轮 2 轮首触发；
     // 之后每次模型调用都回同一段摘要。长文本在上一个 run 里：这次的请求不折，折的是它
-    const { fn } = capturing([toolTurnUsage("t1", { inputTokens: 300, outputTokens: 0 }), reply("ok"), toolTurnUsage("t2", { inputTokens: 950, outputTokens: 0 }), ...Array.from({ length: 4 }, () => reply("<summary>S</summary>"))]);
+    const { fn } = capturing([toolTurnUsage("t1", { inputTokens: 300 + oh, outputTokens: 0 }), reply("ok"), toolTurnUsage("t2", { inputTokens: 950 + oh, outputTokens: 0 }), ...Array.from({ length: 4 }, () => reply("<summary>S</summary>"))]);
     const agent = await agentWithBuiltins(fn, { model: window, compaction: { reserveTokens: 100, keepRecentTokens: 40, keepRecentToolResults: 1 } });
     await agent.prompt(text);
     const { events } = collect(agent);
@@ -606,6 +630,39 @@ test("校准比：ASCII 与中文同一段对话、同一份 usage，压缩跑�
   const cjk = await run("汉字".repeat(600));
   expect(ascii).toEqual(["tool-results", "collapse"]);
   expect(cjk).toEqual(ascii);
+});
+
+test("校准比不把固定开销当乘数：usage 里的工具 schema / 每轮注入单独算，会话早期读几个大文件不会在真实占用约 1/3 窗口时就触发压缩", async () => {
+  const FILE = "const x = 1; // some code line here\n".repeat(1400); // ≈ 12 600 token（英文代码，chars/4 是准的）
+  const read: ModelTool = { kind: "model", name: "read", label: "read", description: "read", concurrent: true, maxInlineTokens: Infinity, parameters: { type: "object", properties: {} }, execute: async () => toolOk(FILE) };
+  // 几件 schema 很大的工具：固定开销是 system 的好几倍（coding 产品实测工具定义约 3.8k token、system 约 1.35k）
+  const heavy: ModelTool[] = ["a", "b", "c", "d"].map((n) => ({ kind: "model", name: `tool_${n}`, label: n, description: "Does a thing. ".repeat(300), parameters: { type: "object", properties: {} }, execute: async () => toolOk("") }));
+  const uses = ["r1", "r2", "r3"].map((id) => ({ type: "tool_use" as const, id, name: "read", input: {} }));
+  let first = true;
+  const requests: Context[] = [];
+  const fn: StreamFn = (m, c, o) => {
+    requests.push(structuredClone(c));
+    if (!first) return scriptedStreamFn([textTurn("done reading")])(m, c, o);
+    first = false;
+    // provider 的真值：system 与消息按字符估是准的，再加上工具定义（同样按 JSON 字符估）
+    const inputTokens = Math.ceil((c.systemPrompt ?? "").length / 4) + 6 + Math.ceil(JSON.stringify(c.tools).length / 4);
+    return scriptedStreamFn([
+      [
+        { type: "start" },
+        ...uses.flatMap((u) => [{ type: "toolcall_start" as const, toolCallId: u.id, name: "read" }, { type: "toolcall_delta" as const, argsText: "{}" }, { type: "toolcall_end" as const }]),
+        { type: "done", message: { role: "assistant", content: uses, stopReason: "tool_use", usage: { inputTokens, outputTokens: 30 } } },
+      ],
+    ])(m, c, o);
+  };
+  const agent = new Agent({ model: { ...FAKE_MODEL, capabilities: { contextWindow: 128_000 } }, streamFunction: fn, tools: [read, ...heavy] });
+  await mountBuiltinTools(agent);
+  const { events } = collect(agent);
+  await agent.prompt("read these three files");
+  // 真实占用 ≈ 首轮输入 + 三个文件 ≈ 4.5 万，远低于触发线 11.2 万：不该压
+  expect(events.filter((e) => e.type === "compaction_start")).toEqual([]);
+  expect(JSON.stringify(requests.at(-1)!.messages)).toContain("some code line here");
+  // Agent 记下的校准比（给下一个 run 首轮与手动压缩用）同样扣掉固定开销：英文内容约 1，不是 4 以上
+  expect((agent as unknown as { lastCalibration: number }).lastCalibration).toBeLessThan(1.5);
 });
 
 test("手动压缩沿用上一次 usage 的校准比：中文会话压完报出的 contextTokens 不是裸字符估", async () => {

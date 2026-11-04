@@ -314,6 +314,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-03-compaction-goal-cap.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-03-prompt-interpolation-opt-in.md",
       "bilingual": false
     },

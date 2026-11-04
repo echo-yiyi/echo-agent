@@ -3,7 +3,7 @@
 > 状态：当前实现说明；估算与摘要质量的限制见 §9<br>
 > 读者：要调压缩参数、换一套压缩策略、写自己的压缩 extension，或排查「模型为什么看不到那一段」的人<br>
 > 假设已读：[Context 与 Message Flow](context-and-message-flow.md) 的术语表——transcript、working context、provider context、projection 在本文按那里的含义用<br>
-> 决策记录（六条，本文只指向，不复述论证）：[策略是 extension](../decisions/implemented/2026-09-02-compaction-as-extension.md) · [状态是视图](../decisions/implemented/2026-09-02-compaction-state-is-a-view.md) · [四段阶梯与应急](../decisions/implemented/2026-09-02-compaction-ladder.md) · [摘要的送模形态](../decisions/implemented/2026-09-02-compaction-summary-message.md) · [阈值以 usage 为准](../decisions/implemented/2026-09-02-compaction-threshold.md) · [手动压缩与状态面](../decisions/implemented/2026-09-02-compaction-manual-and-state.md)
+> 决策记录（七条，本文只指向，不复述论证）：[策略是 extension](../decisions/implemented/2026-09-02-compaction-as-extension.md) · [状态是视图](../decisions/implemented/2026-09-02-compaction-state-is-a-view.md) · [四段阶梯与应急](../decisions/implemented/2026-09-02-compaction-ladder.md) · [摘要的送模形态](../decisions/implemented/2026-09-02-compaction-summary-message.md) · [阈值以 usage 为准](../decisions/implemented/2026-09-02-compaction-threshold.md) · [手动压缩与状态面](../decisions/implemented/2026-09-02-compaction-manual-and-state.md) · [压缩目标封顶、校准扣固定开销](../decisions/implemented/2026-11-03-compaction-goal-cap.md)
 
 ## 导读
 
@@ -83,11 +83,12 @@ system                       不变，每 run 装配一次，不含摘要
 
 **预算**（`compactionBudget()`）：
 
-- `used`：以本 run 最近一次 `usage` 的 `inputTokens + outputTokens` 为基准（它量的是那条 assistant 之前的视图加它自己的输出），之后入账的消息按字符估；压缩一发生基准作废，回到「system + 视图」字符估，直到下一轮 usage 回来。provider 没报 usage 的路径（FakeProvider、测试）只有字符估。
-- **校准比**：字符估（4 字符 ≈ 1 token）对中文低 2–4 倍，而阶段之间只能重新字符估——两个量纲直接比，中文会话会在第一段就「够了」。所以每次 usage 到达时算一次 `真 token / 同一份视图的字符估`，之后流水线里的 `used`、给阶段的 `input.estimate`、压完报出去的 `contextTokens` 都乘它（范围夹在 0.2–10）。Agent 记住最近一次算出的比值：手动压缩（run 之外）与新 run 的首轮没有 usage 基准，就沿用它；`reset()` 归 1。判据：同一段对话的 ASCII 版与中文版，跑过的阶段一致；手动压缩报出的值明显高于裸字符估。
+- `used`：以本 run 最近一次 `usage` 的 `inputTokens + outputTokens` 为基准（它量的是那条 assistant 之前的视图加它自己的输出，含工具 schema 与每轮注入），之后入账的消息按字符估；压缩一发生基准作废，回到「system + 视图」字符估加固定开销，直到下一轮 usage 回来。provider 没报 usage 的路径（FakeProvider、测试）只有字符估。
+- **固定开销**（[`fixedOverhead()`](../../packages/core/src/compaction/pipeline.ts#symbol=fixedOverhead)）：本轮菜单的工具 schema 与每轮注入。usage 里有它们、消息字符估里没有，所以单独估（JSON 按字符、不乘校准比）、单独加。
+- **校准比**：字符估（4 字符 ≈ 1 token）对中文低 2–4 倍，而阶段之间只能重新字符估——两个量纲直接比，中文会话会在第一段就「够了」。所以每次 usage 到达时算一次 `(真 token − 固定开销) / 同一份视图（system + 消息）的字符估`（[`calibrationFrom()`](../../packages/core/src/compaction/pipeline.ts#symbol=calibrationFrom)），之后流水线里 system 与消息的字符估、给阶段的 `input.estimate`、压完报出去的 `contextTokens` 都按它换算（范围夹在 0.2–10）。不扣固定开销的话，会话早期工具定义占了大头，比值被抬到 3–4，之后每个大工具结果都被放大，真实占用约 1/3 窗口就触发压缩（2026-11-03，[固定开销](../../packages/core/test/compaction.test.ts#test=校准比不把固定开销当乘数usage-里的工具-schema-每轮注入单独算会话早期读几个大文件不会在真实占用约-13-窗口时就触发压缩)）。Agent 记住最近一次算出的比值（同一个算法）：手动压缩（run 之外）与新 run 的首轮没有 usage 基准，就沿用它；`reset()` 归 1。判据：同一段对话的 ASCII 版与中文版，跑过的阶段一致；手动压缩报出的值明显高于裸字符估。
 - 图片按尺寸估（[`imageTokens()`](../../packages/core/src/image.ts#symbol=imageTokens)：宽 × 高 ÷ 750，从 base64 的文件头读尺寸），认不出尺寸按 `IMAGE_TOKEN_ESTIMATE`（1 200），绝不按 base64 长度；`toolResult.images` 也算进去。
 - `target = contextWindow − reserveTokens`，`reserveTokens` 缺省 `max(maxOutputTokens, 16 000)`。
-- `goal`：auto / manual 是 `target − 10% window`（免得下一轮又碰线），overflow 是半窗。
+- `goal`：auto / manual 是 `min(target − 10% window, COMPACTION_GOAL_MAX_TOKENS)`（减一截免得下一轮又碰线；20 万封顶，百万窗口的模型压完不再长期带着约 90 万 token），overflow 是半窗。决策见 [压缩目标封顶](../decisions/implemented/2026-11-03-compaction-goal-cap.md)。
 
 **怎么跑。** 阶段按 `order` 升序（`AgentLoopConfig.compaction.getStages()` **每次重取**）：
 

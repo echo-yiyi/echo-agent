@@ -6,11 +6,14 @@
 // 用本 run 冻结的 model 与 streamFn，一次、无工具、不进 transcript。
 //
 // **量纲**：触发以 provider usage 为准，阶段之间只能重新字符估——两者不是一个尺子（中文会话字符估低 2–4 倍）。
-// 所以从 usage 算一个校准比（真 token / 字符估），之后所有字符估都乘它：流水线里的 `used`、给阶段的 `estimate`、
+// 所以从 usage 算一个校准比（真 token / 字符估），之后 system 与消息的字符估都乘它：流水线里的 `used`、给阶段的 `estimate`、
 // 压完报出去的 `contextTokens`，全在 usage 的量纲上。校准比随本 run 最近一次 usage 走（`createCompactor`）。
+// **固定开销单独算**（`fixedOverhead`）：usage 里还有工具 schema 与每轮注入，字符估里没有它们——不扣掉的话，
+// 会话早期工具定义占了大头，校准比被抬到 3–4，之后每个大工具结果都乘它，真实占用约 1/3 窗口就触发压缩。
 
 import type { CompactionReason, CompactionBudget, CompactionModelCall, CompactionState } from "./types.ts";
 import {
+  COMPACTION_GOAL_MAX_TOKENS,
   COMPACTION_SLACK_RATIO,
   DEFAULT_IDLE_CLEAR_MIN_TOKENS,
   DEFAULT_IDLE_CLEAR_MS,
@@ -24,6 +27,7 @@ import type { LoopDeps, TurnResult } from "../loop/types.ts";
 import { clampDelay, sleep } from "../loop/backoff.ts";
 import type { AgentMessage } from "../messages.ts";
 import { agentError, errText } from "../errors.ts";
+import { toolSchemas, type AgentTool } from "../tools/types.ts";
 
 export type CompactionOutcome = {
   /** 有阶段改了状态。false = 跑了但没有一段有事可做（已发 compactionFailed）。 */
@@ -45,6 +49,26 @@ export function clampCalibration(x: number): number {
   return Math.min(CALIBRATION_MAX, Math.max(CALIBRATION_MIN, x));
 }
 
+/**
+ * 每次请求都带、却不在 system 与消息字符估里的固定开销：本轮菜单的工具 schema 与每轮注入。
+ * 按字符估、**不乘校准比**——schema 是 JSON（ASCII 为主），chars/4 本来就准；乘上中文会话的校准比反而放大。
+ */
+export function fixedOverhead(tools: readonly AgentTool[], injections: readonly AgentMessage[]): number {
+  return estimateText(JSON.stringify(toolSchemas(tools))) + estimateTokens(injections);
+}
+
+/** provider 报的真值 → 校准比：先扣掉固定开销，剩下的才是 system + 消息的真值，再与它们的字符估相比。 */
+export function calibrationFrom(tokens: number, contentEstimate: number, overhead: number): number {
+  return contentEstimate > 0 ? clampCalibration((tokens - overhead) / contentEstimate) : 1;
+}
+
+/** 此刻循环的固定开销：`getTools()` 是本轮菜单，每轮注入按它门控现算。 */
+async function overheadNow(deps: LoopDeps): Promise<number> {
+  const tools = deps.config.getTools();
+  const injections = (await deps.config.getTurnInjections?.(new Set(tools.map((t) => t.name)))) ?? [];
+  return fixedOverhead(tools, injections);
+}
+
 export function compactionBudget(input: {
   window: number | undefined;
   maxOutputTokens: number | undefined;
@@ -59,7 +83,8 @@ export function compactionBudget(input: {
   }
   const reserve = input.reserveTokens ?? Math.max(input.maxOutputTokens ?? 0, DEFAULT_RESERVE_TOKENS);
   const target = Math.max(0, window - reserve);
-  const goal = reason === "overflow" ? Math.floor(window / 2) : Math.max(0, target - Math.floor(window * COMPACTION_SLACK_RATIO));
+  const goal =
+    reason === "overflow" ? Math.floor(window / 2) : Math.min(COMPACTION_GOAL_MAX_TOKENS, Math.max(0, target - Math.floor(window * COMPACTION_SLACK_RATIO)));
   return { window, used, target, goal };
 }
 
@@ -128,14 +153,16 @@ export async function runCompaction(
   /** 纯字符估（system + 视图），未校准。 */
   const raw = (state: CompactionState): number =>
     measureContext({ messages: context.messages, state, systemPrompt: context.systemPrompt, anchor: null });
+  // 工具 schema 与每轮注入：usage 里有、字符估里没有，单独加，不乘校准比
+  const overhead = await overheadNow(deps);
   let calibration = clampCalibration(opts.calibration ?? 1);
   let used: number;
   if (opts.anchor !== null) {
     used = measureContext({ messages: context.messages, state: context.compaction, systemPrompt: context.systemPrompt, anchor: opts.anchor, calibration });
     const r = raw(context.compaction);
-    if (r > 0) calibration = clampCalibration(used / r);
+    if (r > 0) calibration = calibrationFrom(used, r, overhead);
   } else {
-    used = Math.ceil(raw(context.compaction) * calibration);
+    used = Math.ceil(raw(context.compaction) * calibration) + overhead;
   }
   const estimate = (messages: readonly AgentMessage[]): number => Math.ceil(estimateTokens(messages) * calibration);
   const budget = compactionBudget({
@@ -193,8 +220,8 @@ export async function runCompaction(
     if (sameCompaction(next, state)) continue;
     state = next;
     applied.push(stage.name);
-    // 同一把尺子：字符估乘校准比，与触发时的 usage 同量纲
-    used = Math.ceil(raw(state) * calibration);
+    // 同一把尺子：字符估乘校准比、加固定开销，与触发时的 usage 同量纲
+    used = Math.ceil(raw(state) * calibration) + overhead;
   }
 
   const changed = applied.length > 0;
@@ -257,9 +284,12 @@ export function createCompactor(deps: LoopDeps): {
   let anchor: ContextAnchor | null = null;
   // 起点用 Agent 记住的上一次校准比：新 run 的首轮还没有 usage，裸字符估对中文会低估
   let calibration = clampCalibration(deps.config.compaction.calibration ?? 1);
+  // 本轮的固定开销（轮首量一次，菜单本轮冻结）：轮末算校准比时从 usage 里扣掉
+  let overhead = 0;
   let recovered = false;
   return {
     async maybeCompact() {
+      overhead = await overheadNow(deps);
       const r = await runCompaction(deps, { reason: "auto", anchor, calibration });
       if (r !== null) {
         if (r.changed) anchor = null;
@@ -281,10 +311,10 @@ export function createCompactor(deps: LoopDeps): {
       const index = deps.context.messages.length - turn.toolResults.length;
       const tokens = usage.inputTokens + usage.outputTokens;
       anchor = { index, tokens };
-      // 校准比：同一份视图（system + 到那条 assistant 为止的投影）的字符估，与 provider 说的真值之比。
+      // 校准比：provider 说的真值扣掉固定开销，与同一份视图（system + 到那条 assistant 为止的投影）的字符估之比。
       // 记住它——压缩之后 anchor 作废、上一轮报错没 usage 时，字符估还能按本会话的语言密度换算。
       const raw = estimateText(deps.context.systemPrompt) + estimateTokens(buildWorkingMessages(deps.context.messages.slice(0, index), deps.context.compaction));
-      if (raw > 0) calibration = clampCalibration(tokens / raw);
+      if (raw > 0) calibration = calibrationFrom(tokens, raw, overhead);
     },
     async recover(turnId) {
       if (recovered) return false;

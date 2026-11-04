@@ -54,7 +54,7 @@ import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTi
 import type { AgentContext, AgentLoopConfig, AttemptResult, LoopProbes, LoopResult, TransformContext, Emit } from "./loop/types.ts";
 import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
-import { clampCalibration, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
+import { calibrationFrom, fixedOverhead, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
 import { buildWorkingMessages, estimateText, estimateTokens, projectRange } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
@@ -3911,10 +3911,16 @@ export class Agent {
         // 这一轮送模的上下文有多大，provider 说了算（输入 + 它自己的输出 = 下一轮至少这么大）
         const tokens = input.usage.inputTokens + input.usage.outputTokens;
         this._state.contextTokens = tokens;
-        // 校准比：真值 / 同一份视图（system + 到这条 assistant 为止的投影；usage 事件紧跟它的 message_end）的字符估。
+        // 校准比：真值扣掉固定开销（工具 schema、每轮注入），与同一份视图（system + 到这条 assistant 为止的投影；
+        // usage 事件紧跟它的 message_end）的字符估之比——与压缩流水线同一个算法（`calibrationFrom`）。
         // 记下来给手动压缩与下一个 run 的首轮用——那两处没有 usage 基准
         const raw = this.lastSystemEstimate + estimateTokens(buildWorkingMessages(this._state.messages, this._state.compaction));
-        if (raw > 0) this.lastCalibration = clampCalibration(tokens / raw);
+        if (raw > 0) {
+          const menu = visibleTools(this.tools, this.loadedTools, this.restriction());
+          const names = new Set(menu.map((t) => t.name));
+          const injections = this.promptSources((n) => names.has(n)).flatMap((src) => src.turnInjections?.() ?? []);
+          this.lastCalibration = calibrationFrom(tokens, raw, fixedOverhead(menu, injections));
+        }
         this._state.usage = {
           inputTokens: this._state.usage.inputTokens + input.usage.inputTokens,
           outputTokens: this._state.usage.outputTokens + input.usage.outputTokens,

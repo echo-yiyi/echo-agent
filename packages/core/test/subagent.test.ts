@@ -10,12 +10,13 @@ import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import { listBackground } from "../src/background/harness.ts";
 import { errorTurn, scriptedDialect, scriptedStreamFn, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
-import { disableTools, restrictTools } from "../src/tools/harness.ts";
+import { disableTools, restrictTools, visibleTools } from "../src/tools/harness.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
 import type { Model, StreamFn } from "../src/provider/types.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { COLLAPSE_SYSTEM, SUMMARY_SYSTEM } from "../src/compaction/builtin.ts";
 import { estimateText } from "../src/compaction/view.ts";
+import { fixedOverhead } from "../src/compaction/pipeline.ts";
 
 type Context = Parameters<StreamFn>[1];
 
@@ -386,7 +387,7 @@ test("父 run 之外派不了：前台与后台都如实拒绝", async () => {
 });
 
 test("子 agent 自己的 context 照样自动压缩，但压缩的 hook（preCompact / postCompact / compactionFailed）不进主循环的 hooks", async () => {
-  const BIG = "line of a big file\n".repeat(220); // ≈ 1 000 token
+  const BIG = "line of a big file\n".repeat(880); // ≈ 4 200 token：比父那份 system + 工具 schema 还大
   const big: ModelTool = { kind: "model", name: "big", label: "big", description: "big", maxInlineTokens: Infinity, parameters: { type: "object", properties: {} }, execute: async () => toolOk(BIG) };
   const child = scriptedStreamFn([toolTurn("k1", "big", {}), textTurn("child done")]);
   const parent = scriptedStreamFn([toolTurn("c1", "subagent", { prompt: "CHILD-TASK read it", system: "CHILD", tools: ["big"] }), textTurn("parent done")]);
@@ -401,8 +402,8 @@ test("子 agent 自己的 context 照样自动压缩，但压缩的 hook（preCo
   };
   const probe = new Agent({ model: { provider: "t", id: "only", api: "scripted" }, streamFunction: fn, tools: [big] });
   await mountBuiltinTools(probe);
-  const sys = estimateText(await probe.assemblePrompt());
-  // 父那边一直不过线（system + 几十 token）；子读完大文件之后过线
+  const sys = estimateText(await probe.assemblePrompt()) + fixedOverhead(visibleTools(probe.tools, new Set()), []);
+  // 父那边一直不过线（system + 工具 schema + 几十 token）；子读完大文件之后过线
   const model: Model = { provider: "t", id: "only", api: "scripted", capabilities: { contextWindow: sys + 400 } };
   const hooks = new HookRuntime();
   const seen: string[] = [];

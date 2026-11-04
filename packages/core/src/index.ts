@@ -199,6 +199,7 @@ export type {
 export type { AgentContext, AttemptResult, LoopCompactionConfig, LoopResult, ReplySource, TransformContext, TurnCause, TurnResult } from "./loop/types.ts";
 /* 压缩（2026-09-02）：状态与阶段契约给写策略的人；视图与估算给他们算字节；缺省阶梯与 prompt 给想改一段的人 */
 export {
+  COMPACTION_GOAL_MAX_TOKENS,
   COMPACTION_SLACK_RATIO,
   DEFAULT_KEEP_RECENT_TOKENS,
   DEFAULT_KEEP_RECENT_TOOL_RESULTS,

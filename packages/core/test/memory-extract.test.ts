@@ -22,6 +22,8 @@ import { errorTurn, FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../
 import type { Model } from "../src/provider/types.ts";
 import { COLLAPSE_SYSTEM, SUMMARY_SYSTEM } from "../src/compaction/builtin.ts";
 import { estimateText } from "../src/compaction/view.ts";
+import { fixedOverhead } from "../src/compaction/pipeline.ts";
+import { visibleTools } from "../src/tools/harness.ts";
 
 // 记忆提取的端到端判据。
 //
@@ -537,10 +539,11 @@ test("提取子循环不做自动压缩：主对话在最后那条回答之后�
   const probe = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()) });
   await mountBuiltinTools(probe);
   const sys = estimateText(await probe.assemblePrompt());
+  const overhead = fixedOverhead(visibleTools(probe.tools, new Set()), []); // 工具 schema 也算进占用
   kinds.length = 0;
   foreground = 0;
   const reserve = 100;
-  const model: Model = { ...FAKE_MODEL, capabilities: { contextWindow: sys + 450 + reserve } };
+  const model: Model = { ...FAKE_MODEL, capabilities: { contextWindow: sys + overhead + 450 + reserve } };
   const hooks = new HookRuntime();
   const compactionHooks: string[] = [];
   hooks.on("postCompact", () => void compactionHooks.push("postCompact"));

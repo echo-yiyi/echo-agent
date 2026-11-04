@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 357（value 129 · type 210 · both 18）
+符号 358（value 130 · type 210 · both 18）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -87,7 +87,8 @@ value  TRANSCRIPT_READ_TOOL
 type   TranscriptReadParams
 value  transcriptReadTool
 
--- src/compaction/types.ts (15) --
+-- src/compaction/types.ts (16) --
+value  COMPACTION_GOAL_MAX_TOKENS
 value  COMPACTION_SLACK_RATIO
 type   CompactionBudget
 type   CompactionInput
