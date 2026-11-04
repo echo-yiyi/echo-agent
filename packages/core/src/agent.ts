@@ -139,6 +139,12 @@ const INBOX_POLL_MS = 1_000;
  */
 const HANDOFF_TIMEOUT_MS = 10_000;
 
+/**
+ * 被请让位的一方最多花多久把手上的活做完（`watchHandoff`）。到点还没做完就中止它再交出去。
+ * 比 `HANDOFF_TIMEOUT_MS` 短，留出收摊与释放 lease 的时间——等锁的人在上限之内拿得到（人优先）。
+ */
+export const HANDOFF_DRAIN_MS = 7_000;
+
 /** Agent 实例的生命周期相位（状态图见 `Agent.phase` 的注释）。只有 `setPhase()` 改它。 */
 export type AgentLifecyclePhase = "new" | "starting" | "restored" | "running" | "pausing" | "stopping" | "stopped" | "lost";
 
@@ -527,6 +533,10 @@ export class Agent {
    * 只有重启（restore 重新裁决 marker）能解封，本进程不得自行重试。
    */
   private inboxFailure: Error | null = null;
+  /** 正在让位（`watchHandoff` 收到请求之后）：被中止的 inbox run 不 ack，整批放回待接手的一方重投。 */
+  private handingOff = false;
+  /** 一次 `consumeInbox()` 从 reserve 到 ack 裁决的整段；让位排空要等它（run 结束之后还有一次 ack 写）。 */
+  private inboxConsumeInFlight: Promise<void> | undefined;
   /** standalone 没有 catalog：model 换一次 revision +1，binding 固定到它。 */
   private catalogRevision = 0;
   /**
@@ -1486,6 +1496,8 @@ export class Agent {
       this.syncAvailability();
       return null;
     }
+    let consumeSettled!: () => void;
+    this.inboxConsumeInFlight = new Promise<void>((r) => (consumeSettled = r));
     try {
       let ticket: AgentAdmissionTicket<LoopResult>;
       try {
@@ -1518,6 +1530,12 @@ export class Agent {
       // **at-least-once**：崩在 ack 之前 → 重启时那批还在，会重放；ack 了 → 删掉，不会变成死循环。
       // **只归 idle，不排下一轮、也不清 outstanding 标记**：裁决还没出来，可能是 indeterminate（那时一轮都不该再起）。
       this.closeRun();
+      // 让位时没做完、被中止的那批：不 ack，整批放回——盘上留着，接手的一方恢复时重投（`watchHandoff`）
+      if (this.handingOff && settled.kind === "executed" && settled.result.outcome.kind === "aborted") {
+        this.inbox.releaseBatch(batch.reservationId, "released");
+        this.reportDiagnostic({ code: "inbox_handoff_released", message: "让位时这批 inbox 消息没处理完，未 ack，交给接手的一方重投" });
+        return settled.result;
+      }
       // **transcript 先落定再 ack**（与 `ackWatched` 同一条）：这批消息写不进会话账本，就不能说它被消费了——
       // 整批放回、盘上留着，重启后照常重投。同时停掉自动消费：会话写坏之后每次消费都会再写失败，
       // 不停就是一轮轮白跑模型；人开的 prompt 不受影响。
@@ -1564,6 +1582,8 @@ export class Agent {
     } finally {
       this.inboxTicketOutstanding = false;
       this.syncAvailability();
+      this.inboxConsumeInFlight = undefined;
+      consumeSettled();
     }
   }
 
@@ -2092,6 +2112,8 @@ export class Agent {
       if (this.schedule !== undefined) await settleTick(this.schedule);
       await this.settleDream();
       await this.activeRun?.promise;
+      // inbox run 结束之后还有一次 ack 写（先等 transcript 落定再写 marker）：等它裁决完，再关 business gate
+      await this.inboxConsumeInFlight;
       await this.settleBackground();
       await this.settleWrites();
 
@@ -2318,9 +2340,13 @@ export class Agent {
    * **有人在等这把锁就让开**（2026-09-07 用户拍板：人优先，后台让位）。
    *
    * 只有 `preemptible` 的实例会收到这个信号（锁的实现只给它们一个会 settle 的 Promise）。
-   * 收到就 `stop()`：drain 完手上的活、把该落的落完、release、收摊——**不是丢锁**。
-   * 这条路与丢锁（`watchLease`）分得很清：丢锁是「已经不归我了，一个字都不许再写」，
+   * 收到之后：① `pauseManagedWork()` 排空——不接新活、做完手上那条（含它那批 inbox 的 ack）、等后台与写入落定；
+   * ② `stop()` 收摊、release。**不是丢锁**：丢锁（`watchLease`）是「已经不归我了，一个字都不许再写」，
    * 让位是「我还在，做完手上的事再交出去」。
+   *
+   * 排空有时限 `HANDOFF_DRAIN_MS`：等锁的人最多等 `HANDOFF_TIMEOUT_MS`，人优先。到点还没做完就中止
+   * 在跑的 run 与后台任务（outcome 的理由是 `handoff`）；被中止的那批 inbox 消息不 ack，盘上留着，
+   * 接手的一方恢复时重投——那条消息在 transcript 里会出现两次（一次被中止、一次做完），不会丢。
    *
    * 让出去之后本实例就完了：它本来就是为了处理一条消息被叫醒的，交出去也就没事可干。
    */
@@ -2329,7 +2355,22 @@ export class Agent {
     if (requested === undefined) return;
     const by = await requested;
     if (this.lease !== lease) return; // 已经正常 release 过了，这条信号过期
-    this.reportDiagnostic({ code: "lease_handoff", message: `${by.by} 要这一段的写入权，让给它` });
+    this.reportDiagnostic({ code: "lease_handoff", message: `${by.by} 要这一段的写入权，做完手上的活就让给它` });
+    this.handingOff = true;
+    const cancelDeadline = this.clock.setInterval(() => {
+      cancelDeadline();
+      this.reportDiagnostic({ code: "lease_handoff_deadline", message: `${HANDOFF_DRAIN_MS}ms 内没做完手上的活：中止它，交出写入权` });
+      this.activeRun?.abortController.abort(new AbortReason(ABORT_REASON.handoff));
+      void killAllBackground(this.background.tasks);
+    }, HANDOFF_DRAIN_MS);
+    try {
+      await this.pauseManagedWork({ reason: "handoff" });
+    } catch (e) {
+      // 相位已经不是 running（正在收摊 / 已丢锁）：交给下面的 stop 判幂等
+      this.reportDiagnostic({ code: "lease_handoff_drain_failed", message: errText(e) });
+    } finally {
+      cancelDeadline();
+    }
     // 不补提取：人优先，后台让位（2026-09-07）——不为记忆让等锁的人多等。被叫醒的会话处理的是 inbox 消息，
     // 没有用户亲口说的话，本来也过不了提取的门槛
     await this.stopWith(false);

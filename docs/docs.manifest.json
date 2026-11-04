@@ -314,6 +314,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-03-handoff-drains-first.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md",
       "bilingual": false
     },

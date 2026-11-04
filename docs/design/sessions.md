@@ -136,7 +136,7 @@ interface AgentToolsRegistry {
 
 **唤醒带来的冲突：人优先，后台让位**。叫醒一段之后多了一种撞车——后台把它叫起来了，**人**在另一个终端 `--resume` 同一段就会被挡在门外。锁本来就保证不会两个写者同时在，问题只在**谁输**：人的显式动作输给一次隐式唤醒不能接受。
 
-规矩是：持有者可以自称**可让位**（`acquire({ preemptible })`，写进认领记录，因为请它走的人在另一个进程里）；拿不到锁的一方先问一句（`StateLock.requestHandoff`），只有自称可让位的才让——收到 `Lease.handoffRequested` 就把手上的活 drain 完、`stop()`、release。**只有不可让位的启动方才问**，两个后台互相请没有意义。
+规矩是：持有者可以自称**可让位**（`acquire({ preemptible })`，写进认领记录，因为请它走的人在另一个进程里）；拿不到锁的一方先问一句（`StateLock.requestHandoff`），只有自称可让位的才让——收到 `Lease.handoffRequested` 就先排空（`pauseManagedWork`：不接新活、做完手上那条及它那批 inbox 的 ack、等后台与写入落定），再 `stop()`、release。排空有时限（`HANDOFF_DRAIN_MS`，比请求方的等待上限短）：到点没做完就中止它，那批 inbox 消息不 ack、留给接手的一方重投（[让位先排空](../decisions/implemented/2026-11-03-handoff-drains-first.md)）。**只有不可让位的启动方才问**，两个后台互相请没有意义。
 
 三条边界：**锁绝不从谁手里夺走**（让不让是持有者自己决定的，所以「core 不抢占、不猜对面死没死」一个字没变）；请不动就超时返回 `false`，调用方退回原来那句「已被另一个写者持有」；让位走的是 `stop()` 那条正常收摊路，不是丢锁——丢锁是「已经不归我了，一个字都不许再写」，让位是「我还在，做完手上的事再交出去」。
 

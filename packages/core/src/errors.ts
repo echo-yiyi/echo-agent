@@ -56,6 +56,8 @@ export const ABORT_REASON = Object.freeze({
   leaseLost: "lease-lost",
   /** Agent 收摊（stop / dispose）。 */
   dispose: "dispose",
+  /** 让位时手上的活在时限内没做完：中止它、交出 lease（被中止的 inbox 消息不 ack，留给接手的一方重投）。 */
+  handoff: "handoff",
 } as const);
 
 export type AgentError = {

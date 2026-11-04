@@ -23,6 +23,45 @@ import { createProviderStreams } from "../src/provider/dialect.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { scriptedDialect, textTurn } from "../src/testing.ts";
 import type { Provider } from "../src/provider/types.ts";
+import type { Dialect } from "../src/provider/dialect.ts";
+import type { ProviderEvent } from "../src/events.ts";
+import { environmentMessage } from "../src/messages.ts";
+import { FakeClock } from "../src/schedule/clock.ts";
+import { HANDOFF_DRAIN_MS } from "../src/agent.ts";
+
+/** 第一轮要 `ms` 才答完（`ms` 为 null = 不中止就永远不答），收到 abort 立刻退出。 */
+function slowDialect(ms: number | null): Dialect {
+  return {
+    api: "fake",
+    async *request(_m, _c, options): AsyncGenerator<ProviderEvent> {
+      yield { type: "start" };
+      await new Promise<void>((resolve) => {
+        const t = ms === null ? undefined : setTimeout(resolve, ms);
+        options?.signal?.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
+      });
+      if (options?.signal?.aborted === true) {
+        yield { type: "error", error: { source: "provider", code: "aborted" as never, retryable: false, message: "aborted" } };
+        return;
+      }
+      yield { type: "text_start" };
+      yield { type: "text_delta", text: "做完了" };
+      yield { type: "text_end" };
+      yield { type: "done", message: { role: "assistant", content: [{ type: "text", text: "做完了" }], stopReason: "end_turn", usage: null } };
+    },
+  };
+}
+
+function providerWith(dialect: Dialect): Provider {
+  return createProvider({
+    id: "t",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams(dialect),
+  });
+}
+
+const envCount = (msgs: readonly { role: string }[]): number => msgs.filter((m) => m.role === "environment").length;
 
 function provider(): Provider {
   return createProvider({
@@ -174,6 +213,63 @@ test("人 start() 时后台那段让开：它自己 stop（drain 完、落完盘
 
   // 后台那段是**正常收摊**，不是丢锁：丢锁会把 lastError 立成 lease-lost
   expect(background.state.lastError).toBeNull();
+  await human.stop();
+});
+
+test("让位时后台正在处理 inbox 消息：先做完这条再交出去（ack 了，人接手后不重做）", async () => {
+  const lock = new InMemoryStateLock();
+  const store = new InMemoryDir();
+  const common = { allowNetwork: false, store, sharedStore: new InMemoryDir(), lock, sessionId: "s1", withoutMemory: true } as const;
+  const background = await createAgent({ ...common, provider: providerWith(slowDialect(300)), preemptible: true });
+  const outcomes: string[] = [];
+  background.subscribe((e) => {
+    if (e.type === "agent_end") outcomes.push(e.outcome.kind);
+  });
+  await background.start();
+  await background.ingress.deliverDurable({ message: environmentMessage("帮我做件事", "session", "s-a:1"), dedupeKey: "session:s-a:1" });
+  await new Promise((r) => setTimeout(r, 50));
+  expect(background.state.status).not.toBe("idle");
+
+  const human = await createAgent({ ...common, provider: provider() });
+  await human.start();
+  expect(outcomes).toEqual(["completed"]);
+  expect(envCount(human.messages)).toBe(1);
+  expect(human.messages.at(-1)?.role).toBe("assistant");
+  expect((await store.list("inbox/")).filter((p) => !p.startsWith("inbox/acks/"))).toHaveLength(0);
+  await human.stop();
+});
+
+test("让位时那条活做不完：到时限就中止，消息不 ack、留给接手的人重投一次", async () => {
+  const lock = new InMemoryStateLock();
+  const store = new InMemoryDir();
+  const clock = new FakeClock();
+  const common = { allowNetwork: false, store, sharedStore: new InMemoryDir(), lock, sessionId: "s1", withoutMemory: true } as const;
+  const background = await createAgent({ ...common, provider: providerWith(slowDialect(null)), preemptible: true, clock });
+  const ends: { kind: string; reason?: string }[] = [];
+  background.subscribe((e) => {
+    if (e.type === "agent_end") ends.push(e.outcome as { kind: string; reason?: string });
+  });
+  await background.start();
+  await background.ingress.deliverDurable({ message: environmentMessage("一件做不完的活", "session", "s-a:1"), dedupeKey: "session:s-a:1" });
+  await new Promise((r) => setTimeout(r, 50));
+  expect(background.state.status).not.toBe("idle");
+
+  const human = await createAgent({ ...common, provider: provider() });
+  const humanStarted = human.start();
+  await new Promise((r) => setTimeout(r, 100)); // 让位请求到达、后台开始排空
+  expect(ends).toEqual([]); // 时限没到：还在做
+  clock.advance(HANDOFF_DRAIN_MS);
+  await humanStarted;
+  expect(ends).toEqual([{ kind: "aborted", reason: "handoff" }]);
+  // 那条没有被 ack：人这一段恢复时把它重投、做完
+  const done = (): boolean => {
+    const m = human.messages.at(-1);
+    return m?.role === "assistant" && m.stopReason === "end_turn";
+  };
+  for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 20));
+  expect(done()).toBe(true);
+  expect(envCount(human.messages)).toBe(2); // 后台那次（被中止）+ 人这边重投的一次
+  expect((await store.list("inbox/")).filter((p) => !p.startsWith("inbox/acks/"))).toHaveLength(0);
   await human.stop();
 });
 
