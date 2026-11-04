@@ -245,3 +245,52 @@ test("管道形态：每轮结束在 err 打 `[run] <run-id>`，正文不受影�
   const o = io();
   expect(await runObserve(["show", runId, "--state-dir", dir], "echo-agent", o)).toBe(0);
 });
+
+/** 一轮回答拆成 `n` 个流式增量（真 provider 就是这样：一个 token 左右一条），每条一个字。 */
+function streamedTurn(n: number): ScriptedTurn {
+  const text = "字".repeat(n);
+  return [
+    { type: "start" },
+    { type: "text_start" },
+    ...Array.from({ length: n }, () => ({ type: "text_delta" as const, text: "字" })),
+    { type: "text_end" },
+    { type: "done", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "end_turn", usage: null } },
+  ];
+}
+
+test("content 档的人读文本：同一次生成里连着的流式增量折成一行（条数 + 字符数）；--body 照样逐条展开，JSON 导出不变", async () => {
+  const echo = await createEcho({
+    provider: scripted([streamedTurn(30)]),
+    sessionsRoot: dir,
+    allowNetwork: false,
+    withoutMemory: true,
+    extensionDirs: [],
+    observation: { capture: "content" },
+  });
+  running.push(echo);
+  await echo.start();
+  const result = await echo.send("hi");
+  await echo.observations.flush();
+  const deltaLines = (text: string): string[] => text.split("\n").filter((l) => l.includes("model.generate.delta"));
+
+  // JSON 导出不变：每个增量各一条（30 个 text_delta，加上同一次生成里的 text_start / text_end / done）
+  const exported = io();
+  expect(await runObserve(["export", result.runId, "--state-dir", dir], "echo-agent", exported)).toBe(0);
+  const json = JSON.parse(exported.out.text) as { timeline: { name: string; attributes: { deltaType?: string } }[] };
+  const deltas = json.timeline.filter((t) => t.name === "model.generate.delta");
+  expect(deltas.filter((t) => t.attributes.deltaType === "text_delta")).toHaveLength(30);
+
+  const last = io();
+  expect(await runObserve(["last", "--state-dir", dir], "echo-agent", last)).toBe(0);
+  const folded = deltaLines(last.out.text);
+  expect(folded).toHaveLength(1);
+  expect(folded[0]).toContain(`chars=30 count=${deltas.length} deltaType=`);
+  expect(folded[0]).toContain("text_delta");
+  // 记录总数照实报：折的是显示，不是记录
+  const records = Number(/records (\d+)/.exec(last.out.text)?.[1]);
+  expect(records).toBe(json.timeline.length);
+
+  const body = io();
+  expect(await runObserve(["show", result.runId, "--state-dir", dir, "--body"], "echo-agent", body)).toBe(0);
+  expect(deltaLines(body.out.text)).toHaveLength(deltas.length);
+});

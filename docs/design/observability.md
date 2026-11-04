@@ -164,6 +164,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 - **`lastRun()` 是最近一次顶层 run**：隔离子循环（§7）是某个 run 派出来的，`source` 带 `parentRunId`，不算「上一次」。`listRuns()` 照常列出全部。
 - **列举顺序新的在前**（[`RunIndexOrderKey`](../../packages/core/src/observability/document-store.ts#symbol=RunIndexOrderKey)）：`acceptedAt` 倒序；同一毫秒时，同一个 runtime 内按 `firstSeq` 倒序（`run.accepted` 的 seq 就是 admission 顺序），跨 runtime 按 `runtimeId` 定一个固定次序——跨 runtime 的 seq 各数各的，没有可比的先后。三段逐级比较是全序，分页游标带的就是这三个字段，所以翻页不重不漏。
 - **renderer 是纯函数**（[render.ts](../../packages/core/src/observability/render.ts#symbol=renderRunObservation) 头注）：`buildRunObservationViewModel()` 与 `renderRunObservation()` 不读 Agent、不查 store、不看订阅状态，也不改原 envelope。同一批记录必然同一输出，所以能上 golden。时间全部相对 `acceptedAt`，golden 不锁 wall clock。
+- **`observe` 的人读文本折叠流式增量**：`content` 档下一次生成有几百条 `model.generate.delta`，`last` / `show` / `export --format text` 交给 renderer 之前把同一个 turn 里连着的折成一条，只留 `count`、`chars`、`deltaType`（[foldGenerationDeltas](../../packages/base/src/observe.ts#symbol=foldGenerationDeltas)）。`--body` 照样逐条展开；JSON 导出、盘上记录与末尾的记录总数都不变。
 
 **跨会话是在装配层做的，不在 core**：core 守「一个状态根、一个 reader」，`packages/base` 的 `SessionObservationReaders` 给每段会话开一个只读 reader 再合并。所以不给 `--session` 时一个面板能看整个集群。只有旧格式 `observations.sqlite` 的会话记进读不了的会话，原因写「旧格式观测，已不再读取」。
 
