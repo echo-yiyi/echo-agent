@@ -15,6 +15,21 @@ import {
   type SlashCommand,
 } from "@earendil-works/pi-tui";
 
+/**
+ * 一行输入是不是斜杠命令；是就拆出命令名与参数（参数已去首尾空白，无参数时是 ""）。
+ *
+ * 判据照 pi：以 `/` 开头、**且 `/` 后面那个词本身不含 `/`**。终端里拖进一个文件，粘进来的是
+ * `/Users/…/shot.png` 这样的绝对路径——先拖图再打字的那一行是消息，不是命令。
+ * `text` 是已去首尾空白的那一行。
+ */
+export function parseSlashCommand(text: string): { name: string; rest: string } | null {
+  if (!text.startsWith("/")) return null;
+  const spaceIndex = text.indexOf(" ");
+  const name = (spaceIndex === -1 ? text : text.slice(0, spaceIndex)).slice(1);
+  if (name.includes("/")) return null;
+  return { name, rest: spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim() };
+}
+
 /** 命令表的一行：pi-tui 的 `SlashCommand`（菜单面）+ 执行体（派发面）。`rest` 已去首尾空白，无参数时是 ""。 */
 export type SlashSpec = SlashCommand & { readonly run: (rest: string) => void };
 

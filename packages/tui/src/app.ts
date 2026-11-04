@@ -29,7 +29,7 @@ import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { installKeybindings } from "./keybindings.ts";
 import { CredentialSetup } from "./setup.ts";
 import { imagePathsIn, isConfigured, loadImageFile, type VerifyFn } from "@echo-agent/base";
-import { SlashCommandProvider, type SlashSpec } from "./slash.ts";
+import { parseSlashCommand, SlashCommandProvider, type SlashSpec } from "./slash.ts";
 import { describeModel } from "./catalog.ts";
 import { bold, dim, EDITOR_THEME, SELECT_LIST_THEME } from "./theme.ts";
 import type { Product } from "@echo-agent/base";
@@ -297,16 +297,16 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
     // 斜杠命令：从 `slashCommands` 表派发（表见 compactNow 之后——菜单、派发、文案同一张表）。
     // 不认识的**报一句并把原文放回**，不发给模型——拼错命令静默变成一条消息，
     // 就是「写了没生效」在对话里的形态。
-    if (trimmed.startsWith("/")) {
-      const spaceIndex = trimmed.indexOf(" ");
-      const name = (spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex)).slice(1);
-      const command = slashCommands.find((c) => c.name === name);
+    // 什么算命令见 `parseSlashCommand`：以绝对路径开头的一行（拖进来的文件）是消息。
+    const slash = parseSlashCommand(trimmed);
+    if (slash !== null) {
+      const command = slashCommands.find((c) => c.name === slash.name);
       if (command !== undefined) {
-        command.run(spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim());
+        command.run(slash.rest);
         return;
       }
       editor.setText(text);
-      transcript.push({ kind: "notice", text: `不认识的命令 /${name}（有 ${slashMenuText}）` });
+      transcript.push({ kind: "notice", text: `不认识的命令 /${slash.name}（有 ${slashMenuText}）` });
       rerender();
       return;
     }

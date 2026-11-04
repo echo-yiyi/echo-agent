@@ -15,8 +15,8 @@
 // `last` 是全部会话里最近的那条；`serve` 一个面板看整个集群。
 // 不认识的子命令 / 选项一律报错（退出码 2），不静默按缺省跑——与 `cli.ts` 同一条纪律。
 
-import { expandHome, resolveSessionsRoot, type RunLookupResult, type RunObservationHeader } from "@echo-agent/core";
-import { renderRunObservation } from "@echo-agent/core/observability";
+import { expandHome, resolveSessionsRoot, type RunLookupResult, type RunObservation, type RunObservationHeader } from "@echo-agent/core";
+import { renderRunObservation, type ObservationEnvelope } from "@echo-agent/core/observability";
 import type { Sink } from "./run.ts";
 import { startObserveServer } from "./observe/server.ts";
 import { SessionObservationReaders } from "./observe/sessions.ts";
@@ -58,7 +58,8 @@ export function observeUsage(name: string): string {
   --state-dir <路径>       会话目录的上一层（与主命令同义：缺省 $ECHO_HOME/sessions，再退到 ~/.echo/sessions）
   --session <id>           只看这一段会话（缺省：全部会话一起看——last 是最近的一条，show 按 run-id 找，serve 一个面板看整个集群）
   --format <text|json>     输出格式（last / show 缺省 text；export 缺省 json）
-  --body                   text 输出里带上每条记录的 body（缺省只有 name / attributes）
+  --body                   text 输出里带上每条记录的 body（缺省只有 name / attributes，
+                           且同一次生成里连着的流式增量折成一行：条数 + 字符数；带 --body 时逐条展开）
   --port <端口>            serve 监听的端口（缺省 ${OBSERVE_DEFAULT_PORT}；0 = 随机）
   --host <地址>            serve 绑定的地址（缺省 127.0.0.1；面板无鉴权，别暴露到局域网）
   -h, --help               显示本帮助
@@ -160,10 +161,49 @@ function headerLine(h: RunObservationHeader): string {
   return `${h.runId} · ${h.status} · observation ${h.integrity} · source ${h.source.kind} · accepted ${new Date(h.acceptedAt).toISOString()}`;
 }
 
+/** content 档下每个流式增量各记一条（`model.generate.delta`）。 */
+const GENERATION_DELTA = "model.generate.delta";
+
+/**
+ * 人读文本用：把同一次生成里**连着的**流式增量折成一条，属性只留 `count`（几条）、`chars`（正文 + 工具参数共多少字符）
+ * 与 `deltaType`（出现过的增量种类，按首次出现排）。一次十几秒的 run 有几百条增量，逐条一行会把时间线淹掉。
+ *
+ * 只动交给渲染的那份副本：盘上的记录、`summary` 里的记录数、JSON 导出都不变。同一次生成 = 同一个 turn 里中间没有
+ * 别的记录隔开（换一次 attempt 中间隔着 span 的首尾记录，自然分成两段）。
+ */
+function foldGenerationDeltas(observation: RunObservation): RunObservation {
+  const records: ObservationEnvelope[] = [];
+  let pending: ObservationEnvelope[] = [];
+  const flush = (): void => {
+    const first = pending[0];
+    if (first === undefined) return;
+    let chars = 0;
+    const types: string[] = [];
+    for (const r of pending) {
+      const b = r.body as { text?: unknown; argsText?: unknown } | null;
+      if (typeof b?.text === "string") chars += b.text.length;
+      if (typeof b?.argsText === "string") chars += b.argsText.length;
+      const t = String(r.attributes.deltaType ?? "?");
+      if (!types.includes(t)) types.push(t);
+    }
+    records.push({ ...first, attributes: { count: pending.length, chars, deltaType: types.join(",") } });
+    pending = [];
+  };
+  for (const r of observation.records) {
+    if (r.name !== GENERATION_DELTA || (pending.length > 0 && pending[0]!.scope.turnId !== r.scope.turnId)) flush();
+    if (r.name === GENERATION_DELTA) pending.push(r);
+    else records.push(r);
+  }
+  flush();
+  return { ...observation, records };
+}
+
 function printLookup(lookup: RunLookupResult, what: string, format: ObserveFormat, body: boolean, io: ObserveIo): number {
   switch (lookup.kind) {
     case "found": {
-      const rendered = renderRunObservation(lookup.observation, { format, includeBody: body });
+      // 折叠只给人读文本；`--body` 要看的就是每一条，照样逐条展开
+      const observation = format === "text" && !body ? foldGenerationDeltas(lookup.observation) : lookup.observation;
+      const rendered = renderRunObservation(observation, { format, includeBody: body });
       io.out.write(rendered.content.endsWith("\n") ? rendered.content : `${rendered.content}\n`);
       return 0;
     }

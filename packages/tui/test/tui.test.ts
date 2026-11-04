@@ -452,7 +452,11 @@ function pngHeader(w: number, h: number): Uint8Array {
   return b;
 }
 
-async function dragImageIn(vision: boolean): Promise<{ sent: { text: string; images: number }[]; screen: string }> {
+/** `typed` 拿到工作目录、给出那一行输入：缺省是「先打字、后拖图」。 */
+async function dragImageIn(
+  vision: boolean,
+  typed: (workspace: string) => string = (w) => `这张图里是什么 ${w}/shot.png`,
+): Promise<{ sent: { text: string; images: number }[]; screen: string }> {
   const workspace = await mkdtemp(join(tmpdir(), "echo-tui-img-"));
   await writeFile(join(workspace, "shot.png"), pngHeader(320, 200));
   const ui = fakeTui();
@@ -466,7 +470,7 @@ async function dragImageIn(vision: boolean): Promise<{ sent: { text: string; ima
   });
   const done = runTui({ agent: runtime, ui });
   await flush();
-  ui.feed(`这张图里是什么 ${workspace}/shot.png`); // 终端里拖进文件，粘贴的就是路径
+  ui.feed(typed(workspace)); // 终端里拖进文件，粘贴的就是路径
   ui.feed("\r");
   // 附图要真读盘：空转事件循环等不到 I/O，按真实时间等到 prompt 发出去（最多 2 秒）
   const deadline = Date.now() + 2_000;
@@ -490,6 +494,15 @@ test("当前模型不收图片：一张都不附，屏幕上说清楚，文字�
   const { sent, screen } = await dragImageIn(false);
   expect(sent).toEqual([{ text: expect.stringContaining("shot.png"), images: 0 }]);
   expect(screen).toContain("不收图片，1 张没有附上");
+});
+
+test("先拖图再打字：以绝对路径开头的一行是消息，不是斜杠命令——照发、附图、不报「不认识的命令」", async () => {
+  const { sent, screen } = await dragImageIn(true, (w) => `${w}/shot.png 这张图里报错是什么意思`);
+  expect(screen).not.toContain("不认识的命令");
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.images).toBe(1);
+  expect(sent[0]!.text.startsWith("/")).toBe(true);
+  expect(screen).toContain("[图片] 已附上 shot.png（320×200）");
 });
 
 test("聚焦之后渲染里要有 CURSOR_MARKER（可见光标——这正是改用 pi-tui 编辑器的理由之一）", async () => {

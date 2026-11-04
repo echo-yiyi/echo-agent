@@ -338,6 +338,18 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-03-pipe-whole-stdin-one-prompt.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-03-process-unhandled-rejection.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-03-workspace-trust.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md",
       "bilingual": false
     },

@@ -32,7 +32,9 @@ registry 的“多”是多个扩展往同一个 registry 注册内容，不是�
 
 [`ExtensionDefinition`](../../packages/core/src/extension/abi.ts#symbol=ExtensionDefinition) 是声明；[`ExtensionEntry`](../../packages/core/src/extension/host.ts#symbol=ExtensionEntry) 把声明与 entryId、原始 config 组合；[`Fiber`](../../packages/core/src/extension/fiber.ts#symbol=Fiber) 是某个 entry 在某一代里的运行实例。definition.name 是作者命名，entryId 是装配身份，generation 是一起挂载与卸载的批次，三者不要混用。
 
-盘上扩展默认来自调用进程 cwd 下的 extensions 目录；显式 `extensionDirs` 整份替换发现目录，相对路径也按 cwd 解析。它不自动跟随恢复 session 后的 workspace 重选，见 [`resolveExtensionDirs()`](../../packages/core/src/create-echo.ts#symbol=resolveExtensionDirs)。
+盘上扩展默认来自调用进程 cwd 下的 extensions 目录；显式 `extensionDirs` 整份替换发现目录，相对路径也按 cwd 解析，给 `[]` 就是不发现（热重载也不去找）。它不自动跟随恢复 session 后的 workspace 重选，见 [`resolveExtensionDirs()`](../../packages/core/src/create-echo.ts#symbol=resolveExtensionDirs)。
+
+产品命令行在这之上加了一道**工作区信任**（[记录](../decisions/implemented/2026-11-03-workspace-trust.md)）：用户没给 `--extensions` 时，约定目录只在受信的工作区里交给 `createEcho()`，不受信就显式给 `[]`。受信的工作区按 realpath 记在 `$ECHO_HOME/settings.json` 的 `trustedWorkspaces`；交互形态第一次遇到会问一次，管道与 `--serve` 不受信就不加载、stderr 说一行；显式 `--extensions` 一律视为受信。实现见 [`echoOptions()`](../../packages/base/src/cli.ts#symbol=echoOptions) 与 [`trustConventionDir()`](../../packages/base/src/cli.ts#symbol=trustConventionDir)；直接调用 `createEcho()` 的库用户不受这道门约束。
 
 [`discoverExtensionFiles()`](../../packages/core/src/create-echo.ts#symbol=discoverExtensionFiles) 只认目录第一层的 ts / mts / js / mjs 文件，或第一层子目录里的 index 入口，不递归寻找更深的扩展入口。目录不存在视为空；无法读取的目录不是“没有扩展”。结果按路径排序，多个目录指到相同解析路径时去重。
 
@@ -171,6 +173,7 @@ replace 在卸旧前验证新代 config 和依赖图；PREPARE 失败保留旧�
 - 已拿到的原始 service 引用不会统一撤销，回调须遵守 signal 与 disposer 协议。
 - start / dispose 不合作时，Host 没有通用强制回收和超时保证。
 - 多文件重载逐项执行，不是整批原子替换；模块求值后的内存也不能由删除快照释放。
+- 扩展里没接住的 Promise rejection 不归 Host 管：库调用方（直接 `createEcho()`）自己决定进程怎么办。产品命令行的入口（[`mainFor()`](../../packages/base/src/cli.ts#symbol=mainFor)）装了进程级 `unhandledRejection` 处理器，stderr 打一行（消息与栈的第一帧）、进程继续；同步抛出、没人接的 `uncaughtException` 保持缺省，进程退出（[记录](../decisions/implemented/2026-11-03-process-unhandled-rejection.md)）。
 
 历史复核探针见 [记录](../code-review/2026-09-15-doc-probes.md)，本文只维护现行契约与测试入口。
 

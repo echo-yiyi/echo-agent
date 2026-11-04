@@ -62,6 +62,8 @@
 
 交互模式缺凭据时引导配置，运行中认证失败可重新输入；管道模式不能要求人操作选择器，按启动器的凭据检查返回错误。凭据的读取、验证、保存与模型选择持久化归宿主能力，TUI 只提供交互。
 
+工作区信任确认 [runTrustPrompt()](../../packages/tui/src/trust.ts#symbol=runTrustPrompt) 同样跑在装配之前：工作目录的 `extensions/` 里有扩展、而这个工作区还不受信时，列出将加载的文件，问信任还是不信任。缺省选中「不信任」，Esc / Ctrl+D 也是不信任；文件名经 clean() 清洗后再显示。记不记住、加不加载由装配层决定（[记录](../decisions/implemented/2026-11-03-workspace-trust.md)），TUI 只返回选择。
+
 ## 四、状态栏
 
 [footerLine()](../../packages/tui/src/app.ts#symbol=footerLine) 从运行态投影生成状态栏，不自行推断业务状态。
@@ -92,7 +94,7 @@ Markdown 使用固定 [MARKDOWN_THEME](../../packages/tui/src/theme.ts#symbol=MA
 
 ## 六、交互能力
 
-命令派发由 runTui 中的命令表负责，补全使用同一命令集合。
+命令派发由 runTui 中的命令表负责，补全使用同一命令集合。一行输入算不算命令由 [parseSlashCommand()](../../packages/tui/src/slash.ts#symbol=parseSlashCommand) 判：以 `/` 开头、且 `/` 后的第一个词不含 `/`。以绝对路径开头的一行（终端里拖入文件后接着打字）是消息，照常发送并附图；不认识的命令报一句并把原文放回输入行，不发给模型。
 
 | 交互 | 所有者与边界 |
 | --- | --- |
@@ -116,7 +118,7 @@ Markdown 使用固定 [MARKDOWN_THEME](../../packages/tui/src/theme.ts#symbol=MA
 ## 八、验证
 
 ```bash
-bun test packages/tui/test/tui.test.ts packages/tui/test/first-run.test.ts \
+bun test packages/tui/test/tui.test.ts packages/tui/test/first-run.test.ts packages/tui/test/trust.test.ts \
   packages/tui/test/setup.test.ts packages/tui/test/extension.test.ts \
   packages/tui/test/key-discipline.test.ts
 bun test packages/cli/test/tui-pty.test.ts

@@ -7,8 +7,8 @@
 // 和隔壁 scripted 样例比，差别只有一处：那边把工具写进 `createEcho({ agent: { tools } })`，
 // 这边**一个工具都没传**——工具躺在 `extensions/current-year.ts` 里，`createEcho()` 自己发现并装上。
 //
-// 打印出来的 `extensions` 会有五条：**内建四条**（`echo:tasks` / `echo:skills` / `echo:memory` /
-// `echo:scheduler`）在前，外部发现的 `current-year` 在后。内建也走同一套 extension 机制，
+// 打印出来的 `extensions` 里，**内建的 `echo:*`**（`echo:agent` / `echo:tasks` / `echo:memory` / `echo:compaction` 等，
+// 几条随 core 版本走，分发门里有当前那份清单）在前，外部发现的 `current-year` 在最后。内建也走同一套 extension 机制，
 // 所以「这个 agent 会什么」在这份清单里是完整的，不是只列第三方。
 // 换句话说：往 `extensions/` 里丢一个文件，agent 下次启动就多一件能力，主程序一行不改。
 //

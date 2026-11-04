@@ -8,7 +8,7 @@
 // 交互形态的判据在 `tui.test.ts` 与 `extension.test.ts`。
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -39,7 +39,7 @@ import { ECHO_AGENT, main } from "../src/product.ts";
 import { isConfigured } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { fakeTui } from "@echo-agent/tui/testing";
-import { linesOf } from "@echo-agent/base";
+import { linesOf, readAll } from "@echo-agent/base";
 import { run, type Sink } from "@echo-agent/base";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-agent.ts");
@@ -354,6 +354,103 @@ test("已经 abort 过的 signal：run() 也不进输入循环，且照样干净
   expect(existsSync(join(dir, ".lock")), "没收摊").toBe(false);
 });
 
+/* ══════════════ 管道形态：整段 stdin 是一条 prompt（2026-11-03，照 `claude -p` / `codex exec`） ══════════════ */
+
+test("readAll：整段读完才交出来，多行原样保留；多字节字符跨块不坏", async () => {
+  const stream = new PassThrough();
+  const read = readAll(stream);
+  const bytes = new TextEncoder().encode("修登录测试。\n\n约束：\n- 不要动 API\n");
+  stream.write(bytes.slice(0, 2)); // 「修」的三个字节拆在两块里
+  stream.write(bytes.slice(2));
+  stream.end();
+  expect(await read).toBe("修登录测试。\n\n约束：\n- 不要动 API\n");
+});
+
+test("readAll：已经 abort 过的 signal 不许卡在等 EOF 上（SIGINT 落在启动期间就是这个形状）", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const stream = new PassThrough(); // 永远不结束
+  const raced = await Promise.race([readAll(stream, controller.signal).then(() => "结束了"), new Promise((r) => setTimeout(() => r("卡住了"), 200))]);
+  expect(raced, "预先 abort 的 signal 没能让读 stdin 收摊").toBe("结束了");
+});
+
+/**
+ * 假的 OpenAI 兼容端点：kimi 认 `ECHO_LLM_BASE_URL`，bin 级的测试就不必碰真 API。
+ * 记下每次请求体，回一段流式正文；`delayMs` 让回答晚到（给「回答之前发生了别的事」留出时间）。
+ */
+function fakeModelServer(reply: string, delayMs = 0): { url: string; requests: { messages: { role: string; content: unknown }[] }[]; stop: () => void } {
+  const requests: { messages: { role: string; content: unknown }[] }[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      requests.push((await req.json()) as (typeof requests)[number]);
+      if (delayMs > 0) await Bun.sleep(delayMs);
+      const chunk = (o: unknown): string => `data: ${JSON.stringify(o)}\n\n`;
+      const body =
+        chunk({ id: "c1", choices: [{ index: 0, delta: { role: "assistant", content: reply } }] }) +
+        chunk({ id: "c1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) +
+        "data: [DONE]\n\n";
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+  return { url: `http://127.0.0.1:${server.port}/v1`, requests, stop: () => server.stop(true) };
+}
+
+/** 异步 spawn bin：同进程里还跑着假端点，`spawnSync` 会把事件循环卡住、端点答不了话。 */
+async function runBin(
+  args: string[],
+  opts: { env?: Record<string, string>; stdin?: string; cwd?: string } = {},
+): Promise<{ code: number; out: string; err: string }> {
+  const p = Bun.spawn(["bun", BIN, ...args], {
+    ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    env: { ...process.env, ...opts.env },
+    stdin: new Blob([opts.stdin ?? ""]),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { code, out, err };
+}
+
+/** 用假端点跑 bin 的环境：假 key、指到假端点、`ECHO_HOME` 在本条的临时目录。 */
+function fakeModelEnv(url: string): Record<string, string> {
+  return { MOONSHOT_API_KEY: "sk-fake", ECHO_LLM_API_KEY: "", ECHO_LLM_BASE_URL: url, ECHO_HOME: join(dir, "home") };
+}
+
+function userText(request: { messages: { role: string; content: unknown }[] }): string {
+  const content = request.messages.filter((m) => m.role === "user").at(-1)?.content;
+  if (typeof content === "string") return content;
+  return Array.isArray(content) ? content.map((p: { text?: string }) => p.text ?? "").join("") : "";
+}
+
+test("bin:管道形态把整段 stdin 当一条 prompt——一次 run、一次模型请求，后面几行约束跟着第一句一起到", async () => {
+  const server = fakeModelServer("改好了");
+  try {
+    const task = "Fix the failing login test.\n\nContext:\n- the test sits next to the login module\n- do not touch the API\n";
+    const ext = join(dir, "no-extensions");
+    mkdirSync(ext);
+    const r = await runBin(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], { env: fakeModelEnv(server.url), stdin: task });
+    expect([r.code, r.err]).toEqual([0, expect.any(String)]);
+    expect(server.requests).toHaveLength(1);
+    expect(userText(server.requests[0]!)).toContain("- do not touch the API");
+    expect(userText(server.requests[0]!)).toContain("Fix the failing login test.");
+    expect(r.err.split("\n").filter((l) => l.startsWith("[run] ")), "一段输入只该开一个 run").toHaveLength(1);
+    expect(r.out).toContain("改好了");
+  } finally {
+    server.stop();
+  }
+}, 30_000);
+
+test("bin:管道形态 stdin 是空的（或全是空白）→ 报错、退出码 1，不装配、不碰状态根", async () => {
+  const r = await runBin(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], {
+    env: { MOONSHOT_API_KEY: "sk-fake", ECHO_LLM_API_KEY: "", ECHO_HOME: join(dir, "home") },
+    stdin: "  \n\n",
+  });
+  expect(r.code).toBe(1);
+  expect(r.err).toContain("stdin 是空的");
+  expect(existsSync(join(dir, "state")), "空输入也把 agent 装起来了").toBe(false);
+}, 30_000);
+
 /* ══════════════ 缺凭据：形态决定策略（2026-09-01：配置是运行态，不阻塞启动） ══════════════ */
 //
 // 一张表两行，两行**各有一条判据**，而且都造得出反例：
@@ -494,24 +591,162 @@ test("main:交互 + 扩展目录里有坏文件 → 照样起来，屏幕上一�
   }
 });
 
-test("bin:管道形态 + 坏扩展 → 照样跑，诊断进 stderr，退出码不受影响", () => {
+test("bin:管道形态 + 坏扩展 → 照样跑，诊断进 stderr，退出码不受影响", async () => {
   const ext = join(dir, "extensions");
   mkdirSync(ext, { recursive: true });
   writeFileSync(join(ext, "broken.ts"), "export const x = 1;\n");
   const home = join(dir, "home");
   mkdirSync(home, { recursive: true });
   writeFileSync(join(home, "credentials.json"), JSON.stringify({ kimi: { apiKey: "sk-ok" } }));
+  const server = fakeModelServer("照常回答");
+  try {
+    // key 从凭据文件来（环境变量清空），模型是假端点
+    const r = await runBin(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], {
+      env: { MOONSHOT_API_KEY: "", ECHO_LLM_API_KEY: "", ECHO_HOME: home, ECHO_LLM_BASE_URL: server.url },
+      stdin: "说一句",
+    });
+    expect([r.code, r.out]).toEqual([0, expect.stringContaining("照常回答")]);
+    expect(r.err).toContain("[扩展]");
+    expect(r.err).toContain("broken.ts");
+  } finally {
+    server.stop();
+  }
+}, 30_000);
 
-  const r = spawnBin(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], {
-    MOONSHOT_API_KEY: "",
-    ECHO_LLM_API_KEY: "",
-    ECHO_HOME: home,
-  });
-  // 空 stdin：一行输入都没有，起得来就 0 退出
-  expect(r.code).toBe(0);
-  expect(r.err).toContain("[扩展]");
-  expect(r.err).toContain("broken.ts");
+test("bin:扩展里一个没接住的 rejection 不让进程退出——stderr 一行说清是什么、在哪个文件，run 照常跑完", async () => {
+  const ext = join(dir, "extensions");
+  mkdirSync(ext, { recursive: true });
+  // 装上 10ms 后丢一个没人接的 rejection；模型的回答 800ms 后才到——缺省的 Bun 在这之前就以 1 退出了
+  writeFileSync(
+    join(ext, "leaky.ts"),
+    'export default { name: "leaky", hostAbiVersion: 1, apply() { setTimeout(() => { Promise.reject(new Error("扩展里没接住的错")); }, 10); } };\n',
+  );
+  const server = fakeModelServer("回答到了", 800);
+  try {
+    const r = await runBin(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", ext], { env: fakeModelEnv(server.url), stdin: "说一句" });
+    expect([r.code, r.out]).toEqual([0, expect.stringContaining("回答到了")]);
+    const line = r.err.split("\n").find((l) => l.startsWith("[unhandledRejection]"));
+    expect(line, `stderr 里没有那一行：${r.err}`).toBeDefined();
+    expect(line).toContain("扩展里没接住的错");
+    expect(line).toContain("leaky.ts"); // 栈的第一帧：看得出是哪个文件
+  } finally {
+    server.stop();
+  }
+}, 30_000);
+
+/* ══════════════ 工作区信任（2026-11-03）：约定目录里的扩展只在受信的工作区里加载 ══════════════ */
+//
+// 装配会 import `<cwd>/extensions` 下的文件、执行里面的代码。探针扩展在**模块求值时**写一个标记文件——
+// 有标记 = 代码被执行过，不管它后来装没装上。
+
+/** 一个工作区：`extensions/probe.ts` 被 import 时在工作区根写 `LOADED`。返回 realpath（macOS 的 /var → /private/var）。 */
+function workspaceWithProbe(name: string): string {
+  const ws = join(dir, name);
+  mkdirSync(join(ws, "extensions"), { recursive: true });
+  writeFileSync(
+    join(ws, "extensions", "probe.ts"),
+    'import { writeFileSync } from "node:fs";\nwriteFileSync(new URL("../LOADED", import.meta.url), "loaded");\nexport default { name: "probe", hostAbiVersion: 1, apply() {} };\n',
+  );
+  return realpathSync(ws);
+}
+
+test("echoOptions：没给 --extensions 时，受信才把约定目录交给 createEcho，不受信显式给 []；给了 --extensions 不看信任", () => {
+  const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+  const none = { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false };
+  const untrusted = echoOptions(ECHO_AGENT, { interactive: false }, none, kimiProvider(), [], credentials, undefined, false);
+  expect(untrusted.extensionDirs).toEqual([]);
+  const trusted = echoOptions(ECHO_AGENT, { interactive: false }, none, kimiProvider(), [], credentials, undefined, true);
+  expect("extensionDirs" in trusted).toBe(false); // 不传 = core 走约定目录
+  const explicit = echoOptions(ECHO_AGENT, { interactive: false }, { ...none, extensionDirs: ["./extensions"] }, kimiProvider(), [], credentials, undefined, false);
+  expect(explicit.extensionDirs).toEqual(["./extensions"]);
 });
+
+test("bin:管道形态，工作区不受信 → 约定目录里的代码不执行，stderr 一行说怎么信任；显式 --extensions ./extensions 或设置里记着受信 → 执行", async () => {
+  const ws = workspaceWithProbe("cloned-repo");
+  const server = fakeModelServer("好");
+  try {
+    const args = ["--state-dir", join(dir, "state"), "--no-memory"];
+    const env = fakeModelEnv(server.url);
+
+    const untrusted = await runBin(args, { env, stdin: "说一句", cwd: ws });
+    expect([untrusted.code, untrusted.out]).toEqual([0, expect.stringContaining("好")]);
+    expect(existsSync(join(ws, "LOADED")), "不受信的工作区里，扩展代码被执行了").toBe(false);
+    const line = untrusted.err.split("\n").find((l) => l.includes("不受信"));
+    expect(line, `stderr 里没有那一行：${untrusted.err}`).toContain("--extensions ./extensions");
+    expect(line).toContain("1 个扩展");
+
+    const explicit = await runBin([...args, "--extensions", "./extensions"], { env, stdin: "说一句", cwd: ws });
+    expect(explicit.code).toBe(0);
+    expect(existsSync(join(ws, "LOADED")), "显式 --extensions 应视为同意").toBe(true);
+    expect(explicit.err).not.toContain("不受信");
+
+    rmSync(join(ws, "LOADED"));
+    mkdirSync(join(dir, "home"), { recursive: true });
+    writeFileSync(join(dir, "home", "settings.json"), JSON.stringify({ trustedWorkspaces: [ws] }));
+    const remembered = await runBin(args, { env, stdin: "说一句", cwd: ws });
+    expect(remembered.code).toBe(0);
+    expect(existsSync(join(ws, "LOADED")), "设置里记着受信，却没加载").toBe(true);
+    expect(remembered.err).not.toContain("不受信");
+  } finally {
+    server.stop();
+  }
+}, 30_000);
+
+test("main:交互形态，工作区不受信 → 进对话前问一次（列出文件）；选信任 → 加载并记住，下次不再问；选不信任 → 不加载、界面说一行", async () => {
+  const restore = isolate();
+  const cwd = process.cwd();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-ok" });
+    const args = ["--state-dir", join(dir, "state"), "--no-memory"];
+
+    // ① 选信任（数字 2）：加载，并按 realpath 记进 settings.json
+    const ws = workspaceWithProbe("mine");
+    process.chdir(ws);
+    const ui1 = fakeTui();
+    const first = main(args, true, { ui: ui1, credentials });
+    await waitFor(() => ui1.screen().includes("信任这个文件夹里的扩展吗"), "信任确认");
+    expect(ui1.screen()).toContain(join("extensions", "probe.ts"));
+    expect(existsSync(join(ws, "LOADED")), "还没答就执行了").toBe(false);
+    ui1.feed("2");
+    await waitFor(() => ui1.screen().includes("模型 kimi-k3"), "主界面");
+    expect(existsSync(join(ws, "LOADED"))).toBe(true);
+    ui1.feed(String.fromCharCode(4));
+    expect(await first).toBe(0);
+    const settings = JSON.parse(readFileSync(join(dir, "home", "settings.json"), "utf8")) as { trustedWorkspaces?: string[] };
+    expect(settings.trustedWorkspaces).toEqual([ws]);
+
+    // ② 同一个工作区再起一次：不问（什么都不按主界面就出来了），直接加载。
+    //    同一进程里 probe.ts 已在模块缓存里、顶层不会再跑，所以用一个新文件当第二个探针
+    writeFileSync(
+      join(ws, "extensions", "again.ts"),
+      'import { writeFileSync } from "node:fs";\nwriteFileSync(new URL("../LOADED-AGAIN", import.meta.url), "loaded");\nexport default { name: "again", hostAbiVersion: 1, apply() {} };\n',
+    );
+    const ui2 = fakeTui();
+    const second = main(args, true, { ui: ui2, credentials });
+    await waitFor(() => ui2.screen().includes("模型 kimi-k3"), "主界面");
+    expect(existsSync(join(ws, "LOADED-AGAIN"))).toBe(true);
+    ui2.feed(String.fromCharCode(4));
+    expect(await second).toBe(0);
+
+    // ③ 另一个工作区，按 Esc（不信任）：不加载，界面里说一行，设置不多记
+    const other = workspaceWithProbe("cloned");
+    process.chdir(other);
+    const ui3 = fakeTui();
+    const third = main(args, true, { ui: ui3, credentials });
+    await waitFor(() => ui3.screen().includes("信任这个文件夹里的扩展吗"), "信任确认");
+    ui3.feed(String.fromCharCode(27));
+    await waitFor(() => ui3.screen().includes("这次没有加载"), "不加载的那一行");
+    expect(existsSync(join(other, "LOADED")), "不信任，代码却被执行了").toBe(false);
+    ui3.feed(String.fromCharCode(4));
+    expect(await third).toBe(0);
+    const after = JSON.parse(readFileSync(join(dir, "home", "settings.json"), "utf8")) as { trustedWorkspaces?: string[] };
+    expect(after.trustedWorkspaces).toEqual([ws]);
+  } finally {
+    process.chdir(cwd);
+    restore();
+  }
+}, 30_000);
 
 /* ══════════════ 记住上次的选择（D7）：切换了之后，重启还要能用 ══════════════ */
 
@@ -893,6 +1128,7 @@ test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，�
     [],
     credentials,
     undefined,
+    true,
   );
   expect(typeof built.sessions?.run).toBe("function"); // 有 runner = 叫得醒没在跑的那段
   // 提问（`ask_user`，2026-09-05）由形态定：交互 = 有人答，管道 = 没人（工具当场如实回话）
@@ -905,6 +1141,7 @@ test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，�
     [],
     credentials,
     undefined,
+    true,
   );
   expect(piped.agent?.questions).toEqual({ responder: "none", askTimeoutMs: null });
   // 产品 preset 自己定了 questions 就不被形态盖掉（类型允许它定，静默盖掉就是「接受配置又忽略」）
@@ -916,6 +1153,7 @@ test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，�
     [],
     credentials,
     undefined,
+    true,
   );
   expect(custom.agent?.questions).toEqual({ responder: "host", askTimeoutMs: 5000 });
 });
@@ -1031,14 +1269,14 @@ test("preset 能给记忆的**形状**（memory），给不了**开关**（witho
   // 装配现场逐字段取、不是展开，所以这里读的是**装配现场那一份入参**，证明它真的被带进了 createEcho。
   const credentials = new FileCredentialStore(join(dir, "credentials.json"));
   const product = { name: "p", version: "0", preset: () => ({ memory: { builtin: false } }) };
-  const on = echoOptions(product, { interactive: false }, { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined);
+  const on = echoOptions(product, { interactive: false }, { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined, true);
   expect(on.memory).toEqual({ builtin: false });
   expect(on.withoutMemory).toBe(false);
   // 用户关掉的记忆，产品给了形状也打不开
-  const off = echoOptions(product, { interactive: false }, { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined);
+  const off = echoOptions(product, { interactive: false }, { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined, true);
   expect(off.withoutMemory).toBe(true);
   // 产品不给 = 不出这个字段（不是给一个空对象），core 走缺省
-  const plain = echoOptions({ name: "q", version: "0" }, { interactive: false }, { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined);
+  const plain = echoOptions({ name: "q", version: "0" }, { interactive: false }, { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, kimiProvider(), [], credentials, undefined, true);
   expect("memory" in plain).toBe(false);
 });
 

@@ -47,7 +47,7 @@ export function conductText(attended: boolean): string {
  * 「别问问题」这半留着——没人能答是事实。
  */
 export const PIPE_SURFACE = `# Non-interactive
-You are running non-interactively: each line of standard input is a request, your text goes to standard output, and nobody can answer a question or approve an action mid-task. Do not ask questions and do not wait for approval: make reasonable assumptions, state them, and carry the task through. If something is genuinely outside what you were asked to do, leave it alone and say why. Output only what the caller needs, with no preamble.`;
+You are running non-interactively: the whole of standard input is one request, your text goes to standard output, and nobody can answer a question or approve an action mid-task. Do not ask questions and do not wait for approval: make reasonable assumptions, state them, and carry the task through. If something is genuinely outside what you were asked to do, leave it alone and say why. Output only what the caller needs, with no preamble.`;
 
 export function conductSection(attended: boolean): PromptSection {
   return { name: "conduct", order: PROMPT_ORDER.conduct, render: () => conductText(attended) };
