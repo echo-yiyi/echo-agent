@@ -4199,15 +4199,16 @@ export class Agent {
    * 只放低基数的事实：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数。
    * 工具 / skill 名单取 `state` getter 的派生视图——与模型菜单、`agent.state` 同一个口径，不另算一份。
    * 摘要、`runtime.status` 与 persistence 由观测线程补（thread-host.ts 的 `completeObservableState`）。
+   * **`off` 档返回 null、什么都不算**：那一档不记状态快照，在主线程上算了再交给观测线程丢掉，就是让主循环多算。
    */
-  private observableState(rt: ObservationRuntime, activeRunId: string | null): ObservableStateInput {
+  private observableState(rt: ObservationRuntime, activeRunId: string | null): ObservableStateInput | null {
+    if (rt.capturePolicy === "off") return null;
     const phase = this.observationPhase();
     const s = this.state;
     return {
       runtime: {
         phase,
         generation: rt.runtimeGeneration,
-        activeEntryCount: 0,
       },
       agent: {
         status: s.status,

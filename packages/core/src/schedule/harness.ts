@@ -169,6 +169,8 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
   await ensureLoaded(ctx);
   let dirty = false;
   const fired: Schedule[] = [];
+  /** 投过的一次性任务：落盘写成之后才从表里删（见 `saveAfterFire`）。 */
+  const spent: ScheduleEntry[] = [];
   for (const entry of [...ctx.entries.values()]) {
     try {
       const due = dueMark(entry, now);
@@ -187,27 +189,31 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
       //（`createdAt` 不同 = 另一个事实，与 agent.ts 的 incarnation 判据同一条）。按快照簿记会把取消的那条写回盘上复活。
       const current = ctx.entries.get(entry.schedule.id);
       if (current === undefined || current.schedule.createdAt !== entry.schedule.createdAt) continue;
-      if (entry.schedule.kind === "at") {
-        ctx.entries.delete(entry.schedule.id); // 一次性:触发即删
-      } else {
-        ctx.entries.set(entry.schedule.id, { ...current, lastFiredAt: due });
-      }
+      if (entry.schedule.kind === "at") spent.push(current); // 一次性:触发即删,但要等落盘写成
+      else ctx.entries.set(entry.schedule.id, { ...current, lastFiredAt: due });
       dirty = true;
     } catch (e) {
       ctx.report?.({ code: "schedule_fire_failed", message: `${entry.schedule.id}: ${errText(e)}` });
     }
   }
-  if (dirty) await saveAfterFire(ctx, fired, now);
+  if (dirty) await saveAfterFire(ctx, fired, now, spent);
 }
 
-/** 投递之后的簿记落盘：失败 = 每条已投递的都记一次 bookkeeping-failed（下次 tick 会再投），错照抛。 */
-async function saveAfterFire(ctx: AgentSchedule, fired: readonly Schedule[], now: number): Promise<void> {
+/**
+ * 投递之后的簿记落盘：失败 = 每条已投递的都记一次 bookkeeping-failed，错照抛。
+ * 投过的一次性任务（`spent`）写进盘时不带它们，**写成之后**才从表里删：写失败时它们还在表里，
+ * 下次 tick 再投一次、再写一次——不会出现内存里删了、盘上还在、要等重启才又提醒的情况。
+ * 周期任务的游标已在内存里前进，下次 tick 不再投，等下一次落盘一起写。
+ */
+async function saveAfterFire(ctx: AgentSchedule, fired: readonly Schedule[], now: number, spent: readonly ScheduleEntry[] = []): Promise<void> {
   try {
-    await save(ctx);
+    await save(ctx, spent);
   } catch (e) {
     for (const s of fired) observe(ctx, { kind: "bookkeeping-failed", id: s.id, scheduleKind: s.kind, message: errText(e) }, now);
     throw e;
   }
+  // 写盘期间被取消或同 id 重建的不动：只删还是投出去的那一条
+  for (const entry of spent) if (ctx.entries.get(entry.schedule.id) === entry) ctx.entries.delete(entry.schedule.id);
 }
 
 /**
@@ -316,8 +322,10 @@ async function ensureLoaded(ctx: AgentSchedule): Promise<void> {
   }
 }
 
-async function save(ctx: AgentSchedule): Promise<void> {
-  await ctx.dir.write(SCHEDULE_FILE, JSON.stringify([...ctx.entries.values()], null, 2));
+/** 全量写 `schedules.json`；`omit` 里的条目不写（已投、等落盘后删的一次性任务）。 */
+async function save(ctx: AgentSchedule, omit: readonly ScheduleEntry[] = []): Promise<void> {
+  const entries = [...ctx.entries.values()].filter((e) => !omit.includes(e));
+  await ctx.dir.write(SCHEDULE_FILE, JSON.stringify(entries, null, 2));
 }
 
 /** 没有 deliver 就 start/tick = 到期了没人收——**fail-loud**,不许静默空转。 */

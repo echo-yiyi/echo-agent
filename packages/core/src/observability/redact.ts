@@ -28,7 +28,6 @@ const KNOWN_ERROR_NAMES: ReadonlySet<string> = new Set([
   "DOMException",
   "ObservationEncodingError",
   "ObservationCorruptionError",
-  "ObservationStoreUnavailableError",
 ]);
 
 /**

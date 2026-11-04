@@ -313,14 +313,10 @@ export type { PeekedLockRecord, StateLockInspection } from "./storage/file-lock.
  */
 export { resolveModel, resolveSessionsRoot, resolveSharedDir, resolveStateDir } from "./create-agent.ts";
 export type { EchoAgentOptions } from "./create-agent.ts";
-export {
-  createEcho,
-  discoverExtensionFiles,
-  loadExtensionFile,
-  resolveExtensionDirs,
-  ExtensionLoadError,
-  EXTENSIONS_DIR,
-} from "./create-echo.ts";
+// 扩展的加载（`loadExtensionFile` / `resolveExtensionDirs` / `ExtensionLoadError`）是 `createEcho()` 内部的步骤，不在这里
+// （2026-11-03）：坏扩展在装配里记成诊断，不往外抛。**发现**留着：产品做工作区信任时要先列出约定目录里将被加载的文件给人看
+// （`@echo-agent/base` 的 `trustConventionDir`），只列不加载、不执行。
+export { createEcho, discoverExtensionFiles, EXTENSIONS_DIR } from "./create-echo.ts";
 export type { CreateEchoOptions, Echo, LoadedExtension } from "./create-echo.ts";
 /** 热部署的结果形状（2026-09-14）：`Echo.reloadExtensions()` 返回的就是它。 */
 export type { ReloadChange, ReloadReport, ReloadResult } from "./extension/reload.ts";

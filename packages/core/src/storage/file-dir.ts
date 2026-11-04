@@ -1,9 +1,11 @@
 // 真盘实现(default):最小可执行 agent 的持久化落点。
 //
 // 缺省根目录 = `~/.echo/`(环境变量 ECHO_HOME 覆盖——测试与多实例隔离靠它)。
-// 写入原子:临时文件 → rename,读者永远看到旧完整文件或新完整文件,不会看到半截。
+// 写入原子:临时文件 → fsync → rename(`atomic-write.ts`),读者永远看到旧完整文件或新完整文件,不会看到半截;
+// 断电后也不会留下零长的目标文件。
 // 单进程假设:不做跨进程文件锁(两个进程共写同一 root 的并发防护列为后续,先诚实写明)。
 
+import { ATOMIC_TEMP_SUFFIX, writeFileAtomic } from "./atomic-write.ts";
 import { DEFAULT_LOCK_TIMEOUT_MS, StorageLockBusy } from "./name-lock.ts";
 import { claimGeneration, describeRecord } from "./generation-lock.ts";
 import { promises as fs } from "node:fs";
@@ -44,9 +46,6 @@ export class FileDir implements StorageDir {
     }
     return target;
   }
-
-  /** 临时文件名的进程内序号。见 `write()` 里的说明——只靠时间戳会碰撞。 */
-  private static tempSeq = 0;
 
   /**
    * 词法 containment 只能挡 `../`。**符号链接照样出得去**：实测把 `root/sessions`
@@ -107,13 +106,7 @@ export class FileDir implements StorageDir {
     // 检查在 mkdir **之前**——否则递归建目录会先顺着符号链接把路径实体化到外面。
     const target = await this.resolveSafe(path);
     await fs.mkdir(dirname(target), { recursive: true });
-    // 临时名必须**在同进程内也唯一**：只用 pid + 毫秒时会碰撞——同一毫秒内并发写同一路径时，
-    // 两个调用生成同名临时文件，先到的 rename 走了，后到的 rename 就 ENOENT，
-    // 那一次写**静默丢失**（2026-08-18 在 CI 上真炸过：SessionService 并发 append 撞上它）。
-    // 加一个进程内单调计数器就够；跨进程仍靠 pid 区分。
-    const temp = `${target}.${process.pid}.${(++FileDir.tempSeq).toString(36)}.${Date.now().toString(36)}.tmp`;
-    await fs.writeFile(temp, content, "utf8");
-    await fs.rename(temp, target); // 原子替换:不留半截文件
+    await writeFileAtomic(target, content); // 唯一临时名 + fsync + rename：不留半截、断电不留零长文件
   }
 
   /**
@@ -169,7 +162,7 @@ export class FileDir implements StorageDir {
     for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) await this.walk(full, out);
-      else if (entry.isFile() && !entry.name.endsWith(".tmp")) {
+      else if (entry.isFile() && !entry.name.endsWith(ATOMIC_TEMP_SUFFIX)) {
         out.push(relative(this.root, full).split(sep).join("/"));
       }
     }

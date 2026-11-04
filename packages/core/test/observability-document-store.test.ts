@@ -342,6 +342,41 @@ describe("过期：只凭盘上的事实删", () => {
     expect(await store.countRecords()).toBe(2);
   });
 
+  test("活着的写者在过期扫描的任意一步提交新 run：那一批不被当成无主删掉（先读 head、后拿 live）", async () => {
+    // 扫描先拿 live 快照、后读 head 时，两步之间提交的新 run 不在 live 里，它的批又已在 head 之前——被删，且回放里没有缺口标记
+    const idx = (runId: string, first: number, last: number, closed: boolean): RunIndexEntryV1 => ({
+      ...index(runId, first),
+      lastSeq: last,
+      ...(closed ? { terminalRecordId: `${RT}:${last}` } : {}),
+    });
+    const fresh = idx("NEW", 3, 4, false);
+    const outcomes: string[] = [];
+    for (let at = 0; ; at++) {
+      const inner = new InMemoryDir();
+      const writer = await open(inner);
+      await writer.commitBatchIfAbsent(batch([1, 2], { runIndexMutations: [MUT(idx("OLD", 1, 2, true))] }, "OLD"));
+      let calls = 0;
+      let injected = false;
+      const inject = async (): Promise<void> => {
+        if (injected || calls++ !== at) return;
+        injected = true;
+        await writer.commitBatchIfAbsent(batch([3, 4], { runIndexMutations: [MUT(fresh)] }, "NEW"));
+      };
+      // 扫描每碰一次存储算一步；第 `at` 步之前，同一个状态根上的写者提交了一批
+      const racing: StorageDir = {
+        read: async (p) => (await inject(), inner.read(p)),
+        list: async (p) => (await inject(), inner.list(p)),
+        write: (p, c) => inner.write(p, c),
+        remove: (p) => inner.remove(p),
+      };
+      await new DocumentObservationExpiry(racing, "(test)").remove({ runs: ["OLD"], activityBefore: 0 });
+      if (!injected) break; // 扫描一共碰了 at 次存储，每个插入点都试过了
+      outcomes.push(`${at}:${(await writer.readRunRecords(RT, "NEW", 3, 4)).length}`);
+    }
+    expect(outcomes.length).toBeGreaterThan(3);
+    expect(outcomes.filter((o) => !o.endsWith(":2"))).toEqual([]);
+  });
+
   test("回放页如实带出被删的 seq 区间（exclusive）：批与批接不上的那一段", async () => {
     const inner = new InMemoryDir();
     const store = await open(inner);

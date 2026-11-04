@@ -58,7 +58,11 @@ export class ObservationStoreMissingError extends Error {
   }
 }
 
-/** 写入端开库失败（读或建 `key.json` 时的 I/O 错误）：完整 Runtime 装配失败，不进 READY。已有文件坏了是 corruption，不是这个。 */
+/**
+ * 写入端开库失败（读或建 `key.json` 时的 I/O 错误）。只在观测线程里出现：这个 runtime 之后的提交全部失败、观测降级，
+ * 只进 persistence health；装配、`start()`、run 照常，不往外抛也不报（thread-host.ts 的 `startWriting`）。
+ * 已有文件坏了是 corruption，不是这个。
+ */
 export class ObservationStoreOpenError extends Error {
   readonly code = "observation_store_open_failed";
   constructor(message: string, options?: { cause?: unknown }) {
@@ -520,10 +524,14 @@ export class DocumentObservationExpiry extends DocumentObservationReader {
       if (await this.dir.remove(runPath(runId))) removedRuns.push(runId);
     }
     if (removedRuns.length === 0 && decision.activityBefore === undefined) return { removedRuns, openRuns, removedBatches: 0 };
+    // **先读每个 runtime 的 head，再拿 live 快照**：写者先写 `runs/`、后写 head（头注），所以 head 之前每一批的 run
+    // 在读 head 时已经在 `runs/` 里，之后拿的 live 一定看得见它。反过来的顺序，两步之间提交的新 run 不在 live 里、
+    // 它的批却已在 head 之前——会被当成无主删掉。
+    const heads = new Map<string, number>();
+    for (const runtimeId of await this.runtimeIds()) heads.set(runtimeId, await this.readHeadFile(runtimeId));
     const live = new Set((await this.readAllRunIndex()).map((e) => e.runId));
     let removedBatches = 0;
-    for (const runtimeId of await this.runtimeIds()) {
-      const head = await this.readHeadFile(runtimeId);
+    for (const [runtimeId, head] of heads) {
       for (const b of await this.batchesOf(runtimeId)) {
         if (b.nextPrefix > head) break;
         const batch = await this.readBatch(b.path);

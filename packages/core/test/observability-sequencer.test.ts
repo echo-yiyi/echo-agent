@@ -781,7 +781,7 @@ describe("run.closed preflight（review P1：超限自动降级、仍 stored、�
     throughSeq: 0,
     at: 1_000,
     state: {
-      runtime: { phase: "ready", status: "ready", observationPersistence: "healthy", generation: "g", activeEntryCount: 0 },
+      runtime: { phase: "ready", status: "ready", observationPersistence: "healthy", generation: "g" },
       agent: { status: agentStatus, activeRunId: null, activeTurnId: null, iteration: 1, messageCount: 2 },
       capabilities: Array.from({ length: n }, (_, i) => ({ id: `cap-${String(i).padStart(3, "0")}`, digest: "x", summary: summary(i) })),
       omittedCapabilitySummaryCount: 0,

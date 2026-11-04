@@ -40,7 +40,9 @@ import {
 } from "../src/compaction/builtin.ts";
 import { renderTranscript, transcriptReadTool } from "../src/compaction/tool.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
-import { AgentCompaction, ExtensionHost, agentRegistries, defineExtension, type ExtensionEntry } from "../src/extension/public.ts";
+import { AgentCompaction, defineExtension, type ExtensionEntry } from "../src/extension/public.ts";
+import { ExtensionHost } from "../src/extension/host.ts";
+import { agentRegistries } from "../src/extension/registries.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 
 /* ─────────────── 夹具 ─────────────── */

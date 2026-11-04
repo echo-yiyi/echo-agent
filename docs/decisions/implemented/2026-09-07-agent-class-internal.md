@@ -47,7 +47,7 @@ README 说「两个使用高度」:高 = `createEcho()`,低 = `new Agent()`。�
 - 根入口撤掉 `Agent` / `AgentOptions` / `readSessionPhase` / `writeSessionPhase` / `STATUS_FILE` / `SessionStatusFile`;`SessionPhase` 留,因为它是 `SessionRow.phase` 的类型。`createEcho({ agent })` 那一份选项有了公共名字 `EchoAgentOptions`,字段不变。`./extension` 撤掉 `agentRuntimeOf` / `RuntimeSource` / `RuntimeAssemblyOps`。根入口符号 344 → 339,`./extension` 85 → 82。
 - 压缩阶梯的作者函数留在根入口,没有下沉到 `./compaction` 子路径。
 - **第 3 条的两个内部实现项(`dispose()` 不还锁、fenced 是隐藏 latch)没有在这次修**,现状见 [Lifecycle](../../design/lifecycle-and-run-loop.md) §1。它们不再是公共契约,但仍是遗留。
-- `@echo-agent/core/extension` 上仍导出几件要喂 `Agent` 内部件才能用的装配零件:`mountBuiltinTools`(参数是 `Agent` 的形状)、`builtinEntries` 与 `BuiltinToolGroups`(内建工具组由 `Agent` 造)、`agentRegistries`(要 `Agent` 的工具表、收紧叠、策略槽)。仓外已经造不出它们要的输入,按第 1 条的判据该不该撤没有拍板。
+- `@echo-agent/core/extension` 上仍导出几件要喂 `Agent` 内部件才能用的装配零件:`mountBuiltinTools`(参数是 `Agent` 的形状)、`builtinEntries` 与 `BuiltinToolGroups`(内建工具组由 `Agent` 造)、`agentRegistries`(要 `Agent` 的工具表、收紧叠、策略槽)。仓外已经造不出它们要的输入,按第 1 条的判据该不该撤没有拍板。**2026-11-03 拍板撤掉**,连同 `ExtensionHost` 与扩展的发现 / 加载函数,见 [装配零件收进内部](2026-11-03-assembly-parts-internal.md)。
 
 ## 验收
 

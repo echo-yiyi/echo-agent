@@ -2,7 +2,10 @@ import { test, expect } from "bun:test";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promises as fsp } from "node:fs";
 import { FileDir } from "../src/storage/file-dir.ts";
+import { fileTaskStore } from "../src/task/fs.ts";
+import { FileCredentialStore } from "../src/provider/file-credentials.ts";
 
 // `FileDir` 的 Store conformance：**一次 `write` 要么整份生效、要么完全不生效**。
 //
@@ -63,4 +66,75 @@ test("list(prefix) 只走 prefix 所在的子树（review 2026-09-07：此前全
 test("read 不存在的路径返回 null，不抛（StorageDir 契约）", async () => {
   const dir = await tmp();
   expect(await dir.read("nope.json")).toBeNull();
+});
+
+/* ───────────── 三个落盘口共用一份原子写（storage/atomic-write.ts） ───────────── */
+
+test("fileTaskStore 并发写同一路径：不抛、不丢（此前临时名固定是 `${path}.tmp`，两个写者撞名、后到的 rename ENOENT）", async () => {
+  const root = await mkdtemp(join(tmpdir(), "echo-taskstore-"));
+  const store = fileTaskStore(join(root, "tasks.json"));
+  const n = 30;
+  const results = await Promise.allSettled(Array.from({ length: n }, (_, i) => store.write(JSON.stringify({ i }))));
+  expect(results.filter((r) => r.status === "rejected")).toEqual([]);
+  const parsed = JSON.parse((await store.read())!) as { i: number };
+  expect(parsed.i).toBeGreaterThanOrEqual(0);
+  expect(parsed.i).toBeLessThan(n);
+  expect((await readdir(root)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+});
+
+test("FileDir / fileTaskStore / FileCredentialStore 写盘都是：fsync 临时文件 → rename → fsync 父目录", async () => {
+  // 断电时 rename 已落盘、数据块还没落盘，就是一个零长 / 半截的目标文件——坏档判红，会话会打不开
+  const root = await mkdtemp(join(tmpdir(), "echo-atomic-"));
+  const log: string[] = [];
+  const realOpen = fsp.open;
+  const realRename = fsp.rename;
+  const spied = fsp as { open: typeof fsp.open; rename: typeof fsp.rename };
+  spied.open = (async (...args: Parameters<typeof fsp.open>) => {
+    const handle = await realOpen(...args);
+    const realSync = handle.sync.bind(handle);
+    handle.sync = async () => {
+      log.push(String(args[0]).endsWith(".tmp") ? "fsync file" : "fsync dir");
+      return realSync();
+    };
+    return handle;
+  }) as typeof fsp.open;
+  spied.rename = (async (...args: Parameters<typeof fsp.rename>) => {
+    log.push("rename");
+    return realRename(...args);
+  }) as typeof fsp.rename;
+  const writers: Record<string, () => Promise<void>> = {
+    FileDir: () => new FileDir(root).write("a/b.json", "{}"),
+    fileTaskStore: () => fileTaskStore(join(root, "tasks.json")).write("[]"),
+    FileCredentialStore: () => new FileCredentialStore(join(root, "credentials.json")).write("kimi", { type: "api_key", key: "sk-test" }),
+  };
+  const seen: Record<string, string[]> = {};
+  try {
+    for (const [name, write] of Object.entries(writers)) {
+      log.length = 0;
+      await write();
+      seen[name] = [...log];
+    }
+  } finally {
+    spied.open = realOpen;
+    spied.rename = realRename;
+  }
+  const want = ["fsync file", "rename", "fsync dir"];
+  expect(seen).toEqual({ FileDir: want, fileTaskStore: want, FileCredentialStore: want });
+});
+
+test("写失败不留临时文件，目标保持旧的完整内容", async () => {
+  const root = await mkdtemp(join(tmpdir(), "echo-atomic-"));
+  const dir = new FileDir(root);
+  await dir.write("x.json", "old");
+  const realRename = fsp.rename;
+  (fsp as { rename: typeof fsp.rename }).rename = (async () => {
+    throw Object.assign(new Error("EIO rename"), { code: "EIO" });
+  }) as typeof fsp.rename;
+  try {
+    await expect(dir.write("x.json", "new")).rejects.toThrow("EIO rename");
+  } finally {
+    (fsp as { rename: typeof fsp.rename }).rename = realRename;
+  }
+  expect(await dir.read("x.json")).toBe("old");
+  expect((await readdir(root)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
 });

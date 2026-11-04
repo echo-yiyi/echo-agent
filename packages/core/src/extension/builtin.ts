@@ -75,7 +75,7 @@ function isSectionArray(v: unknown): v is readonly PromptSection[] {
  * 在一个 effect 里把一组注册（工具、段、变量、收紧、替换）**原子地**装上：中途任一失败，已装的逆序全撤再抛；
  * 返回的 lease 卸载时同样逆序全撤。
  *
- * **公开**（`@echo-agent/core/extension`，2026-09-14）：`defineToolPack` / `definePromptPack` / `ECHO_AGENT` /
+ * **公开**（`@echo-agent/core/extension`，2026-09-14）：`defineToolPack` / `definePromptPack` / `echo:agent` /
  * `echo:memory` / `echo:compaction`、coding 的 `echo:shell` / `echo:worktree`、角色定义 `echo:inline-agent` 都用它——
  * 此前后三处各手抄了一份逆序撤销，「回滚逻辑只写一份」那句是假的。第三方扩展在
  * `ctx.effect({ start: () => registerAll([...]) })` 里用，与内建同一份实现。

@@ -9,7 +9,7 @@
 import { environmentMessage, type AgentMessage } from "../messages.ts";
 import { createRecordIdSource, recordPath, serializeRecord, type InboxRecordV1 } from "../inbox/records.ts";
 import type { StorageDir } from "../storage/types.ts";
-import { listSessions, setSessionStatus, SessionService, assertSafeSessionId } from "./service.ts";
+import { listSessions, readSessionInfo, setSessionStatus, SessionService, assertSafeSessionId } from "./service.ts";
 import { newSessionId, type SessionInfo } from "./types.ts";
 import { describeAgentRef, DEFAULT_AGENT_REF, isAgentRef, isValidAgentName, type AgentDefinition, type AgentRef } from "../agent-def/types.ts";
 import { readSessionPhase, type SessionPhase } from "./status.ts";
@@ -343,9 +343,9 @@ export class EchoSessions implements SessionFace {
     } catch (e) {
       return { kind: "rejected", reason: "invalid", detail: e instanceof Error ? e.message : String(e) };
     }
-    const infos = await listSessions(this.deps.root);
-    const target = infos.find((i) => i.id === to);
-    if (target === undefined) return { kind: "rejected", reason: "not-found", detail: `没有会话 ${to}` };
+    // 只读对方那一个 meta：列全部会话要递归遍历每一段的 entries / inbox / 观测文件
+    const target = await readSessionInfo(this.deps.root, to);
+    if (target === null) return { kind: "rejected", reason: "not-found", detail: `没有会话 ${to}` };
     if (target.status !== "active") return { kind: "rejected", reason: "closed", detail: `会话 ${to} 已经关了` };
 
     // **先确保它活着，再投递**（2026-09-07：虚拟 actor）。顺序不能反——

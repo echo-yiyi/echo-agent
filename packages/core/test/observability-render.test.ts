@@ -93,7 +93,7 @@ async function fixtureRun(): Promise<RunObservation> {
     ],
   });
   const state = (activeTurnId: string | null, iteration: number, messageCount: number): ObservableStateInput => ({
-    runtime: { phase: "ready", generation: "boot", activeEntryCount: 0 },
+    runtime: { phase: "ready", generation: "boot" },
     agent: { status: "generating", activeRunId: "run:fixed", activeTurnId, iteration, messageCount } as ObservableStateInput["agent"],
     capabilities: [],
   });

@@ -1,5 +1,6 @@
-// `@echo-agent/core/extension` —— Extension Host ABI：definition / Context / ServiceKey /
-// Fiber 状态 / Effect / registries。不导出 RunPermit / concrete Agent / Fiber 与 EffectStack 本体。
+// `@echo-agent/core/extension` —— 写 extension 用的 ABI：definition / Context / ServiceKey /
+// Fiber 状态 / Effect / registries 的 token 与类型。不导出 RunPermit / concrete Agent / Fiber 与 EffectStack 本体，
+// 也不导出 ExtensionHost 与装配零件——装 extension 的只有 `createEcho()` 一处。
 //
 // **2026-08-28 起已登记进 `package.json#exports`**（`./extension`）：第一个真实消费者是
 // `examples/extension/extensions/current-year.ts`——用户写的 Extension 文件必须 import 得到
@@ -25,7 +26,10 @@ export {
   type ServiceKey,
   type ServiceKind,
 } from "./abi.ts";
-export { ExtensionHost, ExtensionMountError, type ExtensionEntry, type FiberInfo, type ReplaceResult } from "./host.ts";
+// `ExtensionHost` 与它的结果形状、`agentRegistries`、内建 `echo:*` 定义与 `mountBuiltinTools` / `builtinEntries` /
+// `unmountGenerations` 不在这里（2026-11-03，docs/decisions/implemented/2026-11-03-assembly-parts-internal.md）：
+// 它们是装配现场的零件，凑起来能在 `createEcho()` 之外再搭一个；`ExtensionEntry` 留着，它是 `createEcho({ extensions })` 的元素类型。
+export type { ExtensionEntry } from "./host.ts";
 // 热部署的结果形状（2026-09-14）：壳照 `AgentRuntime.reloadExtensions()` 的回报显示，得念得出它们
 export type { ReloadChange, ReloadReport, ReloadResult, ScheduleResult } from "./reload.ts";
 export type { FiberStatus } from "./fiber.ts";
@@ -41,7 +45,6 @@ export {
   AgentSessionsService,
   AgentSkills,
   AgentTools,
-  agentRegistries,
   type AgentCompactionRegistry,
   type AgentHooksRegistry,
   type AgentMemoryRegistry,
@@ -59,32 +62,18 @@ export { agentMemory, notesMemory, userMemory } from "../memory/types.ts";
 export type { AnyMemory, IndexedMemory, Memory, ResidentMemory } from "../memory/types.ts";
 export type { MemoryCommand } from "../memory/tool-commands.ts";
 export {
-  BUILTIN_GENERATION,
-  builtinEntries,
   definePromptPack,
   defineToolPack,
-  mountBuiltinTools,
   registerAll,
-  ECHO_COMPACTION,
-  ECHO_MEMORY,
-  ECHO_SCHEDULER,
-  ECHO_SKILLS,
-  ECHO_TASKS,
-  ECHO_TOOL_SEARCH,
-  ECHO_ASK,
-  ECHO_RELOAD,
-  ECHO_SUBAGENT,
   type BuiltinToolGroup,
   type BuiltinToolGroups,
   type BuiltinToolsConfig,
   type PromptPackConfig,
 } from "./builtin.ts";
-export { unmountGenerations, type UnmountTarget } from "./cleanup.ts";
 export { AgentRuntimeService, type AgentRuntime, type CompactResult, type EquipResult, type RuntimeTurnResult } from "./runtime.ts";
 // `agentRuntimeOf()` 与它的入参 `RuntimeSource` / `RuntimeAssemblyOps` 在 core 内部（2026-09-17）：
 // 它要的是一个 `Agent`，而 `Agent` 类不出 core，仓外没有东西可传。协议本身经 `Echo.agent` 与
 // `AgentRuntimeService` 拿。
-export { ECHO_AGENT } from "./builtin.ts";
 
 /** `AgentPolicies.declare()` 收的形状与三项的全集：扩展作者写 config 时要念得出它们。 */
 export type { AgentPolicyValues, DeclaredPolicies } from "../policies.ts";

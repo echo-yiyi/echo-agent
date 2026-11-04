@@ -12,7 +12,8 @@ import type { Provider } from "../src/provider/types.ts";
 import { renderRunObservation, buildRunObservationViewModel } from "../src/observability/render.ts";
 import { RUN_ASSEMBLY_RECORD } from "../src/observability/draft.ts";
 import { ObservationRuntime } from "../src/observability/runtime.ts";
-import { STALL_MS } from "../src/observability/thread.ts";
+import { ObservationThread, STALL_MS } from "../src/observability/thread.ts";
+import type { ObservationWork } from "../src/observability/worker-protocol.ts";
 import type { LifecycleEvent } from "../src/events.ts";
 import { expireObservations, type ObservationExpiryRule } from "../src/observability/expiry.ts";
 import type { CapabilityFactDescriptor } from "../src/observability/fact-sink.ts";
@@ -499,7 +500,7 @@ describe("canonical gap（硬门 4）", () => {
       const sink = rt.capabilitySink(numbered, { status: "not-applicable" });
       rt.acceptRun({ runId: "run:gap", source: { kind: "user" }, ...identity, modelBinding: binding });
       rt.startRun("run:gap", identity, "permit-executor", {
-        runtime: { phase: "ready", generation: "boot", activeEntryCount: 0 },
+        runtime: { phase: "ready", generation: "boot" },
         agent: { status: "generating", activeRunId: "run:gap", activeTurnId: null, iteration: 0, messageCount: 1 } as never,
         capabilities: [],
       });
@@ -625,6 +626,34 @@ describe("观测不在主流程上（2026-09-14 硬规矩）", () => {
     await second.send("a");
     expect((await second.observations.snapshot()).health.persistence.status).not.toBe("healthy"); // 写不动只在健康状态里
     expect(notices).toEqual([]);
+  });
+
+  test("off 档：主线程不拍 run 开头 / 结尾的状态（交给观测线程的消息里没有状态），对照 metadata 档照拍", async () => {
+    // 此前 off 档也在主线程上算 `state` getter 再结构化拷贝过线程，观测线程那边才丢掉——让主循环多算
+    const thread = ObservationThread.get();
+    const posted: ObservationWork[] = [];
+    const original = thread.post;
+    thread.post = (work: ObservationWork): void => {
+      posted.push(work);
+      original.call(thread, work);
+    };
+    try {
+      const states = async (capture: "off" | "metadata"): Promise<unknown[]> => {
+        posted.length = 0;
+        const echo = await echoWith({ stateDir: join(await tmp(), "state"), turns: [toolTurn("c1", "ping", {}), textTurn("done")], capture });
+        await echo.send("跑");
+        await echo.stop();
+        return posted.flatMap((w) => (w.t === "run-started" ? [w.state] : w.t === "run-closed" ? [w.finalState] : []));
+      };
+      const off = await states("off");
+      expect(off.length).toBeGreaterThanOrEqual(2);
+      expect(off.every((s) => s === null)).toBe(true);
+      const metadata = await states("metadata");
+      expect(metadata.length).toBeGreaterThanOrEqual(2);
+      expect(metadata.every((s) => s !== null)).toBe(true);
+    } finally {
+      thread.post = original;
+    }
   });
 
   test("观测存储卡死：进程最多再等 STALL_MS 就退出，没写完的观测放弃，exit 监听照常运行", async () => {

@@ -2,7 +2,8 @@
 // 每种结果在 Host 的事务链上各记一条事实。给 Host 一个会记录的探针，逐个分支钉住。
 
 import { test, expect } from "bun:test";
-import { ExtensionAbiError, ExtensionHost, ExtensionMountError, defineExtension, defineService, type ExtensionEntry } from "../src/extension/public.ts";
+import { ExtensionAbiError, defineExtension, defineService, type ExtensionEntry } from "../src/extension/public.ts";
+import { ExtensionHost, ExtensionMountError } from "../src/extension/host.ts";
 import { projectExtensionFact, type ExtensionFact } from "../src/extension/observe.ts";
 
 function recorder(): { host: (opts?: ConstructorParameters<typeof ExtensionHost>[0]) => ExtensionHost; facts: ExtensionFact[] } {

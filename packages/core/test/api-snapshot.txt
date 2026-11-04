@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 357（value 129 · type 210 · both 18）
+符号 354（value 127 · type 210 · both 17）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -129,16 +129,13 @@ value  resolveSessionsRoot
 value  resolveSharedDir
 value  resolveStateDir
 
--- src/create-echo.ts (9) --
+-- src/create-echo.ts (6) --
 value  createEcho
 type   CreateEchoOptions
 value  discoverExtensionFiles
 type   Echo
-both   ExtensionLoadError
 value  EXTENSIONS_DIR
 type   LoadedExtension
-value  loadExtensionFile
-value  resolveExtensionDirs
 
 -- src/errors.ts (9) --
 value  ABORT_REASON
@@ -505,7 +502,7 @@ value  listBackground
 value  startBackground
 
 == 入口 "./extension" → src/extension/public.ts ==
-符号 82（value 35 · type 43 · both 4）
+符号 62（value 20 · type 40 · both 2）
 
 -- src/extension/abi.ts (14) --
 value  defineExtension
@@ -523,43 +520,22 @@ type   ReloadBoundary
 type   ServiceKey
 type   ServiceKind
 
--- src/extension/builtin.ts (20) --
-value  BUILTIN_GENERATION
-value  builtinEntries
+-- src/extension/builtin.ts (7) --
 type   BuiltinToolGroup
 type   BuiltinToolGroups
 type   BuiltinToolsConfig
 value  definePromptPack
 value  defineToolPack
-value  ECHO_AGENT
-value  ECHO_ASK
-value  ECHO_COMPACTION
-value  ECHO_MEMORY
-value  ECHO_RELOAD
-value  ECHO_SCHEDULER
-value  ECHO_SKILLS
-value  ECHO_SUBAGENT
-value  ECHO_TASKS
-value  ECHO_TOOL_SEARCH
-value  mountBuiltinTools
 type   PromptPackConfig
 value  registerAll
-
--- src/extension/cleanup.ts (2) --
-value  unmountGenerations
-type   UnmountTarget
 
 -- src/extension/fiber.ts (1) --
 type   FiberStatus
 
--- src/extension/host.ts (5) --
+-- src/extension/host.ts (1) --
 type   ExtensionEntry
-both   ExtensionHost
-both   ExtensionMountError
-type   FiberInfo
-type   ReplaceResult
 
--- src/extension/registries.ts (18) --
+-- src/extension/registries.ts (17) --
 value  AgentBackgroundService
 value  AgentCompaction
 type   AgentCompactionRegistry
@@ -572,7 +548,6 @@ value  AgentPolicies
 type   AgentPoliciesRegistry
 value  AgentPrompt
 type   AgentPromptRegistry
-value  agentRegistries
 value  AgentSessionsService
 value  AgentSkills
 type   AgentSkillsRegistry
@@ -624,7 +599,7 @@ type   McpHost
 type   McpServerSnapshot
 
 == 入口 "./observability" → src/observability/public.ts ==
-符号 78（value 15 · type 61 · both 2）
+符号 77（value 15 · type 61 · both 1）
 
 -- src/admission/types.ts (1) --
 type   RunSource
@@ -654,9 +629,8 @@ value  buildRunObservationViewModel
 value  RENDERER_VERSION
 value  renderRunObservation
 
--- src/observability/store.ts (2) --
+-- src/observability/store.ts (1) --
 both   ObservationCorruptionError
-both   ObservationStoreUnavailableError
 
 -- src/observability/types.ts (58) --
 type   ActiveEntrySnapshot

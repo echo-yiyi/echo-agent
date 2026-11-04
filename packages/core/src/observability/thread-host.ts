@@ -80,7 +80,6 @@ export function completeObservableState(input: ObservableStateInput, persistence
       status: phase === "ready" && persistence !== "healthy" ? "degraded" : phase,
       observationPersistence: persistence,
       generation: input.runtime.generation,
-      activeEntryCount: input.runtime.activeEntryCount,
     },
     agent: input.agent,
     capabilities: input.capabilities.map((c) => {
@@ -453,7 +452,7 @@ class ThreadRuntime {
   private onRunStarted(work: Extract<ObservationWork, { t: "run-started" }>): void {
     const started: RunStartedBodyV1 = { startedBy: work.startedBy };
     this.fireBoundary(this.boundary("run.started", "event", this.runScope(work.runId, work.identity), work.at, started));
-    if (this.open.capturePolicy === "off") return;
+    if (this.open.capturePolicy === "off" || work.state === null) return;
     const scope = { ...this.identityScope(work.identity), runId: work.runId, runtimeId: this.runtimeId };
     try {
       const state = materializeObservableState(completeObservableState(work.state, this.sequencer.persistenceState.status));

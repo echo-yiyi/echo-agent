@@ -28,6 +28,7 @@
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { errText } from "../errors.ts";
+import { writeFileAtomic } from "../storage/atomic-write.ts";
 import { echoHome, expandHome } from "../storage/file-dir.ts";
 import type { Credential, CredentialStore } from "./types.ts";
 
@@ -48,9 +49,6 @@ const DIR_MODE = 0o700;
 type CredentialRecord = {
   apiKey?: unknown;
 };
-
-/** 临时文件名的进程内序号。理由同 `FileDir.write()`：只靠 pid + 毫秒会在并发写时碰撞。 */
-let tempSeq = 0;
 
 /**
  * 把凭据存在一个文件里的 `CredentialStore`：缺省 `$ECHO_HOME/credentials.json`
@@ -141,21 +139,10 @@ export class FileCredentialStore implements CredentialStore {
       await fs.chmod(dir, DIR_MODE); // mkdir 的 mode 会被 umask 削掉，显式再来一次
     }
 
-    // 临时文件 → rename：读者永远看到旧的完整文件或新的完整文件，不会看到半截。
-    const temp = `${path}.${process.pid}.${(++tempSeq).toString(36)}.${Date.now().toString(36)}.tmp`;
-    try {
-      // **临时文件一出生就是 0600**：先按默认权限写出来、再 chmod，中间那一小段
-      // key 已经落在盘上而权限还没收紧——那个窗口不必存在。
-      await fs.writeFile(temp, `${JSON.stringify(all, null, 2)}\n`, { encoding: "utf8", mode: FILE_MODE });
-      // `writeFile` 的 mode 同样被 umask 削（umask 022 时 0600 仍是 0600，但 umask 不由我们决定），
-      // 所以**显式再设一次**，不依赖 umask——这是拍板要求的那条。
-      await fs.chmod(temp, FILE_MODE);
-      await fs.rename(temp, path); // rename 保留临时文件的权限位，落地就是 0600
-    } catch (e) {
-      // 失败别留下一个带着 key 的临时文件。清理失败不盖掉原始错误。
-      await fs.unlink(temp).catch(() => undefined);
-      throw e;
-    }
+    // 原子写（唯一临时名 → fsync → rename）：读者永远看到旧的完整文件或新的完整文件，断电也不留零长文件。
+    // **临时文件一出生就是 0600**，rename 之前再显式设一次（mode 会被 umask 削，umask 不由我们决定——这是拍板要求的那条）；
+    // rename 保留临时文件的权限位，落地就是 0600。失败时不留下带着 key 的临时文件。
+    await writeFileAtomic(path, `${JSON.stringify(all, null, 2)}\n`, { mode: FILE_MODE });
   }
 }
 

@@ -178,6 +178,26 @@ test("send：不存在 / 已关 / 名字不合法各有各的说法，不含糊�
   expect(await h.sessions.send("s-gone", "还在吗")).toMatchObject({ kind: "rejected", reason: "closed" });
 });
 
+test("send：只读收件人自己的 meta，不列整个会话根（别的段的 entries / inbox / 观测文件再多也不碰）", async () => {
+  // 此前每次 send 都递归列出全部会话的全部文件再找收件人：30 段 × 2000 条要 100ms 以上，且别的段正好收摊时整体抛
+  const h = harness();
+  await seed(h.root, "s-peer");
+  await seed(h.root, "s-gone");
+  await h.sessions.close("s-gone");
+  h.alive.add("s-peer");
+  const listed: string[] = [];
+  const realList = h.root.list.bind(h.root);
+  h.root.list = async (prefix: string) => {
+    listed.push(prefix);
+    return realList(prefix);
+  };
+  expect(await h.sessions.send("s-peer", "在吗")).toMatchObject({ kind: "accepted" });
+  expect(await h.sessions.send("s-nope", "在吗")).toMatchObject({ kind: "rejected", reason: "not-found" });
+  expect(await h.sessions.send("s-gone", "在吗")).toMatchObject({ kind: "rejected", reason: "closed" });
+  // 列的只有收件人自己 inbox 底下（投递发号要看它），没有一次是从会话根列起
+  expect(listed.filter((p) => !p.startsWith("s-peer/"))).toEqual([]);
+});
+
 test("close：只改 meta 的 status，盘上的对话一个字不删", async () => {
   const h = harness();
   await seed(h.root, "s-old");

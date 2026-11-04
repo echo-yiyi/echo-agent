@@ -568,6 +568,30 @@ test("listSessions()：扫上一层、只读 meta、按 updatedAt 降序；活�
   await expect(listSessions(root)).rejects.toThrow(/broken.*解不开/);
 });
 
+test("listSessions()：列出来之后 meta 被撤掉的那一段跳过，不让整个清单抛（别的进程里那段空会话正好收摊）", async () => {
+  // 此前读到空就整体抛「在 list 里有、read 却为空」：session_list、send、--continue 都跟着失败（实测 20 次 12 次）
+  const inner = new InMemoryDir();
+  for (const id of ["s-a", "s-b", "s-c"]) {
+    const s = new SessionService(scoped(inner, `${id}/`));
+    await s.createOrResume(id, { workspace: "/a", product: "echo-agent" });
+    await s.settle();
+  }
+  const root: StorageDir = {
+    read: (p) => inner.read(p),
+    write: (p, c) => inner.write(p, c),
+    remove: (p) => inner.remove(p),
+    list: async (p) => {
+      const listed = await inner.list(p);
+      await inner.remove("s-b/meta.json"); // 列完、读之前，s-b 收摊撤了 meta
+      return listed;
+    },
+  };
+  expect((await listSessions(root)).map((i) => i.id).sort()).toEqual(["s-a", "s-c"]);
+  // 坏档照旧判红：零长的 meta 不是「被撤了」
+  await inner.write("s-c/meta.json", "");
+  await expect(listSessions(root)).rejects.toThrow(/s-c.*解不开/);
+});
+
 test("恢复失败**不解毒**——此前抛错之后 append 仍被接受", async () => {
   // 实测破坏：createOrResume 因 entry 断链抛错，随后 append() 仍被接受、
   // settle() 还返回成功，继续往一个已确认损坏的会话里写。

@@ -16,7 +16,7 @@ function snapshotWith(caps: { id: string; summary: CapabilityObservationSummary 
     throughSeq: 0,
     at: 1_000,
     state: {
-      runtime: { phase: "ready", status: "ready", observationPersistence: "healthy", generation: "g", activeEntryCount: 0 },
+      runtime: { phase: "ready", status: "ready", observationPersistence: "healthy", generation: "g" },
       agent: { status: agentStatus, activeRunId: null, activeTurnId: null, iteration: 1, messageCount: 2 },
       capabilities: caps.map((c) => ({ id: c.id, digest: "x", summary: c.summary })),
       omittedCapabilitySummaryCount: 0,
