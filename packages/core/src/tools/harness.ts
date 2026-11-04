@@ -10,7 +10,7 @@
 //   skill 有「激活」概念（正文进 prompt,要控体积）;tool 注册即可用。
 
 import type { ToolSchema } from "../messages.ts";
-import { toolSchemas as projectToolSchemas, type AgentTool } from "./types.ts";
+import { byToolName, toolSchemas as projectToolSchemas, type AgentTool } from "./types.ts";
 import { TOOL_SEARCH_NAME } from "./tool-search.ts";
 
 /** agent 的工具面。键是 `tool.name`,值就是工具本体。 */
@@ -116,18 +116,27 @@ export function activeTools(tools: ToolMap, only?: ReadonlySet<string>): readonl
 
 /**
  * **本轮摆给模型的菜单**（渐进式披露，2026-09-02 用户拍板）：没被禁用、且（不延迟 或 已加载）。
- * 延迟是工具自己的标记（`ToolBase.deferred`）；`loaded` 是本 agent 经 `tool_search` 取过 schema 的名字。
+ * 延迟是工具自己的标记（`ToolBase.deferred`）；`loaded` 是本 agent 经 `tool_search` 取过 schema 的名字，**按加载顺序**。
  * `tool_search` 自己只在池里**还有没加载的延迟工具**时上菜单——没什么可取时不多占一格。
  * `getTools()` 的实现，循环契约不变。
+ *
+ * **顺序就是请求里的顺序**（2026-11-03，`toolSchemas` 按给定顺序投影）：常驻工具按名排；已加载的延迟工具按加载顺序
+ * 追加在后；`tool_search` 最后（它的描述随加载变）。加载一件延迟工具只动菜单的尾巴，前面的字节与 provider 缓存不动——
+ * 此前全体按名排，新加载的一件插进中间，它之后的工具、system 与整段对话一起失去缓存。不给 `loaded`（不做渐进披露）= 全体按名排。
  */
 export function visibleTools(tools: ToolMap, loaded?: ReadonlySet<string>, only?: ReadonlySet<string>): readonly AgentTool[] {
   const active = activeTools(tools, only);
-  if (loaded === undefined) return active;
+  if (loaded === undefined) return [...active].sort(byToolName);
+  const byName = new Map(active.map((t) => [t.name, t] as const));
+  const resident = active.filter((t) => t.deferred !== true && t.name !== TOOL_SEARCH_NAME).sort(byToolName);
+  const fetched: AgentTool[] = [];
+  for (const name of loaded) {
+    const t = byName.get(name);
+    if (t !== undefined && t.deferred === true) fetched.push(t);
+  }
   const pending = active.some((t) => t.deferred === true && !loaded.has(t.name));
-  return active.filter((t) => {
-    if (t.name === TOOL_SEARCH_NAME) return pending;
-    return t.deferred !== true || loaded.has(t.name);
-  });
+  const search = byName.get(TOOL_SEARCH_NAME);
+  return [...resident, ...fetched, ...(pending && search !== undefined ? [search] : [])];
 }
 
 /** 禁用一批（MCP 断线时它自己知道给过哪些名字）。返回真禁掉的个数。 */
@@ -180,11 +189,9 @@ export function resolveTool(tools: ToolMap, name: string, loaded?: ReadonlySet<s
 }
 
 /**
- * tools 参数的确定性投影（**按名排序**）。
- *
- * tools 在请求最前面,字节一变整个前缀缓存全灭;而注册顺序天然不稳定（MCP 异步连接先到先得）,
- * 所以这里必须给出「同一个集合,永远同一个字节序列」。
+ * 池里全部可用工具的确定性投影（**按名排序**）：同一个集合，永远同一个字节序列（注册顺序天然不稳定，MCP 异步连接先到先得）。
+ * 本轮菜单的顺序见 `visibleTools()`。
  */
 export function toolSchemasOf(tools: ToolMap): readonly ToolSchema[] {
-  return projectToolSchemas(activeTools(tools));
+  return projectToolSchemas([...activeTools(tools)].sort(byToolName));
 }

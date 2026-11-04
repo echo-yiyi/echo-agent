@@ -203,3 +203,33 @@ test("reset 清空对话：已加载的延迟工具一起清掉，菜单回到�
   expect(menus[menus.length - 1]).toContain("tool_search"); // 还有没取的延迟工具，入口回到菜单上
   await echo.stop();
 });
+
+test("菜单顺序：常驻工具按名排，已加载的延迟工具按加载顺序追加在后，tool_search 垫底——加载一件只动菜单尾巴，前面的字节（与 provider 缓存）不动", async () => {
+  const aaa: ModelTool = { ...ping, name: "aaa_lazy", deferred: true };
+  const bbb: ModelTool = { ...ping, name: "bbb_lazy", deferred: true };
+  const zed: ModelTool = { ...ping, name: "zed" };
+  const menus: string[][] = [];
+  const echo = await createEcho({
+    provider: recordingProvider(
+      [toolTurn("s1", "tool_search", { names: ["bbb_lazy"] }), toolTurn("s2", "tool_search", { names: ["aaa_lazy"] }), textTurn("done")],
+      menus,
+    ),
+    store: new InMemoryDir(),
+    lock: new InMemoryStateLock(),
+    allowNetwork: false,
+    withoutMemory: true,
+    extensionDirs: [],
+    agent: { tools: [zed, aaa, bbb, ping] },
+  });
+  await echo.start();
+  await echo.agent.prompt("load two");
+  await echo.stop();
+  const [first, second, third] = menus;
+  const resident = first!.filter((n) => n !== "tool_search");
+  expect(resident).toEqual([...resident].sort());
+  expect(first!.at(-1)).toBe("tool_search");
+  // 取了 bbb：它接在常驻工具后面（不按名插进 aaa…zed 中间），tool_search 仍垫底
+  expect(second).toEqual([...resident, "bbb_lazy", "tool_search"]);
+  // 再取 aaa：按加载顺序接在 bbb 后面（core 自己还有没取的延迟工具，tool_search 仍在、仍垫底）
+  expect(third).toEqual([...resident, "bbb_lazy", "aaa_lazy", "tool_search"]);
+});

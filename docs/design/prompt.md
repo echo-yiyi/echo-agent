@@ -129,7 +129,7 @@ flowchart LR
 
 system 的“冻结”只指主 Agent 从 registry 装配的快照。内部 loop 边界 的 `prepareNextTurn` 仍能直接替换 `AgentContext.systemPrompt`，但 Agent 没有把它暴露为产品或 extension 的 prompt 写入口。子 agent 和 compaction 调用也各自使用独立 system，不能据此声称“进程里所有模型调用的 system 每 run 都不变”。
 
-缓存层面只承诺仓库自己的确定性：sections 稳定排序、工具 schema 按名排序、时间戳不进固定 prompt、injection 追加在消息尾部。是否命中、命中多少以及 tools / system / messages 在厂商缓存里的相对位置，都是 provider 行为，不是 core 契约。
+缓存层面只承诺仓库自己的确定性：sections 稳定排序、时间戳不进固定 prompt、injection 追加在消息尾部，以及工具菜单的顺序（[`visibleTools()`](../../packages/core/src/tools/harness.ts#symbol=visibleTools)，`toolSchemas()` 按给定顺序投影）：常驻工具按名排，已加载的延迟工具按加载顺序追加在后，`tool_search` 垫底（它的描述随加载变）。加载一件延迟工具只动菜单尾巴——此前全体按名排，新加载的一件插进中间，它之后的工具、system 与整段对话一起失去缓存（本机会话实测命中从 9 600 掉到 896）；判据见 [菜单顺序](../../packages/core/test/tool-search.test.ts#test=菜单顺序常驻工具按名排已加载的延迟工具按加载顺序追加在后toolsearch-垫底加载一件只动菜单尾巴前面的字节与-provider-缓存不动)。是否命中、命中多少以及 tools / system / messages 在厂商缓存里的相对位置，都是 provider 行为，不是 core 契约。
 
 ## 5. 工具与 prompt 必须同真同假
 

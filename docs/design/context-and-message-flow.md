@@ -47,7 +47,7 @@ flowchart TD
     H --> I["contextBeforeBuild hook"]
     I --> J["convertToLlm"]
     J --> K["ProviderMessage[]"]
-    T["active tools"] --> U["每 turn 投影并按名排序"]
+    T["active tools"] --> U["每 turn 按菜单顺序投影（常驻按名、已加载的延迟工具按加载顺序、tool_search 最后）"]
     U --> V["ToolSchema[]"]
     R --> W["provider request"]
     K --> W

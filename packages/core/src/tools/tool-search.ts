@@ -10,7 +10,7 @@
 
 import type { ToolMap } from "./harness.ts";
 import type { AgentMessage } from "../messages.ts";
-import { isModelVisible, toolError, toolOk, toolSchemas, type AgentTool, type ModelTool } from "./types.ts";
+import { byToolName, isModelVisible, toolError, toolOk, toolSchemas, type AgentTool, type ModelTool } from "./types.ts";
 
 export const TOOL_SEARCH_NAME = "tool_search";
 
@@ -35,9 +35,9 @@ export type ToolSearchDeps = {
   readonly loaded: Set<string>;
 };
 
-/** 池里当前标着 `deferred` 的工具（按名排）。每次现算：extension / MCP 后注册的也算数。 */
+/** 池里当前标着 `deferred` 的工具（按名排，与菜单同一个比较器）。每次现算：extension / MCP 后注册的也算数。 */
 export function deferredTools(tools: ToolMap): readonly AgentTool[] {
-  return [...tools.values()].filter((t) => t.deferred === true).sort((a, b) => a.name.localeCompare(b.name));
+  return [...tools.values()].filter((t) => t.deferred === true).sort(byToolName);
 }
 
 type Params = { names?: string[]; query?: string };
@@ -88,7 +88,7 @@ export function makeToolSearchTool(deps: ToolSearchDeps): ModelTool<Params> {
       if (wanted.size === 0) {
         return toolError(`No deferred tool matches. Deferred tools: ${catalog()}`);
       }
-      const present = [...wanted].sort();
+      const present = [...wanted].sort(); // 码元序，与 byToolName 一致：一次取多件时按名加载
       for (const n of present) deps.loaded.add(n);
       const schemas = toolSchemas(present.map((n) => byName.get(n)!));
       const lines = schemas.map((s) => `## ${s.name}\n${s.description}\nparameters: ${JSON.stringify(s.input_schema)}`);

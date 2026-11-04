@@ -156,21 +156,24 @@ export function isModelTool(t: AgentTool): t is ModelTool {
  * **模型能看见的工具**（进 schema 清单、可被模型点名的那些）。
  * 加新的模型可见种类时**只改这里**——别在各调用点各判各的。
  */
+/** 工具按名的比较器：码元比较，不用 localeCompare（它随环境变）。菜单、延迟层名单、全量投影共用这一个。 */
+export function byToolName(a: { readonly name: string }, b: { readonly name: string }): number {
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
 /**
- * tools 参数的唯一投影点。**按名排序**——tools 在请求最前面,它的字节一变,整个前缀缓存全灭;
- * 而注册顺序天然不稳定(MCP 异步连接,谁先连上谁先注册),所以确定性只能靠显式排序:
- * 同一个集合,永远同一个字节序列。排序用码元比较,不用 localeCompare(它随环境变)。
+ * tools 参数的唯一投影点：**按给定顺序**投影（只滤掉模型看不见的）。顺序由给菜单的一方定——主循环的菜单是
+ * `visibleTools()`：常驻工具按名排、已加载的延迟工具按加载顺序追加在后、`tool_search` 最后。
+ * tools 在请求最前面，它的字节一变，之后的前缀缓存全灭：注册顺序天然不稳定（MCP 异步连接）所以常驻的要显式排序；
+ * 延迟工具随会话一件件加载，追加在末尾、`tool_search`（描述随加载变）垫底，加载一件只动尾巴。
  */
 export function toolSchemas(tools: readonly AgentTool[]): ToolSchema[] {
-  return tools
-    .filter(isModelVisible)
-    .map((t) => ({
-      name: t.name,
-      // MCP 的 description 在 SDK 里是可选的;空描述的工具模型基本不会用,但不该因此崩
-      description: t.description ?? "",
-      input_schema: t.parameters,
-    }))
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return tools.filter(isModelVisible).map((t) => ({
+    name: t.name,
+    // MCP 的 description 在 SDK 里是可选的;空描述的工具模型基本不会用,但不该因此崩
+    description: t.description ?? "",
+    input_schema: t.parameters,
+  }));
 }
 
 export function isModelVisible(t: AgentTool): t is ModelTool | McpTool {
