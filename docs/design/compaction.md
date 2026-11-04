@@ -112,14 +112,22 @@ system                       不变，每 run 装配一次，不含摘要
 
 | order | 阶段 | 只在 | 做什么 | 模型调用 |
 | --- | --- | --- | --- | --- |
-| 10 | `tool-results` | 四种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`）；清掉的用 `tool_output_read` 按工具调用 id 读回原文 | 0 |
-| 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；`used ≤ goal` 就停；一次最多 8 段 | 每段 1 次 |
-| 30 | `summary` | auto / overflow / manual | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
-| 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`），作为有损的应急保底 | 0 |
+| 10 | `tool-results` | 四种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`）；overflow 时那一批的结果合计超过 `OVERFLOW_KEEP_TOKENS`（2k）就连它也清；清掉的用 `tool_output_read` 按工具调用 id 读回原文 | 0 |
+| 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；绕开用户最新的请求；`used ≤ goal` 就停；一次最多 8 段 | 每段 1 次 |
+| 30 | `summary` | auto / overflow / manual | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点，再放不下也留着在飞那一批。用户最新的请求落在要折的范围里时拆成前后两段（见下）。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
+| 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`），作为有损的应急保底；同样绕开用户最新的请求 | 0 |
+
+**三条底线**（2026-11-03）。此前尾巴放不下在飞那一轮时 `chooseTailStart()` 返回 n（不留尾）：应急时摘要拿着几乎同样大的前缀再撞窗、snip 把 `[0, n)` 整段省略，下一次请求里连用户要干什么都没了；自动压缩时最后一批超过 `keepRecentTokens` 也会把刚拿到的工具结果折进摘要。现在：
+
+1. **在飞那一批永远在尾巴里**（[`inflightStart()`](../../packages/core/src/compaction/builtin.ts#symbol=inflightStart)：最后一个合法切点，以工具批收尾时是那条带 tool_use 的 assistant）。尾巴预算放不下时尾巴就是它。
+2. **用户最新的请求不折不省**（[`latestUserRequest()`](../../packages/core/src/compaction/builtin.ts#symbol=latestUserRequest)：最后一条非 harness 的 user 消息）。它落在要折的范围里时，[`foldRanges()`](../../packages/core/src/compaction/builtin.ts#symbol=foldRanges) 把范围拆成它前后两段：summary 的正文放第一段、第二段只留一句指回它的说明（`frameCovered()`），snip 两段都省略。它本身比窗口还大时没有阶段能动它，run 以 `context_overflow` 收场。
+3. **那一批自己就放不下时清掉它的结果**：overflow 的 `tool-results` 连在飞那一批也清（占位带工具调用 id，模型用 `tool_output_read` 分段读回），而不是整段省略。
+
+做法参照：pi 的切点在尾巴放不下工具结果时退到前面那条 tool call、不退回第一条消息（`findCutPoint`）；codex 压缩后留着用户消息原文、只把其余换成摘要。判据见 [在飞那一批](../../packages/core/test/compaction.test.ts#test=choosetailstart预算够就从最早的轮起点留起预算只够半轮就退到合法切点连一条都放不下也留着在飞那一批)、[请求不折](../../packages/core/test/compaction.test.ts#test=summary在飞的一轮比尾巴预算大要从轮中途切-用户最新的请求原文留在视图里摘要放它前面它后面那段只留一句指回摘要的说明)、[应急清那一批](../../packages/core/test/compaction.test.ts#test=撞窗应急在飞那一批比应急尾巴大清掉它的结果按-id-读回用户的请求原文还在下一次请求里不再整段省略成一句消息被省略了)。
 
 **摘要 prompt**（全英文，`SUMMARY_SYSTEM` / `SUMMARY_INSTRUCTION`，由本模块维护）：先 `<scratchpad>` 草稿再 `<summary>` 正文，运行时 `extractSummary()` 只留正文；要求**用用户主要使用的语言写**（中文用户得到中文摘要）；九个小节：goal、ground rules、touched files、failures and fixes、findings、the user's messages（逐字）、open work、in progress、resume with；已有摘要要合并不重复；manual 的 `instructions` 作为附加要求追加在末尾。collapse 用更短的一段 prompt（`COLLAPSE_*`）。
 
-**框定**：`frameFull()` 给整段摘要加来历（这段对话被压缩过）、范围（`#0–#k`）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
+**框定**：`frameFull()` 给整段摘要加来历（这段对话被压缩过）、范围（`#0–#k`，拆成两段时两段都列、并说明用户最新的请求原文紧跟其后）、取回提示（call `transcript_read`）；`frameSection()` 给折叠段加范围与取回提示。
 
 **`transcript_read({ from, to?, query? })`**（[`transcriptReadTool()`](../../packages/core/src/compaction/tool.ts#symbol=transcriptReadTool)）：按下标读**内存里的完整 transcript**——不走磁盘、不进 workspace jail，没有文件工具的通用 agent 也能用；下标与压缩通知里的 `#12–#40` 同一套；单条 4 000 字符、一次 24 000 字符封顶，超了告诉模型从哪续。同组还有一个 prompt 段（`compactionSection()`，order 150）告诉模型压缩之后细节去哪拿。
 

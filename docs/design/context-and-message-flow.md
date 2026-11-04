@@ -149,7 +149,7 @@ contextBeforeBuild 支持 continue / block / patch，见 [INTERCEPTABLE](../../p
 
 | 判据 | 测试 |
 | --- | --- |
-| 触发后紧接着的 provider request 不含已覆盖原文、含摘要与尾巴 | [auto 触发](../../packages/core/test/compaction.test.ts#test=auto超阈值-轮首压缩-紧接着的-provider-请求只含摘要不含原文压完下一轮不重复压状态与-session-都记下) |
+| 触发后紧接着的 provider request 不含已覆盖原文、含摘要与尾巴 | [auto 触发](../../packages/core/test/compaction.test.ts#test=auto超阈值-轮首压缩-紧接着的-provider-请求只含摘要与这次的请求不含原文压完下一轮不重复压状态与-session-都记下) |
 | 摘要带 harness 来源，不伪装成人或 assistant 原话 | [投影](../../packages/core/test/compaction.test.ts#test=投影段-一条-userharness清掉的-toolresult-换占位但-toolcallid-iserror-不动transcript-原对象一个字不改) |
 | tool_use / tool_result 配对不被切断 | [切点](../../packages/core/test/compaction.test.ts#test=切点toolresult-前面不能切snapback-优先轮起点其次合法切点都没有回-min) |
 | 压缩后立即续与恢复后续，下一次 provider context 逐字节相同 | [恢复一致](../../packages/core/test/compaction.test.ts#test=压缩后立即续跑-vs-重启恢复后续跑下一次送模消息逐字节相同) |

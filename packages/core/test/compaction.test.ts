@@ -33,7 +33,9 @@ import {
   chooseTailStart,
   collapseStage,
   extractSummary,
+  foldRanges,
   frameFull,
+  SUMMARY_SYSTEM,
   snipStage,
   summaryStage,
   toolResultsStage,
@@ -216,13 +218,69 @@ function tokensOf(list: readonly AgentMessage[]): number {
   return list.reduce((acc, x) => acc + estimateTokens([x]), 0);
 }
 
-test("chooseTailStart：预算够就从最早的轮起点留起；预算只够半轮就退到合法切点；连一条都放不下就不留尾", () => {
+test("chooseTailStart：预算够就从最早的轮起点留起；预算只够半轮就退到合法切点；连一条都放不下也留着在飞那一批", () => {
   const m = twoTurns();
   expect(chooseTailStart(m, EMPTY_COMPACTION, 100_000, 0)).toBe(0);
   expect(chooseTailStart(m, EMPTY_COMPACTION, tokensOf(m.slice(4)), 0)).toBe(4);
   // 只够最后三条（asst tool_use + toolResult + asst）：在飞的一轮放不下，退到合法切点 5（不是 6，那会拆开 c2 的配对）
   expect(chooseTailStart(m, EMPTY_COMPACTION, tokensOf(m.slice(5)), 0)).toBe(5);
-  expect(chooseTailStart(m, EMPTY_COMPACTION, 0, 0)).toBe(8);
+  // 一条都放不下：最后那条回答照样留着（此前返回 8 = 不留尾，整段折进摘要）
+  expect(chooseTailStart(m, EMPTY_COMPACTION, 0, 0)).toBe(7);
+  // 以工具批收尾、那一批比预算大：tool_use 与它的结果一起留着，不折刚拿到的结果
+  const batch = [userMessage("read it"), assistantMessage([{ type: "tool_use", id: "r1", name: "echo", input: {} }], "tool_use"), toolResultMessage("r1", "echo", "x".repeat(4000), false)];
+  expect(chooseTailStart(batch, EMPTY_COMPACTION, 10, 0)).toBe(1);
+});
+
+test("foldRanges：用户最新的请求落在要折的范围里就拆成前后两段、它自己不折；harness 插话不算用户请求", () => {
+  const m = [
+    userMessage("old ask"),
+    assistantMessage([{ type: "text", text: "ok" }], "end_turn"),
+    userMessage("LATEST ask"),
+    assistantMessage([{ type: "tool_use", id: "c1", name: "echo", input: {} }], "tool_use"),
+    toolResultMessage("c1", "echo", "r", false),
+    assistantMessage([{ type: "tool_use", id: "c2", name: "echo", input: {} }], "tool_use"),
+    toolResultMessage("c2", "echo", "r", false),
+    userMessage("stop hook says keep going", "harness"),
+  ];
+  expect(foldRanges(m, 0, 2)).toEqual([[0, 2]]);
+  expect(foldRanges(m, 0, 5)).toEqual([[0, 2], [3, 5]]);
+  expect(foldRanges(m, 0, 3)).toEqual([[0, 2]]);
+  expect(foldRanges(m, 2, 5)).toEqual([[3, 5]]);
+  expect(foldRanges(m, 0, 0)).toEqual([]);
+});
+
+test("summary：在飞的一轮比尾巴预算大、要从轮中途切 → 用户最新的请求原文留在视图里，摘要放它前面、它后面那段只留一句指回摘要的说明", async () => {
+  const m = [
+    userMessage("first question"),
+    assistantMessage([{ type: "text", text: "answer one" }], "end_turn"),
+    userMessage("LATEST: refactor retry.ts to honour Retry-After"),
+    assistantMessage([{ type: "tool_use", id: "c1", name: "echo", input: {} }], "tool_use"),
+    toolResultMessage("c1", "echo", "y".repeat(800), false),
+    assistantMessage([{ type: "tool_use", id: "c2", name: "echo", input: {} }], "tool_use"),
+    toolResultMessage("c2", "echo", "z".repeat(40), false),
+  ];
+  const s = await summaryStage({ keepRecentTokens: 30 }).run(input(m, { callModel: fakeCall("<summary>S</summary>") }), SIG);
+  expect(s!.spans.map((x) => [x.from, x.to])).toEqual([[0, 2], [3, 5]]);
+  expect(s!.spans[0]!.summary).toContain("message #2, follows this summary verbatim");
+  expect(s!.spans[1]!.summary).toContain("transcript_read from=3 to=5");
+  const view = buildWorkingMessages(m, s!);
+  expect(JSON.stringify(view)).toContain("LATEST: refactor retry.ts to honour Retry-After");
+  expect(view.map((x) => x.role)).toEqual(["user", "user", "user", "assistant", "toolResult"]);
+  // 应急时省略也一样绕开它（在飞的一轮比应急尾巴大）
+  const heavy = m.map((x) => (x.role === "toolResult" && x.toolCallId === "c1" ? toolResultMessage("c1", "echo", "y".repeat(12_000), false) : x));
+  const snipped = (await snipStage().run(input(heavy, { reason: "overflow" }), SIG))!;
+  expect(snipped.spans.map((x) => [x.from, x.to, x.summary])).toEqual([[0, 2, null], [3, 5, null]]);
+  expect(JSON.stringify(buildWorkingMessages(heavy, snipped))).toContain("LATEST: refactor retry.ts");
+});
+
+test("tool-results：应急时在飞那一批的结果自己就超过应急尾巴 → 连它也清掉（按 id 读回），不留着再撞窗", () => {
+  const m = [userMessage("read it"), assistantMessage([{ type: "tool_use", id: "r1", name: "echo", input: {} }], "tool_use"), toolResultMessage("r1", "echo", "x".repeat(12_000), false)];
+  expect(toolResultsStage().run(input(m, { reason: "overflow" }), SIG)).toEqual({ spans: [], clearedBefore: 3 });
+  // 自动压缩不清在飞那一批（只有应急才动它）
+  expect(toolResultsStage(1).run(input(m), SIG)).toBeNull();
+  // 应急、那一批小：照旧只留它
+  const small = [...m.slice(0, 2), toolResultMessage("r1", "echo", "small", false)];
+  expect(toolResultsStage().run(input(small, { reason: "overflow" }), SIG)).toBeNull();
 });
 
 test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提示）；模型收到的是投影后的前缀 + harness 指令；manual 的指令追加在末尾", async () => {
@@ -230,7 +288,7 @@ test("summary：尾巴之前折成一段，摘要经框定（来历 + 取回提�
   const seen: { systemPrompt: string | null; messages: readonly AgentMessage[] }[] = [];
   const keep = tokensOf(m.slice(4));
   const s = await summaryStage({ keepRecentTokens: keep }).run(input(m, { callModel: fakeCall("<scratchpad>think</scratchpad><summary>THE SUMMARY</summary>", seen) }), new AbortController().signal);
-  expect(s).toEqual({ spans: [{ from: 0, to: 4, summary: frameFull(0, 4, "THE SUMMARY") }], clearedBefore: 0 });
+  expect(s).toEqual({ spans: [{ from: 0, to: 4, summary: frameFull([[0, 4]], "THE SUMMARY") }], clearedBefore: 0 });
   expect(s!.spans[0]!.summary).toContain("transcript_read");
   expect(s!.spans[0]!.summary).not.toContain("think");
   expect(seen[0]!.messages.map((x) => x.role)).toEqual(["user", "assistant", "toolResult", "assistant", "user"]);
@@ -319,18 +377,20 @@ function collect(agent: Agent): { events: AgentEvent[]; lifecycle: LifecycleEven
   return { events, lifecycle };
 }
 
-test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含摘要不含原文；压完下一轮不重复压；状态与 session 都记下", async () => {
+test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含摘要与这次的请求、不含原文；压完下一轮不重复压；状态与 session 都记下", async () => {
   const store = new InMemoryDir();
-  const { fn, requests } = capturing([reply("<summary>S1</summary>"), toolTurn("t1", "echo", {}), textTurn("done")]);
+  const { fn, requests } = capturing([textTurn(BIG_TEXT), reply("<summary>S1</summary>"), toolTurn("t1", "echo", {}), textTurn("done")]);
   const agent = await agentWithBuiltins(fn, { session: { store, id: "s1" } });
+  await agent.prompt("first"); // 上一个 run 的回答很长：这个 run 轮首就过线
   const { events, lifecycle } = collect(agent);
-  const result = await agent.prompt(BIG_TEXT);
+  const result = await agent.prompt("second");
   expect(result.outcome.kind).toBe("completed");
-  // 请求 0 是摘要调用（无工具、末尾一条 harness 指令），请求 1 是真正的那一轮
-  expect(requests[0]!.tools).toEqual([]);
-  expect(requests[1]!.messages.length).toBe(1);
-  expect(textOf(requests[1]!, 0)).toContain("S1");
-  expect(textOf(requests[1]!, 0)).not.toContain(BIG_TEXT);
+  // 请求 1 是摘要调用（无工具、末尾一条 harness 指令），请求 2 是真正的那一轮：摘要 + 这次的请求原文
+  expect(requests[1]!.tools).toEqual([]);
+  expect(requests[2]!.messages.length).toBe(2);
+  expect(textOf(requests[2]!, 0)).toContain("S1");
+  expect(textOf(requests[2]!, 0)).not.toContain(BIG_TEXT);
+  expect(textOf(requests[2]!, 1)).toContain("second");
   // 第二轮（工具结果回来之后）没有再压：compaction_start 只有一次
   expect(events.filter((e) => e.type === "compaction_start").length).toBe(1);
   const end = events.find((e) => e.type === "compaction_end");
@@ -339,7 +399,7 @@ test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含�
   expect(agent.state.contextTokens).not.toBeNull();
   expect(lifecycle.some((e) => e.type === "postCompact")).toBe(true);
   // transcript 原文还在
-  expect(agent.messages[0]!.role === "user" && JSON.stringify(agent.messages[0]!.content)).toContain(BIG_TEXT);
+  expect(agent.messages[1]!.role === "assistant" && JSON.stringify(agent.messages[1]!.content)).toContain(BIG_TEXT);
   // session 里有一条 compaction entry，状态与运行时同一份
   const loaded = await loadSession(store, "s1");
   expect(loaded.compaction).toEqual(agent.state.compaction);
@@ -347,17 +407,18 @@ test("auto：超阈值 → 轮首压缩 → 紧接着的 provider 请求只含�
 
 test("压缩后立即续跑 vs 重启恢复后续跑：下一次送模消息逐字节相同", async () => {
   const store = new InMemoryDir();
-  const a = capturing([reply("<summary>S1</summary>"), textTurn("one"), textTurn("two")]);
+  const a = capturing([textTurn(BIG_TEXT), reply("<summary>S1</summary>"), textTurn("one"), textTurn("two")]);
   const agentA = await agentWithBuiltins(a.fn, { session: { store, id: "s1" } });
-  await agentA.prompt(BIG_TEXT);
-  // 另一个进程在这一刻恢复同一段（transcript 两条 + 一条 compaction entry）
+  await agentA.prompt("first");
+  await agentA.prompt("second"); // 轮首压缩：上一轮折成摘要
+  // 另一个进程在这一刻恢复同一段（transcript 四条 + 一条 compaction entry）
   const b = capturing([textTurn("two")]);
   const agentB = await agentWithBuiltins(b.fn, { session: { store, id: "s1" } });
   expect(agentB.state.compaction).toEqual(agentA.state.compaction);
   await agentA.prompt("next");
   await agentB.prompt("next");
-  expect(b.requests[0]!.messages).toEqual(a.requests[2]!.messages);
-  expect(b.requests[0]!.messages.length).toBe(3); // 摘要 · one · next
+  expect(b.requests[0]!.messages).toEqual(a.requests[3]!.messages);
+  expect(b.requests[0]!.messages.length).toBe(4); // 摘要 · second · one · next
 });
 
 test("/clear 之后再压缩：compaction entry 记盘上下标（越过 reset 前那几条），续会话不判坏档、折的还是同一段", async () => {
@@ -473,14 +534,40 @@ test("撞窗应急：context_overflow → 同一条流水线以 overflow 跑一�
  * 不校准的话中文会话清完第一段就「够了」，collapse / summary 永远轮不到；英文会话恰好对得上所以看不出来。
  * 判据：同一段对话的 ASCII 版与中文版，usage 一样，压缩跑过的阶段必须一样。
  */
+test("撞窗应急、在飞那一批比应急尾巴大：清掉它的结果（按 id 读回），用户的请求原文还在下一次请求里——不再整段省略成一句「消息被省略了」", async () => {
+  const bigRead: ModelTool = { kind: "model", name: "read", label: "read", description: "read", maxInlineTokens: Infinity, parameters: { type: "object", properties: {} }, execute: async () => toolOk("line of a big file\n".repeat(700)) }; // ≈ 3 300 token
+  const model: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 8_000 } };
+  const requests: Context[] = [];
+  const providerWindow = 3_000; // provider 的真实上限比目录标的小：自动压缩没触发，请求撞窗
+  const fn: StreamFn = (m, c, o) => {
+    requests.push(structuredClone(c));
+    const size = JSON.stringify(c.messages).length / 4;
+    const turn: ScriptedTurn = size > providerWindow ? errorTurn("context_overflow", "too long", false) : requests.length === 1 ? toolTurn("r1", "read", {}) : textTurn(c.systemPrompt === SUMMARY_SYSTEM ? "<summary>S</summary>" : "ok");
+    return scriptedStreamFn([turn])(m, c, o);
+  };
+  const agent = new Agent({ model, streamFunction: fn, tools: [bigRead] });
+  await mountBuiltinTools(agent);
+  const r = await agent.prompt("Please refactor src/payment/retry.ts so that the backoff honours the Retry-After header, then run the tests.");
+  expect(r.outcome.kind).toBe("completed");
+  const last = JSON.stringify(requests.at(-1)!.messages);
+  expect(last).toContain("Retry-After header");
+  expect(last).toContain('tool call \\"r1\\"'); // 在飞那一批的结果换成了带 id 的占位
+  expect(last).not.toContain("line of a big file");
+  // 没折、没省略：只清了那一批的结果（撞窗那次失败的 attempt 也在 transcript 里，所以切点在它之后）
+  expect(agent.state.compaction.spans).toEqual([]);
+  expect(agent.state.compaction.clearedBefore).toBeGreaterThan(2);
+});
+
 test("校准比：ASCII 与中文同一段对话、同一份 usage，压缩跑过的阶段一致（中文不会在第一段就停）", async () => {
   const window: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1_000 } };
   const run = async (text: string): Promise<readonly string[]> => {
-    // 轮 1 usage 300（不触发）；轮 2 usage 950（> target 900）→ 轮 3 轮首触发；之后每次模型调用都回同一段摘要
-    const { fn } = capturing([toolTurnUsage("t1", { inputTokens: 300, outputTokens: 0 }), toolTurnUsage("t2", { inputTokens: 950, outputTokens: 0 }), ...Array.from({ length: 4 }, () => reply("<summary>S</summary>"))]);
+    // 第一个 run：长文本、轮 1 usage 300（不触发）。第二个 run：轮 1 usage 950（> target 900）→ 轮 2 轮首触发；
+    // 之后每次模型调用都回同一段摘要。长文本在上一个 run 里：这次的请求不折，折的是它
+    const { fn } = capturing([toolTurnUsage("t1", { inputTokens: 300, outputTokens: 0 }), reply("ok"), toolTurnUsage("t2", { inputTokens: 950, outputTokens: 0 }), ...Array.from({ length: 4 }, () => reply("<summary>S</summary>"))]);
     const agent = await agentWithBuiltins(fn, { model: window, compaction: { reserveTokens: 100, keepRecentTokens: 40, keepRecentToolResults: 1 } });
-    const { events } = collect(agent);
     await agent.prompt(text);
+    const { events } = collect(agent);
+    await agent.prompt("continue");
     const ends = events.filter((e): e is Extract<AgentEvent, { type: "compaction_end" }> => e.type === "compaction_end");
     expect(ends.length).toBe(1);
     return ends[0]!.stages;
@@ -499,8 +586,9 @@ test("手动压缩沿用上一次 usage 的校准比：中文会话压完报出�
     { type: "start" },
     { type: "done", message: { role: "assistant", content: [{ type: "text", text: "好" }], stopReason: "end_turn", usage: { inputTokens: 900, outputTokens: 50 } } },
   ];
-  const agent = await agentWithBuiltins(scriptedStreamFn([withUsage, reply("<summary>S</summary>")]), { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
+  const agent = await agentWithBuiltins(scriptedStreamFn([withUsage, reply("好的"), reply("<summary>S</summary>")]), { model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
   await agent.prompt("汉字".repeat(600)); // 字符估 300，provider 说 950 → 校准比 ≈ 2
+  await agent.prompt("下一个"); // 这次的请求不折：折的是上面那一轮
   const r = await agent.compact();
   expect(r.kind === "done" && r.stages).toEqual(["summary"]);
   const rawAfter = estimateText(await agent.assemblePrompt()) + estimateTokens(buildWorkingMessages(agent.messages, agent.state.compaction));
@@ -657,13 +745,14 @@ test("echo:compaction 装上之后 transcript_read 在工具面上，读的是�
 
 test("Agent.compact：走同一条流水线（manual，无视阈值，指令交给摘要）；忙时 rejected；没阶段 rejected", async () => {
   const store = new InMemoryDir();
-  const { fn, requests } = capturing([textTurn("hi"), reply("<summary>MANUAL</summary>")]);
+  const { fn, requests } = capturing([textTurn("hi"), textTurn("hi again"), reply("<summary>MANUAL</summary>")]);
   const agent = await agentWithBuiltins(fn, { session: { store, id: "s1" }, model: FAKE_MODEL, compaction: { keepRecentTokens: 0 } });
   await agent.prompt("hello");
+  await agent.prompt("again");
   const { events } = collect(agent);
   const r = await agent.compact("only the TODOs");
   expect(r.kind === "done" && r.stages).toEqual(["summary"]);
-  expect(JSON.stringify(requests[1]!.messages)).toContain("only the TODOs");
+  expect(JSON.stringify(requests[2]!.messages)).toContain("only the TODOs");
   expect(agent.state.compaction.spans[0]!.summary).toContain("MANUAL");
   expect(agent.state.status).toBe("idle");
   // 不是一个 run：没有 agent_start / agent_end；但 status 的两条边照样发（开门 generating、收尾 idle）
