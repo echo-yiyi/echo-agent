@@ -1518,6 +1518,20 @@ export class Agent {
       // **at-least-once**：崩在 ack 之前 → 重启时那批还在，会重放；ack 了 → 删掉，不会变成死循环。
       // **只归 idle，不排下一轮、也不清 outstanding 标记**：裁决还没出来，可能是 indeterminate（那时一轮都不该再起）。
       this.closeRun();
+      // **transcript 先落定再 ack**（与 `ackWatched` 同一条）：这批消息写不进会话账本，就不能说它被消费了——
+      // 整批放回、盘上留着，重启后照常重投。同时停掉自动消费：会话写坏之后每次消费都会再写失败，
+      // 不停就是一轮轮白跑模型；人开的 prompt 不受影响。
+      try {
+        await this.sessionService?.settle();
+      } catch (e) {
+        this.inbox.releaseBatch(batch.reservationId, "released");
+        this.autoConsumeInbox = false;
+        this.reportDiagnostic({
+          code: "inbox_transcript_unsettled",
+          message: `这批 inbox 消息没能写进会话账本，未 ack、留待重启后重投，已停止自动消费 inbox：${errText(e)}`,
+        });
+        return settled.result;
+      }
       // ack 的三态由账本裁决：pre-commit（整批仍 pending，下次重投）与 indeterminate（账本已 seal，后续 intake
       // 一律 fail-loud）都以 reject 报出。run 本身确实发生过，所以这里如实记诊断、照样交出 LoopResult——
       // 不假装 ack 成功，也不把已经跑完的 run 说成没跑。

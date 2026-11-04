@@ -98,6 +98,8 @@ export class InboxStore {
    * 盘上没有了就从这里摘掉，所以它不会比 `inbox/` 里的文件数更大。
    */
   private readonly notForRefresh = new Set<string>();
+  /** 本进程正在落盘、还没记进 pending 的 recordId。`refresh()` 列盘时会看见它们的文件，但它们归 `writeRecord` 入队。 */
+  private readonly writing = new Set<string>();
 
   private onDiagnostic?: (d: Diagnostic) => void;
   /** 观测出口（Inbox 行，observe.ts 头注列了全部发点）：装配方（Agent）接上；没接就不发。 */
@@ -221,11 +223,6 @@ export class InboxStore {
   async refresh(): Promise<number> {
     const store = this.store;
     if (store === null || !this.restored || this.sealedReason !== null) return 0;
-    const known = new Set<string>();
-    for (const r of this.pending) known.add(r.recordId);
-    for (const batch of this.reservations.values()) for (const r of batch) known.add(r.recordId);
-    for (const ids of this.index.values()) for (const id of ids) known.add(id);
-    for (const id of this.notForRefresh) known.add(id);
 
     const found: InboxRecordV1[] = [];
     const onDisk = new Set<string>();
@@ -233,7 +230,7 @@ export class InboxStore {
       const nameId = recordIdFromPath(path);
       if (nameId === null) continue;
       onDisk.add(nameId);
-      if (known.has(nameId)) continue;
+      if (this.isKnown(nameId)) continue;
       const full = path.startsWith(`${INBOX_DIR}/`) ? path : `${INBOX_DIR}/${path}`;
       const text = await store.read(full);
       if (text === null) continue; // list 与 read 之间被别人删了——不是坏档
@@ -249,16 +246,28 @@ export class InboxStore {
     }
     // 盘上已经没有的就不用再记着（cleanup 或别的进程删掉了）
     for (const id of this.notForRefresh) if (!onDisk.has(id)) this.notForRefresh.delete(id);
-    if (found.length === 0) return 0;
+    // **入队前同步再判一次**：上面的 list / read 期间，并发的另一次 refresh 或本进程的投递可能已经把同一条收进来了。
+    // 从这里到入队结束没有 await，所以这次判定与入队是一体的
+    const fresh = found.filter((r) => !this.isKnown(r.recordId));
+    if (fresh.length === 0) return 0;
     // 按 recordId 排序 = 按时间排序（id 前缀是定长时间戳），所以别人写进来的这些也按它们的发生顺序入队
-    found.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0));
-    for (const r of found) {
+    fresh.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0));
+    for (const r of fresh) {
       this.pending.push(r);
       this.indexPush(r.dedupeKey, r.recordId);
       // 别的进程写进来的（跨 session 的 session_send 就是这条路）：一条一个事实，source / ref 说是谁发的
       this.fact({ kind: "accepted", records: [inboxRecordBrief(r.message, r.recordId)], deduplicated: false, via: "refresh" });
     }
-    return found.length;
+    return fresh.length;
+  }
+
+  /** 这条 record 本进程已经在管（pending、已 reserve、防重索引里、不许 refresh 捡回、或正在自己落盘）。 */
+  private isKnown(recordId: string): boolean {
+    if (this.writing.has(recordId) || this.notForRefresh.has(recordId)) return true;
+    if (this.pending.some((r) => r.recordId === recordId)) return true;
+    for (const batch of this.reservations.values()) if (batch.some((r) => r.recordId === recordId)) return true;
+    for (const ids of this.index.values()) if (ids.includes(recordId)) return true;
+    return false;
   }
 
   private async readMarkers(store: StorageDir): Promise<Map<string, InboxBatchAckCommitV1>> {
@@ -359,13 +368,16 @@ export class InboxStore {
     }
     const record: InboxRecordV1 = { recordId, dedupeKey, message, acceptedAt: Date.now() };
     if (this.store !== null) {
+      this.writing.add(recordId);
       try {
         await this.store.write(recordPath(recordId), serializeRecord(record));
       } catch (e) {
+        this.writing.delete(recordId);
         // 原文只进本地诊断；协议里给的是**真 digest**，不是截断的错误文本
         this.diagnose("inbox_write_failed", `record ${recordId} 落盘失败：${errText(e)}`);
         return this.reject([inboxRecordBrief(message)], "store-error", await errorDigest(errText(e)), errText(e));
       }
+      this.writing.delete(recordId);
     }
     this.pending.push(record);
     this.indexPush(dedupeKey, recordId);

@@ -22,6 +22,7 @@ import {
 import type { Provider } from "../src/provider/types.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 import type { DurableDeliveryResult } from "../src/inbox/ingress.ts";
+import { SessionService } from "../src/session/service.ts";
 /**
  * 造一个形状合法的 recordId：`<12 位十六进制毫秒>-<16 位十六进制随机>`（2026-09-03 起写者自己发号）。
  * 测试要**确定性**的 id 才能断言顺序，所以这里把随机尾巴固定成序号。
@@ -1198,6 +1199,80 @@ test("clear() 丢掉的 pending，本进程的 refresh() 不再捡回来——�
   expect(s.pendingCount).toBe(0);
   // 盘上留着：下次 restore（重启）照旧重放——clear 的语义没变
   expect(await new InboxStore(dir).restore()).toHaveLength(1);
+});
+
+test("两次 refresh() 并发：别的写者写进来的同一条 record 只进 pending 一次", async () => {
+  const dir = new InMemoryDir();
+  const me = await ledger(dir);
+  const other = await ledger(dir); // 另一个进程里的写者
+  acceptedIdOf(await accept(other, "回信", "peer:1"));
+  const [a, b] = await Promise.all([me.refresh(), me.refresh()]);
+  expect(a + b).toBe(1);
+  expect(me.pendingCount).toBe(1);
+  expect(me.reserveBatch()!.recordIds).toHaveLength(1);
+});
+
+test("inbox run 的 transcript 写不进去：这批不 ack、留在盘上待重投，且不再自动消费（不空转）", async () => {
+  const sessionDisk = new InMemoryDir();
+  let failEntries = false;
+  const sessionDir: StorageDir = {
+    read: (p) => sessionDisk.read(p),
+    list: (p) => sessionDisk.list(p),
+    remove: (p) => sessionDisk.remove(p),
+    write: async (p, c) => {
+      if (failEntries && p.startsWith("entries/")) throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+      return sessionDisk.write(p, c);
+    },
+  };
+  const inboxDisk = new InMemoryDir();
+  let modelCalls = 0;
+  const stream = scriptedStreamFn([textTurn("收到"), textTurn("又一遍"), textTurn("再一遍")]);
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: (...args) => {
+      modelCalls++;
+      return stream(...args);
+    },
+    sessionId: "s-x",
+    sessionService: new SessionService(sessionDir),
+    inboxStore: new InboxStore(inboxDisk),
+    stateLock: new InMemoryStateLock(),
+  });
+  const notes: string[] = [];
+  agent.subscribeLifecycle((e) => {
+    if (e.type === "notification") notes.push(e.message);
+  });
+  await agent.start();
+  failEntries = true; // 从这一刻起 entries 写不进去（盘满 / EIO）
+  await agent.ingress.deliverDurable({ message: environmentMessage("重要的一条消息", "session", "s-peer:1"), dedupeKey: "session:s-peer:1" });
+  await new Promise((r) => setTimeout(r, 200));
+  const inboxLeft = (await inboxDisk.list("inbox/")).filter((p) => !p.startsWith("inbox/acks/"));
+  expect(inboxLeft).toHaveLength(1);
+  expect(modelCalls).toBe(1);
+  expect(notes.some((m) => m.startsWith("[inbox_transcript_unsettled]"))).toBe(true);
+  await agent.stop().catch(() => {});
+});
+
+test("refresh() 撞上本进程正在落盘的投递：那条只进 pending 一次", async () => {
+  const inner = new InMemoryDir();
+  let releaseWrite: (() => void) | undefined;
+  const dir: StorageDir = {
+    read: (p) => inner.read(p),
+    // 内容先可见、写的返回晚到：refresh 正好在「已落盘、还没记进 pending」的窗口里列盘
+    write: async (p, c) => {
+      await inner.write(p, c);
+      if (p.startsWith("inbox/")) await new Promise<void>((r) => (releaseWrite = r));
+    },
+    list: (p) => inner.list(p),
+    remove: (p) => inner.remove(p),
+  };
+  const s = await ledger(dir);
+  const accepting = accept(s, "自己投的", "k1");
+  while (releaseWrite === undefined) await new Promise((r) => setTimeout(r, 1));
+  expect(await s.refresh()).toBe(0);
+  releaseWrite();
+  acceptedIdOf(await accepting);
+  expect(s.pendingCount).toBe(1);
 });
 
 test("ack barrier：pre-commit 裁决 → 同 key 仍 dedupe 到旧事实；indeterminate → store-error", async () => {
