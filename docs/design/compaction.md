@@ -79,6 +79,8 @@ system                       不变，每 run 装配一次，不含摘要
 | `manual` | `Agent.compact(instructions?)`（TUI `/compact`） | 无视阈值；走 admission 拿 permit（忙时 rejected），但不是一个 run：没有 agent_start / agent_end |
 | `idle` | 每轮轮首，`auto` 没触发时（2026-11-02，照 Claude Code 的空闲清理） | 两道门都过才跑（[`idleClearDue()`](../../packages/core/src/compaction/pipeline.ts#symbol=idleClearDue)）：上一条助手回复到此刻超过 `DEFAULT_IDLE_CLEAR_MS`（60 分钟，provider 缓存多半已过期），且最近 3 批之前还没清的旧工具结果估计至少 `DEFAULT_IDLE_CLEAR_MIN_TOKENS`（1 万）。只有 `tool-results` 阶段注册着才看。缓存热的时候不清：清掉一条旧结果，它之后的整段历史要按未命中重付一次 |
 
+**子循环**（[`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)）各压各的 context，主 transcript 不动。记忆提取与 Dream 不压缩（不注册阶段，auto 与撞窗应急都不跑）：提取接在主对话后面，自己压一遍会把提取指令折进摘要，主循环下一轮还要再压一遍；Dream 只看记忆。subagent（fresh / fork）照常自动压缩。所有子循环的压缩都不经主循环的 hooks——不问 `preCompact`，不发 `postCompact` / `compactionFailed` / 压缩失败通知（`LoopCompactionConfig.notifyHooks: false`）：子循环共用主循环的 hook 运行时，自己那份 context 的压缩却不是主会话的事。判据见 [提取不压缩](../../packages/core/test/memory-extract.test.ts#test=提取子循环不做自动压缩主对话在最后那条回答之后越过触发线分叉出来的提取照样只发一次请求不先压一遍压缩通知也不进主-hooks)、[子 agent 的 hook](../../packages/core/test/subagent.test.ts#test=子-agent-自己的-context-照样自动压缩但压缩的-hookprecompact-postcompact-compactionfailed不进主循环的-hooks)。
+
 **预算**（`compactionBudget()`）：
 
 - `used`：以本 run 最近一次 `usage` 的 `inputTokens + outputTokens` 为基准（它量的是那条 assistant 之前的视图加它自己的输出），之后入账的消息按字符估；压缩一发生基准作废，回到「system + 视图」字符估，直到下一轮 usage 回来。provider 没报 usage 的路径（FakeProvider、测试）只有字符估。

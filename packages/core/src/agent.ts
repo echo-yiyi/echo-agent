@@ -3183,6 +3183,7 @@ export class Agent {
         maxIterations: DEFAULT_EXTRACT_MAX_TURNS,
         // 每轮注入不带：它们拼在消息末尾、不进 transcript，本来就不在共享前缀里；带上只是多发一段激活 skill 正文
         turnInjections: "none",
+        compaction: "none",
       },
       scope,
       signal,
@@ -3227,7 +3228,7 @@ export class Agent {
           // **事件不外发**：整理的中间过程不该混进对外事件流。
           // 每轮注入不带（2026-11-03）：激活 skill 正文、任务清单是前台这场对话的，整理只看已有记忆——带上只是每轮多发一段
           const result = await this.runSubagent(
-            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "none" },
+            { prompt: task.prompt, systemPrompt: null, tools: task.tools, runId, source: { kind: "dream", parentRunId: scope.runId }, turnInjections: "none", compaction: "none" },
             scope,
             signal,
             async () => {},
@@ -3278,6 +3279,12 @@ export class Agent {
       runId?: string;
       maxIterations?: number;
       turnInjections: "inherit" | "none";
+      /**
+       * `"none"` = 这条子循环不压缩（不注册阶段：auto、撞窗应急都不跑）。提取与整理用——提取接在主对话后面，
+       * 自己压一遍会把指令折进摘要、主循环下一轮还要再压一遍；整理只看记忆。subagent 用 `"inherit"`：跑得长，要能压。
+       * 两种都不经主循环的 hooks 发压缩通知（`LoopCompactionConfig.notifyHooks`）。
+       */
+      compaction: "inherit" | "none";
       seed?: readonly AgentMessage[];
     },
     scope: AgentAdmissionExecuteScope,
@@ -3306,6 +3313,7 @@ export class Agent {
             return tool === undefined ? { ok: false as const, reason: "not_found" as const } : { ok: true as const, tool };
           },
           ...(spec.turnInjections === "none" ? { getTurnInjections: () => [] } : {}),
+          compaction: { ...base.compaction, ...(spec.compaction === "none" ? { getStages: () => [] } : {}), notifyHooks: false },
           // 不吃 steering / followUp：那些是给前台 run 的（gate 只认前台 run）
           intake: undefined,
         },
@@ -3395,6 +3403,7 @@ export class Agent {
         seed: prepared.seed,
         source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: ctx.toolCallId, background: false },
         turnInjections: prepared.turnInjections,
+        compaction: "inherit",
         ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
       },
       scope,
@@ -3436,6 +3445,7 @@ export class Agent {
             seed: prepared.seed,
             source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: toolCallId, background: true },
             turnInjections: prepared.turnInjections,
+            compaction: "inherit",
             ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
           },
           scope,

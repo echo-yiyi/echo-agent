@@ -145,8 +145,15 @@ export async function runCompaction(
   });
   if (reason === "auto" && used < budget.target) return null;
 
-  const pre = await config.hooks.intercept({ type: "preCompact", reason }, config.hookContext);
-  if (pre.decision === "block") return null;
+  // 子循环的压缩不经 hooks（`LoopCompactionConfig.notifyHooks`）：不问、不报
+  const viaHooks = config.compaction.notifyHooks !== false;
+  const notify = async (event: Parameters<typeof config.hooks.notify>[0]): Promise<void> => {
+    if (viaHooks) await config.hooks.notify(event, config.hookContext);
+  };
+  if (viaHooks) {
+    const pre = await config.hooks.intercept({ type: "preCompact", reason }, config.hookContext);
+    if (pre.decision === "block") return null;
+  }
 
   const observe = deps.observe?.compaction;
   const where = { runId: config.runId, ...(opts.turnId !== undefined ? { turnId: opts.turnId } : {}) };
@@ -176,10 +183,9 @@ export async function runCompaction(
       next = normalizeCompaction(context.messages, next);
     } catch (e) {
       probeCompaction(observe, where, { kind: "compaction_failed", reason, stage: stage.name, message: errText(e) });
-      await config.hooks.notify({ type: "compactionFailed", reason, stage: stage.name, message: errText(e) }, config.hookContext);
-      // 官方产品里 compactionFailed 没人收（TUI 的 default 分支丢掉、观测层不记），压缩失败等于不可见——
-      // 再发一条通用错误通知，壳与 serve 端都认它（review 2026-09-07）
-      await config.hooks.notify({ type: "notification", kind: "error", message: `[compaction_stage_failed] ${stage.name}: ${errText(e)}` }, config.hookContext);
+      await notify({ type: "compactionFailed", reason, stage: stage.name, message: errText(e) });
+      // compactionFailed 在官方产品里没人收（TUI 不显示、观测层不记）：再发一条壳与 serve 端都认的通用错误通知
+      await notify({ type: "notification", kind: "error", message: `[compaction_stage_failed] ${stage.name}: ${errText(e)}` });
       continue;
     }
     if (sameCompaction(next, state)) continue;
@@ -193,12 +199,12 @@ export async function runCompaction(
   if (changed) context.compaction = state;
   else {
     probeCompaction(observe, where, { kind: "compaction_failed", reason, message: "no compaction stage changed the context" });
-    await config.hooks.notify({ type: "compactionFailed", reason, message: "no compaction stage changed the context" }, config.hookContext);
-    await config.hooks.notify({ type: "notification", kind: "error", message: "[compaction_stage_failed] no compaction stage changed the context" }, config.hookContext);
+    await notify({ type: "compactionFailed", reason, message: "no compaction stage changed the context" });
+    await notify({ type: "notification", kind: "error", message: "[compaction_stage_failed] no compaction stage changed the context" });
   }
   probeCompaction(observe, where, { kind: "compaction_ended", reason, compaction: state, stages: applied, contextTokens: used });
   await emit({ type: "compaction_end", reason, compaction: state, stages: applied, contextTokens: used });
-  if (changed) await config.hooks.notify({ type: "postCompact", reason, compaction: state, stages: applied }, config.hookContext);
+  if (changed) await notify({ type: "postCompact", reason, compaction: state, stages: applied });
   return { changed, state, stages: applied, contextTokens: used };
 }
 

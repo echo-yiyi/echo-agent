@@ -19,6 +19,9 @@ import { HookRuntime } from "../src/hooks/runtime.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { errorTurn, FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
+import type { Model } from "../src/provider/types.ts";
+import { COLLAPSE_SYSTEM, SUMMARY_SYSTEM } from "../src/compaction/builtin.ts";
+import { estimateText } from "../src/compaction/view.ts";
 
 // 记忆提取的端到端判据。
 //
@@ -516,4 +519,41 @@ test("reset 清空 transcript：游标归零，在飞的那次提取不把游标
   expect(extracts).toHaveLength(2);
   // 新对话 6 条：要是旧那次把游标推到了它的 6，这一批就会被当成「已经看过」整段跳过
   expect(instructionOf(extracts[1]!)).toContain("«新对话一：分支名用英文»");
+});
+
+test("提取子循环不做自动压缩：主对话在最后那条回答之后越过触发线，分叉出来的提取照样只发一次请求，不先压一遍；压缩通知也不进主 hooks", async () => {
+  const kinds: string[] = [];
+  const longAnswer = "word ".repeat(400); // ≈ 500 token
+  let foreground = 0;
+  const fn: StreamFn = (model, context, options) => {
+    const kind = context.systemPrompt === COLLAPSE_SYSTEM ? "collapse" : context.systemPrompt === SUMMARY_SYSTEM ? "summary" : isExtract(context) ? "extract" : "foreground";
+    kinds.push(kind);
+    if (kind === "collapse" || kind === "summary") return scriptedStreamFn([textTurn("<summary>S</summary>")])(model, context, options);
+    if (kind === "extract") return scriptedStreamFn([textTurn("没什么可记的。")])(model, context, options);
+    foreground += 1;
+    return scriptedStreamFn([textTurn(foreground === 3 ? longAnswer : "ok")])(model, context, options);
+  };
+  // 窗口按 system 定：第三轮轮首没过线（≈ sys + 40），第三条回答之后过线（≈ sys + 540）
+  const probe = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()) });
+  await mountBuiltinTools(probe);
+  const sys = estimateText(await probe.assemblePrompt());
+  kinds.length = 0;
+  foreground = 0;
+  const reserve = 100;
+  const model: Model = { ...FAKE_MODEL, capabilities: { contextWindow: sys + 450 + reserve } };
+  const hooks = new HookRuntime();
+  const compactionHooks: string[] = [];
+  hooks.on("postCompact", () => void compactionHooks.push("postCompact"));
+  hooks.on("compactionFailed", () => void compactionHooks.push("compactionFailed"));
+  const agent = new Agent({ model, streamFunction: fn, hooks, memory: memoriesOn(new InMemoryDir()), compaction: { reserveTokens: reserve, keepRecentTokens: 40 } });
+  await mountBuiltinTools(agent);
+  await say(agent, ...THREE);
+  await until(async () => kinds.includes("extract"));
+  await idleExtract(agent);
+  expect(kinds).toEqual(["foreground", "foreground", "foreground", "extract"]);
+  expect(compactionHooks).toEqual([]);
+  // 主循环自己下一轮照常压（这是它的事）
+  await agent.prompt("第四件事：接着来");
+  expect(kinds.slice(4, 5)).toEqual(["collapse"]);
+  expect(compactionHooks).toEqual(["postCompact"]);
 });

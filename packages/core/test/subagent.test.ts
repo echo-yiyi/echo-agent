@@ -12,7 +12,10 @@ import { errorTurn, scriptedDialect, scriptedStreamFn, textTurn, toolTurn, type 
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { disableTools, restrictTools } from "../src/tools/harness.ts";
 import { createProviderStreams } from "../src/provider/dialect.ts";
-import type { StreamFn } from "../src/provider/types.ts";
+import type { Model, StreamFn } from "../src/provider/types.ts";
+import { HookRuntime } from "../src/hooks/runtime.ts";
+import { COLLAPSE_SYSTEM, SUMMARY_SYSTEM } from "../src/compaction/builtin.ts";
+import { estimateText } from "../src/compaction/view.ts";
 
 type Context = Parameters<StreamFn>[1];
 
@@ -380,4 +383,38 @@ test("父 run 之外派不了：前台与后台都如实拒绝", async () => {
   expect([fg.isError, fg.content]).toEqual([true, expect.stringContaining("inside a run")]);
   const bg = await tool.execute({ prompt: "x", tools: [], background: true }, ctx);
   expect([bg.isError, bg.content]).toEqual([true, expect.stringContaining("inside a run")]);
+});
+
+test("子 agent 自己的 context 照样自动压缩，但压缩的 hook（preCompact / postCompact / compactionFailed）不进主循环的 hooks", async () => {
+  const BIG = "line of a big file\n".repeat(220); // ≈ 1 000 token
+  const big: ModelTool = { kind: "model", name: "big", label: "big", description: "big", maxInlineTokens: Infinity, parameters: { type: "object", properties: {} }, execute: async () => toolOk(BIG) };
+  const child = scriptedStreamFn([toolTurn("k1", "big", {}), textTurn("child done")]);
+  const parent = scriptedStreamFn([toolTurn("c1", "subagent", { prompt: "CHILD-TASK read it", system: "CHILD", tools: ["big"] }), textTurn("parent done")]);
+  const childSeen: string[] = [];
+  const fn: StreamFn = (model, context, options) => {
+    if (context.systemPrompt === COLLAPSE_SYSTEM || context.systemPrompt === SUMMARY_SYSTEM) return scriptedStreamFn([textTurn("<summary>S</summary>")])(model, context, options);
+    if (context.systemPrompt === "CHILD") {
+      childSeen.push(JSON.stringify(context.messages));
+      return child(model, context, options);
+    }
+    return parent(model, context, options);
+  };
+  const probe = new Agent({ model: { provider: "t", id: "only", api: "scripted" }, streamFunction: fn, tools: [big] });
+  await mountBuiltinTools(probe);
+  const sys = estimateText(await probe.assemblePrompt());
+  // 父那边一直不过线（system + 几十 token）；子读完大文件之后过线
+  const model: Model = { provider: "t", id: "only", api: "scripted", capabilities: { contextWindow: sys + 400 } };
+  const hooks = new HookRuntime();
+  const seen: string[] = [];
+  hooks.on("preCompact", () => void seen.push("preCompact"));
+  hooks.on("postCompact", () => void seen.push("postCompact"));
+  hooks.on("compactionFailed", () => void seen.push("compactionFailed"));
+  const agent = new Agent({ model, streamFunction: fn, tools: [big], hooks, compaction: { reserveTokens: 100, keepRecentTokens: 40 } });
+  await mountBuiltinTools(agent);
+  await agent.start();
+  await agent.prompt("go");
+  expect(childSeen).toHaveLength(2);
+  expect(childSeen[0]).not.toContain("line of a big file");
+  expect(childSeen[1]).not.toContain(BIG.slice(0, 2000)); // 子的第二次请求之前压过：大结果不再整段在
+  expect(seen).toEqual([]);
 });
