@@ -22,8 +22,9 @@ import { dirname, join } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 const CORE = join(ROOT, "packages", "core");
 
-function sh(cmd: string[], cwd: string): { ok: boolean; out: string } {
-  const r = Bun.spawnSync(cmd, { cwd, env: { ...process.env } });
+/** `env` 盖在本进程环境之上。会执行 echo 代码的调用要给 `ECHO_HOME`，否则写进开发机真的 `~/.echo`。 */
+function sh(cmd: string[], cwd: string, env: Record<string, string> = {}): { ok: boolean; out: string } {
+  const r = Bun.spawnSync(cmd, { cwd, env: { ...process.env, ...env } });
   return { ok: r.exitCode === 0, out: `${r.stdout.toString()}\n${r.stderr.toString()}`.trim() };
 }
 
@@ -221,7 +222,8 @@ function isolatedConsumer(pkgRel: string, minFiles: number, extraDeps: readonly 
     const tsc = sh(["bunx", "tsc", "--noEmit"], dir);
     expect([tsc.ok, tsc.out.slice(0, 800)]).toEqual([true, tsc.out.slice(0, 800)]);
 
-    const t = sh(["bun", "test", "test"], dir);
+    // 包自己的测试大多自己隔离 ECHO_HOME；兜底指到 work 下，漏了的那条也写不进开发机的 `~/.echo`
+    const t = sh(["bun", "test", "test"], dir, { ECHO_HOME: join(work, "echo-home") });
     expect([t.ok, t.out.slice(-800)]).toEqual([true, t.out.slice(-800)]);
   } finally {
     cleanup();
@@ -267,9 +269,14 @@ function isolatedExample(name: string, runnable?: (stdout: string) => void): voi
     expect([tsc.ok, tsc.out.slice(0, 800)]).toEqual([true, tsc.out.slice(0, 800)]);
 
     if (runnable !== undefined) {
-      const r = sh(["bun", "index.ts"], dir);
+      // 样例装了记忆：project 层落在 `$ECHO_HOME/projects/<哈希>/`。不隔离就写进开发机真的 `~/.echo`
+      //（每跑一次 work 目录都换一个，哈希跟着换，攒下几百个目录）。放在 work 下，cleanup 一起删。
+      const home = join(work, "echo-home");
+      const r = sh(["bun", "index.ts"], dir, { ECHO_HOME: home });
       expect([r.ok, r.out.slice(-800)]).toEqual([true, r.out.slice(-800)]);
       runnable(r.out);
+      // 写到了隔离的那个 home：没写到这里，就是写到了别处
+      expect([name, existsSync(join(home, "projects"))]).toEqual([name, true]);
     }
   } finally {
     cleanup();
@@ -726,7 +733,7 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
           toolOutput: string;
           toolErrored: boolean;
         };
-        // ① 内建六条在前、扫到的 `extensions/current-year.ts` 在后——
+        // ① 内建的 `echo:*` 在前、扫到的 `extensions/current-year.ts` 在后——
         //    这就是「内部 extension 先、外部 extension 后」那条顺序在**装出来的包上**的样子。
         //    内建也走 extension 机制（生命周期 owner），所以它们出现在清单里不是噪音，是契约。
         //    `echo:agent`（provide `AgentRuntime`）2026-08-31 起也在这份清单里：**清单就是 Host
