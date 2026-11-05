@@ -110,7 +110,8 @@ export async function runLoop(deps: LoopDeps, first: ReplyInput): Promise<LoopRe
       const reply = await runReply(runDeps, replyIdOf(config.runId, replies), next.source, next.input);
       leftovers.steers.push(...reply.unconsumedSteers);
       next = null;
-      if (reply.outcome.kind !== "completed") {
+      // 被 `interrupt()` 叫停的那条只停它自己：排队的 followUp 照常做，没有就以它的 outcome 收场（见下面关门那步）
+      if (reply.outcome.kind !== "completed" && !reply.interrupted) {
         outcome = reply.outcome;
         break;
       }
@@ -124,19 +125,25 @@ export async function runLoop(deps: LoopDeps, first: ReplyInput): Promise<LoopRe
           next = { source: "follow_up", input: followUps };
           continue;
         }
-        /* 真要停了——最后问一次 stop 拦截点（排在队列之后：队列里是真实待办，它是策略兜底） */
-        const verdict = await config.hooks.intercept({ type: "stop", iteration: reply.turns, finalText: reply.finalText }, config.hookContext);
-        if (verdict.decision === "block" && stopContinuations < MAX_STOP_CONTINUATIONS) {
-          stopContinuations += 1;
-          next = { source: "stop_hook", input: [userMessage(verdict.reason ?? "The task is not finished yet. Continue.", "harness")] };
-          continue;
+        /* 真要停了——最后问一次 stop 拦截点（排在队列之后：队列里是真实待办，它是策略兜底）。
+           人刚叫停的不问：stop hook 把它拉回来接着干，就等于中断没生效 */
+        if (!reply.interrupted) {
+          const verdict = await config.hooks.intercept({ type: "stop", iteration: reply.turns, finalText: reply.finalText }, config.hookContext);
+          if (verdict.decision === "block" && stopContinuations < MAX_STOP_CONTINUATIONS) {
+            stopContinuations += 1;
+            next = { source: "stop_hook", input: [userMessage(verdict.reason ?? "The task is not finished yet. Continue.", "harness")] };
+            continue;
+          }
         }
       }
 
       /* 关 run intake（RunIntakeGate）。「队列空」与「关门」是同一原子步——stop hook 等待期间
          到达并 accepted 的 followUp 不能凭空消失：关不上就说明有货。 */
       const late = (await config.intake?.tryCloseRun()) ?? null;
-      if (late === null) break;
+      if (late === null) {
+        if (reply.interrupted) outcome = reply.outcome;
+        break;
+      }
       if (replies < config.maxReplies) {
         next = { source: "follow_up", input: late };
         continue;
@@ -176,6 +183,8 @@ type ReplyEnd = {
   stopped: boolean;
   /** turn 交出但没吸收的 steer。 */
   unconsumedSteers: AgentMessage[];
+  /** 被 `interrupt()` 叫停（outcome 是 aborted{理由}）：只停这一条，run 照常往下走 followUp、不问 stop hook。 */
+  interrupted: boolean;
 };
 
 async function runReply(deps: RunDeps, replyId: string, source: ReplySource, input: readonly AgentMessage[]): Promise<ReplyEnd> {
@@ -188,14 +197,16 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
   let final: AssistantMessage | null = null;
   let outcome: AgentOutcome = { kind: "completed" };
   let stopped = false;
+  let interrupted = false;
   const unconsumedSteers: AgentMessage[] = [];
   let cause: TurnCause = "input";
   /** 连续几轮工具调用全部无效（⓪ 空转闸），以及这几轮是不是全是「工具不存在」。有一个调用有效、或这轮不是要工具，就归零。 */
   let invalidStreak = { turns: 0, onlyNotFound: true };
   let ended = false;
   try {
-    // 输入消息的 message_end 紧挨在它引发的 turn_start 之前（中间只可能有轮首压缩的 compaction_*）
-    await absorb(context, input, emit, probe);
+    // 输入消息的 message_end 紧挨在它引发的 turn_start 之前（中间只可能有轮首压缩的 compaction_*）。
+    // 吸收进来的输入的 inputId 交给下一个 turn 的 `turn_started.inputs`：「这句话引出了哪一轮」
+    let inputs = await absorb(context, input, emit, probe);
 
     for (;;) {
       /* 硬闸：三条都在轮首集中判 */
@@ -212,12 +223,20 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
         break;
       }
 
+      /* 这一步的信号 = run 的 + 只属于这一步的中断口（`interrupt()` 只 abort 后者）。轮首压缩与这一 turn 都在这一步里 */
+      const step = config.intake?.beginStep?.();
+      const stepDeps: RunDeps = step === undefined ? deps : { ...deps, signal: AbortSignal.any([deps.signal, step]) };
+
       /* 压缩在轮边界上做，不把一轮劈成两半 */
-      await compactor.maybeCompact();
+      await compactor.maybeCompact(stepDeps.signal);
 
       n += 1;
-      const turn = await runTurn(deps, replyId, n, cause);
+      const turn = await runTurn(stepDeps, replyId, n, cause, inputs);
+      inputs = [];
       compactor.noteTurn(turn);
+      // 中断只管这一步；调用方的 abort、run 超时管的是整个任务，它们在场时按它们收场
+      const interruptReason = config.intake?.takeInterrupt?.() ?? null;
+      const stopHere = interruptReason !== null && !callerSignal.aborted && !fired(deadline);
 
       // deadline 在轮内到了：轮内的等待已被它中止，这里按超时封口（不是「aborted」——调用方没有取消）
       if (fired(deadline) && !callerSignal.aborted) {
@@ -226,6 +245,18 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
         break;
       }
       if (turn.result.kind !== "landed") {
+        // 只认真被中断掉的那种：真失败、被 hook 拦下的，按它们自己的结果收场（中断恰好落在它们之后也一样）
+        if (stopHere && turn.result.kind === "aborted") {
+          // 被中断：这一轮里有插话就接着（插话就是新方向），没有就收这条 reply
+          if (turn.steers.length > 0) {
+            inputs = await absorb(context, turn.steers, emit, probe);
+            cause = "steer";
+            continue;
+          }
+          outcome = { kind: "aborted", reason: interruptReason };
+          interrupted = true;
+          break;
+        }
         unconsumedSteers.push(...turn.steers);
         outcome =
           turn.result.kind === "failed"
@@ -265,11 +296,17 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
       /* ① 这一轮执行了工具（不论 stopReason——与 run-turn 执行工具的判据同一条：落地消息里有 tool_use 就执行）/
          模型还要工具 / ①b 输出被截断（截断不是失败，让模型接着写）→ 继续。结果入了账就得回给模型，否则它从没看到。
          截断先追加一条 harness 提示，说清楚接着写、截在工具调用里就重发；本 turn 交出的 steer 排在它后面一并并入
-         ——「跑的中途插话 → 下一圈开头」，后到的话说了算 */
+         ——「跑的中途插话 → 下一圈开头」，后到的话说了算。有插话时下一轮的 cause 是 steer：是它引出的那一轮。
+         被中断：没有插话就收这条 reply（工具结果已入账，下一个 run 的模型看得到）；有插话就照插话接着，不续写截断 */
       if (turn.toolResults.length > 0 || stop === "tool_use" || stop === "max_tokens") {
-        if (stop === "max_tokens") await absorb(context, [userMessage(MAX_TOKENS_CONTINUATION, "harness")], emit, probe);
-        await absorb(context, turn.steers, emit, probe);
-        cause = stop === "max_tokens" ? "max_tokens" : "tool_use";
+        if (stopHere && turn.steers.length === 0) {
+          outcome = { kind: "aborted", reason: interruptReason };
+          interrupted = true;
+          break;
+        }
+        if (stop === "max_tokens" && !stopHere) await absorb(context, [userMessage(MAX_TOKENS_CONTINUATION, "harness")], emit, probe);
+        inputs = await absorb(context, turn.steers, emit, probe);
+        cause = turn.steers.length > 0 ? "steer" : stop === "max_tokens" ? "max_tokens" : "tool_use";
         continue;
       }
 
@@ -288,9 +325,9 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
         if (update.systemPrompt !== undefined) context.systemPrompt = update.systemPrompt;
       }
 
-      /* ④ 有人插话 → 并入，继续干 */
+      /* ④ 有人插话 → 并入，继续干（这条 reply 本来就要收了，中断落在这里不改变什么） */
       if (turn.steers.length > 0) {
-        await absorb(context, turn.steers, emit, probe);
+        inputs = await absorb(context, turn.steers, emit, probe);
         cause = "steer";
         continue;
       }
@@ -301,7 +338,7 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
     ended = true;
     probe({ kind: "reply_ended", replyId, outcome, hasFinal: final !== null, turns: n });
     await emit({ type: "reply_end", replyId, outcome, final, turns: n });
-    return { outcome, final, finalText: final === null ? "" : textOf(final), turns: n, stopped, unconsumedSteers };
+    return { outcome, final, finalText: final === null ? "" : textOf(final), turns: n, stopped, unconsumedSteers, interrupted };
   } catch (e) {
     // emit / hook / intake 自身坏了：reply 仍由本层关，再上抛（run 的 finally 接着关门）
     if (!ended) {
@@ -338,13 +375,18 @@ async function timedOut(deps: RunDeps): Promise<AgentOutcome> {
 /**
  * 队列消息并入 context。**每条进入 transcript 的消息都要发 message_end**——否则循环的 context 与
  * Agent 的 messages 就分叉了（实测踩到过：插话真的并入了循环，却没进 transcript）。
+ * 返回其中带 `inputId` 的那几条的 id：交给紧接着的那个 turn 的 `turn_started.inputs`。
  */
-async function absorb(context: AgentContext, messages: readonly AgentMessage[], emit: Emit, probe: LoopProbeFn): Promise<void> {
+async function absorb(context: AgentContext, messages: readonly AgentMessage[], emit: Emit, probe: LoopProbeFn): Promise<string[]> {
+  const inputs: string[] = [];
   for (const m of messages) {
     context.messages.push(m);
     probe({ kind: "message_committed", message: m });
     await emit({ type: "message_end", message: m });
+    const id = (m as { inputId?: unknown }).inputId;
+    if (typeof id === "string") inputs.push(id);
   }
+  return inputs;
 }
 
 function textOf(m: AssistantMessage): string {

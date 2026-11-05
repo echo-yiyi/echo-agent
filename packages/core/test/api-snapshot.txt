@@ -487,17 +487,18 @@ value  toolOk
 value  toolSchemas
 
 == 入口 "./background" → src/background/public.ts ==
-符号 9（value 7 · type 1 · both 1）
+符号 10（value 8 · type 1 · both 1）
 
 -- src/background/buffer.ts (1) --
 both   OutputBuffer
 
--- src/background/harness.ts (8) --
+-- src/background/harness.ts (9) --
 value  BACKGROUND_KIND
 value  DEFAULT_KILL_GRACE_MS
 value  getBackground
 value  killAllBackground
 value  killBackground
+value  killBackgroundOfRun
 type   KillOptions
 value  listBackground
 value  startBackground

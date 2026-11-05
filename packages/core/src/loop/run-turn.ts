@@ -66,7 +66,11 @@ type TurnWorkset = {
   readonly hooks: HookWorkset;
 };
 
-export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: TurnCause): Promise<TurnResult> {
+/**
+ * `deps.signal` 是这一步的信号（run 的 + reply 这一步的中断口）。`inputs`：紧挨着这一轮之前吸收进来的输入的 inputId，
+ * 进 `turn_started.inputs`——「这句话引出了哪一轮」。
+ */
+export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: TurnCause, inputs: readonly string[] = []): Promise<TurnResult> {
   const { context, config, emit, signal } = deps;
   const turnId = turnIdOf(replyId, n);
 
@@ -80,8 +84,10 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
   };
   // turn 开门（RunIntakeGate）：同样在 turn_start 之前——订阅者收到 turn_start 就能 steer()
   config.intake?.openTurn(turnId);
+  // 本 turn 收下过 steer 就 abort（gate 在 openTurn 时换新）：还没启动的工具据此不再启动
+  const steered = config.intake?.steered?.();
   const { probe } = deps;
-  probe({ kind: "turn_started", turnId, replyId, cause, tools: workset.tools.map((t) => t.name) }, turnId);
+  probe({ kind: "turn_started", turnId, replyId, cause, tools: workset.tools.map((t) => t.name), inputs: [...inputs] }, turnId);
   await emit({ type: "turn_start", turnId, replyId, cause });
 
   const toolResults: ToolResultMessage[] = [];
@@ -113,7 +119,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
       // 撞窗（provider 说上下文超了）：**应急压缩一次**再来一个 attempt。压不动 / 第二次撞 → 按失败收场。
       // 它不是重试（上下文变了），所以不发 retry_scheduled——压缩事件已说明原因
       if (err.code === "context_overflow") {
-        if (await deps.compactor.recover(turnId)) continue;
+        if (await deps.compactor.recover(turnId, signal)) continue;
         break;
       }
       if (!err.retryable) break;
@@ -130,7 +136,20 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
     /* ② 工具批：只在落地后。切批见 takeBatch——连续的 `concurrent` 工具一批同跑，其余一个一批。 */
     if (result.kind === "landed") {
       const uses = toolUsesFromMessage(result.message);
+      const commit = async (msg: AgentMessage): Promise<void> => {
+        context.messages.push(msg);
+        probe({ kind: "message_committed", message: msg }, turnId);
+        await emit({ type: "message_end", message: msg });
+        toolResults.push(msg as ToolResultMessage);
+      };
       for (let i = 0; i < uses.length; ) {
+        // 还没启动的不再启动：run 停了 / 被中断（signal），或用户插话改了方向（steered）。
+        // **当场入账一条「没执行」的结果**（2026-11-05；此前留空、送模前由投影补）：系统决定不跑它，这件事本身就发生了
+        const skip = skipCauseOf(deps, steered);
+        if (skip !== null) {
+          for (const use of uses.slice(i)) await commit(skipTool(use, skip, deps, turnId));
+          break;
+        }
         const batch = takeBatch(uses, i, workset.tools);
         i += batch.length;
         /* 一把只属于这一批的授权闸：同一时刻只挂一个问，其余在批内排队等
@@ -139,7 +158,7 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
         /* **allSettled 而不是 all**：`runOneTool` 只在 emit / hook / intake 自身违约时抛，
            用 `Promise.all` 时第一个 rejection 会让同批其余的 rejection 无人接管（unhandled rejection，
            本文件的 raceAbort 已栽过一次）。这里全部消费掉，再按顺序补抛第一个。 */
-        const settled = await Promise.allSettled(batch.map((use) => runOneTool(use, deps, turnId, n, workset, askGate, invalidToolCalls)));
+        const settled = await Promise.allSettled(batch.map((use) => runOneTool(use, deps, turnId, n, workset, askGate, invalidToolCalls, steered)));
         // **入账顺序 = tool_use 出现顺序，不是完成顺序**（`context.messages` 与 message_end 都按这个序）。
         // 同批其余的调用已经执行完、副作用已经发生：**先把交出了结果的全部入账，再补抛**——
         // 跟着第一个 rejection 一起丢掉的话，投影会给它们补「没有结果」，模型会把有副作用的工具再跑一遍。
@@ -149,15 +168,10 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
             rejected ??= { reason: one.reason };
             continue;
           }
-          const msg = one.value;
-          context.messages.push(msg);
-          probe({ kind: "message_committed", message: msg }, turnId);
-          await emit({ type: "message_end", message: msg });
-          toolResults.push(msg as ToolResultMessage);
+          await commit(one.value);
         }
         if (rejected !== null) throw rejected.reason; // 与逐个 await 时一样：turn 由外层 catch 关成 failed
-        // 批中断：**已起跑的这一批各自收 signal 结束、结果照样入账**，剩下的批不跑
-        if (signal.aborted) break;
+        // 批中断：**已起跑的这一批各自收 signal 结束、结果照样入账**；剩下的批在下一圈开头记成「没执行」
       }
     }
 
@@ -273,6 +287,20 @@ async function callModel(deps: RunDeps, turnId: string, workset: TurnWorkset, pr
       continue;
     }
     probe({ kind: "generation_delta", delta: item }, turnId);
+    // 方言丢掉的工具调用不进定稿、也就不进 transcript：单独记一条，否则账本里一点痕迹都没有
+    if (item.type === "warning" && item.toolCall !== undefined) {
+      const tc = item.toolCall;
+      probe(
+        {
+          kind: "tool_call_dropped",
+          code: item.code,
+          args: tc.args,
+          ...(tc.id !== undefined ? { toolCallId: tc.id } : {}),
+          ...(tc.name !== undefined ? { toolName: tc.name } : {}),
+        },
+        turnId,
+      );
+    }
     await emit({ type: "message_update", delta: item, message: item.partial });
   }
 
@@ -340,6 +368,38 @@ function createAskGate(): AskGate {
   };
 }
 
+/* ─────────────────── 没启动的调用 ─────────────────── */
+
+/** 一个调用为什么没启动：run 停了（abort / 超时）、这一步被中断、或用户插话改了方向。 */
+type SkipCause = "aborted" | "interrupted" | "superseded";
+
+/** 「没执行」的结果正文（模型面，英文）：说清没跑过、为什么，模型据此决定要不要重发。 */
+export const NOT_EXECUTED: Readonly<Record<SkipCause, string>> = Object.freeze({
+  aborted: "Not executed: the run was stopped before this call started.",
+  interrupted: "Not executed: the user interrupted before this call started.",
+  superseded: "Not executed: the user sent a new message before this call started. Read it first, and issue this call again only if it is still needed.",
+});
+
+/**
+ * 此刻还该不该启动一个调用；该就 null。`deps.signal` 是这一步的（run 的 + 中断口），所以 run 停了与被中断要再分一下：
+ * 调用方的 signal 或 deadline 在场 → aborted，否则是中断。插话只在 run 还在跑时才算。
+ */
+function skipCauseOf(deps: RunDeps, steered: AbortSignal | undefined): SkipCause | null {
+  if (deps.signal.aborted) return deps.callerSignal.aborted || deps.deadline?.aborted === true ? "aborted" : "interrupted";
+  if (steered?.aborted === true) return "superseded";
+  return null;
+}
+
+/**
+ * 没启动的调用当场记一条「没执行」的结果（`metadata.notExecuted` 标原因），观测记 `tool_rejected{stage:"start"}`。
+ * 不经 hook、不发 tool_execution_*：它从没进过执行管线。
+ */
+function skipTool(use: ToolUseBlock, cause: SkipCause, deps: RunDeps, turnId: string): AgentMessage {
+  const reason = NOT_EXECUTED[cause];
+  deps.probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "start", cause: cause === "superseded" ? "superseded" : "aborted", reason }, turnId);
+  return toolResultMessage(use.id, use.name, reason, true, { notExecuted: cause });
+}
+
 /* ─────────────────── 单次工具调用 ─────────────────── */
 
 async function runOneTool(
@@ -351,10 +411,15 @@ async function runOneTool(
   askGate: AskGate,
   /** 调用本身无效、执行前被拒时记一项（`TurnResult.invalidToolCalls`）。 */
   invalid: TurnResult["invalidToolCalls"],
+  /** 本 turn 收下过 steer 就 abort：没启动的不再启动，等授权的问一并撤掉。 */
+  steered: AbortSignal | undefined,
 ): Promise<AgentMessage> {
   const { config, emit, signal } = deps;
   const { probe } = deps;
   const { tools, hooks } = workset;
+  // 同批并行起跑时，前一个被拦的这一刻 run 可能已停、或刚收下插话：没启动就别启动
+  const skipAtEntry = skipCauseOf(deps, steered);
+  if (skipAtEntry !== null) return skipTool(use, skipAtEntry, deps, turnId);
   // **只在本轮快照里找**。找不到的名字只拿一个准确原因回给模型，绝不从实时池里捞对象来执行。
   const tool = tools.find((t) => t.name === use.name);
   if (tool === undefined) {
@@ -443,9 +508,14 @@ async function runOneTool(
     const askReason = verdict.reason;
     /* 进闸：批内一次只挂一个问。登记 → 两条通知 → 等答复，整段都在闸内，
        所以 `pendingPermissions` 在批内任一时刻最多一条。 */
-    const { permissionId, settled } = await askGate(async () => {
-      // 只有真正进入 ask 才有 permissionId：先登记 ledger，再恰好发一次带同一 ID 的 permissionRequest
-      const handle = config.permission.ask({ ...authInput, reason: askReason }, signal);
+    const asked = await askGate(async () => {
+      // 在闸外排队的这段里 run 可能已停、或收下了插话：那就不再去问人
+      const skip = skipCauseOf(deps, steered);
+      if (skip !== null) return { kind: "skip", cause: skip } as const;
+      // 只有真正进入 ask 才有 permissionId：先登记 ledger，再恰好发一次带同一 ID 的 permissionRequest。
+      // 插话也撤掉这个问（改方向了，这件不跑了）——撤掉之后按「没执行」入账，见下面 cancelled 那支
+      const askSignal = steered === undefined ? signal : AbortSignal.any([signal, steered]);
+      const handle = config.permission.ask({ ...authInput, reason: askReason }, askSignal);
       probe({ kind: "permission_asked", toolCallId: use.id, toolName: use.name, permissionId: handle.permissionId, reason: askReason }, turnId);
       await notify(hooks, config, { type: "permissionRequest", permissionId: handle.permissionId, ...authInput, reason: askReason });
       await notify(hooks, config, {
@@ -470,10 +540,14 @@ async function runOneTool(
         },
         turnId,
       );
-      return { permissionId: handle.permissionId, settled: outcome };
+      return { kind: "asked", permissionId: handle.permissionId, settled: outcome } as const;
     });
+    if (asked.kind === "skip") return skipTool(use, asked.cause, deps, turnId);
+    const { permissionId, settled } = asked;
     if (settled.kind === "cancelled") {
       await notify(hooks, config, { type: "permissionCancelled", permissionId, toolCallId: use.id, reason: settled.reason });
+      // 是插话撤掉的（run 还在跑）：不是「中止」，是「改方向，这件不跑了」
+      if (skipCauseOf(deps, steered) === "superseded") return skipTool(use, "superseded", deps, turnId);
       const message = `Aborted while waiting for approval (${settled.reason})`;
       probe({ kind: "tool_rejected", toolCallId: use.id, toolName: use.name, stage: "permission", cause: "cancelled", reason: message }, turnId);
       await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "aborted", message });
@@ -501,6 +575,10 @@ async function runOneTool(
   } else {
     await notify(hooks, config, { type: "permissionGranted", toolCallId: use.id, decidedBy: "policy" });
   }
+
+  // 启动前最后一次：hook 与授权的这段里 run 停了、或收下了插话 → 不启动
+  const skipBeforeStart = skipCauseOf(deps, steered);
+  if (skipBeforeStart !== null) return skipTool(use, skipBeforeStart, deps, turnId);
 
   probe({ kind: "tool_started", toolCallId: use.id, toolName: use.name, params }, turnId);
   await emit({ type: "tool_execution_start", toolCallId: use.id, toolName: use.name, params });

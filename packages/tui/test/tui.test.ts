@@ -174,6 +174,7 @@ function runtimeOf(echo: Echo, overrides: Partial<AgentRuntime> = {}): AgentRunt
     followUp: (m) => base.followUp(m),
     answerPermission: (a) => base.answerPermission(a),
     abort: (r) => base.abort(r),
+    interrupt: (r) => base.interrupt(r),
     setModel: (m) => base.setModel(m),
     setThinkingLevel: (l) => base.setThinkingLevel(l),
     reset: () => base.reset(),
@@ -1202,23 +1203,156 @@ test("Ctrl+D：输入行为空时退出；有字时是向前删一个字符，�
   expect(await done).toBe(0);
 });
 
-test("Esc 中断在飞的那一轮（走协议的 `abort`）；空闲时按 Esc 什么都不发生", async () => {
+test("Esc 只中断当前这一步（走协议的 `interrupt`，不是 abort）；空输入行上 Ctrl+C 停整个任务（`abort`）；空闲时两个键都不发", async () => {
   const ui = fakeTui();
-  const echo = await echoWith([textTurn("好")]);
+  const echo = await echoWith([textTurn("好"), textTurn("又好")]);
   const aborts: (string | undefined)[] = [];
-  const done = runTui({ agent: runtimeOf(echo, { abort: (r) => aborts.push(r) }), ui });
+  const interrupts: (string | undefined)[] = [];
+  const done = runTui({ agent: runtimeOf(echo, { abort: (r) => aborts.push(r), interrupt: (r) => interrupts.push(r) }), ui });
   await flush();
 
-  ui.feed(ESC_KEY); // 空闲：不该 abort
+  ui.feed(ESC_KEY); // 空闲：不该中断
+  ui.feed(CTRL_C); // 空闲 + 空输入行：只是清空，不该停
   await flush();
-  expect(aborts).toEqual([]);
+  expect([interrupts, aborts]).toEqual([[], []]);
 
   ui.feed("跑一轮");
   ui.feed(ENTER); // 发出去的那一拍就算「在飞」（pendingLocal），不用等模型回话
   ui.feed(ESC_KEY);
+  expect([interrupts, aborts]).toEqual([["用户中断"], []]); // 2026-11-05 之前 Esc 是 abort 整个任务
+
+  await flush(200);
+  ui.feed("再跑");
+  ui.feed(ENTER);
+  ui.feed(CTRL_C); // 在跑 + 空输入行：停整个任务
   expect(aborts).toEqual(["用户中断"]);
 
   await flush(200);
+  quit(ui);
+  await done;
+});
+
+/* ── 跑着时的两种说话方式（2026-11-05）：回车是插话（改方向），Alt+Enter 是排队；收下了没处理完的原文放回 ── */
+
+const ALT_ENTER = `${ESC_KEY}\r`;
+
+/** 一个卡住的工具：`started` 在它开跑时 resolve，`release()` 放它走（或者它的 signal 被 abort）。 */
+function gate(name: string): { tool: ModelTool; started: Promise<void>; release: () => void; ran: { n: number } } {
+  let markStarted!: () => void;
+  const started = new Promise<void>((r) => (markStarted = r));
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  const ran = { n: 0 };
+  return {
+    started,
+    release,
+    ran,
+    tool: {
+      kind: "model" as const,
+      name,
+      label: name,
+      description: name,
+      parameters: { type: "object", properties: {} },
+      execute: async (_p, ctx) => {
+        ran.n += 1;
+        markStarted();
+        await Promise.race([released, new Promise<void>((r) => ctx.signal?.addEventListener("abort", () => r(), { once: true }))]);
+        return { content: `${name} done`, isError: false, metadata: null };
+      },
+    },
+  };
+}
+
+/** 一条助手消息里依次点 a、b 两个工具。 */
+const twoTools: ScriptedTurn = [
+  { type: "start" },
+  {
+    type: "done",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: "a", name: "a", input: {} },
+        { type: "tool_use", id: "b", name: "b", input: {} },
+      ],
+      stopReason: "tool_use",
+      usage: null,
+    },
+  },
+];
+
+test("跑着时回车是插话：收下后显示成用户行、说明还没开始的工具不再执行；那个工具真的没跑", async () => {
+  const a = gate("a");
+  const b = gate("b");
+  const ui = fakeTui();
+  const echo = await echoWith([twoTools, textTurn("好，b 不做了")], {}, { tools: [a.tool, b.tool] });
+  const done = runTui({ agent: runtimeOf(echo), ui });
+  await flush();
+  ui.feed("开始");
+  ui.feed(ENTER);
+  await a.started;
+  ui.feed("别做 b");
+  ui.feed(ENTER);
+  await flush();
+  a.release();
+  await flush(300);
+
+  const screen = ui.screen();
+  expect(screen).toContain("› 别做 b");
+  expect(screen).toContain("[插话] 还没开始的工具不再执行");
+  expect(b.ran.n).toBe(0);
+  expect(screen).toContain("好，b 不做了");
+  quit(ui);
+  await done;
+});
+
+test("跑着时 Alt+Enter 是排队：不打断，这件做完接着做；空闲时 Alt+Enter 与回车一样发出去", async () => {
+  const a = gate("a");
+  const ui = fakeTui();
+  const echo = await echoWith([toolTurn("c1", "a", {}), textTurn("第一件完了"), textTurn("第二件也完了"), textTurn("空闲时发的")], {}, { tools: [a.tool] });
+  const prompts = capturePrompts(echo);
+  const done = runTui({ agent: runtimeOf(echo), ui });
+  await flush();
+  ui.feed("第一件");
+  ui.feed(ENTER);
+  await a.started;
+  ui.feed("第二件");
+  ui.feed(ALT_ENTER);
+  await flush();
+  expect(ui.screen()).toContain("[排队] 这件做完接着做");
+  a.release();
+  await flush(300);
+  expect(ui.screen()).toContain("第二件也完了");
+
+  ui.feed("空闲时");
+  ui.feed(ALT_ENTER);
+  await flush(300);
+  expect(prompts).toEqual(["第一件", "空闲时"]); // 排队那句走的是 followUp，不是第二个 prompt
+  quit(ui);
+  await done;
+});
+
+test("收下了却没来得及处理（排队之后 Ctrl+C 停掉整个任务）：原文放回输入行，说一句 [交还]", async () => {
+  const a = gate("a");
+  const ui = fakeTui();
+  const echo = await echoWith([toolTurn("c1", "a", {}), textTurn("不该到")], {}, { tools: [a.tool] });
+  const done = runTui({ agent: runtimeOf(echo), ui });
+  await flush();
+  ui.feed("开始");
+  ui.feed(ENTER);
+  await a.started;
+  ui.feed("下一件");
+  ui.feed(ALT_ENTER);
+  await flush();
+  ui.feed(CTRL_C); // 空输入行 + 在跑：停整个任务
+  await flush(300);
+
+  const screen = ui.screen();
+  expect(screen).toContain("[交还] 1 句没来得及处理的话已放回输入行");
+  expect(screen).not.toContain("不该到");
+  // 原文回到输入行：再按回车就是把它当新的一句发出去
+  ui.feed(ENTER);
+  await flush(300);
+  expect(ui.screen()).toContain("› 下一件");
   quit(ui);
   await done;
 });

@@ -43,8 +43,12 @@ export type LoopFactBody =
   | { kind: "loop_ended"; outcome: AgentOutcome }
   | { kind: "reply_started"; replyId: string; source: ReplySource }
   | { kind: "reply_ended"; replyId: string; outcome: AgentOutcome; hasFinal: boolean; turns: number }
-  /** `tools`：本轮冻结的工作集——模型这一轮**能看见**的工具名（`turn_start` 之前定格，与模型菜单同一份快照）。 */
-  | { kind: "turn_started"; turnId: string; replyId: string; cause: TurnCause; tools: readonly string[] }
+  /**
+   * `tools`：本轮冻结的工作集——模型这一轮**能看见**的工具名（`turn_start` 之前定格，与模型菜单同一份快照）。
+   * `inputs`：上一轮之后、这一轮之前吸收进上下文的输入的 `inputId`（reply 的输入、轮末吸收的 steer）——
+   * 「这句话引出了哪一轮」就看它；那一轮的工具调用都挂在同一个 turnId 下。
+   */
+  | { kind: "turn_started"; turnId: string; replyId: string; cause: TurnCause; tools: readonly string[]; inputs: readonly string[] }
   | { kind: "turn_ended"; turnId: string; result: AttemptResult; toolResultCount: number }
   | { kind: "attempt_started"; turnId: string; attempt: number }
   | { kind: "attempt_ended"; turnId: string; attempt: number; result: AttemptResult }
@@ -63,13 +67,21 @@ export type LoopFactBody =
    * 词汇沿用 `LifecycleEvent` 里已有的：`toolUseFailed.cause`、`permissionDenied.decidedBy`、hook 名。
    */
   | { kind: "tool_rejected"; toolCallId: string; toolName: string; stage: ToolRejectStage; cause: ToolRejectCause; decidedBy?: ToolDecidedBy; reason: string }
+  /**
+   * 方言把模型要的一个工具调用丢掉了（参数不可解析、到最后都没有名字、无主的片段）：它不进定稿、也就不进 transcript，
+   * 不记这一条就一点痕迹都没有。`args` 是原样的参数文本（正文，只在 content 档投影）。
+   */
+  | { kind: "tool_call_dropped"; code: string; toolCallId?: string; toolName?: string; args: string }
   /** 进入等人审批：只有真正进了 ask 才有；策略直接放行 / 拒绝没有这一拍。与 `permission_settled` 配成一个 span，时长就是等人的时间。 */
   | { kind: "permission_asked"; toolCallId: string; toolName: string; permissionId: string; reason: string }
   | { kind: "permission_settled"; toolCallId: string; toolName: string; permissionId: string; decision: "granted" | "denied" | "cancelled"; decidedBy?: ToolDecidedBy; reason?: string };
 
-/** 工具在哪一步被拦：找不到 / 模型不可见 → lookup；参数不合法 → arguments；两个 hook；权限。 */
-export type ToolRejectStage = "lookup" | "arguments" | "preToolUse" | "permission" | "postToolUse";
-export type ToolRejectCause = "not_found" | "not_visible" | "bad_params" | "blocked" | "denied" | "cancelled" | "aborted";
+/**
+ * 工具在哪一步被拦：找不到 / 模型不可见 → lookup；参数不合法 → arguments；两个 hook；权限；
+ * `start`：一直没启动——run 停了 / 被中断（cause `aborted`）、或用户插话改了方向（cause `superseded`）。
+ */
+export type ToolRejectStage = "lookup" | "arguments" | "preToolUse" | "permission" | "start" | "postToolUse";
+export type ToolRejectCause = "not_found" | "not_visible" | "bad_params" | "blocked" | "denied" | "cancelled" | "aborted" | "superseded";
 export type ToolDecidedBy = "hook" | "policy" | "human" | "timeout";
 
 export const SPAN_PERMISSION_WAIT = "permission.wait";
@@ -286,6 +298,9 @@ function messageBody(message: AgentMessage, policy: ObservationCapturePolicy): R
     if (s.thinkingRedacted > 0) body.thinkingRedacted = s.thinkingRedacted;
   }
   if (typeof m.source === "string") body.source = m.source;
+  // 输入的身份是标识，metadata 档就记：与 `turn_started.inputs`、`agent.input.*` 对得上
+  const inputId = (message as { inputId?: unknown }).inputId;
+  if (typeof inputId === "string") body.inputId = inputId;
   if (typeof m.toolName === "string") body.toolName = m.toolName;
   if (typeof m.isError === "boolean") body.isError = m.isError;
   if (collect) {
@@ -343,13 +358,14 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
     case "turn_started": {
       const iteration = turnNumberOf(fact.turnId);
       // 工具名是标识不是正文，metadata 档就记：「这一轮模型为什么没用那个工具」往往答案就是它根本不在工作集里
+      // inputId 是标识不是正文，metadata 档就记：输入 → 这一轮 → 这一轮的工具调用，靠它接上
       return {
         ...base,
         kind: "span_start",
         name: SPAN_TURN_EXECUTE,
         scope: scopeOf(fact),
-        attributes: { iteration, replyId: fact.replyId, cause: fact.cause, toolCount: fact.tools.length },
-        body: { iteration, replyId: fact.replyId, cause: fact.cause, tools: [...fact.tools] },
+        attributes: { iteration, replyId: fact.replyId, cause: fact.cause, toolCount: fact.tools.length, inputCount: fact.inputs.length },
+        body: { iteration, replyId: fact.replyId, cause: fact.cause, tools: [...fact.tools], inputs: [...fact.inputs] },
       };
     }
     case "turn_ended": {
@@ -509,6 +525,20 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
       const body: Record<string, unknown> = { ...attrs };
       if (content) body.reason = fact.reason;
       return { ...base, kind: "event", name: "tool.rejected", scope: scopeOf(fact, { toolCallId: fact.toolCallId }), attributes: attrs, body };
+    }
+    case "tool_call_dropped": {
+      // 哪种丢法、哪个调用、参数多长是标识，metadata 档就记；参数原文是正文，只在 content 档、按正文预算截
+      const attrs: Attrs = { code: fact.code, argsChars: fact.args.length };
+      if (fact.toolName !== undefined) attrs.toolName = fact.toolName;
+      if (fact.toolCallId !== undefined) attrs.toolCallId = fact.toolCallId;
+      const body: Record<string, unknown> = { ...attrs };
+      if (content) {
+        const t = takePrefix(fact.args, MAX_PROJECTED_TEXT_BYTES);
+        body.args = t.text;
+        if (t.truncated) body.argsTruncated = true;
+      }
+      const extra = fact.toolCallId !== undefined ? { toolCallId: fact.toolCallId } : {};
+      return { ...base, kind: "event", name: "tool.call.dropped", scope: scopeOf(fact, extra), attributes: attrs, body };
     }
     case "permission_asked": {
       const attrs: Attrs = { toolName: fact.toolName, toolCallId: fact.toolCallId, permissionId: fact.permissionId };

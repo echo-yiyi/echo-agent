@@ -162,3 +162,86 @@ test("装备变更在 setter 节点上记（run 之外）：思考档从哪档�
     await reader.close();
   }
 });
+
+/* ── 输入与执行对得上（2026-11-05，docs/decisions/implemented/2026-11-05-input-lifecycle.md） ── */
+
+test("输入 → 这一轮 → 这一轮的工具调用：turn.execute 记引出它的 inputId；插话收下有一条 agent.input.accepted；被它撤掉的调用记 tool.rejected（start / superseded）", async () => {
+  const holder: { echo?: Echo } = {};
+  const step = (name: string, then?: () => Promise<unknown>): ModelTool => ({
+    kind: "model",
+    name,
+    label: name,
+    description: name,
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      await then?.();
+      return toolOk(`${name} done`);
+    },
+  });
+  let steerId: string | undefined;
+  const turns: ScriptedTurn[] = [
+    [
+      { type: "start" },
+      {
+        type: "done",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "c1", name: "a", input: {} },
+            { type: "tool_use", id: "c2", name: "b", input: {} },
+          ],
+          stopReason: "tool_use",
+          usage: null,
+        },
+      },
+    ],
+    textTurn("好，b 不做了"),
+  ];
+  const { echo } = await echoWith({
+    turns,
+    tools: [
+      step("a", async () => {
+        const r = await holder.echo!.agent.steer("别做 b");
+        if (r.kind === "accepted") steerId = r.inputId;
+      }),
+      step("b"),
+    ],
+  });
+  holder.echo = echo;
+  const r = await echo.send("go");
+  const promptId = (agentOf(echo).messages[0] as { inputId?: string }).inputId ?? "";
+  expect(promptId).toMatch(/^in-/);
+  expect(steerId).toMatch(/^in-/);
+  const steered = steerId ?? "";
+
+  const records = await recordsOf(echo, r.runId);
+  const turnStarts = records.filter((e) => e.kind === "span_start" && e.name === "turn.execute");
+  expect(turnStarts.map((e) => (e.body as { inputs: string[] }).inputs)).toEqual([[promptId], [steered]]);
+  const firstTurn = turnStarts[0]!.scope.turnId ?? "";
+  expect(records.filter((e) => e.name === "agent.input.accepted").map((e) => e.attributes)).toEqual([
+    { inputId: steered, channel: "steer", runId: r.runId, turnId: firstTurn },
+  ]);
+  const rejected = records.filter((e) => e.name === "tool.rejected");
+  expect(rejected.map((e) => [e.attributes, e.scope.turnId])).toEqual([[{ toolName: "b", toolCallId: "c2", stage: "start", cause: "superseded" }, turnStarts[0]!.scope.turnId]]);
+  // 插话入账那条也带着同一个 inputId
+  const appended = records.filter((e) => e.name === "agent.message.appended" && (e.body as { source?: string }).source === "steer");
+  expect(appended.map((e) => (e.body as { inputId?: string }).inputId)).toEqual([steered]);
+});
+
+test("方言丢掉的工具调用记 tool.call.dropped：哪种丢法、哪个调用、参数多长 metadata 档就记；参数原文只在 content 档", async () => {
+  const dropped: ScriptedTurn = [
+    { type: "start" },
+    { type: "warning", code: "tool_call_dropped", message: "参数不可解析", toolCall: { id: "c9", name: "write", args: '{"path":"a.ts","content":"sec' } },
+    { type: "text_start" },
+    { type: "text_delta", text: "写不了" },
+    { type: "text_end" },
+    { type: "done", message: { role: "assistant", content: [{ type: "text", text: "写不了" }], stopReason: "end_turn", usage: null } },
+  ];
+  for (const capture of ["metadata", "content"] as const) {
+    const { echo } = await echoWith({ turns: [dropped], capture });
+    const r = await echo.send("go");
+    const rec = (await recordsOf(echo, r.runId)).filter((e) => e.name === "tool.call.dropped");
+    expect(rec.map((e) => [e.attributes, e.scope.toolCallId])).toEqual([[{ code: "tool_call_dropped", argsChars: 29, toolName: "write", toolCallId: "c9" }, "c9"]]);
+    expect((rec[0]!.body as { args?: string }).args).toBe(capture === "content" ? '{"path":"a.ts","content":"sec' : undefined);
+  }
+});

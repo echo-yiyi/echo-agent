@@ -44,6 +44,8 @@ const ESC = String.fromCharCode(27);
 
 /** 键位照 pi（`keybindings.ts`）。Ctrl+C 不再是退出——提示行必须写 Ctrl+D，否则用户按 Ctrl+C 只会看到输入被清掉。 */
 const HINT = `${ESC}[2mEnter 发送 · Shift+Enter 换行 · Esc 中断 · Ctrl+D 退出${ESC}[22m`;
+/** 跑着时的键（2026-11-05）：回车是插话（改方向），Alt+Enter 排队，Esc 只停这一步，空输入行 Ctrl+C 停整个任务。 */
+const BUSY_HINT = `${ESC}[2mEnter 插话 · Alt+Enter 排队 · Esc 中断这一步 · Ctrl+C 停掉整个任务${ESC}[22m`;
 
 export type TuiAppOptions = Readonly<{
   /**
@@ -318,12 +320,10 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       return;
     }
     if (busy()) {
-      // 还没就绪 / 正在跑：**文字放回输入行**，用户不用重打（不排队、不假装收下）。
-      // `Editor.submitValue()` 是**先清空再回调**（与 `Input` 相反），所以这里要主动把它放回去——
-      // 只断言「没发出去」是不够的，那样清空了也能过，用户却得重打一遍。
-      // 「还没就绪」也落在 `acceptsWork` 上——未 running 时它就是 false，不需要壳子再记一个布尔。
-      editor.setText(text);
-      rerender();
+      // 正在跑：**回车是插话**（2026-11-05）——还没启动的工具不再启动，带着这句话接着跑；只是补充、不想打断的按排队键。
+      // 插不进去（还没进 turn、还没就绪）就**文字放回输入行**，用户不用重打（不假装收下）。
+      // `Editor.submitValue()` 是**先清空再回调**（与 `Input` 相反），所以放回要主动做。
+      void sendQueued("steer", trimmed, text);
       return;
     }
     // 发出去的才进历史（↑ 翻得到）；被拒的那次不进——它还留在输入行里，进了就是两份。
@@ -905,6 +905,16 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         }
         rerender();
         return;
+      case "input_returned": {
+        // 收下了却没来得及处理（run 停了 / 出错 / 到上限）：原文放回输入行，用户不用重打（2026-11-05）
+        const texts = event.messages.map(userTextOf).filter((t) => t !== "");
+        if (texts.length === 0) return;
+        const current = editor.getText();
+        editor.setText(current === "" ? texts.join("\n") : `${current}\n${texts.join("\n")}`);
+        transcript.push({ kind: "notice", text: `[交还] ${texts.length} 句没来得及处理的话已放回输入行` });
+        rerender();
+        return;
+      }
       case "tool_execution_end": {
         const row = toolRows.get(event.toolCallId);
         if (row !== undefined) {
@@ -950,6 +960,25 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       }
     }
     return images.length > 0 ? images : undefined;
+  };
+
+  /**
+   * 跑着时送一句话（2026-11-05）：`steer` 是插话（改方向——还没开始的工具不再执行），`followUp` 是排队（这件做完再做）。
+   * 收下了就显示成用户行、进历史；收不下就把原文放回输入行，说一句为什么（不假装收下）。
+   */
+  const sendQueued = async (kind: "steer" | "followUp", trimmed: string, raw: string): Promise<void> => {
+    const label = kind === "steer" ? "插话" : "排队";
+    const r = kind === "steer" ? await agent.steer(trimmed) : await agent.followUp(trimmed);
+    if (r.kind === "accepted") {
+      editor.addToHistory(trimmed);
+      transcript.push({ kind: "user", text: trimmed });
+      transcript.push({ kind: "notice", text: kind === "steer" ? `[${label}] 还没开始的工具不再执行，接下来按这句话做` : `[${label}] 这件做完接着做` });
+    } else {
+      editor.setText(raw);
+      const why = r.reason === "no-active-turn" || r.reason === "no-active-run" ? "这一刻插不进去" : r.reason === "reconfiguring" ? "正在交接" : "Agent 现在不接活";
+      transcript.push({ kind: "notice", text: `[${label}] ${why}，原文放回输入行` });
+    }
+    rerender();
   };
 
   const submit = async (text: string): Promise<void> => {
@@ -1043,7 +1072,7 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
       }
       lines.push(...editor.render(width));
       // 空闲且没打字时给一句提示；有字或在跑就不占地方
-      if (editor.getText() === "" && !busy()) lines.push(...wrap(HINT, width)); // 54 列，窄终端要折
+      if (editor.getText() === "") lines.push(...wrap(busy() ? BUSY_HINT : HINT, width)); // 54 列，窄终端要折
       lines.push(footerLine(agent.state, width, { frame: spinnerFrame(), since: busySince }));
       return lines;
     },
@@ -1120,13 +1149,30 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
         return;
       }
       if (keys.matches(data, "app.clear")) {
-        editor.setText("");
+        // 有字：清空输入行（老语义）。空着且在跑：停掉整个任务——这个 run、它起的后台任务（2026-11-05）
+        if (editor.getText() === "" && busy()) agent.abort("用户中断");
+        else editor.setText("");
         rerender();
         return;
       }
       if (keys.matches(data, "app.interrupt") && busy()) {
-        agent.abort("用户中断");
+        // 只停当前这一步：run 留着，排队的照做（2026-11-05；此前是 abort 整个任务）
+        agent.interrupt("用户中断");
         rerender();
+        return;
+      }
+      // 排队键：跑着时这句「这件做完再做」，不打断；空闲时与回车一样
+      if (keys.matches(data, "app.message.followUp")) {
+        const raw = editor.getText();
+        const trimmed = raw.trim();
+        if (trimmed === "") return;
+        if (busy() && !trimmed.startsWith("/") && question === null) {
+          editor.setText("");
+          void sendQueued("followUp", trimmed, raw);
+          return;
+        }
+        editor.setText("");
+        editor.onSubmit?.(raw);
         return;
       }
       editor.handleInput(data);
@@ -1200,6 +1246,15 @@ export async function runTui(options: TuiAppOptions): Promise<number> {
  * 消息内容 → 正文 + thinking。线上形状里 content 可能是字符串或块数组；
  * 被安全过滤器抹掉的 thinking（`redacted`）正文没有，不显示。
  */
+/** 交还的那条消息里人写的字（只看 user 消息的文本块）；别的种类、没有文本就是 ""。 */
+function userTextOf(m: { role: string; content?: unknown }): string {
+  if (m.role !== "user" || !Array.isArray(m.content)) return "";
+  return (m.content as { type: string; text?: string }[])
+    .filter((b) => b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text as string)
+    .join("");
+}
+
 function contentOf(content: unknown): { text: string; thinking: string } {
   if (typeof content === "string") return { text: content, thinking: "" };
   if (!Array.isArray(content)) return { text: "", thinking: "" };

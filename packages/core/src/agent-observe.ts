@@ -28,6 +28,15 @@ export type AgentFactBody =
    */
   | { kind: "equipment_changed"; field: "model" | "thinkingLevel"; from: string; to: string }
   | { kind: "queue_updated"; queue: "steering" | "followUp" | "inbox"; size: number }
+  /**
+   * 一条输入的终态之外的两拍（2026-11-05，docs/decisions/implemented/2026-11-05-input-lifecycle.md）。每条收下的输入恰好落在三处之一：
+   * **进 transcript**（`agent.message.appended` 带 inputId，引出的那一轮的 `turn_started.inputs` 里有它）、
+   * **交还**（`input_returned`：run 收尾时还在队列里，正文交回给壳）、**被拦下**（`input_blocked`：userPromptSubmit hook 说不）。
+   * `input_accepted` 只给排队的两种（steer / followUp）：prompt 的输入当场就进 transcript。`turnId` 是收下时开着的那个 turn。
+   */
+  | { kind: "input_accepted"; inputId: string; channel: "steer" | "followUp"; runId: string; turnId?: string }
+  | { kind: "input_returned"; inputId?: string; channel: "steer" | "followUp"; reason: string }
+  | { kind: "input_blocked"; inputId?: string; channel: "human" | "steer" | "followUp" }
   /** `ResourceChange` 自带一个 `kind`（tool / skill / mcp …），与本联合的判别字段同名，所以整个嵌进 `change`。 */
   | { kind: "resource_changed"; change: ResourceChange };
 
@@ -55,6 +64,22 @@ export function projectAgentFact(fact: AgentFact, policy: ObservationCapturePoli
     }
     case "queue_updated":
       return { ...base, kind: "event", name: "agent.queue.updated", scope: {}, attributes: { queue: fact.queue }, body: { queue: fact.queue, size: fact.size } };
+    // 输入的身份与去向都是标识，metadata 档就记；正文不在这里（进了 transcript 的看 agent.message.appended）
+    case "input_accepted": {
+      const attrs: Record<string, string> = { inputId: fact.inputId, channel: fact.channel, runId: fact.runId };
+      if (fact.turnId !== undefined) attrs.turnId = fact.turnId;
+      return { ...base, kind: "event", name: "agent.input.accepted", scope: {}, attributes: attrs, body: { ...attrs } };
+    }
+    case "input_returned": {
+      const attrs: Record<string, string> = { channel: fact.channel, reason: fact.reason };
+      if (fact.inputId !== undefined) attrs.inputId = fact.inputId;
+      return { ...base, kind: "event", name: "agent.input.returned", scope: {}, attributes: attrs, body: { ...attrs } };
+    }
+    case "input_blocked": {
+      const attrs: Record<string, string> = { channel: fact.channel };
+      if (fact.inputId !== undefined) attrs.inputId = fact.inputId;
+      return { ...base, kind: "event", name: "agent.input.blocked", scope: {}, attributes: attrs, body: { ...attrs } };
+    }
     case "resource_changed":
       return {
         ...base,

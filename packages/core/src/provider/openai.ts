@@ -415,7 +415,13 @@ class Turn {
         lastCall;
       if (call === undefined) {
         if (index === undefined && id === undefined && name === undefined) {
-          this.pendingWarnings.push({ type: "warning", code: "tool_call_fragment_dropped", message: "收到一段没有 index、id、name 的工具调用片段，前面也没有可接的调用：已丢弃" });
+          const fragment = typeof tc.function?.arguments === "string" ? tc.function.arguments : "";
+          this.pendingWarnings.push({
+            type: "warning",
+            code: "tool_call_fragment_dropped",
+            message: "收到一段没有 index、id、name 的工具调用片段，前面也没有可接的调用：已丢弃",
+            toolCall: { args: fragment },
+          });
           yield* this.takeWarnings();
           continue;
         }
@@ -471,6 +477,8 @@ class Turn {
           type: "warning",
           code: "tool_call_dropped",
           message: call.name === "" ? "工具调用到最后都没有名字,已丢弃(未执行)" : `工具调用 '${call.name}' 的参数 JSON 不可解析,已丢弃(未执行)`,
+          // 原样带出去：它不进定稿，循环据此记一条观测事实（自造的占位 id 不算上游给的）
+          toolCall: { ...(call.synthetic ? {} : { id: call.id }), ...(call.name !== "" ? { name: call.name } : {}), args: call.args },
         };
         continue;
       }

@@ -550,6 +550,7 @@ export function agentRuntimeOf(agent: RuntimeSource, assembly: RuntimeAssemblyOp
       return agent.pendingQuestions;
     },
     abort: (reason) => agent.abort(reason),
+    interrupt: (reason) => agent.interrupt(reason),
     // 换装备（P3a）：机制在 Agent 的装备 setter 与 reset() 上，这里只是接口到协议的映射
     setModel: (model) =>
       equip(() => {
@@ -593,6 +594,7 @@ export type RuntimeSource = Pick<
   | "answerQuestion"
   | "pendingQuestions"
   | "abort"
+  | "interrupt"
   | "acceptsWork"
 > & {
   prompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): Promise<{ outcome: AgentOutcome }>;

@@ -9,7 +9,7 @@ import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import type { LifecycleEvent } from "../src/events.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { RunIntakeGate } from "../src/loop/intake.ts";
-import { defaultConvertToLlm, userMessage } from "../src/messages.ts";
+import { defaultConvertToLlm, userMessage, type AgentMessage } from "../src/messages.ts";
 import { runAgentLoop } from "../src/loop/run-loop.ts";
 import type { AgentLoopConfig } from "../src/loop/types.ts";
 import { DEFAULT_RETRY_POLICY } from "../src/provider/dialect.ts";
@@ -127,10 +127,12 @@ test("run 关门与 agent_end 的顺序：agent_end 的订阅者再 followUp 已
   expect(transcript(agent)).toEqual(["user(human):go", "assistant"]);
 });
 
-test("abort 时 accepted 却没消费的 followUp：显式报出 [queue_dropped]、队列清空，下一次 prompt 不会捡到", async () => {
+test("abort 时 accepted 却没消费的 followUp：连正文交还（input_returned 带原消息与 inputId）、[queue_returned] 报出、队列清空，下一次 prompt 不会捡到", async () => {
   let agent!: Agent;
+  let accepted: string | undefined;
   const t = tool("t", async () => {
-    await agent.followUp("跟进");
+    const r = await agent.followUp("跟进");
+    accepted = r.kind === "accepted" ? r.inputId : undefined;
     agent.abort("测试");
     return toolOk("ok");
   });
@@ -140,11 +142,19 @@ test("abort 时 accepted 却没消费的 followUp：显式报出 [queue_dropped]
     tools: [t],
   });
   const seen = lifecycle(agent);
+  const returned: AgentMessage[][] = [];
+  agent.subscribe((e) => {
+    if (e.type === "input_returned") returned.push([...e.messages]);
+  });
   const first = await agent.prompt("go");
   expect(first.outcome.kind).toBe("aborted");
-  const dropped = seen.filter((e) => e.type === "notification" && e.message.includes("[queue_dropped]"));
-  expect(dropped).toHaveLength(1);
-  expect((dropped[0] as { message: string }).message).toContain("followUp 1 条");
+  // 2026-11-05：此前只报一条带条数的诊断，用户打的字丢了——现在原样交还，壳放回输入行
+  expect(accepted).toMatch(/^in-/);
+  expect(returned).toHaveLength(1);
+  expect(returned[0]!.map((m) => [(m as { inputId?: string }).inputId, (m as { content: { text?: string }[] }).content[0]!.text])).toEqual([[accepted, "跟进"]]);
+  const notice = seen.filter((e) => e.type === "notification" && e.message.includes("[queue_returned]"));
+  expect(notice).toHaveLength(1);
+  expect((notice[0] as { message: string }).message).toContain("followUp 1 条");
   await agent.prompt("again");
   // 上一版：「跟进」留在队列里，下一次 run 的收尾把它捞走
   expect(transcript(agent).filter((x) => x.includes("跟进"))).toEqual([]);
@@ -235,7 +245,7 @@ test("退出路径 completed：agent_end 时 intake 已关", async () => {
   await check();
 });
 
-test("退出路径 aborted：agent_end 时 intake 已关；tool 里 accepted 的 followUp 以 [queue_dropped] 报出，不是假 accepted 之后静默", async () => {
+test("退出路径 aborted：agent_end 时 intake 已关；tool 里 accepted 的 followUp 以 [queue_returned] 交还，不是假 accepted 之后静默", async () => {
   let agent!: Agent;
   const t = tool("t", async () => {
     await agent.followUp("跟进");
@@ -247,7 +257,7 @@ test("退出路径 aborted：agent_end 时 intake 已关；tool 里 accepted 的
   const check = assertClosedAtAgentEnd(agent);
   expect((await agent.prompt("go")).outcome.kind).toBe("aborted");
   await check();
-  expect(seen.filter((e) => e.type === "notification" && e.message.includes("[queue_dropped]"))).toHaveLength(1);
+  expect(seen.filter((e) => e.type === "notification" && e.message.includes("[queue_returned]"))).toHaveLength(1);
 });
 
 test("退出路径 error（provider 不可重试错误）：agent_end 时 intake 已关", async () => {

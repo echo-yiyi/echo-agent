@@ -151,6 +151,7 @@ class MessageAccumulator {
         type: "warning",
         code: "tool_call_dropped",
         message: `工具调用 '${open.name ?? "?"}' 的参数 JSON 不可解析，已丢弃（未执行）`,
+        toolCall: { ...(open.id !== undefined ? { id: open.id } : {}), ...(open.name !== undefined ? { name: open.name } : {}), args: open.buf },
       });
       return;
     }

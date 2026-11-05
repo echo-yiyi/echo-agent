@@ -87,6 +87,15 @@ export type LoopIntake = {
    * 与门里剩的一起显式报出。
    */
   closeRun(leftovers?: IntakeLeftovers): void;
+  /**
+   * reply 每一步（轮首的边界工作 + 那一个 turn）开始时调，返回只属于这一步的中断信号（`interrupt()` 只 abort 它）。
+   * 不给 = 不支持中断，一步的信号就是 run 的信号。
+   */
+  beginStep?(): AbortSignal;
+  /** 取走「这一步被中断了」的理由（取一次就清）；没有中断 null。 */
+  takeInterrupt?(): string | null;
+  /** 本 turn 收下过 steer 就 abort 的信号：还没启动的工具据此不再启动（steer 是改方向）。turn 没开 undefined。 */
+  steered?(): AbortSignal | undefined;
 };
 
 /**

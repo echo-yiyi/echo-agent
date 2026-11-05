@@ -113,6 +113,8 @@ export function clientEvent(event: ClientEvent): ClientEvent {
       return { ...event, result: cleanAttempt(event.result) };
     case "session_restored":
       return { ...event, messages: event.messages.map(cleanMessage) };
+    case "input_returned":
+      return { ...event, messages: event.messages.map(cleanMessage) };
     default:
       return event;
   }
@@ -140,6 +142,7 @@ const CARRIES_MESSAGES: Record<CoreAgentEvent["type"], boolean> = {
   usage: false,
   resource_changed: false,
   queue_update: false,
+  input_returned: true,
   equipment_changed: false,
   workspace_changed: false,
   reset: false,

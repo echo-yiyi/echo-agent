@@ -117,7 +117,7 @@ import { renderSkillCatalog, renderSkillInjections } from "./skill/compose.ts";
 import type { ActiveSkill, Skill } from "./skill/types.ts";
 import { parseSkillText, roundTripError, serializeSkill, skillEntryPath, skillNameOfEntry } from "./skill/format.ts";
 import type { AgentMcpPort, McpServerSnapshot } from "./mcp/port.ts";
-import { killAllBackground, startBackground, BACKGROUND_KIND } from "./background/harness.ts";
+import { killAllBackground, killBackgroundOfRun, startBackground, BACKGROUND_KIND } from "./background/harness.ts";
 import type { AgentBackground, BackgroundLimits } from "./background/types.ts";
 import { createTasks, loadTasks, saveTasks, taskSnapshot, type TaskMap } from "./task/harness.ts";
 import { makeTaskTools, taskInjections } from "./task/tools.ts";
@@ -833,6 +833,8 @@ export class Agent {
       onChanged,
       deliver,
       report,
+      // 任务记下起它的 run：`abort()` 停整个任务时一起停（`killBackgroundOfRun`）
+      currentRunId: () => this.admittedRunId(),
       ...(opts.backgroundLimits !== undefined ? { limits: opts.backgroundLimits } : {}),
     };
 
@@ -1246,7 +1248,7 @@ export class Agent {
     // 重入那条以前在这里单独写一遍，现在并进 `refuseWorkReason()`（顺序不变，报文不变）：
     // 判据只有一份，外面的 `acceptsWork` 才可能与它永远一致。
     this.assertAcceptsWork();
-    return this.runPromptMessages(normalizePrompt(input, images));
+    return this.runPromptMessages(normalizePrompt(input, images).map(withInputId));
   }
 
   /** 从现有 transcript 续跑：末条是 user / toolResult 才有得续。 */
@@ -1267,10 +1269,16 @@ export class Agent {
    * 跑的中途插话：只进**当前活动 turn**，轮末并入。裁决与入队在 RunIntakeGate 同一同步步里
    * 完成——方法是 async 只为了与 EchoRuntime 同形，返回前没有 await。没有活动 turn 返回
    * `rejected(no-active-turn)`：不抛、不入队等下一个 run。
+   *
+   * **它是改方向**（2026-11-05）：收下的那一刻，本 turn 还没启动的工具不再启动（各记一条「没执行」），
+   * 等授权的问一并撤掉；已经在跑的照常跑完，然后带着这句话开下一轮。只是补充、不想打断的用 `followUp()`。
    */
   async steer(message: AgentMessage | string): Promise<SteerResult> {
-    const result = this.intake.steer(typeof message === "string" ? userMessage(message, "steer") : message);
+    const result = this.intake.steer(withInputId(typeof message === "string" ? userMessage(message, "steer") : message));
     if (result.kind === "accepted") {
+      if (result.inputId !== undefined) {
+        probeAgent(this.agentProbeNow(), { kind: "input_accepted", inputId: result.inputId, channel: "steer", runId: result.runId, turnId: result.turnId });
+      }
       probeAgent(this.agentProbeNow(), { kind: "queue_updated", queue: "steering", size: this.intake.steeringSize });
       void this.emit({ type: "queue_update", queue: "steering", size: this.intake.steeringSize });
     }
@@ -1279,11 +1287,14 @@ export class Agent {
 
   /**
    * 这件做完接着做下一件：只进**当前 run**。没有 run 返回 `rejected(no-active-run)`，
-   * 不退化成 prompt()。
+   * 不退化成 prompt()。不打断正在做的（要改方向用 `steer()`）。
    */
   async followUp(message: AgentMessage | string): Promise<FollowUpResult> {
-    const result = this.intake.followUp(typeof message === "string" ? userMessage(message, "human") : message);
+    const result = this.intake.followUp(withInputId(typeof message === "string" ? userMessage(message, "human") : message));
     if (result.kind === "accepted") {
+      if (result.inputId !== undefined) {
+        probeAgent(this.agentProbeNow(), { kind: "input_accepted", inputId: result.inputId, channel: "followUp", runId: result.runId });
+      }
       probeAgent(this.agentProbeNow(), { kind: "queue_updated", queue: "followUp", size: this.intake.followUpSize });
       void this.emit({ type: "queue_update", queue: "followUp", size: this.intake.followUpSize });
     }
@@ -1605,10 +1616,26 @@ export class Agent {
     this.inbox.clear();
   }
 
+  /**
+   * **停整个任务**：这个 run 关门（在流的生成、在跑的工具收 signal，没启动的记「没执行」），
+   * 没来得及消费的输入连正文交还（`input_returned`），**这个 run 起的后台任务一起停**（2026-11-05）。
+   * 只停当前这一步、run 留着，用 `interrupt()`。
+   */
   abort(reason?: string): void {
     void this.hooks.notify({ type: "abortRequested", reason }, this.hookContext());
+    const runId = this.admittedRunId();
     // reason 装进 signal 一路带到 outcome（`abortedOutcome`）；裹成 AbortError 形状，provider 才认得出是中止
     this.activeRun?.abortController.abort(reason === undefined ? undefined : new AbortReason(reason));
+    if (runId !== null) void killBackgroundOfRun(this.background.tasks, runId, { report: (d) => this.reportDiagnostic(d) });
+  }
+
+  /**
+   * **只停当前这一步**（2026-11-05）：在流的生成、在跑的工具收 signal，还没启动的记「没执行」；run 留着——
+   * 这一步里收下过插话就带着它接着跑，没有就收掉当前这条 reply（outcome `aborted{理由}`），排队的 followUp 照常做。
+   * 后台任务不动。没有 run 时什么都不做。缺省理由 `ABORT_REASON.interrupted`。
+   */
+  interrupt(reason?: string): void {
+    this.intake.interrupt(reason ?? ABORT_REASON.interrupted);
   }
 
   /** 清 transcript + 运行态 + 队列；**装备与决策点不动**。 */
@@ -2709,6 +2736,8 @@ export class Agent {
       const r = await this.hooks.intercept({ type: "userPromptSubmit", text, source }, this.hookContext("user"));
       if (r.decision === "block") {
         blocked += 1;
+        const inputId = inputIdOf(m);
+        probeAgent(this.agentProbeNow(), { kind: "input_blocked", channel: source, ...(inputId !== undefined ? { inputId } : {}) });
         this.reportDiagnostic({
           code: "user_prompt_blocked",
           message: `userPromptSubmit（${source}）被 hook 拦下，未进 transcript：${r.reason ?? "无理由"}`,
@@ -3688,6 +3717,10 @@ export class Agent {
             if (admitted.length > 0) return admitted;
           }
         },
+        // 中断与插话（2026-11-05）：中断只停 reply 的当前这一步；插话让本 turn 还没启动的工具不再启动
+        beginStep: () => this.intake.beginStep(),
+        takeInterrupt: () => this.intake.takeInterrupt(),
+        steered: () => this.intake.steered,
         // 门里剩的 + loop 已 drain 却没吸收的（turn 交出的 steer、达 reply 上限时 drain 出的 followUp）一起报
         closeRun: (extra) => {
           const left = this.intake.closeRun();
@@ -4298,11 +4331,23 @@ export class Agent {
    * run 关门时 accepted 却没消费的 steer / followUp（只在 abort / error / 超时 / 轮数用尽 / dispose 时非空）：
    * **显式报出、当场清空**——不留给下一个 run 捡走（不偷偷转成下一 run），也不静默丢。
    */
+  /**
+   * run 关门时还没进 transcript 的输入：**连正文交还**（`input_returned`，壳把字放回输入行），逐条记一笔去向，
+   * 再报一条诊断（没人接事件的宿主也看得见）。不转入下一个 run（2026-11-05；此前只报条数，正文丢了）。
+   */
   private reportUnconsumed(left: IntakeLeftovers, when: string): void {
     if (left.steers.length === 0 && left.followUps.length === 0) return;
+    const returned = [...left.steers, ...left.followUps];
+    for (const [channel, list] of [["steer", left.steers], ["followUp", left.followUps]] as const) {
+      for (const m of list) {
+        const inputId = inputIdOf(m);
+        probeAgent(this.agentProbeNow(), { kind: "input_returned", channel, reason: when, ...(inputId !== undefined ? { inputId } : {}) });
+      }
+    }
+    void this.emit({ type: "input_returned", messages: returned, reason: when });
     this.reportDiagnostic({
-      code: "queue_dropped",
-      message: `${when}：accepted 但未消费的消息被丢弃——steer ${left.steers.length} 条 / followUp ${left.followUps.length} 条（run 已关门，不会转入下一个 run）`,
+      code: "queue_returned",
+      message: `${when}：收下了但没来得及处理的消息已交还——steer ${left.steers.length} 条 / followUp ${left.followUps.length} 条（run 已关门，不会转入下一个 run）`,
     });
     if (left.steers.length > 0) {
       probeAgent(this.agentProbeNow(), { kind: "queue_updated", queue: "steering", size: 0 });
@@ -4362,6 +4407,21 @@ function normalizePrompt(input: string | AgentMessage | AgentMessage[], images?:
   if (Array.isArray(input)) return input;
   if (typeof input !== "string") return [input];
   return [userMessage(input, "human", images)];
+}
+
+/**
+ * 收下的那一刻给输入发身份（`UserMessage.inputId`，2026-11-05）：只盖人说的 user 消息（harness 插的不算输入），
+ * 复制一份、不改调用方的对象；每次收下都是新的一个。
+ */
+function withInputId(m: AgentMessage): AgentMessage {
+  if (m.role !== "user" || m.source === "harness") return m;
+  return { ...m, inputId: `in-${crypto.randomUUID()}` };
+}
+
+/** 消息上的 inputId（没有就 undefined）。 */
+function inputIdOf(m: AgentMessage): string | undefined {
+  const id = (m as { inputId?: unknown }).inputId;
+  return typeof id === "string" ? id : undefined;
 }
 
 /** 低层 Agent 的默认：全部放行——授权是产品策略，`new Agent()` 不替产品做决定。 */

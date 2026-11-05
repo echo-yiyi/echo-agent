@@ -86,7 +86,7 @@ describe("循环事实逐 kind 固定投影（metadata 档）", () => {
   const cases: [LoopFact, ObservationRecordKind, string][] = [
     [fact(1, { kind: "loop_started" }), "event", "agent.loop.started"],
     [fact(2, { kind: "reply_started", replyId: "r/1", source: "prompt" }), "span_start", "reply.execute"],
-    [fact(3, { kind: "turn_started", turnId: "r/1#1", replyId: "r/1", cause: "input", tools: ["echo"] }), "span_start", "turn.execute"],
+    [fact(3, { kind: "turn_started", turnId: "r/1#1", replyId: "r/1", cause: "input", tools: ["echo"], inputs: ["in-1"] }), "span_start", "turn.execute"],
     [fact(4, { kind: "attempt_started", turnId: "r/1#1", attempt: 1 }), "span_start", "attempt.execute"],
     [fact(5, { kind: "generation_started" }), "span_start", "model.generate"],
     [fact(6, { kind: "message_committed", message: { role: "assistant", content: [{ type: "text", text: "hi" }], stopReason: "end_turn", usage: null, at: 1 } as never }), "span_end", "model.generate"],
@@ -124,6 +124,24 @@ describe("循环事实逐 kind 固定投影（metadata 档）", () => {
     expect([q.kind, q.name, q.body]).toEqual(["event", "agent.queue.updated", { queue: "inbox", size: 2 }]);
     expect(projectCompactionFact({ kind: "compaction_started", reason: "auto", runId: "run:t", at: 1 }, "off")).toBeNull();
     expect(projectAgentFact({ kind: "queue_updated", queue: "inbox", size: 2, at: 1 }, "off")).toBeNull();
+  });
+
+  test("输入与执行对得上（2026-11-05）：turn 记引出它的 inputId、输入的三种去向、方言丢掉的工具调用——标识 metadata 档就记，参数原文只在 content 档", () => {
+    const turn = projectLoopFact(fact(1, { kind: "turn_started", turnId: "r/1#2", replyId: "r/1", cause: "steer", tools: [], inputs: ["in-a", "in-b"] }), "metadata")!;
+    expect([turn.attributes.inputCount, (turn.body as { inputs: string[] }).inputs]).toEqual([2, ["in-a", "in-b"]]);
+    const appended = projectLoopFact(fact(2, { kind: "message_committed", message: { role: "user", source: "steer", inputId: "in-a", content: [{ type: "text", text: "别删" }], at: 1 } as never }), "metadata")!;
+    expect((appended.body as { inputId?: string }).inputId).toBe("in-a");
+
+    const dropped = { kind: "tool_call_dropped", code: "tool_call_dropped", toolCallId: "c9", toolName: "write", args: '{"path":"a.ts","content":"secret' } as const;
+    const meta = projectLoopFact(fact(3, dropped), "metadata")!;
+    expect([meta.kind, meta.name, meta.scope.toolCallId, meta.attributes]).toEqual(["event", "tool.call.dropped", "c9", { code: "tool_call_dropped", argsChars: 32, toolName: "write", toolCallId: "c9" }]);
+    expect(JSON.stringify(meta.body)).not.toContain("secret"); // 参数是正文：metadata 档不带
+    expect((projectLoopFact(fact(3, dropped), "content")!.body as { args?: string }).args).toBe(dropped.args);
+
+    const accepted = projectAgentFact({ kind: "input_accepted", inputId: "in-a", channel: "steer", runId: "run:t", turnId: "r/1#1", at: 1 }, "metadata")!;
+    expect([accepted.name, accepted.attributes]).toEqual(["agent.input.accepted", { inputId: "in-a", channel: "steer", runId: "run:t", turnId: "r/1#1" }]);
+    expect(projectAgentFact({ kind: "input_returned", inputId: "in-b", channel: "followUp", reason: "run 结束", at: 1 }, "metadata")!.name).toBe("agent.input.returned");
+    expect(projectAgentFact({ kind: "input_blocked", inputId: "in-c", channel: "human", at: 1 }, "metadata")!.name).toBe("agent.input.blocked");
   });
 
   test("压缩失败：阶段名是标识 metadata 档就记，第三方阶段的错误消息只在 content 档进 body", () => {

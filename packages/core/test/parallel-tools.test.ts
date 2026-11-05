@@ -342,7 +342,7 @@ test("批中 abort：已起跑的各自收 signal 结束，每个 tool_use 都�
   expect(overlaps(execSeq(events))).toEqual(["c1|c2"]);
 });
 
-test("批中 abort，后面还有一批：起跑过的那批全员入账，没起跑的那批一个都不跑", async () => {
+test("批中 abort，后面还有一批：起跑过的那批全员入账，没起跑的那批一个都不跑、记成「没执行」", async () => {
   let started = 0;
   let laterRan = 0;
   let agent!: Agent;
@@ -372,7 +372,10 @@ test("批中 abort，后面还有一批：起跑过的那批全员入账，没�
 
   expect(result.outcome.kind).toBe("aborted");
   expect(laterRan).toBe(0); // 「剩下的不跑」——批与批之间的老规矩没变
-  expect(toolResults(result.messages).map((m) => m.toolCallId)).toEqual(["c1", "c2"]);
+  // 没起跑的那个当场记一条「没执行」（2026-11-05）：账本里三件都有去处，不再靠投影补
+  const results = toolResults(result.messages);
+  expect(results.map((m) => m.toolCallId)).toEqual(["c1", "c2", "c3"]);
+  expect(results[2]!.metadata).toEqual({ notExecuted: "aborted" });
 });
 
 test("批里一个调用没能交出结果（订阅者违约）：同批其余已执行的结果照样按序入账、再补抛；没入账的那个，投影说「可能跑过」而不是「没执行」", async () => {

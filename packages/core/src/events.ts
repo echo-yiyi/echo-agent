@@ -48,8 +48,12 @@ export type ProviderEvent =
   | { type: "toolcall_start"; toolCallId: string; name: string }
   | { type: "toolcall_delta"; argsText: string }
   | { type: "toolcall_end" }
-  /* 在途异象，不终结生成（重试不在流里：一次 stream = 一次请求，重试是 loop 的下一个 attempt） */
-  | { type: "warning"; code: string; message: string }
+  /**
+   * 在途异象，不终结生成（重试不在流里：一次 stream = 一次请求，重试是 loop 的下一个 attempt）。
+   * `toolCall`：被丢掉的那个工具调用的原样（参数不可解析、到最后都没有名字、无主的片段）——它不进定稿，
+   * 循环据此记一条观测事实，否则账本里一点痕迹都没有。id / name 上游没给就缺席。
+   */
+  | { type: "warning"; code: string; message: string; toolCall?: { id?: string; name?: string; args: string } }
   /* 终结二选一 */
   | { type: "done"; message: AssistantMessage }
   | { type: "error"; error: AgentError };
@@ -107,6 +111,12 @@ export type CoreAgentEvent =
   | { type: "resource_changed"; kind: string; action: "added" | "removed" | "activated" | "deactivated"; name: string; source: string }
   /* 队列 */
   | { type: "queue_update"; queue: "steering" | "followUp" | "inbox"; size: number }
+  /**
+   * 收下了、却没来得及进 transcript 的输入（run 被 abort / 出错 / 超时 / 到上限 / 收摊时还在 steer 或 followUp 队列里），
+   * **连正文交还**——壳据此把字放回输入行，用户不用重打（2026-11-05；此前只报一条带条数的诊断，正文丢了）。
+   * 不会自动带进下一个 run：abort 的人多半不想它接着跑。`reason` 是给人看的场合（「run 结束」「收摊」）。
+   */
+  | { type: "input_returned"; messages: readonly AgentMessage[]; reason: string }
   /* 装备与会话面。只在 idle 时换（setter 先守 idle），下一个 run 起生效 */
   | { type: "equipment_changed"; field: "model"; model: Model }
   | { type: "equipment_changed"; field: "thinkingLevel"; thinkingLevel: ThinkingLevel }

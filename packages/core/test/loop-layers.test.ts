@@ -700,7 +700,7 @@ test("从 transcript 续跑：reply source=resume，没有输入的 message_end�
   expect(reply?.type === "reply_start" && reply.source).toBe("resume");
 });
 
-test("reply 数达上限且仍有待办：agent_end{error, max_replies}，待办经 [queue_dropped] 报出；达上限但无待办 → completed", async () => {
+test("reply 数达上限且仍有待办：agent_end{error, max_replies}，待办经 [queue_returned] 交还；达上限但无待办 → completed", async () => {
   let agent!: Agent;
   const t = tool("t", async () => {
     await agent.followUp("跟进");
@@ -713,9 +713,10 @@ test("reply 数达上限且仍有待办：agent_end{error, max_replies}，待办
   expect(r.outcome).toMatchObject({ kind: "error", error: { code: "max_replies" } });
   expect(validate(events)).toEqual([]);
   expect(types(events).filter((t) => t === "reply_start")).toHaveLength(1);
-  const dropped = seen.filter((e) => e.type === "notification" && e.message.includes("[queue_dropped]"));
-  expect(dropped).toHaveLength(1);
-  expect((dropped[0] as { message: string }).message).toContain("followUp 1 条");
+  const returned = seen.filter((e) => e.type === "notification" && e.message.includes("[queue_returned]"));
+  expect(returned).toHaveLength(1);
+  expect((returned[0] as { message: string }).message).toContain("followUp 1 条");
+  expect(events.filter((e) => e.type === "input_returned")).toHaveLength(1);
 
   // 上限内、无待办：正常完成
   const quiet = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([textTurn("a")]), maxReplies: 1 });

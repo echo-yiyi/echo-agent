@@ -322,6 +322,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-05-input-lifecycle.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-03-stop-quiesce-and-bounded-waits.md",
       "bilingual": false
     },

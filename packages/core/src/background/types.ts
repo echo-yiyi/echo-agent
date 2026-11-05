@@ -31,6 +31,11 @@ export type BackgroundTask = {
   readonly kind: string;
   readonly label: string;
   readonly startedAt: number;
+  /**
+   * 起它的那个 run（Agent 当时开着的 admission run；run 外起的是 null）。`abort()` 停整个任务时，
+   * 这个 run 起的后台任务一起停（2026-11-05）；正常收尾不停——后台任务本来就是要比 run 活得久的。
+   */
+  readonly runId: string | null;
   /** 终态吸收：只有 running 能转移。 */
   status: BackgroundStatus;
   /** 进入终态的时刻；running 时为 null。淘汰按它排序。 */
@@ -111,9 +116,10 @@ export type BackgroundStart =
   | { ok: false; reason: "too_many_running"; running: number; max: number }
   | { ok: false; reason: "too_many_tasks"; tasks: number; max: number };
 
-/** 起后台任务要 agent 给的三件：变更广播、结束投递、诊断上报。 */
+/** 起后台任务要 agent 给的：变更广播、结束投递、诊断上报，以及此刻开着的 run（盖在任务上，见 `BackgroundTask.runId`）。 */
 export type BackgroundDeps = {
   onChanged?: (change: ResourceChange) => void;
   deliver?: (message: AgentMessage) => void;
   report?: (d: Diagnostic) => void;
+  currentRunId?: () => string | null;
 };

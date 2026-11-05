@@ -91,8 +91,10 @@ createEcho 完成装配，调用方随后显式 await echo.start()；模型输�
 | `prompt()` | 接受 | 拒绝 busy | admission 后立即 | 是 |
 | inbox | 接受或排队 | 排队 | foreground permit 可用时 | 是 |
 | dream / 提取 | 按各自触发条件调度 | 可与前台并行 | 独立记忆通道 | 隔离子循环，不经前台 admission |
-| `steer()` | 拒绝 | 当前 turn intake 开放时接受 | 当前 turn 关闭后 | 否，留在当前 reply |
-| `followUp()` | 拒绝 | 当前 run intake 开放时接受 | 当前任务完成后 | 否，在同一 run 内开新 reply |
+| `steer()` | 拒绝 | 当前 turn intake 开放时接受；**改方向**：本 turn 还没启动的工具不再启动 | 当前 turn 关闭后 | 否，留在当前 reply |
+| `followUp()` | 拒绝 | 当前 run intake 开放时接受；不打断 | 当前任务完成后 | 否，在同一 run 内开新 reply |
+| `interrupt()` | 无事 | 只停当前这一步，run 留着 | — | 否 |
+| `abort()` | 无事 | 停整个任务，连这个 run 起的后台任务 | — | 否 |
 
 判据来自 [`StandaloneRunAdmission`](../../packages/core/src/admission/standalone.ts#symbol=StandaloneRunAdmission)、[`Agent.prompt()`](../../packages/core/src/agent.ts#symbol=Agent.prompt) 和 [`RunIntakeGate`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate)。
 
@@ -114,7 +116,7 @@ admission 接受输入后建立 run intake，循环按 run → reply → turn �
 
 ### 3.2 Run intake 的原子边界
 
-`steer` 只在 active turn 接受，`followUp` 只在 active run 接受。接受与入队同步发生；关闭与 drain 也同步发生，所以一个已经接受的消息不会静默滑到下一 run。未消费的残留必须报告 `queue_dropped`。实现见 [`RunIntakeGate`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate)，对应判据见 [裁决、入队与关门处于同一同步步](../../packages/core/test/intake.test.ts#test=runintakegate裁决与入队同一同步步关门那一刻队列里的全部交出之后的一律-rejected)。
+`steer` 只在 active turn 接受，`followUp` 只在 active run 接受。接受与入队同步发生；关闭与 drain 也同步发生，所以一个已经接受的消息不会静默滑到下一 run。每条接受的输入带 `inputId`，恰好落在三处之一：进 transcript；未消费的残留**连正文交还**（事件 `input_returned`，诊断 `queue_returned`）；被 `userPromptSubmit` hook 拦下。见 [输入的生命周期](../decisions/implemented/2026-11-05-input-lifecycle.md)。实现见 [`RunIntakeGate`](../../packages/core/src/loop/intake.ts#symbol=RunIntakeGate)，对应判据见 [裁决、入队与关门处于同一同步步](../../packages/core/test/intake.test.ts#test=runintakegate裁决与入队同一同步步关门那一刻队列里的全部交出之后的一律-rejected)。
 
 run 结束时不是先检查“队列看起来为空”再异步关闭，而是通过 `tryCloseRun()` 在同一同步边界完成最后一次 drain 与关门。这是 late follow-up 不丢失的关键判据。
 
@@ -159,7 +161,8 @@ run 结束时不是先检查“队列看起来为空”再异步关闭，而是�
 | --- | --- |
 | 正常完成 | `LoopResult.outcome.kind === "completed"` |
 | provider 最终失败 | prompt resolve，outcome 为 `error` |
-| 主动 abort | prompt resolve，outcome 为 `aborted` |
+| 主动 abort | prompt resolve，outcome 为 `aborted`；这个 run 起的后台任务一起停 |
+| 主动 interrupt | 当前 reply 以 `aborted{理由}` 收（有插话就接着跑）；run 照常做排队的 followUp，没有就以它收场 |
 | 最大迭代或 deadline | 对应 terminal outcome |
 | 工具抛错 | 转成 error tool result，run 可继续 |
 | 自动压缩阶段失败 | 记录诊断并尝试后续策略；撞窗应急仍无法继续时以错误结束 |
@@ -170,7 +173,7 @@ run 结束时不是先检查“队列看起来为空”再异步关闭，而是�
 
 ### 6.1 Abort 原因
 
-Agent.abort(reason) 通过 AbortSignal 把原因传到最终 aborted outcome；裸 abort 可以没有 reason。run deadline 则归为 timeout 错误，不与主动中断混同。行为归属与测试见 [abort reason 决策](../decisions/implemented/2026-09-01-abort-reason.md) 和 [Run Loop 的四层](run-loop-layers.md) §6。
+Agent.abort(reason) 通过 AbortSignal 把原因传到最终 aborted outcome；裸 abort 可以没有 reason。run deadline 则归为 timeout 错误，不与主动中断混同。行为归属与测试见 [abort reason 决策](../decisions/implemented/2026-09-01-abort-reason.md) 和 [Run Loop 的四层](run-loop-layers.md) §6。`interrupt(reason)` 是另一档：只停当前这一步（reply 的轮首工作 + 那一个 turn），理由同样进那条 reply 的 `aborted{reason}`，缺省 `ABORT_REASON.interrupted`；见 [Run Loop 的四层](run-loop-layers.md) §2.2。
 
 ## 7. 事件、状态投影与持久化
 

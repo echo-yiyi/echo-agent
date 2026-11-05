@@ -71,7 +71,7 @@ flowchart TD
 
 | 角色 | 表示的事实 | 缺省投影 |
 | --- | --- | --- |
-| `user` | 人类、steer 或 harness 放入的输入 | provider `user`，剥掉 `at/source` |
+| `user` | 人类、steer 或 harness 放入的输入 | provider `user`，剥掉 `at/source/inputId` |
 | `assistant` | provider 的权威定稿、stop reason、usage 与 model 来源 | provider `assistant`，剥掉账本字段；空 content 隐形 |
 | `toolResult` | 某个工具调用的结果及本地 metadata | provider `user` 中的 `tool_result`；metadata 不出门 |
 | `environment` | 后台任务、定时器、webhook 等外部事实 | provider `user`，剥掉 `source/ref` |
@@ -87,6 +87,8 @@ toolResult 与 environment 在账本中保留独立角色，provider 的角色�
 `UserMessage.source` 只有 `human | steer | harness`，见 [`UserMessage`](../../packages/core/src/messages.ts#symbol=UserMessage)。core 自己放进来的记 `harness`，例如 stop hook 的注入、压缩摘要，以及输出在 `max_tokens` 截断后、续轮前的那条续写提示（[Run Loop](run-loop-layers.md) §2.2）。`Agent.followUp("next")` 用 `userMessage(..., "human")` 建消息，见 [`Agent.followUp()`](../../packages/core/src/agent.ts#symbol=Agent.followUp)；之后 `userPromptSubmit` hook 单独收到 `source: "followUp"`，但 admission 不会修正消息本身。
 
 来源字段当前不能单独区分初始 prompt 和 followUp；后者的入站通道另在 hook 中表达。使用它做 UI 或评测归因时，应先区分内容作者与入站通道，不把 hook 的来源枚举当成消息的来源枚举。
+
+人经 prompt / steer / followUp 说的话还带 `inputId`（收下的那一刻由 Agent 发，随消息落盘，投影时剥掉）：观测靠它把这句话与它引出的那一轮、那一轮的工具调用对上，没进 transcript 的（交还、被 hook 拦下）也按它报。harness 插的没有。见 [输入的生命周期](../decisions/implemented/2026-11-05-input-lifecycle.md)。
 
 ### 2.3 消息验形
 
@@ -131,7 +133,7 @@ readonly 是类型约束，不是运行时隔离。调用方修改原消息，�
 - 合并相邻的纯 tool-result provider messages；
 - 对未知自定义 role、空 assistant 和失败的 assistant 消息不生成 provider 消息。
 
-实现见 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。它每个 attempt 从 working context 重算，产物不持久化；provider 方言和模型切换通过投影处理。落单的 `tool_use`（没有配对结果入账的）补一条 error 结果，说法是「没有结果入账、可能跑过」——不说「没执行」：同批别的调用违约时，跑完了却没交出结果的也落在这里。
+实现见 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。它每个 attempt 从 working context 重算，产物不持久化；provider 方言和模型切换通过投影处理。落单的 `tool_use`（没有配对结果入账的）补一条 error 结果，说法是「没有结果入账、可能跑过」——不说「没执行」：同批别的调用违约时，跑完了却没交出结果的也落在这里。确实没启动的（run 停了、被中断、插话改了方向）不靠这里：循环当场入账一条「没执行」的结果（[Run Loop](run-loop-layers.md) §2.3），投影补齐只兜账本里真没有的。
 
 方言再翻一道（OpenAI 兼容方言见 `provider/openai.ts`）：思考块只回放给产它的那个模型（provider + api + model 全等、且带合法签名），别家的或没标来源的**直接丢掉、不并进正文**——可读的思考当正文发过去，下一家会把它当成自己说过的可见回复；丢完什么都不剩的 assistant 消息整条不发。同一条消息里的多个 text 块以空行隔开拼成一个字符串。
 

@@ -176,9 +176,9 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 
 | 发口 | 模块 | 记什么 |
 |---|---|---|
-| 循环 | [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=loopFactDescriptor) | run / reply / turn / attempt 四层（turn 开头带本轮冻结的工具工作集）、模型生成与流式增量、工具执行与进展、重试、用量、**工具被拦**（`tool.rejected`）、**等人审批**（`permission.wait` span） |
+| 循环 | [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=loopFactDescriptor) | run / reply / turn / attempt 四层（turn 开头带本轮冻结的工具工作集与引出它的输入 `inputs`）、模型生成与流式增量、工具执行与进展、重试、用量、**工具被拦**（`tool.rejected`）、**工具调用被方言丢掉**（`tool.call.dropped`）、**等人审批**（`permission.wait` span） |
 | 压缩 | [compaction/observe.ts](../../packages/core/src/compaction/observe.ts#symbol=compactionFactDescriptor) | 一次压缩的起止、**压缩失败**（某个阶段抛错被跳过，或整条流水线没有一段改动上下文） |
-| Agent 自身 | [agent-observe.ts](../../packages/core/src/agent-observe.ts#symbol=agentFactDescriptor) | **生命周期相位**迁移、**装备变更**（模型 / 思考档）、队列长度、资源注册与卸载。**run 开头的整体状态**（`agent.state`）随 `run.started` 一起交出，由观测线程记 |
+| Agent 自身 | [agent-observe.ts](../../packages/core/src/agent-observe.ts#symbol=agentFactDescriptor) | **生命周期相位**迁移、**装备变更**（模型 / 思考档）、队列长度、**输入的去向**（`agent.input.accepted` / `returned` / `blocked`）、资源注册与卸载。**run 开头的整体状态**（`agent.state`）随 `run.started` 一起交出，由观测线程记 |
 | extension | [extension/observe.ts](../../packages/core/src/extension/observe.ts#symbol=extensionFactDescriptor) | 一代装上（每个 extension 提供了什么、依赖的服务实际连到了谁）/ 没装上（prepare 被拒或 apply 抛错并回滚）/ 卸下 / 卸载被拒 |
 | 记忆 | `memory/observe.ts` | 回忆、写入、提取 |
 | 任务 | `task/observe.ts` | 状态变更、落盘 |
@@ -189,7 +189,8 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 
 几类事实值得单说：
 
-- **决定点。** 工具在执行之前被拦下的调用**不发 `tool.execute`**，所以每个拦截分支各记一条 `tool.rejected`：`stage`（lookup / arguments / preToolUse / permission / postToolUse）、`cause`、`decidedBy`。词汇沿用 `LifecycleEvent` 里已有的。只有真正进了 ask 才有 `permission.wait`，结束探针在裁决落下的那一刻记，span 时长就是等人的时间。原因文本可能来自 hook 或人工输入，只在 `content` 档进 body。
+- **决定点。** 工具在执行之前被拦下的调用**不发 `tool.execute`**，所以每个拦截分支各记一条 `tool.rejected`：`stage`（lookup / arguments / preToolUse / permission / start / postToolUse）、`cause`、`decidedBy`。`start` 是一直没启动：run 停了或被中断（cause `aborted`）、用户插话改了方向（cause `superseded`）。词汇沿用 `LifecycleEvent` 里已有的。只有真正进了 ask 才有 `permission.wait`，结束探针在裁决落下的那一刻记，span 时长就是等人的时间。原因文本可能来自 hook 或人工输入，只在 `content` 档进 body。方言丢掉的调用（参数不可解析、没有名字、无主的片段）不进 transcript，记一条 `tool.call.dropped`：丢法、调用 id、工具名、参数长度 metadata 档就记，参数原文只在 `content` 档。
+- **输入与执行对得上。** 人说的每句话收下时带 `inputId`（[输入的生命周期](../decisions/implemented/2026-11-05-input-lifecycle.md)）：`turn.execute` 的开头记引出这一轮的 `inputs`，`agent.message.appended` 记它，排队的两种收下时记 `agent.input.accepted`（带收下时的 run / turn），没进 transcript 的记 `agent.input.returned`（交还）或 `agent.input.blocked`（hook 拦下）。于是「这句话 → 引出的那一轮 → 那一轮的工具调用（同一个 turnId）」不用按时间猜。
 - **整体运行状态。** run 开头（`agent.state` 快照）与结尾（`run.closed` 里的 `finalSnapshot`）各一份，**同形、同一个校验器**（[terminal.ts](../../packages/core/src/observability/terminal.ts#symbol=materializeObservableState)）：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数摘要（`echo:tasks` / `echo:scheduler` / `echo:agent` 的收件箱）。模型与绑定不重复记——它们在 `run.assembly`。校验是**白名单重建**：只有逐个校验过的字段进副本，加字段必须同时扩白名单，否则会在封口时被静默剥掉。
 - **生命周期相位。** `Agent` 里所有相位写入都经 [`Agent.setPhase`](../../packages/core/src/agent.ts#symbol=Agent.setPhase)，节点就是它；丢锁那一拍也在这里当场记——这是 Agent 自己做的迁移，不是观测推断死活。**`stopping → stopped` 进不了账本**：stop 流程里观测被告知收摊（不等），`stopped` 在那之后才成立，观测线程已经不收这个 runtime 的事实。一次正常收摊的最后一拍相位是 `running → stopping`。
 - **extension。** 按**代**记，不按 Fiber 记：装载是全有或全无的事务。发生在任何 run 之外，进「运行时活动」。

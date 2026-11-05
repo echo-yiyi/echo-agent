@@ -73,6 +73,12 @@ export type UserMessage = {
    */
   source: "human" | "steer" | "harness";
   content: ContentBlock[];
+  /**
+   * 这条输入的身份（2026-11-05）：prompt / steer / followUp 收下的那一刻由 Agent 发，随消息入账落盘。
+   * 观测靠它把「这句话」与它引出的那一轮、那一轮里的工具调用对上（`turn_started.inputs`）；
+   * 没走到 transcript 的（交还、被 hook 拦下）也按它报。harness 自己插的话没有。不出门（投影时剥掉）。
+   */
+  inputId?: string;
 };
 
 export type AssistantMessage = {
@@ -288,7 +294,7 @@ export const defaultConvertToLlm: ConvertToLlm = (messages) => {
 function projectOne(m: AgentMessage): ProviderMessage | null {
   switch (m.role) {
     case "user":
-      // 剥壳：at、source 不出门
+      // 剥壳：at、source、inputId 不出门
       return { role: "user", content: [...m.content] };
 
     case "assistant": {
@@ -335,17 +341,16 @@ const NO_TOOL_RESULT = "No result was recorded for this tool call; it may or may
 
 /**
  * 给没有配对结果的 `tool_use` 补一条 error `tool_result`
- * （docs/decisions/implemented/2026-09-07-orphan-tool-use.md，选项 B）。
+ * （docs/decisions/implemented/2026-09-07-orphan-tool-use.md，选项 B；2026-11-05 起退为兜底）。
  *
- * **为什么要补**：一轮工具批中途被 abort 之后，没轮到的那几个调用在 transcript 里就没有结果——
- * `run-turn.ts` 的批循环判到 `signal.aborted` 就 break，剩下的从来没进过 `runOneTool`（它是全函数，
- * 进去必有结果出来），而账本这一侧没有任何清点。带着这样一份 transcript 续跑，
- * OpenAI 兼容端点会拒收：`tool_calls` 里的每个 id 都必须有对应的 `tool` 消息。
+ * **它现在是兜底**：没启动的调用（run 停了、被中断、插话改了方向）由 `run-turn.ts` 当场入账一条「没执行」的结果
+ * （`NOT_EXECUTED`，2026-11-05，docs/decisions/implemented/2026-11-05-input-lifecycle.md）——系统决定不跑它，
+ * 这件事本身就发生了，该进账本。这里补的只剩账本里真没有的：同批别的调用违约、它跑完了却没交出结果（所以说「可能跑过」），
+ * 进程在一批工具中途崩掉，或那之前写下的老会话。
+ * 带着这样一份 transcript 续跑，OpenAI 兼容端点会拒收：`tool_calls` 里的每个 id 都必须有对应的 `tool` 消息。
  *
- * **为什么补在这里而不是补进账本**：与[失败 attempt 留 transcript、投影时丢]
- * (docs/decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) 同一口径——
- * 账本记真实发生的事（模型确实要了三件、确实只跑了一件），送模前的形状归投影。
- * 往账本里塞一条模型没收到过的结果，反而是记了一件没发生的事。
+ * **补的东西不进账本**：账本里没有，就说明那件事没被记下来过；送模前的形状归投影（与
+ * [失败 attempt 留 transcript、投影时丢](docs/decisions/implemented/2026-09-05-failed-attempt-in-transcript.md) 同一口径）。
  *
  * **补在哪个位置**：紧跟在那批已有结果之后、下一条 assistant 或真正的 user 消息之前。
  * 补出来的是一条 tool-result-only 的 user 消息，`mergeAdjacentToolResults` 随后把它并进同一条里。

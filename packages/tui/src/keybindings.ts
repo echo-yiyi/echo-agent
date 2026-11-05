@@ -19,11 +19,17 @@
 
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, type KeybindingDefinition } from "@earendil-works/pi-tui";
 
+/** Windows 与 WSL 上 Alt+Enter 多半被终端占了：照 pi 换成 Ctrl+Q（pi 同名键的同一条判断）。 */
+const windowsLike = process.platform === "win32" || (process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP));
+
 /** P0 接的应用级键。加一条要同时改下面的 `declare module`，不然 `matches()` 不认它的名字。 */
 export const APP_KEYBINDINGS = {
-  "app.interrupt": { defaultKeys: "escape", description: "中断当前这一轮" },
-  "app.clear": { defaultKeys: "ctrl+c", description: "清空输入行" },
+  // 2026-11-05：中断只停当前这一步（run 留着、排队的照做）；停整个任务是空输入行上的 Ctrl+C
+  "app.interrupt": { defaultKeys: "escape", description: "中断当前这一步" },
+  "app.clear": { defaultKeys: "ctrl+c", description: "清空输入行；输入行为空且在跑时停整个任务" },
   "app.exit": { defaultKeys: "ctrl+d", description: "输入行为空时退出" },
+  // 跑着的时候：回车是插话（改方向），这个键是排队（这件做完再做）。名字与缺省键照 pi 的 `app.message.followUp`
+  "app.message.followUp": { defaultKeys: windowsLike ? "ctrl+q" : "alt+enter", description: "跑着时排队一条：这件做完接着做" },
   // P2：工具调用默认折叠，Ctrl+O 全局展开 / 收起（pi 的 `app.tools.expand`，`:112`）
   "app.tools.expand": { defaultKeys: "ctrl+o", description: "展开 / 收起工具输出" },
   // P3a：换装备。键照 pi（`app.model.select` `:111`、`app.thinking.cycle` `:99-102`）
@@ -40,6 +46,7 @@ declare module "@earendil-works/pi-tui" {
     "app.interrupt": true;
     "app.clear": true;
     "app.exit": true;
+    "app.message.followUp": true;
     "app.tools.expand": true;
     "app.model.select": true;
     "app.thinking.cycle": true;

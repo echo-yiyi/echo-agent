@@ -277,13 +277,15 @@ export function idleClearDue(messages: readonly AgentMessage[], state: Compactio
 /**
  * 一个 run 里的压缩簿记：provider 报的 usage 当基准并算校准比、应急只准一次。
  * 循环在轮首调 `maybeCompact()`、轮末调 `noteTurn()`、撞窗时调 `recover()`。
+ * `signal`：这一步的信号（reply 的 `beginStep()`，含 run 的）——中断落在轮首压缩里，压缩的模型调用也停；不给就用 run 的。
  */
 export function createCompactor(deps: LoopDeps): {
-  maybeCompact(): Promise<void>;
+  maybeCompact(signal?: AbortSignal): Promise<void>;
   noteTurn(turn: TurnResult): void;
   /** 撞窗应急：`turnId` 是撞窗的那个 turn。 */
-  recover(turnId: string): Promise<boolean>;
+  recover(turnId: string, signal?: AbortSignal): Promise<boolean>;
 } {
+  const withSignal = (signal: AbortSignal | undefined): LoopDeps => (signal === undefined ? deps : { ...deps, signal });
   let anchor: ContextAnchor | null = null;
   // 起点用 Agent 记住的上一次校准比：新 run 的首轮还没有 usage，裸字符估对中文会低估
   let calibration = clampCalibration(deps.config.compaction.calibration ?? 1);
@@ -291,9 +293,9 @@ export function createCompactor(deps: LoopDeps): {
   let overhead = 0;
   let recovered = false;
   return {
-    async maybeCompact() {
+    async maybeCompact(signal) {
       overhead = await overheadNow(deps);
-      const r = await runCompaction(deps, { reason: "auto", anchor, calibration });
+      const r = await runCompaction(withSignal(signal), { reason: "auto", anchor, calibration });
       if (r !== null) {
         if (r.changed) anchor = null;
         return;
@@ -302,7 +304,7 @@ export function createCompactor(deps: LoopDeps): {
       if (!deps.config.compaction.getStages().some((s) => s.name === TOOL_RESULTS_STAGE)) return;
       const now = deps.config.compaction.now?.() ?? Date.now();
       if (!idleClearDue(deps.context.messages, deps.context.compaction, now, calibration)) return;
-      const idle = await runCompaction(deps, { reason: "idle", anchor, calibration });
+      const idle = await runCompaction(withSignal(signal), { reason: "idle", anchor, calibration });
       if (idle?.changed === true) anchor = null;
     },
     noteTurn(turn) {
@@ -319,10 +321,10 @@ export function createCompactor(deps: LoopDeps): {
       const raw = estimateText(deps.context.systemPrompt) + estimateTokens(buildWorkingMessages(deps.context.messages.slice(0, index), deps.context.compaction));
       if (raw > 0) calibration = calibrationFrom(tokens, raw, overhead);
     },
-    async recover(turnId) {
+    async recover(turnId, signal) {
       if (recovered) return false;
       recovered = true;
-      const r = await runCompaction(deps, { reason: "overflow", anchor, calibration, turnId });
+      const r = await runCompaction(withSignal(signal), { reason: "overflow", anchor, calibration, turnId });
       if (r?.changed === true) anchor = null;
       return r?.changed === true;
     },

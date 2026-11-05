@@ -1,11 +1,11 @@
-// 落单 `tool_use` 的判据（docs/decisions/implemented/2026-09-07-orphan-tool-use.md，拍板选项 B）。
+// 落单 `tool_use` 的判据（docs/decisions/implemented/2026-09-07-orphan-tool-use.md 选项 B；
+// 2026-11-05 起账本当场记下没启动的调用，投影补齐退为兜底：docs/decisions/implemented/2026-11-05-input-lifecycle.md）。
 //
-// 形状是：**账本不动，投影补齐**。中止之后没轮到的那几个调用在 transcript 里本来就没有结果
-// （`run-turn.ts` 的批循环判到 abort 就 break，它们从来没进过 `runOneTool`），那是真实发生的事；
-// 送模前由 `defaultConvertToLlm` 给它们补一条 error `tool_result`，让请求合法。
+// 形状是：**没启动的调用当场入账「没执行」**（`run-turn.ts` 的 `NOT_EXECUTED`）；账本里真没有的
+// （进程在一批中途崩掉、那之前写下的老会话），送模前由 `defaultConvertToLlm` 补一条 error `tool_result`，让请求合法。
 //
-// 每条都是**摘掉 healOrphanToolUses 就会红**的反例：
-//   1. 端到端：一条消息点三件、第一件把 run 中止 → transcript 仍只有一条 toolResult，投影里三条齐
+// 1 是端到端的新契约；2–6 手工构造缺结果的 transcript，都是**摘掉 healOrphanToolUses 就会红**的反例：
+//   1. 端到端：一条消息点三件、第一件把 run 中止 → 账本里三条齐（后两条是「没执行」），投影不必补
 //   2. 补出来的并进同一条 user 消息（线上协议要求一批结果同处一条）
 //   3. 欠账在**下一条 assistant 之前**结清
 //   4. 欠账在**真正的 user 消息之前**结清（不是塞到它后面）
@@ -16,6 +16,7 @@ import { test, expect } from "bun:test";
 import { Agent } from "../src/agent.ts";
 import { FAKE_MODEL, scriptedStreamFn, type ScriptedTurn } from "../src/testing.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
+import { NOT_EXECUTED } from "../src/loop/run-turn.ts";
 import {
   assistantMessage,
   defaultConvertToLlm,
@@ -24,6 +25,7 @@ import {
   type AgentMessage,
   type ProviderMessage,
   type ProviderToolResultBlock,
+  type ToolResultMessage,
 } from "../src/messages.ts";
 
 /* ─────────────── fixtures ─────────────── */
@@ -73,7 +75,7 @@ function usesOf(wire: readonly ProviderMessage[]): string[] {
 
 /* ─────────────── 1. 端到端 ─────────────── */
 
-test("批中 abort：transcript 里少的那两条结果，投影时补齐并标 error", async () => {
+test("批中 abort：没轮到的两件当场入账「没执行」（metadata 标原因），投影三件都配上、不靠补（2026-11-05 起账本记下它）", async () => {
   let agent: Agent;
   const ran: string[] = [];
   agent = new Agent({
@@ -98,12 +100,17 @@ test("批中 abort：transcript 里少的那两条结果，投影时补齐并标
 
   await agent.prompt("go");
 
-  // 账本：只有真的跑过的那一件有结果——**这一条不能变**，B 的全部意思就是账本不动
+  // 账本：真的跑过的只有 a；b、c 没启动——「系统决定不跑它」这件事本身发生了，当场记一条「没执行」
+  // （2026-11-05 推翻选项 B 的「账本不动」：docs/decisions/implemented/2026-11-05-input-lifecycle.md）
   expect(ran).toEqual(["a"]);
-  const ledger = agent.messages.filter((m) => m.role === "toolResult");
-  expect(ledger.map((m) => (m as { toolCallId: string }).toolCallId)).toEqual(["a"]);
+  const ledger = agent.messages.filter((m) => m.role === "toolResult") as (ToolResultMessage & { at: number })[];
+  expect(ledger.map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
+  expect(ledger.slice(1).map((m) => [m.isError, m.content, m.metadata])).toEqual([
+    [true, NOT_EXECUTED.aborted, { notExecuted: "aborted" }],
+    [true, NOT_EXECUTED.aborted, { notExecuted: "aborted" }],
+  ]);
 
-  // 投影：三个 tool_use 一个不少地配上，补出来的两条标 error
+  // 投影：三个 tool_use 一个不少地配上，没执行的两条标 error（来自账本，不是补出来的）
   const wire = await defaultConvertToLlm([...agent.messages]);
   expect(usesOf(wire)).toEqual(["a", "b", "c"]);
   expect(resultsOf(wire)).toEqual([

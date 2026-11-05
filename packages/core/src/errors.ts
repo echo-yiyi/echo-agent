@@ -63,6 +63,11 @@ export const ABORT_REASON = Object.freeze({
    * 它不进 outcome——run 超时的 outcome 是 `error{timeout}`，不是 aborted。
    */
   runTimeout: "run-timeout",
+  /**
+   * `interrupt()` 的缺省理由：只停**当前这一步**（在流的生成、在跑的工具），run 留着——有插话就接着、
+   * 有排队的 followUp 照常做（docs/decisions/implemented/2026-11-05-input-lifecycle.md）。与 `abort()` 停整个任务分开。
+   */
+  interrupted: "interrupted",
 } as const);
 
 export type AgentError = {

@@ -53,6 +53,7 @@ export function startBackground(ctx: AgentBackground, spec: BackgroundSpec): Bac
     kind: spec.kind,
     label: spec.label,
     startedAt: Date.now(),
+    runId: ctx.currentRunId?.() ?? null,
     status: "running",
     endedAt: null,
     error: null,
@@ -118,6 +119,12 @@ export async function killBackground(tasks: BackgroundMap, id: string, opts: Kil
 /** 收摊:全部取消并等干净。**agent 起的东西不能比 agent 活得久**。 */
 export async function killAllBackground(tasks: BackgroundMap, opts: KillOptions = {}): Promise<void> {
   await Promise.all([...tasks.keys()].map((id) => killBackground(tasks, id, opts)));
+}
+
+/** 停整个任务（`abort()`）：只停这个 run 起的、还在跑的那些。别的 run 起的、run 外起的不动。 */
+export async function killBackgroundOfRun(tasks: BackgroundMap, runId: string, opts: KillOptions = {}): Promise<void> {
+  const ids = [...tasks.values()].filter((t) => t.runId === runId && t.status === "running").map((t) => t.id);
+  await Promise.all(ids.map((id) => killBackground(tasks, id, opts)));
 }
 
 /* ─────────────── 私有 ─────────────── */
