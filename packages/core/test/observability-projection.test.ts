@@ -126,6 +126,13 @@ describe("循环事实逐 kind 固定投影（metadata 档）", () => {
     expect(projectAgentFact({ kind: "queue_updated", queue: "inbox", size: 2, at: 1 }, "off")).toBeNull();
   });
 
+  test("model.usage 带缓存命中的输入（provider 报了才有，没报不编 0）", () => {
+    const hit = projectLoopFact(fact(1, { kind: "usage", usage: { inputTokens: 100, outputTokens: 5, cachedInputTokens: 80 } }), "metadata")!;
+    expect(hit.body).toEqual({ inputTokens: 100, outputTokens: 5, cachedInputTokens: 80 });
+    const none = projectLoopFact(fact(2, { kind: "usage", usage: { inputTokens: 100, outputTokens: 5 } }), "metadata")!;
+    expect(none.body).toEqual({ inputTokens: 100, outputTokens: 5 });
+  });
+
   test("输入与执行对得上（2026-11-05）：turn 记引出它的 inputId、输入的三种去向、方言丢掉的工具调用——标识 metadata 档就记，参数原文只在 content 档", () => {
     const turn = projectLoopFact(fact(1, { kind: "turn_started", turnId: "r/1#2", replyId: "r/1", cause: "steer", tools: [], inputs: ["in-a", "in-b"] }), "metadata")!;
     expect([turn.attributes.inputCount, (turn.body as { inputs: string[] }).inputs]).toEqual([2, ["in-a", "in-b"]]);

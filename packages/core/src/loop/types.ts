@@ -13,6 +13,7 @@ import type { CompactionStage, CompactionState } from "../compaction/types.ts";
 import type { CompactionProbe } from "../compaction/observe.ts";
 import type { IntakeLeftovers } from "./intake.ts";
 import type { LoopProbe } from "./observe.ts";
+import type { ContextMirror } from "../observability/context-mirror.ts";
 
 /**
  * 循环拿到的**对话快照**：进来那一刻的 messages，循环内部只往里 push。
@@ -233,6 +234,11 @@ export type LoopResult = {
 export type LoopProbes = Readonly<{
   loop?: LoopProbe;
   compaction?: CompactionProbe;
+  /**
+   * 上下文镜像的主线程那一半（`observability/context-mirror.ts`）：每次调模型前把这次的上下文按编号交出去
+   * （`context.built`）。每个观测 runtime 一份；`off` 档没有。
+   */
+  mirror?: ContextMirror;
 }>;
 
 export type LoopDeps = {

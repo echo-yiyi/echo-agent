@@ -149,11 +149,14 @@ describe("send → getRun → render（completed）", () => {
     // run.started 之后紧跟 run 开头的整体状态快照，再进循环
     expect(n[3]).toBe("snapshot:agent.state");
     expect(n.slice(4, -1)).toEqual([
+      "event:prompt.assembled", // 这个 run 的 system 怎么拼成的：组装在进循环之前（2026-11-08，观测白盒化 §3.2）
       "event:agent.loop.started",
       "span_start:reply.execute",
       "event:agent.message.appended", // 用户输入：在它引发的 turn 开始之前入账
+      "event:context.compact.evaluated", // 轮首判过一次要不要压（§3.5）
       "span_start:turn.execute",
       "span_start:attempt.execute",
+      "event:context.built", // 这次送进去的上下文：在调模型之前（§3.3）
       "span_start:model.generate",
       "span_end:model.generate", // 轮 1 生成出 tool_use
       "span_end:attempt.execute",
@@ -161,8 +164,10 @@ describe("send → getRun → render（completed）", () => {
       "span_end:tool.execute",
       "event:agent.message.appended", // 工具结果入账
       "span_end:turn.execute",
+      "event:context.compact.evaluated",
       "span_start:turn.execute",
       "span_start:attempt.execute",
+      "event:context.built",
       "span_start:model.generate",
       "span_end:model.generate", // 轮 2 生成出最终回答
       "span_end:attempt.execute",

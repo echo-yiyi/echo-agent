@@ -200,7 +200,8 @@ test("parseObserveArgs：serve 缺省端口与地址；--port 校验；--port / 
 const EMITTED_RECORD_NAMES = [
   "run.accepted", "run.started", "run.closed", "run.assembly", "observation.gap",
   "agent.loop.started", "agent.loop.ended", "agent.message.appended", "agent.queue.updated", "agent.phase.changed", "agent.equipment.changed", "agent.state",
-  "tool.rejected", "tool.call.dropped", "permission.wait", "context.compact.failed",
+  "tool.rejected", "tool.call.dropped", "permission.wait", "context.compact.failed", "context.compact.evaluated",
+  "context.built", "prompt.assembled",
   "agent.input.accepted", "agent.input.returned", "agent.input.blocked",
   "agent.resource.changed",
   "reply.execute", "turn.execute", "attempt.execute", "context.compact",

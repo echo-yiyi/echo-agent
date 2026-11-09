@@ -37,8 +37,17 @@ export type AgentFactBody =
   | { kind: "input_accepted"; inputId: string; channel: "steer" | "followUp"; runId: string; turnId?: string }
   | { kind: "input_returned"; inputId?: string; channel: "steer" | "followUp"; reason: string }
   | { kind: "input_blocked"; inputId?: string; channel: "human" | "steer" | "followUp" }
+  /**
+   * 这个 run 的 system prompt 是怎么拼成的（2026-11-08，观测白盒化 §3.2）：每一段的名字、order、谁注册的、
+   * 渲染出来有字 / 空 / 抛错、进 system 的字符数，插值用到的变量名，拼起来的总长。每个 run 组装一次就记一次。
+   * 段名、注册者、字符数都是标识与计数，metadata 档就记；正文在 content 档（正文存储，§4）。
+   */
+  | { kind: "prompt_assembled"; sections: readonly PromptSectionStat[]; variables: readonly string[]; chars: number }
   /** `ResourceChange` 自带一个 `kind`（tool / skill / mcp …），与本联合的判别字段同名，所以整个嵌进 `change`。 */
   | { kind: "resource_changed"; change: ResourceChange };
+
+/** `prompt.assembled` 里的一段。`owner`：注册它的 extension entryId（不经 Fiber 直接塞进表的段没有）。 */
+export type PromptSectionStat = Readonly<{ name: string; order: number; owner: string | null; status: "rendered" | "empty" | "failed"; chars: number }>;
 
 export type AgentFact = AgentFactBody & Readonly<{ at: number }>;
 
@@ -79,6 +88,18 @@ export function projectAgentFact(fact: AgentFact, policy: ObservationCapturePoli
       const attrs: Record<string, string> = { channel: fact.channel };
       if (fact.inputId !== undefined) attrs.inputId = fact.inputId;
       return { ...base, kind: "event", name: "agent.input.blocked", scope: {}, attributes: attrs, body: { ...attrs } };
+    }
+    case "prompt_assembled": {
+      const failed = fact.sections.filter((s) => s.status === "failed").length;
+      const attributes = { sections: fact.sections.length, chars: fact.chars, failed };
+      return {
+        ...base,
+        kind: "event",
+        name: "prompt.assembled",
+        scope: {},
+        attributes,
+        body: { sections: fact.sections.map((s) => ({ ...s })), variables: [...fact.variables], chars: fact.chars },
+      };
     }
     case "resource_changed":
       return {

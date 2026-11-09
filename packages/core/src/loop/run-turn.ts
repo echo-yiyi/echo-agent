@@ -28,7 +28,7 @@ import type { HookWorkset } from "../hooks/runtime.ts";
 import { deepFreezePlain, normalizeVerdict } from "../permission/ledger.ts";
 import type { PermissionVerdict } from "../permission/types.ts";
 import type { AgentMessage, ToolResultMessage, ToolUseBlock } from "../messages.ts";
-import { toolResultMessage, toolUsesFromMessage } from "../messages.ts";
+import { defaultConvertToLlm, toolResultMessage, toolUsesFromMessage } from "../messages.ts";
 import { isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type McpTool, type ModelTool } from "../tools/types.ts";
 import { spillToolResult, TOOL_OUTPUT_INLINE_TOKENS, TOOL_OUTPUT_READ } from "../tools/output.ts";
 import { buildWorkingMessages } from "../compaction/view.ts";
@@ -87,7 +87,8 @@ export async function runTurn(deps: RunDeps, replyId: string, n: number, cause: 
   // 本 turn 收下过 steer 就 abort（gate 在 openTurn 时换新）：还没启动的工具据此不再启动
   const steered = config.intake?.steered?.();
   const { probe } = deps;
-  probe({ kind: "turn_started", turnId, replyId, cause, tools: workset.tools.map((t) => t.name), inputs: [...inputs] }, turnId);
+  // 工具名单是**模型这一轮的实际菜单**（`isModelVisible` 之后，与送模的 schema 同一个过滤）：不混进不上菜单的内部工具
+  probe({ kind: "turn_started", turnId, replyId, cause, tools: workset.tools.filter(isModelVisible).map((t) => t.name), inputs: [...inputs] }, turnId);
   await emit({ type: "turn_start", turnId, replyId, cause });
 
   const toolResults: ToolResultMessage[] = [];
@@ -209,7 +210,7 @@ async function runAttempt(deps: RunDeps, turnId: string, attempt: number, workse
   try {
     let result: AttemptResult;
     try {
-      result = await callModel(deps, turnId, workset, progress);
+      result = await callModel(deps, turnId, attempt, workset, progress);
     } catch (e) {
       // streamFn / 投影 / hook 违约抛出：仍是一次失败的 attempt——不让异常击穿 turn，配对由结构保证。
       // 与 dialect 的「stream 不许 throw」同一态度：throw 只留给 bug，bug 也要有形状。
@@ -242,7 +243,7 @@ async function runAttempt(deps: RunDeps, turnId: string, attempt: number, workse
   }
 }
 
-async function callModel(deps: RunDeps, turnId: string, workset: TurnWorkset, progress: MessageProgress): Promise<AttemptResult> {
+async function callModel(deps: RunDeps, turnId: string, attempt: number, workset: TurnWorkset, progress: MessageProgress): Promise<AttemptResult> {
   const { context, config, emit, signal, streamFn } = deps;
   const { tools, hooks } = workset;
 
@@ -255,14 +256,50 @@ async function callModel(deps: RunDeps, turnId: string, workset: TurnWorkset, pr
   const injections = (await config.getTurnInjections?.(visibleTools)) ?? [];
   let working: AgentMessage[] = buildWorkingMessages(context.messages, context.compaction);
   if (injections.length > 0) working.push(...injections);
+  const hookMarks: { transformContext?: "kept" | "replaced"; contextBeforeBuild?: "kept" | "patched" } = {};
   if (config.transformContext !== undefined) {
+    const before = working;
     working = await config.transformContext(working, signal);
+    hookMarks.transformContext = working === before ? "kept" : "replaced";
   }
   if (hooks.has("contextBeforeBuild")) {
     const r = await hooks.intercept({ type: "contextBeforeBuild", messages: working }, config.hookContext);
     // block = 这个 attempt 不发：没有 assistant 消息可挂，什么都没说过账本里就不该有一条
     if (r.decision === "block") return { kind: "blocked", ...(r.reason !== undefined ? { reason: r.reason } : {}) };
+    hookMarks.contextBeforeBuild = r.event.messages === working ? "kept" : "patched";
     working = r.event.messages;
+  }
+
+  /* ①b 观测：这次送进去的上下文（`context.built`）。主线程只交编号与第一次见到的对象（`ContextMirror`），
+     构成与 token 在观测线程里算——视图没被 hook 改过就交「transcript + 压缩状态 + 注入」，那边用同一个投影函数重建 */
+  const mirror = deps.observe?.mirror;
+  if (mirror !== undefined) {
+    const replaced = hookMarks.transformContext === "replaced" || hookMarks.contextBeforeBuild === "patched";
+    deps.probe(
+      {
+        kind: "context_built",
+        handoff: mirror.handoff({
+          systemPrompt: context.systemPrompt,
+          transcript: context.messages,
+          compaction: context.compaction,
+          injections,
+          ...(replaced ? { final: working } : {}),
+          tools,
+        }),
+        meta: {
+          purpose: "turn",
+          attempt,
+          hooks: hookMarks,
+          converter: config.convertToLlm === defaultConvertToLlm ? "default" : "custom",
+          request: {
+            model: `${config.model.provider}/${config.model.id}`,
+            thinkingLevel: config.thinkingLevel ?? null,
+            maxOutputTokens: config.model.capabilities?.maxOutputTokens ?? null,
+          },
+        },
+      },
+      turnId,
+    );
   }
 
   /* ② 投影：AgentMessage → 线上形状（唯一一道翻译） */

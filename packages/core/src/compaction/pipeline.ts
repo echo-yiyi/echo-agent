@@ -21,11 +21,12 @@ import {
   DEFAULT_RESERVE_TOKENS,
   TOOL_RESULTS_STAGE,
 } from "./types.ts";
-import { probeCompaction } from "./observe.ts";
+import { probeCompaction, type CompactionDecision, type CompactionFactBody } from "./observe.ts";
+import { loopProbeFor } from "../loop/observe.ts";
 import { estimateText, estimateTokens, buildWorkingMessages, measureContext, normalizeCompaction, sameCompaction, type ContextAnchor } from "./view.ts";
 import type { LoopDeps, TurnResult } from "../loop/types.ts";
 import { clampDelay, sleep } from "../loop/backoff.ts";
-import type { AgentMessage } from "../messages.ts";
+import { defaultConvertToLlm, type AgentMessage } from "../messages.ts";
 import { agentError, errText } from "../errors.ts";
 import { toolSchemas, type AgentTool } from "../tools/types.ts";
 
@@ -93,20 +94,47 @@ export function compactionBudget(input: {
  * 它不是 attempt，但重试与 loop 同一份 `retryPolicy`、同一个受 signal 管的退避（`loop/backoff.ts`）：
  * retryable 错误重试到 `maxAttempts`；只发 hook 侧的 modelCallFailed / retryScheduled，不发 loop 事件（它不在任何 turn 里）。
  */
-export function modelCallFor(deps: LoopDeps): CompactionModelCall {
+export function modelCallFor(deps: LoopDeps, where: Readonly<{ stage?: string; turnId?: string }> = {}): CompactionModelCall {
   const { config, streamFn, context } = deps;
+  // 这次模型调用送进去的上下文（`context.built`，purpose `compaction`）：与循环的 attempt 同一条记录、同一个镜像
+  const probe = loopProbeFor(deps.observe?.loop, config.runId);
+  const mirror = deps.observe?.mirror;
   return async ({ systemPrompt, messages }, signal) => {
     // 不给 system = 从这条循环分叉（见 `CompactionModelCall`）：system、菜单、thinking 档位都与循环的请求相同，前缀缓存接得上
     const fork = systemPrompt === undefined;
     const llm = await config.convertToLlm([...messages]);
-    const tools = fork ? toolSchemas(config.getTools()) : [];
+    const menu = fork ? config.getTools() : [];
+    const tools = toolSchemas(menu);
+    const sentSystem = fork ? context.systemPrompt : systemPrompt;
+    const thinkingLevel = fork ? config.thinkingLevel : "off";
     const { maxAttempts } = config.retryPolicy;
     for (let attempt = 1; ; attempt++) {
+      if (mirror !== undefined) {
+        probe(
+          {
+            kind: "context_built",
+            handoff: mirror.explicit({ systemPrompt: sentSystem, messages, tools: menu }),
+            meta: {
+              purpose: "compaction",
+              attempt,
+              ...(where.stage !== undefined ? { stage: where.stage } : {}),
+              hooks: {},
+              converter: config.convertToLlm === defaultConvertToLlm ? "default" : "custom",
+              request: {
+                model: `${config.model.provider}/${config.model.id}`,
+                thinkingLevel: thinkingLevel ?? null,
+                maxOutputTokens: config.model.capabilities?.maxOutputTokens ?? null,
+              },
+            },
+          },
+          where.turnId,
+        );
+      }
       const apiKey = await config.getApiKey?.(config.model.provider);
       const stream = await streamFn(
         config.model,
-        { systemPrompt: fork ? context.systemPrompt : systemPrompt, messages: llm, tools },
-        { signal, apiKey, thinkingLevel: fork ? config.thinkingLevel : "off" },
+        { systemPrompt: sentSystem, messages: llm, tools },
+        { signal, apiKey, thinkingLevel },
       );
       for await (const _item of stream) {
         /* 只要定稿；流式增量不外发 */
@@ -148,10 +176,21 @@ export async function runCompaction(
 ): Promise<CompactionOutcome | null> {
   const { context, config, emit, signal } = deps;
   const { reason } = opts;
+  const observe = deps.observe?.compaction;
+  const where = { runId: config.runId, ...(opts.turnId !== undefined ? { turnId: opts.turnId } : {}) };
+  // 判过一次就记一条（`context.compact.evaluated`）：数是这里本来就算的那几个，没算到的不带
+  const evaluated = (decision: CompactionDecision, numbers: Omit<Extract<CompactionFactBody, { kind: "compaction_evaluated" }>, "kind" | "reason" | "decision"> = {}): void =>
+    probeCompaction(observe, where, { kind: "compaction_evaluated", reason, decision, ...numbers });
   const stages = [...config.compaction.getStages()].sort((a, b) => a.order - b.order);
   const window = config.model.capabilities?.contextWindow;
-  if (stages.length === 0) return null;
-  if (reason === "auto" && window === undefined) return null;
+  if (stages.length === 0) {
+    evaluated("no_stage");
+    return null;
+  }
+  if (reason === "auto" && window === undefined) {
+    evaluated("no_window");
+    return null;
+  }
 
   /** 纯字符估（system + 视图），未校准。 */
   const raw = (state: CompactionState): number =>
@@ -175,7 +214,11 @@ export async function runCompaction(
     used,
     reason,
   });
-  if (reason === "auto" && used < budget.target) return null;
+  const numbers = { used, window: budget.window, target: budget.target, goal: budget.goal, calibration, overhead };
+  if (reason === "auto" && used < budget.target) {
+    evaluated("below_target", numbers);
+    return null;
+  }
 
   // 子循环的压缩不经 hooks（`LoopCompactionConfig.notifyHooks`）：不问、不报
   const viaHooks = config.compaction.notifyHooks !== false;
@@ -184,14 +227,15 @@ export async function runCompaction(
   };
   if (viaHooks) {
     const pre = await config.hooks.intercept({ type: "preCompact", reason }, config.hookContext);
-    if (pre.decision === "block") return null;
+    if (pre.decision === "block") {
+      evaluated("hook_blocked", numbers);
+      return null;
+    }
   }
 
-  const observe = deps.observe?.compaction;
-  const where = { runId: config.runId, ...(opts.turnId !== undefined ? { turnId: opts.turnId } : {}) };
+  evaluated("run", numbers);
   probeCompaction(observe, where, { kind: "compaction_started", reason });
   await emit({ type: "compaction_start", reason });
-  const callModel = modelCallFor(deps);
   let state = context.compaction;
   const applied: string[] = [];
   for (const stage of stages) {
@@ -206,7 +250,8 @@ export async function runCompaction(
           budget: { ...budget, used },
           reason,
           ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}),
-          callModel,
+          // 每个阶段一份：它的模型调用记 `context.built` 时带上是哪个阶段、在哪个 turn
+          callModel: modelCallFor(deps, { stage: stage.name, ...(opts.turnId !== undefined ? { turnId: opts.turnId } : {}) }),
           estimate,
         },
         signal,

@@ -18,6 +18,7 @@ import {
   type ServiceKey,
 } from "./abi.ts";
 import { EffectStack } from "./effects.ts";
+import { serviceForEntry } from "./registries.ts";
 import type { ServiceKeyTable } from "./service-key.ts";
 
 export type FiberStatus = "discovered" | "pending" | "loading" | "active" | "failed" | "unloading" | "disposed";
@@ -85,7 +86,8 @@ export class Fiber {
     };
     /** 有 provider 的边取值：Host 自带的直接取；别的 Fiber 提供的要它还在提供。 */
     const resolve = (key: ServiceKey<unknown>, provider: Fiber | "host"): unknown => {
-      if (provider === "host") return host.hostService(key);
+      // 宿主自带的 registry 可以给每个 Fiber 一份绑定了它 entryId 的视图（记「谁注册的」，`FOR_ENTRY`）
+      if (provider === "host") return serviceForEntry(host.hostService(key), fiber.entryId);
       if (!provider.provided.has(key)) {
         // provider ACTIVE 后 consumer 才 LOADING，且 provider 的 apply 返回时已验过「声明的都 provide 了」；到这里只剩 provider 已卸
         throw new ExtensionAbiError(`Service '${key.id}' 的 provider ${provider.label} 已不再提供它`);
