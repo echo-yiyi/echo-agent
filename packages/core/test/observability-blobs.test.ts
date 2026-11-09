@@ -20,7 +20,8 @@ import { assistantMessage, defaultConvertToLlm, environmentMessage, toolResultMe
 import { buildWorkingMessages } from "../src/compaction/view.ts";
 import type { CompactionState } from "../src/compaction/types.ts";
 import { ContextMirror } from "../src/observability/context-mirror.ts";
-import { ContextMirrorStore, readContextContent, type ContextBuiltBody, type ContextBuiltMeta } from "../src/observability/context-mirror-host.ts";
+import { ContextMirrorStore, type ContextBuiltBody, type ContextBuiltMeta } from "../src/observability/context-mirror-host.ts";
+import { readContextContent } from "../src/observability/context-content.ts";
 import { BLOB_REWRITE_AFTER_MS, BLOB_SWEEP_GRACE_MS, BlobWriter, collectBlobRefs, expandBlobRefs, jsonBlob, textBlob, type EncodedBlob } from "../src/observability/blobs.ts";
 import { DocumentObservationReader } from "../src/observability/document-store.ts";
 import { expireObservations } from "../src/observability/expiry.ts";

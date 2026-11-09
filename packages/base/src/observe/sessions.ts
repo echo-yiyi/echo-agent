@@ -25,6 +25,7 @@ import {
   type SessionInfo,
   type DocumentEchoObservationReader,
 } from "@echo-agent/core";
+import type { ObservationBlobRef } from "@echo-agent/core/observability";
 
 /** 2026-09-14 之前观测落在这个 SQLite 文件里；新版本不读它，只认出来告诉人。 */
 const LEGACY_OBSERVATION_DATABASE = "observations.sqlite";
@@ -239,6 +240,16 @@ export class SessionObservationReaders {
       }
     }
     return { kind: "unknown" };
+  }
+
+  /**
+   * 一条 run 的记录引用的正文（`content` 档的 blob）：正文在 run 所在那一段的库里。run 找不到、或正文已不在都返回 null。
+   */
+  async readBlob(runId: string, ref: ObservationBlobRef): Promise<string | null> {
+    if (!this.runOwner.has(runId) && (await this.getRun(runId)).kind === "unknown") return null;
+    const owner = this.runOwner.get(runId);
+    const reader = owner === undefined ? undefined : this.readers.get(owner);
+    return reader === undefined ? null : reader.readBlob(ref);
   }
 
   /** 全部会话里 acceptedAt 最大的那条。 */

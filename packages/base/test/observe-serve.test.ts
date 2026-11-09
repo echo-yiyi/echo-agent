@@ -121,6 +121,99 @@ test("content 档：/api/runs/<id> 的时间线带工具 params 与结果正文�
   for (const marker of ["contentSections", "FOLDED_INTO", "argPreview", "--observe content", "thinkingText"]) expect(html).toContain(marker);
 });
 
+test("页面读的术语表分区都在：LEX.<分区> 每一个都是 lexicon() 的键", () => {
+  // 2026-11-09 实测：页面读 LEX.persistence[vm.health.persistence]，术语表早没了这个分区、ViewModel 也没这个字段——
+  // undefined[undefined] 抛错，面板任何一条 run 的详情都打不开。页面逻辑在浏览器里跑，这里只能按名字对表
+  const used = new Set([...observePageHtml().matchAll(/\bLEX\.([A-Za-z]+)/g)].map((m) => m[1]!));
+  expect(used.size).toBeGreaterThan(3);
+  const known = new Set(Object.keys(lexicon()));
+  expect([...used].filter((k) => !known.has(k))).toEqual([]);
+});
+
+/* ── 送进模型的是什么（观测白盒化 A3）：面板的原文路由与 `observe show --context` ── */
+
+const pingTool: ModelTool = { kind: "model", name: "ping", label: "ping", description: "回一个 pong", parameters: { type: "object", properties: {} }, execute: async () => toolError("pong 不在") };
+
+type Timeline = { seq: number; name: string; body?: Record<string, unknown> }[];
+
+test("面板：/api/runs/<id>/records/<seq>/content 给出那次送模的原文（system、投影之前的视图、工具 schema）与拼好的 system；metadata 档 404；正文被删 410", async () => {
+  const echo = await echoAt([toolTurn("c1", "ping", {}), textTurn("好了")], { observation: { capture: "content" }, agent: { tools: [pingTool] } });
+  const r = await echo.send("帮我 ping 一下");
+  await echo.observations.flush();
+  const plain = await echoAt([textTurn("嗯")]);
+  const p = await plain.send("metadata 档");
+  await plain.observations.flush();
+  const reader = new SessionObservationReaders({ sessionsRoot: dir });
+  const server = startObserveServer({ readers: reader, port: 0 });
+  try {
+    const vm = (await (await fetch(`${server.url}/api/runs/${r.runId}`)).json()) as { timeline: Timeline };
+    const built = vm.timeline.filter((t) => t.name === "context.built");
+    expect(built).toHaveLength(2);
+    const second = (await (await fetch(`${server.url}/api/runs/${r.runId}/records/${built[1]!.seq}/content`)).json()) as {
+      kind: string;
+      systemPrompt: string;
+      view: { role: string }[];
+      tools: { name: string }[];
+    };
+    expect(second.kind).toBe("context");
+    expect(second.view.map((m) => m.role)).toEqual(["user", "assistant", "toolResult"]);
+    expect(second.view.length).toBe(built[1]!.body!.messages as number);
+    expect(second.tools.map((t) => t.name)).toContain("ping");
+
+    const assembled = vm.timeline.find((t) => t.name === "prompt.assembled")!;
+    const prompt = (await (await fetch(`${server.url}/api/runs/${r.runId}/records/${assembled.seq}/content`)).json()) as { kind: string; texts: { text: string } };
+    expect(prompt.kind).toBe("texts");
+    expect(prompt.texts.text).toBe(second.systemPrompt);
+    expect(prompt.texts.text.length).toBe(assembled.body!.chars as number);
+
+    // metadata 档：构成照有，原文没有
+    const pvm = (await (await fetch(`${server.url}/api/runs/${p.runId}`)).json()) as { timeline: Timeline };
+    const pBuilt = pvm.timeline.find((t) => t.name === "context.built")!;
+    expect(pBuilt.body!.parts).toBeDefined();
+    expect((await fetch(`${server.url}/api/runs/${p.runId}/records/${pBuilt.seq}/content`)).status).toBe(404);
+    expect((await fetch(`${server.url}/api/runs/run:nope/records/1/content`)).status).toBe(404);
+
+    // 正文没了（过期清扫 / 手动删）：410，不是 500
+    const blobs = join(observationStorePath(join(dir, echo.agent.state.sessionId!)), "blobs");
+    rmSync(blobs, { recursive: true, force: true });
+    expect((await fetch(`${server.url}/api/runs/${r.runId}/records/${built[1]!.seq}/content`)).status).toBe(410);
+  } finally {
+    await server.stop();
+    await reader.close();
+  }
+  // 页面侧：两个右栏视图、原文路由都在（渲染在浏览器里跑，这里只验它们没被删）
+  const html = observePageHtml();
+  for (const marker of ["box.append(...contextBuiltView(vm, t))", "box.append(...promptAssembledView(vm, t))", "/records/", "splitPrompt", "keptDetails"]) expect(html).toContain(marker);
+});
+
+test("observe show --context：system 由哪些段拼成、每次调模型的构成；content 档带原文（system 只印一次、每条消息、工具名单），metadata 档说原文在哪一档", async () => {
+  const echo = await echoAt([toolTurn("c1", "ping", {}), textTurn("好了")], { observation: { capture: "content" }, agent: { tools: [pingTool] } });
+  const r = await echo.send("帮我 ping 一下");
+  await echo.observations.flush();
+  const out = sink();
+  const err = sink();
+  expect(await runObserve(["show", r.runId, "--context", "--state-dir", dir], "echo-agent", { out, err })).toBe(0);
+  const text = out.text;
+  expect(text).toContain("system 组装");
+  expect(text).toContain("── 调模型 #1");
+  expect(text).toContain("── 调模型 #2");
+  expect(text).toContain("历史 · 工具结果");
+  expect(text).toContain("帮我 ping 一下"); // 用户那句原文
+  expect(text).toContain("〔调用 ping〕"); // 模型的工具调用
+  expect(text).toMatch(/工具：.*\bping\b/);
+  expect(text).toContain("system：同上面拼好的那一份"); // system 只印一次
+  expect(text).not.toContain("原文只在 content 档记");
+
+  const plain = await echoAt([textTurn("嗯")]);
+  const p = await plain.send("metadata 档");
+  await plain.observations.flush();
+  const out2 = sink();
+  expect(await runObserve(["show", p.runId, "--context", "--state-dir", dir], "echo-agent", { out: out2, err: sink() })).toBe(0);
+  expect(out2.text).toContain("── 调模型 #1");
+  expect(out2.text).toContain("原文只在 content 档记");
+  expect(out2.text).not.toContain("metadata 档\n"); // 没有原文
+});
+
 /** 等 inbox 触发的那条 run 封口（listRuns 只见已 COMMIT 的 header）。 */
 async function waitForInboxRun(echo: Echo): Promise<string> {
   const deadline = Date.now() + 5_000;

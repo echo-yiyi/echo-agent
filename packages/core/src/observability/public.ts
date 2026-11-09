@@ -14,5 +14,7 @@ export type { BuiltinSlotContribution } from "./assembly.ts";
 export { buildRunObservationViewModel, renderRunObservation, RENDERER_VERSION } from "./render.ts";
 export { materializeRunObservation, decodeObservationEnvelope, pairSpans, NOT_CAPTURED } from "./materialize.ts";
 export { ObservationCorruptionError } from "./store.ts";
+export { readContextContent } from "./context-content.ts";
+export type { ContextBuiltContent, ContextContent } from "./context-content.ts";
 export { RUN_ASSEMBLY_RECORD, RUN_BOUNDARY_NAMES } from "./draft.ts";
 export type { RunAssemblyBodyV1, RunBoundaryName, RunAcceptedBodyV1, RunStartedBodyV1, RunObservationHeaderSeed } from "./draft.ts";

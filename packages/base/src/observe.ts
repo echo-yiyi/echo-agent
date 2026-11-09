@@ -2,6 +2,7 @@
 //
 //   observe last                      最近一次 run，人读文本
 //   observe show <run-id>             指定 run
+//   observe show <run-id> --context   这个 run 送进模型的是什么：system 怎么拼的、每次调模型的构成；content 档带原文
 //   observe export <run-id> --format  json（缺省）或 text，原样进 stdout
 //   observe health                    观测目录在哪、每个 runtime 提交到哪、多少 run / record
 //   observe serve [--port N]          本地只读面板（页面轮询观测文档，agent 跑着也能看），Ctrl+C 停
@@ -18,6 +19,7 @@
 import { expandHome, resolveSessionsRoot, type RunLookupResult, type RunObservation, type RunObservationHeader } from "@echo-agent/core";
 import { renderRunObservation, type ObservationEnvelope } from "@echo-agent/core/observability";
 import type { Sink } from "./run.ts";
+import { renderRunContext } from "./observe/context-text.ts";
 import { startObserveServer } from "./observe/server.ts";
 import { SessionObservationReaders } from "./observe/sessions.ts";
 
@@ -27,8 +29,8 @@ export type ObserveFormat = "text" | "json";
 export const OBSERVE_DEFAULT_PORT = 4321;
 
 export type ObserveCommand =
-  | Readonly<{ kind: "last"; format: ObserveFormat; body: boolean }>
-  | Readonly<{ kind: "show"; runId: string; format: ObserveFormat; body: boolean }>
+  | Readonly<{ kind: "last"; format: ObserveFormat; body: boolean; context: boolean }>
+  | Readonly<{ kind: "show"; runId: string; format: ObserveFormat; body: boolean; context: boolean }>
   | Readonly<{ kind: "export"; runId: string; format: ObserveFormat }>
   | Readonly<{ kind: "health" }>
   | Readonly<{ kind: "serve"; port: number; host: string }>;
@@ -60,6 +62,9 @@ export function observeUsage(name: string): string {
   --format <text|json>     输出格式（last / show 缺省 text；export 缺省 json）
   --body                   text 输出里带上每条记录的 body（缺省只有 name / attributes，
                            且同一次生成里连着的流式增量折成一行：条数 + 字符数；带 --body 时逐条展开）
+  --context                last / show 只看送进模型的是什么：system 由哪些段拼成（谁注册的、多大）、
+                           每次调模型的构成（system / 工具 / 历史 / 摘要 / 注入各多少 token）；
+                           content 档的 run 再印出原文（system、每条消息、工具名单）
   --port <端口>            serve 监听的端口（缺省 ${OBSERVE_DEFAULT_PORT}；0 = 随机）
   --host <地址>            serve 绑定的地址（缺省 127.0.0.1；面板无鉴权，别暴露到局域网）
   -h, --help               显示本帮助
@@ -75,6 +80,7 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
   let sessionId: string | undefined;
   let format: ObserveFormat | undefined;
   let body = false;
+  let context = false;
   let port: number | undefined;
   let host: string | undefined;
   const positional: string[] = [];
@@ -101,6 +107,9 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
       case "--body":
         body = true;
         break;
+      case "--context":
+        context = true;
+        break;
       case "--port": {
         const v = value();
         const n = Number(v);
@@ -124,6 +133,8 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
     if (rest.length !== n) throw new Error(`observe ${sub} 需要 ${n} 个参数，给了 ${rest.length} 个\n\n${observeUsage(name)}`);
   };
   if ((port !== undefined || host !== undefined) && sub !== "serve") throw new Error("--port / --host 只对 serve 有意义");
+  if (context && sub !== "last" && sub !== "show") throw new Error("--context 只对 last / show 有意义");
+  if (context && (body || format === "json")) throw new Error("--context 是单独的人读视图，不与 --body / --format json 同用");
   let command: ObserveCommand;
   switch (sub) {
     case "serve":
@@ -133,11 +144,11 @@ export function parseObserveArgs(argv: readonly string[], name: string): Observe
       break;
     case "last":
       only(0);
-      command = { kind: "last", format: format ?? "text", body };
+      command = { kind: "last", format: format ?? "text", body, context };
       break;
     case "show":
       only(1);
-      command = { kind: "show", runId: rest[0]!, format: format ?? "text", body };
+      command = { kind: "show", runId: rest[0]!, format: format ?? "text", body, context };
       break;
     case "export":
       only(1);
@@ -211,6 +222,14 @@ function printLookup(lookup: RunLookupResult, what: string, format: ObserveForma
       io.err.write(`${what}：没有这条 run 的记录（从未有过，或已被过期规则删掉）\n`);
       return 1;
   }
+}
+
+/** `--context`：这个 run 送进模型的是什么；原文从 run 所在那一段的库里读。 */
+async function printContext(lookup: RunLookupResult, what: string, readers: SessionObservationReaders, io: ObserveIo): Promise<number> {
+  if (lookup.kind === "unknown") return printLookup(lookup, what, "text", false, io);
+  const runId = lookup.observation.runId;
+  io.out.write(await renderRunContext(lookup.observation, (ref) => readers.readBlob(runId, ref)));
+  return 0;
 }
 
 /**
@@ -301,10 +320,12 @@ async function execute(command: ObserveCommand, readers: SessionObservationReade
         io.err.write("还没有任何 run 的观测记录\n");
         return 1;
       }
-      return printLookup(lookup, "last", command.format, command.body, io);
+      return command.context ? printContext(lookup, "last", readers, io) : printLookup(lookup, "last", command.format, command.body, io);
     }
-    case "show":
-      return printLookup(await readers.getRun(command.runId), `show ${command.runId}`, command.format, command.body, io);
+    case "show": {
+      const lookup = await readers.getRun(command.runId);
+      return command.context ? printContext(lookup, `show ${command.runId}`, readers, io) : printLookup(lookup, `show ${command.runId}`, command.format, command.body, io);
+    }
     case "export":
       return printLookup(await readers.getRun(command.runId), `export ${command.runId}`, command.format, false, io);
     case "health":

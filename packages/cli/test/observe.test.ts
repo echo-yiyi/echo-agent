@@ -63,12 +63,15 @@ async function echoAt(turns: ScriptedTurn[]): Promise<Echo> {
 test("parseObserveArgs：四条子命令、选项、帮助；不认识的一律 throw", () => {
   expect(parseObserveArgs([], "x")).toBeNull();
   expect(parseObserveArgs(["--help"], "x")).toBeNull();
-  expect(parseObserveArgs(["last"], "x")).toEqual({ command: { kind: "last", format: "text", body: false } });
+  expect(parseObserveArgs(["last"], "x")).toEqual({ command: { kind: "last", format: "text", body: false, context: false } });
   expect(parseObserveArgs(["show", "run:1", "--body", "--state-dir", "/s", "--session", "s-1"], "x")).toEqual({
     stateDir: "/s",
     sessionId: "s-1",
-    command: { kind: "show", runId: "run:1", format: "text", body: true },
+    command: { kind: "show", runId: "run:1", format: "text", body: true, context: false },
   });
+  expect(parseObserveArgs(["show", "run:1", "--context"], "x")).toEqual({ command: { kind: "show", runId: "run:1", format: "text", body: false, context: true } });
+  expect(() => parseObserveArgs(["show", "run:1", "--context", "--body"], "x")).toThrow("--context 是单独的人读视图");
+  expect(() => parseObserveArgs(["export", "run:1", "--context"], "x")).toThrow("--context 只对 last / show 有意义");
   expect(parseObserveArgs(["export", "run:1"], "x")).toEqual({ command: { kind: "export", runId: "run:1", format: "json" } });
   expect(parseObserveArgs(["export", "run:1", "--format", "text"], "x")).toEqual({ command: { kind: "export", runId: "run:1", format: "text" } });
   expect(parseObserveArgs(["health"], "x")).toEqual({ command: { kind: "health" } });

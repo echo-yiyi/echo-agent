@@ -349,6 +349,24 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 .copy { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--stone); font-size: var(--size-micro); padding: 0 var(--space-4); height: 16px; cursor: pointer; }
 .copy:hover { background: var(--ui-raised); color: var(--ink-70); }
 .copy[data-done="1"] { color: var(--ink-70); border-color: var(--ui-line-strong); }
+/* 送进模型的是什么（context.built / prompt.assembled）：一行一块，条长 = 占这次的比例。
+   只有一个系列，所以单色（与时间线的耗时条同一个中性色），不借分类色；每行直接标数字（dataviz 的 relief 规则） */
+.mix { display: grid; grid-template-columns: minmax(0, 1fr) auto 34% auto; column-gap: var(--space-8); row-gap: var(--space-4); align-items: center; margin: var(--space-8) 0; font-size: var(--size-caption); }
+.mixrow { display: contents; }
+.mixlabel { min-width: 0; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mixlabel .owner { margin-left: var(--space-4); font-family: var(--font-mono); color: var(--stone); }
+.mixcount, .mixnum { font-family: var(--font-mono); color: var(--stone); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.mixbar { position: relative; height: 6px; border-radius: var(--r-full); background: var(--ui-line-soft); }
+.mixbar > span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: var(--r-full); background: var(--ink-70); opacity: 0.42; }
+.mixrow--bad .mixlabel, .mixrow--bad .mixnum { color: var(--clay); }
+.mixrow--dim .mixlabel { color: var(--stone); }
+.orig { margin-top: var(--space-8); }
+.orig > details { margin-top: var(--space-6); }
+.orig > details > summary { cursor: pointer; font-size: var(--size-caption); color: var(--ink-70); }
+.origbox { margin-top: var(--space-4); max-height: 70vh; overflow: auto; background: var(--surface); border: 1px solid var(--ui-line-soft); border-radius: var(--r-sm); padding: var(--space-8); }
+.origbox pre { margin: 0; font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+.msg + .msg { margin-top: var(--space-8); padding-top: var(--space-8); border-top: 1px solid var(--ui-line-soft); }
+.msglabel { display: block; margin-bottom: var(--space-2); color: var(--stone); font-size: var(--size-micro); }
 /* 记录健康是页脚：比区块更淡一档，不与「工具与用量」争成一个新区块 */
 .health { margin-top: var(--space-24); padding-top: var(--space-12); border-top: 1px solid var(--ui-line-soft); font-size: var(--size-caption); color: var(--stone); display: flex; flex-wrap: wrap; gap: var(--space-12); align-items: center; }
 .muted { color: var(--stone); }
@@ -401,6 +419,10 @@ const STATE = {
   // 事件详情（2026-09-07 改版）：选中哪条事件、哪些行收起了、原始 JSON 展开没有、状态解释显示哪一条。
   // 都存在 STATE 里，因为详情每 2s 重绘一次——不存的话轮询会把用户刚打开的东西合上。
   selectedEvent: null, collapsed: new Set(), rawOpen: false, markWhy: "",
+  // 点开的原文（content 档的 blob）：`<runId>#<seq>` → { state, data }，读一次就留着；哪几块原文展开着（同上：轮询重绘不许合上）
+  content: new Map(), open: {},
+  // 上一次读到的 run（原样文本）：没变就不重绘
+  vmText: "",
 };
 /* run 归哪个产品：header 只有 sessionId，产品名与 workspace 在会话 meta 里（/api/runs 顺带给） */
 const sessionOf = (r) => (r.sessionId ? STATE.sessions[r.sessionId] : undefined);
@@ -618,6 +640,10 @@ function verbFor(name, attrs, body) {
   if (name === "tool.rejected") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.toolName ?? "?"} · ${attrs.stage ?? ""} ${attrs.cause ?? ""}${attrs.decidedBy ? ` · ${attrs.decidedBy}` : ""}` };
   if (name === "permission.wait") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.toolName ?? "?"}${attrs.decision ? ` · ${attrs.decision}` : ""}` };
   if (name === "agent.state") return { verb: LEX.records[name]?.zh ?? name, obj: attrs.moment === "run_started" ? "run 开头" : (attrs.moment ?? "") };
+  // 送进模型的是什么：一行说出多大，点开右栏看构成与原文
+  if (name === "context.built") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.purpose === "compaction" ? "压缩调用 · " : ""}${attrs.messages ?? 0} 条 · ${fmtTok(attrs.tokens ?? 0)} tokens` };
+  if (name === "prompt.assembled") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.sections ?? 0} 段 · ${(attrs.chars ?? 0).toLocaleString()} 字${attrs.failed ? ` · ${attrs.failed} 段失败` : ""}` };
+  if (name === "context.compact.evaluated") return { verb: LEX.records[name]?.zh ?? name, obj: COMPACT_DECISION[attrs.decision] ?? attrs.decision ?? "" };
   // 上层 agent 的领域事件：名字都叫 agent.custom_event，真正是哪件事在 customEventType 上（metadata 档 body 恒空，
   // 不把它摆出来的话一行里什么都没有——实测一条 run 里四行「自定义事件」谁也分不出）
   if (name === "agent.custom_event") return { verb: LEX.records[name]?.zh ?? name, obj: attrs.customEventType ?? "" };
@@ -827,6 +853,169 @@ function contentSections(t, end) {
   return { secs, strip };
 }
 
+/* ── 送进模型的是什么（观测白盒化 A：context.built / prompt.assembled）── */
+const fmtTok = (n) => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString("en-US"));
+const COMPACT_DECISION = { no_stage: "没有压缩阶段", no_window: "模型没标窗口", below_target: "没到线", hook_blocked: "hook 拦下", run: "开压" };
+const ROLE_ZH = { "user/human": "用户", "user/steer": "用户插话", "user/harness": "系统插话", user: "用户", assistant: "模型", toolResult: "工具结果", environment: "环境" };
+const roleZh = (s) => ROLE_ZH[s] ?? s ?? "";
+function partLabel(p) {
+  switch (p.kind) {
+    case "transcript": return `历史 · ${roleZh(p.source)}`;
+    case "summary": return "压缩摘要";
+    case "omitted": return "压缩省略";
+    case "cleared_placeholder": return "清掉的工具结果";
+    case "injection": return `注入 · ${p.source ?? ""}`;
+    default: return `消息 · ${roleZh(p.source)}`;
+  }
+}
+/** 构成表：一行一块，条长 = 占比，每行直接写数。rows: { label, owner?, count?, value, unit, text?, title?, tone? } */
+function mixTable(rows, total, ariaLabel) {
+  const box = el("div", { class: "mix", role: "table", "aria-label": ariaLabel });
+  for (const r of rows) {
+    const pct = total > 0 ? (100 * r.value) / total : 0;
+    box.append(el("div", { class: `mixrow${r.tone ? ` mixrow--${r.tone}` : ""}`, role: "row", title: r.title ?? "" },
+      el("span", { class: "mixlabel", role: "cell" }, r.label, r.owner ? el("span", { class: "owner", text: r.owner }) : null),
+      el("span", { class: "mixcount", role: "cell", text: r.count === undefined ? "" : `×${r.count}` }),
+      el("span", { class: "mixbar", role: "cell", "aria-hidden": "true" }, r.value > 0 ? el("span", { style: `width: max(1px, ${pct}%)` }) : null),
+      el("span", { class: "mixnum", role: "cell", text: r.text ?? `${fmtTok(r.value)}${r.unit} · ${pct > 0 && pct < 1 ? "<1" : Math.round(pct)}%` }),
+    ));
+  }
+  return box;
+}
+/** 展开 / 收起记在 STATE.open 里：详情会重绘，不记的话用户刚展开的原文会被合上。 */
+function keptDetails(key, defaultOpen, summary, ...children) {
+  const open = STATE.open[key] ?? defaultOpen;
+  const d = el("details", open ? { open: true } : {}, el("summary", {}, ...summary), ...children);
+  d.addEventListener("toggle", () => { STATE.open[key] = d.open; });
+  return d;
+}
+/** 点开才读原文（content 档的 blob），读一次就留着；读完重绘右栏。 */
+function recordContent(runId, seq) {
+  const key = `${runId}#${seq}`;
+  const got = STATE.content.get(key);
+  if (got) return got;
+  const entry = { state: "loading", data: null };
+  STATE.content.set(key, entry);
+  fetch(`/api/runs/${encodeURIComponent(runId)}/records/${seq}/content`, { cache: "no-store" })
+    .then(async (r) => {
+      entry.data = await r.json().catch(() => null);
+      entry.state = r.status === 410 ? "gone" : r.status === 404 ? "none" : r.ok ? "ok" : "error";
+    })
+    .catch((e) => { entry.state = "error"; entry.data = { error: e.message }; })
+    .finally(() => { if (STATE.selected === runId && STATE.selectedEvent === seq) renderDetail(); });
+  return entry;
+}
+/** 原文这一块的开头：没记、在读、不在了、读不出来——各说一句人话。返回 null 表示读到了。 */
+function contentStatus(vm, t, hasRef) {
+  if (!hasRef) {
+    return el("p", { class: "markwhy", text: vm.header.capturePolicy === "content" ? "这条没有带原文。" : "原文只在 content 档记：用 --observe content 跑，这里就能看到送进去的每一个字。" });
+  }
+  const c = recordContent(vm.header.runId, t.seq);
+  if (c.state === "loading") return el("p", { class: "markwhy", text: "正在读原文…" });
+  if (c.state === "gone") return el("p", { class: "markwhy", text: "原文已不在：被过期清扫或手动删掉了（构成还在上面）。" });
+  if (c.state !== "ok") return el("p", { class: "markwhy tl--bad", text: `读不出原文：${c.data?.error ?? c.state}` });
+  return null;
+}
+/** 一条消息排成人读的字：正文、思考、工具调用参数、图片占位。 */
+function messageText(m) {
+  if (m.role === "toolResult") return `${m.content}${m.images?.length ? `\n〔${m.images.length} 张图〕` : ""}`;
+  if (!Array.isArray(m.content)) return JSON.stringify(m, null, 2);
+  return m.content.map((b) => {
+    if (b.type === "text") return b.text;
+    if (b.type === "thinking") return `〔思考〕${b.thinking}`;
+    if (b.type === "tool_use") return `〔调用 ${b.name}〕${JSON.stringify(b.input)}`;
+    if (b.type === "image") return "〔图片〕";
+    return `〔${b.type}〕`;
+  }).join("\n");
+}
+function messageLabel(m, i) {
+  const who = m.role === "user" ? roleZh(`user/${m.source}`)
+    : m.role === "environment" ? `环境 · ${m.source}${m.ref ? ` ${m.ref}` : ""}`
+    : m.role === "toolResult" ? `工具结果 · ${m.toolName}${m.isError ? "（出错）" : ""}`
+    : roleZh(m.role);
+  return `#${i + 1} ${who}`;
+}
+const MSG_LIMIT = 4000;
+const clipMsg = (s) => (s.length > MSG_LIMIT ? `${s.slice(0, MSG_LIMIT)}\n…还有 ${s.length - MSG_LIMIT} 字符（「复制全部」拿完整的）` : s);
+
+/** context.built 的右栏：这次送进模型的构成（条形表）、装备与改动；content 档再加原文。 */
+function contextBuiltView(vm, t) {
+  const b = t.body ?? {};
+  const out = [];
+  const rows = [];
+  if (b.system) rows.push({ label: "system", value: b.system.tokens, unit: "", title: `${b.system.chars.toLocaleString()} 字符` });
+  if (b.tools && b.tools.count > 0) rows.push({ label: "工具菜单", count: b.tools.count, value: b.tools.tokens, unit: "", title: `${b.tools.schemaChars.toLocaleString()} 字符的 schema：${b.tools.names.join(", ")}` });
+  for (const p of b.parts ?? []) {
+    rows.push({ label: partLabel(p), count: p.count, value: p.tokens, unit: "", title: `${p.chars.toLocaleString()} 字符${p.images ? ` · ${p.images} 张图` : ""}`, tone: p.kind === "cleared_placeholder" || p.kind === "omitted" ? "dim" : undefined });
+  }
+  out.push(el("div", { class: "tl-sec" },
+    el("span", { class: "tl-sec-label", text: `构成 · 估算 ${(b.tokens ?? 0).toLocaleString()} tokens（与压缩同一把尺子，未乘校准比）` }),
+    mixTable(rows, b.tokens ?? 0, "这次送进模型的构成")));
+  const dl = el("dl", { class: "fields" });
+  const field = (k, v) => dl.append(el("dt", { text: k }), el("dd", { text: v }));
+  if (b.request) field("模型", `${b.request.model} · 思考 ${b.request.thinkingLevel ?? "未设"} · 输出上限 ${b.request.maxOutputTokens ?? "未标"}`);
+  if (b.purpose === "compaction") field("用途", `压缩阶段 ${b.stage ?? ""} 的模型调用 · 第 ${b.attempt ?? 1} 次`);
+  else if (b.attempt > 1) field("尝试", `第 ${b.attempt} 次（同一轮的重试或压缩之后重跑）`);
+  const hooks = [];
+  if (b.hooks?.transformContext === "replaced") hooks.push("transformContext 换了整份视图");
+  if (b.hooks?.contextBeforeBuild === "patched") hooks.push("contextBeforeBuild 改了消息");
+  if (hooks.length > 0) field("hook", hooks.join("；"));
+  const cv = b.converter;
+  if (cv) field("投影", cv.kind === "custom" ? "自定义 convertToLlm（增删不记）" : `送出 ${cv.outputMessages} 条${cv.dropped ? ` · 丢 ${cv.dropped} 条` : ""}${cv.healedOrphans ? ` · 补了 ${cv.healedOrphans} 个落单的工具结果` : ""}`);
+  if (b.unresolved) field("缺", `${b.unresolved} 条交接时丢了，没算进构成`);
+  out.push(dl);
+
+  const orig = el("div", { class: "orig" });
+  const status = contentStatus(vm, t, b.content !== undefined);
+  if (status !== null) { orig.append(el("span", { class: "tl-sec-label", text: "原文" }), status); out.push(orig); return out; }
+  const d = STATE.content.get(`${vm.header.runId}#${t.seq}`).data;
+  orig.append(el("span", { class: "tl-sec-label" }, "原文（送进投影之前的那一份） ", copyButton("复制全部", JSON.stringify({ systemPrompt: d.systemPrompt, messages: d.view, tools: d.tools }, null, 2))));
+  if (d.systemPrompt !== null) orig.append(keptDetails("ctx.system", false, [`system · ${d.systemPrompt.length.toLocaleString()} 字`], el("div", { class: "origbox" }, el("pre", { text: clip(d.systemPrompt) }))));
+  const msgs = el("div", { class: "origbox" });
+  d.view.forEach((m, i) => msgs.append(el("div", { class: "msg" }, el("span", { class: "msglabel", text: messageLabel(m, i) }), el("pre", { text: clipMsg(messageText(m)) }))));
+  orig.append(keptDetails("ctx.messages", true, [`消息 · ${d.view.length} 条`], msgs));
+  orig.append(keptDetails("ctx.tools", false, [`工具 schema · ${d.tools.length} 个`], el("div", { class: "origbox" }, el("pre", { text: clip(JSON.stringify(d.tools, null, 2)) }))));
+  out.push(orig);
+  return out;
+}
+
+/** 拼好的 system 按段切开：段之间一个空行（`assembleSystem` 的拼法），空段与失败段不占字。对不上就不切，整段给。 */
+function splitPrompt(text, sections) {
+  const rendered = sections.filter((s) => s.status === "rendered");
+  const sum = rendered.reduce((n, s) => n + s.chars, 0) + Math.max(0, rendered.length - 1) * 2;
+  if (sum !== text.length) return null;
+  let at = 0;
+  return rendered.map((s) => { const part = text.slice(at, at + s.chars); at += s.chars + 2; return { s, part }; });
+}
+/** prompt.assembled 的右栏：每段谁注册的、成没成、多大；content 档再按段给原文。 */
+function promptAssembledView(vm, t) {
+  const b = t.body ?? {};
+  const sections = b.sections ?? [];
+  const out = [];
+  const statusZh = { rendered: "", empty: "空", failed: "失败" };
+  const rows = sections.map((s) => ({
+    label: s.name, owner: s.owner ?? "（未登记）", value: s.chars, unit: " 字",
+    text: s.status === "rendered" ? undefined : statusZh[s.status],
+    tone: s.status === "failed" ? "bad" : s.status === "empty" ? "dim" : undefined,
+    title: `order ${s.order} · ${s.owner ?? "不经 extension 直接塞进表的段"}${s.status === "rendered" ? ` · ${s.chars.toLocaleString()} 字` : ` · ${s.status}`}`,
+  }));
+  out.push(el("div", { class: "tl-sec" },
+    el("span", { class: "tl-sec-label", text: `${sections.length} 段 · 共 ${(b.chars ?? 0).toLocaleString()} 字 · 按 order 从上到下` }),
+    mixTable(rows, b.chars ?? 0, "system 由哪些段拼成")));
+  if (Array.isArray(b.variables) && b.variables.length > 0) out.push(el("p", { class: "markwhy", text: `用到的变量：${b.variables.map((v) => `{{${v}}}`).join(" ")}` }));
+  const orig = el("div", { class: "orig" });
+  const status = contentStatus(vm, t, b.text !== undefined);
+  if (status !== null) { orig.append(el("span", { class: "tl-sec-label", text: "原文" }), status); out.push(orig); return out; }
+  const text = STATE.content.get(`${vm.header.runId}#${t.seq}`).data?.texts?.text;
+  if (typeof text !== "string") { orig.append(el("p", { class: "markwhy", text: "原文已不在。" })); out.push(orig); return out; }
+  orig.append(el("span", { class: "tl-sec-label" }, "原文 ", copyButton("复制全部", text)));
+  const parts = splitPrompt(text, sections);
+  if (parts === null) orig.append(el("div", { class: "origbox" }, el("pre", { text: clip(text) })));
+  else for (const { s, part } of parts) orig.append(keptDetails(`prompt.${s.name}`, false, [`${s.name} · ${s.chars.toLocaleString()} 字`], el("div", { class: "origbox" }, el("pre", { text: clip(part) }))));
+  out.push(orig);
+  return out;
+}
+
 function renderEntry(e, gaps, runMs = 0) {
   const t = e.start;
   const end = e.end;
@@ -1005,6 +1194,8 @@ function renderEventDetail(entries, vm) {
     : undefined;
   if (spawned) field("子循环", el("button", { class: "navbtn", text: "打开那条 run", onclick: () => openRun(spawned.runId) }));
   box.append(dl);
+  if (t.name === "context.built") box.append(...contextBuiltView(vm, t));
+  if (t.name === "prompt.assembled") box.append(...promptAssembledView(vm, t));
 
   const { secs, strip } = contentSections(t, end);
   for (const s of secs) box.append(el("div", { class: `tl-sec${s.tone === "bad" ? " tl-sec--bad" : ""}` }, el("span", { class: "tl-sec-label", text: s.label }), el("pre", { class: "tl-text", text: clip(s.text) })));
@@ -1147,7 +1338,6 @@ function renderDetail() {
   box.append(el("div", { class: "health" },
     statusMark(LEX.integrity[h.integrity], h.integrity),
     gaps.length === 0 ? null : el("span", { text: `缺口 ${gaps.length}：${gaps.map((g) => `${g.reason}（丢 ${g.dropped}）`).join("、")}` }),
-    statusMark(LEX.persistence[vm.health.persistence], vm.health.persistence),
     el("span", { text: vm.health.redacted ? "不含正文" : "含正文" }),
     el("span", { class: "mono", text: `记录 ${vm.summary.recordCount}` }),
   ));
@@ -1238,8 +1428,13 @@ async function loadRuns() {
 async function loadRun() {
   if (STATE.selected === null) { STATE.vm = null; renderDetail(); return; }
   try {
-    const vm = await getJson(`/api/runs/${encodeURIComponent(STATE.selected)}`);
-    STATE.vm = vm;
+    const res = await fetch(`/api/runs/${encodeURIComponent(STATE.selected)}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`/api/runs/${STATE.selected} → ${res.status}`);
+    const text = await res.text();
+    // 没变就不重绘：封口的 run 每 2s 读一次，重绘会把正在读的长原文滚回顶上
+    if (text === STATE.vmText && STATE.vm !== null) return;
+    STATE.vmText = text;
+    STATE.vm = JSON.parse(text);
     renderDetail();
   } catch (e) {
     STATE.vm = null;

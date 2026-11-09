@@ -24,7 +24,7 @@
 **待拍板 / 实施中。** 两条，本文只指过去、不复述：
 
 - [观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)——B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部），**未实现**；本文按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
-- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——2026-11-08 拍板、分期实施中。**已落地**：上下文的构成（§7「用了什么」：`prompt.assembled`、`context.built` 的 metadata 档、压缩判断）；正文存储（`content` 档下送进模型的 system / 视图 / 工具 schema 存成 blob，可逐字节还原，§4、§5）。**还没有**：面板展示、记忆的决定点、其余原因码与因果链。
+- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——2026-11-08 拍板、分期实施中。**已落地**：上下文的构成（§7「用了什么」：`prompt.assembled`、`context.built` 的 metadata 档、压缩判断）；正文存储（`content` 档下送进模型的 system / 视图 / 工具 schema 存成 blob，可逐字节还原，§4、§5）；面板与 `observe show --context` 里看得到这些（§6）。**还没有**：记忆的决定点、其余原因码与因果链。
 
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
@@ -157,7 +157,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 
 | 入口 | 形状 | 取锁 | 用途 |
 |---|---|---|---|
-| `observe` 子命令 | `last` / `show <run-id>` / `export` / `health` / `serve` | **不取** | 命令行排查；`serve` 是本地只读面板 |
+| `observe` 子命令 | `last` / `show <run-id>` / `export` / `health` / `serve`；`last` / `show` 加 `--context` 只看送进模型的是什么 | **不取** | 命令行排查；`serve` 是本地只读面板 |
 | `echo.observations` | `EchoObservations`：`getRun` `lastRun` `listRuns` `snapshot` `subscribe` `flush` `readBlob` | 已在 runtime 内 | 宿主自己读 / 订阅；读之前先等观测线程写完此刻之前交出去的 |
 | `openObservationReader({ stateRoot })` | `EchoObservationReader`：同上去掉 `subscribe` 与 `flush`，多一个 `close()` | **不取** | 离线读一个状态根 |
 
@@ -165,11 +165,13 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 
 - **只读入口不启动 agent、不取会话锁**，所以正在跑的会话也能读——读到的是它已提交的部分。reader 只读 rename 完成的文档，看不到半截；`runs/` 最多落后正在写派生文件的那一批。
 - **`getRun()` 只有两态**：`found` / `unknown`（从未有过，或已被过期规则删掉）。
-- **`readBlob(ref)` 按引用取正文**：文件不在（被清扫或手动删了）返回 `null`——「正文已不在」，不是 corruption；在但 digest / 字节数对不上引用是 corruption。一次送模的整份上下文由 [`readContextContent`](../../packages/core/src/observability/context-mirror-host.ts#symbol=readContextContent) 凭 `context.built` 的 `content` 还原：system 原文、投影之前的视图（再过一遍 `defaultConvertToLlm` 就是线上的 messages）、工具 schema。
+- **`readBlob(ref)` 按引用取正文**：文件不在（被清扫或手动删了）返回 `null`——「正文已不在」，不是 corruption；在但 digest / 字节数对不上引用是 corruption。一次送模的整份上下文由 [`readContextContent`](../../packages/core/src/observability/context-content.ts#symbol=readContextContent)（`@echo-agent/core/observability` 导出） 凭 `context.built` 的 `content` 还原：system 原文、投影之前的视图（再过一遍 `defaultConvertToLlm` 就是线上的 messages）、工具 schema。
 - **`lastRun()` 是最近一次顶层 run**：隔离子循环（§7）是某个 run 派出来的，`source` 带 `parentRunId`，不算「上一次」。`listRuns()` 照常列出全部。
 - **列举顺序新的在前**（[`RunIndexOrderKey`](../../packages/core/src/observability/document-store.ts#symbol=RunIndexOrderKey)）：`acceptedAt` 倒序；同一毫秒时，同一个 runtime 内按 `firstSeq` 倒序（`run.accepted` 的 seq 就是 admission 顺序），跨 runtime 按 `runtimeId` 定一个固定次序——跨 runtime 的 seq 各数各的，没有可比的先后。三段逐级比较是全序，分页游标带的就是这三个字段，所以翻页不重不漏。
 - **renderer 是纯函数**（[render.ts](../../packages/core/src/observability/render.ts#symbol=renderRunObservation) 头注）：`buildRunObservationViewModel()` 与 `renderRunObservation()` 不读 Agent、不查 store、不看订阅状态，也不改原 envelope。同一批记录必然同一输出，所以能上 golden。时间全部相对 `acceptedAt`，golden 不锁 wall clock。
 - **`observe` 的人读文本折叠流式增量**：`content` 档下一次生成有几百条 `model.generate.delta`，`last` / `show` / `export --format text` 交给 renderer 之前把同一个 turn 里连着的折成一条，只留 `count`、`chars`、`deltaType`（[foldGenerationDeltas](../../packages/base/src/observe.ts#symbol=foldGenerationDeltas)）。`--body` 照样逐条展开；JSON 导出、盘上记录与末尾的记录总数都不变。
+
+**送进模型的是什么**（观测白盒化 A3）。面板里选中一条 `context.built`，右栏是这次送模的构成：system、工具菜单、历史（按角色）、压缩摘要 / 省略、清掉的占位、注入各一行，条长是占这次估算 token 的比例；下面是模型与思考档、hook 改没改视图、投影送出几条丢几条。选中 `prompt.assembled` 是 system 的段清单：每段谁注册的、成没成、多少字、用到哪些变量。`content` 档的 run 两处都多一块原文——system（按段切开）、投影之前的每条消息、工具 schema——点开那条记录时才经 `GET /api/runs/<run-id>/records/<seq>/content` 读 blob（[server.ts](../../packages/base/src/observe/server.ts#symbol=RecordContentResponse)），正文已被清扫回 410、页面说「原文已不在」。命令行同一份：`observe show <run-id> --context`（[context-text.ts](../../packages/base/src/observe/context-text.ts#symbol=renderRunContext)），system 同一份只印一次。
 
 **跨会话是在装配层做的，不在 core**：core 守「一个状态根、一个 reader」，`packages/base` 的 `SessionObservationReaders` 给每段会话开一个只读 reader 再合并。所以不给 `--session` 时一个面板能看整个集群。只有旧格式 `observations.sqlite` 的会话记进读不了的会话，原因写「旧格式观测，已不再读取」。
 

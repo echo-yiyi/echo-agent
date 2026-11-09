@@ -1,9 +1,11 @@
 // `echo-agent observe serve`：本地只读面板。`Bun.serve` 起一个 HTTP 服务，页面轮询 JSON。
 //
-// 数据面四条路由，全部走 `SessionObservationReaders`（每段会话一个 read-only reader，不取锁、不起 agent）：
+// 数据面五条路由，全部走 `SessionObservationReaders`（每段会话一个 read-only reader，不取锁、不起 agent）：
 //   GET /                        页面（vendor 的 token CSS + 术语表内联，零外部资源）
 //   GET /api/runs?limit          各段会话的 run 合并后按 acceptedAt 倒序的一页 header + 这页用到的会话（产品名 / workspace）
 //   GET /api/runs/<run-id>       `getRun()` → `RunObservationViewModel`（renderer 的 json 格式，UI 消费同一份 ViewModel）
+//   GET /api/runs/<run-id>/records/<seq>/content
+//                                那条记录引用的正文（`content` 档的 blob，`RecordContentResponse`）：点开时才读，不进 ViewModel
 //   GET /api/activity?limit      run 之外的记录（inbox 收件 / ack、闹钟投递……）合并后按 observedAt 倒序，带 sessionId
 //   GET /api/health              会话根、每段的观测目录 / runtime heads / 计数 / 最近 run
 // reader 只读 rename 完成的观测文档，页面轮询与正在写的 agent 互不干扰。
@@ -14,7 +16,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { renderRunObservation } from "@echo-agent/core/observability";
+import { readContextContent, renderRunObservation, type ContextBuiltContent, type ContextContent, type ObservationBlobRef } from "@echo-agent/core/observability";
 import { lexicon } from "./lexicon.ts";
 import type { SessionObservationReaders } from "./sessions.ts";
 
@@ -48,6 +50,46 @@ export function observePageHtml(): string {
   const lex = JSON.stringify(lexicon()).replace(/</g, "\\u003c");
   pageCache = html.replace("/*__TOKENS__*/", tokens).replace("/*__LEXICON__*/ null", lex);
   return pageCache;
+}
+
+/**
+ * `/api/runs/<run-id>/records/<seq>/content` 的回答：
+ *   · `context`：`context.built` 还原出的那次送模（system 原文、投影之前的视图、工具 schema）；
+ *   · `texts`：body 顶层每个正文引用字段的原文（`prompt.assembled` 的 `text`……）；
+ *   · `gone`（410）：引用还在、正文已经不在了（过期清扫或手动删了）；
+ *   · `none`（404）：这条记录没有正文（不是 `content` 档，或这种记录不带正文）。
+ */
+export type RecordContentResponse =
+  | ({ kind: "context" } & ContextContent)
+  | { kind: "texts"; texts: Record<string, string> }
+  | { kind: "gone" }
+  | { kind: "none" };
+
+function isBlobRef(v: unknown): v is ObservationBlobRef {
+  const r = v as { digest?: unknown; size?: unknown } | null;
+  return typeof r === "object" && r !== null && typeof r.digest === "string" && typeof r.size === "number";
+}
+
+/** 一条记录引用的正文：`context.built` 的 `content` 整份还原；其余记录 body 顶层的引用字段逐个读原文。 */
+async function recordContent(readers: SessionObservationReaders, runId: string, record: Readonly<{ name: string; body: unknown }>): Promise<RecordContentResponse> {
+  const read = (ref: ObservationBlobRef): Promise<string | null> => readers.readBlob(runId, ref);
+  const body = (typeof record.body === "object" && record.body !== null ? record.body : {}) as Record<string, unknown>;
+  if (record.name === "context.built") {
+    const content = body.content as ContextBuiltContent | undefined;
+    if (content === undefined || !isBlobRef(content.view)) return { kind: "none" };
+    const restored = await readContextContent(read, content);
+    return restored === null ? { kind: "gone" } : { kind: "context", ...restored };
+  }
+  const texts: Record<string, string> = {};
+  let refs = 0;
+  for (const [field, v] of Object.entries(body)) {
+    if (!isBlobRef(v)) continue;
+    refs += 1;
+    const text = await read(v);
+    if (text !== null) texts[field] = text;
+  }
+  if (refs === 0) return { kind: "none" };
+  return Object.keys(texts).length === 0 ? { kind: "gone" } : { kind: "texts", texts };
 }
 
 function json(body: unknown, status = 200): Response {
@@ -113,6 +155,16 @@ export function startObserveServer(opts: ObserveServerOptions): ObserveServer {
         }
         if (url.pathname === "/api/activity") {
           return json({ items: await readers.activity(clampLimit(url.searchParams.get("limit"), 30)), sessions: readers.sessions });
+        }
+        const c = /^\/api\/runs\/([^/]+)\/records\/(\d+)\/content$/.exec(url.pathname);
+        if (c !== null) {
+          const runId = decodeURIComponent(c[1]!);
+          const lookup = await readers.getRun(runId);
+          if (lookup.kind === "unknown") return json({ kind: "unknown" }, 404);
+          const record = lookup.observation.records.find((r) => r.seq === Number(c[2]));
+          if (record === undefined) return json({ kind: "none" }, 404);
+          const content = await recordContent(readers, runId, record);
+          return json(content, content.kind === "gone" ? 410 : content.kind === "none" ? 404 : 200);
         }
         const m = /^\/api\/runs\/([^/]+)$/.exec(url.pathname);
         if (m !== null) {

@@ -1,7 +1,7 @@
 # 观测白盒化：每个切点上「走了哪条路、用了什么、因为谁」都能从账本里找到
 
 > 状态:proposed → **拍板 2026-11-08,分期实施中** · 提出 2026-11-03 · 来源:用户 2026-11-03「我们的观测，就是要把 agent 的整个过程白盒化，就是要在这些切点去看这些问题」「我们要守住，观测不影响 agent」;2026-11-08「现在观测没有把记忆这些做好诶，感觉我还是看不到prompt这些」→「按推荐的做，先推基线再做 A」<br>
-> **进度**:A1(= P1:上下文镜像、`prompt.assembled`、`context.built` metadata 档、实际菜单、cache tokens、压缩判断与压缩调用入账)、A2(= P2:正文存储、`content` 档的 system / 视图 / 工具 schema 原文、过期清扫、`readBlob`)已实现,见下方「决定」;A3(面板)、B(记忆)未做。全部落地后本条移进 `implemented/`<br>
+> **进度**:A1(= P1:上下文镜像、`prompt.assembled`、`context.built` metadata 档、实际菜单、cache tokens、压缩判断与压缩调用入账)、A2(= P2:正文存储、`content` 档的 system / 视图 / 工具 schema 原文、过期清扫、`readBlob`)、A3(面板与 `observe show --context` 看得到 prompt 与每次送模的构成、原文)已实现,见下方「决定」;B(记忆)未做。全部落地后本条移进 `implemented/`<br>
 > 形态的家是 [观测:一次 run 留下的账本](../../design/observability.md);本条只写取舍与要补的清单,实现合入时形态并进那篇。
 
 ## 导读
@@ -49,7 +49,8 @@
 - **清扫加宽限期**:§4 的「扫剩下的批、其余删掉」和活着的写者并排跑会删掉「已写、引用它的批还没提交」的 blob,而那正是先写 blob 后提交留下的空当。改为:没被引用且 `writtenAt` 早于此刻减 24 小时才删;写入端对仍在引用的正文每小时重写一次(刷新 `writtenAt`)。清扫只在过期真删了东西之后跑。
 - **视图存成引用树,记录里只有一个引用**:§3.3 的 `view?: BlobRef[]` 逐条进记录,一万条消息就超 64 KiB,且每个 attempt 重写一整份清单、盘上随 attempt 数平方增长。改为每 64 条一块、块再成列表;transcript 只增,前面的块 digest 不变、不重写。工具菜单整份一个 blob(菜单很少变)。`context.built` 的 `content` 是 `{ system, view, tools }`。
 - **`prompt.assembled` 的原文走通用的投影 `blobs` 声明**(descriptor 只在 `content` 档给;别的档观测线程不建写入端、不写):这一档每个 run 多一次把 system 串交给观测线程(与 `context.built` 第一次交的是同一份正文,盘上只有一个文件)。B 的记忆写入正文走同一条路。
-- **还原函数先不公开**:[`readContextContent`](../../../packages/core/src/observability/context-mirror-host.ts#symbol=readContextContent) 在 core 内部,公开面只加 `readBlob(ref)`(`EchoObservations` / `EchoObservationReader`)与 `OBSERVATION_BLOB_REFS`;面板要用时(A3)再定从哪导出。
+- **A3 落地时定的**:构成画成**一行一块的条形表**(条长 = 占这次估算 token 的比例,每行直接写数),不画分类色堆叠条——设计系统的分类色板没进编程产品的 token 构建产物,手抄色值违反「取值只从 dist 来」;单系列条形用页面已有的中性色就够,也满足图表规格的「直接标注」要求。原文点开才读(`/api/runs/<id>/records/<seq>/content`),不进 run 的 ViewModel。顺手修了面板一个旧 bug:run 详情读 `LEX.persistence[vm.health.persistence]`,术语表与 ViewModel 早就没有这一项,任何一条 run 的详情都打不开;加了一条测试对表「页面读的术语表分区都在」。
+- **还原函数** [`readContextContent`](../../../packages/core/src/observability/context-content.ts#symbol=readContextContent):A2 时留在 core 内部;A3 面板与 `observe show --context` 要用,挪进纯模块、从 `@echo-agent/core/observability` 导出(连同 `ContextBuiltContent` / `ContextContent` 两个类型)。公开面另加 `readBlob(ref)`(`EchoObservations` / `EchoObservationReader`)与 `OBSERVATION_BLOB_REFS`。
 
 **验收判据(机器可判)。**
 

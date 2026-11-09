@@ -601,7 +601,7 @@ type   McpHost
 type   McpServerSnapshot
 
 == 入口 "./observability" → src/observability/public.ts ==
-符号 78（value 16 · type 61 · both 1）
+符号 81（value 17 · type 63 · both 1）
 
 -- src/admission/types.ts (1) --
 type   RunSource
@@ -610,6 +610,11 @@ type   RunSource
 type   BuiltinSlotContribution
 value  sealAgentAssemblyObservation
 value  snapshotRunModelBinding
+
+-- src/observability/context-content.ts (3) --
+type   ContextBuiltContent
+type   ContextContent
+value  readContextContent
 
 -- src/observability/draft.ts (7) --
 value  RUN_ASSEMBLY_RECORD
