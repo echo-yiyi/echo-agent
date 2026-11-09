@@ -186,6 +186,38 @@ test("面板：/api/runs/<id>/records/<seq>/content 给出那次送模的原文�
   for (const marker of ["box.append(...contextBuiltView(vm, t))", "box.append(...promptAssembledView(vm, t))", "/records/", "splitPrompt", "keptDetails"]) expect(html).toContain(marker);
 });
 
+test("面板：记忆写入的正文（content 档）——/records/<seq>/content 给写成的整份与写之前的那份；页面有逐行改动视图", async () => {
+  // 记忆的用户层在 ECHO_HOME 下：只在这条测试里换到临时目录，绝不碰开发机上真的 ~/.echo
+  const savedHome = process.env["ECHO_HOME"];
+  process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-serve-"));
+  try {
+    const create = { command: "create", path: "user/memory/panel-style.md", file_text: "---\ndescription: 回答风格\n---\n\n回答尽量简短。" };
+    const replace = { command: "str_replace", path: "user/memory/panel-style.md", old_str: "尽量简短", new_str: "简短、先给结论" };
+    const echo = await echoAt([toolTurn("m1", "memory", create), toolTurn("m2", "memory", replace), textTurn("改好了")], { withoutMemory: false, observation: { capture: "content" } });
+    const r = await echo.send("记一下回答风格");
+    await echo.observations.flush();
+    const reader = new SessionObservationReaders({ sessionsRoot: dir });
+    const server = startObserveServer({ readers: reader, port: 0 });
+    try {
+      const vm = (await (await fetch(`${server.url}/api/runs/${r.runId}`)).json()) as { timeline: Timeline };
+      const writes = vm.timeline.filter((t) => t.name === "memory.mutation.committed");
+      expect(writes).toHaveLength(2);
+      const got = (await (await fetch(`${server.url}/api/runs/${r.runId}/records/${writes[1]!.seq}/content`)).json()) as { kind: string; texts: { content: string; before: string } };
+      expect(got.kind).toBe("texts");
+      expect(got.texts.before).toBe(create.file_text);
+      expect(got.texts.content).toBe(create.file_text.replace("尽量简短", "简短、先给结论"));
+    } finally {
+      await server.stop();
+      await reader.close();
+    }
+  } finally {
+    if (savedHome === undefined) delete process.env["ECHO_HOME"];
+    else process.env["ECHO_HOME"] = savedHome;
+  }
+  const html = observePageHtml();
+  for (const marker of ["box.append(...memoryWriteView(vm, t))", "lineDiff(before, after)", "EXTRACT_SKIP[attrs.reason]", "DREAM_DECISION[attrs.decision]"]) expect(html).toContain(marker);
+});
+
 test("observe show --context：system 由哪些段拼成、每次调模型的构成；content 档带原文（system 只印一次、每条消息、工具名单），metadata 档说原文在哪一档", async () => {
   const echo = await echoAt([toolTurn("c1", "ping", {}), textTurn("好了")], { observation: { capture: "content" }, agent: { tools: [pingTool] } });
   const r = await echo.send("帮我 ping 一下");
@@ -301,6 +333,7 @@ const EMITTED_RECORD_NAMES = [
   "model.generate", "model.generate.delta", "model.usage", "model.retry.scheduled",
   "tool.execute", "tool.execute.progress",
   "memory.compose", "memory.mutation.committed", "memory.mutation.rejected", "memory.mutation.failed", "memory.mutation.partial",
+  "memory.extract.skipped", "memory.dream.evaluated",
   "task.state.committed", "task.store.saved", "task.store.failed",
   "schedule.created", "schedule.cancelled", "schedule.delivered", "schedule.bookkeeping-failed", "schedule.missed",
   "inbox.accepted", "inbox.rejected", "inbox.restored", "inbox.consumed", "inbox.acked", "inbox.released", "inbox.sealed",

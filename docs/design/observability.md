@@ -24,7 +24,7 @@
 **待拍板 / 实施中。** 两条，本文只指过去、不复述：
 
 - [观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)——B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部），**未实现**；本文按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
-- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——2026-11-08 拍板、分期实施中。**已落地**：上下文的构成（§7「用了什么」：`prompt.assembled`、`context.built` 的 metadata 档、压缩判断）；正文存储（`content` 档下送进模型的 system / 视图 / 工具 schema 存成 blob，可逐字节还原，§4、§5）；面板与 `observe show --context` 里看得到这些（§6）。**还没有**：记忆的决定点、其余原因码与因果链。
+- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——2026-11-08 拍板、分期实施中。**已落地**：上下文的构成（§7「用了什么」：`prompt.assembled`、`context.built` 的 metadata 档、压缩判断）；正文存储（`content` 档下送进模型的 system / 视图 / 工具 schema 存成 blob，可逐字节还原，§4、§5）；面板与 `observe show --context` 里看得到这些（§6）；记忆后台的门与写进去的正文（§7）。**还没有**：其余决定点的原因码、因果链、诊断入账。
 
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
@@ -187,7 +187,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 | 压缩 | [compaction/observe.ts](../../packages/core/src/compaction/observe.ts#symbol=compactionFactDescriptor) | **每次判断**（`context.compact.evaluated`）、一次压缩的起止、**压缩失败**（某个阶段抛错被跳过，或整条流水线没有一段改动上下文）。压缩阶段自己的模型调用记成 `context.built`（`purpose: "compaction"`） |
 | Agent 自身 | [agent-observe.ts](../../packages/core/src/agent-observe.ts#symbol=agentFactDescriptor) | **生命周期相位**迁移、**装备变更**（模型 / 思考档）、队列长度、**输入的去向**（`agent.input.accepted` / `returned` / `blocked`）、**这个 run 的 system 怎么拼成的**（`prompt.assembled`）、资源注册与卸载。**run 开头的整体状态**（`agent.state`）随 `run.started` 一起交出，由观测线程记 |
 | extension | [extension/observe.ts](../../packages/core/src/extension/observe.ts#symbol=extensionFactDescriptor) | 一代装上（每个 extension 提供了什么、依赖的服务实际连到了谁）/ 没装上（prepare 被拒或 apply 抛错并回滚）/ 卸下 / 卸载被拒 |
-| 记忆 | `memory/observe.ts` | 回忆、写入、提取 |
+| 记忆 | `memory/observe.ts` | 回忆（`memory.compose`，`reused` = 沿用会话里冻结的那份）、写入（`content` 档带写成的整份与写之前的那份，存成正文）、**提取没跑的原因**（`memory.extract.skipped`）、**整理每层判了什么**（`memory.dream.evaluated`） |
 | 任务 | `task/observe.ts` | 状态变更、落盘 |
 | 闹钟 | `schedule/observe.ts` | 排程、触发、取消 |
 | 收件 | `inbox/observe.ts` | accepted / rejected / restored / consumed / acked / released / sealed |
@@ -197,6 +197,7 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 几类事实值得单说：
 
 - **决定点。** 工具在执行之前被拦下的调用**不发 `tool.execute`**，所以每个拦截分支各记一条 `tool.rejected`：`stage`（lookup / arguments / preToolUse / permission / start / postToolUse）、`cause`、`decidedBy`。`start` 是一直没启动：run 停了或被中断（cause `aborted`）、用户插话改了方向（cause `superseded`）。词汇沿用 `LifecycleEvent` 里已有的。只有真正进了 ask 才有 `permission.wait`，结束探针在裁决落下的那一刻记，span 时长就是等人的时间。原因文本可能来自 hook 或人工输入，只在 `content` 档进 body。方言丢掉的调用（参数不可解析、没有名字、无主的片段）不进 transcript，记一条 `tool.call.dropped`：丢法、调用 id、工具名、参数长度 metadata 档就记，参数原文只在 `content` 档。
+- **记忆后台的门。** 提取与整理不在 run 的路径上，判没判、为什么不跑原来没有一点痕迹。回复收尾后提取每道门没过记一条 `memory.extract.skipped`，`reason` 是封闭集（话太少、轮数没攒满、前台这条自己写过、没有模块、对话被换掉、没有新消息、排队时被中止、收摊中、作用域没绑），放行不记——跑起来的提取自己是一个子循环 run。回到 idle 后整理对每一层记一条 `memory.dream.evaluated`：`decision` 是开整（水位到线 / 节流全满足，带那次整理的 runId）或跳过的原因（进行中、太早、写入 / 轮数 / 文件不够、别的会话在整理），与 `shouldDream` 是同一份判断（[`dreamGate`](../../packages/core/src/memory/harness.ts#symbol=dreamGate)）。两条都是 **run 之外的活动**：判的那一刻触发它的 run 可能已经封口（封口后的 run 不收记录），`runId` 属性链回那个 run，面板的「运行时活动」里点得过去。
 - **输入与执行对得上。** 人说的每句话收下时带 `inputId`（[输入的生命周期](../decisions/implemented/2026-11-05-input-lifecycle.md)）：`turn.execute` 的开头记引出这一轮的 `inputs`，`agent.message.appended` 记它，排队的两种收下时记 `agent.input.accepted`（带收下时的 run / turn），没进 transcript 的记 `agent.input.returned`（交还）或 `agent.input.blocked`（hook 拦下）。于是「这句话 → 引出的那一轮 → 那一轮的工具调用（同一个 turnId）」不用按时间猜。
 - **整体运行状态。** run 开头（`agent.state` 快照）与结尾（`run.closed` 里的 `finalSnapshot`）各一份，**同形、同一个校验器**（[terminal.ts](../../packages/core/src/observability/terminal.ts#symbol=materializeObservableState)）：状态、装备（思考档、工具 / skill 名单）、上下文占用、工作目录、各能力的计数摘要（`echo:tasks` / `echo:scheduler` / `echo:agent` 的收件箱）。模型与绑定不重复记——它们在 `run.assembly`。校验是**白名单重建**：只有逐个校验过的字段进副本，加字段必须同时扩白名单，否则会在封口时被静默剥掉。
 - **生命周期相位。** `Agent` 里所有相位写入都经 [`Agent.setPhase`](../../packages/core/src/agent.ts#symbol=Agent.setPhase)，节点就是它；丢锁那一拍也在这里当场记——这是 Agent 自己做的迁移，不是观测推断死活。**`stopping → stopped` 进不了账本**：stop 流程里观测被告知收摊（不等），`stopped` 在那之后才成立，观测线程已经不收这个 runtime 的事实。一次正常收摊的最后一拍相位是 `running → stopping`。
@@ -217,7 +218,7 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 1. **没有崩溃恢复**：缺省存储（`FileDir`）每次写都是 fsync 临时文件 → rename → fsync 父目录（[原子写](../decisions/implemented/2026-11-03-atomic-write-fsync.md)），掉电不会留下零长或半截的批文件；`observation.store` 注入的存储持久到什么程度由它自己定。进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端封口之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
 2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性。两个产品的 30 天规则把它压在「最近 30 天的 run 数」上，不是彻底解决——单段会话在 30 天内堆出足够多的 run 仍然会慢。
 3. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
-4. **超预算的记录只能成缺口**：正文存储只接了送模的上下文（`context.built`）与拼好的 system（`prompt.assembled`）；模型回复、工具结果、记忆写入的正文仍在记录里，超了就截断或成缺口。
+4. **超预算的记录只能成缺口**：正文存储只接了送模的上下文（`context.built`）、拼好的 system（`prompt.assembled`）与记忆写入；模型回复、工具结果的正文仍在记录里，超了就截断或成缺口。
 5. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
 6. **记忆的能力摘要没接。** 状态快照在节点上只收同步可读的值，记忆的状态在盘上要异步读。
 7. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。

@@ -12,7 +12,7 @@ import { ABORT_REASON, AbortReason, errText, type AgentError } from "./errors.ts
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
-import { memoryFactDescriptor, type MemoryFact } from "./memory/observe.ts";
+import { memoryFactDescriptor, type ExtractSkipReason, type MemoryFact } from "./memory/observe.ts";
 import type { CapabilityFactSink } from "./observability/fact-sink.ts";
 import { memoryHostOf } from "./memory/host-wiring.ts";
 import { MemoryChannel } from "./memory/channel.ts";
@@ -81,7 +81,7 @@ import {
   memoryPromptSections,
   memoryTool,
   memoryUpdateMessage,
-  shouldDream,
+  dreamGate,
   shownResidentContents,
   type AgentMemories,
   type MemoryReads,
@@ -558,6 +558,11 @@ export class Agent {
   private loopProbes: LoopProbes | undefined;
   /** Agent 自身节点（队列、资源）的探针（`agent-observe.ts`），与 `observation` 同时解析。 */
   private agentProbe: AgentProbe | undefined;
+  /**
+   * 记忆后台两件事的门（提取没跑、整理每层判了什么）的探针：scope 只给「哪个 agent、哪段会话」，不挂 run——
+   * 判的那一刻触发它的 run 可能已经封口，挂上去会被丢；事实里的 `triggeredBy` 链回那个 run（`memory/observe.ts`）。
+   */
+  private memoryActivity: CapabilityFactSink<MemoryFact> | undefined;
 
   /** 持久记忆的操作面：`agent.memory?.shouldDream()`。undefined = 本 agent 没有记忆。 */
   readonly memory?: AgentMemories;
@@ -3112,17 +3117,26 @@ export class Agent {
    */
   private enqueueExtract(opts: { force?: boolean } = {}): void {
     const memory = this.memory;
+    if (memory === undefined) return; // 没装记忆：是配置，不是一道门，不记
     const scope = this.activeScope ?? this.lastScope;
-    if (memory === undefined || !this.memoryWorkAllowed || scope === undefined) return;
-    // 一个模块都没有（`memory.builtin: false` 且没有扩展注册）：没有地方可写，不为此起一次模型调用
-    if (memory.memories.size === 0) return;
     const force = opts.force === true;
+    // 每道门没过都记一条原因（观测白盒化 B，`memory.extract.skipped`）；放行不记——跑起来的提取自己是一个子循环 run
+    const triggeredBy = scope?.runId;
+    const skipped = (reason: ExtractSkipReason): void => {
+      this.memoryActivity?.offer({ kind: "extract_skipped", reason, force, ...(triggeredBy === undefined ? {} : { triggeredBy }), occurredAt: Date.now() });
+    };
+    if (!this.memoryWorkAllowed) return skipped("not_allowed");
+    if (scope === undefined) return skipped("no_scope");
+    // 一个模块都没有（`memory.builtin: false` 且没有扩展注册）：没有地方可写，不为此起一次模型调用。
+    // 退出前补跑（force）时模块为空不记：`createEcho()` 的 `stop()` 卸完 extension 之后 `doStop()` 还会兜底再补一次，
+    // 那时模块已经卸了——是收摊顺序，不是这段会话没有记忆模块，每次收摊都记一条只会误导
+    if (memory.memories.size === 0) return force ? undefined : skipped("no_modules");
     // **重叠保护**：这条 reply 里前台自己已经写过记忆，这条 reply 就不单独起一次提取——不然刚写完一条，
     // 提取回头看见"这轮有值得记的"，又写一条几乎一样的。**游标不动**（2026-11-03）：攒着的前几轮前台没看过，
     // 下一次提取连同这一条一起看；分叉出来的那次在上文里看得见前台这次写入，prompt 里也有「此刻存着什么」。
     if (this.memoryWrittenThisReply) {
       this.memoryWrittenThisReply = false;
-      if (!force) return;
+      if (!force) return skipped("overlap");
     }
     // 材料在 reply 边界上定格（不取跑的那一刻：那时前台可能正在下一条 reply 的半路上）。
     // `_state.messages` 每次追加都换新数组，所以这两个引用就是此刻的快照。菜单同样此刻取：与主循环最后一次请求同一份。
@@ -3133,21 +3147,27 @@ export class Agent {
     const menu = visibleTools(this.tools, this.loadedTools, this.restriction());
     const end = messages.length;
     this.extractChannel.schedule(async (signal) => {
-      if (epoch !== this.extractEpoch) return; // transcript 已被清空或换掉
+      if (epoch !== this.extractEpoch) return skipped("epoch_changed"); // transcript 已被清空或换掉
       // 起点在跑的那一刻读：排队期间前一次提取可能已经看过一截
       const from = this.extractCursor;
-      if (from >= end) return;
+      if (from >= end) return skipped("empty_range");
       const fresh = messages.slice(from, end);
       // **两道门**：用户亲口说的话没攒够、轮数没攒满就不跑、游标不动——攒着，等下一次一并看
-      if (userProseWords(fresh) < DEFAULT_EXTRACT_MIN_USER_WORDS) return;
-      if (!force && humanTurns(fresh) < DEFAULT_EXTRACT_EVERY_TURNS) return;
+      if (userProseWords(fresh) < DEFAULT_EXTRACT_MIN_USER_WORDS) return skipped("too_short");
+      if (!force && humanTurns(fresh) < DEFAULT_EXTRACT_EVERY_TURNS) return skipped("too_few_turns");
       // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
       const span = projectRange(messages, compaction, from, end);
       const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0 };
-      // 与整理排成一条：等的这段里被中止（stop / 丢锁）或 transcript 换了代，就不跑
-      const done = await this.oneBackgroundWriter(async () =>
-        signal.aborted || epoch !== this.extractEpoch ? false : this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal),
-      );
+      // 与整理排成一条：等的这段里被中止（stop / 丢锁）或 transcript 换了代，就不跑。
+      // 后两道是 `runExtract` 自己开头那道判断（它在任何副作用之前返回 false），在这里先判只为记下原因
+      const done = await this.oneBackgroundWriter(async () => {
+        const why: ExtractSkipReason | null = signal.aborted ? "aborted" : epoch !== this.extractEpoch ? "epoch_changed" : range.messages === 0 ? "empty_range" : !this.memoryWorkAllowed ? "not_allowed" : null;
+        if (why !== null) {
+          skipped(why);
+          return false;
+        }
+        return this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal);
+      });
       if (done && epoch === this.extractEpoch) {
         this.extractCursor = Math.max(this.extractCursor, end);
         await this.recordReviewed(end + offset);
@@ -3324,20 +3344,36 @@ export class Agent {
   private async runDreamPass(scope: AgentAdmissionExecuteScope, signal: AbortSignal): Promise<void> {
     const memory = this.memory;
     if (memory === undefined || !this.memoryWorkAllowed) return;
+    // 每层判出来的结论各记一条（观测白盒化 B，`memory.dream.evaluated`）：开整带那次整理的 runId，没开带原因
+    const evaluated = (layer: string, decision: Awaited<ReturnType<typeof dreamGate>>["decision"] | "locked", dreamRunId?: string): void => {
+      this.memoryActivity?.offer({ kind: "dream_evaluated", layer, decision, ...(dreamRunId === undefined ? {} : { dreamRunId }), triggeredBy: scope.runId, occurredAt: Date.now() });
+    };
     for (const layer of dreamScopes(memory)) {
       if (signal.aborted || !this.memoryWorkAllowed) return;
       try {
         // 门控：节流四道全满足，或者水位单独到线
-        if (!(await shouldDream(memory, layer))) continue;
+        const gate = await dreamGate(memory, layer);
+        if (!gate.run) {
+          evaluated(layer, gate.decision);
+          continue;
+        }
         if (signal.aborted || !this.memoryWorkAllowed) return;
         // 这一层的整理独占（2026-09-11）：试拿一次、不等。拿不到 = 别的 session 正在整理这一层，这轮跳过
         const release = await claimDreamPass(memory, layer);
-        if (release === null) continue;
+        if (release === null) {
+          evaluated(layer, "locked");
+          continue;
+        }
         try {
           // 拿到之后再判一次：刚放手的那个 session 可能已经整理完、把计数清零了
-          if (!(await shouldDream(memory, layer))) continue;
+          const again = await dreamGate(memory, layer);
+          if (!again.run) {
+            evaluated(layer, again.decision);
+            continue;
+          }
           // 门过了才上锁：dreamTask 有副作用（写 startedAt），不能放在判断之前
           const runId = `dream-${crypto.randomUUID()}`;
+          evaluated(layer, again.decision, runId);
           const observe = this.memoryFactsFor(runId);
           const task = await dreamTask(memory, layer, observe === undefined ? undefined : { observe });
           // 只给这一层的那把记忆工具。不是「过滤掉危险的」，是**只给这一件**，而且够不到别的层。
@@ -4202,7 +4238,10 @@ export class Agent {
     };
     this.agentProbe = rt.capabilitySink(agentFactDescriptor, builtinOwner(AGENT_ENTRY_ID));
     // 三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
-    if (this.memory !== undefined) this.memory.observe = rt.capabilitySink(memoryFactDescriptor, builtinOwner(MEMORY_ENTRY_ID));
+    if (this.memory !== undefined) {
+      this.memory.observe = rt.capabilitySink(memoryFactDescriptor, builtinOwner(MEMORY_ENTRY_ID));
+      this.memoryActivity = rt.capabilitySink(memoryFactDescriptor, builtinOwner(MEMORY_ENTRY_ID), () => this.observationIdentityScope());
+    }
     attachTaskObserver(this.tasks, rt.capabilitySink(taskFactDescriptor, builtinOwner(TASKS_ENTRY_ID)));
     if (this.schedule !== undefined) this.schedule.observe = rt.capabilitySink(scheduleFactDescriptor, builtinOwner(SCHEDULER_ENTRY_ID));
     // inbox 没有自己的 tool pack，账本是 Agent 自己的一部分：owner 记 echo:agent，instrumentation（echo.inbox）区分它和 agent 事件

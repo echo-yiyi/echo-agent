@@ -186,7 +186,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: var(--focus-ring-width
 .caret { width: 18px; height: 18px; padding: 0; border: 0; background: transparent; color: var(--stone); cursor: pointer; border-radius: var(--r-sm); align-self: center; }
 .caret:hover { background: var(--ui-raised); color: var(--ink); }
 .caret[data-empty="1"] { visibility: hidden; cursor: default; }
-.tl .folded { color: var(--stone); font-size: var(--size-micro); }
+.tl .folded, .act .folded { color: var(--stone); font-size: var(--size-micro); }
 /* 条形轨占最后一列：左端 = 这条 span 在 run 里的起点，长度 = 它占 run 的比例 */
 /*
  * 条形轨是数据不是交互，所以用中性墨色——紫留给「可操作 / 已选中」。失败那行的条才染色。
@@ -367,6 +367,8 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 .origbox pre { margin: 0; font-family: var(--font-mono); font-size: var(--size-caption); color: var(--ink); white-space: pre-wrap; word-break: break-word; }
 .msg + .msg { margin-top: var(--space-8); padding-top: var(--space-8); border-top: 1px solid var(--ui-line-soft); }
 .msglabel { display: block; margin-bottom: var(--space-2); color: var(--stone); font-size: var(--size-micro); }
+.diff-add { color: var(--ink); }
+.diff-del { color: var(--stone); text-decoration: line-through; }
 /* 记录健康是页脚：比区块更淡一档，不与「工具与用量」争成一个新区块 */
 .health { margin-top: var(--space-24); padding-top: var(--space-12); border-top: 1px solid var(--ui-line-soft); font-size: var(--size-caption); color: var(--stone); display: flex; flex-wrap: wrap; gap: var(--space-12); align-items: center; }
 .muted { color: var(--stone); }
@@ -619,7 +621,10 @@ function verbFor(name, attrs, body) {
     const v = { create: "记住", replace: "修改", insert: "修改", rename: "修改", delete: "删除" }[attrs.operation] ?? attrs.operation;
     return { verb: v, obj: attrs.partition ? `${attrs.partition}${attrs.reasonCode ? ` · ${attrs.reasonCode}` : ""}` : "" };
   }
-  if (name === "memory.compose") return { verb: "回忆", obj: `${attrs.blocks ?? 0}/${attrs.regions ?? 0} 个模块` };
+  if (name === "memory.compose") return { verb: "回忆", obj: attrs.reused === true ? "沿用会话里冻结的那份" : `${attrs.blocks ?? 0}/${attrs.regions ?? 0} 个模块` };
+  // 记忆后台两件事的门（观测白盒化 B）：没跑的原因、整理每层判了什么
+  if (name === "memory.extract.skipped") return { verb: LEX.records[name]?.zh ?? name, obj: `${EXTRACT_SKIP[attrs.reason] ?? attrs.reason ?? ""}${attrs.force ? " · 退出前补跑" : ""}` };
+  if (name === "memory.dream.evaluated") return { verb: LEX.records[name]?.zh ?? name, obj: `${attrs.layer ?? ""} · ${DREAM_DECISION[attrs.decision] ?? attrs.decision ?? ""}` };
   if (name === "observation.gap") return { verb: "记录缺口", obj: attrs.reason ?? "" };
   if (name.startsWith("inbox.")) {
     // 只有一条时说是谁发的：source 是投递方（session = 另一段会话），ref 是它给的编号；多条只说几条
@@ -856,6 +861,14 @@ function contentSections(t, end) {
 /* ── 送进模型的是什么（观测白盒化 A：context.built / prompt.assembled）── */
 const fmtTok = (n) => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString("en-US"));
 const COMPACT_DECISION = { no_stage: "没有压缩阶段", no_window: "模型没标窗口", below_target: "没到线", hook_blocked: "hook 拦下", run: "开压" };
+const EXTRACT_SKIP = {
+  not_allowed: "收摊中 / 丢了锁", no_scope: "作用域还没绑", no_modules: "没有记忆模块", overlap: "前台这条自己写过记忆",
+  epoch_changed: "对话被清空或换掉", empty_range: "没有新消息", too_short: "话太少", too_few_turns: "轮数没攒满", aborted: "排队时被中止",
+};
+const DREAM_DECISION = {
+  budget: "开整 · 水位到线", due: "开整 · 节流全满足", in_progress: "上一次还在整理", too_soon: "距上次太近",
+  few_writes: "写入不够", few_turns: "轮数不够", few_files: "文件不够", locked: "别的会话在整理",
+};
 const ROLE_ZH = { "user/human": "用户", "user/steer": "用户插话", "user/harness": "系统插话", user: "用户", assistant: "模型", toolResult: "工具结果", environment: "环境" };
 const roleZh = (s) => ROLE_ZH[s] ?? s ?? "";
 function partLabel(p) {
@@ -1014,6 +1027,49 @@ function promptAssembledView(vm, t) {
   else for (const { s, part } of parts) orig.append(keptDetails(`prompt.${s.name}`, false, [`${s.name} · ${s.chars.toLocaleString()} 字`], el("div", { class: "origbox" }, el("pre", { text: clip(part) }))));
   out.push(orig);
   return out;
+}
+
+/** 两份文本的逐行差异（LCS）：只列改动的行，`+` 新增、`-` 删掉。记忆文件有预算，几百行以内。 */
+function lineDiff(before, after) {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  if (a.length * b.length > 250000) return null; // 太长不算：直接看两份全文
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) { i++; j++; continue; }
+    if (j < b.length && (i === a.length || dp[i][j + 1] >= dp[i + 1][j])) out.push({ op: "+", line: b[j++] });
+    else out.push({ op: "-", line: a[i++] });
+  }
+  return out;
+}
+/** 记忆写入的右栏：content 档给改动（逐行）、写成的整份、写之前的那份；别的档说正文在哪一档才有。 */
+function memoryWriteView(vm, t) {
+  const b = t.body ?? {};
+  if (b.content === undefined && b.before === undefined) {
+    if (t.name !== "memory.mutation.committed" || vm.header.capturePolicy === "content") return [];
+    return [el("p", { class: "markwhy", text: "写进去的正文只在 content 档记：用 --observe content 跑，这里就能看到写成了什么、改了哪几行。" })];
+  }
+  const orig = el("div", { class: "orig" });
+  const status = contentStatus(vm, t, true);
+  if (status !== null) { orig.append(el("span", { class: "tl-sec-label", text: "正文" }), status); return [orig]; }
+  const texts = STATE.content.get(`${vm.header.runId}#${t.seq}`).data?.texts ?? {};
+  const after = typeof texts.content === "string" ? texts.content : null;
+  const before = typeof texts.before === "string" ? texts.before : null;
+  orig.append(el("span", { class: "tl-sec-label", text: before === null ? "正文（新建）" : "正文" }));
+  const diff = before !== null && after !== null ? lineDiff(before, after) : null;
+  if (diff !== null) {
+    const pre = el("pre", {});
+    for (const d of diff) pre.append(el("span", { class: d.op === "+" ? "diff-add" : "diff-del", text: `${d.op} ${d.line}\n` }));
+    if (diff.length === 0) pre.append("（两份一样）");
+    orig.append(keptDetails("mem.diff", true, [`改动 · ${diff.filter((d) => d.op === "+").length} 行新增 · ${diff.filter((d) => d.op === "-").length} 行删掉`], el("div", { class: "origbox" }, pre)));
+  }
+  if (after !== null) orig.append(keptDetails("mem.after", diff === null, [`写成 · ${after.length.toLocaleString()} 字`], el("div", { class: "origbox" }, el("pre", { text: clip(after) }))));
+  if (before !== null) orig.append(keptDetails("mem.before", false, [`之前 · ${before.length.toLocaleString()} 字`], el("div", { class: "origbox" }, el("pre", { text: clip(before) }))));
+  return [orig];
 }
 
 function renderEntry(e, gaps, runMs = 0) {
@@ -1196,6 +1252,7 @@ function renderEventDetail(entries, vm) {
   box.append(dl);
   if (t.name === "context.built") box.append(...contextBuiltView(vm, t));
   if (t.name === "prompt.assembled") box.append(...promptAssembledView(vm, t));
+  if (t.name.startsWith("memory.mutation.")) box.append(...memoryWriteView(vm, t));
 
   const { secs, strip } = contentSections(t, end);
   for (const s of secs) box.append(el("div", { class: `tl-sec${s.tone === "bad" ? " tl-sec--bad" : ""}` }, el("span", { class: "tl-sec-label", text: s.label }), el("pre", { class: "tl-text", text: clip(s.text) })));
@@ -1368,9 +1425,18 @@ function renderActivity() {
     return;
   }
   const multi = new Set(STATE.activity.map((a) => a.sessionId)).size > 1;
+  // **连着的同一件事折成一行**：提取跳过、整理判断几乎每个回复后都来一条，逐条列会把收件、闹钟挤出去。行上写 ×N
+  let prev = null;
   for (const { sessionId, record: t } of STATE.activity) {
     const attrs = t.attributes ?? {};
     const { verb, obj } = verbFor(t.name, attrs, t.body);
+    const sameKey = `${sessionId}|${t.name}|${verb}|${obj}`;
+    if (prev !== null && prev.key === sameKey) {
+      prev.count += 1;
+      prev.badge.textContent = `×${prev.count}`;
+      prev.badge.hidden = false;
+      continue;
+    }
     const term = LEX.records[t.name];
     const bad = t.name === "inbox.sealed" || t.name.endsWith(".failed") || t.name.endsWith("-failed") || t.name.endsWith("_failed");
     const warn = !bad && (t.name.endsWith(".rejected") || t.name.endsWith(".released") || t.name.endsWith(".missed") || t.name.endsWith("_refused"));
@@ -1385,6 +1451,9 @@ function renderActivity() {
       el("span", { class: "what" }, el("span", { class: "verb", text: verb }), obj ? el("span", { class: "obj", text: obj }) : null),
       el("span", { class: "who", text: multi ? clipLabel(sessionLabel(sessionId), 10) : "", title: multi ? sessionLabel(sessionId) : "" }),
     );
+    const badge = el("span", { class: "folded", text: "", hidden: true, title: "连着的同一件事，折成一行（点开的是最近那一条的 run）" });
+    row.querySelector(".what").append(badge);
+    prev = { key: sameKey, count: 1, badge };
     if (runId) {
       row.setAttribute("role", "button");
       row.setAttribute("tabindex", "0");

@@ -1,7 +1,7 @@
 # 观测白盒化：每个切点上「走了哪条路、用了什么、因为谁」都能从账本里找到
 
 > 状态:proposed → **拍板 2026-11-08,分期实施中** · 提出 2026-11-03 · 来源:用户 2026-11-03「我们的观测，就是要把 agent 的整个过程白盒化，就是要在这些切点去看这些问题」「我们要守住，观测不影响 agent」;2026-11-08「现在观测没有把记忆这些做好诶，感觉我还是看不到prompt这些」→「按推荐的做，先推基线再做 A」<br>
-> **进度**:A1(= P1:上下文镜像、`prompt.assembled`、`context.built` metadata 档、实际菜单、cache tokens、压缩判断与压缩调用入账)、A2(= P2:正文存储、`content` 档的 system / 视图 / 工具 schema 原文、过期清扫、`readBlob`)、A3(面板与 `observe show --context` 看得到 prompt 与每次送模的构成、原文)已实现,见下方「决定」;B(记忆)未做。全部落地后本条移进 `implemented/`<br>
+> **进度**:A1(= P1:上下文镜像、`prompt.assembled`、`context.built` metadata 档、实际菜单、cache tokens、压缩判断与压缩调用入账)、A2(= P2:正文存储、`content` 档的 system / 视图 / 工具 schema 原文、过期清扫、`readBlob`)、A3(面板与 `observe show --context` 看得到 prompt 与每次送模的构成、原文)、B(记忆后台的门、记忆段沿用与否、写入正文)已实现,见下方「决定」;其余决定点(§5 别的族)、因果(P4)、诊断入账未做。全部落地后本条移进 `implemented/`<br>
 > 形态的家是 [观测:一次 run 留下的账本](../../design/observability.md);本条只写取舍与要补的清单,实现合入时形态并进那篇。
 
 ## 导读
@@ -50,6 +50,13 @@
 - **视图存成引用树,记录里只有一个引用**:§3.3 的 `view?: BlobRef[]` 逐条进记录,一万条消息就超 64 KiB,且每个 attempt 重写一整份清单、盘上随 attempt 数平方增长。改为每 64 条一块、块再成列表;transcript 只增,前面的块 digest 不变、不重写。工具菜单整份一个 blob(菜单很少变)。`context.built` 的 `content` 是 `{ system, view, tools }`。
 - **`prompt.assembled` 的原文走通用的投影 `blobs` 声明**(descriptor 只在 `content` 档给;别的档观测线程不建写入端、不写):这一档每个 run 多一次把 system 串交给观测线程(与 `context.built` 第一次交的是同一份正文,盘上只有一个文件)。B 的记忆写入正文走同一条路。
 - **A3 落地时定的**:构成画成**一行一块的条形表**(条长 = 占这次估算 token 的比例,每行直接写数),不画分类色堆叠条——设计系统的分类色板没进编程产品的 token 构建产物,手抄色值违反「取值只从 dist 来」;单系列条形用页面已有的中性色就够,也满足图表规格的「直接标注」要求。原文点开才读(`/api/runs/<id>/records/<seq>/content`),不进 run 的 ViewModel。顺手修了面板一个旧 bug:run 详情读 `LEX.persistence[vm.health.persistence]`,术语表与 ViewModel 早就没有这一项,任何一条 run 的详情都打不开;加了一条测试对表「页面读的术语表分区都在」。
+- **B 落地时定的**:
+  - **门的记录不挂 run**:提取的门大多在提取通道里判,那时触发它的 run 常已封口,而封口后的 run 不再收记录(Sequencer 的终态规则);挂 Agent 此刻的 run 又会挂到无关的下一个 run 上。所以 `memory.extract.skipped` / `memory.dream.evaluated` 都是 run 之外的活动,探针的 scope 只给身份,`runId` 属性链回触发它的 run(开整的整理链到那次整理的 run)。
+  - **收摊时的空转不记**:`createEcho()` 的 `stop()` 卸完 extension 之后 `doStop()` 兜底再补一次提取,那时模块已空;按 `no_modules` 记会在每次收摊冒一条误导的「没有记忆模块」,所以 `force` 且模块为空时不记。
+  - **`memory.compose` 沿用时没有计数**:`chars` 原本是组装出的各块正文的字数(不含段标题与说明),沿用冻结那份时没有组装,不编一个数;这一段在 system 里多大看同一个 run 的 `prompt.assembled`。
+  - **整理的门返回原因**:`shouldDream` 改成 `dreamGate` 的 `run`,判断逻辑一行不动,每个 `return false` 带上它是哪一道。
+  - **面板**:「运行时活动」里连着的同一件事折成一行(×N)——提取跳过、整理判断几乎每个回复后都来;记忆写入的右栏在 `content` 档给逐行改动、写成的整份、写之前的那份。
+  - **没有测试触发的原因码**:提取的 `not_allowed` / `no_scope` / `epoch_changed` / `empty_range` / `aborted`、整理的 `locked`——都是收摊、换代、并发的窄窗口,代码就在各自那道门上,验收判据「每行一个触发测试」这几行还欠着。
 - **还原函数** [`readContextContent`](../../../packages/core/src/observability/context-content.ts#symbol=readContextContent):A2 时留在 core 内部;A3 面板与 `observe show --context` 要用,挪进纯模块、从 `@echo-agent/core/observability` 导出(连同 `ContextBuiltContent` / `ContextContent` 两个类型)。公开面另加 `readBlob(ref)`(`EchoObservations` / `EchoObservationReader`)与 `OBSERVATION_BLOB_REFS`。
 
 **验收判据(机器可判)。**

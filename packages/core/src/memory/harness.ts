@@ -15,7 +15,7 @@ import type { AgentEvent, AgentListener } from "../events.ts";
 import { environmentMessage, type AgentMessage } from "../messages.ts";
 import type { Diagnostic } from "../errors.ts";
 import type { CapabilityFactSink } from "../observability/fact-sink.ts";
-import type { MemoryFact, MemoryIndexOutcome, MemoryMutationStage, MemoryOperation } from "./observe.ts";
+import type { DreamDecision, MemoryFact, MemoryIndexOutcome, MemoryMutationStage, MemoryOperation } from "./observe.ts";
 
 /** MemoryHarness 要 agent 给的**只有一件**：索引重建、写盘失败要能说出来。 */
 export type MemoryDeps = { report?: (d: Diagnostic) => void };
@@ -500,7 +500,15 @@ export function memoryPromptSections(ctx: AgentMemories, frozen: MemorySystemFre
       // 沉底(order 最大):冻结之后它只在作废后重取时变,变了只打掉自己之后的缓存。
       order: PROMPT_ORDER.memory,
       render: async () => {
-        if (frozen.text !== null) return frozen.text;
+        if (frozen.text !== null) {
+          // 沿用冻结那份：记一笔「这次 system 里的记忆段没重读盘」（sink 永不抛，兜一层不让观测影响 prompt）
+          try {
+            ctx.observe?.offer({ kind: "compose", reused: true, occurredAt: Date.now() });
+          } catch {
+            // 观测层的异常不进 prompt 组装
+          }
+          return frozen.text;
+        }
         // 作用域没绑之前组装出来的没有内容（读不到盘），不能冻结——否则整段会话都看不到记忆
         if (!ctx.binding.bound()) return await renderMemorySystem(ctx);
         // 正文与变化基线出自**同一份读**：每个文件只读一次，基线先读、组装复用同一份内容。分两次读盘的话，
@@ -807,22 +815,30 @@ async function budgetPressure(ctx: AgentMemories, scope: string): Promise<number
  * (见 `DreamGates.budgetRatio` 的注释)。
  */
 export async function shouldDream(ctx: AgentMemories, scope: string): Promise<boolean> {
+  return (await dreamGate(ctx, scope)).run;
+}
+
+/**
+ * 整理这一层的门，连同判出来的原因（`DreamDecision`，观测的 `memory.dream.evaluated` 记它）。与 `shouldDream` 同一份判断：
+ * 进行中的锁没过期 → 不跑；水位到线（且上次整理之后有过新写入）→ 跑；节流四道逐道看，第一道没过的就是原因。
+ */
+export async function dreamGate(ctx: AgentMemories, scope: string): Promise<Readonly<{ run: boolean; decision: DreamDecision }>> {
   const state = await readDreamState(ctx.dir, scope);
   // 盘上那份是真相源；顺手把内存镜像刷成**刚查的这一层**的值（新进程起来时它是 0）。
   // 按层之后这两个字段就只是"最近查过的那层"的快照，诊断用，不参与判断。
   ctx.writesSinceDream = state.writes;
   ctx.turnsSinceDream = state.turns;
   const now = Date.now();
-  if (state.startedAt !== null && now - state.startedAt < DREAM_LOCK_STALE_MS) return false; // 这一层有一次整理进行中
+  if (state.startedAt !== null && now - state.startedAt < DREAM_LOCK_STALE_MS) return { run: false, decision: "in_progress" }; // 这一层有一次整理进行中
   const g = ctx.gates;
   // 水位:告警,单独成立——只要上次整理之后有过新写入(2026-11-03):没有的话再整理一遍看到的还是同一份,
   // 占用压不下去时每次回到 idle 都会再来一次
   const writtenSincePass = state.lastAt === null || state.writes > state.writesAtLastPass;
-  if (g.budgetRatio !== undefined && writtenSincePass && (await budgetPressure(ctx, scope)) >= g.budgetRatio) return true;
+  if (g.budgetRatio !== undefined && writtenSincePass && (await budgetPressure(ctx, scope)) >= g.budgetRatio) return { run: true, decision: "budget" };
   // 节流:四道全满足
-  if (g.minIntervalMs !== undefined && state.lastAt !== null && now - state.lastAt < g.minIntervalMs) return false;
-  if (g.minWritesSinceLast !== undefined && state.writes < g.minWritesSinceLast) return false;
-  if (g.minTurnsSinceLast !== undefined && state.turns < g.minTurnsSinceLast) return false;
+  if (g.minIntervalMs !== undefined && state.lastAt !== null && now - state.lastAt < g.minIntervalMs) return { run: false, decision: "too_soon" };
+  if (g.minWritesSinceLast !== undefined && state.writes < g.minWritesSinceLast) return { run: false, decision: "few_writes" };
+  if (g.minTurnsSinceLast !== undefined && state.turns < g.minTurnsSinceLast) return { run: false, decision: "few_turns" };
   if (g.minFiles !== undefined) {
     // **只数这一层**:整理的范围就这一层,拿别的层的文件数来开这道门是把门开在别人身上
     const table = ctx.binding.table();
@@ -835,9 +851,9 @@ export async function shouldDream(ctx: AgentMemories, scope: string): Promise<bo
         files += found.filter((f) => !f.endsWith(`/${MEMORY_INDEX_FILE}`)).length; // 索引不是一条记忆
       }
     }
-    if (files < g.minFiles) return false;
+    if (files < g.minFiles) return { run: false, decision: "few_files" };
   }
-  return true;
+  return { run: true, decision: "due" };
 }
 
 /**
@@ -952,7 +968,7 @@ type MutationFrame = {
 };
 
 type MutationVerdict =
-  | { outcome: "committed"; chars: number | undefined; indexOutcome: MemoryIndexOutcome; text: string }
+  | { outcome: "committed"; chars: number | undefined; indexOutcome: MemoryIndexOutcome; text: string; written?: Readonly<{ content: string; before?: string }> }
   | { outcome: "rejected"; reasonCode: string; message: string }
   | { outcome: "failed"; stage: MemoryMutationStage; message: string }
   | { outcome: "partial"; stage: MemoryMutationStage; indexOutcome: MemoryIndexOutcome; message: string };
@@ -974,8 +990,9 @@ function failed(stage: MemoryMutationStage, message: string): MutationVerdict {
 function partial(stage: MemoryMutationStage, indexOutcome: MemoryIndexOutcome, message: string): MutationVerdict {
   return { outcome: "partial", stage, indexOutcome, message };
 }
-function committed(chars: number | undefined, indexOutcome: MemoryIndexOutcome, text: string): MutationVerdict {
-  return { outcome: "committed", chars, indexOutcome, text };
+/** `written`：create / replace / insert 写成的整份与写之前的那份（观测 content 档存原文用；只是引用）。 */
+function committed(chars: number | undefined, indexOutcome: MemoryIndexOutcome, text: string, written?: Readonly<{ content: string; before?: string }>): MutationVerdict {
+  return { outcome: "committed", chars, indexOutcome, text, ...(written === undefined ? {} : { written }) };
 }
 
 /**
@@ -1056,6 +1073,7 @@ function finishMemoryMutation(ctx: AgentMemories, caller: MemoryCaller | undefin
     ...(verdict.outcome === "committed" || verdict.outcome === "partial" ? { indexOutcome: verdict.indexOutcome } : {}),
     ...(verdict.outcome === "rejected" ? { reasonCode: verdict.reasonCode } : {}),
     ...(verdict.outcome === "committed" ? {} : { message: verdict.message }),
+    ...(verdict.outcome === "committed" && verdict.written !== undefined ? verdict.written : {}),
     occurredAt: frame.at,
   };
   try {
@@ -1142,7 +1160,8 @@ async function writeMemory(
     noteWrite(caller?.reads, path, prepared.basedOn ?? null, prepared.content);
     await bumpWriteCounter(ctx, path);
     const indexOutcome = await refreshIndex(ctx, owner, path);
-    return finishMemoryMutation(ctx, caller, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length)));
+    const written = { content: prepared.content, ...(prepared.basedOn === undefined ? {} : { before: prepared.basedOn }) };
+    return finishMemoryMutation(ctx, caller, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length), written));
   });
 }
 
