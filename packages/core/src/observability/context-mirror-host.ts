@@ -4,13 +4,17 @@
 // 把这次送模的视图重建出来、算构成：
 //   · 视图：`buildWorkingMessages`（压缩投影，与 run-turn 同一个函数）再接上每轮注入；
 //   · token：`estimateMessage` / `estimateText`（与压缩判断用的同一个估算器——两边的数天然一致）；
-//   · 投影的增删：跑一遍 `defaultConvertToLlm`（只在缺省投影下；自定义的只记「是自定义」）。
+//   · 投影的增删：跑一遍 `defaultConvertToLlm`（只在缺省投影下；自定义的只记「是自定义」）；
+//   · `content` 档：system、视图里的每条消息、工具菜单各存成 blob（blobs.ts），body 里放引用（`content`），
+//     `readContextContent` 凭它们逐字节还原这次送模的 `{ systemPrompt, 视图, 工具 schema }`。
 // 这些全在观测线程里做，主线程不为它们多花一拍。
 
 import { buildWorkingMessages, estimateMessage, estimateText } from "../compaction/view.ts";
 import type { CompactionState } from "../compaction/types.ts";
 import { defaultConvertToLlm, type AgentMessage, type ProviderMessage } from "../messages.ts";
+import { expandBlobRefs, jsonBlob, refsTree, textBlob, type BlobBatch } from "./blobs.ts";
 import type { ContextHandoff, MirrorRef, MirrorRuns } from "./context-mirror.ts";
+import type { ObservationBlobRef } from "./types.ts";
 
 /**
  * 视图里一块的来历：
@@ -52,7 +56,17 @@ export type ContextBuiltBody = Readonly<{
   request: ContextBuiltMeta["request"];
   /** 镜像里找不到的编号数（那次交接失败过）：这几条不计入构成。 */
   unresolved?: number;
+  /** `content` 档：这次送进模型的正文（`readContextContent` 还原）。 */
+  content?: ContextBuiltContent;
 }>;
+
+/**
+ * `context.built` 在 `content` 档带的正文引用：
+ *   · `system`：system prompt（`text/plain`；没有 system 或镜像里找不到为 null）；
+ *   · `view`：送进投影之前的视图，一个引用列表（逐层展开后每片是一条 `AgentMessage` 的 JSON）；
+ *   · `tools`：送模的工具 schema 数组（`toolSchemas` 的输出，JSON）。
+ */
+export type ContextBuiltContent = Readonly<{ system: ObservationBlobRef | null; view: ObservationBlobRef; tools: ObservationBlobRef }>;
 
 /** 一条消息的字符数与图片数：与 `estimateMessage` 同一套取法（文本 / 思考按长度，tool_use 按名字加参数 JSON）。 */
 function measure(m: AgentMessage): { chars: number; images: number } {
@@ -93,9 +107,16 @@ function injectionSource(m: AgentMessage): string {
 /** 观测线程的那一半：每个观测 runtime 一份，镜像跟着 runtime 走（收摊即丢）。 */
 export class ContextMirrorStore {
   private readonly values = new Map<MirrorRef, unknown>();
+  /** `content` 档：每条消息对象、每份 system、每份菜单编过的 blob 引用（同一个东西不再序列化）。 */
+  private readonly messageBlobs = new WeakMap<object, ObservationBlobRef>();
+  private readonly systemBlobs = new Map<MirrorRef, ObservationBlobRef>();
+  private readonly toolBlobs = new Map<string, ObservationBlobRef>();
 
-  /** 交接里的 `handoff` + `meta` → `context.built` 的 body。 */
-  resolve(handoff: ContextHandoff, meta: ContextBuiltMeta): ContextBuiltBody {
+  /**
+   * 交接里的 `handoff` + `meta` → `context.built` 的 body。给了 `blobs`（`content` 档）就顺带把正文排进这一批、
+   * body 带上 `content` 引用——调用方写完这一批才能提交这条记录。
+   */
+  resolve(handoff: ContextHandoff, meta: ContextBuiltMeta, blobs?: BlobBatch): ContextBuiltBody {
     for (const f of handoff.fresh) this.values.set(f.ref, f.value);
     let unresolved = 0;
     const get = (ref: MirrorRef): unknown => {
@@ -162,6 +183,18 @@ export class ContextMirrorStore {
     const converter = meta.converter === "default" ? { kind: "default" as const, ...convertStats(view) } : { kind: "custom" as const };
     const partList = [...parts.values()];
     const tokens = (system?.tokens ?? 0) + partList.reduce((n, p) => n + p.tokens, 0) + tools.tokens;
+    let content: ContextBuiltContent | undefined;
+    if (blobs !== undefined) {
+      // 每条都过一遍 `add`：引用它的新记录要提交了，老正文到了重写间隔就得在这一批里重写（清扫的宽限期看 writtenAt）
+      const text = systemText;
+      const systemRef = handoff.system === null || text === undefined || text === null ? null : blobs.addCached(this.systemBlobs, handoff.system.ref, () => textBlob(text));
+      const viewRef = refsTree(
+        view.map((m) => blobs.addCached(this.messageBlobs, m, () => jsonBlob(m))),
+        (b) => blobs.add(b),
+      );
+      const toolsRef = blobs.addCached(this.toolBlobs, handoff.tools.join(","), () => jsonBlob(schemas));
+      content = { system: systemRef, view: viewRef, tools: toolsRef };
+    }
     return {
       purpose: meta.purpose,
       ...(meta.attempt === undefined ? {} : { attempt: meta.attempt }),
@@ -175,8 +208,32 @@ export class ContextMirrorStore {
       converter,
       request: meta.request,
       ...(unresolved === 0 ? {} : { unresolved }),
+      ...(content === undefined ? {} : { content }),
     };
   }
+}
+
+/** 一次送模的正文，按 `context.built` 的 `content` 还原。 */
+export type ContextContent = Readonly<{ systemPrompt: string | null; view: AgentMessage[]; tools: unknown[] }>;
+
+/**
+ * 凭 `content` 引用把那次送进模型的东西还原出来：system 原文、投影之前的视图（再过一遍 `defaultConvertToLlm` 就是线上的
+ * messages）、工具 schema。`read` 是 reader 的 `readBlob`；哪一份正文已经不在（过期清扫 / 手动删了）返回 null。
+ */
+export async function readContextContent(read: (ref: ObservationBlobRef) => Promise<string | null>, content: ContextBuiltContent): Promise<ContextContent | null> {
+  const systemPrompt = content.system === null ? null : await read(content.system);
+  if (content.system !== null && systemPrompt === null) return null;
+  const leaves = await expandBlobRefs(read, content.view);
+  if (leaves === null) return null;
+  const view: AgentMessage[] = [];
+  for (const ref of leaves) {
+    const text = await read(ref);
+    if (text === null) return null;
+    view.push(JSON.parse(text) as AgentMessage);
+  }
+  const toolsText = await read(content.tools);
+  if (toolsText === null) return null;
+  return { systemPrompt, view, tools: JSON.parse(toolsText) as unknown[] };
 }
 
 /**

@@ -5,6 +5,7 @@
 //   batches/<runtimeId>/<nextPrefix>.json  一次提交一个文件——**提交点**（`StorageDir.write` 是临时文件 + rename）
 //   runs/<runId>.json                      这个 run 的 RunIndex——派生
 //   heads/<runtimeId>.json                 { committedPrefix }——派生
+//   blobs/<digest>.json                    content 档的正文（blobs.ts）：写完才提交引用它的批；过期按引用 + 宽限期清扫
 //
 // 与 Sequencer 的契约（store.ts 头注）逐条落在文件上：一批几个 run 的记录与 RunIndex 在同一个批文件里，一次 rename 同时可见；
 // 批文件已存在且逐字相同 = `already-committed-same`，不同 = corruption；head 与 RunIndex 的 CAS 对的是本实例内存里的值
@@ -15,8 +16,9 @@
 // 写入端只在观测线程里用（thread-host.ts），读面主线程与离线 reader 共用。写排一条队；读不排队，只读 rename 完成的文件。
 
 import { join } from "node:path";
+import { blobFileContent, blobMatches, BLOB_SWEEP_GRACE_MS, collectBlobRefs, parseBlobFile, type EncodedBlob } from "./blobs.ts";
 import { ObservationCorruptionError, runIndexDigest, type CanonicalObservationStore, type CommitBatchInput, type CommitBatchResult, type ReplayPage } from "./store.ts";
-import type { RunIndexEntryV1 } from "./types.ts";
+import { OBSERVATION_BLOB_REFS, type ObservationBlobRef, type RunIndexEntryV1 } from "./types.ts";
 import type { StorageDir } from "../storage/types.ts";
 
 /** 观测文档在状态根里的前缀。 */
@@ -28,6 +30,7 @@ const KEY_PATH = `${OBSERVATION_STORE_DIR}/key.json`;
 const BATCHES = `${OBSERVATION_STORE_DIR}/batches/`;
 const RUNS = `${OBSERVATION_STORE_DIR}/runs/`;
 const HEADS = `${OBSERVATION_STORE_DIR}/heads/`;
+const BLOBS = `${OBSERVATION_STORE_DIR}/blobs/`;
 const KEY_LOCK = `${OBSERVATION_STORE_DIR}/key`;
 /** 批文件名里 nextPrefix 的位数：左补零，字典序即数值序。 */
 const PREFIX_DIGITS = 12;
@@ -35,6 +38,7 @@ const PREFIX_DIGITS = 12;
 const BATCH_FILE = /^observability\/batches\/([^/]+)\/(\d{12})\.json$/;
 const RUN_FILE = /^observability\/runs\/([^/]+)\.json$/;
 const HEAD_FILE = /^observability\/heads\/([^/]+)\.json$/;
+const BLOB_FILE = /^observability\/blobs\/([0-9a-f]{64})\.json$/;
 
 /**
  * 这个存储上有没有观测文档：以 `key.json` 为准（每个写入端开库时必建）。目录在但只有别的东西（比如旧的 `observations.sqlite`）不算。
@@ -101,6 +105,10 @@ function runPath(runId: string): string {
 
 function headPath(runtimeId: string): string {
   return `${HEADS}${segment(runtimeId)}.json`;
+}
+
+function blobPath(digest: string): string {
+  return `${BLOBS}${digest}.json`;
 }
 
 function parseJson(text: string, what: string): unknown {
@@ -358,6 +366,21 @@ export class DocumentObservationReader {
     }
     return n;
   }
+
+  /**
+   * 按引用取正文。文件不在（过期清扫或手动删掉了）返回 null——「正文已不在」，不是 corruption；
+   * 在但对不上引用（形状不对、digest / 字节数不符）是 corruption。
+   */
+  async readBlob(ref: ObservationBlobRef): Promise<string | null> {
+    if (!/^[0-9a-f]{64}$/.test(ref.digest)) throw new ObservationCorruptionError(`不是 blob digest：${ref.digest}`);
+    const path = blobPath(ref.digest);
+    const content = await this.dir.read(path);
+    if (content === null) return null;
+    const file = parseBlobFile(content);
+    if (file === null) throw new ObservationCorruptionError(`${path} 不是 blob（schemaVersion 1）`);
+    if (!blobMatches(ref, file.text)) throw new ObservationCorruptionError(`${path} 的正文与引用对不上（digest / size）`);
+    return file.text;
+  }
 }
 
 /**
@@ -404,6 +427,14 @@ export class DocumentObservationStore extends DocumentObservationReader implemen
 
   commitBatchIfAbsent(input: CommitBatchInput): Promise<CommitBatchResult> {
     return this.enqueue(() => this.commit(input));
+  }
+
+  /**
+   * 写一份正文（blobs.ts）。不排进提交的队：调用方（观测线程）自己保证写完才把引用它的记录交给 Sequencer。
+   * 已经有这个文件就整个覆盖——内容只差 `writtenAt`，覆盖就是刷新它（清扫的宽限期看它）。
+   */
+  async writeBlob(blob: EncodedBlob, writtenAt: number): Promise<void> {
+    await this.dir.write(blobPath(blob.ref.digest), blobFileContent(blob, writtenAt));
   }
 
   /** 等队里的写全部做完。不关底下的 `StorageDir`（dispose owner 不在这里）。幂等。 */
@@ -501,6 +532,8 @@ export type ObservationExpiryResult = Readonly<{
   openRuns: readonly string[];
   /** 回收的批文件数。 */
   removedBatches: number;
+  /** 回收的正文（blob）数。 */
+  removedBlobs: number;
 }>;
 
 /**
@@ -508,10 +541,12 @@ export type ObservationExpiryResult = Readonly<{
  * 不取锁、不需要写入端配合，活着的写者旁边做也安全，因为只凭盘上的事实判断：
  *   · run：只删盘上已封口的（RunIndex 有 `terminalRecordId`）——封口之后写者不再写这个 run 的任何文件；
  *   · 批文件：只删 `nextCommittedPrefix ≤ head` 的（它那一批的 `runs/` 已经写成，见头注的派生文件顺序），
- *     且里面出现过的 run 都已不在 `runs/`、run 之外的记录都早于 `activityBefore`（不给就不删带这类记录的批）。
+ *     且里面出现过的 run 都已不在 `runs/`、run 之外的记录都早于 `activityBefore`（不给就不删带这类记录的批）；
+ *   · 正文（blob）：删完批之后标记-清扫——剩下的批里每条记录引用到的（连同引用列表展开出来的）都留下，
+ *     其余 `writtenAt` 早于 `now - BLOB_SWEEP_GRACE_MS` 的删掉。宽限期护住「已写、引用它的批还没提交」的那段空当（blobs.ts 头注）。
  */
 export class DocumentObservationExpiry extends DocumentObservationReader {
-  async remove(decision: Readonly<{ runs?: readonly string[]; activityBefore?: number }>): Promise<ObservationExpiryResult> {
+  async remove(decision: Readonly<{ runs?: readonly string[]; activityBefore?: number }>, now: number = Date.now()): Promise<ObservationExpiryResult> {
     const removedRuns: string[] = [];
     const openRuns: string[] = [];
     for (const runId of new Set(decision.runs ?? [])) {
@@ -523,7 +558,7 @@ export class DocumentObservationExpiry extends DocumentObservationReader {
       }
       if (await this.dir.remove(runPath(runId))) removedRuns.push(runId);
     }
-    if (removedRuns.length === 0 && decision.activityBefore === undefined) return { removedRuns, openRuns, removedBatches: 0 };
+    if (removedRuns.length === 0 && decision.activityBefore === undefined) return { removedRuns, openRuns, removedBatches: 0, removedBlobs: 0 };
     // **先读每个 runtime 的 head，再拿 live 快照**：写者先写 `runs/`、后写 head（头注），所以 head 之前每一批的 run
     // 在读 head 时已经在 `runs/` 里，之后拿的 live 一定看得见它。反过来的顺序，两步之间提交的新 run 不在 live 里、
     // 它的批却已在 head 之前——会被当成无主删掉。
@@ -539,7 +574,48 @@ export class DocumentObservationExpiry extends DocumentObservationReader {
         if (await this.dir.remove(b.path)) removedBatches += 1;
       }
     }
-    return { removedRuns, openRuns, removedBatches };
+    return { removedRuns, openRuns, removedBatches, removedBlobs: await this.sweepBlobs(now - BLOB_SWEEP_GRACE_MS) };
+  }
+
+  /**
+   * 标记-清扫正文：先列出盘上的 blob，再扫剩下的**全部**批（含 head 之后刚提交的）收集引用，引用列表逐层展开；
+   * 没被引用、`writtenAt` 早于 `before` 的删掉。列表之后才写成的 blob 不在这一轮；列表之后才提交的批引用的 blob，
+   * 它的 `writtenAt` 一定还在宽限期里。坏掉的 blob 文件不删（看不懂的东西不动）。
+   */
+  private async sweepBlobs(before: number): Promise<number> {
+    const onDisk: string[] = [];
+    for (const p of await this.dir.list(BLOBS)) {
+      const m = BLOB_FILE.exec(p);
+      if (m !== null) onDisk.push(m[1]!);
+    }
+    if (onDisk.length === 0) return 0;
+    const marked = new Set<string>();
+    const expand: ObservationBlobRef[] = [];
+    const mark = (ref: ObservationBlobRef): void => {
+      if (marked.has(ref.digest)) return;
+      marked.add(ref.digest);
+      if (ref.mediaType === OBSERVATION_BLOB_REFS) expand.push(ref);
+    };
+    for (const runtimeId of await this.runtimeIds()) {
+      for (const b of await this.batchesOf(runtimeId)) {
+        const batch = await this.readBatch(b.path);
+        if (batch === null) continue;
+        for (const r of batch.records) collectBlobRefs(parseJson(r.envelope, `${b.path} seq ${r.seq}`), mark);
+      }
+    }
+    for (let ref = expand.pop(); ref !== undefined; ref = expand.pop()) {
+      const text = await this.readBlob(ref).catch(() => null);
+      if (text !== null) collectBlobRefs(parseJson(text, blobPath(ref.digest)), mark);
+    }
+    let removed = 0;
+    for (const digest of onDisk) {
+      if (marked.has(digest)) continue;
+      const content = await this.dir.read(blobPath(digest));
+      const file = content === null ? null : parseBlobFile(content);
+      if (file === null || file.writtenAt >= before) continue;
+      if (await this.dir.remove(blobPath(digest))) removed += 1;
+    }
+    return removed;
   }
 }
 

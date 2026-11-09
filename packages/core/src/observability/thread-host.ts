@@ -23,6 +23,7 @@ import { CONTEXT_BUILT, CONTEXT_HANDOFF } from "../loop/observe.ts";
 import type { ContextHandoff } from "./context-mirror.ts";
 import { ContextMirrorStore, type ContextBuiltMeta } from "./context-mirror-host.ts";
 import { sealAgentAssemblyObservation, snapshotRunModelBinding } from "./assembly.ts";
+import { BlobWriter, textBlob, type BlobBatch } from "./blobs.ts";
 import { DocumentObservationStore } from "./document-store.ts";
 import { RUN_ASSEMBLY_RECORD, type BoundaryObservationDraft, type BoundedObservationDraft, type RunAcceptedBodyV1, type RunAssemblyBodyV1, type RunObservationHeaderSeed, type RunStartedBodyV1 } from "./draft.ts";
 import type { ObservationFactProjection } from "./fact-sink.ts";
@@ -108,6 +109,20 @@ export function applyProjectionDigests(body: unknown, digests: NonNullable<Obser
   return out;
 }
 
+/**
+ * 投影声明的正文（`blobs`）→ 排进这一批，body 上对应字段换成引用。调用方写完这一批才能交给 Sequencer。
+ * 返回的投影不再带 `blobs`。
+ */
+export function applyProjectionBlobs(projection: ObservationFactProjection, batch: BlobBatch): ObservationFactProjection {
+  const { blobs, ...rest } = projection;
+  if (blobs === undefined) return projection;
+  const body = projection.body;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) throw new Error("带正文的投影 body 必须是普通对象");
+  const out: Record<string, unknown> = { ...(body as Record<string, unknown>) };
+  for (const [field, text] of Object.entries(blobs)) out[field] = batch.add(textBlob(text));
+  return { ...rest, body: out };
+}
+
 /** scope 供给返回值里的 runId（失败路径给 gap 挂归属用）。 */
 function runIdOfScope(raw: unknown): string | undefined {
   try {
@@ -120,13 +135,14 @@ function runIdOfScope(raw: unknown): string | undefined {
 
 /**
  * `context.built` 的交接物 → 真正的投影：按镜像算出 body，attributes 补上视图条数、token 合计、工具数。
+ * 给了 `blobs`（`content` 档）就把正文排进这一批、body 带上引用——调用方写完这一批才能交给 Sequencer。
  * 交接物形状不对、镜像算抛错都返回 null（调用方补 hole + gap）。
  */
-export function resolveContextBuilt(mirror: ContextMirrorStore, projection: ObservationFactProjection): ObservationFactProjection | null {
+export function resolveContextBuilt(mirror: ContextMirrorStore, projection: ObservationFactProjection, blobs?: BlobBatch): ObservationFactProjection | null {
   try {
     const raw = (projection.body as Record<string, unknown> | null)?.[CONTEXT_HANDOFF] as { handoff?: ContextHandoff; meta?: ContextBuiltMeta } | undefined;
     if (raw?.handoff === undefined || raw.meta === undefined) return null;
-    const body = mirror.resolve(raw.handoff, raw.meta);
+    const body = mirror.resolve(raw.handoff, raw.meta, blobs);
     return {
       ...projection,
       attributes: { purpose: body.purpose, messages: body.messages, tokens: body.tokens, tools: body.tools.count, ...(body.unresolved === undefined ? {} : { unresolved: body.unresolved }) },
@@ -256,6 +272,8 @@ class ThreadRuntime {
   private readonly subscriptions = new Map<number, () => void>();
   /** 上下文镜像（观测白盒化 §2.2）：这个 runtime 交过的消息、压缩状态、工具、system，按编号。 */
   private readonly mirror = new ContextMirrorStore();
+  /** `content` 档的正文写入端（blobs.ts）：别的档是 undefined，一个 blob 都不写。 */
+  private readonly blobs: BlobWriter | undefined;
   private chain: Promise<void> = Promise.resolve();
   private pending = 0;
   /** 正在处理的那条消息的时刻：Sequencer 盖 observedAt 用它（事实到达主线程的时刻，不是观测线程处理到的时刻）。 */
@@ -273,6 +291,7 @@ class ThreadRuntime {
     private readonly open: OpenWork,
   ) {
     this.storage = new ThreadStorage(host, runtimeId, open.storageLock);
+    this.blobs = open.capturePolicy === "content" ? new BlobWriter(async (blob, at) => (await this.startWriting()).writeBlob(blob, at)) : undefined;
     this.stateSnapshot = { runtimeId, runtimeGeneration: open.runtimeGeneration, sink: freezeSinkIdentity(open.boundaryOwner, AGENT_INSTRUMENTATION) };
     this.assembly = sealAgentAssemblyObservation(open.assembly);
     this.writerReady = new Promise((resolve, reject) => {
@@ -439,26 +458,44 @@ class ThreadRuntime {
   private async onFact(work: Extract<ObservationWork, { t: "fact" }>): Promise<void> {
     const ctx = this.sinks.get(work.sink);
     if (ctx === undefined) return; // 没登记的探针：主线程那边的 bug，这条不记
-    // 上下文构成：主线程交的是编号 + 第一次见到的对象，这里按镜像算出真正的 body（`ContextMirrorStore`）
+    const fail = (): void => this.withAt(work.at, () => ingestFactFailure(this.sequencer, runIdOfScope(work.scope)));
+    // 上下文构成：主线程交的是编号 + 第一次见到的对象，这里按镜像算出真正的 body（`ContextMirrorStore`）；
+    // `content` 档顺带把正文写成 blob——**写完才交给 Sequencer**，提交了的记录不指向不存在的文件
     if (work.projection.name === CONTEXT_BUILT) {
-      const resolved = resolveContextBuilt(this.mirror, work.projection);
-      if (resolved === null) {
-        this.withAt(work.at, () => ingestFactFailure(this.sequencer, runIdOfScope(work.scope)));
-        return;
-      }
+      const batch = this.blobs?.batch();
+      const resolved = resolveContextBuilt(this.mirror, work.projection, batch);
+      if (resolved === null) return fail();
+      if (batch !== undefined && !(await batch.commit().then(() => true, () => false))) return fail();
       this.withAt(work.at, () => ingestFact(this.sequencer, ctx, { scope: work.scope, projection: resolved }));
       return;
     }
+    // 投影声明的正文：只有 `content` 档写；别的档不写也不留字段（descriptor 本该只在 content 档给）
+    let projection = work.projection;
+    if (projection.blobs !== undefined) {
+      if (this.blobs === undefined) {
+        const { blobs: _dropped, ...rest } = projection;
+        projection = rest;
+      } else {
+        const batch = this.blobs.batch();
+        try {
+          projection = applyProjectionBlobs(projection, batch);
+          await batch.commit();
+        } catch {
+          return fail();
+        }
+      }
+    }
     // 记忆路径的 HMAC 要这个状态根的 key：key 在写入端里，要它就得开始写（这类事实只在 run 里出现，run.accepted 时已经开始了）
     let pathDigestKey: Uint8Array | undefined;
-    const digests = work.projection.digests;
+    const digests = projection.digests;
     if (digests !== undefined && Object.values(digests).some((d) => d.keyed === true)) {
       pathDigestKey = await this.startWriting().then(
         (store) => store.readPathDigestKey(),
         () => undefined,
       );
     }
-    this.withAt(work.at, () => ingestFact(this.sequencer, ctx, { scope: work.scope, projection: work.projection, ...(pathDigestKey === undefined ? {} : { pathDigestKey }) }));
+    const ready = projection;
+    this.withAt(work.at, () => ingestFact(this.sequencer, ctx, { scope: work.scope, projection: ready, ...(pathDigestKey === undefined ? {} : { pathDigestKey }) }));
   }
 
   /* ───────── run 三条边界（唯一 emission owner） ───────── */

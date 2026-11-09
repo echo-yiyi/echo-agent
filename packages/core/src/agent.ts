@@ -3614,6 +3614,7 @@ export class Agent {
         sections: report.sections.map(({ section, status, chars }) => ({ name: section.name, order: section.order, owner: owners.get(section) ?? null, status, chars })),
         variables: report.variables,
         chars: systemPrompt?.length ?? 0,
+        text: systemPrompt ?? null,
       });
     }
     this.lastSystemEstimate = estimateText(systemPrompt); // usage 到达时算校准比要用同一份 system 的字符估

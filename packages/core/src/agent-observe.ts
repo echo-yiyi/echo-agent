@@ -42,7 +42,8 @@ export type AgentFactBody =
    * 渲染出来有字 / 空 / 抛错、进 system 的字符数，插值用到的变量名，拼起来的总长。每个 run 组装一次就记一次。
    * 段名、注册者、字符数都是标识与计数，metadata 档就记；正文在 content 档（正文存储，§4）。
    */
-  | { kind: "prompt_assembled"; sections: readonly PromptSectionStat[]; variables: readonly string[]; chars: number }
+  /** `text`：拼好的 system（只是引用，`content` 档才交给观测线程存成 blob）；没有 system 为 null。 */
+  | { kind: "prompt_assembled"; sections: readonly PromptSectionStat[]; variables: readonly string[]; chars: number; text: string | null }
   /** `ResourceChange` 自带一个 `kind`（tool / skill / mcp …），与本联合的判别字段同名，所以整个嵌进 `change`。 */
   | { kind: "resource_changed"; change: ResourceChange };
 
@@ -99,6 +100,8 @@ export function projectAgentFact(fact: AgentFact, policy: ObservationCapturePoli
         scope: {},
         attributes,
         body: { sections: fact.sections.map((s) => ({ ...s })), variables: [...fact.variables], chars: fact.chars },
+        // content 档：拼好的 system 原文存成 blob，body.text 是引用（别的档不交原文）
+        ...(policy === "content" && fact.text !== null ? { blobs: { text: fact.text } } : {}),
       };
     }
     case "resource_changed":

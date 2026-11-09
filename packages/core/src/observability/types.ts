@@ -34,12 +34,22 @@ export type ObservationError = Readonly<{
   stackChars?: number;
 }>;
 
-/** 大正文的 content-addressed 引用；O3a 只定形状，真正的 blob CAS 接线在 O3b。 */
+/**
+ * 大正文的 content-addressed 引用：正文存在 `observability/blobs/<digest>.json`，记录 body 里只放这个引用
+ * （观测白盒化 §4）。只有 `content` 档写 blob；观测线程写完 blob 才提交引用它的记录。读：`readBlob(ref)`。
+ *   · `digest`：正文 UTF-8 字节的 SHA-256（十六进制）；`size`：字节数。
+ *   · `mediaType`：怎么读正文——`text/plain` 原样是文本；`application/json` 是一个 JSON 值；
+ *     `OBSERVATION_BLOB_REFS`（`application/vnd.echo.blob-refs+json`）是一个 `ObservationBlobRef[]`，按顺序展开。
+ * 同一份正文只存一份；过期清扫只删没有记录（直接或经引用列表）还指着的。
+ */
 export type ObservationBlobRef = Readonly<{
   digest: string;
   mediaType?: string;
   size: number;
 }>;
+
+/** blob 的 mediaType：正文是一个 `ObservationBlobRef[]`（按顺序展开成更长的序列，比如一次送模的整份视图）。 */
+export const OBSERVATION_BLOB_REFS = "application/vnd.echo.blob-refs+json";
 
 /** 指向某条 canonical record（runtimeId + recordId）。 */
 export type ObservationRef = Readonly<{
@@ -517,6 +527,11 @@ export interface EchoObservations {
   snapshot(): Promise<EchoObservationSnapshot>;
   subscribe(options: ObservationSubscribeOptions): Promise<() => void>;
   /**
+   * 按引用取 `content` 档的正文（`ObservationBlobRef`，记录 body 里的）。文件已不在（过期清扫 / 手动删了）返回 null；
+   * 在但对不上引用抛 `ObservationCorruptionError`。引用它的记录提交之前正文就已写完，不用先 `flush()`。
+   */
+  readBlob(ref: ObservationBlobRef): Promise<string | null>;
+  /**
    * 等观测线程把此刻之前交出去的事实全部写完（`stop()` 之后调，等的是收摊那一段）。读方法自己会先等这一步；
    * 要在 `stop()` 之后删目录、搬目录、或让别的进程读之前确认写完，调它。永不 reject。
    */
@@ -531,6 +546,8 @@ export interface EchoObservationReader {
   lastRun(): Promise<RunLookupResult>;
   listRuns(options?: ListRunsOptions): Promise<RunObservationPage>;
   snapshot(): Promise<EchoObservationSnapshot>;
+  /** 按引用取 `content` 档的正文；已不在返回 null（同 `EchoObservations.readBlob`）。 */
+  readBlob(ref: ObservationBlobRef): Promise<string | null>;
   close(): Promise<void>;
 }
 

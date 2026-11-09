@@ -39,6 +39,12 @@ export type ObservationFactProjection = Readonly<{
    * 摘要是观测自己的活，不在节点上算；原文只在进程内过一次线程，不进记录。有它时 `body` 必须是普通对象。
    */
   digests?: Readonly<Record<string, Readonly<{ text: string; keyed?: true }>>>;
+  /**
+   * 要存成 blob 的正文（blobs.ts）：观测线程把文本写成 `observability/blobs/<digest>.json`，写完才把记录交给 Sequencer，
+   * `body[字段]` 换成 `ObservationBlobRef`。**只在 `content` 档给**——别的档观测线程不写、直接去掉这些字段。
+   * 有它时 `body` 必须是普通对象。
+   */
+  blobs?: Readonly<Record<string, string>>;
 }>;
 
 export interface CapabilityFactSink<T> {

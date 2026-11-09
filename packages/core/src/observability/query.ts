@@ -10,7 +10,7 @@ import { decodeObservationEnvelope, materializeRunObservation } from "./material
 import type { ThreadHealth } from "./worker-protocol.ts";
 import { DocumentObservationReader, ObservationStoreMissingError, hasObservationStore, observationStorePath, type RunIndexOrderKey } from "./document-store.ts";
 import { FileDir } from "../storage/file-dir.ts";
-import type { ObservationEnvelope } from "./types.ts";
+import type { ObservationBlobRef, ObservationEnvelope } from "./types.ts";
 import type {
   EchoObservationReader,
   EchoObservationSnapshot,
@@ -34,7 +34,7 @@ export type RunIndexCursor = RunIndexOrderKey;
 export type RuntimeHeadRow = Readonly<{ runtimeId: string; committedPrefix: number }>;
 
 /** live 与离线查询共用的只读面：按 RunIndex 取一个 run、分页列 run。 */
-export type ObservationReadPort = Pick<DocumentObservationReader, "readRunIndex" | "readRunRecords" | "listRunIndex">;
+export type ObservationReadPort = Pick<DocumentObservationReader, "readRunIndex" | "readRunRecords" | "listRunIndex" | "readBlob">;
 
 /** opaque cursor 坏了 / 篡改了：fail-loud，不用可漂移的偏移量猜。 */
 export class ObservationCursorError extends Error {
@@ -145,6 +145,11 @@ export class LiveEchoObservations implements EchoObservations {
     return lastRun(this.deps.reader);
   }
 
+  /** 不先 flush：引用它的记录提交之前正文就已写完。 */
+  readBlob(ref: ObservationBlobRef): Promise<string | null> {
+    return this.deps.reader.readBlob(ref);
+  }
+
   async listRuns(options?: ListRunsOptions): Promise<RunObservationPage> {
     await this.deps.flush();
     return listRuns(this.deps.reader, options);
@@ -202,6 +207,10 @@ export class DocumentEchoObservationReader implements EchoObservationReader {
 
   lastRun(): Promise<RunLookupResult> {
     return lastRun(this.store);
+  }
+
+  readBlob(ref: ObservationBlobRef): Promise<string | null> {
+    return this.store.readBlob(ref);
   }
 
   listRuns(options?: ListRunsOptions): Promise<RunObservationPage> {

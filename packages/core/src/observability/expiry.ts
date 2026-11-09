@@ -27,7 +27,8 @@ export type ExpireObservationsOptions = Readonly<
 >;
 
 /**
- * 按产品的规则过期一个状态根里的观测文档：读全部 run 的 header、调一次规则、按结果删。
+ * 按产品的规则过期一个状态根里的观测文档：读全部 run 的 header、调一次规则、按结果删；删了东西之后顺带清扫
+ * 没有记录再引用的正文（blob，宽限期从 `now` 往前算）。
  * 规则或存储抛错原样抛给调用方——这是产品自己调的函数，不是 agent 的流程。
  */
 export async function expireObservations(options: ExpireObservationsOptions): Promise<ObservationExpiryResult> {
@@ -36,5 +37,6 @@ export async function expireObservations(options: ExpireObservationsOptions): Pr
       ? new DocumentObservationExpiry(options.store, `(store)/${OBSERVATION_STORE_DIR}`)
       : new DocumentObservationExpiry(new FileDir(options.stateRoot), observationStorePath(options.stateRoot));
   const headers = (await expiry.readAllRunIndex()).map((e) => e.header);
-  return expiry.remove(options.rule(headers, options.now ?? Date.now()));
+  const now = options.now ?? Date.now();
+  return expiry.remove(options.rule(headers, now), now);
 }

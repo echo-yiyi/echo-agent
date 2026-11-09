@@ -298,12 +298,12 @@ describe("过期：只凭盘上的事实删", () => {
     const expiry = new DocumentObservationExpiry(inner, "(test)");
     const batches = async () => (await inner.list("observability/batches/")).filter((p) => p.endsWith(".json")).map((p) => p.split("/").pop());
 
-    expect(await expiry.remove({ runs: ["r1"] })).toEqual({ removedRuns: ["r1"], openRuns: [], removedBatches: 1 });
+    expect(await expiry.remove({ runs: ["r1"] })).toEqual({ removedRuns: ["r1"], openRuns: [], removedBatches: 1, removedBlobs: 0 });
     expect(await store.readRunIndex("r1")).toBeNull();
     expect(await batches()).toEqual(["000000000004.json", "000000000005.json"]);
     expect((await store.readRunRecords(RT, "r2", 4, 5)).length).toBe(2);
 
-    expect(await expiry.remove({ runs: ["r2"] })).toEqual({ removedRuns: ["r2"], openRuns: [], removedBatches: 2 });
+    expect(await expiry.remove({ runs: ["r2"] })).toEqual({ removedRuns: ["r2"], openRuns: [], removedBatches: 2, removedBlobs: 0 });
     expect(await batches()).toEqual([]);
     expect(await store.readCommittedPrefix(RT)).toBe(5); // head 不回退
   });
@@ -313,9 +313,9 @@ describe("过期：只凭盘上的事实删", () => {
     const store = await open(inner);
     await threeBatches(store, false);
     const expiry = new DocumentObservationExpiry(inner, "(test)");
-    expect(await expiry.remove({ runs: ["r2", "nope"] })).toEqual({ removedRuns: [], openRuns: ["r2"], removedBatches: 0 });
+    expect(await expiry.remove({ runs: ["r2", "nope"] })).toEqual({ removedRuns: [], openRuns: ["r2"], removedBatches: 0, removedBlobs: 0 });
     expect(await store.readRunIndex("r2")).not.toBeNull();
-    expect(await expiry.remove({})).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0 });
+    expect(await expiry.remove({})).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0, removedBlobs: 0 });
     expect(await store.countRecords()).toBe(5);
   });
 
@@ -338,7 +338,7 @@ describe("过期：只凭盘上的事实删", () => {
     await store.commitBatchIfAbsent(batch([2], { expectedCommittedPrefix: 1 }, undefined, () => ({ observedAt: 1 })));
     const expiry = new DocumentObservationExpiry(inner, "(test)");
     // runs/r1.json 从没写成：盘上看 r1 不在，但 head 没越过这两批——写者可能正要写，不能动
-    expect(await expiry.remove({ activityBefore: 10_000 })).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0 });
+    expect(await expiry.remove({ activityBefore: 10_000 })).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0, removedBlobs: 0 });
     expect(await store.countRecords()).toBe(2);
   });
 
@@ -400,13 +400,13 @@ describe("过期：只凭盘上的事实删", () => {
       },
     });
     expect(seen).toEqual([{ runs: ["r2", "r1"], now: 7 }]);
-    expect(result).toEqual({ removedRuns: ["r1"], openRuns: [], removedBatches: 1 });
+    expect(result).toEqual({ removedRuns: ["r1"], openRuns: [], removedBatches: 1, removedBlobs: 0 });
 
     const root = await tmp();
     await threeBatches(await open(new FileDir(root)));
     expect((await expireObservations({ stateRoot: root, rule: () => ({ runs: ["r1", "r2"] }) })).removedBatches).toBe(3);
     // 没有观测目录的状态根：规则拿到空表，什么都不删
-    expect(await expireObservations({ stateRoot: await tmp(), rule: (runs) => ({ runs: runs.map((h) => h.runId) }) })).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0 });
+    expect(await expireObservations({ stateRoot: await tmp(), rule: (runs) => ({ runs: runs.map((h) => h.runId) }) })).toEqual({ removedRuns: [], openRuns: [], removedBatches: 0, removedBlobs: 0 });
   });
 });
 

@@ -24,7 +24,7 @@
 **待拍板 / 实施中。** 两条，本文只指过去、不复述：
 
 - [观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)——B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部），**未实现**；本文按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
-- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——2026-11-08 拍板、分期实施中。**已落地**：上下文的构成（§7「用了什么」：`prompt.assembled`、`context.built` 的 metadata 档、压缩判断）。**还没有**：正文（`content` 档下 system / 视图 / 工具 schema 的原文，要等正文存储）、面板展示、记忆的决定点、其余原因码与因果链。
+- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——2026-11-08 拍板、分期实施中。**已落地**：上下文的构成（§7「用了什么」：`prompt.assembled`、`context.built` 的 metadata 档、压缩判断）；正文存储（`content` 档下送进模型的 system / 视图 / 工具 schema 存成 blob，可逐字节还原，§4、§5）。**还没有**：面板展示、记忆的决定点、其余原因码与因果链。
 
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
@@ -98,12 +98,12 @@
 |---|---|---|
 | `off` | 探针一律不生成记录，只剩 run 的边界与装配快照（run 在不在、用什么装的、怎么结束）；主线程连 run 开头 / 结尾的状态快照都不拍 | 不想要账本 |
 | `metadata` | 形状与计数：块数、字符数、工具调用数、token 用量、耗时、错误码 | 缺省。够回答「哪步慢、哪步失败」 |
-| `content` | 上面全部，**加**模型文本、思考、工具参数与结果、错误消息，明文落盘 | 要回答「模型到底说了 / 想了什么」 |
+| `content` | 上面全部，**加**模型文本、思考、工具参数与结果、错误消息，明文落盘；**每次调模型送进去的 system、视图、工具 schema 存成正文（blob）**，能逐字节还原成 provider 收到的那一份 | 要回答「模型到底说了 / 想了什么」「到底给模型看了什么」 |
 
 三条要知道的代价：
 
 1. **明文落盘，不脱敏**（Non-Goals 已述）。
-2. **单条记录有预算**：超过就成 `capture_limit` 缺口。工具载荷在投影时就收进预算：结果正文与字符串进展截断并标 `resultTruncated` / `partialTruncated`，截不了半个的结构化载荷（参数、结果 metadata、对象进展、`tool_use` 的 input）放不进就不带、标 `paramsOmitted` / `metadataOmitted` / `partialOmitted` / `inputOmitted`——注定超预算的整份不交给观测线程。正文在投影时先按字节预算截断并标 `textTruncated` / `thinkingTruncated`，思考与回答**各有份额**——思考封顶在正文预算的一半，回答拿剩下的，两边合计不超总预算。原因写在 [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=MAX_PROJECTED_THINKING_BYTES) 的注释里：另开一份等量预算会让 body 翻倍、整条记录穿不过 Sequencer 被丢掉，那是丢更多事实。
+2. **单条记录有预算**：超过就成 `capture_limit` 缺口。送进模型的上下文与拼好的 system 不受它限制——它们在正文存储里（§5），记录里只放引用。工具载荷在投影时就收进预算：结果正文与字符串进展截断并标 `resultTruncated` / `partialTruncated`，截不了半个的结构化载荷（参数、结果 metadata、对象进展、`tool_use` 的 input）放不进就不带、标 `paramsOmitted` / `metadataOmitted` / `partialOmitted` / `inputOmitted`——注定超预算的整份不交给观测线程。正文在投影时先按字节预算截断并标 `textTruncated` / `thinkingTruncated`，思考与回答**各有份额**——思考封顶在正文预算的一半，回答拿剩下的，两边合计不超总预算。原因写在 [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=MAX_PROJECTED_THINKING_BYTES) 的注释里：另开一份等量预算会让 body 翻倍、整条记录穿不过 Sequencer 被丢掉，那是丢更多事实。
 3. **`content` 档下流式增量逐条成记录**（`model.generate.delta`、`tool.execute.progress`）。库因此涨得快得多——清不清、清多少由产品的过期规则定（§5）。
 
 ## 5. 观测不在主流程上
@@ -124,8 +124,11 @@
 | `runs/<runId>.json` | 这个 run 的 RunIndex（header + firstSeq / lastSeq）——派生，写失败下次补 |
 | `heads/<runtimeId>.json` | 这个 runtime 提交到哪——派生 |
 | `key.json` | 记忆路径的 HMAC key，首建写一次、永不改写，读面不读 |
+| `blobs/<digest>.json` | **正文**（只有 `content` 档写）：`{ schemaVersion, writtenAt, text }`，`digest` 是 `text` 的 SHA-256，同一份正文一个文件。记录 body 里放的是 [`ObservationBlobRef`](../../packages/core/src/observability/types.ts#symbol=ObservationBlobRef)（`digest` / `size` / `mediaType`）|
 
 Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个批文件里，一次 rename 同时可见；批文件已存在且逐字相同是幂等重提，不同是 corruption；head 与 RunIndex 的 CAS 对的是写入端内存里的值（每个进程的 runtimeId 是新的，只写自己的批文件、自己 run 的 `runs/`、自己的 `heads/`，与别的进程不相交，所以不需要 lease）。派生文件的写入顺序是约定：**先 `runs/`、后 `heads/`**——过期靠它判断批文件能不能删。
+
+**正文怎么写**（[blobs.ts](../../packages/core/src/observability/blobs.ts#symbol=BlobWriter) 头注）：只在观测线程里写，**写完 blob 才把引用它的记录交给 Sequencer**——提交了的记录不指向不存在的文件；写不成就是这条记录的 hole + gap。`mediaType` 说怎么读：`text/plain` 是原文，`application/json` 是 canonical JSON，[`OBSERVATION_BLOB_REFS`](../../packages/core/src/observability/types.ts#symbol=OBSERVATION_BLOB_REFS) 是一份引用列表（按顺序展开）。`context.built` 的 `content` 是 `{ system, view, tools }` 三个引用：视图每 64 条消息一块、块再成列表——transcript 只增，前面的块不变也不重写，记录里始终只有一个引用。同一个 runtime 对同一份正文一小时内只写一次，过了一小时再被引用就重写（刷新 `writtenAt`，清扫看它）。正文与批文件一样经主线程的 `StorageDir` 落盘：`content` 档主线程多做的 I/O 与本次新增的正文同量级，不随上下文总长增长。
 
 **什么时候开始写**：runtime 第一次有 `run.accepted` 或第一次被读才打开写入端（读或建 `key.json`）；之前事实只进 ring（有界，满了记缺口）。收摊时从没开始写的 runtime 直接丢：一句话都没说过的会话，状态根会被整个删掉，不能有迟到的文件把目录建回来（删之前主线程先同步关掉这个 runtime 的存储闸）。派生文件没写成时下一次提交补上；进程在两者之间退出，那几个 run 就列不出来——不做崩溃恢复。
 
@@ -133,6 +136,7 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 
 - 只删盘上**已封口**的 run（RunIndex 有终态记录）：封口之后写者不再写这个 run 的任何文件。没封口的列进结果的 `openRuns`。删了之后 `getRun()` 是 `unknown`。
 - 批文件只在 `nextCommittedPrefix ≤ head`、里面出现过的 run 都已不在 `runs/`、run 之外的记录都早于 `activityBefore` 时回收。扫描**先读每个 runtime 的 head、再拿 `runs/` 的清单**：按派生文件的写入顺序，读 head 时那之前每一批的 run 已经在 `runs/` 里，之后拿的清单一定看得见它；反过来的顺序，活着的写者在两步之间提交的新 run 会被当成无主、它的第一批被删（[`DocumentObservationExpiry.remove`](../../packages/core/src/observability/document-store.ts#symbol=DocumentObservationExpiry.remove)）。
+- **正文按引用清扫**：删了东西之后做一遍标记-清扫——剩下的批里每条记录引用到的正文（引用列表逐层展开）都留下，其余 `writtenAt` 早于「此刻减宽限期（24 小时）」的删掉。「写 blob」到「提交引用它的批」之间有一段空当，那时 blob 还没人引用，宽限期护的就是这段；写入端每小时重写一次仍在引用的正文，所以老正文被新记录引用时 `writtenAt` 一定还新。结果里 `removedBlobs` 是删掉的数。
 - 订阅回放跨过被删的批，交付 `retention-gap`（传输通知，不进 journal、不改 integrity）。
 
 **今天两个产品怎么调**（2026-09-15 拍板）：`echo-agent` 与 `echo-coding` 各自在自己的 `Product` 上声明 [`observationExpiry: retainRecentDays(30)`](../../packages/base/src/observe/expire.ts#symbol=retainRecentDays)——两个产品平级，规则各写各的。时机归装配层：[`mainFor()`](../../packages/base/src/cli.ts#symbol=mainFor) 启动时**不等地**跑一遍 [`expireSessionObservations`](../../packages/base/src/observe/expire.ts#symbol=expireSessionObservations)，失败不报——观测的任何功能都不许让启动多等一拍。扫的是**会话根下每一段**，不是当前这一段：缺省每次启动都新建一段，只清自己那一段等于什么都不清。某一段的观测坏了只跳过那一段。
@@ -154,13 +158,14 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 | 入口 | 形状 | 取锁 | 用途 |
 |---|---|---|---|
 | `observe` 子命令 | `last` / `show <run-id>` / `export` / `health` / `serve` | **不取** | 命令行排查；`serve` 是本地只读面板 |
-| `echo.observations` | `EchoObservations`：`getRun` `lastRun` `listRuns` `snapshot` `subscribe` `flush` | 已在 runtime 内 | 宿主自己读 / 订阅；读之前先等观测线程写完此刻之前交出去的 |
+| `echo.observations` | `EchoObservations`：`getRun` `lastRun` `listRuns` `snapshot` `subscribe` `flush` `readBlob` | 已在 runtime 内 | 宿主自己读 / 订阅；读之前先等观测线程写完此刻之前交出去的 |
 | `openObservationReader({ stateRoot })` | `EchoObservationReader`：同上去掉 `subscribe` 与 `flush`，多一个 `close()` | **不取** | 离线读一个状态根 |
 
 读面性质如下：
 
 - **只读入口不启动 agent、不取会话锁**，所以正在跑的会话也能读——读到的是它已提交的部分。reader 只读 rename 完成的文档，看不到半截；`runs/` 最多落后正在写派生文件的那一批。
 - **`getRun()` 只有两态**：`found` / `unknown`（从未有过，或已被过期规则删掉）。
+- **`readBlob(ref)` 按引用取正文**：文件不在（被清扫或手动删了）返回 `null`——「正文已不在」，不是 corruption；在但 digest / 字节数对不上引用是 corruption。一次送模的整份上下文由 [`readContextContent`](../../packages/core/src/observability/context-mirror-host.ts#symbol=readContextContent) 凭 `context.built` 的 `content` 还原：system 原文、投影之前的视图（再过一遍 `defaultConvertToLlm` 就是线上的 messages）、工具 schema。
 - **`lastRun()` 是最近一次顶层 run**：隔离子循环（§7）是某个 run 派出来的，`source` 带 `parentRunId`，不算「上一次」。`listRuns()` 照常列出全部。
 - **列举顺序新的在前**（[`RunIndexOrderKey`](../../packages/core/src/observability/document-store.ts#symbol=RunIndexOrderKey)）：`acceptedAt` 倒序；同一毫秒时，同一个 runtime 内按 `firstSeq` 倒序（`run.accepted` 的 seq 就是 admission 顺序），跨 runtime 按 `runtimeId` 定一个固定次序——跨 runtime 的 seq 各数各的，没有可比的先后。三段逐级比较是全序，分页游标带的就是这三个字段，所以翻页不重不漏。
 - **renderer 是纯函数**（[render.ts](../../packages/core/src/observability/render.ts#symbol=renderRunObservation) 头注）：`buildRunObservationViewModel()` 与 `renderRunObservation()` 不读 Agent、不查 store、不看订阅状态，也不改原 envelope。同一批记录必然同一输出，所以能上 golden。时间全部相对 `acceptedAt`，golden 不锁 wall clock。
@@ -210,7 +215,7 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 1. **没有崩溃恢复**：缺省存储（`FileDir`）每次写都是 fsync 临时文件 → rename → fsync 父目录（[原子写](../decisions/implemented/2026-11-03-atomic-write-fsync.md)），掉电不会留下零长或半截的批文件；`observation.store` 注入的存储持久到什么程度由它自己定。进程在批文件与派生文件之间退出，那几个 run 列不出来、也不会被过期回收；写入端封口之后不自动重开。注意这条**不包含**「给崩掉的 run 补终态」——那属于 Non-Goals。
 2. **列 run 读全部概要**：`listRuns` / `lastRun` 每次读 `runs/` 下全部文件再排序，成本随 run 数线性。两个产品的 30 天规则把它压在「最近 30 天的 run 数」上，不是彻底解决——单段会话在 30 天内堆出足够多的 run 仍然会慢。
 3. **TUI 形态不打 runId**，只有管道形态打。从 TUI 跑的会话，终端上看不到该拿哪个 id 去 `observe show`。
-4. **超预算的记录只能成缺口**，没有 attachment / blob 旁路。
+4. **超预算的记录只能成缺口**：正文存储只接了送模的上下文（`context.built`）与拼好的 system（`prompt.assembled`）；模型回复、工具结果、记忆写入的正文仍在记录里，超了就截断或成缺口。
 5. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
 6. **记忆的能力摘要没接。** 状态快照在节点上只收同步可读的值，记忆的状态在盘上要异步读。
 7. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。

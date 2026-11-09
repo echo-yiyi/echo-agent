@@ -601,7 +601,7 @@ type   McpHost
 type   McpServerSnapshot
 
 == 入口 "./observability" → src/observability/public.ts ==
-符号 77（value 15 · type 61 · both 1）
+符号 78（value 16 · type 61 · both 1）
 
 -- src/admission/types.ts (1) --
 type   RunSource
@@ -634,7 +634,7 @@ value  renderRunObservation
 -- src/observability/store.ts (1) --
 both   ObservationCorruptionError
 
--- src/observability/types.ts (58) --
+-- src/observability/types.ts (59) --
 type   ActiveEntrySnapshot
 type   AgentAssemblyObservationSnapshot
 type   AgentOutcomeObservation
@@ -647,6 +647,7 @@ type   EchoObservationSnapshot
 type   EchoRunResult
 type   EchoRuntimeStatus
 type   ListRunsOptions
+value  OBSERVATION_BLOB_REFS
 value  OBSERVATION_BOUNDARY_LIMITS
 value  OBSERVATION_ENVELOPE_RESERVE
 value  OBSERVATION_IDENTITY_LIMITS
