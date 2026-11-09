@@ -142,7 +142,7 @@ test("同一 run 里调两次 → 第二次 toolError「已经登记过」；重
   expect(results.length).toBe(2);
   expect(results[0]!.isError).not.toBe(true);
   expect(results[1]!.isError).toBe(true);
-  expect(JSON.stringify(results[1]!.content)).toContain("已经登记过");
+  expect(JSON.stringify(results[1]!.content)).toContain("Already scheduled");
   await waitFor(() => agentOf(echo).messages.some((m) => m.role === "environment" && m.source === "echo:reload"), "报告");
   expect(agentOf(echo).messages.filter((m) => m.role === "environment" && m.source === "echo:reload").length).toBe(1);
 });

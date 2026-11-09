@@ -382,6 +382,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-09-01-model-facing-english.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-09-07-builtin-capabilities-stay-core.md",
       "bilingual": false
     },
