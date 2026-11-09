@@ -376,13 +376,51 @@ function replaceLayersOf(sections: Map<string, PromptSection>): Map<string, (Pro
   return layers;
 }
 
-/** 两张表上的 registry：先查后写、fail-loud；disposer 认对象身份（O1a exact-reference 契约）。 */
-function promptRegistry(sections: Map<string, PromptSection>, variables: Map<string, PromptVariable>): AgentPromptRegistry {
+/**
+ * 宿主自带的 Service 若带这个方法，Fiber 取它时拿到的是**绑定了自己 entryId 的那一份**（`fiber.ts` 的 resolve）——
+ * registry 据此记下「这一条是谁注册的」（观测白盒化待拍板 3：prompt 段记注册者，2026-11-08 拍板）。装配期的事，运行期零开销。
+ * 内部约定，不在公共面：扩展作者看到的仍是普通的 registry。
+ */
+export const FOR_ENTRY: unique symbol = Symbol("echo.extension.forEntry");
+
+/** 带 `FOR_ENTRY` 的宿主 Service：取它的 Fiber 拿到 `[FOR_ENTRY](entryId)` 的返回值。 */
+export type EntryBound<T> = T & { readonly [FOR_ENTRY]: (entryId: string) => T };
+
+/** 宿主 Service 在某个 Fiber 眼里的样子：带 `FOR_ENTRY` 就绑上它的 entryId，否则原样。 */
+export function serviceForEntry(value: unknown, entryId: string): unknown {
+  const bind = (value as { [FOR_ENTRY]?: unknown } | null | undefined)?.[FOR_ENTRY];
+  return typeof bind === "function" ? (bind as (id: string) => unknown)(entryId) : value;
+}
+
+/**
+ * 每张段表上、每个段对象是谁注册的（entryId）。认**对象身份**：替代层也是各自的对象，生效的是哪一层、记的就是哪一层的注册者。
+ * 挂在段表上（WeakMap），同一张表的各个 registry 视图看到的是同一份。
+ */
+const SECTION_OWNERS = new WeakMap<Map<string, PromptSection>, WeakMap<PromptSection, string>>();
+
+/** 这张段表上各段的注册者（观测的 `prompt.assembled` 读它）。不经 Fiber 直接注册的段没有。 */
+export function promptSectionOwners(sections: Map<string, PromptSection>): WeakMap<PromptSection, string> {
+  let owners = SECTION_OWNERS.get(sections);
+  if (owners === undefined) {
+    owners = new WeakMap();
+    SECTION_OWNERS.set(sections, owners);
+  }
+  return owners;
+}
+
+/**
+ * 两张表上的 registry：先查后写、fail-loud；disposer 认对象身份（O1a exact-reference 契约）。
+ * `owner`：经 Fiber 取到的那一份带着取它的 entryId，注册的段记下它（`promptSectionOwners`）。
+ */
+function promptRegistry(sections: Map<string, PromptSection>, variables: Map<string, PromptVariable>, owner?: string): EntryBound<AgentPromptRegistry> {
   const layers = replaceLayersOf(sections);
+  const owners = promptSectionOwners(sections);
   return {
+    [FOR_ENTRY]: (entryId: string) => promptRegistry(sections, variables, entryId),
     section: (section, opts) => {
       if (typeof section.name !== "string" || section.name === "") throw new Error("prompt 段缺 name");
       if (!Number.isFinite(section.order)) throw new Error(`prompt 段 '${section.name}' 的 order 必须是有限数`);
+      if (owner !== undefined) owners.set(section, owner);
       const name = section.name;
       const existing = sections.get(name);
       if (opts?.replace === true) {

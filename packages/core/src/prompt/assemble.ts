@@ -6,6 +6,16 @@ import { PROMPT_VARIABLE_NAME, type AssembleContext, type PromptSection, type Pr
 export type SectionFailure = (info: { section: string; error: unknown }) => void;
 
 /**
+ * 一次装配里每一段的结果（观测的 `prompt.assembled` 读它）：段对象本身、渲染出来是有字 / 空 / 抛错、
+ * 进 system 的字符数（trim 之后、插值之后；空与失败为 0）。`variables`：插值实际用到的变量名。
+ * 装配循环本来就逐段走一遍，这里只是把那一遍的结论交出来——O(段数)，不另扫正文。
+ */
+export type AssembleReport = Readonly<{
+  sections: readonly Readonly<{ section: PromptSection; status: "rendered" | "empty" | "failed"; chars: number }>[];
+  variables: readonly string[];
+}>;
+
+/**
  * 变量引用错:未注册的名字、provider 返回 undefined、畸形的 `{{…}}`。
  * 这是**作者错误**(段文本是产品 / extension 写的受信文本),装配失败、本次 run 以 error 结束——
  * 不像 `render()` 抛错那样隐形:一个写错的 `{{modle}}` 静默发给模型,没人会发现。
@@ -34,21 +44,27 @@ export async function assembleSystem(
   variables: ReadonlyMap<string, PromptVariable>,
   ctx: AssembleContext,
   onFailure?: SectionFailure,
+  onReport?: (report: AssembleReport) => void,
 ): Promise<string | null> {
   const ordered = [...sections].sort((a, b) => a.order - b.order); // Array#sort 稳定:同 order 保注册序
   const values = resolveVariables(variables, ctx);
   const blocks: string[] = [];
+  const stats: { section: PromptSection; status: "rendered" | "empty" | "failed"; chars: number }[] = [];
+  const used = new Set<string>();
   for (const s of ordered) {
     let raw: string;
     try {
       raw = await s.render(ctx);
     } catch (error) {
       onFailure?.({ section: s.name, error });
+      stats.push({ section: s, status: "failed", chars: 0 });
       continue;
     }
-    const text = (s.interpolate === true ? interpolate(raw, values, s.name) : raw).trim();
+    const text = (s.interpolate === true ? interpolate(raw, values, s.name, used) : raw).trim();
     if (text !== "") blocks.push(text);
+    stats.push({ section: s, status: text === "" ? "empty" : "rendered", chars: text.length });
   }
+  onReport?.({ sections: stats, variables: [...used] });
   return blocks.length > 0 ? blocks.join("\n\n") : null;
 }
 
@@ -66,7 +82,7 @@ function resolveVariables(variables: ReadonlyMap<string, PromptVariable>, ctx: A
  *   · 孤立的 `{{` 后面再没有 `}}` → 当普通文本原样保留;
  *   · 替换进去的值**不再扫描**——值里的 `{{` 不会被二次解释。
  */
-export function interpolate(text: string, values: ReadonlyMap<string, string | undefined>, section: string): string {
+export function interpolate(text: string, values: ReadonlyMap<string, string | undefined>, section: string, used?: Set<string>): string {
   let out = "";
   let i = 0;
   while (i < text.length) {
@@ -93,6 +109,7 @@ export function interpolate(text: string, values: ReadonlyMap<string, string | u
       throw new PromptVariableError(section, name, `prompt 段 '${section}' 引用的变量 '{{${name}}}' 本次没有值`);
     }
     out += value;
+    used?.add(name);
     i = close + 2;
   }
   return out;

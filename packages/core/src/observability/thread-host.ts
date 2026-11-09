@@ -19,6 +19,9 @@
 import type { Model } from "../provider/types.ts";
 import type { StorageDir } from "../storage/types.ts";
 import { AGENT_INSTRUMENTATION } from "../agent-observe.ts";
+import { CONTEXT_BUILT, CONTEXT_HANDOFF } from "../loop/observe.ts";
+import type { ContextHandoff } from "./context-mirror.ts";
+import { ContextMirrorStore, type ContextBuiltMeta } from "./context-mirror-host.ts";
 import { sealAgentAssemblyObservation, snapshotRunModelBinding } from "./assembly.ts";
 import { DocumentObservationStore } from "./document-store.ts";
 import { RUN_ASSEMBLY_RECORD, type BoundaryObservationDraft, type BoundedObservationDraft, type RunAcceptedBodyV1, type RunAssemblyBodyV1, type RunObservationHeaderSeed, type RunStartedBodyV1 } from "./draft.ts";
@@ -103,6 +106,35 @@ export function applyProjectionDigests(body: unknown, digests: NonNullable<Obser
     }
   }
   return out;
+}
+
+/** scope 供给返回值里的 runId（失败路径给 gap 挂归属用）。 */
+function runIdOfScope(raw: unknown): string | undefined {
+  try {
+    const id = (raw as { runId?: unknown } | undefined)?.runId;
+    return typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `context.built` 的交接物 → 真正的投影：按镜像算出 body，attributes 补上视图条数、token 合计、工具数。
+ * 交接物形状不对、镜像算抛错都返回 null（调用方补 hole + gap）。
+ */
+export function resolveContextBuilt(mirror: ContextMirrorStore, projection: ObservationFactProjection): ObservationFactProjection | null {
+  try {
+    const raw = (projection.body as Record<string, unknown> | null)?.[CONTEXT_HANDOFF] as { handoff?: ContextHandoff; meta?: ContextBuiltMeta } | undefined;
+    if (raw?.handoff === undefined || raw.meta === undefined) return null;
+    const body = mirror.resolve(raw.handoff, raw.meta);
+    return {
+      ...projection,
+      attributes: { purpose: body.purpose, messages: body.messages, tokens: body.tokens, tools: body.tools.count, ...(body.unresolved === undefined ? {} : { unresolved: body.unresolved }) },
+      body,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** 一根探针在观测线程这一侧的身份：构造期冻结的副本。 */
@@ -222,6 +254,8 @@ class ThreadRuntime {
   /** run 开头状态快照这条记录的探针上下文（owner `echo:agent`、instrumentation `echo.agent`）。 */
   private readonly stateSnapshot: FactIngestContext;
   private readonly subscriptions = new Map<number, () => void>();
+  /** 上下文镜像（观测白盒化 §2.2）：这个 runtime 交过的消息、压缩状态、工具、system，按编号。 */
+  private readonly mirror = new ContextMirrorStore();
   private chain: Promise<void> = Promise.resolve();
   private pending = 0;
   /** 正在处理的那条消息的时刻：Sequencer 盖 observedAt 用它（事实到达主线程的时刻，不是观测线程处理到的时刻）。 */
@@ -405,6 +439,16 @@ class ThreadRuntime {
   private async onFact(work: Extract<ObservationWork, { t: "fact" }>): Promise<void> {
     const ctx = this.sinks.get(work.sink);
     if (ctx === undefined) return; // 没登记的探针：主线程那边的 bug，这条不记
+    // 上下文构成：主线程交的是编号 + 第一次见到的对象，这里按镜像算出真正的 body（`ContextMirrorStore`）
+    if (work.projection.name === CONTEXT_BUILT) {
+      const resolved = resolveContextBuilt(this.mirror, work.projection);
+      if (resolved === null) {
+        this.withAt(work.at, () => ingestFactFailure(this.sequencer, runIdOfScope(work.scope)));
+        return;
+      }
+      this.withAt(work.at, () => ingestFact(this.sequencer, ctx, { scope: work.scope, projection: resolved }));
+      return;
+    }
     // 记忆路径的 HMAC 要这个状态根的 key：key 在写入端里，要它就得开始写（这类事实只在 run 里出现，run.accepted 时已经开始了）
     let pathDigestKey: Uint8Array | undefined;
     const digests = work.projection.digests;

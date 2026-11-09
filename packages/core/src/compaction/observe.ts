@@ -20,7 +20,26 @@ export type CompactionFactBody =
    * 带 `stage`：那个阶段抛错（流水线跳过它继续）；不带：整条跑完没有任何一段改动上下文。
    * 此前给壳的 `compactionFailed` 没人收（TUI 的 default 分支丢掉），观测也不记——压缩失败完全不可见。
    */
-  | { kind: "compaction_failed"; reason: CompactionReason; stage?: string; message: string };
+  | { kind: "compaction_failed"; reason: CompactionReason; stage?: string; message: string }
+  /**
+   * 判过一次要不要压（观测白盒化 §3.5，2026-11-08）：每次流水线被调就记一条——自动压缩每轮都判，判的结果本身就是要看的数据
+   * （「为什么一直没压」「压之前多大、目标多大」）。`decision` 是封闭集：没注册阶段 / 目录没标窗口 / 没到触发线 /
+   * preCompact 拦下 / 开压。数是压缩自己本来就算的那几个（没算到那一步的不带），观测不为它多算一拍。
+   */
+  | {
+      kind: "compaction_evaluated";
+      reason: CompactionReason;
+      decision: CompactionDecision;
+      used?: number;
+      window?: number | null;
+      target?: number;
+      goal?: number;
+      calibration?: number;
+      overhead?: number;
+    };
+
+/** 一次压缩判断的结论。 */
+export type CompactionDecision = "no_stage" | "no_window" | "below_target" | "hook_blocked" | "run";
 
 /**
  * 带发生时刻与所在循环身份的事实：`runId` 是跑这次压缩的循环的 run，`turnId` 只在 turn 里撞窗应急时才有
@@ -64,6 +83,15 @@ export function projectCompactionFact(fact: CompactionFact, policy: ObservationC
       const body: Record<string, unknown> = { ...attrs };
       if (content) body.message = fact.message;
       return { ...base, kind: "event", name: "context.compact.failed", scope: scopeOf(fact), attributes: attrs, body };
+    }
+    case "compaction_evaluated": {
+      // 全是计数与封闭集，metadata 档就记
+      const body: Record<string, unknown> = { reason: fact.reason, decision: fact.decision };
+      for (const key of ["used", "window", "target", "goal", "calibration", "overhead"] as const) {
+        const v = fact[key];
+        if (v !== undefined) body[key] = v;
+      }
+      return { ...base, kind: "event", name: "context.compact.evaluated", scope: scopeOf(fact), attributes: { reason: fact.reason, decision: fact.decision }, body };
     }
   }
 }

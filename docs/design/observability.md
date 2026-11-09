@@ -21,10 +21,10 @@
 - **语义层的 canonical store 不是用户可换的端口**，只开字节面：`observation.store?: StorageDir` 决定文档放在哪（内存 / 别处），格式与提交语义仍是 core 的（§5）。in-memory 的 `CanonicalObservationStore` 只供参考一致性测试。「换成另一种数据库」的注入等真有使用方再拍（[记录](../decisions/implemented/2026-09-14-observation-document-store.md)决定 4）。
 - 面板长什么样归 UI，本文只说它读什么。
 
-**待拍板。** 两条，本文只指过去、不复述：
+**待拍板 / 实施中。** 两条，本文只指过去、不复述：
 
 - [观测的公开线](../decisions/proposed/2026-09-07-observation-public-face.md)——B 已于 2026-09-07 拍板（读面与 extension 发口公开、写面内部），**未实现**；本文按实现前的现状写。**本文是那条记录说的「形态的家」**：接口形状在这里，取舍留在记录里。
-- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——上下文（送进模型的 system prompt、消息视图、注入、工具菜单）、决定点的原因码、因果链今天都看不见；提案的五条待拍板在那条记录里，**未拍板**。
+- [观测白盒化](../decisions/proposed/2026-11-03-observation-white-box.md)——2026-11-08 拍板、分期实施中。**已落地**：上下文的构成（§7「用了什么」：`prompt.assembled`、`context.built` 的 metadata 档、压缩判断）。**还没有**：正文（`content` 档下 system / 视图 / 工具 schema 的原文，要等正文存储）、面板展示、记忆的决定点、其余原因码与因果链。
 
 **验收判据（机器可判）。** 现有门，全部已绿，改这一层时它们必须仍绿：
 
@@ -176,9 +176,9 @@ Sequencer 的契约没变：一批几个 run 的记录与 RunIndex 在同一个�
 
 | 发口 | 模块 | 记什么 |
 |---|---|---|
-| 循环 | [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=loopFactDescriptor) | run / reply / turn / attempt 四层（turn 开头带本轮冻结的工具工作集与引出它的输入 `inputs`）、模型生成与流式增量、工具执行与进展、重试、用量、**工具被拦**（`tool.rejected`）、**工具调用被方言丢掉**（`tool.call.dropped`）、**等人审批**（`permission.wait` span） |
-| 压缩 | [compaction/observe.ts](../../packages/core/src/compaction/observe.ts#symbol=compactionFactDescriptor) | 一次压缩的起止、**压缩失败**（某个阶段抛错被跳过，或整条流水线没有一段改动上下文） |
-| Agent 自身 | [agent-observe.ts](../../packages/core/src/agent-observe.ts#symbol=agentFactDescriptor) | **生命周期相位**迁移、**装备变更**（模型 / 思考档）、队列长度、**输入的去向**（`agent.input.accepted` / `returned` / `blocked`）、资源注册与卸载。**run 开头的整体状态**（`agent.state`）随 `run.started` 一起交出，由观测线程记 |
+| 循环 | [loop/observe.ts](../../packages/core/src/loop/observe.ts#symbol=loopFactDescriptor) | run / reply / turn / attempt 四层（turn 开头带本轮的**实际菜单**与引出它的输入 `inputs`）、**每次调模型送进去的上下文**（`context.built`）、模型生成与流式增量、工具执行与进展、重试、用量（含缓存命中）、**工具被拦**（`tool.rejected`）、**工具调用被方言丢掉**（`tool.call.dropped`）、**等人审批**（`permission.wait` span） |
+| 压缩 | [compaction/observe.ts](../../packages/core/src/compaction/observe.ts#symbol=compactionFactDescriptor) | **每次判断**（`context.compact.evaluated`）、一次压缩的起止、**压缩失败**（某个阶段抛错被跳过，或整条流水线没有一段改动上下文）。压缩阶段自己的模型调用记成 `context.built`（`purpose: "compaction"`） |
+| Agent 自身 | [agent-observe.ts](../../packages/core/src/agent-observe.ts#symbol=agentFactDescriptor) | **生命周期相位**迁移、**装备变更**（模型 / 思考档）、队列长度、**输入的去向**（`agent.input.accepted` / `returned` / `blocked`）、**这个 run 的 system 怎么拼成的**（`prompt.assembled`）、资源注册与卸载。**run 开头的整体状态**（`agent.state`）随 `run.started` 一起交出，由观测线程记 |
 | extension | [extension/observe.ts](../../packages/core/src/extension/observe.ts#symbol=extensionFactDescriptor) | 一代装上（每个 extension 提供了什么、依赖的服务实际连到了谁）/ 没装上（prepare 被拒或 apply 抛错并回滚）/ 卸下 / 卸载被拒 |
 | 记忆 | `memory/observe.ts` | 回忆、写入、提取 |
 | 任务 | `task/observe.ts` | 状态变更、落盘 |

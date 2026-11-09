@@ -22,6 +22,8 @@ import type { AgentToolResult } from "../tools/types.ts";
 import type { CapabilityFactDescriptor, CapabilityFactSink, ObservationFactProjection } from "../observability/fact-sink.ts";
 import { MAX_PROJECTED_TEXT_BYTES, estimatePayloadBytes, fitPayload, takePrefix } from "../observability/projection.ts";
 import type { ObservationCapturePolicy } from "../observability/types.ts";
+import type { ContextHandoff } from "../observability/context-mirror.ts";
+import type { ContextBuiltMeta } from "../observability/context-mirror-host.ts";
 import { turnNumberOf } from "./ids.ts";
 import type { AttemptResult, ReplySource, TurnCause } from "./types.ts";
 
@@ -72,6 +74,11 @@ export type LoopFactBody =
    * 不记这一条就一点痕迹都没有。`args` 是原样的参数文本（正文，只在 content 档投影）。
    */
   | { kind: "tool_call_dropped"; code: string; toolCallId?: string; toolName?: string; args: string }
+  /**
+   * 一次模型调用送进去的上下文（观测白盒化 §3.3，每个 attempt 一条、压缩阶段的每次模型调用一条）：主线程只交编号与
+   * 第一次见到的对象（`ContextMirror`），构成、token、投影的增删都在观测线程里算（`ContextMirrorStore`）。
+   */
+  | { kind: "context_built"; handoff: ContextHandoff; meta: ContextBuiltMeta }
   /** 进入等人审批：只有真正进了 ask 才有；策略直接放行 / 拒绝没有这一拍。与 `permission_settled` 配成一个 span，时长就是等人的时间。 */
   | { kind: "permission_asked"; toolCallId: string; toolName: string; permissionId: string; reason: string }
   | { kind: "permission_settled"; toolCallId: string; toolName: string; permissionId: string; decision: "granted" | "denied" | "cancelled"; decidedBy?: ToolDecidedBy; reason?: string };
@@ -85,6 +92,11 @@ export type ToolRejectCause = "not_found" | "not_visible" | "bad_params" | "bloc
 export type ToolDecidedBy = "hook" | "policy" | "human" | "timeout";
 
 export const SPAN_PERMISSION_WAIT = "permission.wait";
+
+/** 一次模型调用的上下文构成（`context_built` 投成的记录名）。 */
+export const CONTEXT_BUILT = "context.built";
+/** `context.built` 的投影 body 里交接物的键：观测线程认它，换成按镜像算出的 body。 */
+export const CONTEXT_HANDOFF = "contextHandoff";
 
 /**
  * 带发生时刻与**本循环实例身份**的事实：`runId` 是发出它的这个循环的 run（`config.runId`），`turnId` 只在 turn 里的节点才有。
@@ -452,8 +464,12 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
       }
       return { ...base, kind: "event", name: "agent.message.appended", scope: scopeOf(fact), attributes: { role: m.role }, body: messageBody(m, policy) };
     }
-    case "usage":
-      return { ...base, kind: "event", name: "model.usage", scope: scopeOf(fact), attributes: {}, body: { inputTokens: fact.usage.inputTokens, outputTokens: fact.usage.outputTokens } };
+    case "usage": {
+      // 缓存命中的输入（provider 报了才有）：此前被丢，前缀缓存省没省钱从账本里看不出来
+      const body: Record<string, number> = { inputTokens: fact.usage.inputTokens, outputTokens: fact.usage.outputTokens };
+      if (fact.usage.cachedInputTokens !== undefined) body.cachedInputTokens = fact.usage.cachedInputTokens;
+      return { ...base, kind: "event", name: "model.usage", scope: scopeOf(fact), attributes: {}, body };
+    }
     case "tool_started": {
       const est = estimatePayloadBytes(fact.params);
       const body: Record<string, unknown> = { toolName: fact.toolName, argsBytes: est.payloadBytes, argsTruncated: est.payloadTruncated };
@@ -540,6 +556,17 @@ export function projectLoopFact(fact: LoopFact, policy: ObservationCapturePolicy
       const extra = fact.toolCallId !== undefined ? { toolCallId: fact.toolCallId } : {};
       return { ...base, kind: "event", name: "tool.call.dropped", scope: scopeOf(fact, extra), attributes: attrs, body };
     }
+    case "context_built":
+      // body 在这里只是交接物（编号 + 第一次见到的对象）：观测线程按镜像算出真正的 body 与 attributes 再落账
+      // （`ContextMirrorStore.resolve`，thread-host 的 onFact）。两档都交新对象的值——token 要用同一个估算器在那边算
+      return {
+        ...base,
+        kind: "event",
+        name: CONTEXT_BUILT,
+        scope: scopeOf(fact),
+        attributes: { purpose: fact.meta.purpose },
+        body: { [CONTEXT_HANDOFF]: { handoff: fact.handoff, meta: fact.meta } },
+      };
     case "permission_asked": {
       const attrs: Attrs = { toolName: fact.toolName, toolCallId: fact.toolCallId, permissionId: fact.permissionId };
       const body: Record<string, unknown> = { ...attrs };

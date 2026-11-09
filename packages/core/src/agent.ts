@@ -96,7 +96,9 @@ import {
   type AgentSchedule,
 } from "./schedule/harness.ts";
 import { makeScheduleTools } from "./schedule/tools.ts";
-import { assembleSystem } from "./prompt/assemble.ts";
+import { assembleSystem, type AssembleReport } from "./prompt/assemble.ts";
+import { promptSectionOwners } from "./extension/registries.ts";
+import { ContextMirror } from "./observability/context-mirror.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
 import { newSessionId } from "./session/types.ts";
 import { DEFAULT_AGENT_REF, type AgentRef } from "./agent-def/types.ts";
@@ -3600,8 +3602,20 @@ export class Agent {
   }
 
   private async createContextSnapshot(scope: AgentAdmissionExecuteScope): Promise<AgentContext> {
-    // 用 admission 冻结的模型装配——{{model}} 说的必须是这次 run 真用的那个
-    const systemPrompt = await this.assemblePrompt(scope.modelBinding.model);
+    // 用 admission 冻结的模型装配——{{model}} 说的必须是这次 run 真用的那个。
+    // 装配循环逐段走的那一遍顺手交出段清单（观测的 prompt.assembled，O(段数)；没接观测就不收）
+    const probe = this.agentProbeNow();
+    let report: AssembleReport | undefined;
+    const systemPrompt = await this.assemblePrompt(scope.modelBinding.model, probe === undefined ? undefined : (r) => (report = r));
+    if (probe !== undefined && report !== undefined) {
+      const owners = promptSectionOwners(this.promptSections);
+      probeAgent(probe, {
+        kind: "prompt_assembled",
+        sections: report.sections.map(({ section, status, chars }) => ({ name: section.name, order: section.order, owner: owners.get(section) ?? null, status, chars })),
+        variables: report.variables,
+        chars: systemPrompt?.length ?? 0,
+      });
+    }
     this.lastSystemEstimate = estimateText(systemPrompt); // usage 到达时算校准比要用同一份 system 的字符估
     return {
       systemPrompt,
@@ -3639,19 +3653,29 @@ export class Agent {
    * （`PromptVariableError`，作者错误，让这次 run 以 error 收场，不静默）。
    * `model` 缺省取当前装备——外部（测试、诊断）直接调时用；run 内传 admission 冻结的那份。
    */
-  async assemblePrompt(model: Readonly<{ provider: string; id: string }> = this._state.model): Promise<string | null> {
+  async assemblePrompt(
+    model: Readonly<{ provider: string; id: string }> = this._state.model,
+    /** 装配循环的逐段结论（观测用，`createContextSnapshot` 给）。 */
+    onReport?: (report: AssembleReport) => void,
+  ): Promise<string | null> {
     const ctx: AssembleContext = {
       workspace: this._state.workspace,
       model: { provider: model.provider, id: model.id },
       agentId: this.product,
       sessionId: this._state.sessionId,
     };
-    return assembleSystem([...this.promptSections.values()], this.promptVariables, ctx, ({ section, error }) => {
-      void this.hooks.notify(
-        { type: "notification", kind: "error", message: `[prompt_section_failed] ${section}: ${errText(error)}` },
-        this.hookContext(),
-      );
-    });
+    return assembleSystem(
+      [...this.promptSections.values()],
+      this.promptVariables,
+      ctx,
+      ({ section, error }) => {
+        void this.hooks.notify(
+          { type: "notification", kind: "error", message: `[prompt_section_failed] ${section}: ${errText(error)}` },
+          this.hookContext(),
+        );
+      },
+      onReport,
+    );
   }
 
   /**
@@ -4172,6 +4196,8 @@ export class Agent {
       // 循环与压缩的事实自带 run / turn：scope 供给只给「是哪个 agent、哪段会话」，不从 Agent 身上补
       loop: rt.capabilitySink(loopFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => this.observationIdentityScope()),
       compaction: rt.capabilitySink(compactionFactDescriptor, builtinOwner(AGENT_ENTRY_ID), () => this.observationIdentityScope()),
+      // 上下文镜像（观测白盒化 §2.2）：每个 runtime 一份，主循环、子 agent、提取、整理共用——同一条消息只交一次。`off` 档不要
+      ...(rt.capturePolicy === "off" ? {} : { mirror: new ContextMirror() }),
     };
     this.agentProbe = rt.capabilitySink(agentFactDescriptor, builtinOwner(AGENT_ENTRY_ID));
     // 三条 O3a 领域行：sink 挂在各 Capability 自己的 module-local 位置，descriptor 归语义 owner
