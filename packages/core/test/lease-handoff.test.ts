@@ -154,7 +154,7 @@ for (const [name, make] of [
 }
 
 test("文件锁：请求写在锁旁边，让完就清掉——不许留给下一个持有者", async () => {
-  // 留着的话，下一个拿到锁的一起来就以为有人在等它，转身让给一个早就走了的人。
+  // 请求方自己清（持有者那边一律不删）；就算没清掉，下一个持有者也只认认领之后的请求，不会转身让给一个早就走了的人。
   const { lock, path } = await fileLockAt();
   const held = await lock.acquire({ holder: "后台", preemptible: true });
   void held!.handoffRequested?.then(async () => held!.release());
@@ -170,6 +170,50 @@ test("文件锁：请求写在锁旁边，让完就清掉——不许留给下�
   ]);
   expect(woke).toBe("没人叫");
   await next!.release();
+});
+
+/* ── 2026-11-03：serve.test 偶红的根因——acquire 在「锁已上盘」之后才删旧请求，人恰好在这中间发来的请求被当成旧的擦掉，干等到超时 ── */
+
+/** 等 `handoffRequested`，等不到就算「没人叫」。 */
+async function wokeWithin(held: { handoffRequested?: Promise<{ by: string }> }, ms: number): Promise<string> {
+  return Promise.race([
+    held.handoffRequested!.then((who) => `被 ${who.by} 叫走了`),
+    new Promise<string>((r) => setTimeout(() => r("没人叫"), ms)),
+  ]);
+}
+
+test("文件锁：认领之后才发出的请求，哪怕在 acquire 返回之前就落了盘，也照样算", async () => {
+  // 真实的时序是「claimGeneration 写下记录 → 人看到 valid、写请求 → acquire 才往下走」，单进程里排不出来；
+  // 用晚于现在的 `at` 模拟「这条请求是认领之后发的」，它在 acquire 返回前就已经在盘上
+  const { lock, path } = await fileLockAt();
+  await writeFile(`${path}.handoff`, JSON.stringify({ by: "人", at: Date.now() + 60_000 }));
+  const held = await lock.acquire({ holder: "后台", preemptible: true });
+  expect(held).not.toBeNull();
+  expect(await wokeWithin(held!, 1_000)).toBe("被 人 叫走了"); // 此前：acquire 认领之后 rm，这条请求被擦掉，永远等不到
+  await held!.release();
+});
+
+test("文件锁：上一轮留下的请求（早于认领）不叫醒新持有者，acquire 也不删它；之后来的新请求照样让", async () => {
+  const { lock, path } = await fileLockAt();
+  await writeFile(`${path}.handoff`, JSON.stringify({ by: "早走了的人", at: Date.now() - 60_000 }));
+  const held = await lock.acquire({ holder: "后台", preemptible: true });
+  expect(held).not.toBeNull();
+  expect(existsSync(`${path}.handoff`), "持有者那边一律不删请求文件").toBe(true);
+  expect(await wokeWithin(held!, 200)).toBe("没人叫"); // 四个轮询周期
+
+  void held!.handoffRequested!.then(async () => held!.release());
+  expect(await lock.requestHandoff?.({ by: "人", timeoutMs: 3_000 })).toBe(true);
+});
+
+test("文件锁：读不出 `at` 的请求文件（写坏了）这一次不算：不让，也不卡死后面的真请求", async () => {
+  const { lock, path } = await fileLockAt();
+  await writeFile(`${path}.handoff`, "{坏");
+  const held = await lock.acquire({ holder: "后台", preemptible: true });
+  expect(held).not.toBeNull();
+  expect(await wokeWithin(held!, 200)).toBe("没人叫");
+
+  void held!.handoffRequested!.then(async () => held!.release());
+  expect(await lock.requestHandoff?.({ by: "人", timeoutMs: 3_000 })).toBe(true);
 });
 
 test("文件锁：可让位这件事写进认领记录——请它走的人在另一个进程里，只能从盘上看出来", async () => {
