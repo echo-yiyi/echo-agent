@@ -20,7 +20,10 @@ import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extensio
 /** 候选文件名，按序取第一个存在的。 */
 export const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
 
-/** 进 system 的上限（字符）。照 dsh 的 64 KB；超了截断并留标记，不静默吞。 */
+/**
+ * 正文截断阈值（字符），照 dsh 的 64 KB：`truncateMarked` 截取这么长的前缀再追加标记，header 与标签
+ * 另加固定字节，所以它**不是**最终段长的上限。超了截断并留标记，不静默吞。
+ */
 export const INSTRUCTIONS_CAP = 65_536;
 
 /**
