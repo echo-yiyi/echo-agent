@@ -41,15 +41,14 @@ export type MemoryIndexOutcome = "not-applicable" | "ok" | "failed";
 export type ExtractSkipReason = "not_allowed" | "no_scope" | "no_modules" | "overlap" | "epoch_changed" | "empty_range" | "too_short" | "too_few_turns" | "aborted";
 
 /**
- * 整理对一层判了什么（封闭集）。前两个是开整，其余是跳过：
- *   · `budget`：水位到线（某个模块预算用到比例），单独成立；
- *   · `due`：节流四道全满足；
+ * 整理对一层判了什么（封闭集）。第一个是开整，其余是跳过：
+ *   · `due`：配了的门全满足；
  *   · `in_progress`：这一层有一次整理还在进行（锁没过期）；
  *   · `too_soon`：距上次整理不够间隔；
  *   · `few_writes` / `few_turns` / `few_files`：写入次数 / 轮数 / 文件数没攒够；
  *   · `locked`：别的会话正在整理这一层（试拿锁没拿到）。
  */
-export type DreamDecision = "budget" | "due" | "in_progress" | "too_soon" | "few_writes" | "few_turns" | "few_files" | "locked";
+export type DreamDecision = "due" | "in_progress" | "too_soon" | "few_writes" | "few_turns" | "few_files" | "locked";
 
 export type MemoryFact =
   | Readonly<{

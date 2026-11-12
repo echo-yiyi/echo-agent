@@ -23,10 +23,12 @@ import {
   DEFAULT_EXTRACT_EVERY_TURNS,
   DEFAULT_EXTRACT_MAX_TURNS,
   DEFAULT_EXTRACT_MIN_USER_WORDS,
+  DEFAULT_EXTRACT_UNFINISHED_LIMIT,
   defaultExtractPrompt,
   firstUserText,
   humanTurns,
   userProseWords,
+  type ExtractPass,
   type ExtractRange,
 } from "./memory/extract.ts";
 import { attachTaskObserver, taskFactDescriptor } from "./task/observe.ts";
@@ -769,10 +771,16 @@ export class Agent {
   /**
    * 提取的**游标**（2026-10-30）：transcript 里 `[0, extractCursor)` 已经被提取看过。
    * 下标是原始 transcript 的——压缩只改视图、不动 transcript，所以压缩后照样有效。
-   * 只在提取**正常跑完**时推进，同时落一条 `memory_reviewed` 进会话（2026-11-03）；出错 / 轮数用完 / 被中止都不动，下次重看。
+   * 这段**算看过**才推进（2026-11-12，见 `ExtractPass`）：跑完，或者没跑完但已写成至少一条；一条没写成就停了不推、下次重看，
+   * 连续 `DEFAULT_EXTRACT_UNFINISHED_LIMIT` 次就放弃那段、照推；被中止不推。推的同时落一条 `memory_reviewed` 进会话（2026-11-03）。
    * `reset` 归零；续会话取盘上最后一条 `memory_reviewed`——没提取过的那截跨重启接着攒，进程被杀也不丢。
    */
   private extractCursor = 0;
+  /**
+   * 提取连续几次一条没写成就停了（`ExtractPass` 的 `unfinished`）。到 `DEFAULT_EXTRACT_UNFINISHED_LIMIT` 就放弃那段；推一次游标就归零。
+   * 只在内存：重启归零，最坏是续会话后那段再重试这么多次。
+   */
+  private extractUnfinished = 0;
   /**
    * 内存 transcript 前面还有几条**已落盘、却不在内存里**的消息：`reset`（`/clear`）只清内存、不写会话，
    * 续会话时那些会一起回来。`memory_reviewed` 记的是落盘消息的下标 = 内存下标 + 这个数。续会话归零。
@@ -3159,19 +3167,29 @@ export class Agent {
       const span = projectRange(messages, compaction, from, end);
       const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0 };
       // 与整理排成一条：等的这段里被中止（stop / 丢锁）或 transcript 换了代，就不跑。
-      // 后两道是 `runExtract` 自己开头那道判断（它在任何副作用之前返回 false），在这里先判只为记下原因
-      const done = await this.oneBackgroundWriter(async () => {
+      // 后两道是 `runExtract` 自己开头那道判断（它在任何副作用之前返回 not_run），在这里先判只为记下原因
+      const pass = await this.oneBackgroundWriter(async (): Promise<ExtractPass> => {
         const why: ExtractSkipReason | null = signal.aborted ? "aborted" : epoch !== this.extractEpoch ? "epoch_changed" : range.messages === 0 ? "empty_range" : !this.memoryWorkAllowed ? "not_allowed" : null;
         if (why !== null) {
           skipped(why);
-          return false;
+          return "not_run";
         }
         return this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal);
       });
-      if (done && epoch === this.extractEpoch) {
-        this.extractCursor = Math.max(this.extractCursor, end);
-        await this.recordReviewed(end + offset);
+      if (pass === "not_run" || epoch !== this.extractEpoch) return;
+      if (pass === "unfinished") {
+        // 一条没写成就停了：下次重看这段。连续几次都这样就放弃——卡住的那段本身已攒够轮数，不放弃的话
+        // 之后每条 reply 都重跑一次、范围一次比一次大（`DEFAULT_EXTRACT_UNFINISHED_LIMIT`）
+        this.extractUnfinished += 1;
+        if (this.extractUnfinished < DEFAULT_EXTRACT_UNFINISHED_LIMIT) return;
+        this.reportDiagnostic({
+          code: "memory_extract_gave_up",
+          message: `记忆提取连续 ${this.extractUnfinished} 次没写成就停了：这段对话不再重看，下次从之后的内容看起`,
+        });
       }
+      this.extractUnfinished = 0;
+      this.extractCursor = Math.max(this.extractCursor, end);
+      await this.recordReviewed(end + offset);
     });
   }
 
@@ -3268,15 +3286,16 @@ export class Agent {
    * 一分缓存都吃不到：2026-11-03 三方对比，读过一个 35KB 文件之后的那次提取原价重发了约 1 万 token）。
    * 菜单照原样摆（换掉一件，前缀就在工具那段断开），执行时只放行记忆工具，`maxTurns` 限死。
    * **绝不抛**（通道自己也兜一层）：后台活失败不该影响前台，结果体现在记忆文件上。
-   * 返回这次是否**正常跑完**——只有跑完游标才推进（没起来、出错、轮数用完、被中止都是 false）。
+   * 返回这次的结局（`ExtractPass`），游标推不推由它定：跑完，或者没跑完但已写成至少一条，是 `reviewed`；
+   * 一条没写成就停了（出错、轮数用完）是 `unfinished`；没起来、被中止是 `not_run`。
    */
   private async runExtract(
     memory: AgentMemories,
     scope: AgentAdmissionExecuteScope,
     fork: { seed: readonly AgentMessage[]; menu: readonly AgentTool[]; range: ExtractRange },
     signal: AbortSignal,
-  ): Promise<boolean> {
-    if (fork.range.messages === 0 || !this.memoryWorkAllowed || signal.aborted) return false;
+  ): Promise<ExtractPass> {
+    if (fork.range.messages === 0 || !this.memoryWorkAllowed || signal.aborted) return "not_run";
     const table = memoryScopeTableOf(memory);
     // 此刻存着什么由 prompt 自带：system 里的记忆段是会话开头冻结的那一版，之后写的看不到；不给就只能一个个 view 去摸
     const prompt = defaultExtractPrompt(listMemories(memory), table, fork.range, await memoryManifest(memory));
@@ -3325,20 +3344,21 @@ export class Agent {
       signal,
       async () => {},
     );
+    if (result.outcome.kind === "completed") return "reviewed";
+    // aborted 不报、不算没跑完——那是 stop() / 丢锁在收摊
+    if (result.outcome.kind === "aborted") return "not_run";
     // `runAgentLoop` 对失败不抛，结果在 outcome 里：没跑完（provider 错、轮数用完）要报出来，与通道兜住的抛错同一个 code。
-    // aborted 不报——那是 stop() / 丢锁在收摊。
-    if (result.outcome.kind === "error") {
-      this.reportDiagnostic({
-        code: "memory_extract_failed",
-        message: `记忆提取没跑完（${result.outcome.error.code}）：${result.outcome.error.message}；${written > 0 ? `此前已写入 ${written} 条` : "没有写入"}`,
-      });
-    }
-    return result.outcome.kind === "completed";
+    // 写成过的那几条是真的落了盘：这段按看过算（与整理撞上限按「做了一部分」记同一个口径）
+    this.reportDiagnostic({
+      code: "memory_extract_failed",
+      message: `记忆提取没跑完（${result.outcome.error.code}）：${result.outcome.error.message}；${written > 0 ? `此前已写入 ${written} 条，这段算看过了` : "没有写入"}`,
+    });
+    return written > 0 ? "reviewed" : "unfinished";
   }
 
   /**
    * 一次整理：**按层各整理各的**（2026-09-07）。整理哪些模块由模块自己声明 `dream`，
-   * 整理哪几层就是那些模块声明的层；计数、锁、上次时间、水位都是每层一份。
+   * 整理哪几层就是那些模块声明的层；计数、锁、上次时间都是每层一份。
    * 每层之间重问一次 `memoryWorkAllowed`——`stop()` / 丢锁可能就发生在两层之间。
    */
   private async runDreamPass(scope: AgentAdmissionExecuteScope, signal: AbortSignal): Promise<void> {
@@ -3351,7 +3371,7 @@ export class Agent {
     for (const layer of dreamScopes(memory)) {
       if (signal.aborted || !this.memoryWorkAllowed) return;
       try {
-        // 门控：节流四道全满足，或者水位单独到线
+        // 门控：配了的门全满足才跑
         const gate = await dreamGate(memory, layer);
         if (!gate.run) {
           evaluated(layer, gate.decision);
@@ -4135,6 +4155,7 @@ export class Agent {
         this.invalidateMemorySystem(); // 之前追加的变化通知随 transcript 一起没了
         this.foregroundReads.clear(); // 前台「看过」的那些随对话一起没了：账不能替一段已经清掉的对话作保
         this.extractCursor = 0;
+        this.extractUnfinished = 0;
         this.extractEpoch += 1;
         this.persistedOffset += this._state.messages.length; // 这些还在会话里（reset 不写会话），之后的落盘下标要越过它们
         this._state.messages = [];
@@ -4155,6 +4176,7 @@ export class Agent {
         this.foregroundReads.clear();
         // 游标先设到末尾（这个事件不带复盘下标）；经会话恢复时 `start()` 紧接着按盘上的 `memory_reviewed` 改回去
         this.extractCursor = input.messages.length;
+        this.extractUnfinished = 0;
         this.extractEpoch += 1;
         this.persistedOffset = 0;
         this._state.messages = [...input.messages];

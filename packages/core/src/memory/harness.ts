@@ -784,43 +784,14 @@ async function bumpWriteCount(ctx: AgentMemories, scope: string): Promise<void> 
   await updateDreamState(ctx, scope, (s) => ({ ...s, writes: s.writes + 1 }));
 }
 
-/**
- * 这一层某个模块的预算用掉多少(0..1,取各模块的最大值)。水位门按它判。
- * resident 按全文字符数,indexed 按索引渲染后的字符数——与 `checkWrite` 同一把尺。
- */
-async function budgetPressure(ctx: AgentMemories, scope: string): Promise<number> {
-  const table = ctx.binding.table();
-  let worst = 0;
-  for (const m of ctx.memories.values()) {
-    if (m.dream !== true) continue;
-    const budget = "budget" in m && typeof m.budget === "number" ? m.budget : 0;
-    if (budget <= 0) continue;
-    for (const { scope: s, path } of memoryPaths(table, m)) {
-      if (s !== scope) continue;
-      let used = 0;
-      if (path.endsWith("/")) {
-        const stored = await ctx.dir.read(`${path}${MEMORY_INDEX_FILE}`);
-        used = stored === null ? renderIndex(await indexEntries(m as IndexedMemory, ctx.dir, scope)).length : stored.length;
-      } else {
-        used = ((await ctx.dir.read(path)) ?? "").length;
-      }
-      worst = Math.max(worst, used / budget);
-    }
-  }
-  return worst;
-}
-
-/**
- * 纯判断,无副作用。**节流四道全满足,或者水位单独到线**——两组门语义相反,不做 AND
- * (见 `DreamGates.budgetRatio` 的注释)。
- */
+/** 纯判断,无副作用:配了的门全满足才跑(见 `DreamGates`)。 */
 export async function shouldDream(ctx: AgentMemories, scope: string): Promise<boolean> {
   return (await dreamGate(ctx, scope)).run;
 }
 
 /**
  * 整理这一层的门，连同判出来的原因（`DreamDecision`，观测的 `memory.dream.evaluated` 记它）。与 `shouldDream` 同一份判断：
- * 进行中的锁没过期 → 不跑；水位到线（且上次整理之后有过新写入）→ 跑；节流四道逐道看，第一道没过的就是原因。
+ * 进行中的锁没过期 → 不跑；其余几道逐道看，第一道没过的就是原因。
  */
 export async function dreamGate(ctx: AgentMemories, scope: string): Promise<Readonly<{ run: boolean; decision: DreamDecision }>> {
   const state = await readDreamState(ctx.dir, scope);
@@ -831,11 +802,6 @@ export async function dreamGate(ctx: AgentMemories, scope: string): Promise<Read
   const now = Date.now();
   if (state.startedAt !== null && now - state.startedAt < DREAM_LOCK_STALE_MS) return { run: false, decision: "in_progress" }; // 这一层有一次整理进行中
   const g = ctx.gates;
-  // 水位:告警,单独成立——只要上次整理之后有过新写入(2026-11-03):没有的话再整理一遍看到的还是同一份,
-  // 占用压不下去时每次回到 idle 都会再来一次
-  const writtenSincePass = state.lastAt === null || state.writes > state.writesAtLastPass;
-  if (g.budgetRatio !== undefined && writtenSincePass && (await budgetPressure(ctx, scope)) >= g.budgetRatio) return { run: true, decision: "budget" };
-  // 节流:四道全满足
   if (g.minIntervalMs !== undefined && state.lastAt !== null && now - state.lastAt < g.minIntervalMs) return { run: false, decision: "too_soon" };
   if (g.minWritesSinceLast !== undefined && state.writes < g.minWritesSinceLast) return { run: false, decision: "few_writes" };
   if (g.minTurnsSinceLast !== undefined && state.turns < g.minTurnsSinceLast) return { run: false, decision: "few_turns" };
@@ -912,7 +878,7 @@ function dreamOnlyTool(ctx: AgentMemories, tool: ModelTool<MemoryToolParams>): M
 /** 某一层整理成功后:记时间、放锁、清计数。整理失败不调它——锁 1 小时后自动过期。 */
 export async function markDreamed(ctx: AgentMemories, scope: string): Promise<void> {
   // 清零同样走串行链:不然「读到 5 → markDreamed 清 0 → 写回 6」会把计数复活
-  await updateDreamState(ctx, scope, () => ({ lastAt: Date.now(), startedAt: null, writes: 0, turns: 0, writesAtLastPass: 0 }));
+  await updateDreamState(ctx, scope, () => ({ lastAt: Date.now(), startedAt: null, writes: 0, turns: 0 }));
 }
 
 /**
@@ -923,8 +889,7 @@ export async function markDreamed(ctx: AgentMemories, scope: string): Promise<vo
  * 为什么计数不清：还有没整理完的，下一次照常节流（间隔）就该再来，不必等攒够新的写入。
  */
 export async function markDreamPartial(ctx: AgentMemories, scope: string): Promise<void> {
-  // 记下这一刻的写入数：水位门要涨过它才再开（`DreamState.writesAtLastPass`）——计数不清，光看 writes > 0 挡不住
-  await updateDreamState(ctx, scope, (s) => ({ ...s, lastAt: Date.now(), startedAt: null, writesAtLastPass: s.writes }));
+  await updateDreamState(ctx, scope, (s) => ({ ...s, lastAt: Date.now(), startedAt: null }));
 }
 
 /** 一层的整理状态（计数、startedAt）读改写用的短锁；与模块的提交锁同在那一层的字节面上。 */

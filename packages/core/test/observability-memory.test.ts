@@ -119,7 +119,7 @@ test("整理每一层判了什么：回到 idle 后每层一条 memory.dream.eva
   expect(evaluated.length).toBeGreaterThan(0);
   for (const e of evaluated) {
     expect(typeof e.attributes.layer).toBe("string");
-    // 新会话：没写过、没整理过——写入数这道没过（缺省门：5 次写入、10 个文件、24 小时，或水位 80%）
+    // 新会话：没写过、没整理过——写入数这道没过（缺省门：5 次写入、10 个文件、24 小时）
     expect(e.attributes.decision).toBe("few_writes");
     expect(e.attributes.runId).toBe(r.runId);
     expect(e.scope.runId).toBeUndefined();
@@ -137,17 +137,16 @@ function memories(opts?: MemoryHarnessOptions): AgentMemories {
 }
 
 function state(over: Partial<DreamState>): DreamState {
-  return { lastAt: null, startedAt: null, writes: 0, turns: 0, writesAtLastPass: 0, ...over } as DreamState;
+  return { lastAt: null, startedAt: null, writes: 0, turns: 0, ...over } as DreamState;
 }
 
-test("dreamGate：进行中 / 太早 / 写入不够 / 轮数不够 / 文件不够 / 水位 / 全满足，各给一个原因；shouldDream 就是它的 run", async () => {
+test("dreamGate：进行中 / 太早 / 写入不够 / 轮数不够 / 文件不够 / 全满足，各给一个原因；shouldDream 就是它的 run", async () => {
   const cases: [DreamDecision, MemoryHarnessOptions["dream"], Partial<DreamState>, boolean][] = [
     ["in_progress", { minWritesSinceLast: 0 }, { startedAt: Date.now() }, false],
-    ["too_soon", { minIntervalMs: 60_000 }, { lastAt: Date.now(), writes: 9, writesAtLastPass: 9 }, false],
+    ["too_soon", { minIntervalMs: 60_000 }, { lastAt: Date.now(), writes: 9 }, false],
     ["few_writes", { minWritesSinceLast: 5 }, { writes: 2 }, false],
     ["few_turns", { minWritesSinceLast: 0, minTurnsSinceLast: 5 }, { turns: 1 }, false],
     ["few_files", { minWritesSinceLast: 0, minFiles: 3 }, {}, false],
-    ["budget", { budgetRatio: 0, minWritesSinceLast: 99 }, { writes: 1 }, true],
     ["due", { minWritesSinceLast: 1, minFiles: 0 }, { writes: 1 }, true],
   ];
   for (const [decision, gates, s, run] of cases) {

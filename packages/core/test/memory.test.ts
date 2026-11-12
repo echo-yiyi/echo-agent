@@ -592,8 +592,8 @@ describe("Dream 门控", () => {
     expect(await s2.read(".dream/state.json")).toBeNull(); // 锁也不共用
   });
 
-  test("缺省门:四道节流是 CC 量级,外加一道水位(防手滑改缺省)", () => {
-    expect(DEFAULT_DREAM_GATES).toEqual({ minWritesSinceLast: 5, minFiles: 10, minIntervalMs: 24 * 3600_000, budgetRatio: 0.8 });
+  test("缺省门:三道节流是 CC 量级,没有按占用触发的门(防手滑改缺省)", () => {
+    expect(DEFAULT_DREAM_GATES).toEqual({ minWritesSinceLast: 5, minFiles: 10, minIntervalMs: 24 * 3600_000 });
   });
 });
 

@@ -80,6 +80,22 @@ export const DEFAULT_EXTRACT_DRAIN_MS = 15_000;
  */
 export const DEFAULT_EXTRACT_MAX_TURNS = 5;
 
+/**
+ * 一次提取的结局，决定游标推不推（2026-11-12）：
+ * - `reviewed`：这段算看过——跑完了，或者没跑完但已写成至少一条（那几条是真的落了盘）。游标推进。
+ * - `unfinished`：一条没写成就停了（模型出错、轮数用完）。游标不动、下次重看；连续 `DEFAULT_EXTRACT_UNFINISHED_LIMIT` 次就放弃那段。
+ * - `not_run`：没起来，或者被中止（stop / 丢锁）。游标不动，也不算一次没跑完——丢锁之后一个字都不许再写。
+ */
+export type ExtractPass = "reviewed" | "unfinished" | "not_run";
+
+/**
+ * 提取**连续**几次一条没写成就停了（`ExtractPass` 的 `unfinished`），就放弃那段、游标照推（2026-11-12）。
+ *
+ * 为什么要放弃：卡住的那段本身已经攒够轮数，游标不动的话之后每条 reply 都会再跑一次，要看的范围一次比一次大——
+ * 越大越容易再撞轮数上限，自己越卡越死。为什么不第一次就放弃：模型一时出错、或这一次恰好没写完，重看一次多半就过了。
+ */
+export const DEFAULT_EXTRACT_UNFINISHED_LIMIT = 2;
+
 /** 提取 prompt 的第一句。脚本化模型的测试靠它认出一次模型调用是提取子循环发的。 */
 export const EXTRACT_PROMPT_OPENING = "A reply just finished.";
 

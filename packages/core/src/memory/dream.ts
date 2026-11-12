@@ -4,7 +4,7 @@
 // 编辑原语、LLM 负责信息架构;CC:Dream = fork 受限 agent 去重合并剪枝)。
 //
 // **按层各整理各的**(2026-09-07 用户拍板,替代"只整理 session 层"):整理哪些模块由模块
-// 自己声明 `dream`,整理哪几层就是那些模块声明的层。于是计数、锁、上次时间、水位**每层一份**,
+// 自己声明 `dream`,整理哪几层就是那些模块声明的层。于是计数、锁、上次时间**每层一份**,
 // 落在那一层自己的目录下——不需要一个"本段独占"的层来放状态。
 //
 // 门控信号:轮次 = turn_end 事件计数、写入 = 写方法的账、文件数 = dir.list、
@@ -15,6 +15,13 @@ import { memoryPaths, type AnyMemory } from "./types.ts";
 import type { MemoryDir } from "./types.ts";
 import type { MemoryScopeTable } from "./scope.ts";
 
+/**
+ * 整理的门:**配了的几道全满足才跑**,没配的不参与。
+ *
+ * 没有按占用触发的门(2026-11-12 删掉了水位):写满时写入被拒、由写的一方就地腾地方——常驻模块的全文
+ * 本来就摆在提取指令里,一次覆写就能压紧;indexed 模块快到上限时文件早已成百上千,这几道早就满足。
+ * 而「整理完占用仍在线上 → 下一次写入又触发」会让整理的频率等于写入的频率。
+ */
 export type DreamGates = {
   /** 上次整理以来的记忆写入次数 ≥ N 才触发。 */
   minWritesSinceLast?: number;
@@ -24,25 +31,13 @@ export type DreamGates = {
   minFiles?: number;
   /** 距上次整理 ≥ N 毫秒(CC 缺省 24h)。 */
   minIntervalMs?: number;
-  /**
-   * **水位**(2026-09-07 新增):这一层某个模块的预算用掉 ≥ 这个比例就整理。
-   *
-   * **它不与上面四道做 AND,而是单独成立**:那四道是节流("没必要太频繁"),水位是告警
-   * ("再不整理,下一次写入就要被拒了")。AND 连起来等于让节流否决告警——恰好在最需要整理
-   * 的时候不整理,模型只好在前台自己收拾,而那正是我们想用后台换掉的事。
-   *
-   * 唯一的附加条件(2026-11-03):**上次整理之后有过新写入**(或从没整理过,见 `DreamState.writesAtLastPass`)。
-   * 占用压不下去(内容都值得留)时,没有新写入就再整理一遍,看到的是同一份内容——否则每次回到 idle 都整理一次。
-   */
-  budgetRatio?: number;
 };
 
-/** 缺省门:写过 5 次、攒到 10 个文件、距上次 24h(全满足)——**或者**任一模块用到 80%。 */
+/** 缺省门:写过 5 次、攒到 10 个文件、距上次 24h,全满足才跑。 */
 export const DEFAULT_DREAM_GATES: DreamGates = {
   minWritesSinceLast: 5,
   minFiles: 10,
   minIntervalMs: 24 * 3600_000,
-  budgetRatio: 0.8,
 };
 
 /** 锁的崩溃恢复:整理 agent 死了没 markDreamed,1 小时后锁自动过期(CC 同款)。 */
@@ -69,15 +64,9 @@ export type DreamState = {
    */
   writes: number;
   turns: number;
-  /**
-   * 上一次整理结束（跑完或做了一部分）那一刻的 `writes`（2026-11-03）。水位门要 `writes` 涨过它才再开：
-   * 没有新写入，再整理一遍看到的还是同一份内容——占用压不下去时（内容都值得留），否则每次回到 idle 都会再整理一次。
-   * 跑完时 `writes` 清零，它也是 0；做了一部分时计数不清，它记下当时的值。旧状态文件没有这个字段 = 0。
-   */
-  writesAtLastPass: number;
 };
 
-const EMPTY_STATE: DreamState = { lastAt: null, startedAt: null, writes: 0, turns: 0, writesAtLastPass: 0 };
+const EMPTY_STATE: DreamState = { lastAt: null, startedAt: null, writes: 0, turns: 0 };
 
 function count(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
@@ -93,7 +82,6 @@ export async function readDreamState(dir: MemoryDir, scope: string): Promise<Dre
       startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : null,
       writes: count(parsed.writes),
       turns: count(parsed.turns),
-      writesAtLastPass: count(parsed.writesAtLastPass),
     };
   } catch {
     return { ...EMPTY_STATE }; // 坏档当空:Dream 是 best-effort,不为它硬失败

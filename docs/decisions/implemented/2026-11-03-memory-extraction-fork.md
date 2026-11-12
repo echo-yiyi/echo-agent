@@ -1,6 +1,6 @@
 # 记忆提取从主对话分叉、攒满三轮才跑、退出前补一次、游标落盘
 
-> 状态:implemented · 提出 2026-11-03（三方缓存对比：echo 未命中是 pi / dsh 的两倍多，约四成来自记忆提取；同时复现「最后一轮答完就退出、那一轮永远不被提取」）· 拍板 2026-11-03（用户：「这几个问题都要解决，多次记忆提取的问题也要解决」——即 [降频](2026-10-30-memory-extraction-gate.md) 那份两步方案的第 2 步，加降频与退出补跑）· 落地 `packages/core/src/memory/extract.ts` / `channel.ts` / `agent.ts` / `create-echo.ts` / `session/types.ts` / `session/service.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [降频](2026-10-30-memory-extraction-gate.md) 的第 2、3 条与 Non-Goals
+> 状态:implemented · 提出 2026-11-03（三方缓存对比：echo 未命中是 pi / dsh 的两倍多，约四成来自记忆提取；同时复现「最后一轮答完就退出、那一轮永远不被提取」）· 拍板 2026-11-03（用户：「这几个问题都要解决，多次记忆提取的问题也要解决」——即 [降频](2026-10-30-memory-extraction-gate.md) 那份两步方案的第 2 步，加降频与退出补跑）· 落地 `packages/core/src/memory/extract.ts` / `channel.ts` / `agent.ts` / `create-echo.ts` / `session/types.ts` / `session/service.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [降频](2026-10-30-memory-extraction-gate.md) 的第 2、3 条与 Non-Goals · **后续** 2026-11-12 [没跑完时看写成了没有](2026-11-12-memory-extraction-unfinished.md)：游标「只在正常跑完时推进」改为「这段算看过就推」，连续没写成就放弃那段；2026-11-12 [删掉整理的水位门](2026-11-12-dream-watermark-removed.md)：第 11 条随水位门一起删除
 
 **给谁看**：改记忆提取的触发、输入、成本或收摊顺序的人。假设已知 [降频](2026-10-30-memory-extraction-gate.md)（门槛 + 游标）与 [记忆设计](../../design/memory.md) §5。
 
@@ -50,7 +50,7 @@
 
 - Dream 轮数用完：[做了一部分](../../../packages/core/test/dream-schedule.test.ts#test=整理撞上轮数上限-按做了一部分记锁放掉记下时间计数不清下次按间隔接着做不会一小时后锁过期就整套重跑)
 
-- 水位门要新写入：[跑完仍在线上](../../../packages/core/test/dream-schedule.test.ts#test=水位到线整理跑完占用仍在线上没有新写入就不再整理写进一条之后才按水位再来)、[做了一部分仍在线上](../../../packages/core/test/dream-schedule.test.ts#test=水位到线整理撞上轮数上限做了一部分之后同样要等新写入才按水位再来计数不清光看写入数-0-挡不住)
+- 水位门要新写入：第 11 条连同水位门一起被 [删掉整理的水位门](2026-11-12-dream-watermark-removed.md)（2026-11-12）取代，这两条判据随之删除。
 
 十二种变异（去掉退出补跑 / 去掉攒满三轮 / 替身换回原工具 / system 换回 null / 重叠保护改回推游标 / view 也算写 / 续会话不按盘上恢复游标 / 落盘下标不加偏移 / 跑完不落盘 / 轮数用完退回当失败 / 水位门不看新写入 / 做了一部分不记当时的写入数）各让对应判据变红。Dream 不带注入、Dream prompt 的批量与只回一行没有专门判据（纪律）。
 

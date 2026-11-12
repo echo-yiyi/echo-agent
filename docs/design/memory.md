@@ -80,7 +80,7 @@
 | 笔记模块预算 | 索引 25000，单文件 4096 | [`notesMemory`](../../packages/core/src/memory/types.ts#symbol=notesMemory) |
 | 构造器缺省 | resident 2000；indexed 索引 25000、单文件 4096 | [`residentMemory()`](../../packages/core/src/memory/types.ts#symbol=residentMemory)、[`indexedMemory()`](../../packages/core/src/memory/types.ts#symbol=indexedMemory) |
 | 索引描述行 | 单行化后截断 200 字符 | [`indexEntries()`](../../packages/core/src/memory/compose.ts#symbol=indexEntries) |
-| Dream 门 | 写 5 次、10 个 indexed 文件、24 小时、水位 0.8；**没有轮数门** | [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) |
+| Dream 门 | 写 5 次、10 个 indexed 文件、24 小时，全满足才跑；**没有轮数门，也没有按占用触发的门** | [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) |
 | startedAt 过期 | 1 小时 | [`DREAM_LOCK_STALE_MS`](../../packages/core/src/memory/dream.ts#symbol=DREAM_LOCK_STALE_MS) |
 | 提取轮数上限 | 5 | [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS) |
 | 提取门槛 | 用户说的话 8 个词，且攒满 3 轮用户输入 | [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)、[`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) |
@@ -132,7 +132,7 @@
 
 当前 [`Agent.enqueueExtract()`](../../packages/core/src/agent.ts#symbol=Agent.enqueueExtract) 依次检查：记忆已绑定、生命周期允许工作且有运行 scope；**一个模块都没有就不跑**（不为提取起一次模型调用）；本 reply 的重叠保护标志——前台这轮写过记忆，这条 reply 就不单独起提取（游标不动，见下）。都过了就把 reply 结束时的 transcript 与菜单定格，排进提取通道。
 
-**游标、门槛与频率**（2026-10-30 / 2026-11-03，决策见 [记忆提取降频](../decisions/implemented/2026-10-30-memory-extraction-gate.md) 与 [从主对话分叉](../decisions/implemented/2026-11-03-memory-extraction-fork.md)）：Agent 记一个 transcript 下标，之前的部分算已看过。真跑的那一刻从游标读起，过两道门才起模型调用：游标之后**用户亲口说的话**攒够 [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)（[`userProseWords()`](../../packages/core/src/memory/extract.ts#symbol=userProseWords)：只数 `human` / `steer` 的用户正文，中日韩文字一字一词、其余按空白分词），且**用户输入**攒满 [`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) 轮（[`humanTurns()`](../../packages/core/src/memory/extract.ts#symbol=humanTurns)：一条 `human` 用户消息一轮）。任一没过就不跑、游标不动——攒着，下一次一并看。**正常跑完**才把游标推到这次材料的末尾，并在会话里记一条 `memory_reviewed` entry（落盘消息的下标，见 [`SessionEntry`](../../packages/core/src/session/types.ts#symbol=SessionEntry)）；出错、轮数用完、被中止都不动。压缩不改 transcript 下标，游标照样有效；`reset` 归零（`/clear` 只清内存、不写会话，所以落盘下标要越过 reset 之前那几条，Agent 记着这个偏移）；**续会话取盘上最后一条 `memory_reviewed`**（一条都没有 = 0）——上个进程没提取的那截跨重启接着攒，被杀、退出前那次补跑没跑完都不丢（2026-11-03）。
+**游标、门槛与频率**（2026-10-30 / 2026-11-03，决策见 [记忆提取降频](../decisions/implemented/2026-10-30-memory-extraction-gate.md) 与 [从主对话分叉](../decisions/implemented/2026-11-03-memory-extraction-fork.md)）：Agent 记一个 transcript 下标，之前的部分算已看过。真跑的那一刻从游标读起，过两道门才起模型调用：游标之后**用户亲口说的话**攒够 [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)（[`userProseWords()`](../../packages/core/src/memory/extract.ts#symbol=userProseWords)：只数 `human` / `steer` 的用户正文，中日韩文字一字一词、其余按空白分词），且**用户输入**攒满 [`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) 轮（[`humanTurns()`](../../packages/core/src/memory/extract.ts#symbol=humanTurns)：一条 `human` 用户消息一轮）。任一没过就不跑、游标不动——攒着，下一次一并看。这段**算看过**才把游标推到这次材料的末尾，并在会话里记一条 `memory_reviewed` entry（落盘消息的下标，见 [`SessionEntry`](../../packages/core/src/session/types.ts#symbol=SessionEntry)）。算不算看过由一次提取的结局 [`ExtractPass`](../../packages/core/src/memory/extract.ts#symbol=ExtractPass) 定（2026-11-12，决策见 [没跑完时看写成了没有](../decisions/implemented/2026-11-12-memory-extraction-unfinished.md)）：跑完算；没跑完（provider 出错、轮数用完）但已写成至少一条也算——那几条已经落盘，与整理撞上限按「做了一部分」记同一个口径；**一条没写成就停了**不推，下次重看这段，连续 [`DEFAULT_EXTRACT_UNFINISHED_LIMIT`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_UNFINISHED_LIMIT) 次都这样就放弃这段、照推，报诊断 `memory_extract_gave_up`——卡住的那段本身已攒够轮数，不放弃的话之后每条 reply 都重跑一次、范围一次比一次大。连续次数只记在内存里，重启归零。被中止（stop / 丢锁）不推，也不算一次没跑完。压缩不改 transcript 下标，游标照样有效；`reset` 归零（`/clear` 只清内存、不写会话，所以落盘下标要越过 reset 之前那几条，Agent 记着这个偏移）；**续会话取盘上最后一条 `memory_reviewed`**（一条都没有 = 0）——上个进程没提取的那截跨重启接着攒，被杀、退出前那次补跑没跑完都不丢（2026-11-03）。
 
 **退出前补一次**（[`Agent.drainExtract()`](../../packages/core/src/agent.ts#symbol=Agent.drainExtract)）：不看攒了几轮（仍过词数门槛），等它跑完，最多 [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS)，到点照常收摊（提取被中止、游标不动）。`echo.stop()` 在卸 Extension **之前**调它——记忆模块、记忆工具与 prompt 段都是 builtin 挂的，卸完就没得提取，前缀也对不上；`Agent.stop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底。丢锁与 handoff 让位不补；本进程一个 run 都没跑过（只是续上来看一眼就退）也不补——没有运行 scope，`enqueueExtract` 直接返回。所以「没攒满就结束」的那一截通常当场就被看到；没赶上的（进程被杀、补跑到点）由盘上的游标留给下一次续会话。
 
@@ -151,10 +151,11 @@
 [`dreamScopes()`](../../packages/core/src/memory/harness.ts#symbol=dreamScopes) 选出 dream 模块涉及的层，按作用域顺序逐层处理。每层的 [`shouldDream()`](../../packages/core/src/memory/harness.ts#symbol=shouldDream) 判据为：
 
 1. 有未过期 startedAt 标记时不启动。
-2. 否则，任一参与整理模块达到配置水位即可启动——前提是**上次整理之后有过新写入**（或从没整理过；[`DreamState`](../../packages/core/src/memory/dream.ts#symbol=DreamState) 的 `writesAtLastPass`，2026-11-03）。占用压不下去（内容都值得留）时，没有新写入就再整理一遍看到的是同一份内容；不加这一条，每次回到 idle 都会再整理一次。
-3. 未达水位时，所有**已配置**的节流条件都满足才启动：间隔、写入数、轮数、indexed 文件数——缺省门里没有轮数这一条（见第 3 节的缺省值表），没配的条件不参与。
+2. 否则，所有**已配置**的节流条件都满足才启动：间隔、写入数、轮数、indexed 文件数——缺省门里没有轮数这一条（见第 3 节的缺省值表），没配的条件不参与。
 
-缺省阈值以 [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) 为准。水位对 resident 看全文，对 indexed 看索引，不看 indexed 单个正文是否快满。轮次来自前台 turn_end 并向各参与层计数；状态存于各层 `.dream/state.json`。
+缺省阈值以 [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) 为准。轮次来自前台 turn_end 并向各参与层计数；状态存于各层 `.dream/state.json`。
+
+**没有按占用触发的门**（2026-11-12 删掉了水位，决策见 [删掉整理的水位门](../decisions/implemented/2026-11-12-dream-watermark-removed.md)）。模块写满时，写入被拒（第 4 节），由写的一方就地腾地方：resident 模块的全文本来就摆在提取指令里、已记为读过，一次覆写就能压紧；indexed 模块的索引快到上限时文件早已成百上千，上面几道早就满足。此前那道水位门（某模块用到预算 80% 就整理，不看间隔）的问题是：整理只要求压回预算内，整理完占用仍在线上，于是这一层每次写入都会再整理一整层——整理的频率等于写入的频率。
 
 [`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask) 写 startedAt 并生成限定该层的 memory 工具；写操作还会拒绝同层 dream:false 的模块。整理跑在 `systemPrompt: null` 下，所以这把工具的描述与 `path` 参数说明用 [`TASK_MEMORY_TOOL_DESCRIPTION`](../../packages/core/src/memory/tool.ts#symbol=TASK_MEMORY_TOOL_DESCRIPTION) 那一版：模块与层在任务指令里，不指向 system 的记忆段（产品给了自己的描述就用它的）。读取不受该模块整理开关限制。同一层同时只有一个整理者，靠的是第 7 节那把 `.dream/pass` 的试拿；startedAt 管的是失败之后的退避。
 
@@ -178,7 +179,7 @@ Dream 与提取都不带父的每轮注入（激活 skill 正文、任务清单�
 
 [`Agent.settleDream()`](../../packages/core/src/agent.ts#symbol=Agent.settleDream) 虽沿用旧名字，实际会同时 abort 并等待提取、Dream 两条通道，接入 stop / 丢锁路径。停发新工作与等待在飞工作结束是两件事；不能以“后台不阻塞前台”推导“退出不必等后台”。正常 `stop()` 在它之前先给提取一个跑完的机会（第 5 节「退出前补一次」），到点没跑完才由它中止。
 
-正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。子循环里那把记忆工具带自己的事实 sink：由 [`Agent.memoryFactsFor()`](../../packages/core/src/agent.ts#symbol=Agent.memoryFactsFor) 造，scope 里放的是这个子循环的 runId，随那把工具的调用方状态（[`MemoryCaller`](../../packages/core/src/memory/harness.ts#symbol=MemoryCaller)，同时也是「读到过的版本」那本账）传下去。于是写入事实挂在那次提取 / 整理自己的 run 上，不借 Agent 此刻开着的 admission run。提取没跑完会报诊断 `memory_extract_failed`，并说明此前已写入几条（那几条已经落盘）：通道兜住的抛错，与子循环以 error 收场（provider 出错、轮数用完）是同一个 code；stop / 丢锁造成的 aborted 不报。
+正文变更由 [`MemoryFact`](../../packages/core/src/memory/observe.ts#symbol=MemoryFact) 表达 committed / rejected / failed / partial；索引结果单独记录。后台循环不经 admission，但每次提取 / 整理在观测账本里各是一个子循环 run：`source` 带 `parentRunId` 链回排它的那次 run（见[观测 §7「子循环」](observability.md#7-谁在发事实)）。子循环里那把记忆工具带自己的事实 sink：由 [`Agent.memoryFactsFor()`](../../packages/core/src/agent.ts#symbol=Agent.memoryFactsFor) 造，scope 里放的是这个子循环的 runId，随那把工具的调用方状态（[`MemoryCaller`](../../packages/core/src/memory/harness.ts#symbol=MemoryCaller)，同时也是「读到过的版本」那本账）传下去。于是写入事实挂在那次提取 / 整理自己的 run 上，不借 Agent 此刻开着的 admission run。提取没跑完会报诊断 `memory_extract_failed`，并说明此前已写入几条（那几条已经落盘，这段因此算看过）：通道兜住的抛错，与子循环以 error 收场（provider 出错、轮数用完）是同一个 code；stop / 丢锁造成的 aborted 不报。连续没写成就停了、放弃那段时另报 `memory_extract_gave_up`（第 5 节）。
 
 ## 8. 当前限制
 

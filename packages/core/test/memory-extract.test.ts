@@ -489,6 +489,66 @@ test("提取没跑完（模型出错）游标不动：下一轮就把那段连�
   expect(instructionOf(extracts[1]!)).toContain("the last 8 messages");
 });
 
+/* ───────── 2026-11-12：没跑完时游标推不推看写成了没有，连续没写成就放弃那段 ───────── */
+
+const NEXT_THREE = ["第四件事：发版前先看 CI", "第五件事：文档改完跑 docs-lint", "第六件事：别用 sed 批量改名"];
+
+/** 每次提取的第一次模型调用：最后一条就是提取指令（之后几次调用的最后一条是工具结果）。 */
+function extractStarts(extracts: readonly Context[]): Context[] {
+  return extracts.filter((c) => JSON.stringify(c.messages.at(-1)).includes(EXTRACT_PROMPT_OPENING));
+}
+
+test("撞上轮数上限、但写成过一条：这段算看过、游标照推——下一次从新的一批看起，不把那段重看一遍（此前游标不动，之后每条 reply 都重看）", async () => {
+  const view = (id: string) => toolTurn(id, "memory", { command: "view", path: "session/memory/" });
+  const extract = scriptedStreamFn([
+    toolTurn("w1", "memory", { command: "create", path: "session/memory/a.md", file_text: "---\ndescription: 一条\n---\n\n甲" }),
+    view("v1"),
+    view("v2"),
+    view("v3"),
+    view("v4"), // 第五轮还在要工具：要第六轮才收得了尾，撞上限
+    textTurn("没什么可记的。"),
+  ]);
+  const { fn, extracts } = recording({ extract });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()) });
+
+  await say(agent, ...THREE);
+  await idleExtract(agent);
+  await say(agent, ...NEXT_THREE);
+  await idleExtract(agent);
+
+  const starts = extractStarts(extracts);
+  expect(starts).toHaveLength(2);
+  expect(instructionOf(starts[1]!)).toContain(`«${NEXT_THREE[0]}»`);
+  expect(instructionOf(starts[1]!)).toContain("the last 6 messages");
+});
+
+test("一条没写成就撞上限：下一次重看那段；连续两次都这样就放弃那段（报 memory_extract_gave_up），再下一次从之后的内容看起", async () => {
+  const notices: string[] = [];
+  const hooks = new HookRuntime();
+  hooks.on("notification", (e) => {
+    notices.push(e.message);
+  });
+  let n = 0;
+  // 每次都只 view、从不写：每次提取都把 5 轮用完、一条没写成
+  const viewing: StreamFn = (model, context, options) => scriptedStreamFn([toolTurn(`v${n++}`, "memory", { command: "view", path: "session/memory/" })])(model, context, options);
+  const { fn, extracts } = recording({ extract: viewing });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()), hooks });
+
+  await say(agent, ...THREE); // 第一次：没写成，游标不动
+  await idleExtract(agent);
+  await say(agent, NEXT_THREE[0]!); // 那段已攒够三轮：这一轮就重看（第二次），又没写成 → 放弃，游标推到这里
+  await idleExtract(agent);
+  await say(agent, NEXT_THREE[1]!, NEXT_THREE[2]!, "第七件事：周五不发版"); // 从放弃之后攒满三轮
+  await idleExtract(agent);
+
+  const starts = extractStarts(extracts);
+  expect(starts).toHaveLength(3);
+  expect(instructionOf(starts[0]!)).toContain(`«${THREE[0]}»`);
+  expect(instructionOf(starts[1]!)).toContain(`«${THREE[0]}»`); // 重看一次
+  expect(instructionOf(starts[2]!)).toContain(`«${NEXT_THREE[1]}»`); // 放弃之后从新的看起
+  expect(notices.filter((m) => m.includes("memory_extract_gave_up"))).toHaveLength(1);
+});
+
 test("reset 清空 transcript：游标归零，在飞的那次提取不把游标推到旧下标上", async () => {
   let release = (): void => {};
   const held = new Promise<void>((r) => {
