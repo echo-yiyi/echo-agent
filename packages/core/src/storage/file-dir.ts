@@ -151,6 +151,24 @@ export class FileDir implements StorageDir {
     return out.filter((p) => p.startsWith(prefix)).sort();
   }
 
+  /** 一次 `readdir`，不递归。与 `walk` 同一套取舍：只认普通文件与目录（符号链接不算），原子写的临时文件不算。 */
+  async children(dir: string): Promise<string[]> {
+    const target = dir === "" ? this.root : await this.resolveSafe(dir);
+    let entries;
+    try {
+      entries = await fs.readdir(target, { withFileTypes: true });
+    } catch (e) {
+      if (isNotFound(e)) return []; // 这一层还没建 = 空
+      throw e;
+    }
+    const out: string[] = [];
+    for (const entry of entries) {
+      if (entry.isDirectory()) out.push(`${entry.name}/`);
+      else if (entry.isFile() && !entry.name.endsWith(ATOMIC_TEMP_SUFFIX)) out.push(entry.name);
+    }
+    return out.sort();
+  }
+
   private async walk(dir: string, out: string[]): Promise<void> {
     let entries;
     try {

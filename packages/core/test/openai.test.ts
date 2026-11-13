@@ -1060,7 +1060,8 @@ test("finish_reason 的异常值不当正常结束：内容过滤 → 不可重�
   for (const reason of ["content_filter", "sensitive"]) {
     const msg = await finishWith(reason);
     expect(msg.stopReason).toBe("error");
-    expect(msg.error).toMatchObject({ source: "provider", retryable: false });
+    // 自己的码，不混在 `protocol` 里：调用方要能分出「后端违约」与「内容被拦」（2026-11-13）
+    expect(msg.error).toMatchObject({ source: "provider", code: "content_filter", retryable: false });
     expect(msg.error!.message).toContain(reason);
     expect(msg.content).toEqual([{ type: "text", text: "部分" }]);
   }
