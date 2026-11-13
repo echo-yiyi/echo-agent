@@ -17,7 +17,9 @@ import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import type { Provider } from "../src/provider/types.ts";
 import type { ReloadReport } from "../src/extension/reload.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
-import { RELOAD_APPLY_LIMIT_MS, STOP_UNMOUNT_LIMIT_MS } from "../src/create-echo.ts";
+import { STOP_UNMOUNT_LIMIT_MS } from "../src/create-echo.ts";
+import { EXTENSION_APPLY_LIMIT_MS } from "../src/extension/host.ts";
+import { defineExtension } from "../src/extension/public.ts";
 
 process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
@@ -432,14 +434,16 @@ test("后台子 agent 还在跑时热部署推迟：它拿着的是现在这一�
   expect(later.kind === "done" ? kinds(later.report) : later).toEqual({ [file]: "replaced" });
 });
 
-test("热部署时新版 apply 挂住：到时限报 lost、放开 admission；stop() 卸载限时，照常停 Agent", async () => {
+/** 只有 apply 的扩展：`apply` 是源码里的一段表达式。 */
+const applyOnlySource = (name: string, apply: string): string =>
+  `import { defineExtension } from ${JSON.stringify(ABI_PATH)};\n` +
+  `export default defineExtension({ name: ${JSON.stringify(name)}, hostAbiVersion: 1, reload: "run", apply: ${apply} });\n`;
+
+test("热部署时新版 apply 挂住：Host 到时限放弃它、把旧版装回去（rolled_back）、放开 admission；事务队列没被堵住，改好再部署照常换上，stop() 不用等", async () => {
   const dir = join(await tmp(), "extensions");
   await mkdir(dir, { recursive: true });
   const file = join(dir, "x.ts");
-  const source = (apply: string): string =>
-    `import { defineExtension } from ${JSON.stringify(ABI_PATH)};\n` +
-    `export default defineExtension({ name: "x", hostAbiVersion: 1, reload: "run", apply: ${apply} });\n`;
-  await writeFile(file, source("() => {}"));
+  await writeFile(file, applyOnlySource("x", "() => {}"));
   const clock = new FakeClock();
   const echo = await createEcho({
     provider: scripted([textTurn("ok")]),
@@ -449,18 +453,116 @@ test("热部署时新版 apply 挂住：到时限报 lost、放开 admission；s
     withoutMemory: true,
     clock,
   });
+  running.push(echo);
   await echo.start();
-  await writeFile(file, source("() => new Promise(() => {})"));
+  await writeFile(file, applyOnlySource("x", "() => new Promise(() => {})"));
   const reload = echo.reloadExtensions();
   await new Promise((r) => setTimeout(r, 100));
-  clock.advance(RELOAD_APPLY_LIMIT_MS);
+  clock.advance(EXTENSION_APPLY_LIMIT_MS);
   const r = await reload;
   expect(r.kind).toBe("done");
-  if (r.kind === "done") expect(kinds(r.report)).toEqual({ [file]: "lost" });
-  expect(echo.diagnostics.map((d) => d.code)).toContain("extension_apply_timeout");
+  // 旧版装回去了：不是 lost（此前装配层在外面到点不等，Host 的事务还挂着，旧版已卸、新版没起来）
+  if (r.kind === "done") expect(kinds(r.report)).toEqual({ [file]: "rolled_back" });
+  expect(echo.diagnostics.filter((d) => d.path === file).map((d) => d.code)).toEqual(["extension_apply_timeout"]);
+  expect(echo.extensions.filter((e) => e.file !== undefined).map((e) => e.name)).toEqual(["x"]);
+  expect(await snapshotsIn(dir)).toEqual([]); // 没装上的那份快照当场删了（旧版是启动时从原路径加载的，没有快照）
   // admission 放开了：热部署不再握着 permit
   expect((await echo.send("hi")).outcome.kind).toBe("completed");
-  // 收摊：卸载排在挂住的那次装载后面，到时限不再等，照常停 Agent、交还 lease
+  // **事务队列没被堵住**：改好再部署照常换上。此前挂住的那次装载一直占着 Host 的队列，之后的装载、卸载都排在它后面
+  await writeFile(file, applyOnlySource("x", "() => { /* 改好了 */ }"));
+  const again = await echo.reloadExtensions();
+  expect(again.kind === "done" ? kinds(again.report) : again).toEqual({ [file]: "replaced" });
+  expect(echo.diagnostics.filter((d) => d.path === file)).toEqual([]);
+  // 收摊不用等卸载时限：没有事务挂在队列上
+  await echo.stop();
+  running.splice(running.indexOf(echo), 1);
+  expect(agentOf(echo).acceptsWork).toBe(false);
+});
+
+test("启动时盘上扩展的 apply 挂住：Host 到时限放弃它、只记一条诊断，createEcho() 照常返回，排在它后面的扩展照常装上、用得上", async () => {
+  const dir = join(await tmp(), "extensions");
+  await mkdir(dir, { recursive: true });
+  const hung = join(dir, "a-hung.ts");
+  const fine = join(dir, "b-fine.ts");
+  const g = globalThis as { __bootHungStarted?: boolean };
+  g.__bootHungStarted = false;
+  await writeFile(hung, applyOnlySource("hung", "() => { globalThis.__bootHungStarted = true; return new Promise(() => {}); }"));
+  await writeFile(fine, extensionSource("hello", "v1"));
+  const clock = new FakeClock();
+  const creating = createEcho({
+    provider: scripted([toolTurn("c1", "hello", {}), textTurn("done")]),
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    extensionDirs: [dir],
+    withoutMemory: true,
+    clock,
+  });
+  // 等装载真的走到挂住的那个再拨钟：早拨会把时限算到别的扩展头上
+  // 读成函数：TS 把上面那次赋值收窄成恒 false，而运行时它是扩展自己改的
+  const hungStarted = (): boolean => g.__bootHungStarted === true;
+  for (let i = 0; i < 250 && !hungStarted(); i++) await new Promise((r) => setTimeout(r, 20));
+  expect(hungStarted(), "装载没走到挂住的那个扩展").toBe(true);
+  clock.advance(EXTENSION_APPLY_LIMIT_MS);
+  // 此前这里永远等不到：角色那一代排在挂住的装载后面
+  const raced = await Promise.race([creating, new Promise<"卡住了">((r) => setTimeout(() => r("卡住了"), 5000))]);
+  if (raced === "卡住了") throw new Error("createEcho() 没有在装载时限之后返回");
+  const echo = raced;
+  running.push(echo);
+  expect(echo.diagnostics.filter((d) => d.path === hung).map((d) => d.code)).toEqual(["extension_apply_timeout"]);
+  expect(echo.extensions.filter((e) => e.file !== undefined).map((e) => e.name)).toEqual(["hello"]);
+  await echo.start();
+  expect(await callTool(echo)).toContain("v1");
+});
+
+test("启动时显式装配的扩展 apply 挂住：到时限 createEcho() 抛错（fail-loud），不是一直等", async () => {
+  const clock = new FakeClock();
+  let started = false;
+  const hung = defineExtension({
+    name: "product",
+    hostAbiVersion: 1,
+    apply: () => {
+      started = true;
+      return new Promise<void>(() => {});
+    },
+  });
+  const creating = createEcho({
+    provider: scripted([]),
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    extensionDirs: [],
+    withoutMemory: true,
+    clock,
+    extensions: [{ entryId: "product", definition: hung }],
+  }).then(
+    () => "created",
+    (e: unknown) => String(e),
+  );
+  const applying = (): boolean => started;
+  for (let i = 0; i < 250 && !applying(); i++) await new Promise((r) => setTimeout(r, 20));
+  expect(applying(), "装载没走到产品那一代").toBe(true);
+  clock.advance(EXTENSION_APPLY_LIMIT_MS);
+  const raced = await Promise.race([creating, new Promise<string>((r) => setTimeout(() => r("卡住了"), 5000))]);
+  expect(raced).toContain("没结束（apply 或 Effect start 挂住了）");
+});
+
+test("stop()：扩展的 disposer 挂住，卸载到时限不再等，照常停 Agent、交还 lease", async () => {
+  const dir = join(await tmp(), "extensions");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "x.ts"),
+    applyOnlySource("x", '(ctx) => { void ctx.effect({ boundary: "run", start: () => ({ value: null, dispose: () => new Promise(() => {}) }) }); }'),
+  );
+  const clock = new FakeClock();
+  const echo = await createEcho({
+    provider: scripted([textTurn("ok")]),
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    extensionDirs: [dir],
+    withoutMemory: true,
+    clock,
+  });
+  expect(echo.extensions.filter((e) => e.file !== undefined).map((e) => e.name)).toEqual(["x"]); // 真装上了，stop 才有东西可卸
+  await echo.start();
   const stopping = echo.stop().then(
     () => "resolved",
     (e: unknown) => String(e),
