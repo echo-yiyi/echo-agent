@@ -52,6 +52,23 @@ test("不变量① 恢复后 messages 与 compaction 同源（同一份 entries 
   expect(resumed.info.messageCount).toBe(3);
 });
 
+test("entries/ 下点开头的文件（Finder 的 .DS_Store）不是 entry：续会话照常；别的认不出的文件照旧判红", async () => {
+  // 此前目录里每个文件都当 entry 解析：用 Finder 打开过这个目录，这段会话就再也打不开
+  const dir = new InMemoryDir();
+  const first = new SessionService(dir);
+  await first.createOrResume("main");
+  await first.append("main", [{ kind: "message", message: userMessage("一") }]);
+  await first.settle();
+  await dir.write("entries/.DS_Store", "\u0000\u0001Bud1");
+
+  const resumed = await new SessionService(dir).createOrResume("main");
+  expect(resumed.messages.map((m) => m.role)).toEqual(["user"]);
+
+  // 只放过点开头的：坏档不能靠「跳过」变成静默少一条
+  await dir.write("entries/garbage.json", "不是 json");
+  await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/解不开/);
+});
+
 test("compaction 状态在恢复出来的 messages 上不成立 → 坏档判红（越界 / 切在配对中间）", async () => {
   for (const compaction of [
     { spans: [{ from: 0, to: 5, summary: "越界" }], clearedBefore: 0 },

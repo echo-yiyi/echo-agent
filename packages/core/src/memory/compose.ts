@@ -37,6 +37,11 @@ function entryOf(path: string, content: string): IndexEntry {
   return { path, description: truncateMarked(singleLine(description), INDEX_LINE_CAP) };
 }
 
+/** 模块目录下的相对路径里有没有点开头的段：那是内部状态或系统留下的文件，不是一条记忆。 */
+export function hasDotSegment(relativePath: string): boolean {
+  return relativePath.split("/").some((seg) => seg.startsWith("."));
+}
+
 /**
  * 渲染一份 indexed 记忆**某一层**的全部索引条目。条目里的 path 带作用域前缀——
  * 模型照着索引 view 哪个文件、往哪一层写,都只看这一个路径。
@@ -48,7 +53,9 @@ export async function indexEntries(
   scope: string,
   override?: { path: string; content: string },
 ): Promise<IndexEntry[]> {
-  const paths = (await dir.list(`${scope}/${m.path}`)).filter((p) => !p.endsWith(`/${MEMORY_INDEX_FILE}`)); // 索引不索引自己
+  const root = `${scope}/${m.path}`;
+  // 索引不索引自己；点开头的段是内部状态或系统留下的文件（`.dream/`、`.DS_Store`），不是一条记忆——与 `memoryView` 同一条规矩
+  const paths = (await dir.list(root)).filter((p) => !p.endsWith(`/${MEMORY_INDEX_FILE}`) && !hasDotSegment(p.slice(root.length)));
   const seen = new Set<string>();
   const out: IndexEntry[] = [];
   for (const p of paths) {

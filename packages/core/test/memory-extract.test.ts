@@ -549,6 +549,35 @@ test("一条没写成就撞上限：下一次重看那段；连续两次都这�
   expect(notices.filter((m) => m.includes("memory_extract_gave_up"))).toHaveLength(1);
 });
 
+test("提取被 contextBeforeBuild hook 拦下（signal 没动）：照没跑完算——报诊断、连续两次就放弃那段（此前当成收摊：每条 reply 都重装一遍再被拦，没有诊断、永远到不了放弃）", async () => {
+  const notices: string[] = [];
+  const hooks = new HookRuntime();
+  hooks.on("notification", (e) => {
+    notices.push(e.message);
+  });
+  let blocked = 0;
+  // 只拦提取那条子循环的送模（产品的花费上限、内容守卫就是这个形状）：最后一条是提取指令
+  hooks.on("contextBeforeBuild", (e) => {
+    if (!JSON.stringify(e.messages.at(-1)).includes(EXTRACT_PROMPT_OPENING)) return undefined;
+    blocked++;
+    return { decision: "block" as const, reason: "花费上限" };
+  });
+  const { fn, extracts } = recording({ extract: scriptedStreamFn([textTurn("没什么可记的。")]) });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()), hooks });
+
+  await say(agent, ...THREE); // 第一次被拦：没跑完，游标不动
+  await idleExtract(agent);
+  await say(agent, NEXT_THREE[0]!); // 那段已攒够三轮：这一轮重看，又被拦 → 放弃
+  await idleExtract(agent);
+  await say(agent, NEXT_THREE[1]!); // 放弃之后还没攒够三轮：不再起提取
+  await idleExtract(agent);
+
+  expect(blocked).toBe(2);
+  expect(extracts).toHaveLength(0); // 一次都没送到模型
+  expect(notices.filter((m) => m.includes("被 hook 拦下（花费上限）"))).toHaveLength(2);
+  expect(notices.filter((m) => m.includes("memory_extract_gave_up"))).toHaveLength(1);
+});
+
 test("reset 清空 transcript：游标归零，在飞的那次提取不把游标推到旧下标上", async () => {
   let release = (): void => {};
   const held = new Promise<void>((r) => {

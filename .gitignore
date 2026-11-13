@@ -1,6 +1,7 @@
 node_modules/
 .echo/
 *.log
+.DS_Store
 
 # Claude Code 的本地态：worktree 是完整仓库拷贝（`git add -A` 会当 embedded repo 收进来），
 # settings.local.json 是个人配置。共享的 .claude/settings.json 与 commands/ 仍可提交。

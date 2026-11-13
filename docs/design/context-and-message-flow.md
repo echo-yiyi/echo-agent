@@ -135,7 +135,7 @@ readonly 是类型约束，不是运行时隔离。调用方修改原消息，�
 
 实现见 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。它每个 attempt 从 working context 重算，产物不持久化；provider 方言和模型切换通过投影处理。落单的 `tool_use`（没有配对结果入账的）补一条 error 结果，说法是「没有结果入账、可能跑过」——不说「没执行」：同批别的调用违约时，跑完了却没交出结果的也落在这里。确实没启动的（run 停了、被中断、插话改了方向）不靠这里：循环当场入账一条「没执行」的结果（[Run Loop](run-loop-layers.md) §2.3），投影补齐只兜账本里真没有的。
 
-方言再翻一道（OpenAI 兼容方言见 `provider/openai.ts`）：思考块只回放给产它的那个模型（provider + api + model 全等、且带合法签名），别家的或没标来源的**直接丢掉、不并进正文**——可读的思考当正文发过去，下一家会把它当成自己说过的可见回复；丢完什么都不剩的 assistant 消息整条不发。同一条消息里的多个 text 块以空行隔开拼成一个字符串。
+方言再翻一道（OpenAI 兼容方言见 `provider/openai.ts`）：思考块只回放给产它的那个模型（provider + api + model 全等、且带合法签名），别家的或没标来源的**直接丢掉、不并进正文**——可读的思考当正文发过去，下一家会把它当成自己说过的可见回复；没有正文也没有工具调用的 assistant 消息整条不发——不管是思考丢完之后什么都不剩，还是只剩可回放的思考（模型某一轮只出了 reasoning）：思考是挂在一条有内容的消息上带回去的，单独发就是一条 `content: null` 的消息，上游会拒。同一条消息里的多个 text 块以空行隔开拼成一个字符串。
 
 **图片**是 base64 内联的 `ImageBlock`，可以出现在用户消息里，也可以挂在 `toolResult.images` 上。产生图片的入口都走 [`imageFromBytes()`](../../packages/core/src/image.ts#symbol=imageFromBytes)：按魔数认 PNG / JPEG / GIF / WebP、从文件头读宽高，超过 5 MB 或长边 8 000 像素就拒，交调用方缩放（`@echo-agent/base` 的 `loadImageFile` 借 `sips` / ImageMagick 把长边缩到 1 568）。目录没标 `vision` 的模型：用户贴的图与工具带回的图都换成一句文字说明、请求照发（见 `provider/openai.ts`）——图在调模型之前就已入账落盘，方言里抛错会让之后每次请求都失败，换到不收图的模型会话就卡死（[修订](../decisions/implemented/2026-09-09-tool-result-images.md#2026-11-03-修订用户贴图也不抛)）。
 

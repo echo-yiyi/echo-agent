@@ -220,6 +220,28 @@ describe("tick", () => {
     expect(await inner.read(SCHEDULE_FILE)).not.toContain("once");
   });
 
+  test("登记表第一次读盘失败:不把它当成已加载的空表——下次重读,盘上原有的任务还在,新加一条不会把它们盖掉", async () => {
+    // 此前读盘之前就置 loaded = true:读失败后表是「已加载、空的」,下一次 addSchedule 只写新这一条,盘上原有的全丢
+    const inner = new InMemoryDir();
+    const seed = harness(inner);
+    await addSchedule(seed.h, sched({ kind: "every", everyMs: 60_000 } as never, "old"), T0);
+    let readDown = true;
+    const dir: StorageDir = {
+      read: (p) => (readDown ? Promise.reject(new Error("EIO read")) : inner.read(p)),
+      write: (p, c) => inner.write(p, c),
+      remove: (p) => inner.remove(p),
+      list: (p) => inner.list(p),
+    };
+    const { h } = harness(dir);
+    await expect(listSchedules(h)).rejects.toThrow("EIO read");
+    readDown = false;
+    await addSchedule(h, sched({ kind: "every", everyMs: 60_000 } as never, "new"), T0);
+    expect((await listSchedules(h)).map((e) => e.schedule.id).sort()).toEqual(["new", "old"]);
+    const onDisk = await inner.read(SCHEDULE_FILE);
+    expect(onDisk).toContain("old");
+    expect(onDisk).toContain("new");
+  });
+
   test("单条坏不杀 tick:前一条投递炸了,后一条照常", async () => {
     const dir = new InMemoryDir();
     const delivered: AgentMessage[] = [];

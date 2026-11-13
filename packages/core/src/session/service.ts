@@ -486,6 +486,9 @@ export class SessionService {
     const seen = new Set<string>();
     for (const p of paths) {
       const full = p.startsWith(prefix) ? p : `${prefix}${p}`;
+      // 点开头的文件不是 entry：Finder 的 `.DS_Store`、编辑器的交换文件。只放过这一种——别的认不出的文件照旧判红，
+      // 坏档不能靠「跳过」变成静默少一条
+      if (full.slice(full.lastIndexOf("/") + 1).startsWith(".")) continue;
       const text = await this.store.read(full);
       // list 报告了它、read 却说没有——store 自相矛盾，判红而不是跳过
       if (text === null) throw new Error(`会话 ${sessionId} 的 ${full} 在 list 里有、read 却为空`);

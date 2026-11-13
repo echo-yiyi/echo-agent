@@ -1,6 +1,6 @@
 # 记忆提取降频：用户说的话攒够才跑，只看上次提取之后的新内容
 
-> 状态:implemented · 提出 2026-10-30（用户反馈后台提取太频繁；对照 Claude Code 2.1.314 的提取门控）· 拍板 2026-10-30（用户，两步方案的第 1 步）· 落地 `packages/core/src/memory/extract.ts` / `agent.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [每条 reply 结束跑一次提取](2026-09-07-memory-extraction.md) 的触发与输入 · **后续** 2026-11-03 [从主对话分叉、攒满三轮、退出前补一次](2026-11-03-memory-extraction-fork.md)：第 2 条的「会话结束时没攒够的那一截不提取」、第 3 条的「前台写过就推过游标」、第 5 条的「渲染成文本交给提取」与 Non-Goals 里的「不做每 N 轮」已被它修改
+> 状态:implemented · 提出 2026-10-30（用户反馈后台提取太频繁；对照 Claude Code 2.1.314 的提取门控）· 拍板 2026-10-30（用户，两步方案的第 1 步）· 落地 `packages/core/src/memory/extract.ts` / `agent.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [每条 reply 结束跑一次提取](2026-09-07-memory-extraction.md) 的触发与输入 · **后续** 2026-11-03 [从主对话分叉、攒满三轮、退出前补一次](2026-11-03-memory-extraction-fork.md)：第 2 条的「会话结束时没攒够的那一截不提取」、第 3 条的「前台写过就推过游标」、第 5 条的「渲染成文本交给提取」与 Non-Goals 里的「不做每 N 轮」已被它修改；2026-11-12 [没跑完时看写成了没有](2026-11-12-memory-extraction-unfinished.md)：第 3 条的「只在提取正常跑完时推进；出错、轮数用完、被中止都不动」已被它修改（写成过就算看过，连续没写成就放弃那段）
 
 **给谁看**：改记忆提取的触发、输入或成本的人。假设已知 [提取的原始决策](2026-09-07-memory-extraction.md) 与 [记忆设计](../../design/memory.md) §5。
 
