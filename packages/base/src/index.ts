@@ -67,8 +67,8 @@ export { readSettings, writeSettings, settingsPath, SETTINGS_FILE, type CliSetti
 
 /** 管道形态的实质：给 Agent 一个进程与一个输入源。自己写别的输入源时用得上。 */
 export { run, type RunOptions, type Sink } from "./run.ts";
-/** stdin 输入源：`readAll` 整段一条（管道形态用的就是它），`linesOf` 一行一条。 */
-export { linesOf, readAll } from "./stdin.ts";
+/** stdin 输入源：`readAll` 整段读完当一条输入（管道形态用的就是它）。 */
+export { readAll } from "./stdin.ts";
 
 /** 观测面板：只读盘上的观测库，不装配、不取锁。 */
 export { runObserve, parseObserveArgs, observeUsage, type ObserveCommand, type ObserveOptions, type ObserveIo } from "./observe.ts";

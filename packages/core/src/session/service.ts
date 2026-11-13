@@ -676,14 +676,29 @@ export async function setSessionStatus(store: SessionStore, sessionId: string, s
  */
 export async function listSessions(root: SessionStore): Promise<SessionInfo[]> {
   const out: SessionInfo[] = [];
-  for (const p of await root.list("")) {
-    if (!p.endsWith(`/${META_FILE}`)) continue;
-    const id = p.slice(0, -(META_FILE.length + 1));
-    if (id.includes("/")) continue; // 只认 <id>/meta.json 这一层
+  for (const id of await sessionIds(root)) {
     const info = await readSessionInfo(root, id);
     if (info !== null) out.push(info);
   }
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/**
+ * `root` 下可能是一段会话的目录名。有浅层列举（`StorageDir.children`）就只看这一层：成本随会话**段数**涨，
+ * 不随所有会话的 entry 总数涨（entry 一条一文件）。没有的字节面退回递归 `list`、认 `<id>/meta.json`。
+ * 两条路交出的 id 不必相同（浅层那条会带上没有 meta 的目录），读 meta 那一步把没有的滤掉，清单相同。
+ */
+async function sessionIds(root: SessionStore): Promise<string[]> {
+  if (root.children !== undefined) {
+    return (await root.children("")).filter((name) => name.endsWith("/")).map((name) => name.slice(0, -1));
+  }
+  const ids: string[] = [];
+  for (const p of await root.list("")) {
+    if (!p.endsWith(`/${META_FILE}`)) continue;
+    const id = p.slice(0, -(META_FILE.length + 1));
+    if (!id.includes("/")) ids.push(id); // 只认 <id>/meta.json 这一层
+  }
+  return ids;
 }
 
 /**

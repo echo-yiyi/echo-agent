@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promises as fsp } from "node:fs";
 import { FileDir } from "../src/storage/file-dir.ts";
+import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 import { fileTaskStore } from "../src/task/fs.ts";
 import { FileCredentialStore } from "../src/provider/file-credentials.ts";
 
@@ -61,6 +62,24 @@ test("list(prefix) 只走 prefix 所在的子树（review 2026-09-07：此前全
   expect(await dir.list("b/de")).toEqual(["b/deep/3.json"]); // 文件名前缀：起点是 b/，再按整串过滤
   expect(await dir.list("nope/")).toEqual([]); // 起点不存在 = 空，不抛
   expect(await dir.list("")).toEqual(["a/1.json", "b/2.json", "b/deep/3.json"]);
+});
+
+test("children(dir) 只看一层：文件给名字、子目录给名字加 /，不往下走；FileDir 与 InMemoryDir 同一个答案", async () => {
+  const root = await mkdtemp(join(tmpdir(), "echo-filedir-"));
+  for (const dir of [new FileDir(root), new InMemoryDir()]) {
+    await dir.write("top.json", "1");
+    await dir.write("s-1/meta.json", "1");
+    await dir.write("s-1/entries/000001.json", "1");
+    await dir.write("s-2/inbox/a.json", "1");
+    expect(await dir.children("")).toEqual(["s-1/", "s-2/", "top.json"]);
+    expect(await dir.children("s-1")).toEqual(["entries/", "meta.json"]);
+    expect(await dir.children("s-1/")).toEqual(["entries/", "meta.json"]); // 结尾的 / 可有可无
+    expect(await dir.children("s")).toEqual([]); // 是目录不是字符串前缀：`s` 不匹配 `s-1`
+    expect(await dir.children("nope")).toEqual([]); // 这一层不存在 = 空
+  }
+  // 原子写的临时文件不算（与 list 同一条规矩）
+  await fsp.writeFile(join(root, "top.json.1.2.3.tmp"), "半截");
+  expect(await new FileDir(root).children("")).toEqual(["s-1/", "s-2/", "top.json"]);
 });
 
 test("read 不存在的路径返回 null，不抛（StorageDir 契约）", async () => {

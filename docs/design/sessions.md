@@ -57,7 +57,7 @@
   observability/
 ```
 
-meta 与 entries 位于目录根，SessionService 一个实例管一段；[listSessions()](../../packages/core/src/session/service.ts#symbol=listSessions) 扫上级目录得到清单。列出来之后、读之前 meta 没了的那一段跳过（别的进程里一段空会话正好收摊撤了 meta），零长或解不开的 meta 仍判红。给一段发消息（`sessions.send`）只读对方的 `<id>/meta.json`（[readSessionInfo()](../../packages/core/src/session/service.ts#symbol=readSessionInfo)），不列全表。
+meta 与 entries 位于目录根，SessionService 一个实例管一段；[listSessions()](../../packages/core/src/session/service.ts#symbol=listSessions) 只列上级目录这一层、再逐段读 meta 得到清单：字节面有浅层列举（[`StorageDir`](../../packages/core/src/storage/types.ts#symbol=StorageDir) 的 `children`，`FileDir` 与 `InMemoryDir` 都有）时成本随会话段数涨，不随所有会话的 entry 总数涨；没有的字节面退回递归 `list`，清单相同（[决策](../decisions/implemented/2026-11-13-storage-children.md)）。列出来之后、读之前 meta 没了的那一段跳过（别的进程里一段空会话正好收摊撤了 meta），零长或解不开的 meta 仍判红。给一段发消息（`sessions.send`）只读对方的 `<id>/meta.json`（[readSessionInfo()](../../packages/core/src/session/service.ts#symbol=readSessionInfo)），不列全表。
 
 身份类型以 [SessionInfo](../../packages/core/src/session/types.ts#symbol=SessionInfo) 与 [AgentRef](../../packages/core/src/agent-def/types.ts#symbol=AgentRef) 为准，不在本文复制类型声明。product 表示哪个产品创建，agent 保存可选 name 与 definition 快照；definition 决定如何运行，name 关联角色记忆。恢复使用保存的定义，不重新读取角色文件。
 
@@ -219,8 +219,6 @@ extension 通过 AgentSessionsService 使用同一会话面；未接实际能力
 **切换失败。** /resume 由壳选段并退出，容器先停止旧段再启动目标段；目标段拿不到 lease 时尝试回到原段，回退也可能失败。它不是两段锁同时持有的原子交换。
 
 **空段清理竞态。** 停止前检查盘上 inbox 并清理空段元数据之间仍有竞态窗口；lease 不能替代对外部投递的完整协调。
-
-**清单遍历全部文件。** `listSessions()` 经 `StorageDir.list("")` 递归列出会话根下每一段的全部文件（entries、inbox、观测文档）再挑出 `<id>/meta.json`，成本随所有会话的总文件数线性涨——`session_list`、`--continue`、观测面板扫会话都走它。`StorageDir` 没有「只列一层」的原语，只读顶层要先给端口加一个。
 
 ## 10. 验证判据
 

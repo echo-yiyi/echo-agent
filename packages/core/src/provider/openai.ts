@@ -563,7 +563,7 @@ function mapStop(reason: string): StopReason | { error: AgentError } {
       return "max_tokens";
     case "content_filter":
     case "sensitive":
-      return { error: agentError("provider", "protocol", `上游以 finish_reason: ${reason} 收尾：输出被内容安全过滤拦下`, false) };
+      return { error: agentError("provider", "content_filter", `上游以 finish_reason: ${reason} 收尾：输出被内容安全过滤拦下`, false) };
     case "network_error":
     case "error":
       return { error: agentError("provider", "server", `上游以 finish_reason: ${reason} 收尾：服务端推理异常`, true) };

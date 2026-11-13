@@ -188,7 +188,7 @@ agent_end{completed}
 | 5xx；流内 `error` 段是过载 / 5xx 类；finish_reason 是服务端推理异常（`network_error`、`error`） | `server` | 是 |
 | 连接失败；流在 finish_reason 与 `[DONE]` 之前断开 | `network` | 是 |
 | 413；400 且正文是明确的上下文超限说法（各家原文的短语表，不认裸的 context / length / token）；流内 `error` 段的 code 是上下文超限 | `context_overflow` | 否（走应急压缩） |
-| finish_reason 是内容过滤（`content_filter`、`sensitive`） | `protocol` | 否 |
+| finish_reason 是内容过滤（`content_filter`、`sensitive`） | `content_filter`（[决策](../decisions/implemented/2026-11-13-content-filter-error-code.md)） | 否 |
 | 构造请求体失败（请求没发出去） | `internal` | 否 |
 | 外层 signal 已中止（调用方取消、run 超时） | `aborted` | 否 |
 | 其余 4xx、其余流内 `error` 段 | `protocol` | 否 |

@@ -18,6 +18,7 @@ export type ErrorCode =
   | "timeout" // 超时
   | "network" // 连接失败
   | "protocol" // 后端违约（缺终结事件、响应不可解析）
+  | "content_filter" // 输出被上游的内容安全过滤拦下：后端没违约，是这份输入 / 输出过不了它的审核
   | "server" // 后端 5xx
   // —— 工具侧 ——
   | "tool_not_found"

@@ -1,6 +1,6 @@
 # 管道形态：整段 stdin 是一条 prompt，跑一个 run
 
-> 状态:implemented · 提出 2026-11-03（review：`cat task.md | echo-coding` 被拆成多次独立 run）· 拍板 2026-11-03（用户：「全部按推荐修，并参考成熟实现」）· 落地 `packages/base/src/cli.ts#runPiped`、`packages/base/src/stdin.ts#readAll`、`packages/base/src/prompt.ts#PIPE_SURFACE`，判据见文末
+> 状态:implemented · 提出 2026-11-03（review：`cat task.md | echo-coding` 被拆成多次独立 run）· 拍板 2026-11-03（用户：「全部按推荐修，并参考成熟实现」）· 落地 `packages/base/src/cli.ts#runPiped`、`packages/base/src/stdin.ts#readAll`、`packages/base/src/prompt.ts#PIPE_SURFACE`，判据见文末 · **后续** 2026-11-13 [删掉 `linesOf`](2026-11-13-lines-of-removed.md)：Non-Goals 里的「`linesOf` 不删」已被它修改
 
 **给谁看**：改管道形态、写脚本 / CI 调 `echo-agent` / `echo-coding` 的人。假设已知 [CONTEXT](../../../CONTEXT.md) 里的 run。
 

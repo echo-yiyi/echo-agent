@@ -39,7 +39,7 @@ import { ECHO_AGENT, main } from "../src/product.ts";
 import { isConfigured } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { fakeTui } from "@echo-agent/tui/testing";
-import { linesOf, readAll } from "@echo-agent/base";
+import { readAll } from "@echo-agent/base";
 import { run, type Sink } from "@echo-agent/base";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-agent.ts");
@@ -323,23 +323,6 @@ test("流式那条不许打两遍（补打只在没流过的时候）", async ()
   expect(out.text.split("流式正文").length - 1, "正文被打了不止一遍").toBe(1);
 });
 
-test("已经 abort 过的 signal：不许卡在 stdin 上等一行永远不来的输入", async () => {
-  // `addEventListener("abort")` 只等**将来**的 abort。SIGINT 落在 createAgent() 期间时，
-  // 等 linesOf() 开始读，abort 早就过去了——上一版会在这里永久挂住。
-  const controller = new AbortController();
-  controller.abort();
-  const stream = new PassThrough(); // 空流，永远不给行
-
-  const lines: string[] = [];
-  const drained = (async () => {
-    for await (const line of linesOf(stream, controller.signal)) lines.push(line);
-    return "结束了";
-  })();
-
-  const raced = await Promise.race([drained, new Promise((r) => setTimeout(() => r("卡住了"), 200))]);
-  expect(raced, "预先 abort 的 signal 没能让输入源收摊").toBe("结束了");
-  expect(lines).toEqual([]);
-});
 
 test("已经 abort 过的 signal：run() 也不进输入循环，且照样干净收摊", async () => {
   const controller = new AbortController();
