@@ -354,6 +354,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-13-context-mirror-eviction.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-03-stop-quiesce-and-bounded-waits.md",
       "bilingual": false
     },
