@@ -97,7 +97,12 @@ function injectionSource(m: AgentMessage): string {
   return typeof e.ref === "string" ? `${source}:${e.ref}` : source;
 }
 
-/** 观测线程的那一半：每个观测 runtime 一份，镜像跟着 runtime 走（收摊即丢）。 */
+/**
+ * 观测线程的那一半：每个观测 runtime 一份，镜像跟着 runtime 走（收摊即丢）。
+ *
+ * 镜像里留着的是主线程**还会再提起**的东西：transcript 的消息、压缩状态、工具 schema、当前的 system。
+ * 每轮注入与被换掉的 system 处理完那次交接就删（`forget`）——留着它们，这里的内存随模型调用次数一直涨。
+ */
 export class ContextMirrorStore {
   private readonly values = new Map<MirrorRef, unknown>();
   /** `content` 档：每条消息对象、每份 system、每份菜单编过的 blob 引用（同一个东西不再序列化）。 */
@@ -111,6 +116,32 @@ export class ContextMirrorStore {
    */
   resolve(handoff: ContextHandoff, meta: ContextBuiltMeta, blobs?: BlobBatch): ContextBuiltBody {
     for (const f of handoff.fresh) this.values.set(f.ref, f.value);
+    try {
+      return this.bodyOf(handoff, meta, blobs);
+    } finally {
+      // 算不出来（抛错）也照删：这次交接的注入不会有人再提起
+      this.forget(handoff);
+    }
+  }
+
+  /** 镜像里现在留着多少个值。判据用：每轮注入与被换掉的 system 不该攒下来。 */
+  get size(): number {
+    return this.values.size;
+  }
+
+  /**
+   * 这次交接用完就丢的那些：每轮注入（编号只在这次交接里有效）、主线程报出的被换掉的 system（连同它编过的 blob 引用）。
+   * 正文在 `bodyOf` 里已经同步算完、编完，之后没有人再按这些编号来取。
+   */
+  private forget(handoff: ContextHandoff): void {
+    if (handoff.view.kind === "rebuild") for (const ref of handoff.view.injections) this.values.delete(ref);
+    for (const ref of handoff.drop ?? []) {
+      this.values.delete(ref);
+      this.systemBlobs.delete(ref);
+    }
+  }
+
+  private bodyOf(handoff: ContextHandoff, meta: ContextBuiltMeta, blobs?: BlobBatch): ContextBuiltBody {
     let unresolved = 0;
     const get = (ref: MirrorRef): unknown => {
       const v = this.values.get(ref);

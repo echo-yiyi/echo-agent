@@ -222,3 +222,4 @@ run 的三条边界 + `run.assembly` 由 `ObservationRuntime` 独家发，不走
 5. **术语表是手抄快照**：core 加了记录名、产品加了工具，`lexicon.ts` 不会自己红。要立成门得让 core 导出记录名清单、让工具注册表可枚举。
 6. **记忆的能力摘要没接。** 状态快照在节点上只收同步可读的值，记忆的状态在盘上要异步读。
 7. **同一个能力有两套 Entry id。** `run.assembly` 的槽位写 `echo:task` / `echo:schedule` / `echo:inbox`，而真实装上的 extension 与能力事实的 owner 是 `echo:tasks` / `echo:scheduler` / `echo:agent`——两份记录按 id 对不上。状态快照的能力摘要用的是后者。
+8. **观测线程里的上下文镜像只淘汰两样。** 为了重建每次送模的视图，观测线程按编号留着主线程交过来的值（[context-mirror-host.ts](../../packages/core/src/observability/context-mirror-host.ts#symbol=ContextMirrorStore)）。每轮注入与被换掉的 system 处理完那次交接就删（[决策](../decisions/implemented/2026-11-13-context-mirror-eviction.md)），所以它不随模型调用次数涨。其余的留到 runtime 收摊：transcript 的每条消息（含图片，与主线程那份同量级）、每个出现过的压缩状态、每个出现过的工具对象的 schema、hook 改视图时每次新造的消息。后三样随「出现过多少个不同的对象」涨，常驻进程里没有上界。
