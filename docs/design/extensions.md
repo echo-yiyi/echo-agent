@@ -116,9 +116,26 @@ mount / unmount / replace 在同一条 Host 队列里按调用顺序串行，一
 
 ACTIVE 后新建 effect 的失败与 mount 期不同：不会回滚 Fiber，也不自动进入诊断，登记者应 await 并处理。卸载后的旧 ctx.get/provide/effect 会拒绝，但以前拿到的原始 service 引用不会被统一撤销；异步回调停止使用它仍需遵守 signal 和 disposer 协议。
 
-Host 没有通用 start/dispose 超时或强制中止。忽略 abort 的 start、永不结束的 disposer 都可能让卸载及后续 Host 事务一直等待。Host 保证尝试清理的顺序，不保证不合作的扩展能被强制回收。
+**装载有时限、听中止**（[决策](../decisions/implemented/2026-11-13-host-apply-limit.md)）。每个 Extension 的装载——apply 加上它在 apply 期间登记的 effect start——与 [`EXTENSION_APPLY_LIMIT_MS`](../../packages/core/src/extension/host.ts#symbol=EXTENSION_APPLY_LIMIT_MS) 及调用方传给 `mount()` / `replace()` 的 `signal` 赛跑。到点或中止，Host **放弃**它：按装载失败回滚，抛 `ExtensionMountError`，cause 是 [`ExtensionApplyAbandoned`](../../packages/core/src/extension/host.ts#symbol=ExtensionApplyAbandoned)；事务结束，队列继续。已经中止的 signal 不再起 apply。
 
-装配层在两处给等待设了上限，事务本身仍在 Host 队列上跑：热部署里每个扩展的装载等 [`RELOAD_APPLY_LIMIT_MS`](../../packages/core/src/create-echo.ts#symbol=RELOAD_APPLY_LIMIT_MS)，到点按 `failed`（新文件）或 `lost`（换代）报、诊断 `extension_apply_timeout`、交还 admission permit，迟到的结果补记进账；`echo.stop()` 卸 extension 等 [`STOP_UNMOUNT_LIMIT_MS`](../../packages/core/src/create-echo.ts#symbol=STOP_UNMOUNT_LIMIT_MS)，到点不再等、照常停 Agent 并交还 lease，`stop()` 以这条错误 reject。`echo.stop()` 卸 extension 之前先让 Agent 停止接活、中止在跑的 run，卸载期间不会冒出跑在缺了产品工具与段的 agent 上的新 run。启动时盘上扩展的 apply 挂住仍会让 `createEcho()` 一直等（显式与角色那两代排在同一条 Host 队列上）。判据：[热部署 apply 挂住](../../packages/core/test/extension-reload.test.ts#test=热部署时新版-apply-挂住到时限报-lost放开-admissionstop-卸载限时照常停-agent)、[卸 extension 期间不接新工作](../../packages/core/test/create-echo.test.ts#test=stop-卸-extension-期间不接新工作先停接活中止在跑的-run再卸)。
+Host 中断不了被放弃的 apply，它照跑，但它的 context 已失效：
+
+- 之后再调 `ctx.get` / `provide` / `effect` 一律拒绝，登记不上。
+- 回滚不等还在飞的 start（挂住的可能正是它）；已经拿到 lease 的照常按逆序释放，之后才交出的 lease 当场释放，不按登记顺序。
+- 绕过 `ctx.effect()` 直接写 registry 的注册 Host 收不回来，与卸载时是同一条限制。
+
+**卸载没有时限**。永不结束的 disposer 仍会让这次卸载及后续 Host 事务一直等待。Host 保证尝试清理的顺序，不保证不合作的扩展能被强制回收。
+
+判据：[apply 不返回](../../packages/core/test/extension-host.test.ts#test=装载到时限apply-不返回的那一代被放弃并回滚排在它后面的-mount-照常执行被放弃的-apply-之后再登记一律抛)、[effect start 挂住](../../packages/core/test/extension-host.test.ts#test=装载到时限挂住的是-effect-start回滚不等它已经起来的那个照常卸它之后才交出的-lease-当场卸掉)、[中止](../../packages/core/test/extension-host.test.ts#test=装载听中止signal-中止时正在装的那个被放弃并回滚已经中止的-signal-不再起-apply)、[换代时装回旧代](../../packages/core/test/extension-host.test.ts#test=换代时新代的装载到时限旧代按原样装回去rolledback不是-lost)。
+
+装载的时限在 Host 里，所以启动与热部署是同一个行为，装配层只负责把结果报出来：
+
+- **启动**：盘上扩展的装载到点，记一条诊断 `extension_apply_timeout`、跳过它，其余的代照常装，`createEcho()` 照常返回。显式装配的那几代（产品自带、inline、角色）到点则让 `createEcho()` 抛错，不会一直等。
+- **热部署**：装配层把 admission permit 的 signal 传给 Host。新文件的装载到点报 `failed`；换代时 Host 把旧版装回去，报 `rolled_back`，装回也没成才是 `lost`。诊断同样是 `extension_apply_timeout`，permit 照常交还。事务已经结束，没有之后才装上的结果。
+
+装配层自己只给收摊的卸载设了上限：`echo.stop()` 卸 extension 等 [`STOP_UNMOUNT_LIMIT_MS`](../../packages/core/src/create-echo.ts#symbol=STOP_UNMOUNT_LIMIT_MS)，到点不再等、照常停 Agent 并交还 lease，`stop()` 以这条错误 reject。`echo.stop()` 卸 extension 之前先让 Agent 停止接活、中止在跑的 run，卸载期间不会冒出跑在缺了产品工具与段的 agent 上的新 run。
+
+判据：[启动时 apply 挂住](../../packages/core/test/extension-reload.test.ts#test=启动时盘上扩展的-apply-挂住host-到时限放弃它只记一条诊断createecho-照常返回排在它后面的扩展照常装上用得上)、[显式装配的扩展挂住](../../packages/core/test/extension-reload.test.ts#test=启动时显式装配的扩展-apply-挂住到时限-createecho-抛错fail-loud不是一直等)、[热部署 apply 挂住](../../packages/core/test/extension-reload.test.ts#test=热部署时新版-apply-挂住host-到时限放弃它把旧版装回去rolledback放开-admission事务队列没被堵住改好再部署照常换上stop-不用等)、[disposer 挂住时收摊](../../packages/core/test/extension-reload.test.ts#test=stop扩展的-disposer-挂住卸载到时限不再等照常停-agent交还-lease)、[卸 extension 期间不接新工作](../../packages/core/test/create-echo.test.ts#test=stop-卸-extension-期间不接新工作先停接活中止在跑的-run再卸)。
 
 ## 6. 热重载：时机与范围
 

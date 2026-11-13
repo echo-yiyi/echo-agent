@@ -1,6 +1,6 @@
 # echo.stop() 先停接活再卸 extension；热部署装载与收摊卸载各有等待上限
 
-> 状态:implemented · 提出 2026-11-03（全仓 review）· 拍板 2026-11-03（用户：按推荐修）· 来源 [`createEcho`](../../../packages/core/src/create-echo.ts#symbol=createEcho)
+> 状态:implemented · 提出 2026-11-03（全仓 review）· 拍板 2026-11-03（用户：按推荐修）· 来源 [`createEcho`](../../../packages/core/src/create-echo.ts#symbol=createEcho) · **后续** 2026-11-13 [装载的时限放进 Host](2026-11-13-host-apply-limit.md)：选项 B 在装载这一半改为采纳；「热部署」一条里装配层的限时与迟到补记、「不覆盖」一条、验收里热部署报 `lost` 的说法已被它取代，收摊卸载的上限不变
 
 ## 现状(拍板前)
 
