@@ -543,6 +543,18 @@ test("crash 矩阵：commit 后崩（marker 在、record 还在）→ restore �
   expect(await ackFiles(dir)).toEqual([]); // records 全没了才删 marker
 });
 
+test("inbox/acks/ 下点开头的文件（Finder 的 .DS_Store）不是 marker：恢复照常；别的不合法文件名照旧封账", async () => {
+  // 此前任何认不出的文件名都封账、start() 判红：用 Finder 打开过这个目录，这段会话就再也起不来
+  const dir = new InMemoryDir();
+  const s = await ledger(dir);
+  const a = acceptedIdOf(await accept(s, "一", "k1"));
+  await dir.write("inbox/acks/.DS_Store", "\u0000\u0001Bud1");
+  const restored = await new InboxStore(dir).restore();
+  expect(restored.map((r) => r.recordId)).toEqual([a]);
+  await dir.write("inbox/acks/not-a-marker.json", "{}");
+  await expect(new InboxStore(dir).restore()).rejects.toThrow(/非法文件名/);
+});
+
 test("crash 矩阵：commit 前崩（没有 marker）→ 整批仍 pending，重启后重放", async () => {
   const dir = new InMemoryDir();
   const s = await ledger(dir);

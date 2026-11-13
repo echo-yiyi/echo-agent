@@ -21,7 +21,7 @@ import type { DreamDecision, MemoryFact, MemoryIndexOutcome, MemoryMutationStage
 export type MemoryDeps = { report?: (d: Diagnostic) => void };
 import { PROMPT_ORDER, type PromptSection } from "../prompt/types.ts";
 import { toolError, toolOk, type AgentToolResult, type ModelTool } from "../tools/types.ts";
-import { defaultCheckWrite, defaultComposeMemory, indexEntries, renderIndex, renderMemorySystem } from "./compose.ts";
+import { defaultCheckWrite, defaultComposeMemory, hasDotSegment, indexEntries, renderIndex, renderMemorySystem } from "./compose.ts";
 import {
   DEFAULT_DREAM_GATES,
   DREAM_LOCK_STALE_MS,
@@ -814,7 +814,7 @@ export async function dreamGate(ctx: AgentMemories, scope: string): Promise<Read
       for (const { scope: s, path } of memoryPaths(table, m)) {
         if (s !== scope || !path.endsWith("/")) continue;
         const found = await ctx.dir.list(path);
-        files += found.filter((f) => !f.endsWith(`/${MEMORY_INDEX_FILE}`)).length; // 索引不是一条记忆
+        files += found.filter((f) => !f.endsWith(`/${MEMORY_INDEX_FILE}`) && !hasDotSegment(f.slice(path.length))).length; // 索引与点开头的文件不是一条记忆
       }
     }
     if (files < g.minFiles) return { run: false, decision: "few_files" };

@@ -3346,8 +3346,18 @@ export class Agent {
       async () => {},
     );
     if (result.outcome.kind === "completed") return "reviewed";
-    // aborted 不报、不算没跑完——那是 stop() / 丢锁在收摊
-    if (result.outcome.kind === "aborted") return "not_run";
+    if (result.outcome.kind === "aborted") {
+      // signal 中止了：stop() / 丢锁在收摊——不报、不算没跑完
+      if (signal.aborted) return "not_run";
+      // signal 没动却以 aborted 收场：送模前被 `contextBeforeBuild` hook 拦下了（子循环与主循环同一套 hooks）。
+      // 这不是收摊，照没跑完算——这段已攒够轮数，当成没跑的话之后每条 reply 都重装一次 prompt、再被拦一次，
+      // 没有诊断、也永远到不了放弃
+      this.reportDiagnostic({
+        code: "memory_extract_failed",
+        message: `记忆提取被 hook 拦下（${result.outcome.reason ?? "没给原因"}）；${written > 0 ? `此前已写入 ${written} 条，这段算看过了` : "没有写入"}`,
+      });
+      return written > 0 ? "reviewed" : "unfinished";
+    }
     // `runAgentLoop` 对失败不抛，结果在 outcome 里：没跑完（provider 错、轮数用完）要报出来，与通道兜住的抛错同一个 code。
     // 写成过的那几条是真的落了盘：这段按看过算（与整理撞上限按「做了一部分」记同一个口径）
     this.reportDiagnostic({

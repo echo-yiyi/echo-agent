@@ -250,8 +250,10 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
         toolCalls.push({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } });
       }
     }
-    // 什么都不剩（只有被丢掉的思考）：整条不发——`content: null` 又没有 `tool_calls` 的 assistant 消息各家会拒
-    if (texts.length === 0 && toolCalls.length === 0 && reasoning.size === 0) return [];
+    // 没有正文也没有工具调用：整条不发——`content: null` 又没有 `tool_calls` 的 assistant 消息各家会拒。
+    // 只剩可回放的思考时同样不发（模型某一轮只出了 reasoning，或截在思考里）：思考是挂在一条有内容的消息上带回去的，
+    // 单独一条发出去就是那条会被拒的消息，而它留在 transcript 里，之后每次请求都带着它
+    if (texts.length === 0 && toolCalls.length === 0) return [];
     const text = texts.join(TEXT_BLOCK_SEPARATOR);
     const out: Record<string, unknown> = { role: "assistant", content: text === "" ? null : text };
     // **原样带回上一轮的思考**：Z.AI Coding Plan、MiniMax M2.x 这类开着 preserved thinking 的家，

@@ -299,9 +299,14 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
 }
 
 async function ensureLoaded(ctx: AgentSchedule): Promise<void> {
-  if (ctx.loaded === true) return;
-  ctx.loaded = true;
+  // 读成函数：await 前后各判一次，TS 会把第二次收窄成恒假，而运行时它恰恰会变（并发的另一个调用者）
+  const loaded = (): boolean => ctx.loaded === true;
+  if (loaded()) return;
+  // **读到了才算已加载**：读盘失败照抛、`loaded` 不动，下次重读——先置 true 的话，读失败之后表被当成「已加载的空表」，
+  // 下一次写就把盘上原有的定时任务整份盖掉
   const raw = await ctx.dir.read(SCHEDULE_FILE);
+  if (loaded()) return; // 等读盘的这段里别的调用者已经装好了
+  ctx.loaded = true;
   if (raw === null) return;
   try {
     const parsed = JSON.parse(raw) as ScheduleEntry[];

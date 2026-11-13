@@ -626,6 +626,14 @@ async function runOneTool(
   // 由外层 catch 把 turn 关成 failed——与 tool_execution_start 的行为对齐
   let updateFailure: unknown = null;
   const updates: Promise<void>[] = [];
+  /** 工具违约（抛了、或交回来的不是一份结果）：记成一条出错的工具结果，这一轮照常往下走。 */
+  const crashedWith = async (message: string) => {
+    await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "crashed", message });
+    const crashed: AgentToolResult = { content: message, isError: true, metadata: null };
+    probe({ kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: crashed }, turnId);
+    await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: crashed });
+    return toolResultMessage(use.id, use.name, message, true);
+  };
   try {
     result = await tool.execute(params, {
       toolCallId: use.id,
@@ -643,15 +651,14 @@ async function runOneTool(
       },
     });
   } catch (e) {
-    const message = `Tool '${use.name}' threw: ${errText(e)}`;
-    await notify(hooks, config, { type: "toolUseFailed", toolCallId: use.id, toolName: use.name, cause: "crashed", message });
-    const crashed: AgentToolResult = { content: message, isError: true, metadata: null };
-    probe({ kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: crashed }, turnId);
-    await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: crashed });
-    return toolResultMessage(use.id, use.name, message, true);
+    return crashedWith(`Tool '${use.name}' threw: ${errText(e)}`);
   }
   await Promise.all(updates); // 都已挂 catch，这里只是等它们 settle、让 updateFailure 定下来（工具返回时 emit 可能还在飞）
   if (updateFailure !== null) throw updateFailure;
+  // **返回值也验形**：忘了 return 的工具交回 undefined，后面读 `result.content` 会抛、整个 run 以 internal 收场、
+  // tool_use 落单；形状不对的（content 不是字符串）则一路进 transcript，之后每次请求都带着这条坏消息
+  const malformed = toolResultProblem(result);
+  if (malformed !== null) return crashedWith(`Tool '${use.name}' ${malformed}`);
 
   /* postToolUse 拦截：可改写结果，也可 block */
   const post = await hooks.intercept(
@@ -672,7 +679,9 @@ async function runOneTool(
     await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: denied });
     return toolResultMessage(use.id, use.name, reason, true);
   }
-  const finalResult = post.event.result;
+  // hook 改写出来的结果同样验形。写坏的（null、content 不是字符串）当这条 hook 没说话、用工具自己的那份：
+  // postToolUse 是 fail-open，一条写坏的 patch 不能打死这个 run，更不能进 transcript
+  const finalResult = toolResultProblem(post.event.result) === null ? post.event.result : result;
 
   probe({ kind: "tool_ended", toolCallId: use.id, toolName: use.name, result: finalResult }, turnId);
   await emit({ type: "tool_execution_end", toolCallId: use.id, toolName: use.name, result: finalResult });
@@ -701,6 +710,20 @@ async function runOneTool(
  *   - 本轮开始时已知 → 去问实时池要原因：禁用（带来源给的话）/ 已卸载 /
  *     本轮开始时被禁用、中途又恢复了（下一轮起可用）。**只取原因，不取对象。**
  */
+/**
+ * 工具（或 postToolUse hook 的 patch）交回来的是不是一份能入账的结果：`content` 是字符串、`isError` 是布尔、
+ * `images` 给了就得是数组。是 → null；不是 → 一句接在 `Tool 'x' ` 后面给模型看的话。
+ * 类型系统管不到这里：工具来自扩展与 MCP，hook 的 patch 是运行时合并的。
+ */
+function toolResultProblem(result: unknown): string | null {
+  if (typeof result !== "object" || result === null) return `returned ${result === null ? "null" : typeof result} instead of a tool result`;
+  const r = result as { content?: unknown; isError?: unknown; images?: unknown };
+  if (typeof r.content !== "string") return `returned a result whose content is not a string (${r.content === null ? "null" : typeof r.content})`;
+  if (typeof r.isError !== "boolean") return "returned a result without a boolean isError";
+  if (r.images !== undefined && !Array.isArray(r.images)) return "returned a result whose images is not an array";
+  return null;
+}
+
 function explainMissingTool(config: AgentLoopConfig, known: ReadonlySet<string>, name: string): string {
   if (!known.has(name)) return `Unknown tool '${name}'`;
   const r = config.resolveTool(name);

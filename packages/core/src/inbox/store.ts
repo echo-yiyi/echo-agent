@@ -274,6 +274,8 @@ export class InboxStore {
     const out = new Map<string, InboxBatchAckCommitV1>();
     for (const path of [...(await store.list(`${INBOX_ACK_DIR}/`))].sort()) {
       const full = path.startsWith(`${INBOX_ACK_DIR}/`) ? path : `${INBOX_ACK_DIR}/${path}`;
+      // 点开头的文件不是 marker（Finder 的 `.DS_Store` 之类）：跳过。别的不合法文件名照旧封账
+      if (full.slice(full.lastIndexOf("/") + 1).startsWith(".")) continue;
       const nameId = ackIdFromPath(full);
       if (nameId === null) {
         this.seal(`inbox ack 目录下有非法文件名：${full}`);
