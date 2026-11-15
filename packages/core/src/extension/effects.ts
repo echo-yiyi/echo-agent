@@ -8,6 +8,8 @@
 // 「异步回调不能在 disposer snapshot 之后偷偷注册新资源」靠两件事：闸关了之后 `ctx.effect()` 直接抛；
 // 闸关之前已经开始、之后才完成的 start，它的 lease 仍会入栈并在随后的 unwind 里被卸掉——
 // 所以 unwind 必须等 pending start 全部 settle 之后才开始。
+// **唯一的例外**是装载被 Host 放弃（到时限 / 被中止，`host.ts` 头注）：挂住的可能正是某个 start，那条路不等，
+// 直接 unwind；之后才到手的 lease 由 `fill()` 当场卸掉，不按登记序。
 
 import type { Disposer, EffectLease, ReloadBoundary } from "./abi.ts";
 
@@ -65,8 +67,19 @@ export class EffectStack {
     return this.entries.length - 1;
   }
 
-  /** start 完成、lease 到手：填进当初占的那一位。 */
+  /**
+   * start 完成、lease 到手：填进当初占的那一位。
+   *
+   * 栈已经卸完才到手的（装载到时限或被中止、Host 放弃了这个 Fiber，那条路不等 pending start）：没有栈可进，
+   * **当场卸掉**。它的 disposer 抛的错没有人可报——这一代早已按装载失败回滚、报过了。
+   */
   fill(slot: number, boundary: ReloadBoundary, lease: EffectLease<unknown>, label: string): void {
+    if (this.unwound) {
+      void Promise.resolve()
+        .then(() => lease.dispose())
+        .catch(() => {});
+      return;
+    }
     this.entries[slot] = { boundary, dispose: lease.dispose, label };
     this.filled++;
   }
@@ -100,6 +113,7 @@ export class EffectStack {
     if (this.unwound) return;
     this.unwound = true;
     this.gate = false;
+    this.bufferFailures = false; // 卸完之后才失败的 start（被放弃的装载留下的）没有人来 drain，不再攒
     const errors: unknown[] = [];
     const failed: string[] = [];
     while (this.entries.length > 0) {

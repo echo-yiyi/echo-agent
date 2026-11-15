@@ -11,12 +11,41 @@
 //   - 失败时 **Host 状态零变化**：ServiceKey 的 canonical 表用 staged 层，整代 ACTIVE 才 commit；
 //   - mount / unmount 走同一条串行事务链，**按调用顺序**执行：并发 mount 同一 generation 只有第一个成功（第二个
 //     执行时发现已存在而拒绝）；unmount(g) 紧接 mount(g) 先卸后装。所有检查都在链内做，链外不看 Host 状态。
+//
+// **装载有时限、听中止**（2026-11-13）：事务链是串行的，一个不返回的 apply 会把它后面所有的装载与卸载堵住。
+// 所以每个 Extension 的装载（apply 加上它在 apply 期间登记的 Effect start）与 `EXTENSION_APPLY_LIMIT_MS`
+// 及调用方的 signal 赛跑：到点或中止，Host **放弃**它——按装载失败回滚、事务照常结束、链继续。
+// 被放弃的 apply 还在跑，但它的 Context 已失效：之后再 `provide()` / `effect()` 一律抛；已经在飞的 start 之后才交出的
+// lease 当场卸掉（`EffectStack.fill`）。卸载（disposer）没有时限，见 `create-echo.ts` 的 `STOP_UNMOUNT_LIMIT_MS`。
 
 import { ExtensionAbiError, RELOAD_BOUNDARY_RANK, type ExtensionDefinition, type ReloadBoundary, type ServiceKey } from "./abi.ts";
 import { Fiber, type FiberStatus } from "./fiber.ts";
 import { resolveGraph } from "./graph.ts";
 import { ServiceKeyTable } from "./service-key.ts";
 import { probeExtension, type ExtensionFiberFact, type ExtensionProbe } from "./observe.ts";
+import { systemClock, type Clock } from "../schedule/clock.ts";
+
+/** 一个 Extension 的装载（apply 加上它在 apply 期间登记的 Effect start）最多等多久；到点 Host 放弃它、按装载失败回滚。 */
+export const EXTENSION_APPLY_LIMIT_MS = 30_000;
+
+/**
+ * 装载被 Host 放弃：到了时限（`timeout`），或调用方的 signal 中止了（`aborted`）。
+ * 作为 `ExtensionMountError.cause` 出现——调用方据此区分「装载挂住了」与「apply 自己抛了」。
+ */
+export class ExtensionApplyAbandoned extends Error {
+  constructor(
+    readonly entryId: string,
+    readonly reason: "timeout" | "aborted",
+    limitMs: number,
+  ) {
+    super(
+      reason === "timeout"
+        ? `装载 ${limitMs}ms 没结束（apply 或 Effect start 挂住了），不再等，按装载失败回滚`
+        : "装载被中止（调用方在收摊），按装载失败回滚",
+    );
+    this.name = "ExtensionApplyAbandoned";
+  }
+}
 
 export type ExtensionEntry = Readonly<{
   /** 稳定身份（跨 generation 不变）。 */
@@ -95,14 +124,22 @@ export class ExtensionHost {
   private chain: Promise<unknown> = Promise.resolve();
   /** 观测探针（`extension/observe.ts`）：装载 / 卸载的结果在事务链上当场记。可选——低层用法不给照跑。 */
   private readonly observe: ExtensionProbe | undefined;
+  private readonly applyLimitMs: number;
+  private readonly clock: Clock;
 
   /**
-   * @param opts.services Host 自带的 Service（AgentTools / AgentHooks 这类 registry）。任何 Fiber 都可 inject；
-   *                      没有 Fiber 能 provide 它们。
-   * @param opts.observe  观测探针。与 services 无关——它不是 extension 能拿到的东西，是插在 Host 事务上的节点。
+   * @param opts.services     Host 自带的 Service（AgentTools / AgentHooks 这类 registry）。任何 Fiber 都可 inject；
+   *                          没有 Fiber 能 provide 它们。
+   * @param opts.observe      观测探针。与 services 无关——它不是 extension 能拿到的东西，是插在 Host 事务上的节点。
+   * @param opts.applyLimitMs 一个 Extension 的装载最多等多久（缺省 `EXTENSION_APPLY_LIMIT_MS`）。
+   * @param opts.clock        计时用的钟（缺省真时钟；测试给假钟拨）。
    */
-  constructor(opts: { services?: ReadonlyArray<readonly [ServiceKey<unknown>, unknown]>; observe?: ExtensionProbe } = {}) {
+  constructor(
+    opts: { services?: ReadonlyArray<readonly [ServiceKey<unknown>, unknown]>; observe?: ExtensionProbe; applyLimitMs?: number; clock?: Clock } = {},
+  ) {
     this.observe = opts.observe;
+    this.applyLimitMs = opts.applyLimitMs ?? EXTENSION_APPLY_LIMIT_MS;
+    this.clock = opts.clock ?? systemClock;
     for (const [key, value] of opts.services ?? []) {
       const k = this.keys.canonical(key);
       if (this.hostServices.has(k)) throw new ExtensionAbiError(`Host Service '${k.id}' 重复`);
@@ -127,12 +164,16 @@ export class ExtensionHost {
    * 一切检查都在事务链内（doMount 开头）：链外看 `generations` 会让 unmount(g) → mount(g) 的后者看到还没卸的旧代而
    * 误拒；并发 mount 同一 generation 则由串行本身保证只有第一个成功（上一版两个都越过 has()，Effect 泄漏，实测）。
    */
-  mount(generation: string, entries: readonly ExtensionEntry[]): Promise<void> {
-    return this.serialize(() => this.mountObserved(generation, entries));
+  /**
+   * `opts.signal`：调用方中止时，正在装载的那个 Extension 被放弃（与到时限同一条路），这次 mount 以
+   * `ExtensionMountError`（`cause` 是 `ExtensionApplyAbandoned`）失败并回滚。
+   */
+  mount(generation: string, entries: readonly ExtensionEntry[], opts: Readonly<{ signal?: AbortSignal }> = {}): Promise<void> {
+    return this.serialize(() => this.mountObserved(generation, entries, opts.signal));
   }
 
   /** 装配加观测：装上 / 没装上各记一条。`mount()` 与 `replace()` 里的装回都走这里——换代在账本里不能是空白。 */
-  private async mountObserved(generation: string, entries: readonly ExtensionEntry[]): Promise<void> {
+  private async mountObserved(generation: string, entries: readonly ExtensionEntry[], signal: AbortSignal | undefined): Promise<void> {
     let prepared: Prepared;
     try {
       prepared = this.prepare(generation, entries);
@@ -140,13 +181,13 @@ export class ExtensionHost {
       this.noteMountFailed(generation, entries, e); // PREPARE 失败：还没加载任何 Entry
       throw e;
     }
-    await this.loadObserved(generation, prepared);
+    await this.loadObserved(generation, prepared, signal);
   }
 
   /** LOADING 加观测。`replace()` 装新代走这里——它的 PREPARE 在卸旧之前单独做。 */
-  private async loadObserved(generation: string, prepared: Prepared): Promise<void> {
+  private async loadObserved(generation: string, prepared: Prepared, signal: AbortSignal | undefined): Promise<void> {
     try {
-      await this.load(generation, prepared);
+      await this.load(generation, prepared, signal);
     } catch (e) {
       this.noteMountFailed(generation, prepared.entries, e); // 某个 Entry 的 apply / Effect start 失败并已回滚
       throw e;
@@ -206,13 +247,16 @@ export class ExtensionHost {
    * **先卸再装，不先装再卸**：依赖图允许两代 overlap，但工具 / skill / prompt 段都按名注册，新代先装会撞名。
    * 但**卸之前先把新代 PREPARE 好**（config 解析、依赖图；2026-09-14 修，此前 PREPARE 在卸旧之后，config 抛会先卸再装回）：
    * 这一步失败旧代一个字都不动，结果是 `rolled_back` 且 `unwindErrors` 为空。调用方只需把新代码 import 好、验过形再调这里。
+   *
+   * 新代的装载到时限或被 `opts.signal` 中止时，与 apply 抛错同一条路：把旧的装回去（`rolled_back`）；
+   * 装回也没成（旧代的 apply 同样挂住，或调用方已经在收摊）就是 `lost`。
    */
   replace(
     old: string,
     next: Readonly<{ generation: string; entries: readonly ExtensionEntry[] }> | null,
-    opts: Readonly<{ safePoint: ReloadBoundary }>,
+    opts: Readonly<{ safePoint: ReloadBoundary; signal?: AbortSignal }>,
   ): Promise<ReplaceResult> {
-    return this.serialize(() => this.doReplace(old, next, opts.safePoint));
+    return this.serialize(() => this.doReplace(old, next, opts.safePoint, opts.signal));
   }
 
   private serialize<T>(work: () => Promise<T>): Promise<T> {
@@ -225,7 +269,7 @@ export class ExtensionHost {
   }
 
   private async doMount(generation: string, entries: readonly ExtensionEntry[]): Promise<void> {
-    await this.load(generation, this.prepare(generation, entries));
+    await this.load(generation, this.prepare(generation, entries), undefined);
   }
 
   /**
@@ -267,21 +311,34 @@ export class ExtensionHost {
     return { keys, order, entries };
   }
 
-  /** LOADING：按拓扑序逐个 apply；失败全回滚。 */
-  private async load(generation: string, prepared: Prepared): Promise<void> {
+  /** LOADING：按拓扑序逐个 apply；失败全回滚。每个 Extension 的装载有时限、听 `signal`（文件头注）。 */
+  private async load(generation: string, prepared: Prepared, signal: AbortSignal | undefined): Promise<void> {
     const { keys, order, entries } = prepared;
     const activated: Fiber[] = [];
     const access = { keys, hostService: (k: ServiceKey<unknown>) => this.hostServices.get(k) };
     for (const f of order) {
       f.status = "loading";
       const ctx = f.createContext(access);
+      let abandoned = false;
       try {
-        await f.definition.apply(ctx, f.config);
-        // apply 返回 ≠ Effect 都起来了：`void ctx.effect()` 的 start 还在飞。先等当时已登记的 pending start，
-        // 任一失败按 mount failure 回滚——不能让 Fiber 顶着失败的 Effect 标成 ACTIVE（实测 inspect 仍显示 ACTIVE）。
-        const startFailures = await f.effects.settlePendingStarts();
-        if (startFailures.length > 0) {
-          throw startFailures.length === 1 ? startFailures[0] : new AggregateError(startFailures, `${startFailures.length} 个 Effect start 失败`);
+        // 已经中止了就不再起 apply：它起来之后中断不了
+        if (signal?.aborted === true) {
+          abandoned = true;
+          throw new ExtensionApplyAbandoned(f.entryId, "aborted", this.applyLimitMs);
+        }
+        const applying = (async (): Promise<void> => {
+          await f.definition.apply(ctx, f.config);
+          // apply 返回 ≠ Effect 都起来了：`void ctx.effect()` 的 start 还在飞。先等当时已登记的 pending start，
+          // 任一失败按 mount failure 回滚——不能让 Fiber 顶着失败的 Effect 标成 ACTIVE（实测 inspect 仍显示 ACTIVE）。
+          const startFailures = await f.effects.settlePendingStarts();
+          if (startFailures.length > 0) {
+            throw startFailures.length === 1 ? startFailures[0] : new AggregateError(startFailures, `${startFailures.length} 个 Effect start 失败`);
+          }
+        })();
+        const cut = await this.bounded(applying, signal);
+        if (cut !== null) {
+          abandoned = true;
+          throw new ExtensionApplyAbandoned(f.entryId, cut, this.applyLimitMs);
         }
         // 声明要 provide 的必须都 provide 了——否则 consumer 拿到的是空
         for (const key of f.declaredProvides) {
@@ -292,13 +349,35 @@ export class ExtensionHost {
       } catch (e) {
         f.status = "failed";
         const unwindErrors: unknown[] = [];
-        await this.unloadFiber(f, unwindErrors);
+        await this.unloadFiber(f, unwindErrors, abandoned);
         for (const done of [...activated].reverse()) await this.unloadFiber(done, unwindErrors);
         throw new ExtensionMountError(generation, f.entryId, e, unwindErrors); // staged keys 随之丢弃
       }
     }
     keys.commit();
     this.generations.set(generation, { id: generation, fibers: order, entries });
+  }
+
+  /**
+   * 等 `work` 落定，但只等到时限或 `signal` 中止：落定交 `null`（它抛的错照抛），否则交放弃的原因。
+   * 被放弃的 `work` 照跑——它之后再 reject 没有人接，这里先挂一个空的 catch，不让它变成 unhandled rejection。
+   */
+  private async bounded(work: Promise<void>, signal: AbortSignal | undefined): Promise<"timeout" | "aborted" | null> {
+    work.catch(() => {});
+    let cancel = (): void => {};
+    let onAbort = (): void => {};
+    const cut = new Promise<"timeout" | "aborted">((resolve) => {
+      cancel = this.clock.setInterval(() => resolve("timeout"), this.applyLimitMs);
+      onAbort = (): void => resolve("aborted");
+      if (signal?.aborted === true) resolve("aborted");
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([work.then(() => null), cut]);
+    } finally {
+      cancel();
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   private async doUnmount(generation: string): Promise<void> {
@@ -316,6 +395,7 @@ export class ExtensionHost {
     old: string,
     next: Readonly<{ generation: string; entries: readonly ExtensionEntry[] }> | null,
     safePoint: ReloadBoundary,
+    signal: AbortSignal | undefined,
   ): Promise<ReplaceResult> {
     const g = this.generations.get(old);
     if (g === undefined) throw new ExtensionAbiError(`generation '${old}' 没有 mount，无从换代`);
@@ -361,11 +441,12 @@ export class ExtensionHost {
 
     /* ── 装新（LOADING）；装不上就把旧的按原 entries 装回去。装新与装回都记账：装上 / 没装上各一条事实 ── */
     try {
-      await this.loadObserved(next.generation, prepared);
+      await this.loadObserved(next.generation, prepared, signal);
       return { kind: "replaced", unwindErrors };
     } catch (error) {
       try {
-        await this.mountObserved(old, g.entries);
+        // 装回同样有时限、听 signal：调用方已经在收摊时不再起旧代的 apply，结果是 `lost`（这一代没挂着，收摊也不必卸它）
+        await this.mountObserved(old, g.entries, signal);
         return { kind: "rolled_back", error, unwindErrors };
       } catch (rollbackError) {
         return { kind: "lost", error, rollbackError, unwindErrors };
@@ -398,13 +479,14 @@ export class ExtensionHost {
   }
 
   /** 关闸 → abort → 等 pending start → LIFO unwind → 撤 Service。每一步都做，错误收进 errors。 */
-  private async unloadFiber(f: Fiber, errors: unknown[]): Promise<void> {
+  private async unloadFiber(f: Fiber, errors: unknown[], abandoned = false): Promise<void> {
     if (f.status === "disposed") return;
     f.beginUnload();
     try {
       // 卸载时 start 自己的失败不算 Host 的错：它须自行清理。ACTIVE 之后 `void ctx.effect()` 的失败也在这里被丢掉——
-      // 那是契约（见 `ExtensionContext.effect` 的注释），不是遗漏
-      await f.effects.settlePendingStarts();
+      // 那是契约（见 `ExtensionContext.effect` 的注释），不是遗漏。
+      // **装载被放弃的那条路不等 pending start**：挂住的可能正是其中一个。它之后才交出的 lease 由 `EffectStack.fill` 当场卸掉
+      if (!abandoned) await f.effects.settlePendingStarts();
       await f.effects.unwind();
     } catch (e) {
       if (e instanceof AggregateError) errors.push(...e.errors);

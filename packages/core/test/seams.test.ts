@@ -186,6 +186,52 @@ test("postToolUse 返回 block：结果按 reason 入账为 error、发 toolUseD
   expect(ends).toEqual(["c1:true", "c2:false"]); // 工具已经跑过，start / end 仍配对
 });
 
+test("工具交回来的不是一份结果（忘了 return、content 不是字符串）：记成出错的工具结果，这一轮照常往下走，不打死 run", async () => {
+  // 此前 undefined 让 run 以 internal 错误收场、tool_use 落单；content: 123 则原样进 transcript，之后每次请求都带着
+  const failed: string[] = [];
+  const hooks = new HookRuntime();
+  hooks.on("toolUseFailed", (e) => void failed.push(`${e.toolCallId}:${e.cause}`));
+  const forgot = tool("forgot", (async () => undefined) as unknown as ModelTool["execute"]);
+  const wrong = tool("wrong", (async () => ({ content: 123, isError: false, metadata: null })) as unknown as ModelTool["execute"]);
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: scriptedStreamFn([toolTurn("c1", "forgot", {}), toolTurn("c2", "wrong", {}), textTurn("done")]),
+    tools: [forgot, wrong],
+    hooks,
+  });
+  const result = await agent.prompt("go");
+  expect(result.outcome).toEqual({ kind: "completed" });
+  const rs = toolResults(result.messages);
+  expect(rs.map((r) => [r.isError, typeof r.content])).toEqual([
+    [true, "string"],
+    [true, "string"],
+  ]);
+  expect(rs[0]!.content).toContain("returned undefined instead of a tool result");
+  expect(rs[1]!.content).toContain("content is not a string");
+  expect(failed).toEqual(["c1:crashed", "c2:crashed"]);
+});
+
+test("postToolUse 把结果改成了错的形状（null、content 不是字符串）：当这条 hook 没说话，入账的是工具自己的那份", async () => {
+  // postToolUse 是 fail-open：此前 patch 成 null 打死 run，patch 成 { content: 123 } 则一条坏的 toolResult 进了 transcript
+  const hooks = new HookRuntime();
+  hooks.on("postToolUse", (e) =>
+    e.toolCallId === "c1" ? { patch: { result: null as never } } : e.toolCallId === "c2" ? { patch: { result: { content: 123 } as never } } : undefined,
+  );
+  const t = tool("t", async () => toolOk("原样"));
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: scriptedStreamFn([toolTurn("c1", "t", {}), toolTurn("c2", "t", {}), textTurn("done")]),
+    tools: [t],
+    hooks,
+  });
+  const result = await agent.prompt("go");
+  expect(result.outcome).toEqual({ kind: "completed" });
+  expect(toolResults(result.messages).map((r) => [r.isError, r.content])).toEqual([
+    [false, "原样"],
+    [false, "原样"],
+  ]);
+});
+
 /* ─────────────── 3. userPromptSubmit 真的可拦截 ─────────────── */
 
 test("userPromptSubmit：patch 改写正文进 transcript；block 拒掉这次 prompt、不起循环", async () => {

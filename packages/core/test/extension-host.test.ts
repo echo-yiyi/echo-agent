@@ -18,7 +18,8 @@ import {
   type ExtensionEntry,
   type ReloadBoundary,
 } from "../src/extension/public.ts";
-import { ExtensionHost, ExtensionMountError } from "../src/extension/host.ts";
+import { EXTENSION_APPLY_LIMIT_MS, ExtensionApplyAbandoned, ExtensionHost, ExtensionMountError } from "../src/extension/host.ts";
+import { FakeClock } from "../src/schedule/clock.ts";
 import { agentRegistries } from "../src/extension/registries.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { defineToolPack, mountBuiltinTools } from "../src/extension/builtin.ts";
@@ -1033,4 +1034,134 @@ test("并行的 Effect start：栈位按登记顺序占，卸载是登记序的�
   await host.unmount("g");
   // 修之前这里是 ["dispose:first", "dispose:second"]——lease 完成才入栈，并行 start 按完成序排队
   expect(log).toEqual(["dispose:second", "dispose:first"]);
+});
+
+/* ─────────────── 装载有时限、听中止（2026-11-13）：一个不返回的 apply 不能把事务队列堵住 ─────────────── */
+
+/** mount 的结局：装上了给 "mounted"，没装上给那个错（不让 rejection 在等钟的时候变成 unhandled）。 */
+function settled(mounting: Promise<void>): Promise<unknown> {
+  return mounting.then(
+    () => "mounted",
+    (e: unknown) => e,
+  );
+}
+
+test("装载到时限：apply 不返回的那一代被放弃并回滚，排在它后面的 mount 照常执行；被放弃的 apply 之后再登记一律抛", async () => {
+  const clock = new FakeClock();
+  const host = new ExtensionHost({ clock });
+  let resume!: () => void;
+  const late: unknown[] = [];
+  const hung = defineExtension({
+    name: "hung",
+    hostAbiVersion: 1,
+    async apply(ctx) {
+      await new Promise<void>((r) => {
+        resume = r;
+      });
+      // 被放弃之后才醒过来：Context 已失效，登记不上
+      try {
+        await ctx.effect({ start: () => ({ value: 1, dispose: () => {} }) });
+      } catch (e) {
+        late.push(e);
+      }
+    },
+  });
+  const fine = defineExtension({ name: "fine", hostAbiVersion: 1, apply() {} });
+  const first = settled(host.mount("g-hung", [entry("hung", hung)]));
+  const second = host.mount("g-fine", [entry("fine", fine)]); // 排在挂住的那次后面
+  await new Promise((r) => setTimeout(r, 10));
+  expect(host.mountedGenerations).toEqual([]); // 队列被第一次占着：后面那个还没轮到
+  clock.advance(EXTENSION_APPLY_LIMIT_MS);
+  const failed = await first;
+  expect(failed).toBeInstanceOf(ExtensionMountError);
+  const cause = (failed as ExtensionMountError).cause;
+  expect(cause).toBeInstanceOf(ExtensionApplyAbandoned);
+  expect((cause as ExtensionApplyAbandoned).reason).toBe("timeout");
+  // 修之前这里永远等不到：事务链只有 apply 返回才往下走
+  await second;
+  expect(host.mountedGenerations).toEqual(["g-fine"]);
+  resume();
+  await new Promise((r) => setTimeout(r, 10));
+  expect(late).toHaveLength(1);
+  expect(late[0]).toBeInstanceOf(ExtensionDisposedError);
+  expect(host.inspect().map((f) => f.entryId)).toEqual(["fine"]);
+});
+
+test("装载到时限：挂住的是 Effect start——回滚不等它，已经起来的那个照常卸；它之后才交出的 lease 当场卸掉", async () => {
+  const clock = new FakeClock();
+  const host = new ExtensionHost({ clock });
+  const log: string[] = [];
+  let finish!: (lease: EffectLease<number>) => void;
+  const slow = defineExtension({
+    name: "slow-start",
+    hostAbiVersion: 1,
+    apply(ctx) {
+      void ctx.effect({ start: () => leaseOf(log, "ready", 1) });
+      void ctx.effect({
+        start: () =>
+          new Promise<EffectLease<number>>((r) => {
+            finish = r;
+          }),
+      });
+    },
+  });
+  const mounting = settled(host.mount("g", [entry("slow", slow)]));
+  await new Promise((r) => setTimeout(r, 10));
+  clock.advance(EXTENSION_APPLY_LIMIT_MS);
+  expect(await mounting).toBeInstanceOf(ExtensionMountError);
+  expect(log).toEqual(["dispose:ready"]);
+  expect(host.mountedGenerations).toEqual([]);
+  finish(leaseOf(log, "late", 2));
+  await new Promise((r) => setTimeout(r, 10));
+  expect(log).toEqual(["dispose:ready", "dispose:late"]); // 没有栈可进，也没有漏
+});
+
+test("装载听中止：signal 中止时正在装的那个被放弃并回滚；已经中止的 signal 不再起 apply", async () => {
+  const host = new ExtensionHost();
+  const controller = new AbortController();
+  let started = 0;
+  const hung = defineExtension({
+    name: "hung",
+    hostAbiVersion: 1,
+    apply: () => {
+      started++;
+      return new Promise<void>(() => {});
+    },
+  });
+  const mounting = settled(host.mount("g1", [entry("hung", hung)], { signal: controller.signal }));
+  await new Promise((r) => setTimeout(r, 10));
+  controller.abort();
+  const failed = await mounting;
+  expect(failed).toBeInstanceOf(ExtensionMountError);
+  expect(((failed as ExtensionMountError).cause as ExtensionApplyAbandoned).reason).toBe("aborted");
+  expect(started).toBe(1);
+  const again = await settled(host.mount("g2", [entry("hung", hung)], { signal: controller.signal }));
+  expect(again).toBeInstanceOf(ExtensionMountError);
+  expect(started).toBe(1); // 它起来之后中断不了，所以不起
+  expect(host.mountedGenerations).toEqual([]);
+});
+
+test("换代时新代的装载到时限：旧代按原样装回去（rolled_back），不是 lost", async () => {
+  const clock = new FakeClock();
+  const host = new ExtensionHost({ clock });
+  const log: string[] = [];
+  const v1 = defineExtension({
+    name: "x",
+    hostAbiVersion: 1,
+    reload: "run",
+    apply(ctx) {
+      void ctx.effect({ boundary: "run", start: () => leaseOf(log, "v1", 1) });
+    },
+  });
+  const v2 = defineExtension({ name: "x", hostAbiVersion: 1, reload: "run", apply: () => new Promise<void>(() => {}) });
+  await host.mount("g1", [entry("x", v1)]);
+  const replacing = host.replace("g1", { generation: "g2", entries: [entry("x", v2)] }, { safePoint: "run" });
+  await new Promise((r) => setTimeout(r, 10));
+  clock.advance(EXTENSION_APPLY_LIMIT_MS);
+  const r = await replacing;
+  expect(r.kind).toBe("rolled_back");
+  if (r.kind === "rolled_back") expect((r.error as ExtensionMountError).cause).toBeInstanceOf(ExtensionApplyAbandoned);
+  expect(host.mountedGenerations).toEqual(["g1"]);
+  expect(log).toEqual(["dispose:v1"]); // 卸过一次，又按原 entries 装回来了
+  expect(host.inspect()[0]?.effects).toBe(1);
 });

@@ -59,7 +59,7 @@ import { holderGone } from "./storage/generation-lock.ts";
 import { errText, type Diagnostic } from "./errors.ts";
 import { systemClock, type Clock } from "./schedule/clock.ts";
 import { defineExtension, type ExtensionDefinition } from "./extension/abi.ts";
-import { ExtensionHost, type ExtensionEntry } from "./extension/host.ts";
+import { ExtensionApplyAbandoned, ExtensionHost, ExtensionMountError, type ExtensionEntry } from "./extension/host.ts";
 import { extensionFactDescriptor } from "./extension/observe.ts";
 import { AGENT_ENTRY_ID, builtinOwner } from "./observability/runtime.ts";
 import { agentRegistries } from "./extension/registries.ts";
@@ -105,17 +105,20 @@ function isSnapshotName(name: string): boolean {
 const RELOAD_SAFE_POINT = "run" as const;
 
 /**
- * 热部署里一个扩展的装载（mount / replace）最多等多久。热部署全程握着 admission 的 permit，
- * apply 挂住（等一个永远不来的连接）时不能一直不放——到点按 `failed` / `lost` 报，permit 交还。
- * Host 的事务本身中断不了：迟到的结果由调用处补记进账（见 `reloadExtensions`）。
- */
-export const RELOAD_APPLY_LIMIT_MS = 30_000;
-
-/**
- * `echo.stop()` 卸 extension 最多等多久。卸载排在 Host 的事务队列上，一个挂住的 apply 或 disposer 会让它一直等；
+ * `echo.stop()` 卸 extension 最多等多久。卸载排在 Host 的事务队列上，一个挂住的 disposer 会让它一直等
+ *（装载有 Host 自己的时限 `EXTENSION_APPLY_LIMIT_MS`，卸载没有）；
  * 到点不再等，照常停 Agent、交还 lease——不合作的扩展不能把状态根的锁扣住（它的资源不保证回收，诊断里有一条）。
  */
 export const STOP_UNMOUNT_LIMIT_MS = 10_000;
+
+/**
+ * 一次装载失败记哪条诊断：Host 到时限放弃的（apply 或 Effect start 挂住，`ExtensionApplyAbandoned`）单列
+ * `extension_apply_timeout`；其余——apply 抛错、依赖图不成立、被收摊中止——都是 `extension_mount_failed`。
+ */
+function mountFailureCode(e: unknown): "extension_apply_timeout" | "extension_mount_failed" {
+  const timedOut = e instanceof ExtensionMountError && e.cause instanceof ExtensionApplyAbandoned && e.cause.reason === "timeout";
+  return timedOut ? "extension_apply_timeout" : "extension_mount_failed";
+}
 
 /**
  * `p` 在 `ms` 内落定就交出它的结果；到点、或 `signal` 中止，交 `null`（`p` 照跑，结果由调用方另接）。
@@ -586,6 +589,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     ...(opts.sessions?.runTimeoutMs !== undefined ? { runTimeoutMs: opts.sessions.runTimeoutMs } : {}),
   });
 
+  /** 装载的时限（Host）与收摊卸载的时限用的钟（与 Agent 同一个，测试可拨）。 */
+  const clock = opts.clock ?? systemClock;
   const host = new ExtensionHost({
     services: agentRegistries({
       tools: agent.tools,
@@ -615,6 +620,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
     // 观测探针：五代装载（builtin / inline / 盘上发现的 / boot / role）的结果都在 Host 的事务链上当场记。
     // 盘上发现的 extension 装坏时，此前只进一条 diagnostic；现在账本里也有，带是哪个 Entry、在哪个阶段失败
     observe: observation.capabilitySink(extensionFactDescriptor, builtinOwner(AGENT_ENTRY_ID)),
+    // 装载的时限用装配的钟计（与 Agent 同一个，测试可拨）
+    clock,
   });
 
   // 从这里起 Agent 已经存在：任何（fail-loud 路径上的）失败都必须把它停掉，否则 store 与文件锁没人收。
@@ -652,8 +659,6 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   );
 
   const mountedGens: string[] = [];
-  /** 热部署与收摊的时限用的钟（与 Agent 同一个，测试可拨）。 */
-  const clock = opts.clock ?? systemClock;
   try {
     // 盘上的扩展逐个加载：**坏一个记一条诊断、跳过它**（D6，头注）。`loadExtensionFile` 本身照抛
     // ExtensionLoadError——低层调用方仍然 fail-loud，宽恕只发生在装配这一层、只对盘上的文件。
@@ -765,7 +770,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
         mountedGens.push(gen);
         discovered.get(d.file)!.generation = gen;
       } catch (e) {
-        diagnostics.push({ code: "extension_mount_failed", message: errText(e), path: d.file });
+        // 挂住的 apply 到 Host 的时限被放弃、回滚（`extension_apply_timeout`）：与别的装坏一样只记诊断，后面的代照常装
+        diagnostics.push({ code: mountFailureCode(e), message: errText(e), path: d.file });
       }
     }
     if (role.length > 0) {
@@ -870,31 +876,15 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
           }
           const gen = `reload-${snapshotSeq}:${file}`;
           const entry: ExtensionEntry = { entryId: file, definition };
-          const snapshotPath = snapshot.path;
           if (prev === undefined || prev.generation === null) {
             try {
-              const mounting = host.mount(gen, [entry]);
-              const settled = await within(mounting, RELOAD_APPLY_LIMIT_MS, clock, signal);
-              if (settled === null) {
-                // 到点没装完：按没装上报，permit 交还。Host 的事务还在跑——迟到的成功补记进账（收摊才卸得到它）
-                const reason = `装载 ${RELOAD_APPLY_LIMIT_MS}ms 没结束（apply 或 Effect start 挂住了），不再等；它之后若装上会补记`;
-                dropDiagnostics(file);
-                diagnostics.push({ code: "extension_apply_timeout", message: reason, path: file });
-                discovered.set(file, { root, hash, generation: null, snapshot: null, name: null });
-                changes.push({ kind: "failed", file, reason });
-                mounting.then(
-                  () => {
-                    swapGeneration(gen, gen);
-                    discovered.set(file, { root, hash, generation: gen, snapshot: snapshotPath, name: definition.name });
-                  },
-                  () => void removeSnapshot(snapshotPath),
-                );
-                continue;
-              }
+              // 时限与中止都在 Host 的事务里：挂住的 apply 到点（或收摊时）被放弃并回滚，这里拿到的就是一次装载失败——
+              // 事务已经结束，不会有之后才装上的结果，permit 照常交还
+              await host.mount(gen, [entry], { signal });
             } catch (e) {
               await removeSnapshot(snapshot.path);
               dropDiagnostics(file);
-              diagnostics.push({ code: "extension_mount_failed", message: errText(e), path: file });
+              diagnostics.push({ code: mountFailureCode(e), message: errText(e), path: file });
               discovered.set(file, { root, hash, generation: null, snapshot: null, name: null });
               changes.push({ kind: "failed", file, reason: errText(e) });
               continue;
@@ -905,39 +895,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
             changes.push({ kind: "added", file });
             continue;
           }
-          const oldGeneration = prev.generation;
-          const oldSnapshot = prev.snapshot;
-          const replacing = host.replace(oldGeneration, { generation: gen, entries: [entry] }, { safePoint: RELOAD_SAFE_POINT });
-          const settled = await within(replacing, RELOAD_APPLY_LIMIT_MS, clock, signal);
-          if (settled === null) {
-            // 到点没换完：旧版多半已卸（Host 在卸旧之后才 apply 新代），新版没起来——按 lost 报，permit 交还。
-            // 迟到的结果补记进账：换上了记新代，装回旧版记旧代，收摊才卸得到
-            const reason = `新版装载 ${RELOAD_APPLY_LIMIT_MS}ms 没结束（apply 或 Effect start 挂住了），不再等；现在可能什么都没挂着，之后若装上会补记`;
-            swapGeneration(oldGeneration, null);
-            dropDiagnostics(file);
-            diagnostics.push({ code: "extension_apply_timeout", message: reason, path: file });
-            discovered.set(file, { root, hash, generation: null, snapshot: null, name: null });
-            changes.push({ kind: "lost", file, reason });
-            replacing.then(
-              (late) => {
-                if (late.kind === "replaced") {
-                  swapGeneration(gen, gen);
-                  void removeSnapshot(oldSnapshot);
-                  discovered.set(file, { root, hash, generation: gen, snapshot: snapshotPath, name: definition.name });
-                } else if (late.kind === "rolled_back" || late.kind === "refused") {
-                  swapGeneration(oldGeneration, oldGeneration);
-                  void removeSnapshot(snapshotPath);
-                  discovered.set(file, { root, hash: prev.hash, generation: oldGeneration, snapshot: oldSnapshot, name: prev.name });
-                } else {
-                  void removeSnapshot(snapshotPath);
-                  void removeSnapshot(oldSnapshot);
-                }
-              },
-              () => void removeSnapshot(snapshotPath),
-            );
-            continue;
-          }
-          const r = settled.value;
+          // 新版的 apply 挂住时 Host 到点放弃它、把旧版装回去（`rolled_back`）；装回也没成才是 `lost`
+          const r = await host.replace(prev.generation, { generation: gen, entries: [entry] }, { safePoint: RELOAD_SAFE_POINT, signal });
           switch (r.kind) {
             case "refused":
               await removeSnapshot(snapshot.path);
@@ -955,7 +914,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
               await removeSnapshot(snapshot.path);
               dropDiagnostics(file);
               noteUnwind(file, r.unwindErrors);
-              diagnostics.push({ code: "extension_mount_failed", message: errText(r.error), path: file });
+              diagnostics.push({ code: mountFailureCode(r.error), message: errText(r.error), path: file });
               changes.push({ kind: "rolled_back", file, reason: errText(r.error) });
               break;
             case "lost":
@@ -964,7 +923,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
               swapGeneration(prev.generation, null);
               dropDiagnostics(file);
               noteUnwind(file, r.unwindErrors);
-              diagnostics.push({ code: "extension_mount_failed", message: errText(r.error), path: file });
+              diagnostics.push({ code: mountFailureCode(r.error), message: errText(r.error), path: file });
               diagnostics.push({ code: "extension_rollback_failed", message: errText(r.rollbackError), path: file });
               discovered.set(file, { root, hash, generation: null, snapshot: null, name: null });
               changes.push({ kind: "lost", file, reason: `新版：${errText(r.error)}；装回旧版也失败：${errText(r.rollbackError)}` });
@@ -1000,12 +959,12 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       // extension-unmount-failed 整个丢了）。丢掉一个失败原因，排查时就少了一半线索。
       // **按 mount 的逆序卸所有代**（外部各代 → inline → builtin）：后代可能 inject 了前代的
       // Service，先卸后代才不会让 provider 在还有 consumer 时消失。未 mount 的代幂等跳过。
-      // **卸载限时**（`STOP_UNMOUNT_LIMIT_MS`）：它排在 Host 的事务队列上，一个挂住的 apply / disposer 会让它一直等，
+      // **卸载限时**（`STOP_UNMOUNT_LIMIT_MS`）：它排在 Host 的事务队列上，一个挂住的 disposer 会让它一直等，
       // 而 `agent.stop()` 排在它后面——不限时，lease 就永远不还。
       const unmounted = await within(unmountGenerations(host, [...[...mountedGens].reverse(), BUILTIN_GENERATION]), STOP_UNMOUNT_LIMIT_MS, clock);
       const errors: unknown[] =
         unmounted === null
-          ? [new Error(`卸 extension 超过 ${STOP_UNMOUNT_LIMIT_MS}ms 没结束（有 apply 或 disposer 挂住了）：不再等，照常停 Agent、交还 lease；那些扩展的资源不保证回收`)]
+          ? [new Error(`卸 extension 超过 ${STOP_UNMOUNT_LIMIT_MS}ms 没结束（有 disposer 挂住了）：不再等，照常停 Agent、交还 lease；那些扩展的资源不保证回收`)]
           : unmounted.value;
       try {
         await agent.stop();

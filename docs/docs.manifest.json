@@ -330,6 +330,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-13-core-review-fixes-batch-1.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-12-dream-watermark-removed.md",
       "bilingual": false
     },
@@ -339,6 +343,26 @@
     },
     {
       "path": "docs/decisions/implemented/2026-11-13-background-retry-bounds.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-content-filter-error-code.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-storage-children.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-lines-of-removed.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-host-apply-limit.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-context-mirror-eviction.md",
       "bilingual": false
     },
     {

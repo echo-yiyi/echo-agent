@@ -52,6 +52,23 @@ test("不变量① 恢复后 messages 与 compaction 同源（同一份 entries 
   expect(resumed.info.messageCount).toBe(3);
 });
 
+test("entries/ 下点开头的文件（Finder 的 .DS_Store）不是 entry：续会话照常；别的认不出的文件照旧判红", async () => {
+  // 此前目录里每个文件都当 entry 解析：用 Finder 打开过这个目录，这段会话就再也打不开
+  const dir = new InMemoryDir();
+  const first = new SessionService(dir);
+  await first.createOrResume("main");
+  await first.append("main", [{ kind: "message", message: userMessage("一") }]);
+  await first.settle();
+  await dir.write("entries/.DS_Store", "\u0000\u0001Bud1");
+
+  const resumed = await new SessionService(dir).createOrResume("main");
+  expect(resumed.messages.map((m) => m.role)).toEqual(["user"]);
+
+  // 只放过点开头的：坏档不能靠「跳过」变成静默少一条
+  await dir.write("entries/garbage.json", "不是 json");
+  await expect(new SessionService(dir).createOrResume("main")).rejects.toThrow(/解不开/);
+});
+
 test("compaction 状态在恢复出来的 messages 上不成立 → 坏档判红（越界 / 切在配对中间）", async () => {
   for (const compaction of [
     { spans: [{ from: 0, to: 5, summary: "越界" }], clearedBefore: 0 },
@@ -590,6 +607,32 @@ test("listSessions()：列出来之后 meta 被撤掉的那一段跳过，不让
   // 坏档照旧判红：零长的 meta 不是「被撤了」
   await inner.write("s-c/meta.json", "");
   await expect(listSessions(root)).rejects.toThrow(/s-c.*解不开/);
+});
+
+test("listSessions()：字节面有浅层列举（children）就只看一层，不递归列每一段的 entry；没有的字节面退回 list，清单相同", async () => {
+  const inner = new InMemoryDir();
+  for (const id of ["s-1", "s-2"]) {
+    const s = new SessionService(scoped(inner, `${id}/`));
+    await s.createOrResume(id, { workspace: "/a", product: "echo-agent" });
+    await s.append(id, [{ kind: "message", message: userMessage("一") }]);
+    await s.settle();
+  }
+  await inner.write("stray.txt", "顶层的散文件，不是一段会话");
+  await inner.write("no-meta/entries/x.json", "{}"); // 有目录、没有 meta：不是一段会话
+
+  const calls: string[] = [];
+  const bytes = { read: (p: string) => inner.read(p), write: (p: string, c: string) => inner.write(p, c), remove: (p: string) => inner.remove(p) };
+  const shallow: StorageDir = {
+    ...bytes,
+    list: (p) => (calls.push(`list:${p}`), inner.list(p)),
+    children: (d) => (calls.push(`children:${d}`), inner.children(d)),
+  };
+  const deep: StorageDir = { ...bytes, list: (p) => inner.list(p) };
+  const ids = async (root: StorageDir): Promise<string[]> => (await listSessions(root)).map((i) => i.id).sort();
+
+  expect(await ids(shallow)).toEqual(["s-1", "s-2"]);
+  expect(calls).toEqual(["children:"]); // 一次浅层列举；成本随段数涨，不随所有会话的 entry 总数涨
+  expect(await ids(deep)).toEqual(["s-1", "s-2"]);
 });
 
 test("恢复失败**不解毒**——此前抛错之后 append 仍被接受", async () => {

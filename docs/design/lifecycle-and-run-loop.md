@@ -164,7 +164,8 @@ run 结束时不是先检查“队列看起来为空”再异步关闭，而是�
 | 主动 abort | prompt resolve，outcome 为 `aborted`；这个 run 起的后台任务一起停 |
 | 主动 interrupt | 当前 reply 以 `aborted{理由}` 收（有插话就接着跑）；run 照常做排队的 followUp，没有就以它收场 |
 | 最大迭代或 deadline | 对应 terminal outcome |
-| 工具抛错 | 转成 error tool result，run 可继续 |
+| 工具抛错，或交回来的不是一份结果（`undefined`、`content` 不是字符串） | 转成 error tool result，run 可继续 |
+| `postToolUse` hook 把结果改成了错的形状 | 当这条 hook 没说话，入账的是工具自己的结果 |
 | 自动压缩阶段失败 | 记录诊断并尝试后续策略；撞窗应急仍无法继续时以错误结束 |
 | busy、未启动、已停止等 API 误用 | 方法 reject / throw |
 | listener 或持久化等回调失败 | 尽量规范化为完整 terminal event/result |

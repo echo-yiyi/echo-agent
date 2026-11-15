@@ -1,6 +1,6 @@
 # 记忆提取没跑完：写成过就算看过，连续没写成就放弃那段
 
-> 状态:implemented · 提出 2026-11-11（用户点出：游标只在提取跑完后推进，耗尽 5 轮怎么办）· 拍板 2026-11-12（用户：「可以按照他的来做」——照参照物的处理）· 落地 `packages/core/src/memory/extract.ts` / `agent.ts`，判据 `packages/core/test/memory-extract.test.ts` · 修改 [从主对话分叉](2026-11-03-memory-extraction-fork.md) 与 [降频](2026-10-30-memory-extraction-gate.md) 里「游标只在正常跑完时推进；出错、轮数用完都不动」那一条
+> 状态:implemented · 提出 2026-11-11（用户点出：游标只在提取跑完后推进，耗尽 5 轮怎么办）· 拍板 2026-11-12（用户：「可以按照他的来做」——照参照物的处理）· 落地 `packages/core/src/memory/extract.ts` / `agent.ts`，判据 `packages/core/test/memory-extract.test.ts` · 修改 [从主对话分叉](2026-11-03-memory-extraction-fork.md) 与 [降频](2026-10-30-memory-extraction-gate.md) 里「游标只在正常跑完时推进；出错、轮数用完都不动」那一条 · **后续** 2026-11-13 [core review 第一批修复](2026-11-13-core-review-fixes-batch-1.md)：第 3 条的「被中止」收窄到 signal 真的中止了（stop / 丢锁）；送模前被 `contextBeforeBuild` hook 拦下的提取同样以 aborted 收场，但照 `unfinished` 算、报诊断
 
 **给谁看**：改记忆提取的游标、失败处理或轮数上限的人。假设已知 [从主对话分叉](2026-11-03-memory-extraction-fork.md)（攒满三轮、游标落盘）与 [记忆设计](../../design/memory.md) §5。
 

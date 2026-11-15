@@ -208,6 +208,15 @@ describe("INDEX.md(落盘索引)", () => {
     expect(denied.isError).toBe(true);
     expect(denied.content).toContain("system-maintained");
   });
+
+  test("点开头的文件（Finder 的 .DS_Store）不进索引:它不是一条记忆,模型 view 不了也删不掉", async () => {
+    // 此前只滤 INDEX.md:.DS_Store 的二进制首行被读进索引、随记忆段进 system、占索引预算
+    const dir = new InMemoryDir();
+    const h = memories(dir);
+    await dir.write("user/memory/.DS_Store", "\u0000\u0001Bud1 二进制");
+    await call(h, { command: "create", path: "user/memory/a.md", file_text: "---\ndescription: 钩子甲\n---\n" });
+    expect(await dir.read("user/memory/INDEX.md")).toBe("- user/memory/a.md — 钩子甲");
+  });
 });
 
 /* ───────────────────────── ③ 组装 ───────────────────────── */
