@@ -77,6 +77,16 @@ export type ShellTrustOptions = Readonly<{
   ui?: unknown;
 }>;
 
+export type ShellTakeoverOptions = Readonly<{
+  product?: Pick<Product, "name" | "version">;
+  /** 要续的那一段。 */
+  sessionId: string;
+  /** 此刻占着它的是谁（给人看的一句：进程、机器、从什么时候起、最近一次心跳），或「锁是坏的」的原因。 */
+  holder: string;
+  signal?: AbortSignal;
+  ui?: unknown;
+}>;
+
 /**
  * 交互形态的壳。装配层只认这三件事：
  *   · `open()` —— 界面本体；
@@ -85,6 +95,10 @@ export type ShellTrustOptions = Readonly<{
  *     **装配之前**问一次。`true` = 信任（装配层记住并加载），`false` = 不信任（这次不加载）；被中止也是 `false`。
  *     装配会 import 这些文件、执行里面的代码，所以只能在装配前问。
  *
+ *   · `confirmTakeover()`（可选，2026-11-15）—— 续的那一段正被一个**还活着**的进程占着（另一个终端开着它，或沙箱
+ *     刚异常退出、心跳还没过期）时，**装配之前**问一次要不要接管。`true` = 接管（对方丢锁停手），`false` = 不接管
+ *     （照旧报「已被另一个写者持有」）；被中止也是 `false`。壳没实现它就当 `false`。
+ *
  * 不做成一件事，是因为时机不同：引导设置与信任确认发生在还没有 agent 的时候，界面发生在装配之后。
  * 合成一个「界面」接口会让实现方必须先造出一个没有 agent 可显示的界面。
  */
@@ -92,4 +106,5 @@ export type Shell = Readonly<{
   open(opts: ShellOpenOptions): ShellHandle;
   firstRun(opts: ShellFirstRunOptions): Promise<FirstRunOutcome>;
   trustWorkspace(opts: ShellTrustOptions): Promise<boolean>;
+  confirmTakeover?(opts: ShellTakeoverOptions): Promise<boolean>;
 }>;

@@ -597,7 +597,7 @@ export function sessionRunner(opts: CliOptions, providerName: string | undefined
     const child = spawn([process.execPath, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
     child.unref();
 
-    const lock = join(expandHome(opts.stateDir ?? resolveSessionsRoot()), row.id, ".lock");
+    const lock = sessionLockPath(opts, row.id);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       // 先看进程：它退了就是没跑起来——哪怕盘上留着一把别人的 / 坏的锁
@@ -617,6 +617,31 @@ export function sessionRunner(opts: CliOptions, providerName: string | undefined
     await child.exited;
     throw new Error(`会话 ${row.id} 的容器 ${timeoutMs}ms 内没拿到锁，已杀掉`);
   };
+}
+
+/** 某一段会话的锁目录。 */
+function sessionLockPath(opts: CliOptions, id: string): string {
+  return join(expandHome(opts.stateDir ?? resolveSessionsRoot()), id, ".lock");
+}
+
+/**
+ * 显式续会话之前看一眼锁（2026-11-15）：值得问一句「要接管吗」的只有两种——占着它的进程**还活着**、又**不可让位**
+ * （另一个终端开着它，或沙箱刚异常退出、心跳还没过期），或者锁是坏的。返回给人看的一句；不用问的（没人占、持有者已经
+ * 不在了、可让位的后台宿主会自己让开）返回 `null`。
+ */
+export async function takeoverQuestion(lockPath: string, now: number = Date.now()): Promise<string | null> {
+  const cur = await inspectStateLock(lockPath);
+  if (cur.state === "missing") return null;
+  if (cur.state === "corrupt") return `锁是坏的（${cur.why}）`;
+  if (!cur.alive || cur.record.preemptible === true) return null;
+  const r = cur.record;
+  const since = new Date(r.at);
+  return (
+    `进程 ${r.pid}` +
+    (r.host !== undefined ? `（${r.host}）` : "") +
+    (Number.isNaN(since.getTime()) ? "" : `，${since.toLocaleString()} 起`) +
+    (r.beat !== undefined ? `，${Math.max(0, Math.round((now - r.beat) / 1000))} 秒前还有心跳` : "，旧版本写的锁、没有心跳记录")
+  );
 }
 
 /** SIGKILL 一个进程组（组长 pid 取负）。组已经不在了（ESRCH）不算错。 */
@@ -704,8 +729,13 @@ async function runPiped(
   }
   // **唯一 composition root**：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
   const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId, workspaceTrusted);
-  // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥
-  const echo = await createEcho({ ...base, extensions: [...(base.extensions ?? []), pipeSurfaceEntry()] });
+  // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥。
+  // 显式续会话一定续得上（2026-11-15）：没人可问，占着它的进程（多半已随沙箱一起没了）一律接管
+  const echo = await createEcho({
+    ...base,
+    ...(sessionId !== undefined ? { takeover: true } : {}),
+    extensions: [...(base.extensions ?? []), pipeSurfaceEntry()],
+  });
   // 启动口信（设置读不动等）与装配诊断（坏扩展被跳过，D6）都走 stderr：说了才算没静默，但不挡启动、不改退出码
   if (sessionId !== undefined) process.stderr.write(`[会话] 续 ${sessionId}\n`); // 续了就说，无声恢复是禁止的
   for (const n of notices) process.stderr.write(`${n}\n`);
@@ -745,6 +775,15 @@ async function runInteractive(
   /** 上一段的 id。只在「刚换过段」时有值——换不成就退回它，退一次。 */
   let fallback: string | undefined;
   for (;;) {
+    // 显式续会话一定续得上（2026-11-15）：占着它的进程还活着、又不肯让，才问一句；不用问的（没人占、持有者已经不在了、
+    // 可让位的后台宿主）一律准许接管——请过让位还拿不到时接管。问要在开界面**之前**：那一屏与主界面不同时在
+    let takeover = false;
+    if (toOpen !== undefined) {
+      const question = await takeoverQuestion(sessionLockPath(opts, toOpen));
+      takeover =
+        question === null ||
+        (await shell.confirmTakeover?.({ product, sessionId: toOpen, holder: question, signal, ...(deps.ui !== undefined ? { ui: deps.ui } : {}) })) === true;
+    }
     const ui = shell.open({
       product,
       signal,
@@ -764,6 +803,7 @@ async function runInteractive(
     const base = echoOptions(product, form, opts, chosen.provider, choices, credentials, toOpen, workspaceTrusted);
     const echo = await createEcho({
       ...base,
+      ...(takeover ? { takeover: true } : {}),
       // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的
       // `AgentRuntime` 由 builtin 那一代提供（`create-echo.ts`），与同代里谁先谁后无关。
       extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: ui.definition }],

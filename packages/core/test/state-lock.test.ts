@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileStateLock, inspectStateLock } from "../src/storage/file-lock.ts";
+import { LOCK_BEAT_MS } from "../src/storage/generation-lock.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
 
 // StateLock 的契约。文件锁 = 带递增编号的锁（`storage/generation-lock.ts`，2026-09-10）。
@@ -162,7 +163,7 @@ test("旧代会被清掉：来回拿放多次，锁目录里只留最近两代�
   expect(await readdir(path)).not.toContain(`t-${DEAD_PID}-leftover`);
 });
 
-test("持有中 lost 永不 settle（本地锁没有租约到期这回事）", async () => {
+test("持有中、没人接管：lost 不 settle", async () => {
   const dir = await tmp();
   const lease = await fileStateLock(join(dir, ".lock")).acquire({ holder: "我" });
   const raced = await Promise.race([lease!.lost.then(() => "lost"), new Promise((r) => setTimeout(() => r("still-held"), 20))]);
@@ -312,3 +313,99 @@ test(
   },
   180_000,
 );
+
+/* ───────── 2026-11-15：心跳判死活、显式续会话强行接管、被接管的一方丢锁停手 ───────── */
+
+/** 等到条件成立或超时。心跳是真时钟上的 `setInterval`，这几条要等上一拍。 */
+async function eventually(cond: () => boolean | Promise<boolean>, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await cond()) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return await cond();
+}
+
+test("沙箱重建之后：机器名换了、pid 又被复用（甚至就是自己），心跳过期就接管——此前判成「别的机器、还活着」，崩掉的会话续不上", async () => {
+  const path = join(await tmp(), ".lock");
+  // 旧容器写下的记录：主机名是旧容器的，pid 恰好与新进程撞上，心跳停在一分钟前
+  await forge(path, 1, { holder: "旧容器", pid: process.pid, host: "old-container.invalid", at: Date.now() - 60_000, beat: Date.now() - 60_000, token: "old" });
+  const seen = await inspectStateLock(path);
+  expect(seen.state === "valid" && seen.alive).toBe(false);
+  const lease = await fileStateLock(path).acquire({ holder: "新容器" });
+  expect(lease).not.toBeNull();
+  expect((await generations(path)).g).toEqual([1, 2]);
+  await lease!.release();
+});
+
+test("心跳没过期就当活着：机器名对不上也不抢（只看心跳，不看名字）", async () => {
+  const path = join(await tmp(), ".lock");
+  await forge(path, 1, { holder: "刚刚还在的", pid: DEAD_PID, host: "another-host.invalid", at: Date.now(), beat: Date.now(), token: "fresh" });
+  expect(await fileStateLock(path).acquire({ holder: "想接管的" })).toBeNull();
+  const seen = await inspectStateLock(path);
+  expect(seen.state === "valid" && seen.alive).toBe(true);
+});
+
+test("持有期间心跳在刷：别人读到的 beat 一拍比一拍新", async () => {
+  const path = join(await tmp(), ".lock");
+  const lease = await fileStateLock(path).acquire({ holder: "活着的" });
+  const beatOf = async (): Promise<number> => (JSON.parse(await readFile(join(path, "g1"), "utf8")) as { beat: number }).beat;
+  const first = await beatOf();
+  expect(await eventually(async () => (await beatOf()) > first, LOCK_BEAT_MS * 3)).toBe(true);
+  await lease!.release();
+});
+
+test("takeOver：活着的持有者也接管；被接管的一方在一拍心跳内 lost 触发，它的 release() 不报「单写者被破坏」", async () => {
+  const path = join(await tmp(), ".lock");
+  const a = await fileStateLock(path).acquire({ holder: "另一个终端" });
+  expect(await fileStateLock(path).acquire({ holder: "续会话的" })).toBeNull(); // 活着：普通 acquire 照旧拿不到
+  let lostWith: Error | null = null;
+  void a!.lost.then((e) => (lostWith = e));
+  const b = await fileStateLock(path).takeOver!({ holder: "续会话的" });
+  expect(await eventually(() => lostWith !== null, LOCK_BEAT_MS * 3)).toBe(true);
+  expect(String(lostWith)).toContain("接管");
+  await a!.release(); // 被接管之后收摊：没有可放的，不是事故
+  const seen = await inspectStateLock(path);
+  expect(seen.state === "valid" && seen.record.holder).toBe("续会话的");
+  await b.release();
+  expect((await inspectStateLock(path)).state).toBe("missing");
+});
+
+test("takeOver：旧版本的单文件锁挪到一边再接管；当前代记录坏了也照样叠上去", async () => {
+  const legacy = join(await tmp(), ".lock");
+  await writeFile(legacy, JSON.stringify({ holder: "旧版本", pid: DEAD_PID, at: Date.now() }));
+  const l1 = await fileStateLock(legacy).takeOver!({ holder: "新版本" });
+  const parent = await readdir(join(legacy, ".."));
+  expect(parent.some((n) => n.startsWith(".lock.legacy-"))).toBe(true);
+  await l1.release();
+
+  const broken = join(await tmp(), ".lock");
+  await forge(broken, 1, "不是 json");
+  const l2 = await fileStateLock(broken).takeOver!({ holder: "新版本" });
+  expect((await generations(broken)).g).toEqual([1, 2]);
+  await l2.release();
+});
+
+test("两个人同时 takeOver 同一把：最后只有一个还持有，原来的和另一个 lost 触发", async () => {
+  const path = join(await tmp(), ".lock");
+  const holder = await fileStateLock(path).acquire({ holder: "原来的" });
+  const [x, y] = await Promise.all([fileStateLock(path).takeOver!({ holder: "甲" }), fileStateLock(path).takeOver!({ holder: "乙" })]);
+  const lost = [false, false, false];
+  [holder!, x, y].forEach((l, i) => void l.lost.then(() => (lost[i] = true)));
+  expect(await eventually(() => lost.filter(Boolean).length === 2, LOCK_BEAT_MS * 3)).toBe(true);
+  expect(lost[0]).toBe(true); // 原来的那个一定被接管了
+  const seen = await inspectStateLock(path);
+  const winner = lost[1] ? "乙" : "甲";
+  expect(seen.state === "valid" && seen.record.holder).toBe(winner);
+  for (const l of [holder!, x, y]) await l.release();
+});
+
+test("内存锁 takeOver：当前持有者收到 lost，锁归新来的", async () => {
+  const lock = new InMemoryStateLock();
+  const a = await lock.acquire({ holder: "一" });
+  const b = await lock.takeOver({ holder: "二" });
+  expect((await a!.lost).message).toContain("接管");
+  expect(await lock.acquire({ holder: "三" })).toBeNull();
+  await b.release();
+  expect(await lock.acquire({ holder: "三" })).not.toBeNull();
+});

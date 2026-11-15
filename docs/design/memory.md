@@ -172,7 +172,7 @@ Dream 与提取都不带父的每轮注入（激活 skill 正文、任务清单�
 当前只能确认以下边界：
 
 - **提交锁**：同一层、同一个记忆模块的一次提交（读、改、预算校验、落盘、重建索引）整段独占，锁挂在那一层的**字节面**上，名字 `.locks/<模块>`（[`withMemoryRegionLock()`](../../packages/core/src/memory/lock.ts#symbol=withMemoryRegionLock)）。字节面有 `lock` 原语时——`FileDir` 的锁目录（带递增编号的锁，与 lease 同一个实现）、`InMemoryDir` 的实例内互斥，经前缀视图与写入闸视图一路转发——跨实例、跨进程都互斥；没有时按字节面对象在进程内互斥。等不到（缺省 10 秒）返回 `busy`，一个字节都不写。
-- **持有者崩溃后自动接管**（与 lease 同一个实现，[决策](../decisions/implemented/2026-09-10-generation-lock-takeover.md)）：持有者崩在持锁窗口里，下一个写者确认它已死（同一台机器、pid 查无此号）就接管，不会一直 `busy`。确认不了死活（别的机器、pid 被复用）或记录被写坏时，照旧等到超时返回 `busy`，报错里带锁的位置与持有者。
+- **持有者不在了就自动接管**（与 lease 同一个实现，[决策](../decisions/implemented/2026-09-10-generation-lock-takeover.md)、[心跳](../decisions/implemented/2026-11-15-lock-heartbeat-takeover.md)）：持有期间刷心跳；持有者崩在持锁窗口里，心跳过期、或本机上那个 pid 查无此号，下一个写者就接管，不会一直 `busy`。持有者还活着、或记录被写坏时，照旧等到超时返回 `busy`，报错里带锁的位置与持有者。
 - **覆写前核对读到的版本**（[决策](../decisions/implemented/2026-09-11-memory-read-version-check.md)）：提交锁只罩住一次工具调用，而模型「读完 → 思考 → 写回」横跨好几次调用。每把记忆工具记一本 [`MemoryReads`](../../packages/core/src/memory/harness.ts#symbol=MemoryReads)（view 看到的全文）；整份覆写已有文件、insert、delete 之前核对它还是不是现在这一版，不是就拒（`not_read` / `stale_read`）——**拒绝里附上现行内容并记成看过**，模型照着重做就放行，不必再单独 view 一轮（超过 8000 字符的不附、不记；2026-11-03）。str_replace 不核对（old_str 在最新内容上找得到本身就是核对），rename 搬的就是最新内容。前台那把工具、每次提取、每次整理各一本账；**提取那本从前台克隆**（上文里前台 view 过的，提取也算看过），并预记指令里全文展示过的常驻文件（缺省组装、没被截尾时）；两本之后各记各的。程序直接调写方法、不给账，就不核对。
 - **本进程里后台改记忆排成一条**（2026-11-03）：提取与整理各走各的通道、都不挡前台，但同一时刻只有一个在改记忆（[`Agent.oneBackgroundWriter()`](../../packages/core/src/agent.ts#symbol=Agent.oneBackgroundWriter)）——此前同一次空闲里二者能并发改同一层，互相 `stale_read`。
 - [`assertFresh()`](../../packages/core/src/memory/lock.ts#symbol=assertFresh) 仍在落盘前重读旧内容，挡的是**不守提交锁**的写者（人手改文件）。
