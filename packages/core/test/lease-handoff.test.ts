@@ -11,7 +11,7 @@
 // 两种实现（内存锁 / 文件锁）走同一份语义，所以下面每条都对两边成立。
 
 import { test, expect } from "bun:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +28,7 @@ import type { ProviderEvent } from "../src/events.ts";
 import { environmentMessage } from "../src/messages.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
 import { HANDOFF_DRAIN_MS } from "../src/agent.ts";
+import { LOCK_BEAT_MS } from "../src/storage/generation-lock.ts";
 
 /** 第一轮要 `ms` 才答完（`ms` 为 null = 不中止就永远不答），收到 abort 立刻退出。 */
 function slowDialect(ms: number | null): Dialect {
@@ -337,4 +338,60 @@ test("两个后台互相不请：谁先拿到谁跑，第二个如实拒绝（�
   const second = await createAgent(common);
   await expect(second.start()).rejects.toThrow(/已被另一个写者持有/);
   await first.stop();
+});
+
+/* ───────── 2026-11-15：显式续会话一定续得上——不肯让的持有者也接管，它丢锁停手 ───────── */
+
+/** 等到条件成立或超时：被接管的一方要等它下一次刷心跳才发现。 */
+async function eventually(cond: () => boolean, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !cond()) await new Promise((r) => setTimeout(r, 25));
+  return cond();
+}
+
+test("显式续会话（takeover）：另一个终端开着、不肯让的那段也接管——原来那段丢锁停手，新来的续上对话；不带 takeover 照旧挡在门外", async () => {
+  const { path } = await fileLockAt();
+  const store = new InMemoryDir();
+  const common = { provider: provider(), allowNetwork: false, store, sharedStore: new InMemoryDir(), sessionId: "s1", withoutMemory: true } as const;
+
+  const there = await createAgent({ ...common, lock: fileStateLock(path) }); // 另一个终端：人开的，不可让位
+  const notes: string[] = [];
+  there.subscribeLifecycle((e) => {
+    if (e.type === "notification") notes.push(e.message);
+  });
+  await there.start();
+  await there.prompt("那边先说了一句");
+
+  const polite = await createAgent({ ...common, lock: fileStateLock(path) });
+  await expect(polite.start()).rejects.toThrow(/已被另一个写者持有/); // 不带 takeover：行为不变
+
+  const here = await createAgent({ ...common, lock: fileStateLock(path), takeover: true });
+  await here.start();
+  expect(here.messages.length).toBeGreaterThan(0); // 续上了那边落下的对话
+  expect(await eventually(() => notes.some((m) => m.startsWith("[lease_lost]")), LOCK_BEAT_MS * 3)).toBe(true);
+  expect(there.acceptsWork).toBe(false); // 那边停手：不再接活
+  const seen = await inspectStateLock(path);
+  expect(seen.state === "valid" && seen.alive).toBe(true);
+  await here.stop();
+  await there.stop().catch(() => {}); // 丢锁之后收摊：不该再动锁
+});
+
+test("被叫醒的后台宿主（preemptible）带了 takeover 也不抢：人开着的那段照旧挡住它", async () => {
+  const { path } = await fileLockAt();
+  const store = new InMemoryDir();
+  const common = { provider: provider(), allowNetwork: false, store, sharedStore: new InMemoryDir(), sessionId: "s1", withoutMemory: true } as const;
+  const human = await createAgent({ ...common, lock: fileStateLock(path) });
+  await human.start();
+  const background = await createAgent({ ...common, lock: fileStateLock(path), preemptible: true, takeover: true });
+  await expect(background.start()).rejects.toThrow(/已被另一个写者持有/);
+  await human.stop();
+});
+
+test("沙箱重建留下的残锁（机器名换了、pid 被复用、心跳早停了）：不带 takeover 也直接续上", async () => {
+  const { path } = await fileLockAt();
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, "g1"), JSON.stringify({ holder: "旧容器", pid: process.pid, host: "old-container.invalid", at: Date.now() - 60_000, beat: Date.now() - 60_000, token: "old" }));
+  const agent = await createAgent({ provider: provider(), allowNetwork: false, store: new InMemoryDir(), sharedStore: new InMemoryDir(), lock: fileStateLock(path), sessionId: "s1", withoutMemory: true });
+  await agent.start();
+  await agent.stop();
 });

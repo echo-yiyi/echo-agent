@@ -22,6 +22,7 @@ import type { Product } from "@echo-agent/base";
 import { terminalSurfaceSection } from "./prompt.ts";
 import { runFirstRunSetup } from "./first-run.ts";
 import { runTrustPrompt } from "./trust.ts";
+import { runTakeoverPrompt } from "./takeover.ts";
 import type { Shell } from "@echo-agent/base";
 
 /**
@@ -194,4 +195,5 @@ export const terminalShell: Shell = {
     }),
   firstRun: ({ ui, ...rest }) => runFirstRunSetup({ ...rest, ...(ui !== undefined ? { ui: ui as TUI } : {}) }),
   trustWorkspace: ({ ui, ...rest }) => runTrustPrompt({ ...rest, ...(ui !== undefined ? { ui: ui as TUI } : {}) }),
+  confirmTakeover: ({ ui, ...rest }) => runTakeoverPrompt({ ...rest, ...(ui !== undefined ? { ui: ui as TUI } : {}) }),
 };

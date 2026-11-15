@@ -55,7 +55,6 @@ import { inlineAgentExtension, INLINE_AGENT_ENTRY } from "./agent-def/extension.
 import { DEFAULT_AGENT_REF, isEmptyDefinition, type AgentRef } from "./agent-def/types.ts";
 import type { ParsedAgentFile } from "./agent-def/parse.ts";
 import { inspectStateLock } from "./storage/file-lock.ts";
-import { holderGone } from "./storage/generation-lock.ts";
 import { errText, type Diagnostic } from "./errors.ts";
 import { systemClock, type Clock } from "./schedule/clock.ts";
 import { defineExtension, type ExtensionDefinition } from "./extension/abi.ts";
@@ -560,7 +559,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   //
   // 这里注进去的两件都是**宿主知识**，core 自己给不出：
   //   · `isAlive` 读的是那一段的 `.lock`——文件锁是 node 的事。崩溃留下的锁在被下一个人接管之前
-  //     仍是 valid，所以还要看持有者死没死，判法与锁接管用的是同一个（`holderGone`）。
+  //     仍是 valid，所以还要看持有者还在不在，判法与锁接管用的是同一个（检查结果的 `alive`）。
   //   · `run` 是「怎么让新的一段跑起来」，core 不起进程（sessions.md 的 Non-Goals）。
   //
   // 别人那一段的目录**不过本 Agent 的写入闸**：闸管的是「本段的 lease 还在不在手上」，
@@ -569,12 +568,12 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
   const sessions = new EchoSessions({
     root: new FileDir(sessionsRoot),
     storeFor: (id) => new FileDir(sessionDirOf(id)),
-    // 「活着」= 锁合法 **且** 持有者没有确认死掉（2026-09-09 拍板加 pid 探针，review 2026-09-07 #90）。
+    // 「活着」= 锁合法 **且** 持有者还在（2026-09-09 拍板加 pid 探针，review 2026-09-07 #90；2026-11-15 改看心跳）。
     // 会话面拿这个判「直投还是叫醒」：崩溃留下的锁若算活着，发给它的消息就躺在没人读的 inbox 里，工具还回「它会读」。
-    // 「确认死掉」与锁接管同一个判法——同一台机器、pid 查无此号；别的机器、EPERM 一律当活着。
+    // 「还在」与锁接管同一个判法：心跳没过期，且不是「本机、pid 查无此号」。
     isAlive: async (id) => {
       const cur = await inspectStateLock(join(sessionDirOf(id), LOCK_FILE));
-      return cur.state === "valid" && !holderGone(cur.record);
+      return cur.state === "valid" && cur.alive;
     },
     self: () => ({
       sessionId: agent.state.sessionId,

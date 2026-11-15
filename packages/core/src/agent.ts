@@ -338,6 +338,15 @@ export type AgentOptions = {
    */
   preemptible?: boolean;
   /**
+   * 显式续会话时**一定续得上**（2026-11-15 用户拍板）：拿不到锁、请让位也没让成，就强行接管
+   * （`StateLock.takeOver`）。缺省 `false`。
+   *
+   * 给**显式续会话**的那一方：人 `--resume` / `--continue`、沙箱异常退出后重新拉起。盘上的持有者多半已经
+   * 随旧进程一起没了、只是判不出来（机器名变了、pid 被复用）；万一它还活着，它那边丢锁、停手。
+   * 被叫醒的临时宿主（`preemptible`）一律不抢——给了也不生效。
+   */
+  takeover?: boolean;
+  /**
    * 哪个产品（2026-09-07，替代 `agentId` / `agentName`）。写进每个新建会话的
    * `SessionInfo.product`；产品（`echo-agent` / `echo-coding`）各给各的名字，同一目录里就各有各的
    * 对话（`--continue` 按 workspace + product 挑）。缺省 `"default"`。
@@ -581,6 +590,8 @@ export class Agent {
   private readonly clock: Clock;
   /** 见 `AgentOptions.preemptible`。 */
   private readonly preemptible: boolean;
+  /** 见 `AgentOptions.takeover`。可让位的实例恒为 false。 */
+  private readonly takeover: boolean;
   /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
   private inboxPollCancel?: () => void;
   /** 哪个产品（`AgentOptions.product`）。写进新建会话的 `SessionInfo.product`，也是 holder 与观测 scope 的那一半。 */
@@ -1047,6 +1058,7 @@ export class Agent {
     this.sessionService?.attachDiagnostics((d) => this.reportDiagnostic(d));
     this.clock = opts.clock ?? systemClock;
     this.preemptible = opts.preemptible === true;
+    this.takeover = opts.takeover === true && !this.preemptible;
     this.stateLock = opts.stateLock;
     this.product = opts.product ?? "default";
     this.agentRef = opts.agent ?? DEFAULT_AGENT_REF;
@@ -1966,10 +1978,17 @@ export class Agent {
           if ((await this.stateLock.requestHandoff?.({ by: holder, timeoutMs: HANDOFF_TIMEOUT_MS })) === true) {
             lease = await this.stateLock.acquire({ holder, preemptible: this.preemptible });
           }
+          // **显式续会话一定续得上**（2026-11-15）：请过让位还拿不到，就强行接管。原持有者多半已经随旧进程
+          // （沙箱）一起没了、只是判不出来；还活着的话它那边 `lost` 触发、停手。
+          if (lease === null && this.takeover && this.stateLock.takeOver !== undefined) {
+            const was = (await this.stateLock.describeHolder?.()) ?? "持有者不明";
+            lease = await this.stateLock.takeOver({ holder, preemptible: this.preemptible });
+            this.reportDiagnostic({ code: "lease_takeover", message: `接管了这一段的写入权；原持有者：${was}` });
+          }
         }
         if (lease === null) {
-          // 拿不到就是拿不到——core 不抢占（持有者确认已死的锁，实现在 acquire 里就接管了）。
-          // 但**必须说清是谁占着**：对面还活着就该去找它；确认不了死活或锁坏了，人得先看得见对面是谁才能清。
+          // 拿不到就是拿不到（持有者已经不在的锁，实现在 acquire 里就接管了；显式续会话会走上面的接管）。
+          // 但**必须说清是谁占着**：对面还活着就该去找它；锁坏了，人得先看得见对面是谁才能清。
           const who = (await this.stateLock.describeHolder?.()) ?? null;
           throw new Error(
             `状态根已被另一个写者持有（${holder}）：拒绝启动` +

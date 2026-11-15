@@ -210,6 +210,12 @@ export type CreateAgentOptions = {
    * 否则一次后台唤醒就能把正在用的界面顶下去。透传给 `Agent`。
    */
   preemptible?: boolean;
+  /**
+   * 显式续会话时一定续得上（2026-11-15）：拿不到锁、请让位也没让成，就强行接管，原持有者丢锁停手。
+   * 缺省 `false`。只给人 `--resume` / `--continue`、沙箱重新拉起这类显式续会话；`preemptible` 的宿主给了也不生效。
+   * 透传给 `Agent`（见 `AgentOptions.takeover`）。
+   */
+  takeover?: boolean;
   /** 时间与定时器。不给用真时钟；测试给 `FakeClock` 才能零 sleep 地驱动 schedule。 */
   clock?: Clock;
   /** 凭据存储，透传给 `Models`。 */
@@ -254,7 +260,7 @@ export type CreateAgentOptions = {
  * `createEcho({ agent })` 收的那组选项：工具、skill、权限、hooks、执行预算、压缩等**装备与决策点**。
  *
  * 由 core 按状态根装配的端口不在这里——`model` / `sessionService` / `stateLock` / `memory` / `taskStore` /
- * `schedule` / `inboxStore` / `skillStore` / `toolOutputStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible`。
+ * `schedule` / `inboxStore` / `skillStore` / `toolOutputStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible` / `takeover`。
  * 嵌套里再给一个只会被**静默覆盖**，写了没生效是最坏的一种参数。
  *
  * 它有自己的名字，是因为 `Agent` 类在 core 内部（2026-09-17）：仓外念不出 `AgentOptions`，
@@ -268,6 +274,7 @@ export type EchoAgentOptions = Omit<
   | "product"
   | "agent"
   | "preemptible"
+  | "takeover"
   | "sessionId"
   | "memory"
   | "taskStore"
@@ -543,6 +550,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       product,
       ...(opts.agentDef !== undefined ? { agent: opts.agentDef } : {}),
       ...(opts.preemptible === true ? { preemptible: true } : {}),
+      ...(opts.takeover === true ? { takeover: true } : {}),
       // Agent 拿 clock 只做一件事：定期重扫 inbox（别的进程写进来的消息靠它才看得见）。
       // 与 schedule 拿到的是**同一个**——测试拨一次 FakeClock，两边一起动。
       clock: opts.clock ?? systemClock,
