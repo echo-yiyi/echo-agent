@@ -34,7 +34,7 @@ import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { inspectStateLock } from "@echo-agent/core";
 import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
-import { echoOptions, mainFor, parseArgs, retainRecentDays, usage, wakeArgs, type PresetForm } from "@echo-agent/base";
+import { echoOptions, mainFor, parseArgs, presetForm, retainRecentDays, usage, wakeArgs, type PresetForm } from "@echo-agent/base";
 import { ECHO_AGENT, main } from "../src/product.ts";
 import { isConfigured } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
@@ -1095,6 +1095,12 @@ test("叫醒会话的 argv 带 --provider / --model / --observe：宿主与父�
   expect(args).toEqual(["/bin/echo-agent.ts", "--serve", "--resume", "abc", "--provider", "kimi", "--model", "kimi-k2.6", "--state-dir", "/s", "--observe", "content", "--no-memory", "--extensions", "/ext"]);
   // 没选出家（choices 为空）就不传，副本按自己的设置走
   expect(wakeArgs("/bin/x", { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, undefined, "id")).toEqual(["/bin/x", "--serve", "--resume", "id"]);
+});
+
+test("交给产品的形态：--serve 不装壳、没人能答，哪怕在终端里起的也不算交互形态（2026-11-15）", () => {
+  expect(presetForm(true, { serve: false })).toEqual({ interactive: true });
+  expect(presetForm(true, { serve: true })).toEqual({ interactive: false });
+  expect(presetForm(false, { serve: false })).toEqual({ interactive: false });
 });
 
 test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，也能把没在跑的那段叫起来", async () => {

@@ -3827,7 +3827,7 @@ export class Agent {
       model: binding.model as Model, // RunModelSnapshot 与 Model 同形——JSON-like 的冻结副本
       runId: scope.runId,
       saveToolOutput: (file, text) => this.toolOutputs.write(file, text),
-      permission: this.permissionStage(),
+      permission: this.permissionStage(scope),
       sessionId: this._state.sessionId,
       thinkingLevel: binding.thinkingLevel,
       maxRetryDelayMs: binding.maxRetryDelayMs,
@@ -4040,13 +4040,16 @@ export class Agent {
    * loop 看到的授权 stage：policy 只裁决，ask 的登记/超时/中止/回答全在本 Agent 的 ledger。
    * `responder:"none"` 的策略若返回 ask，这里把它折成 policy deny——诚实缺席，不生成 ask、不等人。
    */
-  private permissionStage(): PermissionStage {
+  private permissionStage(scope: AgentAdmissionExecuteScope): PermissionStage {
     // 每次建 stage 时现读：扩展在 mount 期换掉策略之后，下一次 run 就该用新的那份
     const policy = this.policySlots.values.permission;
+    const binding = scope.modelBinding;
     return {
       authorize: async (input) => {
+        // 策略多看两样（2026-11-15）：用户本人说的话、一次用本会话模型的调用。params 仍是 loop 冻结的同一份对象
+        const policyInput = Object.freeze({ ...input, userIntent: this.userIntent(), askModel: (r: { system: string; prompt: string }) => this.askModel(binding, r) });
         // 先验形再看 kind：策略返回 null/"bogus" 时，这里要给出「非法裁决」而不是 TypeError
-        const verdict = normalizeVerdict(await policy.authorize(input));
+        const verdict = normalizeVerdict(await policy.authorize(policyInput));
         if (verdict.kind === "ask" && policy.responder === "none") {
           return { kind: "deny", reason: `${verdict.reason} (the policy asks for approval, but no responder is configured: ask counts as deny)` };
         }
@@ -4059,6 +4062,39 @@ export class Agent {
       },
       ask: (input, signal) => this.permissions.openAsk(input, { timeoutMs: policy.askTimeoutMs, signal }),
     };
+  }
+
+  /**
+   * 本会话里用户本人说的话（`PermissionPolicyInput.userIntent`）：transcript 里 `human` / `steer` 用户消息的文字，旧的在前。
+   * harness 插的话、工具结果、模型正文、环境消息都不算——它们不是用户写的。
+   */
+  private userIntent(): readonly string[] {
+    const out: string[] = [];
+    for (const m of this._state.messages) {
+      if (m.role !== "user" || (m.source !== "human" && m.source !== "steer")) continue;
+      const text = m.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
+      if (text !== "") out.push(text);
+    }
+    return Object.freeze(out);
+  }
+
+  /**
+   * 一次不带工具的模型调用（`PermissionPolicyInput.askModel`）：用这个 run 冻结的模型装备，受 run 的 signal 管。
+   * 出错或被中止 → reject，不返回半截文字。不进 transcript、不记观测——它是授权的一部分，不是对话。
+   */
+  private async askModel(binding: RunModelBinding, request: { system: string; prompt: string }): Promise<string> {
+    const model = binding.model as Model;
+    const apiKey = await binding.getApiKey?.(model.provider);
+    const stream = await binding.streamFunction(
+      model,
+      { systemPrompt: request.system, messages: [{ role: "user", content: [{ type: "text", text: request.prompt }] }], tools: [] },
+      { ...(this.signal !== undefined ? { signal: this.signal } : {}), ...(apiKey !== undefined ? { apiKey } : {}), thinkingLevel: "off" },
+    );
+    const final = await stream.result();
+    if (final.stopReason === "error" || final.stopReason === "aborted") {
+      throw new Error(final.error?.message ?? `the model call ended with ${final.stopReason}`);
+    }
+    return final.content.map((b) => (b.type === "text" ? b.text : "")).join("");
   }
 
   /**

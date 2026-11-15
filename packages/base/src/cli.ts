@@ -524,7 +524,7 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
-      const form: PresetForm = { interactive };
+      const form = presetForm(interactive, opts);
       // 观测过期：产品给了规则才清，**不等它**——观测的任何功能都不许让启动多等一拍（observability.md §5）。
       // 扫的是会话根下每一段：缺省每次启动都新建一段，只清自己这一段等于什么都不清。
       if (product.observationExpiry !== undefined) {
@@ -546,6 +546,14 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
   };
 }
 
+
+/**
+ * 交给产品的形态（导出只为判据）。`--serve` 不装壳、没人能答：哪怕是在终端里起的也不算交互形态——
+ * 否则产品按「有人答」装的权限策略（echo-coding 审不过就问人）与提问策略没人兑现，run 入口当场拒跑（2026-11-15）。
+ */
+export function presetForm(interactive: boolean, opts: Pick<CliOptions, "serve">): PresetForm {
+  return { interactive: interactive && opts.serve !== true };
+}
 
 /**
  * 叫醒一段会话时给副本的 argv（导出只为判据）：与父进程**同一家、同一模型**、同状态根、同扩展目录

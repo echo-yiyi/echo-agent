@@ -38,7 +38,7 @@ import { codingConductSection, codingIdentitySection, shellToolsSection, workspa
 
 export type CodingPresetOptions = {
   /**
-   * 权限策略；false = 不装策略、全放行（出厂 echo-coding 就是这一档，见 `cli.ts`）。不给 = `DEFAULT_PERMISSION`
+   * 权限策略；false = 不装策略、全放行（出厂 echo-coding 的管道形态就是这一档，见 `cli.ts`）。不给 = `DEFAULT_PERMISSION`
    * （`permission.ts`：bash / write_file / edit_file 先问）——没配裁决人时这三件会被拒。
    */
   permission?: PermissionPolicy | false;

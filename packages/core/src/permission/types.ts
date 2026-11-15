@@ -65,7 +65,26 @@ export type PermissionVerdict =
   | Readonly<{ kind: "deny"; reason: string }>
   | Readonly<{ kind: "ask"; reason: string }>;
 
-export type PermissionAuthorizer = (input: PermissionAuthorizeInput) => PermissionVerdict | Promise<PermissionVerdict>;
+/**
+ * 策略看到的现场（2026-11-15）：stage 的输入，加上 Agent 补的两样。loop 不碰它们——`PermissionStage` 的输入仍是
+ * `PermissionAuthorizeInput`，由 Agent 在交给策略之前补上。
+ */
+export type PermissionPolicyInput = PermissionAuthorizeInput &
+  Readonly<{
+    /**
+     * 本会话里**用户本人说的话**：`human` / `steer` 用户消息的正文，旧的在前。只读快照。
+     * 不含工具结果、模型正文、环境消息（别的会话、提醒、后台任务）——那些可能是别人写来引导 agent 的，
+     * 审「这一步是不是用户要的」时只能拿用户亲口说的比。会话由别的会话或定时器开起来时可能是空的。
+     */
+    userIntent: readonly string[];
+    /**
+     * 用本会话的模型做一次不带工具的调用，返回它的文本（不含 thinking）。给「让模型审一审」的策略用。
+     * 受 run 的 signal 管；模型出错或被中止时 reject——策略该把 reject 当成「审不了」，不当成放行。
+     */
+    askModel: (request: Readonly<{ system: string; prompt: string }>) => Promise<string>;
+  }>;
+
+export type PermissionAuthorizer = (input: PermissionPolicyInput) => PermissionVerdict | Promise<PermissionVerdict>;
 
 /**
  * Agent 构造期收的策略（`AgentOptions.permission`）。

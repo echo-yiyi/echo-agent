@@ -119,6 +119,7 @@ export type {
   PermissionAsk,
   PermissionAskHandle,
   PermissionAuthorizeInput,
+  PermissionPolicyInput,
   PermissionAuthorizer,
   PermissionPolicy,
   PermissionPolicyConfig,

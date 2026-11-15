@@ -13,9 +13,10 @@ export {
   mainFor,
   parseArgs,
   usage,
-  // 判据入口：`echoOptions` 是「装配现场那一份入参」，`wakeArgs` 是叫醒一段会话时传给子进程的参数。
-  // 导出它们是为了让产品能对着**装配的真入参**写判据，而不是另搭一套。
+  // 判据入口：`echoOptions` 是「装配现场那一份入参」，`wakeArgs` 是叫醒一段会话时传给子进程的参数，
+  // `presetForm` 是交给产品的形态。导出它们是为了让产品能对着**装配的真入参**写判据，而不是另搭一套。
   echoOptions,
+  presetForm,
   wakeArgs,
   type CliOptions,
   type Main,

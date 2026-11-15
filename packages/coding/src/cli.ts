@@ -7,16 +7,19 @@
 // 装配、收摊全在 base 的 `mainFor()` 里，这里一行都不复制；交互形态起哪个壳由本文件挑
 // （`terminalShell`），装配层不写死。
 //
-// **权限：出厂的 echo-coding 全放行**（2026-09-01 用户拍板，两种形态都是）。这里传 `permission: false` = 不装策略，
-// bash / write_file / edit_file 不问直接跑。理由：这是用户自己在自己的仓库里开的 coding agent，
-// 每一步都问只会让人按到麻木；管道形态更是没人可问。
+// **权限**：2026-09-01 定的是两种形态都全放行——每一步都问只会让人按到麻木，管道形态更是没人可问。
+// 2026-11-15 起**交互形态改由模型先审**（`REVIEWED_PERMISSION`）：bash 与 web_fetch 先让本会话的模型对着用户说过的话
+// 审一遍，日常开发放行、用户没要的高风险动作拦下；人只在连着被拦、或审不了的时候被问到。全放行时模型一旦被
+// 仓库里、网页里的字骗了，后面没有任何一层拦得住。**管道形态仍全放行**（`permission: false`）：评测与 CI 没人可问，
+// 每条命令多一次模型调用也会改掉评测的成本与结果。
 // `permission.ts` 的 `DEFAULT_PERMISSION`（三件先问的黑名单）**不是这条命令的行为**：它只在嵌入方调 `codingPreset()`
-// 而不传 `permission` 时生效（评测、别的宿主）；要在交互壳里问 y/n，再给 `responder: "host"`。
+// 而不传 `permission` 时生效（评测、别的宿主）。
 
 import { readFileSync } from "node:fs";
 import { conductEntry, mainFor, retainRecentDays, type Product } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { codingPreset } from "./agent.ts";
+import { REVIEWED_PERMISSION } from "./permission.ts";
 
 /** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置。 */
 const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
@@ -35,7 +38,9 @@ export const ECHO_CODING: Product = Object.freeze({
   // 共用的纪律段由**产品**挂（2026-09-09 拍板）：装配层不再恒挂，形态决定「有没有人能答」那一条。
   // `codingPreset()` 自己只依赖 core，所以这一条加在这里，不加进它。
   preset: (form, host) => {
-    const preset = codingPreset({ permission: false, maxIterations: 200, credentials: host.credentials });
+    // 交互形态由模型先审、审不过问终端里的人；管道形态全放行（见文件头）
+    const permission = form.interactive ? ({ ...REVIEWED_PERMISSION, responder: "host" } as const) : false;
+    const preset = codingPreset({ permission, maxIterations: 200, credentials: host.credentials });
     return { ...preset, extensions: [conductEntry(form), ...preset.extensions] };
   },
   // 观测留 30 天（2026-09-15 用户拍板，与 echo-agent 同一条规则；两个产品平级，各自声明各自的）。

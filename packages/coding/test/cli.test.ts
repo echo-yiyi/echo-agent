@@ -12,7 +12,7 @@ import { ECHO_CODING } from "../src/cli.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
-test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；两种形态都不装权限策略（缺省全放行）", () => {
+test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；交互形态装模型审查的权限策略、管道形态全放行", async () => {
   for (const interactive of [true, false]) {
     const preset = ECHO_CODING.preset!({ interactive }, { credentials: new InMemoryCredentialStore() });
     // 身份与纪律段、文件读写与搜索、shell 只属于 coding（不在 echo-agent 里）——它们以 Extension 的形态跟着产品走。
@@ -33,10 +33,19 @@ test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 w
     // workspace 是 session 级事实，由 `mainFor()` 直接交给 `createEcho()`，preset 不出这一项（2026-09-01）。
     // 执行预算 200（2026-09-02 用户拍板）：core 缺省 20 是通用 agent / 评测的预算，coding 几步就撞顶。
     // 思考档 medium（2026-11-03 拍板）：两种形态都开，管道形态没有 Shift+Tab 可按
-    expect(preset.agent).toEqual({ maxIterations: 200, thinkingLevel: "medium" });
-    // 缺省全放行（2026-09-01 用户拍板）：不装策略，bash / write_file / edit_file 不问直接跑。
-    // 「动手先问」（`permission.ts` 的 `DEFAULT_PERMISSION`）是 `codingPreset()` 不传 permission 时的缺省（评测 / 别的宿主），本产品传 false 不用它。
-    expect([interactive, preset.agent?.permission]).toEqual([interactive, undefined]);
+    // 权限（2026-11-15）：交互形态 bash / web_fetch 先过模型审查、审不过问人（responder host）；管道形态仍全放行（不装策略）。
+    // 「动手先问」（`permission.ts` 的 `DEFAULT_PERMISSION`）是 `codingPreset()` 不传 permission 时的缺省（评测 / 别的宿主），本产品不用它。
+    const { permission, ...rest } = preset.agent ?? {};
+    expect(rest).toEqual({ maxIterations: 200, thinkingLevel: "medium" });
+    expect([interactive, permission === undefined]).toEqual([interactive, !interactive]);
+    if (permission !== undefined) {
+      expect([permission.responder, permission.askTimeoutMs]).toEqual(["host", null]);
+      const verdict = await permission.authorize({
+        runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params: { command: "ls" }, userIntent: [],
+        askModel: async () => "BLOCK: not asked for",
+      });
+      expect(verdict.kind).toBe("deny"); // bash 走审查
+    }
   }
 });
 

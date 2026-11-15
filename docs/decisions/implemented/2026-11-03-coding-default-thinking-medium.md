@@ -1,6 +1,6 @@
 # `echo-coding` 缺省开思考：`codingPreset()` 的思考档缺省 `medium`
 
-> 状态:implemented · 提出 2026-11-03（echo-coding 工具线排查）· 拍板 2026-11-03（用户：「全部按推荐修」）· 实现 2026-11-03 · 来源 `packages/coding/src/agent.ts`（`codingPreset` 与 `CodingPresetOptions.thinkingLevel`），判据 [缺省与显式](../../../packages/coding/test/identity.test.ts#test=codingpreset-缺省开思考medium装出来的-agent-生效值就是它调用方显式给的档位照用)、[产品两种形态](../../../packages/coding/test/cli.test.ts#test=preset产品自带-echocoding-echoworkspace-echoshell不碰-workspace两种形态都不装权限策略缺省全放行)
+> 状态:implemented · 提出 2026-11-03（echo-coding 工具线排查）· 拍板 2026-11-03（用户：「全部按推荐修」）· 实现 2026-11-03 · 来源 `packages/coding/src/agent.ts`（`codingPreset` 与 `CodingPresetOptions.thinkingLevel`），判据 [缺省与显式](../../../packages/coding/test/identity.test.ts#test=codingpreset-缺省开思考medium装出来的-agent-生效值就是它调用方显式给的档位照用)、[产品两种形态](../../../packages/coding/test/cli.test.ts#test=preset产品自带-echocoding-echoworkspace-echoshell不碰-workspace交互形态装模型审查的权限策略管道形态全放行)
 
 ## 现状(拍板前)
 
