@@ -427,9 +427,10 @@ test.skipIf(detectSandbox().name === "unavailable")("沙箱走真装配：echo:s
   expect([fg.isError, existsSync(outside)]).toEqual([true, false]);
   const bg = await run("bash", { command: `echo x > ${outside}.bg; echo finished`, background: true });
   const id = /Started in the background: (\S+)/.exec(bg.content)![1]!;
+  // 等作业结束再看输出（看状态，不看输出里的字：作业的标签就是命令本身，命令里的字恒在）
   const deadline = Date.now() + 5000;
   let seen = await run("job_output", { id });
-  while (!seen.content.includes("finished") && Date.now() < deadline) {
+  while (seen.content.startsWith(`${id} [running]`) && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 20));
     seen = await run("job_output", { id });
   }
