@@ -170,6 +170,9 @@ const ctx = (): ToolExecutionContext => ({
   iteration: 0,
 });
 
+/** web_fetch / web_search 的正文：去掉打头那一句「外部内容」说明（它的判据在 web.test.ts）。 */
+const webBody = (content: string): string => (content.startsWith("[External content from ") ? content.slice(content.indexOf("\n") + 1) : content);
+
 function tool(list: ModelTool[], name: string): ModelTool {
   return list.find((t) => t.name === name)!;
 }
@@ -780,15 +783,15 @@ test("web_fetch：HTML 剥成文本（标题、标题级、链接、列表）；
     expect([big.isError, big.content]).toEqual([false, expect.stringContaining("over 4000000 bytes, cut")]);
     expect(served).toBeLessThan(8 * 1024 * 1024); // 到上限就 cancel 了，不是把无限流读到内存里
     const page = await fetchTool.execute({ url: `${base}/page` }, ctx());
-    expect([page.isError, page.content]).toEqual([false, "Hi & bye\n\n# Top\nHello [link](https://x.test/a) world\n- one\n- two"]);
+    expect([page.isError, webBody(page.content)]).toEqual([false, "Hi & bye\n\n# Top\nHello [link](https://x.test/a) world\n- one\n- two"]);
     const json = await fetchTool.execute({ url: `${base}/json` }, ctx());
-    expect([json.isError, json.content]).toEqual([false, '{"a":1}']);
+    expect([json.isError, webBody(json.content)]).toEqual([false, '{"a":1}']);
     const missing = await fetchTool.execute({ url: `${base}/missing` }, ctx());
     expect([missing.isError, missing.content]).toEqual([true, expect.stringContaining("HTTP 404")]);
     const bin = await fetchTool.execute({ url: `${base}/bin` }, ctx());
     expect([bin.isError, bin.content]).toEqual([true, expect.stringContaining("Unsupported content type")]);
     const short = await fetchTool.execute({ url: `${base}/page`, max_chars: 8 }, ctx());
-    expect([short.isError, short.content.startsWith("Hi & bye\n…[truncated")]).toEqual([false, true]);
+    expect([short.isError, webBody(short.content).startsWith("Hi & bye\n…[truncated")]).toEqual([false, true]);
     const bad = await fetchTool.execute({ url: "ftp://x" }, ctx());
     expect(bad.isError).toBe(true);
   } finally {
@@ -836,7 +839,8 @@ test("web_search（Brave）：没配 key 如实报没配；环境变量优先于
     const store = { read: async (id: string) => (id === "brave" ? ({ type: "api_key", key: "from-store" } as const) : undefined) };
     const withStore = search(makeWebTools({ credentials: store, searchEndpoint: endpoint }));
     const r1 = await withStore.execute({ query: "bun workspace", count: 2, freshness: "week" }, ctx());
-    expect([r1.isError, r1.content]).toEqual([
+    expect(r1.content.split("\n")[0]).toContain("External content from Brave Search");
+    expect([r1.isError, webBody(r1.content)]).toEqual([
       false,
       'Results for "bun workspace":\n1. Bun docs (2 days ago)\n   https://bun.sh/docs\n   Bun & TypeScript guide\n2. Other\n   https://x.test',
     ]);

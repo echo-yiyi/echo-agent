@@ -28,7 +28,7 @@ describe("文档门", () => {
   test("链接:Markdown 锚点真实存在;源码链接仍指向声明或唯一测试名", () => {
     const v = checkLinks(manifest);
     expect(v.map(x => x.path), `死链:${fmt(v)}\n`).toEqual([]);
-  });
+  }, 30_000); // 每条源码链接都要解析一遍 TS：本机约 3 秒，macOS CI 机器上到过 5.5 秒，缺省 5 秒不够
 
   test("代码块:文档里的 ts 围栏能独立编译", () => {
     const v = checkCodeBlocks(manifest);

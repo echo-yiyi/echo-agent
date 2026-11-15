@@ -582,6 +582,8 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       // **现查的那一份工作集**：不越权检查读它。装配时抄一份下来的话，
       // 一段被角色收紧过的 session 仍然能按「产品全套」去派活，收紧就成了摆设。
       tools: agent.state.tools.map((t) => t.name),
+      // 被收紧过的创建者派出「不点工具」的新段时，新段继承它的工具集，不拿回产品全套
+      restricted: agent.toolRestrictions.length > 0,
     }),
     agentDefs: () => agentDefs,
     ...(opts.sessions?.run !== undefined ? { run: opts.sessions.run } : {}),

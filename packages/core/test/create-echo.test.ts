@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtemp, mkdir, writeFile, rm, chmod } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, chmod } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -927,12 +927,13 @@ test("不越权比的是创建者此刻的工具集而不是池：被角色收�
     execute: async () => toolOk(name),
     ...(deferred ? { deferred: true } : {}),
   });
+  const sessionsRoot = await tmp();
   const echo = await createEcho({
     provider: scripted([textTurn("ok")]),
     allowNetwork: false,
     withoutMemory: true,
     extensionDirs: [],
-    sessionsRoot: await tmp(),
+    sessionsRoot,
     sessions: {},
     agent: { tools: [tool("read_a"), tool("write_b"), tool("cold_c", true)] },
     agentDef: { name: "narrow", definition: { tools: ["read_a", "cold_c"] } },
@@ -943,6 +944,10 @@ test("不越权比的是创建者此刻的工具集而不是池：被角色收�
 
   await expect(create(["write_b"])).rejects.toThrow(/write_b/); // 在池里、被角色收紧挡掉——比池的话会放行
   expect((await create(["cold_c"])).id).toMatch(/^s-/); // 延迟、没取过、不在菜单上：创建者随时取得来，算它有
+  // 不点工具的新段：创建者被角色收紧过 → 继承它此刻的工具集，拿不回 write_b（2026-11-15）
+  const bare = await echo.sessions.create({ message: "干活", main: false });
+  const meta = JSON.parse(await readFile(join(sessionsRoot, bare.id, "meta.json"), "utf8")) as { agent: { definition: { tools?: string[] } } };
+  expect(meta.agent.definition.tools?.slice().sort()).toEqual(["cold_c", "read_a"]);
   disableTools(agentOf(echo).tools, ["read_a"], "test");
   await expect(create(["read_a"])).rejects.toThrow(/read_a/); // 在池里、已禁用
 });

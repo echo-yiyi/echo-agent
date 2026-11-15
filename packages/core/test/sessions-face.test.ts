@@ -45,6 +45,8 @@ function harness(
     runTimeoutMs?: number;
     /** 创建者此刻的工作集——不越权检查读它。 */
     tools?: readonly string[];
+    /** 创建者的工作集是不是被收紧过。 */
+    restricted?: boolean;
     /** 容器认得的具名 agent 定义。不给 = 一份都没有，点名一律判红。 */
     agentDefs?: ReadonlyMap<string, AgentDefinition>;
   } = {},
@@ -56,7 +58,7 @@ function harness(
     root,
     storeFor: (id) => scoped(root, `${id}/`),
     isAlive: async (id) => alive.has(id),
-    self: () => ({ sessionId: opts.selfId ?? "s-self", product: "echo-agent", workspace: "/repo", tools: opts.tools ?? [] }),
+    self: () => ({ sessionId: opts.selfId ?? "s-self", product: "echo-agent", workspace: "/repo", tools: opts.tools ?? [], ...(opts.restricted !== undefined ? { restricted: opts.restricted } : {}) }),
     ...(opts.agentDefs !== undefined ? { agentDefs: () => opts.agentDefs! } : {}),
     ...(opts.run !== undefined
       ? {
@@ -557,6 +559,22 @@ test("运行中造具名身份：{ name, definition } 不用预先注册；名�
   await expect(h.sessions.create({ message: "x", main: false, agent: { name: "reviewer", definition: {} } })).rejects.toThrow("reviewer");
   await expect(h.sessions.create({ message: "x", main: false, agent: { name: "../hr", definition: {} } })).rejects.toThrow("不能用");
   expect((await listSessions(h.root)).length).toBe(3); // 三次判红，盘上一段都没多
+});
+
+test("被收紧过的创建者派新段：定义里没写 tools 的（不点角色、点名、现写）一律按创建者此刻的工具集补上并落进 meta；写了的照旧验越权；没被收紧的不补（2026-11-15）", async () => {
+  // 此前不写 tools = 产品全套：被角色收紧到只读的段派一段「不点工具」的，就拿回了 bash
+  const h = harness({ run: async () => {}, tools: ["read_file"], restricted: true, agentDefs: new Map([["helper", { identity: "帮手" }]]) });
+  await h.sessions.create({ message: "a", main: false });
+  await h.sessions.create({ message: "b", main: false, agent: "helper" });
+  await h.sessions.create({ message: "c", main: false, agent: { identity: "现写的" } });
+  await h.sessions.create({ message: "d", main: false, agent: { name: "hr-z", definition: {} } });
+  const tools = (await listSessions(h.root)).map((i) => i.agent.definition.tools);
+  expect(tools).toEqual([["read_file"], ["read_file"], ["read_file"], ["read_file"]]);
+  await expect(h.sessions.create({ message: "x", main: false, agent: { tools: ["shell"] } })).rejects.toThrow("shell");
+
+  const free = harness({ run: async () => {}, tools: ["read_file", "shell"] });
+  await free.sessions.create({ message: "a", main: false });
+  expect((await listSessions(free.root)).map((i) => i.agent.definition.tools)).toEqual([undefined]);
 });
 
 test("工具面：inline 定义带 name 就是一个具名身份；带名字时空定义也行；名字不合法当场判红", async () => {

@@ -56,6 +56,7 @@ export {
   zaiCodingProvider,
   minimaxProvider,
   OPENAI_COMPLETIONS_API,
+  BUILTIN_PROVIDER_KEY_ENV,
 } from "./provider/openai.ts";
 export type { OpenAiDialectOptions, BuiltinProviderOptions } from "./provider/openai.ts";
 export type {

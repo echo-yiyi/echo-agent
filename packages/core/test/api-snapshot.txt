@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 357（value 128 · type 212 · both 17）
+符号 358（value 129 · type 212 · both 17）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -358,7 +358,8 @@ type   CreateProviderOptions
 both   InMemoryCredentialStore
 both   Models
 
--- src/provider/openai.ts (9) --
+-- src/provider/openai.ts (10) --
+value  BUILTIN_PROVIDER_KEY_ENV
 type   BuiltinProviderOptions
 value  deepseekProvider
 value  kimiProvider
