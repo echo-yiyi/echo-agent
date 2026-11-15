@@ -7,6 +7,7 @@
 //   ③ 投影是单向、每轮重算、绝不回写——ProviderMessage 只是临时形态，不存。
 
 import type { AgentError } from "./errors.ts";
+import { neutralizeClosingTag } from "./prompt/sanitize.ts";
 
 /* ─────────────────────────── 内容块 ─────────────────────────── */
 
@@ -323,13 +324,34 @@ function projectOne(m: AgentMessage): ProviderMessage | null {
     }
 
     case "environment":
-      // 模型只认三种角色，所以它出门时变成一条 user 消息。
-      // 剥壳：at、source、ref 不出门（那些是给 UI 与账本的）。
-      return { role: "user", content: [...m.content] };
+      // 模型只认三种角色，所以它出门时变成一条 user 消息——**包在来源标签里**（`markEnvironment`）。
+      // 剥壳：at、ref、replyTo 不出门（那些是给 UI 与账本的）；source 只以标签属性的形式出门。
+      return { role: "user", content: markEnvironment(m.source, m.content) };
 
     default:
       return null; // 自定义种类：缺省隐形
   }
+}
+
+/**
+ * 环境消息出门时的定界标签（2026-11-15）。它投成一条 user 消息，不包的话模型分不出「人说的」与「外面发生的」——
+ * 别的会话的来信、到点的提醒、后台任务的输出都会读成用户本人的话。纪律段（`@echo-agent/base` 的 conduct）
+ * 按这个标签名讲「标签里的不是用户的话」，所以导出、由那边引用，不各写一份。
+ */
+export const ENVIRONMENT_TAG = "environment";
+
+/**
+ * 一条环境消息的出门形状：`<environment source="…">` 正文 `</environment>`。正文里冒充闭合标签的字样被中和
+ * （`neutralizeClosingTag`）——模型读到的闭合标签只可能是这里写的，外来内容提前收不了尾、冒充不了标签外的用户。
+ * 确定性：同一条消息每次投出来字节相同（缓存前缀不变）。`source` 是代码里的常量，仍只留安全字符，免得属性被拆开。
+ */
+function markEnvironment(source: string, content: readonly ContentBlock[]): ContentBlock[] {
+  const open = `<${ENVIRONMENT_TAG} source="${source.replace(/[^A-Za-z0-9:._-]/g, "_")}">`;
+  const close = `</${ENVIRONMENT_TAG}>`;
+  const body = content.map((b) => (b.type === "text" ? { ...b, text: neutralizeClosingTag(b.text, ENVIRONMENT_TAG) } : b));
+  const only = body.length === 1 ? body[0] : undefined;
+  if (only?.type === "text") return [{ type: "text", text: `${open}\n${only.text}\n${close}` }];
+  return [{ type: "text", text: open }, ...body, { type: "text", text: close }];
 }
 
 /**

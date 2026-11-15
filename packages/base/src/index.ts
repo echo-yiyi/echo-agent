@@ -54,7 +54,6 @@ export {
   instructionsSection,
   loadInstructions,
   renderInstructions,
-  neutralizeClosingTag,
   INSTRUCTION_FILES,
   INSTRUCTIONS_CAP,
   instructionsHeader,

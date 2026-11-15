@@ -1174,7 +1174,7 @@ test("续上一段会话：system 按此刻的记忆重取（完整内容回到 
   const last = seen[seen.length - 1]!;
   expect(last.systemPrompt).toContain("偏好B"); // 完整的现行内容在 system 里
   const texts = last.messages.map((m) => m.content.map((b) => (b.type === "text" ? b.text : "")).join(""));
-  const notices = texts.filter((t) => t.startsWith("Memory files changed"));
+  const notices = texts.filter((t) => t.startsWith("<environment source=\"memory\">\nMemory files changed")); // 环境消息出门包在来源标签里（2026-11-15）
   expect(notices).toHaveLength(1); // 上个进程那条，原样还在；续上没有新变化，不补
   expect(notices[0]).toContain("added: user/user.md"); // 冻结那一刻它还不存在
   expect(notices[0]).not.toContain("偏好A"); // 通知不带内容

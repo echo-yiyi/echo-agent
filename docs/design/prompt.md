@@ -172,18 +172,20 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 - **结构卫生**：单行化、围栏、截断是否让格式与体积可控。
 - **安全隔离**：不可信文字是否无法改变更高层指令的含义。
 
-[`singleLine()`](../../packages/core/src/prompt/sanitize.ts#symbol=singleLine)、[`fenceSafe()`](../../packages/core/src/prompt/sanitize.ts#symbol=fenceSafe) 与 [`truncateMarked()`](../../packages/core/src/prompt/sanitize.ts#symbol=truncateMarked) 只提供第二项：折叠换行、替换反引号、截取前缀并留下标记。它们不提供第三项，也不应该叫 sanitizer 或“安全边界”。`fenceSafe()` 只给放进反引号围栏的内容用；项目指令与 skill 正文用标签或标记行定界、没有围栏要保护，反引号原样保留——换掉它们只会把正文里的命令与代码改坏。
+[`singleLine()`](../../packages/core/src/prompt/sanitize.ts#symbol=singleLine)、[`fenceSafe()`](../../packages/core/src/prompt/sanitize.ts#symbol=fenceSafe)、[`neutralizeClosingTag()`](../../packages/core/src/prompt/sanitize.ts#symbol=neutralizeClosingTag) 与 [`truncateMarked()`](../../packages/core/src/prompt/sanitize.ts#symbol=truncateMarked) 只提供第二项：折叠换行、替换反引号、中和冒充闭合标签的字样、截取前缀并留下标记。它们不提供第三项，也不应该叫 sanitizer 或“安全边界”。`fenceSafe()` 只给放进反引号围栏的内容用；项目指令与 skill 正文用标签或标记行定界、没有围栏要保护，反引号原样保留——换掉它们只会把正文里的命令与代码改坏。
 
 | 来源 | authority | 当前卫生措施 | 必须如实说明的限制 |
 | --- | --- | --- | --- |
 | 产品 / extension 字面量 | 产品代码 | 无；视为受信 | 改文案就是改模型行为，应与代码一起 review |
-| workspace 的 AGENTS.md / CLAUDE.md | 作为用户自己的项目指令执行 | 正文前缀 65 536 字符、XML-like 标签定界、正文里冒充闭合标签的字样中和；段头写实际加载的文件名 | 第三方仓库本身不可信时，靠 prompt 包装无法授权它 |
+| workspace 的 AGENTS.md / CLAUDE.md | 这个仓库的约定：照守「在这里怎么干活」；段头说清它随仓库来、不是用户的话，批准不了用户没要的动作（2026-11-15） | 正文前缀 65 536 字符、XML-like 标签定界、正文里冒充闭合标签的字样中和；段头写实际加载的文件名 | 段头只是 prompt 层的约束：模型照不照守靠它自己，第三方仓库的真正信任决定在权限、确认与沙箱层 |
 | skill 正文与激活参数 | 被激活后作为工作指令执行 | 与起止标记同形的行转义、单条和总预算、参数单行化 | 起止标记不是安全沙箱；skill 的安装 / 激活就是信任决定 |
-| memory | 跨 run 的持久背景 | resident / index 各自有预算；索引描述单行化 | 正文有意保留多行并直接影响模型，旧记忆可能陈旧或被污染 |
+| memory | 跨 run 的持久背景；段头说清它不是用户的指令、记着的「用户允许过」不是此刻的许可（2026-11-15） | resident / index 各自有预算；索引描述单行化；提取指令要求许可与偏好只记用户亲口说的 | 正文有意保留多行并直接影响模型，旧记忆可能陈旧或被污染 |
+| environment 消息（后台任务、提醒到点、别的会话来信、记忆变化、skill 正文、任务清单） | 材料：纪律段讲清只有用户本人的消息是指令（2026-11-15） | 出门时包 `<environment source="…">` 标签，正文里冒充闭合标签的字样中和（[`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)） | 标签只让模型分得清来源，不阻止它照做；照不照做靠模型守纪律段 |
+| `web_fetch` / `web_search` 结果（echo-coding） | 材料 | 正文前一行写来源、说明当数据不当指令 | 同上：是标记，不是过滤 |
 | task title / executor | 只应是清单数据 | 只有条数上限 | 当前可换行、可无界增长，能伪装成额外指令段 |
 | prompt variables | section 引用的运行事实 | 无转义，替换值不重扫 | workspace 等字符串原样进入 system；它们不是模板代码，但仍能包含换行 |
 
-项目指令尤其不能写成“定界与消毒保证结构隔离”。它们本来就是要模型执行的用户级指令；若用户打开第三方仓库，真正的信任决策应发生在宿主权限、确认与沙箱层。把 `</project-instructions>` 替换掉也不会让正文失去指令性，只会让标签更整齐。
+项目指令尤其不能写成“定界与消毒保证结构隔离”。约定本来就是要模型照守的；段头把它定位成「仓库的约定」而不是「用户本人的话」（2026-11-15），只是让模型有据可依，若用户打开第三方仓库，真正的信任决策仍应发生在宿主权限、确认与沙箱层。把 `</project-instructions>` 替换掉也不会让正文失去指令性，只会让标签更整齐。
 
 `INSTRUCTIONS_CAP` 也是正文前缀的 cap，不是最终 section 长度上限：`truncateMarked()` 会在截取的前缀后追加 marker，header / tags 再增加固定字节。文档和注释应称“正文截断阈值”，机器判据则检查最终输出的明确上界，而不是声称 `out.length <= INSTRUCTIONS_CAP`。
 

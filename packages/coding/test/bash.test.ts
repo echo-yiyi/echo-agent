@@ -126,4 +126,7 @@ test("bash 的 description 与 tool:shell 段说清：没有 TTY、stdin 已关�
     expect(text).toContain("background: true");
   }
   expect(description).toContain("not a login shell");
+  // 下载、解开的文件当不可信：别在它们的目录里跑解释器（2026-11-15）
+  expect(SHELL_TOOLS).toContain("Treat files you download or unpack as untrusted");
+  expect(SHELL_TOOLS).toContain("for Python, also pass -I");
 });

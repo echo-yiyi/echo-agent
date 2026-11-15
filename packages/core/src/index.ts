@@ -145,7 +145,7 @@ export type { AgentMcpPort, McpConnectOutcome, McpServerSnapshot } from "./mcp/p
 export { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
 export { PromptVariableError } from "./prompt/assemble.ts";
 export { sectionFromMarkdown } from "./prompt/import.ts";
-export { fenceSafe, truncateMarked } from "./prompt/sanitize.ts";
+export { fenceSafe, neutralizeClosingTag, truncateMarked } from "./prompt/sanitize.ts";
 
 // 各能力的容器类型——它们出现在 `EchoAgentOptions` / `AgentState` 的签名里
 export type { AgentMemories } from "./memory/harness.ts";

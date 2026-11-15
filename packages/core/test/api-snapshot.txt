@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 358（value 129 · type 212 · both 17）
+符号 360（value 131 · type 212 · both 17）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -245,7 +245,7 @@ type   MemoryExtractOptions
 -- src/memory/harness.ts (1) --
 type   AgentMemories
 
--- src/messages.ts (28) --
+-- src/messages.ts (29) --
 type   AgentMessage
 value  assistantMessage
 type   AssistantMessage
@@ -254,6 +254,7 @@ type   Context
 type   ConvertToLlm
 type   CustomAgentMessages
 value  defaultConvertToLlm
+value  ENVIRONMENT_TAG
 value  environmentMessage
 type   EnvironmentMessage
 type   ImageBlock
@@ -327,8 +328,9 @@ both   PromptVariableError
 -- src/prompt/import.ts (1) --
 value  sectionFromMarkdown
 
--- src/prompt/sanitize.ts (2) --
+-- src/prompt/sanitize.ts (3) --
 value  fenceSafe
+value  neutralizeClosingTag
 value  truncateMarked
 
 -- src/prompt/types.ts (5) --

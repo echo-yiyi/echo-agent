@@ -13,6 +13,15 @@ export function singleLine(text: string): string {
   return text.replace(/\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/g, " ").trim();
 }
 
+/**
+ * 正文里冒充闭合标签 `</tag …>` 的字样(含大小写与内部空白变体),把 `<` 换成全角 `＜`:字面还看得出来,但不再是标签。
+ * 用标签定界的地方(项目说明、环境消息)都用它——闭合标签只能由我们写在最后,正文提前收不了尾。
+ */
+export function neutralizeClosingTag(body: string, tag: string): string {
+  const re = new RegExp(`<\\s*/\\s*${tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b[^>]*>?`, "gi");
+  return body.replace(re, (m) => `＜${m.slice(1)}`);
+}
+
 /** 只中和反引号(→ ˋ U+02CB)、保换行。用于放进围栏的多行不可信内容——围栏本身靠它不被逃逸。 */
 export function fenceSafe(text: string): string {
   return text.replaceAll("`", "ˋ");
