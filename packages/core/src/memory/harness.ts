@@ -32,6 +32,7 @@ import {
   type DreamGates,
   type DreamState,
 } from "./dream.ts";
+import { DEFAULT_EXTRACT_SETTINGS, type ExtractSettings } from "./extract.ts";
 import { createMemoryTool, hasHiddenSegment, normalizeMemoryPath, TASK_MEMORY_TOOL_DESCRIPTION, TASK_MEMORY_TOOL_PARAMETERS, type CreateMemoryToolOptions, type MemoryToolParams } from "./tool.ts";
 import { lateBoundMemoryDir, safeScopeSegment, splitScopePath, type LateBoundMemoryDir, type MemoryScopeTable } from "./scope.ts";
 import { acquireMemoryLock, assertFresh, withMemoryRegionLock } from "./lock.ts";
@@ -58,7 +59,10 @@ export type MemoryHarnessOptions = {
    * (2026-09-08,对齐压缩的 `builtin` 分法)。
    */
   memories?: readonly AnyMemory[];
+  /** 整理的门，**整份替换** `DEFAULT_DREAM_GATES`（产品配的那份在装配层已与缺省合好，见 `resolveDreamGates`）。 */
   dream?: DreamGates;
+  /** 提取的节奏与上限，已补齐缺省的那份（装配层由 `resolveExtractOptions` 给）。缺省 `DEFAULT_EXTRACT_SETTINGS`。 */
+  extract?: ExtractSettings;
   /** 替换组装分发(支持自定义 mode 时用)。 */
   composeMemory?: ComposeMemory;
   /** 替换写入校验分发。 */
@@ -92,6 +96,8 @@ export type AgentMemories = MemoryDeps & {
   composeFn: ComposeMemory;
   checkFn: CheckWrite;
   gates: DreamGates;
+  /** 提取的节奏与上限（`Agent` 排提取、起提取子循环时读）。 */
+  extract: ExtractSettings;
   toolOpts?: CreateMemoryToolOptions;
   /**
    * 内建那三个模块该不该由 `echo:memory` 注册。传了 `memories` = 完全接管 → false。
@@ -152,6 +158,7 @@ export function createAgentMemories(opts?: MemoryHarnessOptions): AgentMemories 
     composeFn: opts?.composeMemory ?? defaultComposeMemory,
     checkFn: opts?.checkWrite ?? defaultCheckWrite,
     gates: opts?.dream ?? DEFAULT_DREAM_GATES,
+    extract: opts?.extract ?? DEFAULT_EXTRACT_SETTINGS,
     ...(opts?.tool !== undefined ? { toolOpts: opts.tool } : {}),
     builtinModules: opts?.memories === undefined,
     ...(opts?.lockTimeoutMs !== undefined ? { lockTimeoutMs: opts.lockTimeoutMs } : {}),

@@ -860,7 +860,7 @@ function contentSections(t, end) {
 
 /* ── 送进模型的是什么（观测白盒化 A：context.built / prompt.assembled）── */
 const fmtTok = (n) => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString("en-US"));
-const COMPACT_DECISION = { no_stage: "没有压缩阶段", no_window: "模型没标窗口", below_target: "没到线", hook_blocked: "hook 拦下", run: "开压" };
+const COMPACT_DECISION = { no_stage: "没有压缩阶段", no_window: "模型没标窗口", below_target: "没到线", cooldown: "上次压完仍在线上，等上下文再涨", hook_blocked: "hook 拦下", run: "开压" };
 const EXTRACT_SKIP = {
   not_allowed: "收摊中 / 丢了锁", no_scope: "作用域还没绑", no_modules: "没有记忆模块", overlap: "前台这条自己写过记忆",
   epoch_changed: "对话被清空或换掉", empty_range: "没有新消息", too_short: "话太少", too_few_turns: "轮数没攒满", aborted: "排队时被中止",

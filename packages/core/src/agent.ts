@@ -20,9 +20,6 @@ import { MEMORY_TOOL_NAME } from "./memory/tool.ts";
 import { agentMemory, notesMemory, userMemory } from "./memory/types.ts";
 import {
   DEFAULT_EXTRACT_DRAIN_MS,
-  DEFAULT_EXTRACT_EVERY_TURNS,
-  DEFAULT_EXTRACT_MAX_TURNS,
-  DEFAULT_EXTRACT_MIN_USER_WORDS,
   DEFAULT_EXTRACT_UNFINISHED_LIMIT,
   defaultExtractPrompt,
   firstUserText,
@@ -54,7 +51,7 @@ import { StandaloneRunAdmission } from "./admission/standalone.ts";
 import { normalizeModelSnapshot } from "./admission/model-snapshot.ts";
 import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTicket, RunModelBinding, RunSource } from "./admission/types.ts";
 import type { AgentContext, AgentLoopConfig, AttemptResult, LoopProbes, LoopResult, TransformContext, Emit } from "./loop/types.ts";
-import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
+import { EMPTY_COMPACTION, type CompactionFloor, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { calibrationFrom, fixedOverhead, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
 import { buildWorkingMessages, estimateText, estimateTokens, projectRange } from "./compaction/view.ts";
@@ -390,6 +387,12 @@ export const DEFAULT_MAX_ITERATIONS = 20;
  */
 export const DEFAULT_MAX_REPLIES = 10;
 
+/** 子循环的压缩配置：主会话那份去掉「压完仍在线上」的冷却状态（`floor` / `onFloor`）——子循环的上下文是另一份。 */
+function subloopCompaction(main: AgentLoopConfig["compaction"]): AgentLoopConfig["compaction"] {
+  const { floor: _floor, onFloor: _onFloor, ...rest } = main;
+  return rest;
+}
+
 /**
  * `deliver()` 与 schedule adapter 的 dedupeKey 派生：有稳定事实身份（environment 的 source + ref，比如
  * schedule incarnation、background 任务 id）就用它；**没有自然身份的每次都生成唯一 UUID**——那等价于
@@ -722,6 +725,11 @@ export class Agent {
    */
   private lastCalibration = 1;
   private lastSystemEstimate = 0;
+  /**
+   * 上一次压缩压完仍在线上的那一刻（`CompactionFloor`，2026-11-13）：跨 run 记着，下一个 run 的自动压缩照它冷却——
+   * 不记的话，不可压的部分过线时每条新消息的首轮都白压一次。transcript 清空或换掉时归 null。
+   */
+  private compactionFloor: CompactionFloor | null = null;
   /**
    * system 里那份记忆段，会话内冻结（`MemorySystemFreeze`）。压缩落地、transcript 清空或从盘上换掉时
    * 置回 null（`processEvents` 里），下一次组装重取。
@@ -1578,6 +1586,11 @@ export class Agent {
           code: "inbox_transcript_unsettled",
           message: `这批 inbox 消息没能写进会话账本，未 ack、留待重启后重投，已停止自动消费 inbox：${errText(e)}`,
         });
+        // run 里登记的收尾活（`afterRun`）照样排空（2026-11-13）：此前这里直接返回，模型触发的热部署要等下一个人开的 run
+        // 收尾才做，其间一直 reloadPending。先放票据再排空，与下面正常收尾同一个顺序；不排自主工作（自动消费已停）
+        this.inboxTicketOutstanding = false;
+        this.syncAvailability();
+        if (this.afterRunQueue.length > 0) void this.drainAfterRun();
         return settled.result;
       }
       // ack 的三态由账本裁决：pre-commit（整批仍 pending，下次重投）与 indeterminate（账本已 seal，后续 intake
@@ -1591,7 +1604,11 @@ export class Agent {
           this.enterInboxFailure(e); // 先进失败态，再清标记——中间不给任何新 run 可乘之机
           indeterminate = true;
         } else {
-          this.reportDiagnostic({ code: "inbox_ack_failed", message: errText(e) }); // pre-commit：整批仍 pending，下次重投
+          // pre-commit：整批仍 pending、盘上留着，重启后照常重投。同时停掉自动消费（2026-11-13）：不停的话下一轮又领到
+          // 同一批、再跑一遍模型、再 ack 失败——ack 写不进时就是一轮轮白跑模型，transcript 里同一条消息越堆越多。
+          // 与上面 transcript 写失败那一支同一条；人开的 prompt 不受影响
+          this.autoConsumeInbox = false;
+          this.reportDiagnostic({ code: "inbox_ack_failed", message: `这批 inbox 消息处理完了但 ack 没写成，留待重启后重投，已停止自动消费 inbox：${errText(e)}` });
         }
       }
       // 裁决出来了才放行：committed / pre-commit 先清标记再排下一轮；indeterminate 只清标记，一轮都不排
@@ -1661,6 +1678,7 @@ export class Agent {
     const inboxHad = this.inbox.pendingCount > 0;
     this.clearAllQueues();
     this.lastCalibration = 1;
+    this.compactionFloor = null;
     this.emitDetached({ type: "reset" });
     if (inboxHad) this.emitDetached({ type: "queue_update", queue: "inbox", size: 0 });
   }
@@ -1694,6 +1712,7 @@ export class Agent {
     }
     const outcome = box.outcome;
     if (outcome === null) return { kind: "done", stages: [], contextTokens: this._state.contextTokens };
+    this.compactionFloor = outcome.floor; // 手动压完落到线下，自动压缩的冷却随之解除；仍在线上就从这里起算
     return { kind: "done", stages: outcome.stages, contextTokens: outcome.contextTokens };
   }
 
@@ -2239,7 +2258,8 @@ export class Agent {
   private async beginManagedWork(): Promise<void> {
     // 补跑的写只走 managed-activation（lane 表）：Schedule catch-up 的 delivery / cursor / expired 都在
     // 这条 lane 上，timer 不用它。**business 仍关着**——判据是 OR，先开 business 这条 lane 就形同虚设。
-    if (this.schedule !== undefined) {
+    // inbox 已封账（`enterInboxFailure`）就不起：提醒经 inbox 投递，起来也只是每拍被拒（暂停后恢复走的是这里）
+    if (this.schedule !== undefined && this.inboxFailure === null) {
       const closeActivation = this.gate?.openLane("managed-activation");
       try {
         await startSchedule(this.schedule);
@@ -2822,6 +2842,9 @@ export class Agent {
     this.inboxFailure = error;
     this.autoConsumeInbox = false;
     this.autoDream = false;
+    // 闹钟也停（2026-11-13）：到期的提醒要经 inbox 投递，封账之后每一拍都必然被拒——此前每秒一条 schedule_fire_failed，
+    // 直到重启。在飞的那一拍照常收尾；重启重新裁决时 schedule 随 managed work 一起起来
+    if (this.schedule !== undefined) stopSchedule(this.schedule);
     // 直写 lastError 是 `events.ts` 文件头登记的例外：此刻 ticket 仍在，清掉它的那一拍发 availability_changed，
     // reason 带的就是这条消息
     this._state.lastError = { source: "internal", code: "internal", retryable: false, message: error.message };
@@ -3120,7 +3143,8 @@ export class Agent {
 
   /**
    * reply 收尾时把材料定格、排进提取通道。真跑时两道门（2026-10-30 / 2026-11-03）：游标之后用户说的话攒够
-   * `DEFAULT_EXTRACT_MIN_USER_WORDS`，且攒满 `DEFAULT_EXTRACT_EVERY_TURNS` 轮——任一没过就不起模型调用、游标不动。
+   * `memory.extract.minUserWords`，且攒满 `memory.extract.everyTurns` 轮（产品可配，缺省 `DEFAULT_EXTRACT_SETTINGS`）——
+   * 任一没过就不起模型调用、游标不动。
    * `force` = 退出前那次补跑（`drainExtract`）：不看攒了几轮，之后不会再有下一次了。
    * **不进 admission**，走自己的通道——为什么见 `memory/channel.ts` 头注。
    */
@@ -3162,8 +3186,8 @@ export class Agent {
       if (from >= end) return skipped("empty_range");
       const fresh = messages.slice(from, end);
       // **两道门**：用户亲口说的话没攒够、轮数没攒满就不跑、游标不动——攒着，等下一次一并看
-      if (userProseWords(fresh) < DEFAULT_EXTRACT_MIN_USER_WORDS) return skipped("too_short");
-      if (!force && humanTurns(fresh) < DEFAULT_EXTRACT_EVERY_TURNS) return skipped("too_few_turns");
+      if (userProseWords(fresh) < memory.extract.minUserWords) return skipped("too_short");
+      if (!force && humanTurns(fresh) < memory.extract.everyTurns) return skipped("too_few_turns");
       // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
       const span = projectRange(messages, compaction, from, end);
       const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0 };
@@ -3266,7 +3290,15 @@ export class Agent {
 
   async drainExtract(): Promise<void> {
     if (!this.memoryWorkAllowed) return;
-    this.enqueueExtract({ force: true });
+    // 在跑的整理先中止（2026-11-13）：提取与整理排成一条（`oneBackgroundWriter`），补跑那次排在整理后面——
+    // 整理一般好几轮、多半超过上限，到点两个一起被中止，最后那段对话就没看到。整理被中止只是推迟到下次（锁过期后重来），
+    // 没看到的对话却可能再也没人看。中止也算在同一个上限里：整理卡在写盘上时收摊不被它拖住
+    const work = (async (): Promise<void> => {
+      await this.dreamChannel.settle();
+      if (!this.memoryWorkAllowed) return;
+      this.enqueueExtract({ force: true });
+      await this.extractChannel.idle();
+    })();
     let cancel = (): void => {};
     const deadline = new Promise<void>((resolve) => {
       cancel = this.clock.setInterval(() => {
@@ -3275,7 +3307,7 @@ export class Agent {
       }, DEFAULT_EXTRACT_DRAIN_MS);
     });
     try {
-      await Promise.race([this.extractChannel.idle(), deadline]);
+      await Promise.race([work, deadline]);
     } finally {
       cancel();
     }
@@ -3336,7 +3368,7 @@ export class Agent {
         seed: fork.seed,
         runId,
         source: { kind: "extract", parentRunId: scope.runId },
-        maxIterations: DEFAULT_EXTRACT_MAX_TURNS,
+        maxIterations: memory.extract.maxTurns,
         // 每轮注入不带：它们拼在消息末尾、不进 transcript，本来就不在共享前缀里；带上只是多发一段激活 skill 正文
         turnInjections: "none",
         compaction: "none",
@@ -3486,7 +3518,8 @@ export class Agent {
             return tool === undefined ? { ok: false as const, reason: "not_found" as const } : { ok: true as const, tool };
           },
           ...(spec.turnInjections === "none" ? { getTurnInjections: () => [] } : {}),
-          compaction: { ...base.compaction, ...(spec.compaction === "none" ? { getStages: () => [] } : {}), notifyHooks: false },
+          // 主会话那份「压完仍在线上」不带进来：子循环的上下文是另一份，也不往回写
+          compaction: { ...subloopCompaction(base.compaction), ...(spec.compaction === "none" ? { getStages: () => [] } : {}), notifyHooks: false },
           // 不吃 steering / followUp：那些是给前台 run 的（gate 只认前台 run）
           intake: undefined,
         },
@@ -3823,6 +3856,10 @@ export class Agent {
         ...(this.compaction.reserveTokens !== undefined ? { reserveTokens: this.compaction.reserveTokens } : {}),
         getStages: () => [...this.compactionStages.values()],
         calibration: this.lastCalibration,
+        floor: this.compactionFloor,
+        onFloor: (floor) => {
+          this.compactionFloor = floor;
+        },
         now: () => this.clock.now(),
       },
       // **现读**：`setWorkspace()`（worktree 隔离）在轮中途改它，下一次工具执行就要看到新目录
@@ -4173,6 +4210,7 @@ export class Agent {
         // 已加载的延迟工具从 transcript 里收回来（2026-11-03）：菜单与上个进程最后一次请求的相同，缓存不断
         this.loadedTools.clear();
         for (const name of loadedToolsIn(input.messages)) this.loadedTools.add(name);
+        this.compactionFloor = null; // 换了一份 transcript：上一份的「压完仍在线上」不作数
         this.invalidateMemorySystem(); // 换了一份 transcript：system 按此刻的记忆重取（完整内容），基线跟着重记
         this.foregroundReads.clear();
         // 游标先设到末尾（这个事件不带复盘下标）；经会话恢复时 `start()` 紧接着按盘上的 `memory_reviewed` 改回去

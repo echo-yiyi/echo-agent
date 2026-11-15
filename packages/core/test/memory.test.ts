@@ -318,6 +318,9 @@ describe("写入闸(checkWrite 经方法生效)", () => {
     expect(r.isError).toBe(true);
     expect(r.content).toContain("exceed its budget");
     expect(r.content).toContain("str_replace");
+    // 常驻模块的 delete 删整个文件：指引要指向整份覆写，不能把模型引向 delete（2026-11-13）
+    expect(r.content).toContain("rewrite the whole file with create");
+    expect(r.content).not.toContain("str_replace/delete");
   });
 
   test("indexed 单文件超限拒", async () => {

@@ -9,7 +9,7 @@ import type { RetryPolicy } from "../provider/dialect.ts";
 import type { AgentTool } from "../tools/types.ts";
 import type { ToolResolution } from "../tools/harness.ts";
 import type { PermissionStage } from "../permission/types.ts";
-import type { CompactionStage, CompactionState } from "../compaction/types.ts";
+import type { CompactionFloor, CompactionStage, CompactionState } from "../compaction/types.ts";
 import type { CompactionProbe } from "../compaction/observe.ts";
 import type { IntakeLeftovers } from "./intake.ts";
 import type { LoopProbe } from "./observe.ts";
@@ -108,6 +108,12 @@ export type LoopCompactionConfig = {
   getStages: () => readonly CompactionStage[];
   /** 本 run 拿到第一次 usage 之前用的校准比（真 token / 字符估）：Agent 从上一次 usage 记下来的；不给 = 1。 */
   calibration?: number;
+  /**
+   * 上一次压缩压完仍在线上的那一刻（`CompactionFloor`）：Agent 跨 run 记着的；不给 = 没有。
+   * 每次压缩跑完由 `onFloor` 交回新的值（压到线下就是 null）。子循环不带这两项——它们的上下文与主会话无关。
+   */
+  floor?: CompactionFloor | null;
+  onFloor?: (floor: CompactionFloor | null) => void;
   /** 此刻（毫秒）：空闲清理判「停了多久」用。Agent 给的是它的 clock（测试可拨）；不给 = `Date.now()`。 */
   now?: () => number;
   /**

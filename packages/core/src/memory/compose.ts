@@ -167,7 +167,9 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
           ok: false,
           reason:
             `Module '${r.name}' would exceed its budget: ${next.length} characters after this write, limit ${r.budget}. ` +
-            `Keep this module small and dense: merge duplicates and delete stale entries with str_replace/delete first, then write.`,
+            // 常驻模块的 delete 删的是整个文件（2026-11-13：此前这句写「用 str_replace/delete 删条目」，把模型引向删掉整份 agent.md）
+            `Keep this module small and dense: rewrite the whole file with create as a merged, shorter version, or remove stale entries with str_replace — then write. ` +
+            `Do not delete the file: that drops every entry in it.`,
         };
       }
       return { ok: true };

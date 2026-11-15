@@ -24,7 +24,7 @@ export type CompactionFactBody =
   /**
    * 判过一次要不要压（观测白盒化 §3.5，2026-11-08）：每次流水线被调就记一条——自动压缩每轮都判，判的结果本身就是要看的数据
    * （「为什么一直没压」「压之前多大、目标多大」）。`decision` 是封闭集：没注册阶段 / 目录没标窗口 / 没到触发线 /
-   * preCompact 拦下 / 开压。数是压缩自己本来就算的那几个（没算到那一步的不带），观测不为它多算一拍。
+   * 上次压完仍在线上、上下文还没再涨一截（`cooldown`，2026-11-13）/ preCompact 拦下 / 开压。数是压缩自己本来就算的那几个（没算到那一步的不带），观测不为它多算一拍。
    */
   | {
       kind: "compaction_evaluated";
@@ -39,7 +39,7 @@ export type CompactionFactBody =
     };
 
 /** 一次压缩判断的结论。 */
-export type CompactionDecision = "no_stage" | "no_window" | "below_target" | "hook_blocked" | "run";
+export type CompactionDecision = "no_stage" | "no_window" | "below_target" | "cooldown" | "hook_blocked" | "run";
 
 /**
  * 带发生时刻与所在循环身份的事实：`runId` 是跑这次压缩的循环的 run，`turnId` 只在 turn 里撞窗应急时才有

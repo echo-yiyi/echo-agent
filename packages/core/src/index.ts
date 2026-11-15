@@ -148,6 +148,9 @@ export { fenceSafe, truncateMarked } from "./prompt/sanitize.ts";
 
 // 各能力的容器类型——它们出现在 `EchoAgentOptions` / `AgentState` 的签名里
 export type { AgentMemories } from "./memory/harness.ts";
+// 记忆后台活的可调取值：产品经 `CreateEchoOptions.memory.extract` / `.dream` 配（2026-11-12）
+export type { MemoryExtractOptions } from "./memory/extract.ts";
+export type { DreamGates } from "./memory/dream.ts";
 export type { AgentSchedule } from "./schedule/harness.ts";
 export type { InboxStore } from "./inbox/store.ts";
 // durable ingress 的公共协议（`agent.ingress` 的类型）与两份持久 schema。

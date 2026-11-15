@@ -197,8 +197,9 @@ describe("tick", () => {
     expect(delivered.length).toBe(3);
   });
 
-  test("一次性任务投递后落盘失败:先不从内存删,下次 tick 再投一次并重试落盘;写成之后才删", async () => {
-    // 此前触发即删:内存里没了、盘上还在,下次 tick 什么都不做,要等重启才又提醒一次
+  test("一次性任务投递后落盘失败:不再投第二次,之后每拍只重试落盘;写成之后才从表里删", async () => {
+    // 2026-11-13:此前「下次 tick 再投一次并重试落盘」——那条提醒被消费之后去重键没了,落盘持续失败期间每拍都重新响一次、
+    // 每次多跑一轮模型。现在投过就在内存里记上,不再到期;重启时盘上那份还在,照常再提醒一次(至少一次)
     const inner = new InMemoryDir();
     let diskDown = false;
     const dir: StorageDir = {
@@ -211,12 +212,14 @@ describe("tick", () => {
     await addSchedule(h, sched({ kind: "at", at: T0 + 5_000 } as never, "once"), T0);
     diskDown = true;
     await expect(tickSchedule(h, T0 + 6_000)).rejects.toThrow("EIO write");
+    await expect(tickSchedule(h, T0 + 7_000)).rejects.toThrow("EIO write"); // 只重试写盘
+    await expect(tickSchedule(h, T0 + 8_000)).rejects.toThrow("EIO write");
     expect(delivered.length).toBe(1);
-    expect((await listSchedules(h)).map((e) => e.schedule.id)).toEqual(["once"]);
+    expect((await listSchedules(h)).map((e) => e.schedule.id)).toEqual([]); // 投过的不再列出
+    expect(await inner.read(SCHEDULE_FILE)).toContain("once"); // 盘上还在：没写成
     diskDown = false;
-    await tickSchedule(h, T0 + 7_000);
-    expect(delivered.length).toBe(2);
-    expect((await listSchedules(h)).map((e) => e.schedule.id)).toEqual([]);
+    await tickSchedule(h, T0 + 9_000);
+    expect(delivered.length).toBe(1);
     expect(await inner.read(SCHEDULE_FILE)).not.toContain("once");
   });
 

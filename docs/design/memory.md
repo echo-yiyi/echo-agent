@@ -36,6 +36,8 @@
 
 **开关归用户，形状归产品。** `withoutMemory` 对应用户的 `--no-memory`，产品碰不到；装哪些模块、分哪几层由产品经 `Product.preset` 返回的 `memory` 决定。`memory.builtin: false` 不装内建的三个模块（agent / user / memory——笔记模块的名字就是 `memory`，点名、关 dream、重新注册都用这个键），模块全部来自扩展经 `AgentMemory.module()` 的注册——扩展注册在缺省情况下只是**追加**，要替换就得先关掉内建这组。想保留其中某几个，就把 `@echo-agent/core/extension` 导出的定义再注册一遍。**什么值得记的判据写在各模块自己的 instructions 里**：记忆段、提取、整理三处 prompt 只讲机制（先看再写、合并不新增近似条、超预算先整理、绝不存凭据、可以什么都不写），所以 `builtin: false` 会连同内建模块的判据一起拿掉，产品模块用自己的 instructions 带自己的判据。
 
+**后台活的节奏也归产品**（2026-11-12，决策见 [记忆的可调取值](../decisions/implemented/2026-11-12-memory-tuning-config.md)）：`memory.extract`（[`MemoryExtractOptions`](../../packages/core/src/memory/extract.ts#symbol=MemoryExtractOptions)：轮数上限 `maxTurns`、攒满几轮 `everyTurns`、攒够多少词 `minUserWords`）与 `memory.dream`（[`DreamGates`](../../packages/core/src/memory/dream.ts#symbol=DreamGates)：整理的各道门，给了的项覆盖缺省里的同名项，0 = 这一道不设门槛）。间隔 `minIntervalMs` 给 0 要知道后果：一层大到一次整理不完（撞轮数上限、按「做了一部分」记、计数不清）时，每次回 idle 都会接着整理；只留文件数一道门、其余全给 0 也一样——文件数整理完不会降回门下。这是产品自己选的节奏，每次都有进展，core 不拦。轮数上限看模型，节奏看对话风格，所以跟着产品走；用户这边仍只有开关。不给的项用第 3 节表里的缺省；**配错在装配时就抛**（[`resolveExtractOptions()`](../../packages/core/src/memory/tuning.ts#symbol=resolveExtractOptions)、[`resolveDreamGates()`](../../packages/core/src/memory/tuning.ts#symbol=resolveDreamGates)：不是整数、低于下限、写错键名），不回落到缺省。连续没写成就放弃的次数、退出前补跑的等待上限、锁的超时是机制内部的取值，不开放。
+
 **作用域回答“谁共享”，记忆模块回答“记什么”。** 路径由两者组合：`<作用域>/<模块路径>`。例如 `project/agent.md` 是这个项目里共同使用的行为记忆，不是某个 agent 实例的私有文件。相同内容出现在不同作用域时，不自动覆盖、去重或跨层提升。
 
 产品通过 [`CreateAgentOptions`](../../packages/core/src/create-agent.ts#symbol=CreateAgentOptions) 的 `memory.scopes` 整份替换默认声明。每项 [`MemoryScopeDef`](../../packages/core/src/memory/scope.ts#symbol=MemoryScopeDef) 指定名字、顺序、可见性说明、锚点、相对前缀及可选留痕。默认真盘位置由 [`DEFAULT_MEMORY_SCOPES`](../../packages/core/src/create-agent.ts#symbol=DEFAULT_MEMORY_SCOPES) 给出：
@@ -72,7 +74,7 @@
 
 模块不填 `scopes` 表示当前所有层都有；填写则限定在那些层。同一模块每层独立存储、独立预算。[`residentMemory()`](../../packages/core/src/memory/types.ts#symbol=residentMemory) / [`indexedMemory()`](../../packages/core/src/memory/types.ts#symbol=indexedMemory) 是仓内的声明构造器，**不在公共面上**：包外扩展交的是纯数据 `AnyMemory`（必填 `name` / `mode` / `path` / `budget` / `instructions` / `dream`，indexed 另有 `fileBudget` 且 `path` 以 `/` 结尾），或把 `@echo-agent/core/extension` 导出的内建定义再注册一遍。构造器本身也不会自行装入运行中的产品。重复名字、已绑定后的路径重叠会拒绝，避免同一路径落进两个预算域。
 
-当前缺省值如下。**真源是链接的符号**，数值随构造器与内建定义改：
+当前缺省值如下。**真源是链接的符号**，数值随构造器与内建定义改。标「产品可配」的，产品能经 `memory.extract` / `memory.dream` 改（第 2 节）：
 
 | 项 | 缺省 | 真源 |
 | --- | --- | --- |
@@ -80,10 +82,10 @@
 | 笔记模块预算 | 索引 25000，单文件 4096 | [`notesMemory`](../../packages/core/src/memory/types.ts#symbol=notesMemory) |
 | 构造器缺省 | resident 2000；indexed 索引 25000、单文件 4096 | [`residentMemory()`](../../packages/core/src/memory/types.ts#symbol=residentMemory)、[`indexedMemory()`](../../packages/core/src/memory/types.ts#symbol=indexedMemory) |
 | 索引描述行 | 单行化后截断 200 字符 | [`indexEntries()`](../../packages/core/src/memory/compose.ts#symbol=indexEntries) |
-| Dream 门 | 写 5 次、10 个 indexed 文件、24 小时，全满足才跑；**没有轮数门，也没有按占用触发的门** | [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) |
+| Dream 门（产品可配） | 写 5 次、10 个 indexed 文件、24 小时，全满足才跑；**没有轮数门，也没有按占用触发的门** | [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) |
 | startedAt 过期 | 1 小时 | [`DREAM_LOCK_STALE_MS`](../../packages/core/src/memory/dream.ts#symbol=DREAM_LOCK_STALE_MS) |
-| 提取轮数上限 | 5 | [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS) |
-| 提取门槛 | 用户说的话 8 个词，且攒满 3 轮用户输入 | [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)、[`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) |
+| 提取轮数上限（产品可配） | 5 | [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS) |
+| 提取门槛（产品可配） | 用户说的话 8 个词，且攒满 3 轮用户输入 | [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)、[`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) |
 | 退出前补提取最多等 | 15 秒 | [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS) |
 | 提交锁等待 | 10 秒 | [`DEFAULT_LOCK_TIMEOUT_MS`](../../packages/core/src/storage/name-lock.ts#symbol=DEFAULT_LOCK_TIMEOUT_MS) |
 
@@ -134,7 +136,7 @@
 
 **游标、门槛与频率**（2026-10-30 / 2026-11-03，决策见 [记忆提取降频](../decisions/implemented/2026-10-30-memory-extraction-gate.md) 与 [从主对话分叉](../decisions/implemented/2026-11-03-memory-extraction-fork.md)）：Agent 记一个 transcript 下标，之前的部分算已看过。真跑的那一刻从游标读起，过两道门才起模型调用：游标之后**用户亲口说的话**攒够 [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)（[`userProseWords()`](../../packages/core/src/memory/extract.ts#symbol=userProseWords)：只数 `human` / `steer` 的用户正文，中日韩文字一字一词、其余按空白分词），且**用户输入**攒满 [`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) 轮（[`humanTurns()`](../../packages/core/src/memory/extract.ts#symbol=humanTurns)：一条 `human` 用户消息一轮）。任一没过就不跑、游标不动——攒着，下一次一并看。这段**算看过**才把游标推到这次材料的末尾，并在会话里记一条 `memory_reviewed` entry（落盘消息的下标，见 [`SessionEntry`](../../packages/core/src/session/types.ts#symbol=SessionEntry)）。算不算看过由一次提取的结局 [`ExtractPass`](../../packages/core/src/memory/extract.ts#symbol=ExtractPass) 定（2026-11-12，决策见 [没跑完时看写成了没有](../decisions/implemented/2026-11-12-memory-extraction-unfinished.md)）：跑完算；没跑完（provider 出错、轮数用完）但已写成至少一条也算——那几条已经落盘，与整理撞上限按「做了一部分」记同一个口径；**一条没写成就停了**不推，下次重看这段，连续 [`DEFAULT_EXTRACT_UNFINISHED_LIMIT`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_UNFINISHED_LIMIT) 次都这样就放弃这段、照推，报诊断 `memory_extract_gave_up`——卡住的那段本身已攒够轮数，不放弃的话之后每条 reply 都重跑一次、范围一次比一次大。连续次数只记在内存里，重启归零。被中止（stop / 丢锁）不推，也不算一次没跑完。压缩不改 transcript 下标，游标照样有效；`reset` 归零（`/clear` 只清内存、不写会话，所以落盘下标要越过 reset 之前那几条，Agent 记着这个偏移）；**续会话取盘上最后一条 `memory_reviewed`**（一条都没有 = 0）——上个进程没提取的那截跨重启接着攒，被杀、退出前那次补跑没跑完都不丢（2026-11-03）。
 
-**退出前补一次**（[`Agent.drainExtract()`](../../packages/core/src/agent.ts#symbol=Agent.drainExtract)）：不看攒了几轮（仍过词数门槛），等它跑完，最多 [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS)，到点照常收摊（提取被中止、游标不动）。`echo.stop()` 在卸 Extension **之前**调它——记忆模块、记忆工具与 prompt 段都是 builtin 挂的，卸完就没得提取，前缀也对不上；`Agent.stop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底。丢锁与 handoff 让位不补；本进程一个 run 都没跑过（只是续上来看一眼就退）也不补——没有运行 scope，`enqueueExtract` 直接返回。所以「没攒满就结束」的那一截通常当场就被看到；没赶上的（进程被杀、补跑到点）由盘上的游标留给下一次续会话。
+**退出前补一次**（[`Agent.drainExtract()`](../../packages/core/src/agent.ts#symbol=Agent.drainExtract)）：不看攒了几轮（仍过词数门槛），等它跑完，最多 [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS)，到点照常收摊（提取被中止、游标不动）。**先中止在跑的整理**（2026-11-13）：提取与整理排成一条，补跑那次排在整理后面的话，整理一般好几轮、多半超过上限，到点两个一起被中止，最后那段对话就没人看；整理被中止只是推迟（锁过期后重来）。中止整理也算在同一个上限里。`echo.stop()` 在卸 Extension **之前**调它——记忆模块、记忆工具与 prompt 段都是 builtin 挂的，卸完就没得提取，前缀也对不上；`Agent.stop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底。丢锁与 handoff 让位不补；本进程一个 run 都没跑过（只是续上来看一眼就退）也不补——没有运行 scope，`enqueueExtract` 直接返回。所以「没攒满就结束」的那一截通常当场就被看到；没赶上的（进程被杀、补跑到点）由盘上的游标留给下一次续会话。
 
 **提取从主对话分叉**（[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract)）：system 是主循环每个 run 装配的那一份（记忆段是冻结的那一版），菜单是 reply 收尾时主循环的菜单，消息是主循环的 working context（含最后那条回答），末尾接一条提取指令——前缀与主循环最后一次请求逐字相同，厂商的前缀缓存直接接着用。每轮注入（激活 skill 正文、任务清单）不带：它们拼在消息末尾、本来不在共享前缀里。提取与 Dream 的子循环不做压缩（见 [压缩](compaction.md) §4）。菜单照原样摆，只换执行：记忆工具换成这次提取的实例（同一份 schema），其余换成同名同 schema、一点名就在修参那一步拒掉的替身——早于 preToolUse 与权限，后台复盘不会去问人。主菜单上没有记忆工具时补在末尾（前缀在工具那段断开，但照样能写）。指令按游标分两种说法：游标为 0（这场对话还没复盘过）说「从头看起」，否则说「上次复盘到对话中途，只看之后的」（[`ExtractRange.fromStart`](../../packages/core/src/memory/extract.ts#symbol=ExtractRange)）。
 

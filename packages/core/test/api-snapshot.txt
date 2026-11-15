@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 355（value 128 · type 210 · both 17）
+符号 357（value 128 · type 212 · both 17）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -235,6 +235,12 @@ type   TurnResult
 type   AgentMcpPort
 type   McpConnectOutcome
 type   McpServerSnapshot
+
+-- src/memory/dream.ts (1) --
+type   DreamGates
+
+-- src/memory/extract.ts (1) --
+type   MemoryExtractOptions
 
 -- src/memory/harness.ts (1) --
 type   AgentMemories

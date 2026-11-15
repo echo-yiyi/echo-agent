@@ -11,7 +11,7 @@
 // **固定开销单独算**（`fixedOverhead`）：usage 里还有工具 schema 与每轮注入，字符估里没有它们——不扣掉的话，
 // 会话早期工具定义占了大头，校准比被抬到 3–4，之后每个大工具结果都乘它，真实占用约 1/3 窗口就触发压缩。
 
-import type { CompactionReason, CompactionBudget, CompactionModelCall, CompactionState } from "./types.ts";
+import type { CompactionReason, CompactionBudget, CompactionFloor, CompactionModelCall, CompactionState } from "./types.ts";
 import {
   COMPACTION_GOAL_MAX_TOKENS,
   COMPACTION_SLACK_RATIO,
@@ -38,6 +38,8 @@ export type CompactionOutcome = {
   readonly stages: readonly string[];
   /** 跑完之后的估算（usage 量纲）。 */
   readonly contextTokens: number;
+  /** 跑完仍在触发线上就是那一刻（`CompactionFloor`），压到线下或目录没标窗口是 null。 */
+  readonly floor: CompactionFloor | null;
 };
 
 /** 校准比的合理范围：超出多半是 usage 报错了（比如把缓存算了两遍），别让一个坏数把估算放大百倍。 */
@@ -163,6 +165,17 @@ export function modelCallFor(deps: LoopDeps, where: Readonly<{ stage?: string; t
 }
 
 /**
+ * 压完仍在线上之后，占用涨到多少才重试自动压缩：那一刻到窗口之间的一半（2026-11-13）。
+ * 不用固定一截：触发线只比窗口低一个 reserve，按窗口比例算的一截常常越过窗口，自动压缩就再也不会重试、只能等撞窗应急。
+ * 对半收敛，到撞窗之前最多重试 log2(余量 / 每轮增量) 次。那一刻的估算已经到了窗口（没有余量）就每涨
+ * `COMPACTION_SLACK_RATIO` 个窗口试一次：估算可能偏高，不能就此再也不试。
+ */
+export function compactionRetryAt(floor: CompactionFloor): number {
+  const room = floor.window - floor.tokens;
+  return floor.tokens + (room > 0 ? Math.max(1, Math.floor(room / 2)) : Math.floor(floor.window * COMPACTION_SLACK_RATIO));
+}
+
+/**
  * 跑一次流水线。返回 `null` = 没触发（auto 未碰线 / 目录没标窗口 / 没有阶段 / preCompact 拦下），
  * 什么事件都没发；否则 compaction_start / compaction_end 成对，状态已写进 `deps.context.compaction`。
  *
@@ -172,7 +185,15 @@ export function modelCallFor(deps: LoopDeps, where: Readonly<{ stage?: string; t
 export async function runCompaction(
   deps: LoopDeps,
   /** `turnId`：撞窗应急时所在的 turn（轮首的自动压缩与手动压缩不在 turn 里，不给）。只用于观测记录的身份。 */
-  opts: { reason: CompactionReason; instructions?: string; anchor: ContextAnchor | null; calibration?: number; turnId?: string },
+  opts: {
+    reason: CompactionReason;
+    instructions?: string;
+    anchor: ContextAnchor | null;
+    calibration?: number;
+    turnId?: string;
+    /** 上一次压完仍在线上的那一刻：auto 要等占用比它再涨一截才压（见 `CompactionFloor`）。其余 reason 不看它。 */
+    floor?: CompactionFloor | null;
+  },
 ): Promise<CompactionOutcome | null> {
   const { context, config, emit, signal } = deps;
   const { reason } = opts;
@@ -217,6 +238,14 @@ export async function runCompaction(
   const numbers = { used, window: budget.window, target: budget.target, goal: budget.goal, calibration, overhead };
   if (reason === "auto" && used < budget.target) {
     evaluated("below_target", numbers);
+    return null;
+  }
+  // 上一次压完仍在线上（不可压的部分本身过线、压缩调用失败、没有一段有事可做）：再压一遍多半还是一样，
+  // 等上下文涨过那一刻到窗口之间的一半才重试（`compactionRetryAt`）。换了模型（窗口不同）、或此刻比那一刻还小
+  //（估算被 usage 纠正、上下文变小了）就不作数（2026-11-13）
+  const floor = opts.floor ?? null;
+  if (reason === "auto" && floor !== null && budget.window === floor.window && used >= floor.tokens && used < compactionRetryAt(floor)) {
+    evaluated("cooldown", numbers);
     return null;
   }
 
@@ -266,6 +295,9 @@ export async function runCompaction(
       continue;
     }
     if (sameCompaction(next, state)) continue;
+    // 自动触发的只采纳让上下文变小的：清掉一条很短的工具结果，占位可能比原文还长（2026-11-13）。
+    // 手动是用户要的、应急要一步到位，照旧采纳
+    if ((reason === "auto" || reason === "idle") && raw(next) >= raw(state)) continue;
     state = next;
     applied.push(stage.name);
     // 同一把尺子：字符估乘校准比、加固定开销，与触发时的 usage 同量纲
@@ -282,7 +314,8 @@ export async function runCompaction(
   probeCompaction(observe, where, { kind: "compaction_ended", reason, compaction: state, stages: applied, contextTokens: used });
   await emit({ type: "compaction_end", reason, compaction: state, stages: applied, contextTokens: used });
   if (changed) await notify({ type: "postCompact", reason, compaction: state, stages: applied });
-  return { changed, state, stages: applied, contextTokens: used };
+  const floorAfter: CompactionFloor | null = budget.window !== null && used >= budget.target ? { tokens: used, window: budget.window } : null;
+  return { changed, state, stages: applied, contextTokens: used, floor: floorAfter };
 }
 
 /**
@@ -337,12 +370,19 @@ export function createCompactor(deps: LoopDeps): {
   // 本轮的固定开销（轮首量一次，菜单本轮冻结）：轮末算校准比时从 usage 里扣掉
   let overhead = 0;
   let recovered = false;
+  // 上一次压完仍在线上的那一刻：从 Agent 跨 run 记着的接过来，每次压完把新的交回去（`CompactionFloor`）
+  let floor = deps.config.compaction.floor ?? null;
+  const settled = (r: CompactionOutcome): void => {
+    if (r.changed) anchor = null;
+    floor = r.floor;
+    deps.config.compaction.onFloor?.(floor);
+  };
   return {
     async maybeCompact(signal) {
       overhead = await overheadNow(deps);
-      const r = await runCompaction(withSignal(signal), { reason: "auto", anchor, calibration });
+      const r = await runCompaction(withSignal(signal), { reason: "auto", anchor, calibration, floor });
       if (r !== null) {
-        if (r.changed) anchor = null;
+        settled(r);
         return;
       }
       // 没碰窗口线：再看空闲清理该不该做（2026-11-02，照 Claude Code）。只在清旧工具结果的阶段注册着时才看
@@ -350,7 +390,7 @@ export function createCompactor(deps: LoopDeps): {
       const now = deps.config.compaction.now?.() ?? Date.now();
       if (!idleClearDue(deps.context.messages, deps.context.compaction, now, calibration)) return;
       const idle = await runCompaction(withSignal(signal), { reason: "idle", anchor, calibration });
-      if (idle?.changed === true) anchor = null;
+      if (idle !== null) settled(idle);
     },
     noteTurn(turn) {
       // 只有落地的 turn 有可信的 usage；失败 / block / abort 的没有基准可记
@@ -370,7 +410,7 @@ export function createCompactor(deps: LoopDeps): {
       if (recovered) return false;
       recovered = true;
       const r = await runCompaction(withSignal(signal), { reason: "overflow", anchor, calibration, turnId });
-      if (r?.changed === true) anchor = null;
+      if (r !== null) settled(r);
       return r?.changed === true;
     },
   };

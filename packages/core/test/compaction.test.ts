@@ -47,7 +47,7 @@ import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import { AgentCompaction, defineExtension, type ExtensionEntry } from "../src/extension/public.ts";
 import { ExtensionHost } from "../src/extension/host.ts";
 import { agentRegistries } from "../src/extension/registries.ts";
-import { compactionBudget, fixedOverhead } from "../src/compaction/pipeline.ts";
+import { compactionBudget, compactionRetryAt, fixedOverhead } from "../src/compaction/pipeline.ts";
 import { visibleTools } from "../src/tools/harness.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 
@@ -387,12 +387,12 @@ test("摘要调用撞上输出上限（stopReason max_tokens）= 这一阶段失
 /** 低层路径：`new Agent()` + `mountBuiltinTools()`，与 createEcho 同一张 builtin 表。 */
 async function agentWithBuiltins(
   streamFunction: StreamFn,
-  opts: { model?: Model; session?: { store: InMemoryDir; id: string }; compaction?: Agent["compaction"]; retryPolicy?: Agent["retryPolicy"] } = {},
+  opts: { model?: Model; session?: { store: InMemoryDir; id: string }; compaction?: Agent["compaction"]; retryPolicy?: Agent["retryPolicy"]; tool?: ModelTool } = {},
 ): Promise<Agent> {
   const agent = new Agent({
     model: opts.model ?? SMALL,
     streamFunction,
-    tools: [echoTool()],
+    tools: [opts.tool ?? echoTool()],
     ...(opts.retryPolicy !== undefined ? { retryPolicy: opts.retryPolicy } : {}),
     // 一个 store 就是一段 session 的目录（2026-09-03）：同一个 store 换个 Agent 就是「另一个进程续同一段」
     ...(opts.session !== undefined ? { sessionService: new SessionService(opts.session.store), sessionId: opts.session.id } : {}),
@@ -640,7 +640,9 @@ test("校准比：ASCII 与中文同一段对话、同一份 usage，压缩跑�
     // 第一个 run：长文本、轮 1 usage 300（不触发）。第二个 run：轮 1 usage 950（> target 900）→ 轮 2 轮首触发；
     // 之后每次模型调用都回同一段摘要。长文本在上一个 run 里：这次的请求不折，折的是它
     const { fn } = capturing([toolTurnUsage("t1", { inputTokens: 300 + oh, outputTokens: 0 }), reply("ok"), toolTurnUsage("t2", { inputTokens: 950 + oh, outputTokens: 0 }), ...Array.from({ length: 4 }, () => reply("<summary>S</summary>"))]);
-    const agent = await agentWithBuiltins(fn, { model: window, compaction: { reserveTokens: 100, keepRecentTokens: 40, keepRecentToolResults: 1 } });
+    // 工具回一段像样的输出：清掉它要真的省下地方（自动压缩只采纳让上下文变小的阶段，2026-11-13）
+    const tool: ModelTool = { ...echoTool(), execute: async () => toolOk("r".repeat(200)) };
+    const agent = await agentWithBuiltins(fn, { model: window, compaction: { reserveTokens: 100, keepRecentTokens: 40, keepRecentToolResults: 1 }, tool });
     await agent.prompt(text);
     const { events } = collect(agent);
     await agent.prompt("continue");
@@ -894,4 +896,108 @@ test("Agent.compact：走同一条流水线（manual，无视阈值，指令交�
   const bare = new Agent({ model: FAKE_MODEL, streamFunction: scriptedStreamFn([]), compaction: { builtin: false } });
   const none = await bare.compact();
   expect(none.kind === "rejected" && none.reason).toContain("没有注册任何压缩阶段");
+});
+
+/* ═══════════════ 压完仍在线上：冷却，不每轮重压（2026-11-13） ═══════════════ */
+
+/** 窗口 1000、reserve 400 → 触发线 600；用户一句 2400 字符（约 600 token）一上来就过线。 */
+const COOL: Model = { ...FAKE_MODEL, capabilities: { contextWindow: 1000 } };
+const OVER_LINE = "x".repeat(2400);
+
+/** 叫 echo 的工具：第 `bigAt` 次（从 0 数）回一大段（约 400 token），其余回一个词。 */
+function echoGrowing(bigAt: number): ModelTool {
+  let n = 0;
+  return { ...echoTool(), execute: async () => toolOk(n++ === bigAt ? "y".repeat(1600) : "echoed") };
+}
+
+/** 只记被调了几次的阶段：`run` 决定它这次做什么。 */
+function countingStage(run: () => CompactionState | null): { stage: CompactionStage; calls: () => number } {
+  let calls = 0;
+  return {
+    stage: stage("counting", 5, () => {
+      calls += 1;
+      return run();
+    }),
+    calls: () => calls,
+  };
+}
+
+test("压完仍在线上（没有一段有事可做）：同一 run 的后几轮、下一个 run 都不再压——此前每轮都压一次、每轮一条错误通知", async () => {
+  const { stage: nothing, calls } = countingStage(() => null);
+  const agent = new Agent({
+    model: COOL,
+    streamFunction: scriptedStreamFn([toolTurn("t1", "echo", {}), toolTurn("t2", "echo", {}), textTurn("done"), textTurn("ok")]),
+    tools: [echoGrowing(-1)],
+    compaction: { builtin: false, reserveTokens: 400 },
+  });
+  agent.compactionStages.set(nothing.name, nothing);
+  const { lifecycle } = collect(agent);
+
+  await agent.prompt(OVER_LINE); // 三轮：第一轮压了没压动，后两轮只多了几个词
+  await agent.prompt("继续"); // 新 run：跨 run 记着那一刻
+
+  expect(calls()).toBe(1);
+  const notices = lifecycle.filter((e) => e.type === "notification" && e.kind === "error");
+  expect(notices.length).toBe(1);
+});
+
+test("压缩调用一直失败：不每轮重来；上下文涨过「那一刻到窗口的一半」才再试一次", async () => {
+  const { stage: failing, calls } = countingStage(() => {
+    throw new Error("provider down");
+  });
+  const agent = new Agent({
+    model: COOL,
+    // 四轮：前两次工具结果各一个词（不重试），第三次一大段（涨过一半 → 第四轮前再试一次）
+    streamFunction: scriptedStreamFn([toolTurn("t1", "echo", {}), toolTurn("t2", "echo", {}), toolTurn("t3", "echo", {}), textTurn("done")]),
+    tools: [echoGrowing(2)],
+    compaction: { builtin: false, reserveTokens: 400 },
+  });
+  agent.compactionStages.set(failing.name, failing);
+
+  await agent.prompt(OVER_LINE);
+
+  expect(calls()).toBe(2);
+});
+
+test("重试点：那一刻到窗口之间的一半；估算已经到了窗口就每涨一成窗口试一次（估算可能偏高，不能再也不试）", () => {
+  expect(compactionRetryAt({ tokens: 900, window: 1000 })).toBe(950);
+  expect(compactionRetryAt({ tokens: 999, window: 1000 })).toBe(1000);
+  expect(compactionRetryAt({ tokens: 1000, window: 1000 })).toBe(1100);
+  expect(compactionRetryAt({ tokens: 1300, window: 1000 })).toBe(1400);
+});
+
+test("自动压缩只采纳让上下文变小的阶段：清掉一条很短的工具结果、占位比原文还长 → 不算压过（手动照旧采纳）", async () => {
+  // 清掉 transcript 里全部工具结果（只有一条「echoed」）：占位一句话比原文长。等到轮首有工具结果可清才动手
+  const grow = stage("grow", 5, (input) => (input.messages.some((m) => m.role === "toolResult") ? { spans: [], clearedBefore: input.messages.length } : null));
+  const agent = new Agent({
+    model: COOL,
+    streamFunction: scriptedStreamFn([toolTurn("t1", "echo", {}), textTurn("done")]),
+    tools: [echoGrowing(-1)],
+    // reserve 拉到窗口：触发线 0，每轮都判要压——测的是采不采纳，不是触发
+    compaction: { builtin: false, reserveTokens: 1000 },
+  });
+  agent.compactionStages.set(grow.name, grow);
+  const { events } = collect(agent);
+
+  await agent.prompt("hi");
+
+  const ends = events.filter((e): e is Extract<AgentEvent, { type: "compaction_end" }> => e.type === "compaction_end");
+  expect(ends.some((e) => e.stages.length > 0)).toBe(false);
+  expect(agent.state.compaction.clearedBefore).toBe(0);
+  const manual = await agent.compact();
+  expect(manual.kind === "done" && manual.stages).toEqual(["grow"]);
+});
+
+test("collapse：折到第二段时模型调用失败 → 已经折好的那段照样交出去（此前整段抛掉，花掉的调用白费、下一轮从同一处重做）", async () => {
+  const m = [...twoTurns(), userMessage("third question"), assistantMessage([{ type: "text", text: "answer three" }], "end_turn")];
+  let n = 0;
+  const flaky: CompactionInput["callModel"] = async () => {
+    if (n++ === 0) return "<summary>C</summary>";
+    throw new Error("max_tokens");
+  };
+  const s = await collapseStage({ sectionTokens: 1, keepRecentTokens: 1 }).run(input(m, { budget: { window: 400, used: 500, target: 300, goal: 0 }, callModel: flaky }), SIG);
+  expect(n).toBe(2);
+  expect(s!.spans.map((x) => [x.from, x.to])).toEqual([[0, 4]]);
+  // 第一段就失败：照旧抛（流水线记诊断）
+  await expect(collapseStage({ sectionTokens: 1, keepRecentTokens: 1 }).run(input(m, { callModel: async () => "" }), SIG)).rejects.toThrow("no summary");
 });

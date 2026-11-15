@@ -1289,3 +1289,67 @@ test("/clear 之后再续会话：复盘下标越过 reset 之前那几条（它
   expect(extractPrompts[1]).toContain("the last 2 messages"); // 记的是落盘下标 4，不是内存下标 2
 });
 
+/* ───────────── 记忆的可调取值经 createEcho 接到 Agent（2026-11-12） ───────────── */
+
+/** 记下提取与整理各发了几次请求：提取认指令开头，整理认它 prompt 的第一句。 */
+function backgroundCountingProvider(): { provider: ReturnType<typeof createProvider>; counts: { extract: number; dream: number } } {
+  const counts = { extract: 0, dream: 0 };
+  const dialect: Dialect = {
+    api: "fake",
+    async *request(_model, context) {
+      const text = JSON.stringify(context.messages);
+      const background = text.includes(EXTRACT_PROMPT_OPENING) ? "extract" : text.includes("Consolidate the ") ? "dream" : null;
+      if (background !== null) counts[background] += 1;
+      for (const ev of textTurn(background !== null ? "Nothing to change." : "好的")) yield structuredClone(ev);
+    },
+  };
+  const provider = createProvider({
+    id: "scripted",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams(dialect),
+  });
+  return { provider, counts };
+}
+
+async function eventually(cond: () => boolean, ms = 3_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !cond()) await new Promise((r) => setTimeout(r, 10));
+  return cond();
+}
+
+test("memory.extract 经 createEcho 接到 Agent：配了 everyTurns 1，一轮之后就提取（缺省要攒满三轮，第一轮不跑）", async () => {
+  const { provider, counts } = backgroundCountingProvider();
+  const echo = await createEcho({ provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [], memory: { extract: { everyTurns: 1 } } });
+  running.push(echo);
+  await echo.start();
+  await echo.agent.prompt("第一件事：我们的测试一律用 bun 跑");
+
+  expect(await eventually(() => counts.extract > 0), "配了每轮都看，第一轮之后却没提取").toBe(true);
+});
+
+test("memory.dream 经 createEcho 接到 Agent：写入数与文件数两道给 0，回到 idle 就整理（缺省要写满 5 次、10 个文件）", async () => {
+  const { provider, counts } = backgroundCountingProvider();
+  const echo = await createEcho({ provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [], memory: { dream: { minWritesSinceLast: 0, minFiles: 0 } } });
+  running.push(echo);
+  await echo.start();
+  await echo.agent.prompt("好");
+
+  expect(await eventually(() => counts.dream > 0), "门都放开了，回到 idle 却没整理").toBe(true);
+});
+
+test("memory.extract / memory.dream 配错：createEcho 当场报错，不回落到缺省", async () => {
+  const base = { provider: scripted([textTurn("ok")]), allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [] };
+  const failure = async (memory: Parameters<typeof createEcho>[0]["memory"]): Promise<string> => {
+    try {
+      running.push(await createEcho({ ...base, memory }));
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+    return "";
+  };
+  expect(await failure({ extract: { maxTurns: 0 } })).toContain("memory.extract.maxTurns 必须是 ≥ 1 的整数");
+  expect(await failure({ dream: { minFile: 3 } as never })).toContain("memory.dream 没有 'minFile' 这一项");
+});
+

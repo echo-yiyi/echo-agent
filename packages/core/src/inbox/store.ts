@@ -93,7 +93,8 @@ export class InboxStore {
   private readonly ackBarriers = new Map<string, Promise<void>>();
   /**
    * 本进程**不再收**的 record id：已逻辑 ack 但 cleanup 没删掉的（marker 与 record 都还在盘上），
-   * 以及 `clear()` 丢弃的（盘上留着等下次 restore 重放）。`refresh()` 重扫盘时跳过它们——
+   * `clear()` 丢弃的（盘上留着等下次 restore 重放），以及 `refresh()` 读不出来的坏档（报一次，重启时按坏档判红）。
+   * `refresh()` 重扫盘时跳过它们——
    * 否则每一拍都把它们当「别人新投进来的」重新入队（review 2026-09-07：已 ack 的每秒重投、`/clear` 形同虚设）。
    * 盘上没有了就从这里摘掉，所以它不会比 `inbox/` 里的文件数更大。
    */
@@ -241,7 +242,10 @@ export class InboxStore {
         if (parsed === "legacy") continue;
         found.push(parsed);
       } catch (e) {
-        this.diagnose("inbox_refresh_skipped", `record ${nameId} 读不出来，本次跳过（重启时按坏档判红）：${errText(e)}`);
+        // 报一次就记下不再收（2026-11-13）：写是原子的，盘上不会有写了一半的文件，坏了就是真坏了——
+        // 此前每一拍（轮询每秒一次）都重读、重报一条
+        this.notForRefresh.add(nameId);
+        this.diagnose("inbox_refresh_skipped", `record ${nameId} 读不出来，本进程不再收（重启时按坏档判红）：${errText(e)}`);
       }
     }
     // 盘上已经没有的就不用再记着（cleanup 或别的进程删掉了）

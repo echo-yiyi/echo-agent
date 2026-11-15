@@ -89,11 +89,12 @@ system                       不变，每 run 装配一次，不含摘要
 - 图片按尺寸估（[`imageTokens()`](../../packages/core/src/image.ts#symbol=imageTokens)：宽 × 高 ÷ 750，从 base64 的文件头读尺寸），认不出尺寸按 `IMAGE_TOKEN_ESTIMATE`（1 200），绝不按 base64 长度；`toolResult.images` 也算进去。
 - `target = contextWindow − reserveTokens`，`reserveTokens` 缺省 `max(maxOutputTokens, 16 000)`。
 - `goal`：auto / manual 是 `min(target − 10% window, COMPACTION_GOAL_MAX_TOKENS)`（减一截免得下一轮又碰线；20 万封顶，百万窗口的模型压完不再长期带着约 90 万 token），overflow 是半窗。决策见 [压缩目标封顶](../decisions/implemented/2026-11-03-compaction-goal-cap.md)。
+- **压完仍在线上就冷却**（2026-11-13，[后台重试有上界](../decisions/implemented/2026-11-13-background-retry-bounds.md)）：一次压缩跑完 `used` 仍 ≥ `target`（不可压的部分本身过线、压缩调用失败、没有一段有事可做），记下那一刻（[`CompactionFloor`](../../packages/core/src/compaction/types.ts#symbol=CompactionFloor)：占用与窗口），auto 要等占用涨过 [`compactionRetryAt()`](../../packages/core/src/compaction/pipeline.ts#symbol=compactionRetryAt)——那一刻到窗口之间的一半；估算已经到了窗口就每涨一成窗口——才再试，其间判为 `cooldown`。不冷却的话这种情况每轮都压一次（每轮两次模型调用、缓存每轮断一次），压缩调用一直失败时每轮重来一遍。Agent 跨 run 记着它（下一个 run 的首轮同样冷却），换了窗口、或此刻比那一刻还小（估算被 usage 纠正、上下文变小了）就不作数；压到线下、`/clear`、换一份 transcript 都清掉。子循环不带它。
 
 **怎么跑。** 阶段按 `order` 升序（`AgentLoopConfig.compaction.getStages()` **每次重取**）：
 
 1. `preCompact` 拦截（block = 这次不压）；发 `compaction_start`。
-2. 逐个 `stage.run(input)`：返回 `null` 跳过；返回状态先过 `normalizeCompaction`，与当前相同也跳过；否则采用、重估 `used`。auto 一旦 `used ≤ goal` 就停。
+2. 逐个 `stage.run(input)`：返回 `null` 跳过；返回状态先过 `normalizeCompaction`，与当前相同也跳过；自动触发的（auto / idle）还要让上下文变小才算——清掉一条很短的工具结果，占位可能比原文还长（manual 是用户要的、overflow 要一步到位，照旧采用）；否则采用、重估 `used`。auto 一旦 `used ≤ goal` 就停。
 3. 阶段抛错：发 `compactionFailed { stage, message }`，跳到下一段。一段都没改：发 `compactionFailed`（不带 stage）。
 4. 发 `compaction_end { reason, compaction, stages, contextTokens }`（start / end 成对，观测 span 要闭合）；改了才发 `postCompact`、才写 session entry。
 
@@ -102,7 +103,7 @@ system                       不变，每 run 装配一次，不含摘要
 | 情况 | 结果 |
 | --- | --- |
 | 阶段抛错 | 诊断 + 跳过该段，run 继续 |
-| auto 跑完没压动 | 诊断，本轮照常发（超窗由 provider 报错兜底 → 走 overflow） |
+| auto 跑完没压动 / 压完仍在线上 | 诊断，本轮照常发（超窗由 provider 报错兜底 → 走 overflow）；之后按上面的冷却，占用没涨够不再自动压 |
 | overflow 没压动 / 第二次撞窗 | run 以 `context_overflow` error 收场 |
 | 没有任何阶段 | auto 静默不压；overflow / manual 直接按上面两条 |
 | `preCompact` block | 这次不压，四种 reason 都尊重 |
@@ -114,7 +115,7 @@ system                       不变，每 run 装配一次，不含摘要
 | order | 阶段 | 只在 | 做什么 | 模型调用 |
 | --- | --- | --- | --- | --- |
 | 10 | `tool-results` | 四种 | 保留最近 `keepRecentToolResults`（缺省 3；overflow 时 1）批工具调用的结果，之前的标清（`clearedBefore`）；overflow 时那一批的结果合计超过 `OVERFLOW_KEEP_TOKENS`（2k）就连它也清；清掉的用 `tool_output_read` 按工具调用 id 读回原文 | 0 |
-| 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；绕开用户最新的请求；`used ≤ goal` 就停；一次最多 8 段 | 每段 1 次 |
+| 20 | `collapse` | auto | 从最旧原文起，每 `sectionTokens`（缺省 32k）一段、在轮起点收口，折成一段摘要；绕开用户最新的请求；`used ≤ goal` 就停；一次最多 8 段；某一段的调用失败时，前面已经折好的几段照样交出（第一段就失败才抛） | 每段 1 次 |
 | 30 | `summary` | auto / overflow / manual | 尾巴之前的全部（已有段摘要 + 剩余原文）折成一份九节结构化摘要；尾巴 = `keepRecentTokens`（缺省 8k；overflow 时 2k）吸到轮起点，在飞的一轮放不下就退到合法切点，再放不下也留着在飞那一批。用户最新的请求落在要折的范围里时拆成前后两段（见下）。尾巴以只读文本（去 thinking、有上限）附在指令里：不总结它，只用来把「open work / in progress / resume with」写成现在的状态——否则答完一轮再 `/compact`，摘要会说「尚未回答」 | 1 次 |
 | 40 | `snip` | overflow | summary 都失败时把尾巴之前直接省略（`summary: null`），作为有损的应急保底；同样绕开用户最新的请求 | 0 |
 

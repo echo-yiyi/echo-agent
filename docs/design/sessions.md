@@ -126,9 +126,10 @@ interface AgentToolsRegistry {
 会话消息写入目标 inbox；持有目标 lease 的实例负责消费与 ack，发送方只追加 record。[InboxStore](../../packages/core/src/inbox/store.ts#symbol=InboxStore) 提供持久 record、ack marker 与 at-least-once 语义。
 
 - record id 由写者生成，包含时间、计数与随机部分，不依赖多个发送方共享一个内存序号。
-- refresh 扫描外部追加的 record 并加入 pending；运行中发现坏记录报告诊断，恢复期按恢复规则校验。
+- refresh 扫描外部追加的 record 并加入 pending；运行中发现坏记录报告一次诊断、本进程不再收（不再每拍重读重报），恢复期按恢复规则校验。
 - Agent 通过 Clock 端口轮询 inbox，在可消费时调度工作；跨进程投递不依赖内存事件通知。
 - 消费确认前中断可能导致重投，接收业务不能把 at-least-once 当成 exactly-once。
+- 一批处理完、ack 却没写成（pre-commit）：整批留在盘上待重启重投，**本进程停止自动消费**——与 transcript 写不进那一支同一条；不停的话下一轮又领到同一批，一轮轮白跑模型（2026-11-13，[后台重试有上界](../decisions/implemented/2026-11-13-background-retry-bounds.md)）。ack 无法裁决（indeterminate）时同样停消费，并连闹钟一起停：到期的提醒要经 inbox 投递，封账之后每一拍都必然被拒。
 
 **只跟活着的段说话**。一段 session 的**地址是持久的，但它得有宿主才谈得上通信**——所以 `send` 先确认对方活着：没在跑就调容器的 `SessionRunner` 把它叫起来，再投递；叫不起来（容器没给 `run`，或 runner 失败）就 `rejected: unreachable`，**一条消息都不留**。
 
