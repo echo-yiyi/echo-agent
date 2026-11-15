@@ -43,7 +43,7 @@ bun add -g @echo-agent/coding
 MOONSHOT_API_KEY=sk-... echo-coding
 ```
 
-Both commands accept the same options (`--help`). `echo-coding` runs every tool without asking, in the interactive UI and through a pipe alike — treat it as a script that may change files in the current directory.
+Both commands accept the same options (`--help`). In the interactive UI, `echo-coding` has its model review every shell command and web fetch against what you asked for before it runs, and asks you only when the review keeps blocking or cannot run; shell commands run in an OS sandbox that can write only inside the working directory, temporary directories and package caches. Through a pipe it runs every tool without asking — treat it there as a script that may change files in the current directory.
 
 ## Use the CLI
 

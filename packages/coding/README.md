@@ -21,9 +21,14 @@ Or run it once without installing: `bunx --package @echo-agent/coding echo-codin
 The command name stays `echo-coding` even though the package is scoped — the unscoped name was
 already taken on npm by an unrelated project.
 
-`echo-coding` accepts the same options as `echo-agent` (`--help`). **It runs every tool without
-asking**, in the interactive UI and through a pipe alike — treat it as a script that may change
-files in the current directory.
+`echo-coding` accepts the same options as `echo-agent` (`--help`). In the interactive UI, every
+shell command and web fetch is first reviewed by the session's model against what you asked for;
+you are asked only when the review keeps blocking or cannot run. Shell commands run in an OS
+sandbox (macOS `sandbox-exec`, Linux bubblewrap) that can write only inside the working directory,
+temporary directories and package caches, and cannot read echo's credential file. Where no sandbox
+works (inside most containers), each command has to run explicitly outside it and is reviewed the
+same way. **Through a pipe it runs every tool without asking** — treat it there as a script that
+may change files in the current directory.
 
 Sessions belong to a directory *and* a command, so `echo-agent` and `echo-coding` never share a
 conversation even in the same directory.
