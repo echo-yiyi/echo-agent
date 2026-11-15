@@ -55,6 +55,12 @@ export type CodingPresetOptions = {
    * 不给 = 只认环境变量（评测、低层装配）。宿主给的是与模型 key 同一个 store（`PresetForm.credentials`）。
    */
   credentials?: CredentialStore;
+  /**
+   * bash 的命令包进操作系统沙箱跑（2026-11-15，`tools/sandbox.ts`）：只能写工作区、临时目录与包管理器缓存，读不到 echo 的凭据文件。
+   * 缺省不开。开了之后模型能带 `sandbox: false` 让某一条在沙箱外跑——那一条要靠权限策略把关（出厂交互形态是模型审查），
+   * 只开沙箱、不装权限策略的话这扇门没人看。
+   */
+  sandbox?: boolean;
 };
 
 /**
@@ -192,7 +198,7 @@ export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
       },
       // bash 不行：它要 `agent.background`。所以 `echo:shell` 自己 inject 那条能力端口并在 apply 里
       // 注册工具与段，这里只列 definition、不给 config（见 `extensions.ts` 的注释）。
-      { entryId: "echo:shell", definition: ECHO_SHELL },
+      { entryId: "echo:shell", definition: ECHO_SHELL, ...(opts.sandbox === true ? { config: { sandbox: true } } : {}) },
       // worktree 隔离要 `AgentRuntime.setWorkspace`，同 shell 一样自己 inject（2026-09-03）
       { entryId: "echo:worktree", definition: ECHO_WORKTREE },
       // 取网页 / 搜索：纯函数工具，config 进来；延迟工具，经 tool_search 取过才上菜单

@@ -15,6 +15,7 @@ import { AgentBackgroundService, AgentPrompt, AgentRuntimeService, AgentTools, d
 import { detectShellEnvironment, makeShellTools } from "./tools/bash.ts";
 import { makeWorktreeTools } from "./tools/worktree.ts";
 import { shellToolsSection } from "./prompt.ts";
+import { DIRECT_BACKEND, detectSandbox } from "./tools/sandbox.ts";
 
 /** 工作区读写与搜索：`read_file` / `write_file` / `edit_file` / `glob` / `grep` / `list_dir`。 */
 export const ECHO_WORKSPACE = defineToolPack("echo:workspace");
@@ -66,7 +67,10 @@ export const ECHO_WORKTREE = defineExtension({
  * （`makeBashTool()` 的 `deps.background` 仍是可选：单独造工具、不接后台队列时 `background: true` 不可用，
  * 与本扩展的装配前提是两件事。）
  */
-export const ECHO_SHELL = defineExtension({
+/** `echo:shell` 的配置：`sandbox: true` = 命令包进操作系统沙箱跑（装配时找一次这台机器上能用的沙箱，`tools/sandbox.ts`）。 */
+export type ShellConfig = { readonly sandbox?: boolean } | undefined;
+
+export const ECHO_SHELL = defineExtension<ShellConfig>({
   name: "echo:shell",
   hostAbiVersion: 1,
   inject: {
@@ -74,13 +78,15 @@ export const ECHO_SHELL = defineExtension({
     background: { service: AgentBackgroundService, required: true },
     prompt: { service: AgentPrompt, required: true },
   },
-  apply(ctx) {
+  apply(ctx, config) {
     const registry = ctx.get(AgentTools);
     const prompt = ctx.get(AgentPrompt);
+    // 执行后端装配时定一次：要沙箱就现在找（真跑一条试过才算），段与工具用同一个
+    const backend = config?.sandbox === true ? detectSandbox() : DIRECT_BACKEND;
     // bash + job_output / job_stop：同一张后台任务表（`agent.background`），一起装、一起撤
-    const tools = makeShellTools({ background: ctx.get(AgentBackgroundService) });
+    const tools = makeShellTools({ background: ctx.get(AgentBackgroundService), backend });
     // 运行环境（平台、bash 版本）装配时取一次，写进段里；不是每轮现问
-    const section = shellToolsSection(detectShellEnvironment());
+    const section = shellToolsSection(detectShellEnvironment(), backend);
     void ctx.effect({
       // 与 `defineToolPack` 同一档：工具面每轮都可能变，声明得比实际需要强会挡住热重载
       boundary: "turn",

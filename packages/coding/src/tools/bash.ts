@@ -12,6 +12,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { BUILTIN_PROVIDER_KEY_ENV, toolError, toolOk, type AgentBackground, type AgentToolResult, type ModelTool } from "@echo-agent/core";
 import { BRAVE_ENV } from "./web.ts";
+import { DIRECT_BACKEND, type ShellBackend } from "./sandbox.ts";
 
 /** 命令跑在什么环境里：`tool:shell` 段据此写明平台与 bash 版本（macOS 的 BSD 工具链、bash 3.2 的缺口）。 */
 export type ShellEnvironment = { platform: NodeJS.Platform; bashVersion: string | null };
@@ -94,6 +95,11 @@ export function shellEnv(parent: NodeJS.ProcessEnv, cwd: string): NodeJS.Process
 export type BashDeps = {
   /** 给了才支持 background: true(接 agent.background);job_output / job_stop 也读同一张表。 */
   background?: AgentBackground;
+  /**
+   * 命令怎么起（`sandbox.ts`）。缺省直接起。给的是沙箱时 bash 多一个 `sandbox` 参数：`false` = 这一条在沙箱外跑——
+   * 参数明着写在调用里，权限策略看得见（echo-coding 的模型审查就按它审）。
+   */
+  backend?: ShellBackend;
 };
 
 /**
@@ -111,7 +117,10 @@ export function makeShellTools(deps: BashDeps = {}): ModelTool[] {
 export function makeBashTool(
   deps: BashDeps = {},
   state: ShellState = { cwd: undefined, workspace: undefined },
-): ModelTool<{ command: string; timeout_ms?: number; background?: boolean }> {
+): ModelTool<{ command: string; timeout_ms?: number; background?: boolean; sandbox?: boolean }> {
+  const backend = deps.backend ?? DIRECT_BACKEND;
+  /** 这一条用哪个后端：沙箱后端下带了 `sandbox: false` 就直接起。 */
+  const backendFor = (sandbox: boolean | undefined): ShellBackend => (backend.sandboxed && sandbox === false ? DIRECT_BACKEND : backend);
   /** 本次命令从哪起：保留的目录还在就用它；workspace 换了或目录被删了就退回 workspace（后者要告诉模型）。 */
   const startDir = (workspace: string): { cwd: string; note: string } => {
     if (state.workspace !== workspace) {
@@ -142,10 +151,15 @@ export function makeBashTool(
         command: { type: "string" },
         timeout_ms: { type: "number", description: "Timeout in milliseconds, default 120000" },
         background: { type: "boolean", description: "Run in the background (does not block this turn)" },
+        // 沙箱后端才有这个参数：没有沙箱时它什么也不改，摆出来只会让模型以为有
+        ...(backend.sandboxed
+          ? { sandbox: { type: "boolean", description: "false runs this command outside the sandbox; it is reviewed before it runs. Default true" } }
+          : {}),
       },
       required: ["command"],
     },
-    async execute({ command, timeout_ms, background }, ctx) {
+    async execute({ command, timeout_ms, background, sandbox }, ctx) {
+      const via = backendFor(sandbox);
       if (background === true) {
         if (deps.background === undefined) return toolError("This agent has no background queue; background: true is not supported");
         const r = startBackground(deps.background, {
@@ -153,7 +167,11 @@ export function makeBashTool(
           label: command.slice(0, 60),
           run: (bg) =>
             new Promise<void>((resolvePromise, rejectPromise) => {
-              const child = spawnShell(command, startDir(ctx.workspace).cwd);
+              const child = spawnShell(command, { cwd: startDir(ctx.workspace).cwd, workspace: ctx.workspace }, via);
+              if (typeof child === "string") {
+                rejectPromise(new Error(child));
+                return;
+              }
               // 每条流一只流式 decoder：跨 chunk 的多字节字符不再被解成替换符（review 2026-09-07）
               const outDec = new TextDecoder();
               const errDec = new TextDecoder();
@@ -183,7 +201,7 @@ export function makeBashTool(
       }
 
       const start = startDir(ctx.workspace);
-      const result = await runForeground(command, start.cwd, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
+      const result = await runForeground(command, { cwd: start.cwd, workspace: ctx.workspace }, via, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
       // 命令跑到了末尾才有标记（exec / 被杀 / 语法错都没有）：没有就保持原来的目录
       const changed = result.cwd !== undefined && result.cwd !== start.cwd;
       if (result.cwd !== undefined) state.cwd = result.cwd === ctx.workspace ? undefined : result.cwd;
@@ -207,13 +225,21 @@ function withCwdMarker(command: string): string {
  * `PWD` 例外，设成本次的起点：继承来的是父进程的目录，bash 发现它不指向当前目录就改用物理路径——
  * 工作区经软链时（macOS 的 `/var` → `/private/var`）`$PWD` 成了展开后的路径，第一条命令就被当成「cd 过了」。
  */
-function spawnShell(command: string, cwd: string): ChildProcess {
-  return spawn("bash", ["-c", command], {
-    cwd,
+function spawnShell(command: string, at: { cwd: string; workspace: string }, backend: ShellBackend): ChildProcess | string {
+  const launch = backend.argv(["bash", "-c", command], at);
+  if (!launch.ok) return sandboxRefusal(launch.reason);
+  const [file, ...args] = launch.argv;
+  return spawn(file!, args, {
+    cwd: at.cwd,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
-    env: shellEnv(process.env, cwd),
+    env: shellEnv(process.env, at.cwd),
   });
+}
+
+/** 沙箱起不来时给模型的话：为什么、怎么办（带 `sandbox: false` 重跑，那一步会被审）。 */
+function sandboxRefusal(reason: string): string {
+  return `Not run: commands are meant to run in a sandbox, but none is available on this machine (${reason}). Run it again with sandbox: false; that call is reviewed before it runs.`;
 }
 
 /** 输出里摘掉最后一个 cwd 标记（连同它前后各一个换行），返回标记里的目录。没有标记 = 命令没跑到末尾（exec / 被杀 / 语法错）。 */
@@ -299,12 +325,17 @@ function jobStopTool(deps: BashDeps): ModelTool<{ id: string }> {
 
 function runForeground(
   command: string,
-  cwd: string,
+  at: { cwd: string; workspace: string },
+  backend: ShellBackend,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<AgentToolResult & { cwd?: string }> {
   return new Promise((resolvePromise) => {
-    const child = spawnShell(withCwdMarker(command), cwd);
+    const child = spawnShell(withCwdMarker(command), at, backend);
+    if (typeof child === "string") {
+      resolvePromise(toolError(child));
+      return;
+    }
     let out = "";
     let truncated = false;
     let tail = ""; // 末尾几百字节单独留着：cwd 标记在这里找，输出被截断也丢不了

@@ -10,6 +10,7 @@
 
 import { PROMPT_ORDER, type PromptSection } from "@echo-agent/core";
 import type { ShellEnvironment } from "./tools/bash.ts";
+import type { ShellBackend } from "./tools/sandbox.ts";
 
 export const CODING_IDENTITY =
   "You are Echo Coding, a coding agent working inside the user's repository. You read, change, and verify code on the user's behalf, and you work for one user across many sessions.";
@@ -59,8 +60,22 @@ export function workspaceToolsSection(): PromptSection {
   return { name: "tool:workspace", order: PROMPT_ORDER.tools, render: () => WORKSPACE_TOOLS };
 }
 
-/** `env` 由调用方取好传进来（`echo:shell` 装配时 / identity 现取），段本身不跑命令。 */
-export function shellToolsSection(env: ShellEnvironment): PromptSection {
-  const text = `${SHELL_TOOLS}\n${shellEnvironmentText(env)}`;
+/**
+ * 段末那句沙箱（2026-11-15）：只在 bash 的执行后端是沙箱时出——`sandbox` 参数也只在那时有。
+ * 说清能写哪、读不到什么、撞上了怎么认、怎么办；没有可用沙箱时说清每条都要带 `sandbox: false`。
+ */
+export function sandboxText(backend: ShellBackend): string {
+  if (backend.name === "unavailable") {
+    return "Commands are meant to run in a sandbox, but none is available on this machine, so bash refuses to run them as they are: pass sandbox: false on every call. Each such call is reviewed before it runs.";
+  }
+  return (
+    `Commands run in a sandbox (${backend.name}): they can write only inside the workspace, temporary directories and package caches, and cannot read echo's credential file; reading elsewhere and the network work as usual. ` +
+    'A write elsewhere fails with "Operation not permitted" or "Read-only file system". If the task really needs it (a global install, a file in the home directory), run the command again with sandbox: false; that call is reviewed before it runs.'
+  );
+}
+
+/** `env` 由调用方取好传进来（`echo:shell` 装配时 / identity 现取），段本身不跑命令。`backend` 是沙箱时段末多一句沙箱。 */
+export function shellToolsSection(env: ShellEnvironment, backend?: ShellBackend): PromptSection {
+  const text = `${SHELL_TOOLS}\n${shellEnvironmentText(env)}${backend?.sandboxed === true ? `\n${sandboxText(backend)}` : ""}`;
   return { name: "tool:shell", order: PROMPT_ORDER.tools + 1, render: () => text };
 }

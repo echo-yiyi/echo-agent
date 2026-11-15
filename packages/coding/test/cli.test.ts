@@ -46,6 +46,8 @@ test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 w
       });
       expect(verdict.kind).toBe("deny"); // bash 走审查
     }
+    // 沙箱同理：交互形态 bash 包进操作系统沙箱，管道形态不包（2026-11-15）
+    expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual(interactive ? { sandbox: true } : undefined);
   }
 });
 

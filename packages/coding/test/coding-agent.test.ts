@@ -3,7 +3,7 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { textTurn, toolTurn, type ScriptedTurn } from "@echo-agent/core/testing";
 import {
@@ -19,6 +19,7 @@ import {
 import { AgentRuntimeService, defineExtension, type ExtensionEntry } from "@echo-agent/core/extension";
 import { makeFsTools } from "../src/tools/fs.ts";
 import { makeBashTool } from "../src/tools/bash.ts";
+import { detectSandbox } from "../src/tools/sandbox.ts";
 import { makeSearchTools } from "../src/tools/search.ts";
 import { htmlToText, makeWebTools } from "../src/tools/web.ts";
 import { codingPreset } from "../src/agent.ts";
@@ -124,6 +125,7 @@ async function idle(echo: Echo): Promise<void> {
 async function echoWith(opts: {
   turns?: ScriptedTurn[];
   permission?: PermissionPolicy | false;
+  sandbox?: boolean;
   skillDirs?: readonly string[];
   /** 排在产品那几条**之前**的额外 extension（同一代里卸载是 LIFO，所以它们晚于产品的卸）。 */
   extensionsBefore?: readonly ExtensionEntry[];
@@ -133,6 +135,7 @@ async function echoWith(opts: {
   const requests = new Map<string, ToolCallRequest>();
   const preset = codingPreset({
     ...(opts.permission !== undefined ? { permission: opts.permission } : {}),
+    ...(opts.sandbox !== undefined ? { sandbox: opts.sandbox } : {}),
     ...(skills !== undefined ? { skills } : {}),
   });
   const echo = await createEcho({
@@ -415,6 +418,25 @@ test("bash 工作目录跨调用保留：cd 之后下一次从那里起；cd 失
   // 10 万字符原样收全：截断与外存归 core（2026-11-02），工具这里不再截到 30,000 丢掉后半
   expect([huge.isError, huge.content.startsWith(`${"x".repeat(100_000)}\n(working directory is now`), huge.content.includes("truncated")]).toEqual([false, true, false]);
   expect((await bash.execute({ command: "basename \"$PWD\"" }, ctx())).content.trimEnd()).toBe("sub2");
+});
+
+test.skipIf(detectSandbox().name === "unavailable")("沙箱走真装配：echo:shell 配了 sandbox，前台与后台命令都写不进家目录；工作区照写（2026-11-15）", async () => {
+  const { call: run } = await echoWith({ permission: false, sandbox: true });
+  const outside = join(homedir(), `echo-ca-sbx-${process.pid}.txt`);
+  const fg = await run("bash", { command: `echo x > ${outside}` });
+  expect([fg.isError, existsSync(outside)]).toEqual([true, false]);
+  const bg = await run("bash", { command: `echo x > ${outside}.bg; echo finished`, background: true });
+  const id = /Started in the background: (\S+)/.exec(bg.content)![1]!;
+  const deadline = Date.now() + 5000;
+  let seen = await run("job_output", { id });
+  while (!seen.content.includes("finished") && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 20));
+    seen = await run("job_output", { id });
+  }
+  expect(seen.content).toMatch(/Operation not permitted|Read-only file system/);
+  expect(existsSync(`${outside}.bg`)).toBe(false);
+  const inside = await run("bash", { command: "echo ok > sbx-inside.txt && cat sbx-inside.txt" });
+  expect([inside.isError, inside.content.split("\n")[0]]).toEqual([false, "ok"]);
 });
 
 test("后台作业：bash background 起 → job_output 看得到状态与最近输出 → job_stop 杀掉 → 再看是 killed；丢了 id 也找得回", async () => {
