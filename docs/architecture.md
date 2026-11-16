@@ -47,7 +47,7 @@
 
 | 能力 | 机制与状态（core） | 缺省内容（`echo:*`） | 让别人扩展的口 |
 |---|---|---|---|
-| memory | `packages/core/src/memory/harness.ts`：模块表、唯一写路径、索引重建、预算校验、文件锁；作用域由产品声明（`memory/scope.ts`）；提取与整理各走一条后台通道 | `echo:memory`：`memory` 工具、记忆段、内建三个记忆模块 | `AgentMemory.module()`：第三方注册自己的记忆模块，与内建的同一条 |
+| memory | `packages/core/src/memory/harness.ts`：模块表、唯一写路径、索引重建、预算校验、文件锁；作用域由产品声明（`memory/scope.ts`）；提取与整理各走一条后台通道 | `echo:memory`：`memory` 工具、记忆的规则段（记忆正文不进 system，是对话最前面的一条消息）、内建三个记忆模块 | `AgentMemory.module()`：第三方注册自己的记忆模块，与内建的同一条 |
 | tasks | `packages/core/src/task/harness.ts`：DAG、落盘尾巴 | `echo:tasks`：四件 Task 工具 | 无 |
 | schedule | `packages/core/src/schedule/harness.ts`：cron、tick、补跑 | `echo:scheduler`：三件工具 | 无 |
 | skills | `packages/core/src/skill/harness.ts`：池与激活 | `echo:skills`：激活 / 创建工具、目录段 | `AgentSkills` registry |

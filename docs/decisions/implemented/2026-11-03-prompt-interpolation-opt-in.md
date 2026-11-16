@@ -41,7 +41,7 @@
 
 - 未声明的段原样：[assembleSystem](../../../packages/core/test/prompt.test.ts#test=没声明-interpolate-的段原样第三方文本里的-secretsx-valuesx-workspace-都不当变量)
 - 项目指令里的 `${{ secrets.X }}` 原样、run 照常：[instructions](../../../packages/cli/test/prompt.test.ts#test=instructionsagentsmd-里一行-github-actions-的-secretsx-原样进-systemrun-照常跑完项目指令不插值)
-- 记忆里的 `{{ user.name }}` 原样、run 照常：[memory](../../../packages/core/test/memory.test.ts#test=记忆正文里写着-username-secretsx-原样进-systemrun-照常跑完记忆段不插值)
+- 记忆里的 `{{ user.name }}` 原样、run 照常：[memory](../../../packages/core/test/memory.test.ts#test=记忆正文里写着-username-secretsx-原样送到模型run-照常跑完记忆正文不插值)（2026-11-13 起记忆正文不在 system 里，是对话最前面的一条消息，本来就不经插值）
 - 声明了插值的段写错变量照旧让 run 以 error 收场：[变量错](../../../packages/core/test/prompt.test.ts#test=变量错-run-以-error-收场不静默发一份错的-system)
 
 变异：把 `assembleSystem` 改回对所有段插值，上面前三条变红。

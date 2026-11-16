@@ -4,7 +4,7 @@
 
 ## 现状(拍板前)
 
-记忆只有一条写入路径:**前台模型自己想起来**。core 的 [`renderMemorySystem`](../../../packages/core/src/memory/compose.ts#symbol=renderMemorySystem) 出一段规则(模块说明、选层说明、"写前先找能合并的、删过期的、超预算先整理、别记当前任务进度、别存密钥"),`echo-agent` 与 `echo-coding` 两个产品的 prompt 里一个字都没提记忆。
+记忆只有一条写入路径:**前台模型自己想起来**。core 的 [`renderMemoryRules`](../../../packages/core/src/memory/compose.ts#symbol=renderMemoryRules)（当时叫 `renderMemorySystem`，2026-11-13 拆成规则与正文两个函数） 出一段规则(模块说明、选层说明、"写前先找能合并的、删过期的、超预算先整理、别记当前任务进度、别存密钥"),`echo-agent` 与 `echo-coding` 两个产品的 prompt 里一个字都没提记忆。
 
 那段规则里**没有一条讲什么时候写**。实测结果:旧位置的 dream 状态记着 `{"writes":3,"turns":320}`——自 2026-09-04 那次整理以来 320 轮对话,记忆写入 3 次,而且三次全发生在冒烟测试当天 02:14,之后是 0。
 

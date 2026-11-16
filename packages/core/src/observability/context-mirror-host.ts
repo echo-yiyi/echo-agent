@@ -19,13 +19,14 @@ import type { ObservationBlobRef } from "./types.ts";
 
 /**
  * 视图里一块的来历：
+ *   · `preamble`：开头消息（`AgentContext.preamble`，排在 transcript 之前、不进账本；`source` 是 `memory`）；
  *   · `transcript`：transcript 里的原消息（`source` 是角色）；
  *   · `summary` / `omitted`：压缩折掉的一段，换成摘要 / 只留一句省略说明；
  *   · `cleared_placeholder`：被清掉正文的旧工具结果的占位；
  *   · `injection`：每轮注入（`source` 是 `skill:<名>` / `task`）；
  *   · `message`：hook 改过的视图、压缩阶段自己拼的输入——来历分不出，按角色（`source`）记。
  */
-export type ContextPartKind = "transcript" | "summary" | "omitted" | "cleared_placeholder" | "injection" | "message";
+export type ContextPartKind = "preamble" | "transcript" | "summary" | "omitted" | "cleared_placeholder" | "injection" | "message";
 
 export type ContextPart = Readonly<{ kind: ContextPartKind; source?: string; count: number; chars: number; images: number; tokens: number }>;
 
@@ -90,7 +91,7 @@ function roleOf(m: AgentMessage): string {
   return r.role === "user" && typeof r.source === "string" ? `user/${r.source}` : r.role;
 }
 
-/** 注入的来历：`skill:<名>` / `task`。 */
+/** 注入与开头消息的来历：环境消息的 `source`（带 `ref` 就接在后面）——`skill:<名>` / `task` / `memory`。 */
 function injectionSource(m: AgentMessage): string {
   const e = m as { source?: unknown; ref?: unknown };
   const source = typeof e.source === "string" ? e.source : (m as { role: string }).role;
@@ -162,6 +163,7 @@ export class ContextMirrorStore {
     // 视图：没被 hook 改过就用同一个投影函数重建，能分清每一块的来历；改过的按给出的顺序，来历只分角色
     const blocks: { m: AgentMessage; kind: ContextPartKind; source?: string }[] = [];
     if (handoff.view.kind === "rebuild") {
+      for (const m of expand(handoff.view.preamble)) blocks.push({ m, kind: "preamble", source: injectionSource(m) });
       const transcript = expand(handoff.view.transcript);
       const state = get(handoff.view.compaction) as CompactionState | undefined;
       const inTranscript = new Set<AgentMessage>(transcript);

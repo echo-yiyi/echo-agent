@@ -4,8 +4,8 @@
 // 行为(组装 / 写入校验)是外置的分发函数(compose.ts),认不出的种类组装时隐形。
 // 记忆模块可 JSON 序列化,能直接写进配置文件——它是配置,不是对象机器。
 //
-// 两种 mode = 两种进 system 的方式(2026-08-05 用户拍定,参照 Hermes s10 / Claude Code s09):
-//   resident 学 Hermes:小而关键,**全文常驻** system(每次 run 冻结快照);
+// 两种 mode = 两种展示给模型的方式(正文在对话开头那条消息里,不在 system;2026-08-05 用户拍定,参照 Hermes s10 / Claude Code s09):
+//   resident 学 Hermes:小而关键,**全文常驻**(会话内冻结的快照);
 //   indexed  学 Claude Code:大而稀疏,**索引常驻、正文按需**(模型用 memory 工具自取)。
 // Hermes 那句格言是分界依据:「小而关键的全量冻结注入;大而稀疏的才索引召回」。
 //
@@ -63,7 +63,7 @@ export type IndexedMemory = MemoryBase & {
   readonly fileBudget: number;
 };
 
-/** 内核认识的两种,闭合——内核只会两种「进 system」的方式。第三种方式 = 新机制,回设计。 */
+/** 内核认识的两种,闭合——内核只会两种展示给模型的方式。第三种方式 = 新机制,回设计。 */
 export type Memory = ResidentMemory | IndexedMemory;
 
 /**
@@ -168,8 +168,8 @@ export const notesMemory: IndexedMemory = indexedMemory("memory", {
     "with its reasoning; a fact you had to discover rather than read. Keep it only if it will still be true and useful in a different session next month. " +
     "Leave out progress on the current task (the transcript has it), anything the repository already states (layout, code, version history, its " +
     "instruction files), and anything true only inside this conversation. One fact per .md file, with frontmatter (name, description — the " +
-    "description decides whether you will find it again); say why it matters, not just what happened. Only the index is shown in the system prompt; " +
-    "view a file to read it.",
+    "description decides whether you will find it again); say why it matters, not just what happened. Only the index is shown to you at the start of a " +
+    "conversation; view a file to read it.",
 });
 
 /* ───────────────────────── 行为的函数类型(实现在 compose.ts) ───────────────────────── */
@@ -182,7 +182,7 @@ export const MEMORY_INDEX_FILE = "INDEX.md";
 
 export type WriteVerdict = { ok: true } | { ok: false; reason: string };
 
-/** 一份记忆怎么进 system。契约:**绝不 throw**;"" = 这份没内容,不出段。 */
+/** 一份记忆的正文怎么展示给模型（进对话开头那条记忆消息）。契约:**绝不 throw**;"" = 这份没内容,不出块。 */
 export type ComposeMemory = (memory: AnyMemory, dir: MemoryDir, table: MemoryScopeTable) => Promise<string>;
 
 /** 一次写入(写完后的全文)能不能落。拒绝时 reason 原样回给模型——要说清怎么腾地方。 */

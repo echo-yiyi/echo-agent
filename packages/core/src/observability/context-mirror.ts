@@ -30,13 +30,13 @@ export type MirrorFresh = readonly Readonly<{ ref: MirrorRef; value: unknown }>[
 
 /**
  * 一次模型调用的上下文在主线程交出去的样子。视图两种写法：
- *   · `rebuild`：没被 hook 改过——观测线程用同一个 `buildWorkingMessages` 从 transcript + 压缩状态重建，再接上注入；
+ *   · `rebuild`：没被 hook 改过——观测线程把开头消息摆在最前，用同一个 `buildWorkingMessages` 从 transcript + 压缩状态重建，再接上注入；
  *   · `explicit`：被 `transformContext` / `contextBeforeBuild` 改过、或压缩阶段自己拼的——按顺序给出每条消息的编号。
  */
 export type ContextHandoff = Readonly<{
   system: Readonly<{ ref: MirrorRef; chars: number }> | null;
   view:
-    | Readonly<{ kind: "rebuild"; transcript: MirrorRuns; compaction: MirrorRef; injections: readonly MirrorRef[] }>
+    | Readonly<{ kind: "rebuild"; preamble: MirrorRuns; transcript: MirrorRuns; compaction: MirrorRef; injections: readonly MirrorRef[] }>
     | Readonly<{ kind: "explicit"; messages: MirrorRuns }>;
   /** 实际菜单（`isModelVisible` 之后），按顺序。 */
   tools: readonly MirrorRef[];
@@ -65,11 +65,12 @@ export class ContextMirror {
   private readonly encoded = new WeakMap<readonly AgentMessage[], { length: number; last: AgentMessage | undefined; runs: [MirrorRef, number][] }>();
 
   /**
-   * 一次 run 内调模型的上下文。`final` 给了（hook 改过视图）就按它逐条编号；否则交「transcript + 压缩状态 + 注入」，
-   * 由观测线程重建。
+   * 一次 run 内调模型的上下文。`final` 给了（hook 改过视图）就按它逐条编号；否则交「开头消息 + transcript + 压缩状态 + 注入」，
+   * 由观测线程重建。开头消息会话内是同一批对象（冻结的那份），只在第一次交值。
    */
   handoff(input: {
     systemPrompt: string | null;
+    preamble: readonly AgentMessage[];
     transcript: readonly AgentMessage[];
     compaction: CompactionState;
     injections: readonly AgentMessage[];
@@ -84,6 +85,7 @@ export class ContextMirror {
         ? { kind: "explicit", messages: this.runsOf(input.final, fresh) }
         : {
             kind: "rebuild",
+            preamble: this.runsOf(input.preamble, fresh),
             transcript: this.transcriptRuns(input.transcript, fresh),
             compaction: this.objectRef(input.compaction, fresh, () => input.compaction),
             injections: input.injections.map((m) => this.onceRef(m, fresh)),

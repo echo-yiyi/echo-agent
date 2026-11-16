@@ -149,8 +149,10 @@ test(
     // ⑨ **第二轮模型调用真的用得上第一轮的东西**——判据落在模型收到的 Context 上，
     // 不是「盘上有」。「东西回来了」与「东西进了 context」是两件事，此前只验过前者。
     const last = rc.seen.at(-1)!;
-    // Memory：A 进程写的那条，出现在 C 进程的 system 里
-    expect(last.systemPrompt, "A 进程写的记忆没进 C 进程的 system").toContain("项目笔记");
+    // Memory：A 进程写的那条，出现在 C 进程对话最前面那条记忆正文里（2026-11-13 起记忆内容不进 system，system 只留规则）
+    expect(last.texts[0], "A 进程写的记忆没进 C 进程的开头消息").toContain("项目笔记");
+    expect(last.systemPrompt, "记忆内容不该在 system 里").not.toContain("项目笔记");
+    expect(last.systemPrompt, "记忆的规则段没进 system").toContain("# Memory");
     // Session：第一轮的对话回到了 context
     expect(last.texts.join("\n"), "第一轮的对话没进 context").toContain("把「用户在做 Echo」记进记忆");
     // Skill：目录段进 system（激活是运行态、不跨进程；宿主每次启动重新交 skill）
