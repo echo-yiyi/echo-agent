@@ -12,7 +12,7 @@ import { ABORT_REASON, AbortReason, errText, type AgentError } from "./errors.ts
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
-import { memoryFactDescriptor, type ExtractSkipReason, type MemoryFact } from "./memory/observe.ts";
+import { memoryFactDescriptor, type ExtractAttemptOutcome, type ExtractSkipReason, type MemoryFact } from "./memory/observe.ts";
 import type { CapabilityFactSink } from "./observability/fact-sink.ts";
 import { memoryHostOf } from "./memory/host-wiring.ts";
 import { MemoryChannel } from "./memory/channel.ts";
@@ -100,7 +100,7 @@ import { assemblePrompt as assembleSections, type AssembleReport } from "./promp
 import { promptSectionOwners } from "./extension/registries.ts";
 import { ContextMirror } from "./observability/context-mirror.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
-import { newSessionId } from "./session/types.ts";
+import { newSessionId, type ExtractOutcome } from "./session/types.ts";
 import { DEFAULT_AGENT_REF, type AgentRef } from "./agent-def/types.ts";
 import { isModelVisible, toolError, type AgentTool, type AgentToolResult, type ModelTool } from "./tools/types.ts";
 import { activeTools, effectiveRestriction, registerTool, registerTools, resolveTool, toolSchemasOf, visibleTools, type ToolMap, type ToolRestrictions } from "./tools/harness.ts";
@@ -3243,24 +3243,48 @@ export class Agent {
         const why: ExtractSkipReason | null = signal.aborted ? "aborted" : epoch !== this.extractEpoch ? "epoch_changed" : range.messages === 0 ? "empty_range" : !this.memoryWorkAllowed ? "not_allowed" : null;
         if (why !== null) {
           skipped(why);
-          return "not_run";
+          return { kind: "not_run" };
         }
         return this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal);
       });
-      if (pass === "not_run" || epoch !== this.extractEpoch) return;
-      if (pass === "unfinished") {
+      if (pass.kind === "not_run" || epoch !== this.extractEpoch) return;
+      // 每一次跑了的提取都留一条结局（2026-11-16）：正常结束 / 部分完成 / 失败（下次重看） / 失败后放弃
+      const finished = (outcome: ExtractAttemptOutcome, written: number, reasonCode?: string): void => {
+        this.memoryActivity?.offer({
+          kind: "extract_finished",
+          outcome,
+          written,
+          ...(reasonCode === undefined ? {} : { reasonCode }),
+          extractRunId: pass.runId,
+          ...(triggeredBy === undefined ? {} : { triggeredBy }),
+          occurredAt: Date.now(),
+        });
+      };
+      let reviewed: { outcome: ExtractOutcome; written: number; reason?: string };
+      if (pass.kind === "failed") {
         // 一条没写成就停了：下次重看这段。连续几次都这样就放弃——卡住的那段本身已攒够轮数，不放弃的话
         // 之后每条 reply 都重跑一次、范围一次比一次大（`DEFAULT_EXTRACT_UNFINISHED_LIMIT`）
         this.extractUnfinished += 1;
-        if (this.extractUnfinished < DEFAULT_EXTRACT_UNFINISHED_LIMIT) return;
+        if (this.extractUnfinished < DEFAULT_EXTRACT_UNFINISHED_LIMIT) {
+          finished("failed", 0, pass.reason);
+          return;
+        }
         this.reportDiagnostic({
           code: "memory_extract_gave_up",
           message: `记忆提取连续 ${this.extractUnfinished} 次没写成就停了：这段对话不再重看，下次从之后的内容看起`,
         });
+        finished("abandoned", 0, pass.reason);
+        reviewed = { outcome: "abandoned", written: 0, reason: pass.reason };
+      } else if (pass.kind === "partial") {
+        finished("partial", pass.written, pass.reason);
+        reviewed = { outcome: "partial", written: pass.written, reason: pass.reason };
+      } else {
+        finished("completed", pass.written);
+        reviewed = { outcome: "completed", written: pass.written };
       }
       this.extractUnfinished = 0;
       this.extractCursor = Math.max(this.extractCursor, end);
-      await this.recordReviewed(end + offset);
+      await this.recordReviewed(end + offset, reviewed);
     });
   }
 
@@ -3269,11 +3293,11 @@ export class Agent {
    * `settleDream()` 等通道收完，所以收摊不会抢在这笔写之前交出 lease。落盘失败只留诊断：
    * 这次提取写的记忆已经在盘上了，最坏是续会话后把这段再看一遍。
    */
-  private async recordReviewed(through: number): Promise<void> {
+  private async recordReviewed(through: number, how: { outcome: ExtractOutcome; written: number; reason?: string }): Promise<void> {
     const id = this._state.sessionId;
     if (id === null || this.sessionService === undefined) return;
     try {
-      await this.sessionService.append(id, [{ kind: "memory_reviewed", at: this.clock.now(), through }]);
+      await this.sessionService.append(id, [{ kind: "memory_reviewed", at: this.clock.now(), through, ...how }]);
     } catch (e) {
       this.reportDiagnostic({ code: "memory_extract_cursor_persist_failed", message: errText(e) });
     }
@@ -3374,7 +3398,7 @@ export class Agent {
     fork: { seed: readonly AgentMessage[]; menu: readonly AgentTool[]; range: ExtractRange },
     signal: AbortSignal,
   ): Promise<ExtractPass> {
-    if (fork.range.messages === 0 || !this.memoryWorkAllowed || signal.aborted) return "not_run";
+    if (fork.range.messages === 0 || !this.memoryWorkAllowed || signal.aborted) return { kind: "not_run" };
     const table = memoryScopeTableOf(memory);
     // 此刻存着什么由 prompt 自带：上文开头那条记忆正文是会话开头冻结的那一版，之后写的看不到；不给就只能一个个 view 去摸
     const prompt = defaultExtractPrompt(listMemories(memory), table, fork.range, await memoryManifest(memory));
@@ -3423,26 +3447,27 @@ export class Agent {
       signal,
       async () => {},
     );
-    if (result.outcome.kind === "completed") return "reviewed";
+    if (result.outcome.kind === "completed") return { kind: "completed", written, runId };
     if (result.outcome.kind === "aborted") {
       // signal 中止了：stop() / 丢锁在收摊——不报、不算没跑完
-      if (signal.aborted) return "not_run";
+      if (signal.aborted) return { kind: "not_run" };
       // signal 没动却以 aborted 收场：送模前被 `contextBeforeBuild` hook 拦下了（子循环与主循环同一套 hooks）。
       // 这不是收摊，照没跑完算——这段已攒够轮数，当成没跑的话之后每条 reply 都重装一次 prompt、再被拦一次，
       // 没有诊断、也永远到不了放弃
       this.reportDiagnostic({
         code: "memory_extract_failed",
-        message: `记忆提取被 hook 拦下（${result.outcome.reason ?? "没给原因"}）；${written > 0 ? `此前已写入 ${written} 条，这段算看过了` : "没有写入"}`,
+        message: `记忆提取被 hook 拦下（${result.outcome.reason ?? "没给原因"}）；${written > 0 ? `此前已写入 ${written} 条，这段算部分完成` : "没有写入"}`,
       });
-      return written > 0 ? "reviewed" : "unfinished";
+      return written > 0 ? { kind: "partial", written, reason: "hook_blocked", runId } : { kind: "failed", reason: "hook_blocked", runId };
     }
     // `runAgentLoop` 对失败不抛，结果在 outcome 里：没跑完（provider 错、轮数用完）要报出来，与通道兜住的抛错同一个 code。
     // 写成过的那几条是真的落了盘：这段按看过算（与整理撞上限按「做了一部分」记同一个口径）
     this.reportDiagnostic({
       code: "memory_extract_failed",
-      message: `记忆提取没跑完（${result.outcome.error.code}）：${result.outcome.error.message}；${written > 0 ? `此前已写入 ${written} 条，这段算看过了` : "没有写入"}`,
+      message: `记忆提取没跑完（${result.outcome.error.code}）：${result.outcome.error.message}；${written > 0 ? `此前已写入 ${written} 条，这段算部分完成` : "没有写入"}`,
     });
-    return written > 0 ? "reviewed" : "unfinished";
+    const reason = result.outcome.error.code;
+    return written > 0 ? { kind: "partial", written, reason, runId } : { kind: "failed", reason, runId };
   }
 
   /**

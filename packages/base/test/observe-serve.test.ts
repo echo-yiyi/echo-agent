@@ -333,7 +333,7 @@ const EMITTED_RECORD_NAMES = [
   "model.generate", "model.generate.delta", "model.usage", "model.retry.scheduled",
   "tool.execute", "tool.execute.progress",
   "memory.compose", "memory.mutation.committed", "memory.mutation.rejected", "memory.mutation.failed", "memory.mutation.partial",
-  "memory.extract.skipped", "memory.dream.evaluated",
+  "memory.extract.skipped", "memory.extract.finished", "memory.dream.evaluated",
   "task.state.committed", "task.store.saved", "task.store.failed",
   "schedule.created", "schedule.cancelled", "schedule.delivered", "schedule.bookkeeping-failed", "schedule.missed",
   "inbox.accepted", "inbox.rejected", "inbox.restored", "inbox.consumed", "inbox.acked", "inbox.released", "inbox.sealed",

@@ -17,6 +17,7 @@ import { assistantMessage, environmentMessage, toolResultMessage, userMessage, t
 import type { StreamFn } from "../src/provider/types.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
+import { SessionService } from "../src/session/service.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { FakeClock } from "../src/schedule/clock.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
@@ -727,4 +728,55 @@ test("提取子循环不做自动压缩：主对话在最后那条回答之后�
   await agent.prompt("第四件事：接着来");
   expect(kinds.slice(4, 5)).toEqual(["collapse"]);
   expect(compactionHooks).toEqual(["postCompact"]);
+});
+
+test("三种结局分得清（2026-11-16）：会话里的游标记录带上正常结束 / 部分完成 / 失败后放弃、写了几条、停下的原因码；观测每次跑了的提取都记一条（含失败待重试）", async () => {
+  const create = (id: string, path: string) => toolTurn(id, "memory", { command: "create", path, file_text: "---\ndescription: 一条\n---\n\n内容" });
+  const view = (id: string) => toolTurn(id, "memory", { command: "view", path: "session/memory/" });
+  // 每次提取一份剧本：最后一条消息是那条提取指令，就是新的一次开始
+  const attempts = [
+    [create("w1", "session/memory/a.md"), textTurn("记好了。")], // 正常结束，写了 1 条
+    [create("w2", "session/memory/b.md"), view("v1"), view("v2"), view("v3"), view("v4")], // 写了 1 条后撞轮数上限：部分完成
+    [view("x1"), view("x2"), view("x3"), view("x4"), view("x5")], // 一条没写成就撞上限：失败，游标不动
+    [view("y1"), view("y2"), view("y3"), view("y4"), view("y5")], // 又失败：连续两次，放弃
+  ];
+  let current: StreamFn | undefined;
+  let next = 0;
+  const extract: StreamFn = (model, context, options) => {
+    if (JSON.stringify(context.messages.at(-1)).includes(EXTRACT_PROMPT_OPENING)) current = scriptedStreamFn(attempts[next++]!);
+    return current!(model, context, options);
+  };
+  const { fn } = recording({ extract });
+  const store = new InMemoryDir();
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()), sessionService: new SessionService(store), sessionId: "s1" });
+  await agent.start();
+  const facts: { kind: string; outcome?: string; written?: number; reasonCode?: string }[] = [];
+  (agent as unknown as { memoryActivity: { offer(f: unknown): void } }).memoryActivity = { offer: (f) => void facts.push(f as (typeof facts)[number]) };
+
+  await say(agent, ...THREE);
+  await idleExtract(agent);
+  await say(agent, ...NEXT_THREE);
+  await idleExtract(agent);
+  await say(agent, "第七件事：周五不发版", "第八件事：先写测试再改代码", "第九件事：评审意见当天回");
+  await idleExtract(agent); // 失败：游标不动
+  await say(agent, "第十件事：发版说明写中文");
+  await idleExtract(agent); // 重看那段，又失败：放弃
+  await agent.stop();
+
+  const reviewed: Record<string, unknown>[] = [];
+  for (const name of (await store.list("entries/")).sort()) {
+    const entry = JSON.parse((await store.read(name))!) as Record<string, unknown>;
+    if (entry.kind === "memory_reviewed") reviewed.push({ outcome: entry.outcome, written: entry.written, ...(entry.reason === undefined ? {} : { reason: entry.reason }) });
+  }
+  expect(reviewed).toEqual([
+    { outcome: "completed", written: 1 },
+    { outcome: "partial", written: 1, reason: "max_iterations" },
+    { outcome: "abandoned", written: 0, reason: "max_iterations" },
+  ]);
+  expect(facts.filter((f) => f.kind === "extract_finished").map((f) => [f.outcome, f.written, f.reasonCode])).toEqual([
+    ["completed", 1, undefined],
+    ["partial", 1, "max_iterations"],
+    ["failed", 0, "max_iterations"],
+    ["abandoned", 0, "max_iterations"],
+  ]);
 });

@@ -29,7 +29,10 @@ import { assertMessageShape } from "../message-shape.ts";
 import { EMPTY_COMPACTION, type CompactionReason, type CompactionState } from "../compaction/types.ts";
 import { assertCompactionFits } from "../compaction/view.ts";
 import { assertSafePathSegment } from "../storage/path-safety.ts";
-import type { SessionData, SessionEntry, SessionInfo, SessionStore } from "./types.ts";
+import type { ExtractOutcome, SessionData, SessionEntry, SessionInfo, SessionStore } from "./types.ts";
+
+/** `memory_reviewed.outcome` 认得的三种（验形用；类型的出处是 `ExtractOutcome`）。 */
+const EXTRACT_OUTCOMES: readonly unknown[] = ["completed", "partial", "abandoned"] satisfies readonly ExtractOutcome[];
 import { STATUS_FILE, writeSessionPhase, type SessionPhase } from "./status.ts";
 import type { Diagnostic } from "../errors.ts";
 
@@ -70,7 +73,7 @@ export type SessionEntryInput =
   | { kind: "compaction"; at: number; reason: CompactionReason; compaction: CompactionState }
   | { kind: "error"; at: number; error: AgentError }
   | { kind: "workspace"; at: number; workspace: string }
-  | { kind: "memory_reviewed"; at: number; through: number };
+  | { kind: "memory_reviewed"; at: number; through: number; outcome?: ExtractOutcome; written?: number; reason?: string };
 
 /**
  * 会话的语义所有者。**一个实例管一段 session**（2026-09-03）：注入的 store 就是那一段的目录，
@@ -568,6 +571,10 @@ function assertEntryShape(entry: SessionEntry, where: string): void {
     case "memory_reviewed":
       if (!Number.isSafeInteger(entry.through) || entry.through < 0) throw new Error(`${where} 是 memory_reviewed 但 through 不是非负整数`);
       if (typeof entry.at !== "number") throw new Error(`${where} 是 memory_reviewed 但缺 at`);
+      // 结局三项可缺（2026-11-16 之前的旧记录没有），有就得认得出
+      if (entry.outcome !== undefined && !EXTRACT_OUTCOMES.includes(entry.outcome)) throw new Error(`${where} 是 memory_reviewed 但 outcome 不认识：${String(entry.outcome)}`);
+      if (entry.written !== undefined && (!Number.isSafeInteger(entry.written) || entry.written < 0)) throw new Error(`${where} 是 memory_reviewed 但 written 不是非负整数`);
+      if (entry.reason !== undefined && typeof entry.reason !== "string") throw new Error(`${where} 是 memory_reviewed 但 reason 不是字符串`);
       return;
     default:
       // 未知 kind：不猜、不跳过。多半是版本不匹配，接着写会写出更乱的东西。

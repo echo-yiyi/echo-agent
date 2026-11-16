@@ -49,6 +49,14 @@ export type ExtractSkipReason = "not_allowed" | "no_scope" | "no_modules" | "ove
  *   · `locked`：别的会话正在整理这一层（试拿锁没拿到）。
  */
 export type DreamDecision = "due" | "in_progress" | "too_soon" | "few_writes" | "few_turns" | "few_files" | "locked";
+/**
+ * 提取跑了的那一次是怎么结束的（2026-11-16，封闭集）：
+ *   · `completed`：模型自己收尾；
+ *   · `partial`：中途停了但写成过——游标推过去，记成部分完成；
+ *   · `failed`：一条没写成就停了——游标不动，下次重看；
+ *   · `abandoned`：又一次一条没写成，连续次数到了上限——放弃这段，游标推过去。
+ */
+export type ExtractAttemptOutcome = "completed" | "partial" | "failed" | "abandoned";
 
 export type MemoryFact =
   | Readonly<{
@@ -96,6 +104,18 @@ export type MemoryFact =
       occurredAt: number;
     }>
   | Readonly<{
+      kind: "extract_finished";
+      outcome: ExtractAttemptOutcome;
+      /** 这一次写成了几条。 */
+      written: number;
+      /** 中途停下的原因码（部分完成、失败、放弃才有）：循环的错误码，被 hook 拦下是 `hook_blocked`。 */
+      reasonCode?: string;
+      /** 那次提取子循环的 runId。 */
+      extractRunId: string;
+      triggeredBy?: string;
+      occurredAt: number;
+    }>
+  | Readonly<{
       kind: "dream_evaluated";
       /** 哪一层（`user` / `project` …）。 */
       layer: string;
@@ -134,6 +154,24 @@ export const memoryFactDescriptor: CapabilityFactDescriptor<MemoryFact> = {
         scope: {},
         attributes: { reason: fact.reason, force: fact.force, ...link },
         body: { reason: fact.reason, force: fact.force, ...link },
+      };
+    }
+    if (fact.kind === "extract_finished") {
+      const reason: Record<string, string> = fact.reasonCode === undefined ? {} : { reasonCode: fact.reasonCode };
+      const attributes: Record<string, string | number | boolean> = { outcome: fact.outcome, written: fact.written, runId: fact.extractRunId, ...reason };
+      return {
+        occurredAt: fact.occurredAt,
+        kind: "event",
+        name: "memory.extract.finished",
+        scope: {},
+        attributes,
+        body: {
+          outcome: fact.outcome,
+          written: fact.written,
+          extractRunId: fact.extractRunId,
+          ...reason,
+          ...(fact.triggeredBy === undefined ? {} : { triggeredBy: fact.triggeredBy }),
+        },
       };
     }
     if (fact.kind === "dream_evaluated") {

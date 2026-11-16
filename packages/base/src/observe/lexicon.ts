@@ -122,6 +122,7 @@ export const RECORD_TERMS: Readonly<Record<string, Term>> = {
   "memory.mutation.partial": { zh: "记忆半提交", en: "memory.mutation.partial", tone: "critical", hint: "rename 目标已建、源删失败之类的半提交" },
   "memory.compose": { zh: "记忆正文组装", en: "memory.compose", tone: "neutral", hint: "这次组装出的记忆正文（对话开头那条消息）的模块数 / 块数 / 字符数；reused = 沿用会话里冻结的那份、没重读盘" },
   "memory.extract.skipped": { zh: "提取跳过", en: "memory.extract.skipped", tone: "neutral", hint: "回复收尾后这次没起记忆提取：话太少、轮数没攒满、前台自己写过、没有模块……；点开回到触发它的 run" },
+  "memory.extract.finished": { zh: "提取结局", en: "memory.extract.finished", tone: "neutral", hint: "一次跑了的记忆提取怎么结束的：正常结束、部分完成（写成过但中途停了，没写到的不再看）、失败（下次重看）、失败后放弃；写了几条、停下的原因码；点开到那次提取" },
   "memory.dream.evaluated": { zh: "整理判断", en: "memory.dream.evaluated", tone: "neutral", hint: "回到 idle 后对每一层判了要不要整理：写入 / 轮数 / 文件不够、太早、进行中、别的会话在整理，或开整（节流全满足）" },
   "task.state.committed": { zh: "任务状态", en: "task.state.committed", tone: "neutral", hint: "内存清单已变（不等于已落盘）" },
   "task.store.saved": { zh: "任务已落盘", en: "task.store.saved", tone: "positive", hint: "真实 TaskStore.save() 成功" },

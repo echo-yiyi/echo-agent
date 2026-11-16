@@ -107,15 +107,23 @@ export const DEFAULT_EXTRACT_SETTINGS: ExtractSettings = Object.freeze({
 });
 
 /**
- * 一次提取的结局，决定游标推不推（2026-11-12）：
- * - `reviewed`：这段算看过——跑完了，或者没跑完但已写成至少一条（那几条是真的落了盘）。游标推进。
- * - `unfinished`：一条没写成就停了（模型出错、轮数用完）。游标不动、下次重看；连续 `DEFAULT_EXTRACT_UNFINISHED_LIMIT` 次就放弃那段。
- * - `not_run`：没起来，或者被中止（stop / 丢锁）。游标不动，也不算一次没跑完——丢锁之后一个字都不许再写。
+ * 一次提取的结局，决定游标推不推（2026-11-12），推的话记成哪种（2026-11-16，会话里 `memory_reviewed.outcome`）：
+ * - `completed`：模型自己收尾（写没写都算）。游标推进，记「正常结束」。
+ * - `partial`：中途停了（轮数用完、模型出错、被 hook 拦下），但已写成至少一条（那几条是真的落了盘）。游标推进，记「部分完成」
+ *   ——没写到的那部分不再看；先记下来看多常见，要不要重试另议。
+ * - `failed`：一条没写成就停了。游标不动、下次重看；连续 `DEFAULT_EXTRACT_UNFINISHED_LIMIT` 次就放弃那段，记「失败后放弃」。
+ * - `not_run`：没起来，或者被中止（stop / 丢锁）。游标不动，也不算一次失败——丢锁之后一个字都不许再写。
+ *
+ * `reason` 是中途停下的原因码：循环的错误码（如 `max_iterations`），被 hook 拦下是 `hook_blocked`。`runId` 是那次提取子循环。
  */
-export type ExtractPass = "reviewed" | "unfinished" | "not_run";
+export type ExtractPass =
+  | Readonly<{ kind: "completed"; written: number; runId: string }>
+  | Readonly<{ kind: "partial"; written: number; reason: string; runId: string }>
+  | Readonly<{ kind: "failed"; reason: string; runId: string }>
+  | Readonly<{ kind: "not_run" }>;
 
 /**
- * 提取**连续**几次一条没写成就停了（`ExtractPass` 的 `unfinished`），就放弃那段、游标照推（2026-11-12）。
+ * 提取**连续**几次一条没写成就停了（`ExtractPass` 的 `failed`），就放弃那段、游标照推（2026-11-12），记成 `abandoned`。
  *
  * 为什么要放弃：卡住的那段本身已经攒够轮数，游标不动的话之后每条 reply 都会再跑一次，要看的范围一次比一次大——
  * 越大越容易再撞轮数上限，自己越卡越死。为什么不第一次就放弃：模型一时出错、或这一次恰好没写完，重看一次多半就过了。
