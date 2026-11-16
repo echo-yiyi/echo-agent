@@ -21,9 +21,9 @@
    - [`askOutsideSandbox()`](../../../packages/tools/src/preset.ts#symbol=askOutsideSandbox)：包在任意策略外面，策略放行的 bash 带 `sandbox: false` 改成问人。
 3. **`echo-coding` 只剩内容**：缺省规则表 [`DEFAULT_PERMISSION`](../../../packages/coding/src/permission.ts#symbol=DEFAULT_PERMISSION) 点哪三件、免判名单 [`CODING_SAFE_TOOLS`](../../../packages/coding/src/permission.ts#symbol=CODING_SAFE_TOOLS) 在工具包那份后面补 worktree 两件。`permissionPolicyFor()` 是规则表加 `askOutsideSandbox()` 的组合。它的公共面不再导出 `PermissionPolicy` / `PermissionRule` 两个类型（用 core 的），`CODING_CLASSIFIER_NOTES` 删掉（用工具包的），没有兼容转发。
 4. **`echo-agent` 挂三条工具 extension**（[`ECHO_AGENT`](../../../packages/cli/src/product.ts#symbol=ECHO_AGENT)）：`echo:workspace` / `echo:shell` / `echo:web`。三个产品自己的决定与 `echo-coding` 相同，各自声明各自的：
-   - 沙箱跟形态走：交互形态包、管道形态不包；
+   - 沙箱归使用者：`settings.json` 写了 `sandbox: true` 才包，缺省不包（2026-11-16 起，见[安全加固](2026-11-15-security-hardening.md)第 4 步）；
    - 交给分类器的形状取工具包那一份，开不开归使用者；
-   - 分类器关着时，交互形态越出沙箱的那一条问终端里的人；
+   - 开着沙箱、分类器关着时，越出沙箱的那一条问人（交互形态问终端里的人，管道形态没人可问就是拒）；
    - **管道形态全放行**：没人可问，分类器缺省关着。
 
 ## 承重约束
@@ -42,11 +42,11 @@
 
 - **`echo-agent` 的行为变了**：以前把内容管道进 `echo-agent` 只会得到一段文字；现在模型可以读写当前目录、跑命令、取网页，而且管道形态不问人。两个 README 都写了「在那里把它当作一个会跑命令、会改当前目录文件的脚本」。
 - `echo-agent` 多一个依赖（`@echo-agent/tools`），隔离安装门与分发门各跟着多拷一个包。
-- 两个产品各有一份「沙箱跟形态走、分类器关着时装哪份策略」的几行声明。它们是产品的决定，不是装配逻辑，但改一边时要想起另一边。
+- 两个产品各有一份「沙箱开着、分类器关着时装哪份策略」的几行声明。它们是产品的决定，不是装配逻辑，但改一边时要想起另一边。
 
 ## 验收
 
 - 规则表：[三档](../../../packages/core/test/permission-rules.test.ts#test=规则表三档点名的工具照点名的走allow-放行deny-拒并说是策略拒的ask-问人并说要裁决人)、[fallback](../../../packages/core/test/permission-rules.test.ts#test=规则表里没有的工具走-fallbackfallback-不给就是放行)、[有没有人答](../../../packages/core/test/permission-rules.test.ts#test=规则表换出来的策略ask-等人不超时没说有人答就是-noneagent-把-ask-折成拒说了-host-就是-host)
 - 工具包的共用件：[条目](../../../packages/tools/test/preset.test.ts#test=toolsentries三条顺序-echoworkspace-echoshell-echowebsandbox-true-才给-echoshell-配沙箱每次调用是一组新的工具对象)、[免判名单与真工具集对得上](../../../packages/tools/test/preset.test.ts#test=免判名单只读的只动工作区文件的后台作业的读与停都在能出这台机器的-bash-与-webfetch-不在名单里没有不存在的工具)、[越出沙箱必须问人](../../../packages/tools/test/preset.test.ts#test=askoutsidesandbox策略放行的-bash-带-sandbox-false-改问人不带的别的工具照放策略自己说拒或问的不动)
 - `echo-coding`：[名单补了哪两件](../../../packages/coding/test/permission.test.ts#test=交给安全分类器的免判名单工具包那份原样加上本产品自己的-worktree-两件bash-与-webfetch-不在)、[identity 漂移测试](../../../packages/coding/test/identity.test.ts#test=identity-的工具集与-prompt-与真装出来的-coding-agent-一致漂移即红)（装出来的工具集与挂载顺序不变）
-- `echo-agent`：[preset](../../../packages/cli/test/cli.test.ts#test=presetecho-agent-自带身份段纪律段与工具包的三条文件与搜索shellweb交互形态包沙箱管道形态不包分类器关着时交互形态越出沙箱的那一条问人管道形态什么都不装2026-11-15)、隔离安装（`packages/cli/test/package-isolation.test.ts`：依赖恰好是 core / base / tools / tui，拷出去装完 `--help` 退出码 0）
+- `echo-agent`：[preset](../../../packages/cli/test/cli.test.ts#test=presetecho-agent-自带身份段纪律段与工具包的三条沙箱归使用者缺省不包写了-sandbox-才包给分类器的说明才带沙箱那一句开着沙箱而分类器关着时越出沙箱的那一条问人管道形态就是拒2026-11-16)、隔离安装（`packages/cli/test/package-isolation.test.ts`：依赖恰好是 core / base / tools / tui，拷出去装完 `--help` 退出码 0）

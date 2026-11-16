@@ -13,7 +13,7 @@ to no single product. A product mounts the packs it wants; `echo-coding` mounts 
 | Extension | Tools | Notes |
 |---|---|---|
 | `ECHO_WORKSPACE` (`echo:workspace`) | `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `list_dir` | Confined to the session's workspace: a path that leads outside it, directly or through a symlink, is refused. An existing file must be read before it is changed. |
-| `ECHO_SHELL` (`echo:shell`) | `bash`, `job_output`, `job_stop` | Not confined to the workspace. Commands do not see echo's own API keys. With `{ sandbox: true }` they run in an OS sandbox (macOS `sandbox-exec`, Linux bubblewrap) that can write only inside the workspace, temporary directories and package caches, and cannot read echo's credential file. |
+| `ECHO_SHELL` (`echo:shell`) | `bash`, `job_output`, `job_stop` | Not confined to the workspace. echo's own API keys are left out of the commands' environment; that stops a casual `$KEY`, not a command that reads the parent process's environment as the same user. With `{ sandbox: true }` they run in an OS sandbox (macOS `sandbox-exec`, Linux bubblewrap) that can write only inside the workspace, temporary directories and package caches, and cannot read echo's credential file. |
 | `ECHO_WEB` (`echo:web`) | `web_fetch`, `web_search` | `web_fetch` reaches public internet addresses only. `web_search` uses Brave Search and needs `BRAVE_API_KEY` or a `brave` entry in the credential store. Both are deferred tools. |
 
 ## Mount them

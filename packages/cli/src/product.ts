@@ -5,9 +5,10 @@
 //
 // **对外的工具**（2026-11-15）：通用 agent 也挂工具包的三条（`@echo-agent/tools`：文件与搜索、shell、web）。
 // 它们不属于哪个产品，这里只做三个产品自己的决定，与 `echo-coding` 各自声明各自的：
-//   · 沙箱跟形态走：交互形态 bash 包进操作系统沙箱，管道形态不包；
-//   · 交给内核安全分类器的形状取工具包那一份（哪些工具不用判、bash 的 `sandbox: false` 是什么意思）；开不开归使用者；
-//   · 分类器关着时，交互形态越出沙箱的那一条问终端里的人；开着时由分类器判，不另装策略。
+//   · 沙箱归使用者（2026-11-16）：settings.json 写了 `sandbox: true` 才把 bash 包进操作系统沙箱，缺省不包——
+//     常见用法是整个 agent 已经放在容器里；
+//   · 交给内核安全分类器的形状取工具包那一份（哪些工具不用判；开着沙箱时再带上 bash 的 `sandbox: false` 是什么意思）；开不开归使用者；
+//   · 开着沙箱、分类器关着时，越出沙箱的那一条问人（管道形态没人可问就是拒）；分类器开着时由它判，不另装策略。
 // **管道形态全放行**：没人可问，分类器缺省也关着——那时它就是一个会读写当前目录、会跑命令的脚本。
 
 import { readFileSync } from "node:fs";
@@ -26,12 +27,12 @@ export const ECHO_AGENT: Product = Object.freeze({
   name: "echo-agent",
   version: VERSION,
   preset: (form, host) => ({
-    extensions: [identityEntry(), conductEntry(form), ...toolsEntries({ sandbox: form.interactive, credentials: host.credentials })],
-    // 分类器关着、有人坐在终端前：全放行，但越出沙箱的那一条问人。其余情形不装策略（分类器开着时装配层会补一份让「问人」有人接）
-    ...(form.interactive && !form.safetyClassifier
-      ? { agent: { permission: askOutsideSandbox(permissionPolicyFromRules({ fallback: "allow", responder: "host" })) } }
+    extensions: [identityEntry(), conductEntry(form), ...toolsEntries({ sandbox: form.sandbox === true, credentials: host.credentials })],
+    // 开着沙箱、分类器关着：全放行，但越出沙箱的那一条问人。其余情形不装策略（分类器开着时装配层会补一份让「问人」有人接）
+    ...(form.sandbox === true && !form.safetyClassifier
+      ? { agent: { permission: askOutsideSandbox(permissionPolicyFromRules({ fallback: "allow", responder: form.interactive ? "host" : "none" })) } }
       : {}),
-    safetyClassifier: { safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES },
+    safetyClassifier: { safeTools: TOOLS_SAFE_TOOLS, ...(form.sandbox === true ? { notes: SHELL_CLASSIFIER_NOTES } : {}) },
   }),
   // 观测留 30 天（2026-09-15 用户拍板）：更早且已封口的 run 在启动时被清掉。
   // 不给这条规则的话观测只增不减，`listRuns` 越来越慢（observability.md §8）。

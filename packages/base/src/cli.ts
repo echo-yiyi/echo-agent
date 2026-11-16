@@ -92,6 +92,8 @@ export type CliOptions = {
   observe?: ObservationCapturePolicy;
   /** 安全分类器开不开：来自设置文件的 `safetyClassifier`（没有对应的命令行旗子）。不给 = 没说，按形态（`presetForm`）。 */
   safetyClassifier?: boolean;
+  /** 命令进不进操作系统沙箱：来自设置文件的 `sandbox`（没有对应的命令行旗子）。不给 = 不进（`presetForm`）。 */
+  sandbox?: boolean;
 };
 
 /** `--observe` 能接的值。与 `ObservationCapturePolicy` 同一份枚举——多写少写 `satisfies` 都会报。 */
@@ -152,6 +154,9 @@ export function usage(name: string): string {
 **工作区信任**：没给 --extensions 时，./extensions 里的扩展只在受信的工作区里加载——装配会执行它们的代码。
 交互形态第一次遇到会列出文件问一次，信任就按目录记进 $ECHO_HOME/settings.json；管道与 --serve 没人可问，
 不受信就不加载，并在 stderr 说一行怎么信任。
+
+**沙箱**：$ECHO_HOME/settings.json 里写 "sandbox": true，bash 的命令就包进操作系统沙箱（macOS sandbox-exec、Linux bubblewrap），
+只能写工作区、临时目录与包管理器缓存，读不到 echo 的凭据文件。缺省不包：整个 agent 放在容器里跑时，容器就是那层边界。
 
 **安全分类器**：$ECHO_HOME/settings.json 里写 "safetyClassifier": true 或 false。开着时，工具执行前先让模型判一次
 该不该自动执行，判拦的不跑、判不了或连着判拦就问你。不写就按形态：交互开、管道关；写了两种形态都照写的来。
@@ -535,8 +540,13 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
       // 工作区信任（2026-11-03）：约定目录里的扩展只在受信的工作区里加载。交互形态要问人，所以在装配之前定。
       const trusted = await trustConventionDir(product, shell, opts, interactive, settingsRead.settings.trustedWorkspaces ?? [], notices, controller.signal, deps);
       // 安全分类器开不开只有设置文件这一个入口（2026-11-15）：不写 = 没说，按形态（`presetForm`）
-      const safetyClassifier = settingsRead.settings.safetyClassifier;
-      const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}), ...(safetyClassifier !== undefined ? { safetyClassifier } : {}) };
+      const { safetyClassifier, sandbox } = settingsRead.settings;
+      const effective: CliOptions = {
+        ...opts,
+        ...(model !== undefined ? { model } : {}),
+        ...(safetyClassifier !== undefined ? { safetyClassifier } : {}),
+        ...(sandbox !== undefined ? { sandbox } : {}),
+      };
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
@@ -567,10 +577,11 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
  * 交给产品的形态（导出只为判据）。`--serve` 不装壳、没人能答：哪怕是在终端里起的也不算交互形态——
  * 否则按「有人答」装的权限、提问策略与安全分类器的「问人」没人兑现，run 入口当场拒跑（2026-11-15）。
  */
-export function presetForm(interactive: boolean, opts: Pick<CliOptions, "serve" | "safetyClassifier">): PresetForm {
+export function presetForm(interactive: boolean, opts: Pick<CliOptions, "serve" | "safetyClassifier" | "sandbox">): PresetForm {
   const attended = interactive && opts.serve !== true;
   // 安全分类器：使用者说了算；没说按形态——有人在就开（判不了能问人），管道 / CI 不开（没人可问，每步多一两次模型调用也改评测的成本）
-  return { interactive: attended, safetyClassifier: opts.safetyClassifier ?? attended };
+  // 沙箱：使用者写了 true 才包（2026-11-16）——常见用法是整个 agent 已在容器里，里面再包一层既多余、多半也起不来
+  return { interactive: attended, safetyClassifier: opts.safetyClassifier ?? attended, sandbox: opts.sandbox === true };
 }
 
 /**

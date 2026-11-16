@@ -25,17 +25,18 @@ already taken on npm by an unrelated project.
 runtime's safety classifier checks every shell command, web fetch and any tool not known to be
 safe (MCP and extension tools included) against what you asked for, before it runs: a one-word
 quick check, and a careful second look only for what the quick check flags. You are asked only when
-the classifier keeps blocking or cannot run. Shell commands run in an OS sandbox (macOS
-`sandbox-exec`, Linux bubblewrap) that can write only inside the working directory, temporary
-directories and package caches, and cannot read echo's credential file. Where no sandbox works
-(inside most containers), each command has to run explicitly outside it and is checked the same
-way. **Through a pipe it runs every tool without asking** — treat it there as a script that may
-change files in the current directory.
+the classifier keeps blocking or cannot run. **Through a pipe it runs every tool without asking** —
+treat it there as a script that may change files in the current directory.
 
-Whether the classifier runs is your call: set `"safetyClassifier": false` (or `true`) in
-`$ECHO_HOME/settings.json`. Unset, it is on in the interactive UI and off through a pipe; set, it
-applies to both. With it off, the sandbox still applies in the interactive UI, and a command that
-asks to run outside it asks you first.
+Both switches are yours, in `$ECHO_HOME/settings.json`:
+
+- `"safetyClassifier"`: unset, it is on in the interactive UI and off through a pipe; set, it applies
+  to both.
+- `"sandbox": true`: shell commands run in an OS sandbox (macOS `sandbox-exec`, Linux bubblewrap)
+  that can write only inside the working directory, temporary directories and package caches, and
+  cannot read echo's credential file. Off by default, because the usual setup already runs the whole
+  agent inside a container. Where no sandbox can start, each command has to run explicitly outside
+  it and is checked by the classifier; with the classifier off, such a command asks you first.
 
 Sessions belong to a directory *and* a command, so `echo-agent` and `echo-coding` never share a
 conversation even in the same directory.

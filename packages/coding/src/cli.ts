@@ -12,8 +12,9 @@
 //   · **安全分类器**是内核的（`createEcho({ safetyClassifier })`），开不开归使用者（settings.json 的 `safetyClassifier`，
 //     不写按形态：交互开、管道关——装配层 `presetForm` 定）。本产品只交**形状**：哪些工具不用判（`CODING_SAFE_TOOLS`：
 //     工具包那份加上本产品的 worktree 两件）、bash 的 `sandbox: false` 是什么意思（工具包的 `SHELL_CLASSIFIER_NOTES`）。
-//   · **交互形态命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，`@echo-agent/tools` 的 `sandbox.ts`）。分类器关着时，越出沙箱的那一条
-//     由人看（`permissionPolicyFor` 的规矩）；开着时由分类器判，不另装策略。
+//   · **沙箱归使用者**（2026-11-16，settings.json 的 `sandbox`，缺省不包——常见用法是整个 agent 已经在容器里）：写了 `true`
+//     才把命令包进操作系统沙箱（只能写工作区、临时目录与缓存，`@echo-agent/tools` 的 `sandbox.ts`）。开着沙箱、分类器关着时，
+//     越出沙箱的那一条由人看（`permissionPolicyFor` 的规矩）；分类器开着时由它判，不另装策略。
 // `permission.ts` 的 `DEFAULT_PERMISSION`（三件先问的黑名单）**不是这条命令的行为**：它只在嵌入方调 `codingPreset()`
 // 而不传 `permission` 时生效（评测、别的宿主）。
 
@@ -41,13 +42,15 @@ export const ECHO_CODING: Product = Object.freeze({
   // 共用的纪律段由**产品**挂（2026-09-09 拍板）：装配层不再恒挂，形态决定「有没有人能答」那一条。
   // `codingPreset()` 自己只依赖 core，所以这一条加在这里，不加进它。
   preset: (form, host) => {
-    // 沙箱跟形态走：交互形态包、管道形态不包。分类器关着时越出沙箱的那一条问终端里的人；开着时交给分类器（见文件头）
-    const permission = form.interactive && !form.safetyClassifier ? ({ fallback: "allow", responder: "host" } as const) : false;
-    const preset = codingPreset({ permission, sandbox: form.interactive, maxIterations: 200, credentials: host.credentials });
+    // 沙箱归使用者（settings.json 的 `sandbox`，缺省不包）。开着沙箱、分类器关着时越出沙箱的那一条问人（管道形态就是拒）；
+    // 分类器开着时交给分类器（见文件头）
+    const sandbox = form.sandbox === true;
+    const permission = sandbox && !form.safetyClassifier ? ({ fallback: "allow", responder: form.interactive ? "host" : "none" } as const) : false;
+    const preset = codingPreset({ permission, sandbox, maxIterations: 200, credentials: host.credentials });
     return {
       ...preset,
       extensions: [conductEntry(form), ...preset.extensions],
-      safetyClassifier: { safeTools: CODING_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES },
+      safetyClassifier: { safeTools: CODING_SAFE_TOOLS, ...(sandbox ? { notes: SHELL_CLASSIFIER_NOTES } : {}) },
     };
   },
   // 观测留 30 天（2026-09-15 用户拍板，与 echo-agent 同一条规则；两个产品平级，各自声明各自的）。

@@ -1,6 +1,6 @@
 # 安全加固四步：剥凭据与堵越权、外来内容打来源标签、安全分类器、操作系统沙箱
 
-> 状态:implemented · 提出 2026-11-13（安全分层学习总结末尾「对 echo 意味着什么」的四步方案）· 拍板 2026-11-15（用户：「之前说的安全问题，我们这边内核能做的，也全部做掉」）· 同日追加分类器的覆盖面、两段与开关（用户：「我们要加成两段，并且补上配置去开关，打开这个安全分类器，让使用者去决策」），并把分类器挪进内核、经 `createEcho()` 一个参数开关（用户：「通过 createecho 的这里加一个参数可以开关不好吗？」「我们做的一直不是一个 coding agent，我们改的其实大部分都是 echo 内核」）· 落地 `packages/tools/src/bash.ts` / `sandbox.ts` / `web.ts` / `prompt.ts` / `extensions.ts`（落地时在 `packages/coding/src/` 下，同日随 [工具独立成包](2026-11-15-tools-package.md) 搬出）、`packages/coding/src/permission.ts` / `agent.ts` / `cli.ts`、`packages/core/src/messages.ts` / `prompt/sanitize.ts` / `permission/types.ts` / `permission/classifier.ts` / `agent.ts` / `create-agent.ts` / `session/sessions.ts` / `session/tools.ts` / `memory/compose.ts` / `memory/extract.ts` / `create-echo.ts` / `provider/openai.ts`、`packages/base/src/prompt.ts` / `instructions.ts` / `cli.ts` / `product.ts` / `settings.ts`，判据见验收 · 修改 2026-09-01「出厂 echo-coding 两种形态都全放行」（交互形态缺省开安全分类器 + 沙箱，管道形态不变；原理由写在 `packages/coding/src/cli.ts` 文件头）
+> 状态:implemented · 提出 2026-11-13（安全分层学习总结末尾「对 echo 意味着什么」的四步方案）· 拍板 2026-11-15（用户：「之前说的安全问题，我们这边内核能做的，也全部做掉」）· 同日追加分类器的覆盖面、两段与开关（用户：「我们要加成两段，并且补上配置去开关，打开这个安全分类器，让使用者去决策」），并把分类器挪进内核、经 `createEcho()` 一个参数开关（用户：「通过 createecho 的这里加一个参数可以开关不好吗？」「我们做的一直不是一个 coding agent，我们改的其实大部分都是 echo 内核」）· 2026-11-16 沙箱改成缺省不开、使用者写了才开（用户：「现在有的用户就是这样（把 agent 全部放到沙箱里），我们肯定不能白白浪费……默认是不需要开启沙箱的，如果用户选择了开启沙箱才上我们这些专用功能」）· 落地 `packages/tools/src/bash.ts` / `sandbox.ts` / `web.ts` / `prompt.ts` / `extensions.ts`（落地时在 `packages/coding/src/` 下，同日随 [工具独立成包](2026-11-15-tools-package.md) 搬出）、`packages/coding/src/permission.ts` / `agent.ts` / `cli.ts`、`packages/core/src/messages.ts` / `prompt/sanitize.ts` / `permission/types.ts` / `permission/classifier.ts` / `agent.ts` / `create-agent.ts` / `session/sessions.ts` / `session/tools.ts` / `memory/compose.ts` / `memory/extract.ts` / `create-echo.ts` / `provider/openai.ts`、`packages/base/src/prompt.ts` / `instructions.ts` / `cli.ts` / `product.ts` / `settings.ts`，判据见验收 · 修改 2026-09-01「出厂 echo-coding 两种形态都全放行」（交互形态缺省开安全分类器 + 沙箱，管道形态不变；原理由写在 `packages/coding/src/cli.ts` 文件头）
 
 **给谁看**：改 echo-coding 的 shell / web 工具、权限策略、环境消息投影或纪律段的人。假设已知 [prompt](../../design/prompt.md) §7 的三个概念（authority / 结构卫生 / 安全隔离）与 [会话](../../design/sessions.md) §4 的不越权规则。
 
@@ -39,22 +39,27 @@
    - bash 的执行后端可替换（[`ShellBackend`](../../../packages/tools/src/sandbox.ts#symbol=ShellBackend)）：给一条 bash argv，返回真正要起的 argv。macOS 用 `sandbox-exec`，Linux 用 bubblewrap，装配时真跑一条试过才算（[`detectSandbox`](../../../packages/tools/src/sandbox.ts#symbol=detectSandbox)）。
    - 沙箱里只能写工作区（git worktree 加主仓库的 `.git`）、临时目录、存在的包管理器缓存；读不到 `$ECHO_HOME/credentials.json`；读别处、出网照旧。
    - 模型可以带 `sandbox: false` 让某一条在沙箱外跑——参数明着写在调用里，分类器的说明讲清它在沙箱外。**没有可用沙箱时不悄悄直接起**：拒跑并说明，模型要带 `sandbox: false` 重跑，那一条照样过分类器（关着时问人）。
-   - 出厂 echo-coding 交互形态开（`codingPreset({ sandbox })`），管道形态不开。
+   - **缺省不开，开不开归使用者**（2026-11-16）：`$ECHO_HOME/settings.json` 写 `"sandbox": true` 才开，两种形态都照写的来（[`presetForm`](../../../packages/base/src/cli.ts#symbol=presetForm) 定好放进 `PresetForm.sandbox`，产品据此调 `toolsEntries({ sandbox })`）。常见用法是整个 agent 已经放在容器里跑：外面那层就是写的边界，里面再包一层既多余、多半也起不来（Docker 缺省挡住 bubblewrap），白白多一来一回。
+   - 只有开着沙箱时才有：bash 的 `sandbox` 参数、tool:shell 段的沙箱说明、给分类器的「`sandbox: false` 是在沙箱外跑」那句、分类器关着时「越出沙箱的那一条问人」（管道形态没人可问就是拒）。
 
 ## 实现时的一处改动（相对 11-13 的方案）
 
-方案原写「沙箱不可用就拒绝执行」。照字面做，容器里（Docker 缺省的 seccomp 挡住 bubblewrap 要的用户命名空间）echo-coding 的 bash 就一条都跑不了——而用户正是把整个 agent 放在容器里跑。改成：不可用时带沙箱的那条拒跑，`sandbox: false` 的那条过安全分类器后照跑（分类器关着时问人）。效果是容器里每条命令都过分类器，与没有沙箱时一样；沙箱可用的机器上仍是沙箱兜底、越出沙箱要明着说并过分类器。
+方案原写「沙箱不可用就拒绝执行」。照字面做，容器里（Docker 缺省的 seccomp 挡住 bubblewrap 要的用户命名空间）echo-coding 的 bash 就一条都跑不了——而用户正是把整个 agent 放在容器里跑。改成：不可用时带沙箱的那条拒跑，`sandbox: false` 的那条过安全分类器后照跑（分类器关着时问人）。
+
+2026-11-16 再往前一步：沙箱整个改成缺省不开（见第 4 步）。容器里的使用者不写 `sandbox`，就不会撞上「不可用 → 拒跑 → 带 `sandbox: false` 重跑」这一来一回；写了 `true` 而这台机器起不来沙箱时，才走上面那条路。
 
 ## Non-Goals
 
 - 不限网络、不限读（除凭据文件）。第一期只限写。
 - 分类器的判断规则只写通用的几类风险；点名某个工具、某个参数的说明由产品经 `notes` 交，不写进内核。
-- 管道形态缺省不开分类器、不包沙箱（评测与 CI；容器本身就是边界）。使用者可以在设置里打开分类器。
+- 管道形态缺省不开分类器；两种形态缺省都不包沙箱（评测与 CI、整个 agent 放在容器里的用法——容器本身就是边界）。使用者可以在设置里打开。
+- 不自动识别「是不是在容器里」：开发用的容器常把家目录挂进去，那时容器不是边界，猜错的代价是该包的没包。由使用者明着写。
 - 分类器的模型调用不进 transcript、不记观测、不计入用量统计。
 - 不做 bash 命令的静态白名单快速通道（解析 shell 安全地判「只读」本身就是一大块）。
 
 ## 已知代价与限制
 
+- **「命令看不到 echo 的 key」只挡随手引用，不是边界**（2026-11-16 实测）：bash 的子进程环境里确实没有那几个变量，但命令与 agent 是同一个用户，父进程（agent 自己）的环境照样读得到——macOS 上 `ps eww -p $PPID` 实测打印出了父进程的 key，Linux 上是 `/proc/$PPID/environ`（同一用户缺省可读，未在本机实测）。沙箱只限写，挡不住这条读。`credentials.json` 也只在开着沙箱时读不到。整个 agent 放在容器里时，key 与命令在同一个容器、同一个用户下，echo 自己护不住它：要靠放容器的人在外面做——网络出口只放行需要的地址、用额度有限能随时作废的 key（或在容器外放一个替请求加 key 的代理，容器里根本没有 key）。
 - 开着分类器时，名单之外的每一步多一次短的模型调用（不开思考、只答一个词）；第一段判拦的再多一次带推理的复判。延迟与费用随模型而定。
 - 分类器是模型判断，不是关卡：它看不到工具输出，所以注入骗不到它，但它可能误放或误拦。判拦的理由回到模型，连着三次后改问人。
 - 分类器关掉、又没有可用沙箱时（多数容器），每条命令都要带 `sandbox: false`、都会问人。
@@ -70,6 +75,6 @@
 - 来源标签：[网页内容标来源](../../../packages/tools/test/web.test.ts#test=webfetch-的正文前面说明它是外部内容当数据不当指令并写出来源跳转之后写最终那个地址页面里藏的先运行某某认得出来源2026-11-15)、[环境消息包标签](../../../packages/core/test/background.test.ts#test=环境消息投影成-user-消息包在来源标签里source-以标签属性出门ref-不出门模型分得清它不是用户说的2026-11-15)、[冒充闭合标签被中和](../../../packages/core/test/background.test.ts#test=环境消息里冒充闭合标签的字样被中和外来内容提前收不了尾冒充不了标签外的用户每次投出来字节相同2026-11-15)、[纪律段](../../../packages/cli/test/prompt.test.ts#test=conduct两种形态都讲谁的话算数按-core-包环境消息的那个标签名讲没人值守的那版加材料要的对外动作只报告2026-11-15)
 - 策略的两样输入：[userIntent 只有用户本人的话](../../../packages/core/test/permission.test.ts#test=策略的-userintent-只有用户本人的话human-steerharness-插话环境消息工具结果模型正文都不算)、[askModel](../../../packages/core/test/permission.test.ts#test=策略的-askmodel用本会话的模型不带工具system-与-prompt-原样不进-transcript模型出错就-reject策略据此拒)
 - 分类器（内核）：[两段](../../../packages/core/test/safety-classifier.test.ts#test=两段第一段放行就放行一次调用第一段判拦才进第二段以第二段为准第二段放回去的照跑两段同一份-system作答要求各在请求末尾)、[两段都判拦与连拦三次](../../../packages/core/test/safety-classifier.test.ts#test=两段都判拦deny第二段的理由交回模型说明这一步没跑连着判拦三次之后改问人不再调模型放行一次就重新计数只数第二段的判拦)、[一共二十次](../../../packages/core/test/safety-classifier.test.ts#test=一个会话里一共判拦满二十次也改问人哪怕中间都放行过)、[判不了改问人](../../../packages/core/test/safety-classifier.test.ts#test=判不了不等于判过模型出错改问人fail-closed)、[名单](../../../packages/core/test/safety-classifier.test.ts#test=名单内核自己的只读-自身状态工具不判产品补的-safetools-也不判名单之外的一律判mcp扩展extensionreloadskillcreate)、[接在授权 stage 上](../../../packages/core/test/safety-classifier.test.ts#test=agent-开了分类器策略放行之后名单外的工具先判两段都判拦就不跑理由回到工具结果判过的照跑名单上的不调模型)、[策略先判](../../../packages/core/test/safety-classifier.test.ts#test=策略说拒或问照它的分类器不插手没开分类器的-agent-一次也不调判不了模型出错改问人没人答就是拒)、[createEcho 一个参数](../../../packages/core/test/create-echo.test.ts#test=createecho-的-safetyclassifier-一个参数开关安全分类器true-给形状就开名单外的工具先判判拦的不跑不给就不判2026-11-15)
-- 开关与形状：[设置文件到得了形态](../../../packages/cli/test/cli.test.ts#test=mainforsettingsjson-里的-safetyclassifier-进了交给产品的形态使用者的开关到得了产品2026-11-15)、[装配层交给内核](../../../packages/cli/test/cli.test.ts#test=echooptions安全分类器开不开照形态里定好的交给-createecho形状取产品给的产品没装权限策略时补一份全放行的让问人有人接2026-11-15)、[--serve 不算交互](../../../packages/cli/test/cli.test.ts#test=交给产品的形态--serve-不装壳没人能答哪怕在终端里起的也不算交互形态2026-11-15)、[echo-coding 交的形状](../../../packages/coding/test/cli.test.ts#test=preset产品自带-echocoding-echoworkspace-echoshell不碰-workspace交互形态包沙箱管道形态不包交给安全分类器的是形状不是开关)、[分类器关掉时越界问人](../../../packages/coding/test/cli.test.ts#test=使用者关掉安全分类器settingsjson-的-safetyclassifier-false交互形态仍包沙箱越出沙箱的那一条改问人管道形态什么都不装2026-11-15)、[越出沙箱不悄悄放行](../../../packages/coding/test/permission.test.ts#test=越出沙箱从不悄悄放行规则是-allow-时-bash-带-sandbox-false-改问人不带的照放)
+- 开关与形状：[设置文件到得了形态](../../../packages/cli/test/cli.test.ts#test=mainforsettingsjson-里的-safetyclassifier-与-sandbox-进了交给产品的形态使用者的开关到得了产品2026-11-15)、[装配层交给内核](../../../packages/cli/test/cli.test.ts#test=echooptions安全分类器开不开照形态里定好的交给-createecho形状取产品给的产品没装权限策略时补一份全放行的让问人有人接2026-11-15)、[--serve 不算交互](../../../packages/cli/test/cli.test.ts#test=交给产品的形态--serve-不装壳没人能答哪怕在终端里起的也不算交互形态2026-11-15)、[echo-coding 交的形状](../../../packages/coding/test/cli.test.ts#test=preset产品自带-echocoding-echoworkspace-echoshell不碰-workspace沙箱缺省不包使用者写了才包交给安全分类器的是形状不是开关)、[分类器关掉时越界问人](../../../packages/coding/test/cli.test.ts#test=开着沙箱关掉安全分类器越出沙箱的那一条改问人管道形态没人可问就是拒没开沙箱就什么都不装2026-11-16)、[越出沙箱不悄悄放行](../../../packages/coding/test/permission.test.ts#test=越出沙箱从不悄悄放行规则是-allow-时-bash-带-sandbox-false-改问人不带的照放)
 - 沙箱：[真沙箱](../../../packages/tools/test/sandbox.test.ts#test=真沙箱工作区临时目录能写家目录写不进echo-的凭据文件读不到sandbox-false-那条读得到)、[不可用不悄悄直接起](../../../packages/tools/test/sandbox.test.ts#test=沙箱不可用bash-不悄悄直接起拒跑说明原因与怎么办带-sandbox-false-的那条照常跑)、[走真装配含后台作业](../../../packages/coding/test/coding-agent.test.ts#test=沙箱走真装配echoshell-配了-sandbox前台与后台命令都写不进家目录工作区照写2026-11-15)
 - 真模型：两段分类器对 DeepSeek `deepseek-flash`（2026-11-15）19 个例子：判拦上传 SSH 私钥、强推、`curl | sh`、把 key 塞进 URL、没要求的 Slack 发帖与 `extension_reload`、读 `~/.aws/credentials`、`npm publish`；放行跑测试、`git status`、用户要的推送与开 issue、清缓存重装、项目脚本的 `chmod +x`（第一段误判、第二段放回）、`sandbox: false` 的 `bun install`。用户说「撤掉上一个提交」而 agent 用 `git reset --hard HEAD~1`：第二段判拦（5/5），理由是 `--hard` 还会丢掉未提交的改动、建议 `--soft`——与 echo-coding 纪律段「不许 `git reset --hard`，除非用户点名要」一致。只用第一段时多误拦一条。这是实测，不是机器判据。

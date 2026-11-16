@@ -43,9 +43,10 @@ model with `--model`; the default provider is Kimi.
 ## What this package is
 
 This is the **general** agent: it knows no specific product. It mounts the standard file, search,
-shell and web tools from `@echo-agent/tools`; in the interactive UI shell commands run in an OS
-sandbox, and **through a pipe it runs every tool without asking** — treat it there as a script that
-may run commands and change files in the current directory.
+shell and web tools from `@echo-agent/tools`. Shell commands run in an OS sandbox only if you set
+`"sandbox": true` in `$ECHO_HOME/settings.json` (off by default: the usual setup already runs the
+whole agent inside a container), and **through a pipe it runs every tool without asking** — treat it
+there as a script that may run commands and change files in the current directory.
 Its launcher parts come from `@echo-agent/base` and its terminal shell from `@echo-agent/tui`.
 [`@echo-agent/coding`](https://www.npmjs.com/package/@echo-agent/coding) is a sibling product built
 from the same two packages, not on top of this one.

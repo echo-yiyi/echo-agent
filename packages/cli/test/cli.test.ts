@@ -650,15 +650,17 @@ test("echoOptions：安全分类器开不开照形态里定好的交给 createEc
   // 关着：不交给内核，也不补策略
   const off = echoOptions(bare, { interactive: true, safetyClassifier: false }, none, kimiProvider(), [], credentials, undefined, true);
   expect([off.safetyClassifier, off.agent?.permission]).toEqual([false, undefined]);
-  // echo-agent 自己交了形状（工具包那一份）：开着时交给内核的就是它
+  // echo-agent 自己交了形状（工具包那一份）：开着时交给内核的就是它；开着沙箱才带沙箱那一句说明
   const own = echoOptions(ECHO_AGENT, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
-  expect(own.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
+  expect(own.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS });
+  const ownBoxed = echoOptions(ECHO_AGENT, { interactive: true, safetyClassifier: true, sandbox: true }, none, kimiProvider(), [], credentials, undefined, true);
+  expect(ownBoxed.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
   // 产品交了形状就用它的
   const shaped: Product = { name: "x", version: "0", preset: () => ({ safetyClassifier: { safeTools: ["read_file"] } }) };
   expect(echoOptions(shaped, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true).safetyClassifier).toEqual({ safeTools: ["read_file"] });
 });
 
-test("preset：echo-agent 自带身份段、纪律段与工具包的三条（文件与搜索、shell、web）；交互形态包沙箱、管道形态不包；分类器关着时交互形态越出沙箱的那一条问人，管道形态什么都不装（2026-11-15）", async () => {
+test("preset：echo-agent 自带身份段、纪律段与工具包的三条；沙箱归使用者——缺省不包，写了 sandbox 才包、给分类器的说明才带沙箱那一句；开着沙箱而分类器关着时，越出沙箱的那一条问人（管道形态就是拒）（2026-11-16）", async () => {
   const presetOf = (form: PresetForm) => ECHO_AGENT.preset!(form, { credentials: new InMemoryCredentialStore() });
   const step = (params: unknown): PermissionPolicyInput => ({
     runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params, userIntent: [],
@@ -667,22 +669,27 @@ test("preset：echo-agent 自带身份段、纪律段与工具包的三条（文
     },
   });
   for (const interactive of [true, false]) {
-    // 形态照装配层的缺省：分类器交互开、管道关
-    const preset = presetOf({ interactive, safetyClassifier: interactive });
+    // 形态照装配层的缺省：分类器交互开、管道关；沙箱不包
+    const preset = presetOf({ interactive, safetyClassifier: interactive, sandbox: false });
     // 没有 echo:coding、没有 echo:worktree：那两条是 coding 产品自己的
     expect(preset.extensions?.map((e) => e.entryId)).toEqual(["echo:identity", "echo:conduct", "echo:workspace", "echo:shell", "echo:web"]);
-    expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual(interactive ? { sandbox: true } : undefined);
-    // 分类器开着（交互）或压根没人（管道）：产品不装策略；交给分类器的是形状，开不开不归它
+    expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toBeUndefined();
+    // 产品不装策略；交给分类器的是形状，开不开不归它；没有沙箱就不提沙箱
     expect(preset.agent).toBeUndefined();
-    expect(preset.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
+    expect(preset.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS });
+    // 使用者写了 sandbox: true：两种形态都包，给分类器的说明带上 sandbox: false 是什么意思
+    const boxed = presetOf({ interactive, safetyClassifier: interactive, sandbox: true });
+    expect(boxed.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual({ sandbox: true });
+    expect(boxed.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
   }
-  // 使用者关掉分类器：交互形态仍包沙箱，全放行但越出沙箱的那一条问终端里的人
-  const off = presetOf({ interactive: true, safetyClassifier: false });
+  // 开着沙箱、关掉分类器：全放行，但越出沙箱的那一条问人——交互形态问终端里的人，管道形态没人可问（问人折成拒）
+  const off = presetOf({ interactive: true, safetyClassifier: false, sandbox: true });
   const permission = off.agent!.permission!;
   expect([permission.responder, (await permission.authorize(step({ command: "ls" }))).kind]).toEqual(["host", "allow"]);
   expect((await permission.authorize(step({ command: "npm i -g x", sandbox: false }))).kind).toBe("ask");
-  expect(off.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual({ sandbox: true });
-  expect(presetOf({ interactive: false, safetyClassifier: false }).agent).toBeUndefined();
+  expect(presetOf({ interactive: false, safetyClassifier: false, sandbox: true }).agent?.permission?.responder).toBe("none");
+  // 没开沙箱、分类器也关着：什么都不装（没有沙箱可越）
+  expect(presetOf({ interactive: true, safetyClassifier: false, sandbox: false }).agent).toBeUndefined();
 });
 
 test("echoOptions：没给 --extensions 时，受信才把约定目录交给 createEcho，不受信显式给 []；给了 --extensions 不看信任", () => {
@@ -942,7 +949,7 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
     expect(ui.screen()).toContain("v9.9.9");
     // 形态到了 preset 手里，而且只调一次（workspace 不经 preset，`mainFor()` 直接交给 createEcho）
     // 形态里**只有形态**（2026-09-09）：凭据这类宿主能力走 preset 的第二个参数，不再夹带在形态里
-    expect(forms).toEqual([{ interactive: true, safetyClassifier: true }]); // 没写设置：分类器按形态，交互开
+    expect(forms).toEqual([{ interactive: true, safetyClassifier: true, sandbox: false }]); // 没写设置：分类器按形态，交互开；沙箱不包
     expect(applied, "preset 交出的 Extension 没被 mount").toBe(1);
     // 渐进式披露的缺省名单（`DEFAULT_DEFERRED_TOOLS`）进了装配：名单非空 → `tool_search` 在池里；
     // 延迟的工具本身也在池里（只是不上菜单，那半边的判据在 core 的 tool-search.test）
@@ -956,14 +963,14 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
   }
 });
 
-test("mainFor：settings.json 里的 safetyClassifier 进了交给产品的形态——使用者的开关到得了产品（2026-11-15）", async () => {
+test("mainFor：settings.json 里的 safetyClassifier 与 sandbox 进了交给产品的形态——使用者的开关到得了产品（2026-11-15）", async () => {
   const restore = isolate();
   const ui = fakeTui();
   try {
     const credentials = new FileCredentialStore(join(dir, "credentials.json"));
     await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
     mkdirSync(join(dir, "home"), { recursive: true });
-    writeFileSync(join(dir, "home", "settings.json"), JSON.stringify({ safetyClassifier: false }));
+    writeFileSync(join(dir, "home", "settings.json"), JSON.stringify({ safetyClassifier: false, sandbox: true }));
     const forms: PresetForm[] = [];
     const productMain = mainFor({ name: "echo-试产品", version: "9.9.9", preset: (form) => (forms.push(form), {}) }, terminalShell);
     const running = productMain(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
@@ -972,7 +979,7 @@ test("mainFor：settings.json 里的 safetyClassifier 进了交给产品的形�
       verify: async () => ({ ok: true }),
     });
     await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
-    expect(forms).toEqual([{ interactive: true, safetyClassifier: false }]);
+    expect(forms).toEqual([{ interactive: true, safetyClassifier: false, sandbox: true }]);
     ui.feed(String.fromCharCode(4));
     expect(await running).toBe(0);
   } finally {
@@ -1174,12 +1181,15 @@ test("叫醒会话的 argv 带 --provider / --model / --observe：宿主与父�
 });
 
 test("交给产品的形态：--serve 不装壳、没人能答，哪怕在终端里起的也不算交互形态（2026-11-15）", () => {
-  expect(presetForm(true, { serve: false })).toEqual({ interactive: true, safetyClassifier: true });
-  expect(presetForm(true, { serve: true })).toEqual({ interactive: false, safetyClassifier: false });
-  expect(presetForm(false, { serve: false })).toEqual({ interactive: false, safetyClassifier: false });
+  expect(presetForm(true, { serve: false })).toEqual({ interactive: true, safetyClassifier: true, sandbox: false });
+  expect(presetForm(true, { serve: true })).toEqual({ interactive: false, safetyClassifier: false, sandbox: false });
+  expect(presetForm(false, { serve: false })).toEqual({ interactive: false, safetyClassifier: false, sandbox: false });
   // 安全分类器：使用者写了就照写的（来自 settings.json），没写按形态——有人在开、管道与 --serve 不开
-  expect(presetForm(true, { serve: false, safetyClassifier: false })).toEqual({ interactive: true, safetyClassifier: false });
-  expect(presetForm(false, { serve: false, safetyClassifier: true })).toEqual({ interactive: false, safetyClassifier: true });
+  expect(presetForm(true, { serve: false, safetyClassifier: false })).toEqual({ interactive: true, safetyClassifier: false, sandbox: false });
+  expect(presetForm(false, { serve: false, safetyClassifier: true })).toEqual({ interactive: false, safetyClassifier: true, sandbox: false });
+  // 沙箱：使用者写了 true 才包，两种形态都照写的来（2026-11-16）
+  expect(presetForm(true, { serve: false, sandbox: true })).toEqual({ interactive: true, safetyClassifier: true, sandbox: true });
+  expect(presetForm(false, { serve: false, sandbox: true })).toEqual({ interactive: false, safetyClassifier: false, sandbox: true });
 });
 
 test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，也能把没在跑的那段叫起来", async () => {

@@ -14,10 +14,10 @@ import { CODING_SAFE_TOOLS } from "../src/permission.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
-test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；交互形态包沙箱、管道形态不包；交给安全分类器的是形状不是开关", async () => {
+test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；沙箱缺省不包、使用者写了才包；交给安全分类器的是形状不是开关", async () => {
   for (const interactive of [true, false]) {
-    // 形态照装配层的缺省：分类器交互开、管道关（`presetForm`）
-    const preset = ECHO_CODING.preset!({ interactive, safetyClassifier: interactive }, { credentials: new InMemoryCredentialStore() });
+    // 形态照装配层的缺省：分类器交互开、管道关；沙箱不包（`presetForm`）
+    const preset = ECHO_CODING.preset!({ interactive, safetyClassifier: interactive, sandbox: false }, { credentials: new InMemoryCredentialStore() });
     // 身份与编码纪律段、worktree 是 coding 自己的；文件读写与搜索、shell、web 来自工具包（echo-agent 也挂）——都以 Extension 的形态进装配。
     // **共用纪律段也在里面**（2026-09-09 拍板：纪律归产品，装配层不再恒挂）。
     expect(preset.extensions?.map((e) => e.entryId)).toEqual([
@@ -39,13 +39,16 @@ test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 w
     // 权限（2026-11-15）：分类器开着时产品不装策略（越界那一条交给分类器判）；分类器本身是内核的，产品只交形状。
     // 「动手先问」（`permission.ts` 的 `DEFAULT_PERMISSION`）是 `codingPreset()` 不传 permission 时的缺省（评测 / 别的宿主），本产品不用它。
     expect(preset.agent).toEqual({ maxIterations: 200, thinkingLevel: "medium" });
-    expect(preset.safetyClassifier).toEqual({ safeTools: CODING_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
-    // 沙箱跟形态走：交互形态 bash 包进操作系统沙箱，管道形态不包（2026-11-15）
-    expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual(interactive ? { sandbox: true } : undefined);
+    expect(preset.safetyClassifier).toEqual({ safeTools: CODING_SAFE_TOOLS }); // 没有沙箱就不提沙箱
+    // 沙箱归使用者（2026-11-16）：缺省不包；写了 sandbox: true 两种形态都包，给分类器的说明带上 sandbox: false 是什么意思
+    expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toBeUndefined();
+    const boxed = ECHO_CODING.preset!({ interactive, safetyClassifier: interactive, sandbox: true }, { credentials: new InMemoryCredentialStore() });
+    expect(boxed.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual({ sandbox: true });
+    expect(boxed.safetyClassifier).toEqual({ safeTools: CODING_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
   }
 });
 
-test("使用者关掉安全分类器（settings.json 的 safetyClassifier: false）：交互形态仍包沙箱，越出沙箱的那一条改问人；管道形态什么都不装（2026-11-15）", async () => {
+test("开着沙箱、关掉安全分类器：越出沙箱的那一条改问人（管道形态没人可问就是拒）；没开沙箱就什么都不装（2026-11-16）", async () => {
   const presetOf = (form: PresetForm) => ECHO_CODING.preset!(form, { credentials: new InMemoryCredentialStore() });
   const step = (params: unknown): PermissionPolicyInput => ({
     runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params, userIntent: [],
@@ -53,12 +56,15 @@ test("使用者关掉安全分类器（settings.json 的 safetyClassifier: false
       throw new Error("分类器关着，产品的规则不该调模型");
     },
   });
-  const off = presetOf({ interactive: true, safetyClassifier: false });
+  const off = presetOf({ interactive: true, safetyClassifier: false, sandbox: true });
   const permission = off.agent!.permission!;
   expect([permission.responder, (await permission.authorize(step({ command: "ls" }))).kind]).toEqual(["host", "allow"]);
   expect((await permission.authorize(step({ command: "npm i -g x", sandbox: false }))).kind).toBe("ask");
   expect(off.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual({ sandbox: true });
-  expect(presetOf({ interactive: false, safetyClassifier: false }).agent?.permission).toBeUndefined();
+  expect(presetOf({ interactive: false, safetyClassifier: false, sandbox: true }).agent?.permission?.responder).toBe("none");
+  for (const interactive of [true, false]) {
+    expect(presetOf({ interactive, safetyClassifier: false, sandbox: false }).agent?.permission).toBeUndefined();
+  }
 });
 
 /* ─────────────────────────── 可执行文件本身 ─────────────────────────── */
