@@ -1,6 +1,6 @@
 {
   "name": "@echo-agent/tools",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "license": "MIT",
   "type": "module",
   "description": "Echo's standard tool packs: workspace files and search, shell with an optional OS sandbox, web fetch and search. Any product mounts the ones it wants. Requires Bun.",
