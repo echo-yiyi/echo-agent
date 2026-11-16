@@ -29,7 +29,10 @@ export type DreamGates = {
   minTurnsSinceLast?: number;
   /** indexed 模块的文件总数 ≥ N。 */
   minFiles?: number;
-  /** 距上次整理 ≥ N 毫秒(CC 缺省 24h)。 */
+  /**
+   * 距上次整理 ≥ N 毫秒(CC 缺省 24h)。**给 0 要知道后果**:一层大到一次整理不完(撞轮数上限、按「做了一部分」记、
+   * 计数不清)时,每次回 idle 都会接着整理;只留 `minFiles` 一道、其余全 0 也一样(文件数整理完不会降回门下)。
+   */
   minIntervalMs?: number;
 };
 

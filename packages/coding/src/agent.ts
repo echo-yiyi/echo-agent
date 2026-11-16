@@ -8,7 +8,7 @@
 // 更要命的是它会分家：`createEcho()` 后来补的每一条（inline 工具转 Extension、
 // 清单与真相相等、失败路径逆序卸载），这边都得再补一遍，漏一条就是两种行为。
 //
-// 现在这里只出**数据**：权限策略、三条 Extension 的 Entry（产品的 prompt 段也在其中）。
+// 现在这里只出**数据**：权限策略、五条 Extension 的 Entry（产品的 prompt 段也在其中）。
 // 装配归 `createEcho()`，一处。
 //
 // ```ts
@@ -21,27 +21,34 @@
 // ```
 //
 // system prompt（2026-09-01）：不再有 `systemPrompt` 字符串。产品的身份与编码纪律是 `echo:coding`
-// 这条 prompt pack 的两段；文件 / shell 工具的习惯段随 `echo:workspace` / `echo:shell` 走
-// （文本都在 `prompt.ts`）。工具目录不进 system。
+// 这条 prompt pack 的两段（文本在 `prompt.ts`）；文件 / shell 工具的习惯段随 `echo:workspace` / `echo:shell` 走
+// （文本在 `@echo-agent/tools`）。工具目录不进 system。
 
 import { DEFAULT_MAX_ITERATIONS, type AssembleContext } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
 import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extension";
-import type { CredentialStore, PermissionPolicy as CorePermissionPolicy, PromptSection, Skill, ThinkingLevel } from "@echo-agent/core";
-import { detectShellEnvironment, makeBashTool, makeShellTools } from "./tools/bash.ts";
-import { makeFsTools } from "./tools/fs.ts";
-import { makeSearchTools } from "./tools/search.ts";
-import { makeWebTools } from "./tools/web.ts";
+import type { CredentialStore, PermissionPolicy, PermissionRules, PromptSection, Skill, ThinkingLevel } from "@echo-agent/core";
+// 文件 / 搜索 / shell / web 四组工具、它们的 Extension 与习惯段不是本产品的，来自 `@echo-agent/tools`；本产品只决定挂不挂、沙箱开不开
+import {
+  detectShellEnvironment,
+  makeFsTools,
+  makeSearchTools,
+  makeShellTools,
+  makeWebTools,
+  shellToolsSection,
+  toolsEntries,
+  workspaceToolsSection,
+} from "@echo-agent/tools";
 import { makeWorktreeTools } from "./tools/worktree.ts";
-import { ECHO_SHELL, ECHO_WEB, ECHO_WORKSPACE, ECHO_WORKTREE } from "./extensions.ts";
-import { permissionPolicyFor, type PermissionPolicy } from "./permission.ts";
-import { codingConductSection, codingIdentitySection, shellToolsSection, workspaceToolsSection } from "./prompt.ts";
+import { ECHO_WORKTREE } from "./extensions.ts";
+import { permissionPolicyFor } from "./permission.ts";
+import { codingConductSection, codingIdentitySection } from "./prompt.ts";
 
 export type CodingPresetOptions = {
   /**
-   * 权限策略；false = 不装策略、全放行（出厂 echo-coding 就是这一档，见 `cli.ts`）。不给 = `DEFAULT_PERMISSION`
-   * （`permission.ts`：bash / write_file / edit_file 先问）——没配裁决人时这三件会被拒。
+   * 权限规则表（内核的 `PermissionRules`）；false = 不装策略、全放行（出厂 echo-coding 的管道形态就是这一档，见 `cli.ts`）。
+   * 不给 = `DEFAULT_PERMISSION`（`permission.ts`：bash / write_file / edit_file 先问）——没配裁决人时这三件会被拒。
    */
-  permission?: PermissionPolicy | false;
+  permission?: PermissionRules | false;
   /**
    * 已经扫好的 skill。**本函数不扫盘**——它是同步的一份配置，读盘是调用方的事
    * （`loadSkills()` 在 core 公共面上）。评测传空就是「不加载仓库 skill」。
@@ -55,6 +62,12 @@ export type CodingPresetOptions = {
    * 不给 = 只认环境变量（评测、低层装配）。宿主给的是与模型 key 同一个 store（`PresetForm.credentials`）。
    */
   credentials?: CredentialStore;
+  /**
+   * bash 的命令包进操作系统沙箱跑（2026-11-15，`@echo-agent/tools` 的 `sandbox.ts`）：只能写工作区、临时目录与包管理器缓存，读不到 echo 的凭据文件。
+   * 缺省不开。开了之后模型能带 `sandbox: false` 让某一条在沙箱外跑——那一条要有人把关（内核的安全分类器，或权限策略问人），
+   * 只开沙箱、不装权限策略的话这扇门没人看。
+   */
+  sandbox?: boolean;
 };
 
 /**
@@ -65,7 +78,7 @@ export type CodingPresetOptions = {
  */
 export type CodingPreset = {
   agent: {
-    permission?: CorePermissionPolicy;
+    permission?: PermissionPolicy;
     // `Skill[]` 而不是 `readonly Skill[]`：形状跟着 `AgentOptions` 走，
     // 自己另定一份「更严格」的类型只会在 spread 进 `createEcho()` 时打架。
     skills?: Skill[];
@@ -173,6 +186,8 @@ export function codingAgentIdentity(): {
 }
 
 export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
+  // 工具包的三条（`echo:workspace` / `echo:shell` / `echo:web`）：条目怎么造归工具包，本产品只说沙箱开不开、凭据从哪来
+  const [workspace, shell, web] = toolsEntries({ sandbox: opts.sandbox, credentials: opts.credentials }) as [ExtensionEntry, ExtensionEntry, ExtensionEntry];
   return {
     agent: {
       ...(opts.permission !== false ? { permission: permissionPolicyFor(opts.permission) } : {}),
@@ -183,23 +198,11 @@ export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
     extensions: [
       // 产品的身份与编码纪律
       { entryId: "echo:coding", definition: ECHO_CODING_PROMPT, config: { sections: [codingIdentitySection(), codingConductSection()] } },
-      // fs / search 的工具是纯函数造出来的，可以在装配前就备好 → 走 `defineToolPack` 的 config；
-      // 它们的跨调用习惯段跟工具同一个 config 进来：工具卸了段也走
-      {
-        entryId: "echo:workspace",
-        definition: ECHO_WORKSPACE,
-        config: { tools: [...makeFsTools(), ...makeSearchTools()], sections: [workspaceToolsSection()] },
-      },
-      // bash 不行：它要 `agent.background`。所以 `echo:shell` 自己 inject 那条能力端口并在 apply 里
-      // 注册工具与段，这里只列 definition、不给 config（见 `extensions.ts` 的注释）。
-      { entryId: "echo:shell", definition: ECHO_SHELL },
-      // worktree 隔离要 `AgentRuntime.setWorkspace`，同 shell 一样自己 inject（2026-09-03）
+      workspace,
+      shell,
+      // worktree 隔离是本产品自己的：要 `AgentRuntime.setWorkspace`，自己 inject（2026-09-03）。夹在 shell 与 web 之间是原来的挂载顺序，不动它
       { entryId: "echo:worktree", definition: ECHO_WORKTREE },
-      // 取网页 / 搜索：纯函数工具，config 进来；延迟工具，经 tool_search 取过才上菜单
-      { entryId: "echo:web", definition: ECHO_WEB, config: { tools: makeWebTools({ credentials: opts.credentials }) } },
+      web,
     ],
   };
 }
-
-/** `bash` 单独造一把（不经 Extension）。`makeShellTools()` 与测试都从这里造。 */
-export { makeBashTool };

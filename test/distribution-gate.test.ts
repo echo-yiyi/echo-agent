@@ -171,6 +171,8 @@ function expectNoNestedFileDeps(tgz: string, work: string): void {
 function packStack(work: string, coreTgz: string): Record<string, string> {
   const t: Record<string, string> = { "@echo-agent/core": coreTgz };
   t["@echo-agent/base"] = packWorkspace(work, "packages/base", t);
+  // 工具包只依赖 core 与 base，排在 base 之后；只有挂它的产品（coding）会真装到它，别的消费者多 pack 一个不碍事
+  t["@echo-agent/tools"] = packWorkspace(work, "packages/tools", t);
   t["@echo-agent/tui"] = packWorkspace(work, "packages/tui", t);
   return t;
 }
@@ -602,8 +604,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   test(
     "tui 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
     () => {
-      // pi-tui 是它真实的外部依赖（终端差分渲染），显式写出来——判据仍是「恰好等于」
-      isolatedConsumer("packages/cli", 3, ["@echo-agent/base", "@echo-agent/tui"]);
+      // base、tools 与 tui 是它真实的依赖（启动器部件、文件 / shell / web 工具、终端壳），显式写出来——判据仍是「恰好等于」
+      isolatedConsumer("packages/cli", 3, ["@echo-agent/base", "@echo-agent/tools", "@echo-agent/tui"]);
     },
     300_000,
   );
@@ -659,23 +661,33 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   );
 
   test(
+    "tools 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
+    () => {
+      // base 是它真实的依赖（read_file 读图片用 base 的图片加载），显式写出来——判据仍是「恰好等于」。
+      // 它不依赖任何产品与壳：这条绿着，就是「工具不属于哪个产品」的机器判据
+      isolatedConsumer("packages/tools", 5, ["@echo-agent/base"]);
+    },
+    300_000,
+  );
+
+  test(
     "coding 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
     () => {
-      // base 与 tui 是它真实的依赖（启动器部件来自 base、壳来自 tui，见 `packages/coding/src/cli.ts`），显式写出来——判据仍是「恰好等于」
-      isolatedConsumer("packages/coding", 5, ["@echo-agent/base", "@echo-agent/tui"]);
+      // base、tools 与 tui 是它真实的依赖（启动器部件来自 base、文件 / shell / web 工具来自 tools、壳来自 tui，见 `packages/coding/src/cli.ts` 与 `agent.ts`），显式写出来——判据仍是「恰好等于」
+      isolatedConsumer("packages/coding", 5, ["@echo-agent/base", "@echo-agent/tools", "@echo-agent/tui"]);
     },
     300_000,
   );
 
   // **`echo-coding` 的分发门**：与 `echo-agent` 那条同形——它依赖装配层与壳，于是装出来的包要经过
-  // **三级**依赖（coding → tui → base → core）才谈得上「用户拿到的能用」。
+  // **三级**依赖（coding → tui / tools → base → core）才谈得上「用户拿到的能用」。
   // 拷目录跑源文件对这一条同样恒绿（workspace 软链会把多级依赖全抹平），所以照样走真路。
   test(
     "echo-coding 分发：pack `echo-coding` → 干净项目安装 → 从 `node_modules/.bin` 真执行",
     () => {
       const { work, tarball: coreTgz, cleanup } = packCore();
       try {
-        // ① 链上每一环各出一个真 tarball（core → base → tui），再 pack coding 自己。
+        // ① 链上每一环各出一个真 tarball（core → base → tools → tui），再 pack coding 自己。
         // **coding 不再依赖 `echo-agent`**（2026-09-09 拆包：产品之间平级），所以这里没有它。
         const stack = packStack(work, coreTgz);
         const codingTgz = packWorkspace(work, "packages/coding", stack, "echo-coding");

@@ -245,9 +245,11 @@ export function testCaseAnchors(text: string, fileName = "source.test.ts"): Map<
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       let callee: string | null = null;
-      if (ts.isIdentifier(node.expression)) callee = node.expression.text;
-      else if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
-        callee = node.expression.expression.text;
+      // `test(…)`、`test.skip(…)`，以及按条件跳过的 `test.skipIf(cond)(…)` / `test.if(cond)(…)`
+      const fn = ts.isCallExpression(node.expression) ? node.expression.expression : node.expression;
+      if (ts.isIdentifier(fn)) callee = fn.text;
+      else if (ts.isPropertyAccessExpression(fn) && ts.isIdentifier(fn.expression)) {
+        callee = fn.expression.text;
       }
       const title = node.arguments[0];
       if ((callee === "test" || callee === "it") && title !== undefined && (ts.isStringLiteral(title) || ts.isNoSubstitutionTemplateLiteral(title))) {

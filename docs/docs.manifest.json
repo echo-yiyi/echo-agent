@@ -46,6 +46,10 @@
       "bilingual": false
     },
     {
+      "path": "packages/tools/README.md",
+      "bilingual": false
+    },
+    {
       "path": "packages/tui/README.md",
       "bilingual": false
     },
@@ -330,11 +334,59 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-15-lock-heartbeat-takeover.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-15-security-hardening.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-15-tools-package.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-15-permission-rules-and-general-tools.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-12-memory-extraction-unfinished.md",
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-13-core-review-fixes-batch-1.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-12-dream-watermark-removed.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-12-memory-tuning-config.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-background-retry-bounds.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-content-filter-error-code.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-storage-children.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-lines-of-removed.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-host-apply-limit.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-13-context-mirror-eviction.md",
       "bilingual": false
     },
     {

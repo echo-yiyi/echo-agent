@@ -126,7 +126,15 @@ export async function cancelSchedule(ctx: AgentSchedule, id: string): Promise<bo
 
 export async function listSchedules(ctx: AgentSchedule): Promise<readonly ScheduleEntry[]> {
   await ensureLoaded(ctx);
-  return [...ctx.entries.values()];
+  return [...ctx.entries.values()].filter((e) => !isSpentAt(e));
+}
+
+/**
+ * 投过、还没从盘上删掉的一次性任务（2026-11-13）：内存里 `lastFiredAt` 已记上——`dueMark` 不再判它到期，
+ * 列表里也不出现；`save` 写盘时不带它，写成之后才从表里删。落盘一直失败也只重试写盘，不再投第二次。
+ */
+function isSpentAt(entry: ScheduleEntry): boolean {
+  return entry.schedule.kind === "at" && entry.lastFiredAt !== null;
 }
 
 /* ───────────── 触发 ───────────── */
@@ -170,8 +178,6 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
   await ensureLoaded(ctx);
   let dirty = false;
   const fired: Schedule[] = [];
-  /** 投过的一次性任务：落盘写成之后才从表里删（见 `saveAfterFire`）。 */
-  const spent: ScheduleEntry[] = [];
   for (const entry of [...ctx.entries.values()]) {
     try {
       const due = dueMark(entry, now);
@@ -190,31 +196,31 @@ async function tickOnce(ctx: AgentSchedule, at?: number): Promise<void> {
       //（`createdAt` 不同 = 另一个事实，与 agent.ts 的 incarnation 判据同一条）。按快照簿记会把取消的那条写回盘上复活。
       const current = ctx.entries.get(entry.schedule.id);
       if (current === undefined || current.schedule.createdAt !== entry.schedule.createdAt) continue;
-      if (entry.schedule.kind === "at") spent.push(current); // 一次性:触发即删,但要等落盘写成
-      else ctx.entries.set(entry.schedule.id, { ...current, lastFiredAt: due });
+      // 一次性的也记上 `lastFiredAt`：从此不再到期（`isSpentAt`），等落盘写成才从表里删
+      ctx.entries.set(entry.schedule.id, { ...current, lastFiredAt: due });
       dirty = true;
     } catch (e) {
       ctx.report?.({ code: "schedule_fire_failed", message: `${entry.schedule.id}: ${errText(e)}` });
     }
   }
-  if (dirty) await saveAfterFire(ctx, fired, now, spent);
+  // 上一拍落盘失败、还没从盘上删掉的一次性任务：这一拍只重试写盘
+  if (dirty || [...ctx.entries.values()].some(isSpentAt)) await saveAfterFire(ctx, fired, now);
 }
 
 /**
  * 投递之后的簿记落盘：失败 = 每条已投递的都记一次 bookkeeping-failed，错照抛。
- * 投过的一次性任务（`spent`）写进盘时不带它们，**写成之后**才从表里删：写失败时它们还在表里，
- * 下次 tick 再投一次、再写一次——不会出现内存里删了、盘上还在、要等重启才又提醒的情况。
+ * 投过的一次性任务写进盘时不带它们，**写成之后**才从表里删（`save`）：写失败时它们还在表里、但已记上
+ * `lastFiredAt`，下次 tick 不再投、只重试写盘（2026-11-13；此前再投一次——提醒被消费之后去重键没了，
+ * 落盘持续失败期间每一拍都重新响一次、多跑一轮模型）。重启时盘上那份还在，照常再提醒一次。
  * 周期任务的游标已在内存里前进，下次 tick 不再投，等下一次落盘一起写。
  */
-async function saveAfterFire(ctx: AgentSchedule, fired: readonly Schedule[], now: number, spent: readonly ScheduleEntry[] = []): Promise<void> {
+async function saveAfterFire(ctx: AgentSchedule, fired: readonly Schedule[], now: number): Promise<void> {
   try {
-    await save(ctx, spent);
+    await save(ctx);
   } catch (e) {
     for (const s of fired) observe(ctx, { kind: "bookkeeping-failed", id: s.id, scheduleKind: s.kind, message: errText(e) }, now);
     throw e;
   }
-  // 写盘期间被取消或同 id 重建的不动：只删还是投出去的那一条
-  for (const entry of spent) if (ctx.entries.get(entry.schedule.id) === entry) ctx.entries.delete(entry.schedule.id);
 }
 
 /**
@@ -299,9 +305,14 @@ async function catchUp(ctx: AgentSchedule, now: number): Promise<void> {
 }
 
 async function ensureLoaded(ctx: AgentSchedule): Promise<void> {
-  if (ctx.loaded === true) return;
-  ctx.loaded = true;
+  // 读成函数：await 前后各判一次，TS 会把第二次收窄成恒假，而运行时它恰恰会变（并发的另一个调用者）
+  const loaded = (): boolean => ctx.loaded === true;
+  if (loaded()) return;
+  // **读到了才算已加载**：读盘失败照抛、`loaded` 不动，下次重读——先置 true 的话，读失败之后表被当成「已加载的空表」，
+  // 下一次写就把盘上原有的定时任务整份盖掉
   const raw = await ctx.dir.read(SCHEDULE_FILE);
+  if (loaded()) return; // 等读盘的这段里别的调用者已经装好了
+  ctx.loaded = true;
   if (raw === null) return;
   try {
     const parsed = JSON.parse(raw) as ScheduleEntry[];
@@ -323,10 +334,13 @@ async function ensureLoaded(ctx: AgentSchedule): Promise<void> {
   }
 }
 
-/** 全量写 `schedules.json`；`omit` 里的条目不写（已投、等落盘后删的一次性任务）。 */
-async function save(ctx: AgentSchedule, omit: readonly ScheduleEntry[] = []): Promise<void> {
-  const entries = [...ctx.entries.values()].filter((e) => !omit.includes(e));
+/** 全量写 `schedules.json`；投过的一次性任务（`isSpentAt`）不写，写成之后从表里删。 */
+async function save(ctx: AgentSchedule): Promise<void> {
+  const spent = [...ctx.entries.values()].filter(isSpentAt);
+  const entries = [...ctx.entries.values()].filter((e) => !isSpentAt(e));
   await ctx.dir.write(SCHEDULE_FILE, JSON.stringify(entries, null, 2));
+  // 写盘期间被取消或同 id 重建的不动：只删写盘之前就是「投过」的那一条
+  for (const entry of spent) if (ctx.entries.get(entry.schedule.id) === entry) ctx.entries.delete(entry.schedule.id);
 }
 
 /** 没有 deliver 就 start/tick = 到期了没人收——**fail-loud**,不许静默空转。 */

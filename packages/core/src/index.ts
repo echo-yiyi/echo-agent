@@ -56,6 +56,7 @@ export {
   zaiCodingProvider,
   minimaxProvider,
   OPENAI_COMPLETIONS_API,
+  BUILTIN_PROVIDER_KEY_ENV,
 } from "./provider/openai.ts";
 export type { OpenAiDialectOptions, BuiltinProviderOptions } from "./provider/openai.ts";
 export type {
@@ -118,6 +119,7 @@ export type {
   PermissionAsk,
   PermissionAskHandle,
   PermissionAuthorizeInput,
+  PermissionPolicyInput,
   PermissionAuthorizer,
   PermissionPolicy,
   PermissionPolicyConfig,
@@ -125,6 +127,9 @@ export type {
   PermissionStage,
   PermissionVerdict,
 } from "./permission/types.ts";
+export type { SafetyClassifierOptions } from "./permission/classifier.ts";
+export { permissionPolicyFromRules } from "./permission/rules.ts";
+export type { PermissionRule, PermissionRules } from "./permission/rules.ts";
 export type {
   QuestionAnswer,
   QuestionAnswerResult,
@@ -144,10 +149,13 @@ export type { AgentMcpPort, McpConnectOutcome, McpServerSnapshot } from "./mcp/p
 export { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
 export { PromptVariableError } from "./prompt/assemble.ts";
 export { sectionFromMarkdown } from "./prompt/import.ts";
-export { fenceSafe, truncateMarked } from "./prompt/sanitize.ts";
+export { fenceSafe, neutralizeClosingTag, truncateMarked } from "./prompt/sanitize.ts";
 
 // 各能力的容器类型——它们出现在 `EchoAgentOptions` / `AgentState` 的签名里
 export type { AgentMemories } from "./memory/harness.ts";
+// 记忆后台活的可调取值：产品经 `CreateEchoOptions.memory.extract` / `.dream` 配（2026-11-12）
+export type { MemoryExtractOptions } from "./memory/extract.ts";
+export type { DreamGates } from "./memory/dream.ts";
 export type { AgentSchedule } from "./schedule/harness.ts";
 export type { InboxStore } from "./inbox/store.ts";
 // durable ingress 的公共协议（`agent.ingress` 的类型）与两份持久 schema。

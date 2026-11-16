@@ -13,6 +13,7 @@
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Agent, type AgentOptions } from "./agent.ts";
+import type { SafetyClassifierOptions } from "./permission/classifier.ts";
 import { errText } from "./errors.ts";
 import { Models } from "./provider/models.ts";
 import type { CredentialStore, Model, Provider } from "./provider/types.ts";
@@ -22,6 +23,9 @@ import { adoptStorageView } from "./state/write-gate.ts";
 import { attachStateHost } from "./state/host-wiring.ts";
 import { bindMemoryScopes, createAgentMemories } from "./memory/harness.ts";
 import { attachMemoryHost } from "./memory/host-wiring.ts";
+import type { DreamGates } from "./memory/dream.ts";
+import type { ExtractSettings, MemoryExtractOptions } from "./memory/extract.ts";
+import { resolveDreamGates, resolveExtractOptions } from "./memory/tuning.ts";
 import {
   assertProjectWorkspace,
   expandMemoryPrefix,
@@ -196,6 +200,16 @@ export type CreateAgentOptions = {
      * 声明是**纯数据**，能写进配置文件。
      */
     scopes?: readonly MemoryScopeDef[];
+    /**
+     * 提取的节奏与上限（2026-11-12）：轮数上限、攒满几轮、攒够多少词。不给的项用缺省；配错在装配时抛。
+     * 见 `MemoryExtractOptions`。
+     */
+    extract?: MemoryExtractOptions;
+    /**
+     * 整理的门（2026-11-12）：给了的项覆盖 `DEFAULT_DREAM_GATES` 里的同名项，其余照缺省；0 = 这一道不设门槛。
+     * 配错在装配时抛。见 `DreamGates`。
+     */
+    dream?: DreamGates;
   };
   /**
    * 关掉记忆（C6/D7 的装配面）。缺省 **false** = 装配记忆并让 `start()` 打开 Dream 自调度。
@@ -210,6 +224,17 @@ export type CreateAgentOptions = {
    * 否则一次后台唤醒就能把正在用的界面顶下去。透传给 `Agent`。
    */
   preemptible?: boolean;
+  /**
+   * 显式续会话时一定续得上（2026-11-15）：拿不到锁、请让位也没让成，就强行接管，原持有者丢锁停手。
+   * 缺省 `false`。只给人 `--resume` / `--continue`、沙箱重新拉起这类显式续会话；`preemptible` 的宿主给了也不生效。
+   * 透传给 `Agent`（见 `AgentOptions.takeover`）。
+   */
+  takeover?: boolean;
+  /**
+   * 安全分类器（2026-11-15）：`true` 或给形状就开，`false` / 不给就不开。权限策略放行之后，名单之外的工具再让本会话的模型判一次
+   * （`permission/classifier.ts`）。产品经形状补自己的免判工具与说明；开不开归使用者。透传给 `Agent`。
+   */
+  safetyClassifier?: boolean | SafetyClassifierOptions;
   /** 时间与定时器。不给用真时钟；测试给 `FakeClock` 才能零 sleep 地驱动 schedule。 */
   clock?: Clock;
   /** 凭据存储，透传给 `Models`。 */
@@ -254,7 +279,7 @@ export type CreateAgentOptions = {
  * `createEcho({ agent })` 收的那组选项：工具、skill、权限、hooks、执行预算、压缩等**装备与决策点**。
  *
  * 由 core 按状态根装配的端口不在这里——`model` / `sessionService` / `stateLock` / `memory` / `taskStore` /
- * `schedule` / `inboxStore` / `skillStore` / `toolOutputStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible`。
+ * `schedule` / `inboxStore` / `skillStore` / `toolOutputStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible` / `takeover` / `safetyClassifier`。
  * 嵌套里再给一个只会被**静默覆盖**，写了没生效是最坏的一种参数。
  *
  * 它有自己的名字，是因为 `Agent` 类在 core 内部（2026-09-17）：仓外念不出 `AgentOptions`，
@@ -268,6 +293,8 @@ export type EchoAgentOptions = Omit<
   | "product"
   | "agent"
   | "preemptible"
+  | "takeover"
+  | "safetyClassifier"
   | "sessionId"
   | "memory"
   | "taskStore"
@@ -426,6 +453,9 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   if (opts.lock !== undefined && opts.store === undefined) {
     throw new Error("给了自定义 lock 就必须同时给 store：只换锁不换存储没有意义，多半是漏传了");
   }
+  // 记忆的可调取值（2026-11-12）：在碰任何存储之前校验——配错就在这里抛，不回落到缺省。
+  // 关着记忆也照样校验：配置写错了，打开记忆那天才发现更糟。
+  const memoryTuning = { extract: resolveExtractOptions(opts.memory?.extract), dream: resolveDreamGates(opts.memory?.dream) };
   const store = opts.store ?? new FileDir(stateDir);
   // user 层（记忆、技能）是**另一个根**：状态根成了 session 目录，它们不能跟着下沉。
   // 缺省两个根各自解析；给了自定义 `store` 而没单独给 `sharedStore` 时**跟着 `store` 走**——
@@ -512,7 +542,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
     // **装配期不再对 project 层做撞车检查**(2026-09-07):作用域现在是 `start()` 里 session
     // 加载完才解析的,只有那一个解析点,"早点判红比晚点好"这条理由不再成立——早的那一次
     // 查的是**可能不对**的 workspace。检查跟着解析走,见 `resolveMemoryScopes`。
-    const parts = prepareCapabilities({ assembly, shared, sharedUser, clock: opts.clock, withoutMemory: opts.withoutMemory, memoryBuiltin: opts.memory?.builtin, workspace: memoryWorkspace });
+    const parts = prepareCapabilities({ assembly, shared, sharedUser, clock: opts.clock, withoutMemory: opts.withoutMemory, memoryBuiltin: opts.memory?.builtin, memoryTuning, workspace: memoryWorkspace });
 
     // 形状到此为止。**seal 只冻结形状，不转移所有权**——转移发生在构造成功之后的 `adoptInto()`。
     assembly.seal();
@@ -543,6 +573,8 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       product,
       ...(opts.agentDef !== undefined ? { agent: opts.agentDef } : {}),
       ...(opts.preemptible === true ? { preemptible: true } : {}),
+      ...(opts.takeover === true ? { takeover: true } : {}),
+      ...(opts.safetyClassifier === true ? { safetyClassifier: {} } : typeof opts.safetyClassifier === "object" ? { safetyClassifier: opts.safetyClassifier } : {}),
       // Agent 拿 clock 只做一件事：定期重扫 inbox（别的进程写进来的消息靠它才看得见）。
       // 与 schedule 拿到的是**同一个**——测试拨一次 FakeClock，两边一起动。
       clock: opts.clock ?? systemClock,
@@ -672,6 +704,8 @@ function prepareCapabilities(input: {
   withoutMemory?: boolean;
   /** `memory.builtin`：`false` = 内建三个模块不装（见 `CreateAgentOptions.memory`）。 */
   memoryBuiltin?: boolean;
+  /** `memory.extract` / `memory.dream` 校验并补齐缺省之后的取值。 */
+  memoryTuning: { extract: ExtractSettings; dream: DreamGates };
   /** project 层记忆**先**按它分目录(`projects/<hash>/`);`start()` 拿到盘上权威的 workspace 后重指一次。 */
   workspace: string;
 }): AssembledCapabilities {
@@ -759,7 +793,7 @@ function prepareCapabilities(input: {
     input.withoutMemory === true ? undefined : assembly.adopt("echo:memory", () =>
           // `memory.builtin: false` → 交一张空的模块表：`builtinModules` 随之为 false，
           // `echo:memory` 那组不再注册内建三个，模块全部来自扩展的 `AgentMemory.module()`
-          createAgentMemories(input.memoryBuiltin === false ? { memories: [] } : undefined),
+          createAgentMemories({ ...(input.memoryBuiltin === false ? { memories: [] } : {}), dream: input.memoryTuning.dream, extract: input.memoryTuning.extract }),
         );
 
   // 任务清单与闹钟也落在同一个状态根下。

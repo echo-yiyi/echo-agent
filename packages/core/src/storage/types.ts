@@ -13,6 +13,15 @@ export interface StorageDir {
   remove(path: string): Promise<boolean>;
   /** prefix 下全部文件的相对路径(递归,/ 分隔)。prefix "" = 全部。 */
   list(prefix: string): Promise<string[]>;
+  /**
+   * `dir` 这一层的名字，**不往下走**（2026-11-13，会话清单要它）。`dir` 是 `/` 分隔的相对目录，结尾的 `/`
+   * 可有可无，`""` = 根；这一层不存在 = 空。文件给名字，子目录给名字加结尾的 `/`，按字典序排。
+   *
+   * 与 `list` 的分工：`list` 的成本随子树里的文件总数涨，`children` 只看一层——「这下面有哪几段」这种问题用它。
+   * 子目录名不保证底下有文件（`FileDir` 上空目录也会列出来）。
+   * 不实现 = 这个字节面没有浅层列举，调用方退回 `list` 自己切出第一层：结果相同，只是贵。
+   */
+  children?(dir: string): Promise<string[]>;
   close?(): Promise<void>;
   /**
    * 独占一个名字，返回释放函数（2026-09-10，记忆的原子提交要它）。

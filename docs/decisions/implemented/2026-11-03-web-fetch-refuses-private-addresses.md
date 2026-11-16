@@ -1,6 +1,6 @@
 # `echo-coding` 的 web_fetch 缺省不取内网地址，重定向逐跳重查
 
-> 状态:implemented · 提出 2026-11-03（echo-coding 工具线排查）· 拍板 2026-11-03（用户：「全部按推荐修」）· 实现 2026-11-03 · 来源 [`isPrivateAddress`](../../../packages/coding/src/tools/web.ts#symbol=isPrivateAddress)，判据 [地址段](../../../packages/coding/test/web.test.ts#test=isprivateaddressloopback私网链路本地含云元数据cgnat未指定ipv6-同类与-ipv4-映射一律算内网边界外的照常)、[缺省拒绝](../../../packages/coding/test/web.test.ts#test=webfetch-缺省拒绝内网地址本机服务一次请求都收不到报错说明这是安全限制)、[解析结果任一落段](../../../packages/coding/test/web.test.ts#test=webfetch-主机名解析出的地址任一落在内网段就拒)、[重定向逐跳](../../../packages/coding/test/web.test.ts#test=webfetch-重定向逐跳跟随每跳重查跳到内网就拒不发出那一跳跳太多次报错正常跳转照常并注明)
+> 状态:implemented · 提出 2026-11-03（echo-coding 工具线排查）· 拍板 2026-11-03（用户：「全部按推荐修」）· 实现 2026-11-03 · 来源 [`isPrivateAddress`](../../../packages/tools/src/web.ts#symbol=isPrivateAddress)，判据 [地址段](../../../packages/tools/test/web.test.ts#test=isprivateaddressloopback私网链路本地含云元数据cgnat未指定ipv6-同类与-ipv4-映射一律算内网边界外的照常)、[缺省拒绝](../../../packages/tools/test/web.test.ts#test=webfetch-缺省拒绝内网地址本机服务一次请求都收不到报错说明这是安全限制)、[解析结果任一落段](../../../packages/tools/test/web.test.ts#test=webfetch-主机名解析出的地址任一落在内网段就拒)、[重定向逐跳](../../../packages/tools/test/web.test.ts#test=webfetch-重定向逐跳跟随每跳重查跳到内网就拒不发出那一跳跳太多次报错正常跳转照常并注明)
 
 ## 现状(拍板前)
 

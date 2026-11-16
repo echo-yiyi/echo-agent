@@ -1,6 +1,6 @@
 # 记忆提取从主对话分叉、攒满三轮才跑、退出前补一次、游标落盘
 
-> 状态:implemented · 提出 2026-11-03（三方缓存对比：echo 未命中是 pi / dsh 的两倍多，约四成来自记忆提取；同时复现「最后一轮答完就退出、那一轮永远不被提取」）· 拍板 2026-11-03（用户：「这几个问题都要解决，多次记忆提取的问题也要解决」——即 [降频](2026-10-30-memory-extraction-gate.md) 那份两步方案的第 2 步，加降频与退出补跑）· 落地 `packages/core/src/memory/extract.ts` / `channel.ts` / `agent.ts` / `create-echo.ts` / `session/types.ts` / `session/service.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [降频](2026-10-30-memory-extraction-gate.md) 的第 2、3 条与 Non-Goals · **后续** 2026-11-12 [没跑完时看写成了没有](2026-11-12-memory-extraction-unfinished.md)：游标「只在正常跑完时推进」改为「这段算看过就推」，连续没写成就放弃那段；2026-11-12 [删掉整理的水位门](2026-11-12-dream-watermark-removed.md)：第 11 条随水位门一起删除
+> 状态:implemented · 提出 2026-11-03（三方缓存对比：echo 未命中是 pi / dsh 的两倍多，约四成来自记忆提取；同时复现「最后一轮答完就退出、那一轮永远不被提取」）· 拍板 2026-11-03（用户：「这几个问题都要解决，多次记忆提取的问题也要解决」——即 [降频](2026-10-30-memory-extraction-gate.md) 那份两步方案的第 2 步，加降频与退出补跑）· 落地 `packages/core/src/memory/extract.ts` / `channel.ts` / `agent.ts` / `create-echo.ts` / `session/types.ts` / `session/service.ts`，判据 `packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [降频](2026-10-30-memory-extraction-gate.md) 的第 2、3 条与 Non-Goals · **后续** 2026-11-12 [没跑完时看写成了没有](2026-11-12-memory-extraction-unfinished.md)：游标「只在正常跑完时推进」改为「这段算看过就推」，连续没写成就放弃那段；2026-11-12 [删掉整理的水位门](2026-11-12-dream-watermark-removed.md)：第 11 条随水位门一起删除；2026-11-12 [记忆的可调取值](2026-11-12-memory-tuning-config.md)：Non-Goals 里「不做成产品配置」的门槛、轮数两项已被它放开
 
 **给谁看**：改记忆提取的触发、输入、成本或收摊顺序的人。假设已知 [降频](2026-10-30-memory-extraction-gate.md)（门槛 + 游标）与 [记忆设计](../../design/memory.md) §5。
 
@@ -35,7 +35,7 @@
 - 不做空闲补跑、「先问一句」：退出补跑已经兜住「没攒满就结束」，空闲补跑只多一个计时器。
 - ~~游标不落盘~~（第 7 条改了：被杀、补跑没跑完的那截，续会话后接着攒）。
 - 不改提取的模型、轮数上限（5）。提取仍不进 admission、走自己的通道。
-- 门槛、轮数、补跑上限都不做成产品配置。
+- ~~门槛、轮数、补跑上限都不做成产品配置~~（2026-11-12 [记忆的可调取值](2026-11-12-memory-tuning-config.md) 放开了门槛、攒满几轮与提取轮数上限；补跑上限仍不开放）。
 - 不改 Dream。
 
 ## 验收

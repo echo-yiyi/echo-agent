@@ -1,18 +1,19 @@
 // first-party 的 single-writer 文件锁（D6）。**node-only**——`node:fs`，只在根入口。
 //
 // 底下是带递增编号的锁（`generation-lock.ts`，2026-09-10）：`path` 是一个目录，里面按代记认领与释放。
-// **持有者崩溃之后，下一个来拿的人自动接管**——前提是能确认它死了（同一台机器、pid 查无此号）；
-// 确认不了（别的机器、pid 被复用、记录坏了）就照旧拿不到，报错说清是谁占着、锁在哪。
+// **持有者不在了，下一个来拿的人自动接管**：持有期间刷心跳，心跳过期、或本机 pid 查无此号就算不在了
+// （2026-11-15，此前只认后者——机器名随网络变、沙箱重建之后崩掉的会话就续不上）。
+// 活着的持有者照旧拿不到，报错说清是谁占着、锁在哪；显式续会话可以强行接管（`takeOver`），
+// 被接管的那一方在下一次刷心跳前发现、`lost` 触发、停手。
 //
-// 2026-08-18 那一版是单个锁文件、不自动接管，因为「读 → 判陈旧 → 删 → 重建」会双授（压测第 136 次）；
-// 代价是崩溃后 `--resume` 起不来、要人工删锁。新实现里当前代从不删除，接管是往上叠一代，
-// 那条双授的路径不存在了（理由与判据见 `generation-lock.ts` 头注）。
+// 2026-08-18 那一版是单个锁文件、不自动接管，因为「读 → 判陈旧 → 删 → 重建」会双授（压测第 136 次）。
+// 现在当前代从不删除，接管是往上叠一代，那条双授的路径不存在了（理由与判据见 `generation-lock.ts` 头注）。
 //
 // 可让位的交还请求写在锁目录旁边的 `<path>.handoff`：要请它走的人在另一个进程里。
 
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { claimGeneration, describeRecord, holderGone, inspectGeneration, type StateLockInspection } from "./generation-lock.ts";
+import { claimGeneration, describeRecord, inspectGeneration, type Claim, type StateLockInspection } from "./generation-lock.ts";
 import type { Lease, StateLock } from "./lock.ts";
 
 export type { PeekedLockRecord, StateLockInspection } from "./generation-lock.ts";
@@ -72,49 +73,67 @@ function liveRequest(raw: string, claimedAt: number): { by: string } | null {
   }
 }
 
-/** 这把锁此刻空着吗：没人持有，或持有者确认已死（下一次 acquire 会接管）。 */
+/** 这把锁此刻空着吗：没人持有，或持有者已经不在了（下一次 acquire 会接管）。 */
 function isFree(cur: StateLockInspection): boolean {
-  return cur.state === "missing" || (cur.state === "valid" && holderGone(cur.record));
+  return cur.state === "missing" || (cur.state === "valid" && !cur.alive);
 }
 
 /**
  * `path` 是锁目录，例如 `<stateDir>/.lock`。
  *
- * 活着的持有者占着 → `null`（不等待、不抢）；持有者确认已死 → 接管。`release()` 只放自己那一代。
+ * 活着的持有者占着 → `null`（不等待、不抢）；持有者已经不在了 → 接管。`release()` 只放自己那一代。
+ * `takeOver()` 不管持有者在不在都接管（显式续会话用）。
  */
 export function fileStateLock(path: string): StateLock {
   /** 交还请求：锁旁边的一个小文件。用文件而不是信号，因为要跨进程、而且要能被崩溃后清掉。 */
   const handoffPath = `${path}.handoff`;
+  /** 拿到的那一代 → 租约。`claimedAt` 是认领**之前**取的时刻（见 `acquire`）。 */
+  const leaseOf = (claim: Claim, preemptible: boolean, claimedAt: number): Lease => {
+    // **只有可让位的持有者才盯这个文件**：别人不该被请走，也就不该为此每秒读一次盘。
+    // 上一轮留下的请求靠时间戳排除（`liveRequest`），**这里一律不删 `.handoff`**：删在认领之后，人在「锁已上盘、
+    // 还没删」之间发来的请求会被当成旧的擦掉，干等到超时（serve.test 偶红的根因）；删在认领之前，拿不到锁的
+    // acquire 又会擦掉别人正在等的请求。请求文件由请求方自己清（`requestHandoff` 的 finally）
+    const handoff = preemptible
+      ? waitFor(async () => {
+          const raw = await readFile(handoffPath, "utf8").catch(() => null);
+          return raw === null ? null : liveRequest(raw, claimedAt);
+        })
+      : null;
+    // 被接管了就不必再盯让位请求
+    void claim.lost.then(() => handoff?.stop());
+    return {
+      release: async () => {
+        // 这把租约到头了：先停 handoff 轮询，再去放锁（放不放得掉都不该再盯着 `.handoff`）
+        handoff?.stop();
+        // 只放自己那一代；没被接管、却已经不是我的，或记录读不出来时抛——调用方必须知道单写者约束可能破了
+        await claim.release();
+      },
+      // 被别人接管（心跳前看见上面叠了更大的代）就触发；一直持有时永不 settle
+      lost: claim.lost,
+      handoffRequested: handoff === null ? new Promise<{ by: string }>(() => {}) : handoff.promise,
+    };
+  };
   return {
     async acquire(opts: { holder: string; preemptible?: boolean }): Promise<Lease | null> {
       // 认领**之前**取时刻：请求方要先在盘上看到这一代的认领记录才会发请求，所以冲着这一把来的请求，`at` 都不早于它
       const claimedAt = Date.now();
       const got = await claimGeneration(path, { holder: opts.holder, ...(opts.preemptible === true ? { preemptible: true } : {}) });
       if (!got.ok) return null;
+      return leaseOf(got.claim, opts.preemptible === true, claimedAt);
+    },
 
-      // **只有可让位的持有者才盯这个文件**：别人不该被请走，也就不该为此每秒读一次盘。
-      // 上一轮留下的请求靠时间戳排除（`liveRequest`），**这里一律不删 `.handoff`**：删在认领之后，人在「锁已上盘、
-      // 还没删」之间发来的请求会被当成旧的擦掉，干等到超时（serve.test 偶红的根因）；删在认领之前，拿不到锁的
-      // acquire 又会擦掉别人正在等的请求。请求文件由请求方自己清（`requestHandoff` 的 finally）
-      const handoff =
-        opts.preemptible === true
-          ? waitFor(async () => {
-              const raw = await readFile(handoffPath, "utf8").catch(() => null);
-              return raw === null ? null : liveRequest(raw, claimedAt);
-            })
-          : null;
-
-      return {
-        release: async () => {
-          // 这把租约到头了：先停 handoff 轮询，再去放锁（放不放得掉都不该再盯着 `.handoff`）
-          handoff?.stop();
-          // 只放自己那一代；已经不是我的、或记录读不出来时抛——调用方必须知道单写者约束可能破了
-          await got.claim.release();
-        },
-        // 本地文件锁没有租约到期这回事：活着就一直拿着，直到 release（只有确认已死才会被接管）。
-        lost: new Promise<Error>(() => {}),
-        handoffRequested: handoff === null ? new Promise<{ by: string }>(() => {}) : handoff.promise,
-      };
+    /**
+     * 不管持有者在不在、锁坏没坏，照样接管（2026-11-15，显式续会话用）。活着的持有者在下一次刷心跳前发现、
+     * 它那边的 `lost` 触发、停手。旧版本的单文件锁先挪到一边再认领。连锁目录都读不出来时抛。
+     */
+    async takeOver(opts: { holder: string; preemptible?: boolean }): Promise<Lease> {
+      const claimedAt = Date.now();
+      const got = await claimGeneration(path, { holder: opts.holder, ...(opts.preemptible === true ? { preemptible: true } : {}) }, { force: true });
+      if (!got.ok) {
+        const why = got.seen.kind === "corrupt" ? got.seen.why : describeRecord(got.seen.record);
+        throw new Error(`接管不了锁 ${path}：${why}`);
+      }
+      return leaseOf(got.claim, opts.preemptible === true, claimedAt);
     },
 
     /**
@@ -129,7 +148,7 @@ export function fileStateLock(path: string): StateLock {
      */
     async requestHandoff(opts: { by: string; timeoutMs: number }): Promise<boolean> {
       const cur = await inspectGeneration(path);
-      if (isFree(cur)) return true; // 已经空着（或持有者已死，acquire 会接管）
+      if (isFree(cur)) return true; // 已经空着（或持有者已经不在了，acquire 会接管）
       if (cur.state !== "valid") return false; // 坏档要人来看，不是请一下就能解决的
       if (cur.record.preemptible !== true) return false;
 
@@ -163,10 +182,10 @@ export function fileStateLock(path: string): StateLock {
 }
 
 /**
- * 锁被谁占着——给人看，也给会话面判「活着」（配合 `holderGone`）。不改任何东西。
+ * 锁被谁占着——给人看，也给会话面判「活着」（`valid` 的 `alive`）。不改任何东西。
  *
  * 三态照实报，不折叠：`missing`（没人持有）· `corrupt`（有但读不出/字段不全，附原因）·
- * `valid`（附当前代的记录，**持有者可能已经死了**）。折叠成 `null` 会让调用方分不清「没锁」和
+ * `valid`（附当前代的记录与持有者此刻在不在）。折叠成 `null` 会让调用方分不清「没锁」和
  * 「锁坏了」——那曾是 `release()` 把失败报成成功的根因。
  */
 export async function inspectStateLock(path: string): Promise<StateLockInspection> {

@@ -34,12 +34,14 @@ import { textTurn, toolTurn } from "@echo-agent/core/testing";
 import { inspectStateLock } from "@echo-agent/core";
 import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension";
 import { PassThrough } from "node:stream";
-import { echoOptions, mainFor, parseArgs, retainRecentDays, usage, wakeArgs, type PresetForm } from "@echo-agent/base";
+import { echoOptions, mainFor, parseArgs, presetForm, retainRecentDays, usage, wakeArgs, type PresetForm, type Product } from "@echo-agent/base";
 import { ECHO_AGENT, main } from "../src/product.ts";
+import { SHELL_CLASSIFIER_NOTES, TOOLS_SAFE_TOOLS } from "@echo-agent/tools";
+import { InMemoryCredentialStore, type PermissionPolicyInput } from "@echo-agent/core";
 import { isConfigured } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { fakeTui } from "@echo-agent/tui/testing";
-import { linesOf, readAll } from "@echo-agent/base";
+import { readAll } from "@echo-agent/base";
 import { run, type Sink } from "@echo-agent/base";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-agent.ts");
@@ -323,23 +325,6 @@ test("流式那条不许打两遍（补打只在没流过的时候）", async ()
   expect(out.text.split("流式正文").length - 1, "正文被打了不止一遍").toBe(1);
 });
 
-test("已经 abort 过的 signal：不许卡在 stdin 上等一行永远不来的输入", async () => {
-  // `addEventListener("abort")` 只等**将来**的 abort。SIGINT 落在 createAgent() 期间时，
-  // 等 linesOf() 开始读，abort 早就过去了——上一版会在这里永久挂住。
-  const controller = new AbortController();
-  controller.abort();
-  const stream = new PassThrough(); // 空流，永远不给行
-
-  const lines: string[] = [];
-  const drained = (async () => {
-    for await (const line of linesOf(stream, controller.signal)) lines.push(line);
-    return "结束了";
-  })();
-
-  const raced = await Promise.race([drained, new Promise((r) => setTimeout(() => r("卡住了"), 200))]);
-  expect(raced, "预先 abort 的 signal 没能让输入源收摊").toBe("结束了");
-  expect(lines).toEqual([]);
-});
 
 test("已经 abort 过的 signal：run() 也不进输入循环，且照样干净收摊", async () => {
   const controller = new AbortController();
@@ -650,6 +635,56 @@ function workspaceWithProbe(name: string): string {
   return realpathSync(ws);
 }
 
+test("echoOptions：安全分类器开不开照形态里定好的交给 createEcho，形状取产品给的；产品没装权限策略时补一份全放行的，让「问人」有人接（2026-11-15）", async () => {
+  const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+  const none = { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false };
+  // 一个什么都不交的产品（不交形状、不装策略）：开着就是内核缺省（true）；交互形态补的策略问终端里的人
+  const bare: Product = { name: "bare", version: "0" };
+  const on = echoOptions(bare, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
+  expect(on.safetyClassifier).toBe(true);
+  expect(on.agent?.permission?.responder).toBe("host");
+  expect(await on.agent!.permission!.authorize({} as never)).toEqual({ kind: "allow" });
+  // 管道形态开着：没人可问
+  const piped = echoOptions(bare, { interactive: false, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
+  expect([piped.safetyClassifier, piped.agent?.permission?.responder]).toEqual([true, "none"]);
+  // 关着：不交给内核，也不补策略
+  const off = echoOptions(bare, { interactive: true, safetyClassifier: false }, none, kimiProvider(), [], credentials, undefined, true);
+  expect([off.safetyClassifier, off.agent?.permission]).toEqual([false, undefined]);
+  // echo-agent 自己交了形状（工具包那一份）：开着时交给内核的就是它
+  const own = echoOptions(ECHO_AGENT, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
+  expect(own.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
+  // 产品交了形状就用它的
+  const shaped: Product = { name: "x", version: "0", preset: () => ({ safetyClassifier: { safeTools: ["read_file"] } }) };
+  expect(echoOptions(shaped, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true).safetyClassifier).toEqual({ safeTools: ["read_file"] });
+});
+
+test("preset：echo-agent 自带身份段、纪律段与工具包的三条（文件与搜索、shell、web）；交互形态包沙箱、管道形态不包；分类器关着时交互形态越出沙箱的那一条问人，管道形态什么都不装（2026-11-15）", async () => {
+  const presetOf = (form: PresetForm) => ECHO_AGENT.preset!(form, { credentials: new InMemoryCredentialStore() });
+  const step = (params: unknown): PermissionPolicyInput => ({
+    runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params, userIntent: [],
+    askModel: async () => {
+      throw new Error("产品的规则不该调模型");
+    },
+  });
+  for (const interactive of [true, false]) {
+    // 形态照装配层的缺省：分类器交互开、管道关
+    const preset = presetOf({ interactive, safetyClassifier: interactive });
+    // 没有 echo:coding、没有 echo:worktree：那两条是 coding 产品自己的
+    expect(preset.extensions?.map((e) => e.entryId)).toEqual(["echo:identity", "echo:conduct", "echo:workspace", "echo:shell", "echo:web"]);
+    expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual(interactive ? { sandbox: true } : undefined);
+    // 分类器开着（交互）或压根没人（管道）：产品不装策略；交给分类器的是形状，开不开不归它
+    expect(preset.agent).toBeUndefined();
+    expect(preset.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
+  }
+  // 使用者关掉分类器：交互形态仍包沙箱，全放行但越出沙箱的那一条问终端里的人
+  const off = presetOf({ interactive: true, safetyClassifier: false });
+  const permission = off.agent!.permission!;
+  expect([permission.responder, (await permission.authorize(step({ command: "ls" }))).kind]).toEqual(["host", "allow"]);
+  expect((await permission.authorize(step({ command: "npm i -g x", sandbox: false }))).kind).toBe("ask");
+  expect(off.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual({ sandbox: true });
+  expect(presetOf({ interactive: false, safetyClassifier: false }).agent).toBeUndefined();
+});
+
 test("echoOptions：没给 --extensions 时，受信才把约定目录交给 createEcho，不受信显式给 []；给了 --extensions 不看信任", () => {
   const credentials = new FileCredentialStore(join(dir, "credentials.json"));
   const none = { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false };
@@ -907,13 +942,37 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
     expect(ui.screen()).toContain("v9.9.9");
     // 形态到了 preset 手里，而且只调一次（workspace 不经 preset，`mainFor()` 直接交给 createEcho）
     // 形态里**只有形态**（2026-09-09）：凭据这类宿主能力走 preset 的第二个参数，不再夹带在形态里
-    expect(forms).toEqual([{ interactive: true }]);
+    expect(forms).toEqual([{ interactive: true, safetyClassifier: true }]); // 没写设置：分类器按形态，交互开
     expect(applied, "preset 交出的 Extension 没被 mount").toBe(1);
     // 渐进式披露的缺省名单（`DEFAULT_DEFERRED_TOOLS`）进了装配：名单非空 → `tool_search` 在池里；
     // 延迟的工具本身也在池里（只是不上菜单，那半边的判据在 core 的 tool-search.test）
     expect(poolNames).toContain("tool_search");
     expect(poolNames).toContain("schedule_create");
 
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
+test("mainFor：settings.json 里的 safetyClassifier 进了交给产品的形态——使用者的开关到得了产品（2026-11-15）", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    mkdirSync(join(dir, "home"), { recursive: true });
+    writeFileSync(join(dir, "home", "settings.json"), JSON.stringify({ safetyClassifier: false }));
+    const forms: PresetForm[] = [];
+    const productMain = mainFor({ name: "echo-试产品", version: "9.9.9", preset: (form) => (forms.push(form), {}) }, terminalShell);
+    const running = productMain(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+      verify: async () => ({ ok: true }),
+    });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
+    expect(forms).toEqual([{ interactive: true, safetyClassifier: false }]);
     ui.feed(String.fromCharCode(4));
     expect(await running).toBe(0);
   } finally {
@@ -1112,6 +1171,15 @@ test("叫醒会话的 argv 带 --provider / --model / --observe：宿主与父�
   expect(args).toEqual(["/bin/echo-agent.ts", "--serve", "--resume", "abc", "--provider", "kimi", "--model", "kimi-k2.6", "--state-dir", "/s", "--observe", "content", "--no-memory", "--extensions", "/ext"]);
   // 没选出家（choices 为空）就不传，副本按自己的设置走
   expect(wakeArgs("/bin/x", { withoutMemory: false, extensionDirs: [], continueLast: false, serve: false }, undefined, "id")).toEqual(["/bin/x", "--serve", "--resume", "id"]);
+});
+
+test("交给产品的形态：--serve 不装壳、没人能答，哪怕在终端里起的也不算交互形态（2026-11-15）", () => {
+  expect(presetForm(true, { serve: false })).toEqual({ interactive: true, safetyClassifier: true });
+  expect(presetForm(true, { serve: true })).toEqual({ interactive: false, safetyClassifier: false });
+  expect(presetForm(false, { serve: false })).toEqual({ interactive: false, safetyClassifier: false });
+  // 安全分类器：使用者写了就照写的（来自 settings.json），没写按形态——有人在开、管道与 --serve 不开
+  expect(presetForm(true, { serve: false, safetyClassifier: false })).toEqual({ interactive: true, safetyClassifier: false });
+  expect(presetForm(false, { serve: false, safetyClassifier: true })).toEqual({ interactive: false, safetyClassifier: true });
 });
 
 test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，也能把没在跑的那段叫起来", async () => {

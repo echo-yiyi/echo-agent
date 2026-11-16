@@ -105,6 +105,86 @@ test("重建：开头消息排最前记 preamble、压缩折掉的段记 summary
   expect(body.unresolved).toBeUndefined();
 });
 
+/* ─────────────── 用完就丢：镜像不随模型调用次数涨（2026-11-13） ─────────────── */
+
+test("每轮注入用完就丢：同一段 transcript 调 500 次模型、每次注入都是新对象，镜像里留着的值不随调用次数涨；每次的构成照样算得出", () => {
+  // 此前注入按对象身份记编号、观测线程只存不删：每次调用都是新对象，500 次之后镜像里攒下 500 份正文
+  const mirror = new ContextMirror();
+  const store = new ContextMirrorStore();
+  const list = [userMessage("问题")];
+  const call = (): ContextBuiltBody =>
+    store.resolve(
+      mirror.handoff({ systemPrompt: "SYS", preamble: [], transcript: list, compaction: NO_COMPACTION, injections: [environmentMessage("技能正文".repeat(100), "skill", "review")], tools: [] }),
+      META,
+    );
+  const first = call();
+  const settled = store.size;
+  expect(settled).toBe(3); // 一条消息 + system + 压缩状态；注入不在里面
+  for (let i = 0; i < 500; i++) {
+    const body = call();
+    expect(body.unresolved).toBeUndefined();
+    expect(body.parts.find((p) => p.kind === "injection")).toEqual(first.parts.find((p) => p.kind === "injection")!);
+  }
+  expect(store.size).toBe(settled);
+});
+
+test("被换掉的 system 用完就丢：主循环与子 agent 交替送模（每次都换 system），镜像里只留当前那一份，每次的 system 照样量得出", () => {
+  // 此前主线程只记最近一份、每次换都发一个新编号，观测线程把每一份都留着
+  const mirror = new ContextMirror();
+  const store = new ContextMirrorStore();
+  const list = [userMessage("问题")];
+  const systems = ["主循环的 system", "子 agent 的 system，长一些"];
+  const call = (system: string): ContextBuiltBody => store.resolve(mirror.handoff({ systemPrompt: system, preamble: [], transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META);
+  call(systems[0]!);
+  const settled = store.size;
+  for (let i = 1; i <= 200; i++) {
+    const system = systems[i % 2]!;
+    const body = call(system);
+    expect(body.unresolved).toBeUndefined();
+    expect(body.system!.chars).toBe(system.length);
+    expect(body.system!.tokens).toBeGreaterThan(0);
+  }
+  expect(store.size).toBe(settled);
+});
+
+test("开头消息只交一次：冻结的同一份调 200 次模型，镜像里留着的值不随调用次数涨；作废重取换了对象才多一份", () => {
+  // 开头消息按对象身份记编号（与 transcript 消息同一种）：会话内冻结期间是同一个对象，不像每轮注入那样每次都是新的
+  const mirror = new ContextMirror();
+  const store = new ContextMirrorStore();
+  const list = [userMessage("问题")];
+  const call = (preamble: AgentMessage[]): ContextBuiltBody =>
+    store.resolve(mirror.handoff({ systemPrompt: "SYS", preamble, transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META);
+  const frozen = environmentMessage("记忆正文".repeat(100), "memory", undefined, 0);
+  const first = call([frozen]);
+  const settled = store.size;
+  expect(settled).toBe(4); // 开头消息 + 一条消息 + system + 压缩状态
+  for (let i = 0; i < 200; i++) {
+    const body = call([frozen]); // 每个 run 的数组可以是新的，对象是同一个
+    expect(body.unresolved).toBeUndefined();
+    expect(body.parts.find((p) => p.kind === "preamble")).toEqual(first.parts.find((p) => p.kind === "preamble")!);
+  }
+  expect(store.size).toBe(settled);
+  call([environmentMessage("重取之后的记忆正文", "memory", undefined, 0)]); // 压缩落地 / reset / 续会话：换了一个对象
+  expect(store.size).toBe(settled + 1);
+});
+
+test("主线程：注入每次都交值、编号只在那一次交接里有效；system 换了才在 drop 里报出被换掉的编号", () => {
+  const mirror = new ContextMirror();
+  const injection = environmentMessage("技能正文", "skill", "review");
+  const input = { preamble: [], transcript: [userMessage("问")], compaction: NO_COMPACTION, tools: [] };
+  const injectionsOf = (h: ReturnType<ContextMirror["handoff"]>): readonly number[] => (h.view.kind === "rebuild" ? h.view.injections : []);
+  const a = mirror.handoff({ ...input, systemPrompt: "S1", injections: [injection] });
+  const b = mirror.handoff({ ...input, systemPrompt: "S1", injections: [injection] });
+  // 同一个注入对象第二次也照交：不靠对象身份记它，观测线程那边上一次的已经删了
+  expect(injectionsOf(b)).not.toEqual(injectionsOf(a));
+  expect(b.fresh.map((f) => f.ref)).toEqual([...injectionsOf(b)]);
+  expect(a.drop).toBeUndefined();
+  expect(b.drop).toBeUndefined(); // system 没换
+  const c = mirror.handoff({ ...input, systemPrompt: "S2", injections: [] });
+  expect(c.drop).toEqual([a.system!.ref]);
+  expect(c.system!.ref).not.toBe(a.system!.ref);
+});
+
 test("hook 改过的视图按给出的顺序记、来历只分角色；镜像里没有的编号（交接失败过）记进 unresolved、不计入构成", () => {
   const mirror = new ContextMirror();
   const store = new ContextMirrorStore();

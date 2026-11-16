@@ -1,6 +1,6 @@
 # `echo-coding` 的 grep 加两个参数：`ignore_case` 与 `output_mode`
 
-> 状态:implemented · 提出 2026-11-03（echo-coding 工具线排查）· 拍板 2026-11-03（用户：「全部按推荐修」）· 实现 2026-11-03 · 来源 `packages/coding/src/tools/search.ts`（`grep` 工具），判据 [ignore_case](../../../packages/coding/test/search.test.ts#test=grep-ignorecase不分大小写写-i-时报错里指向-ignorecase)、[output_mode](../../../packages/coding/test/search.test.ts#test=grep-outputmodecontent缺省-fileswithmatches-count)
+> 状态:implemented · 提出 2026-11-03（echo-coding 工具线排查）· 拍板 2026-11-03（用户：「全部按推荐修」）· 实现 2026-11-03 · 来源 `packages/tools/src/search.ts`（`grep` 工具），判据 [ignore_case](../../../packages/tools/test/search.test.ts#test=grep-ignorecase不分大小写写-i-时报错里指向-ignorecase)、[output_mode](../../../packages/tools/test/search.test.ts#test=grep-outputmodecontent缺省-fileswithmatches-count)
 
 ## 现状(拍板前)
 
@@ -23,4 +23,4 @@
 
 ## 验收
 
-`grep` 的 schema 有这两个参数、`output_mode` 带 enum；不给它们时输出与此前相同（`packages/coding/test/coding-agent.test.ts` 里已有的 grep 判据不改仍绿）；上面两条判据把「不分大小写」「三种输出」「`(?i)` 的提示」「非法取值」各钉住，改坏任一处即红。
+`grep` 的 schema 有这两个参数、`output_mode` 带 enum；不给它们时输出与此前相同（`packages/tools/test/tools.test.ts` 里已有的 grep 判据不改仍绿）；上面两条判据把「不分大小写」「三种输出」「`(?i)` 的提示」「非法取值」各钉住，改坏任一处即红。

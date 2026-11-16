@@ -57,7 +57,7 @@
   observability/
 ```
 
-meta 与 entries 位于目录根，SessionService 一个实例管一段；[listSessions()](../../packages/core/src/session/service.ts#symbol=listSessions) 扫上级目录得到清单。列出来之后、读之前 meta 没了的那一段跳过（别的进程里一段空会话正好收摊撤了 meta），零长或解不开的 meta 仍判红。给一段发消息（`sessions.send`）只读对方的 `<id>/meta.json`（[readSessionInfo()](../../packages/core/src/session/service.ts#symbol=readSessionInfo)），不列全表。
+meta 与 entries 位于目录根，SessionService 一个实例管一段；[listSessions()](../../packages/core/src/session/service.ts#symbol=listSessions) 只列上级目录这一层、再逐段读 meta 得到清单：字节面有浅层列举（[`StorageDir`](../../packages/core/src/storage/types.ts#symbol=StorageDir) 的 `children`，`FileDir` 与 `InMemoryDir` 都有）时成本随会话段数涨，不随所有会话的 entry 总数涨；没有的字节面退回递归 `list`，清单相同（[决策](../decisions/implemented/2026-11-13-storage-children.md)）。列出来之后、读之前 meta 没了的那一段跳过（别的进程里一段空会话正好收摊撤了 meta），零长或解不开的 meta 仍判红。给一段发消息（`sessions.send`）只读对方的 `<id>/meta.json`（[readSessionInfo()](../../packages/core/src/session/service.ts#symbol=readSessionInfo)），不列全表。
 
 身份类型以 [SessionInfo](../../packages/core/src/session/types.ts#symbol=SessionInfo) 与 [AgentRef](../../packages/core/src/agent-def/types.ts#symbol=AgentRef) 为准，不在本文复制类型声明。product 表示哪个产品创建，agent 保存可选 name 与 definition 快照；definition 决定如何运行，name 关联角色记忆。恢复使用保存的定义，不重新读取角色文件。
 
@@ -117,7 +117,7 @@ interface AgentToolsRegistry {
 
 **`restrict` 与延迟工具叠在一起**：先收紧、再按 `deferred` 过滤，两道都作用在工作集上。所以角色白名单外的工具，模型用 `tool_search` 既查不到也取不出——`tool_search` 看的是工作集，不是池。
 
-**不越权**（core 的 `sessions.create` 里验，不靠工具自觉）：角色的 `tools` 必须是创建者当前工具集的子集，权限策略继承创建者的、不能放宽。违反判红，盘上不建目录。「当前工具集」是 [`AgentState.tools`](../../packages/core/src/agent.ts#symbol=AgentState.tools)：池里没被禁用、且过了角色收紧的那些，**不是池**——比池的话，被收紧过的段能派出比自己更宽的段，收紧就成了摆设。延迟工具取没取过都算在内：创建者随时能经 `tool_search` 取来。
+**不越权**（core 的 `sessions.create` 里验，不靠工具自觉）：角色的 `tools` 必须是创建者当前工具集的子集，权限策略继承创建者的、不能放宽。违反判红，盘上不建目录。「当前工具集」是 [`AgentState.tools`](../../packages/core/src/agent.ts#symbol=AgentState.tools)：池里没被禁用、且过了角色收紧的那些，**不是池**——比池的话，被收紧过的段能派出比自己更宽的段，收紧就成了摆设。延迟工具取没取过都算在内：创建者随时能经 `tool_search` 取来。定义里**没写 `tools`** 的新段（不点角色、点了没写 `tools` 的角色、现写的）：创建者自己被收紧过时，按创建者此刻的工具集补上、随定义存进 meta；创建者没被收紧时才是产品全套。否则被收紧的段派一段「不点工具」的，就拿回了全套。判据见 [被收紧过的创建者派新段](../../packages/core/test/sessions-face.test.ts#test=被收紧过的创建者派新段定义里没写-tools-的不点角色点名现写一律按创建者此刻的工具集补上并落进-meta写了的照旧验越权没被收紧的不补2026-11-15)。
 
 **快照权威、只能收紧。** 检查在创建那一刻做一次，通过的定义整份存进 meta，之后它就是这段 session 的权威定义，不再回头看创建者（创建者可能已经 closed）。`--resume` 时工具集取「快照 ∩ 容器此刻能提供的」，只会更小；快照里有、容器没有的工具不挂、不报错。任何路径都不能让它比快照更宽。
 
@@ -126,9 +126,10 @@ interface AgentToolsRegistry {
 会话消息写入目标 inbox；持有目标 lease 的实例负责消费与 ack，发送方只追加 record。[InboxStore](../../packages/core/src/inbox/store.ts#symbol=InboxStore) 提供持久 record、ack marker 与 at-least-once 语义。
 
 - record id 由写者生成，包含时间、计数与随机部分，不依赖多个发送方共享一个内存序号。
-- refresh 扫描外部追加的 record 并加入 pending；运行中发现坏记录报告诊断，恢复期按恢复规则校验。
+- refresh 扫描外部追加的 record 并加入 pending；运行中发现坏记录报告一次诊断、本进程不再收（不再每拍重读重报），恢复期按恢复规则校验。
 - Agent 通过 Clock 端口轮询 inbox，在可消费时调度工作；跨进程投递不依赖内存事件通知。
 - 消费确认前中断可能导致重投，接收业务不能把 at-least-once 当成 exactly-once。
+- 一批处理完、ack 却没写成（pre-commit）：整批留在盘上待重启重投，**本进程停止自动消费**——与 transcript 写不进那一支同一条；不停的话下一轮又领到同一批，一轮轮白跑模型（2026-11-13，[后台重试有上界](../decisions/implemented/2026-11-13-background-retry-bounds.md)）。ack 无法裁决（indeterminate）时同样停消费，并连闹钟一起停：到期的提醒要经 inbox 投递，封账之后每一拍都必然被拒。
 
 **只跟活着的段说话**。一段 session 的**地址是持久的，但它得有宿主才谈得上通信**——所以 `send` 先确认对方活着：没在跑就调容器的 `SessionRunner` 把它叫起来，再投递；叫不起来（容器没给 `run`，或 runner 失败）就 `rejected: unreachable`，**一条消息都不留**。
 
@@ -138,9 +139,15 @@ interface AgentToolsRegistry {
 
 规矩是：持有者可以自称**可让位**（`acquire({ preemptible })`，写进认领记录，因为请它走的人在另一个进程里）；拿不到锁的一方先问一句（`StateLock.requestHandoff`），只有自称可让位的才让——收到 `Lease.handoffRequested` 就先排空（`pauseManagedWork`：不接新活、做完手上那条及它那批 inbox 的 ack、等后台与写入落定），再 `stop()`、release。排空有时限（`HANDOFF_DRAIN_MS`，比请求方的等待上限短）：到点没做完就中止它，那批 inbox 消息不 ack、留给接手的一方重投（[让位先排空](../decisions/implemented/2026-11-03-handoff-drains-first.md)）。**只有不可让位的启动方才问**，两个后台互相请没有意义。
 
-三条边界：**锁绝不从谁手里夺走**（让不让是持有者自己决定的，所以「core 不抢占、不猜对面死没死」一个字没变）；请不动就超时返回 `false`，调用方退回原来那句「已被另一个写者持有」；让位走的是 `stop()` 那条正常收摊路，不是丢锁——丢锁是「已经不归我了，一个字都不许再写」，让位是「我还在，做完手上的事再交出去」。
+三条边界：**请让位不夺锁**（让不让是持有者自己决定的）；请不动就超时返回 `false`，调用方退回原来那句「已被另一个写者持有」，或者在显式续会话时接管（见下）；让位走的是 `stop()` 那条正常收摊路，不是丢锁——丢锁是「已经不归我了，一个字都不许再写」，让位是「我还在，做完手上的事再交出去」。
 
 被叫醒的临时宿主该带 `preemptible: true`（`CreateAgentOptions.preemptible`），人开的会话一律留 `false`。
+
+**显式续会话一定续得上**（2026-11-15，[锁看心跳、显式续会话接管](../decisions/implemented/2026-11-15-lock-heartbeat-takeover.md)）。会话的锁由持有者每两秒刷一次心跳；心跳过期（十秒）、或者本机上那个 pid 已经查无此号，就算持有者不在了，下一个来续的直接接管——沙箱异常退出之后重新拉起、换网络之后主机名变了、pid 被复用，都不再挡住续会话。持有者还活着、又不肯让位时，显式续会话（`CreateAgentOptions.takeover`）照样**强行接管**：叠一代锁，原来那个进程在下一次刷心跳前看见、丢锁停手（与上面的丢锁善后同一条路），这之间至多差一次刷心跳，它可能还写进一条。谁会带 `takeover`：
+
+- 管道形态的 `--resume` / `--continue`：没人可问，一律接管。
+- 交互形态：装配之前先看一眼锁，持有者还活着、又不可让位（或锁坏了）时经壳问一句（`Shell.confirmTakeover`），答「接管」才带；缺省选中「不接管」。`/resume` 换段时同样问。
+- `--serve` 被叫醒的临时宿主一律不带（`preemptible` 的实例给了也不生效）。
 
 `SessionFace.canWake` 说的就是「这个容器叫不叫得醒」。消费方按它决定**怎么说话**：叫得醒时没在跑的段仍是可以对话的 peer（`session_list` 说「发消息会把它叫起来」）；叫不醒时它们只是盘上的记录（说「从这儿够不着，`/resume` 切过去」）。
 
@@ -219,8 +226,6 @@ extension 通过 AgentSessionsService 使用同一会话面；未接实际能力
 **切换失败。** /resume 由壳选段并退出，容器先停止旧段再启动目标段；目标段拿不到 lease 时尝试回到原段，回退也可能失败。它不是两段锁同时持有的原子交换。
 
 **空段清理竞态。** 停止前检查盘上 inbox 并清理空段元数据之间仍有竞态窗口；lease 不能替代对外部投递的完整协调。
-
-**清单遍历全部文件。** `listSessions()` 经 `StorageDir.list("")` 递归列出会话根下每一段的全部文件（entries、inbox、观测文档）再挑出 `<id>/meta.json`，成本随所有会话的总文件数线性涨——`session_list`、`--continue`、观测面板扫会话都走它。`StorageDir` 没有「只列一层」的原语，只读顶层要先给端口加一个。
 
 ## 10. 验证判据
 

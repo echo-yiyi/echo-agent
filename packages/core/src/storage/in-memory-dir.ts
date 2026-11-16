@@ -23,6 +23,18 @@ export class InMemoryDir implements StorageDir {
     return [...this.files.keys()].filter((k) => k.startsWith(prefix)).sort();
   }
 
+  async children(dir: string): Promise<string[]> {
+    const base = dir === "" || dir.endsWith("/") ? dir : `${dir}/`;
+    const names = new Set<string>();
+    for (const key of this.files.keys()) {
+      if (!key.startsWith(base)) continue;
+      const rest = key.slice(base.length);
+      const cut = rest.indexOf("/");
+      names.add(cut === -1 ? rest : rest.slice(0, cut + 1));
+    }
+    return [...names].sort();
+  }
+
   /** 同一个实例内互斥（它本来就只活在这一个进程里）。 */
   lock(name: string, opts?: { timeoutMs?: number }): Promise<() => Promise<void>> {
     return this.mutex.acquire(name, opts?.timeoutMs);

@@ -13,12 +13,17 @@
 // 形态列在 `extensions` 里——没有 `systemPrompt` 字符串这条路了。workspace 不再经 preset：
 // 它是 session 级事实，`mainFor()` 直接交给 `createEcho({ workspace })`。
 
-import type { CreateEchoOptions, CredentialStore, ObservationExpiryRule } from "@echo-agent/core";
+import type { CreateEchoOptions, CredentialStore, ObservationExpiryRule, SafetyClassifierOptions } from "@echo-agent/core";
 
 /** 装配前已经定了的形态。产品层据此决定「谁答权限询问」之类；工作目录不在这里（见文件头）。 */
 export type PresetForm = Readonly<{
   /** `true` = 交互形态（有人坐在终端前）；`false` = 管道 / CI。判据只有 `main()` 那一个。 */
   interactive: boolean;
+  /**
+   * 这次开没开安全分类器（2026-11-15）：装配层按 `settings.json` 的 `safetyClassifier` 与形态定好的结果（不写 = 交互开、管道关）。
+   * 分类器本身是内核的，不归产品装；产品看它只为调自己相关的东西（如沙箱开着、分类器关着时，越界那一条改问人）。不给 = 没开。
+   */
+  safetyClassifier?: boolean;
 }>;
 
 /**
@@ -54,8 +59,12 @@ export type Product = Readonly<{
    *
    * 与 `--no-memory` 的关系同一条分界：**开关归用户**（`withoutMemory`），**形状归产品**（`memory`）。
    * 产品能换掉内建的记忆模块（`memory.builtin: false`），但关不掉用户要的记忆，也打不开用户关掉的。
+   * 安全分类器同理（2026-11-15）：产品交**形状**（`safetyClassifier`：自己哪些工具不用判、给分类器的说明），开不开归使用者
+   * （`PresetForm.safetyClassifier`）。
    */
-  preset?: (form: PresetForm, host: ProductHost) => Pick<CreateEchoOptions, "agent" | "extensions" | "memory">;
+  preset?: (form: PresetForm, host: ProductHost) => Pick<CreateEchoOptions, "agent" | "extensions" | "memory"> & {
+    safetyClassifier?: SafetyClassifierOptions;
+  };
   /**
    * 观测留多久（2026-09-15 用户拍板）。**规则归产品，core 一条都不删**：不给这个字段 = 这个产品不清理，
    * 观测文档只增不减（`listRuns` / `lastRun` 读全部概要，会越来越慢——设计文档 §8 的第 2 条）。

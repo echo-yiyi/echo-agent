@@ -7,16 +7,22 @@
 // 装配、收摊全在 base 的 `mainFor()` 里，这里一行都不复制；交互形态起哪个壳由本文件挑
 // （`terminalShell`），装配层不写死。
 //
-// **权限：出厂的 echo-coding 全放行**（2026-09-01 用户拍板，两种形态都是）。这里传 `permission: false` = 不装策略，
-// bash / write_file / edit_file 不问直接跑。理由：这是用户自己在自己的仓库里开的 coding agent，
-// 每一步都问只会让人按到麻木；管道形态更是没人可问。
+// **权限**：2026-09-01 定的是两种形态都全放行——每一步都问只会让人按到麻木，管道形态更是没人可问。
+// 2026-11-15 起两层兜底，都不是本产品自己的机制：
+//   · **安全分类器**是内核的（`createEcho({ safetyClassifier })`），开不开归使用者（settings.json 的 `safetyClassifier`，
+//     不写按形态：交互开、管道关——装配层 `presetForm` 定）。本产品只交**形状**：哪些工具不用判（`CODING_SAFE_TOOLS`：
+//     工具包那份加上本产品的 worktree 两件）、bash 的 `sandbox: false` 是什么意思（工具包的 `SHELL_CLASSIFIER_NOTES`）。
+//   · **交互形态命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，`@echo-agent/tools` 的 `sandbox.ts`）。分类器关着时，越出沙箱的那一条
+//     由人看（`permissionPolicyFor` 的规矩）；开着时由分类器判，不另装策略。
 // `permission.ts` 的 `DEFAULT_PERMISSION`（三件先问的黑名单）**不是这条命令的行为**：它只在嵌入方调 `codingPreset()`
-// 而不传 `permission` 时生效（评测、别的宿主）；要在交互壳里问 y/n，再给 `responder: "host"`。
+// 而不传 `permission` 时生效（评测、别的宿主）。
 
 import { readFileSync } from "node:fs";
 import { conductEntry, mainFor, retainRecentDays, type Product } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { codingPreset } from "./agent.ts";
+import { SHELL_CLASSIFIER_NOTES } from "@echo-agent/tools";
+import { CODING_SAFE_TOOLS } from "./permission.ts";
 
 /** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置。 */
 const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
@@ -35,8 +41,14 @@ export const ECHO_CODING: Product = Object.freeze({
   // 共用的纪律段由**产品**挂（2026-09-09 拍板）：装配层不再恒挂，形态决定「有没有人能答」那一条。
   // `codingPreset()` 自己只依赖 core，所以这一条加在这里，不加进它。
   preset: (form, host) => {
-    const preset = codingPreset({ permission: false, maxIterations: 200, credentials: host.credentials });
-    return { ...preset, extensions: [conductEntry(form), ...preset.extensions] };
+    // 沙箱跟形态走：交互形态包、管道形态不包。分类器关着时越出沙箱的那一条问终端里的人；开着时交给分类器（见文件头）
+    const permission = form.interactive && !form.safetyClassifier ? ({ fallback: "allow", responder: "host" } as const) : false;
+    const preset = codingPreset({ permission, sandbox: form.interactive, maxIterations: 200, credentials: host.credentials });
+    return {
+      ...preset,
+      extensions: [conductEntry(form), ...preset.extensions],
+      safetyClassifier: { safeTools: CODING_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES },
+    };
   },
   // 观测留 30 天（2026-09-15 用户拍板，与 echo-agent 同一条规则；两个产品平级，各自声明各自的）。
   observationExpiry: retainRecentDays(30),

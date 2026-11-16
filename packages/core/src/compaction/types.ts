@@ -133,6 +133,14 @@ export const DEFAULT_SECTION_TOKENS = 32_000;
 export const DEFAULT_KEEP_RECENT_TOOL_RESULTS = 3;
 /** auto / manual 压到 target 之下再留这么一截（占窗口比例），免得下一轮又碰线。 */
 export const COMPACTION_SLACK_RATIO = 0.1;
+
+/**
+ * 上一次压缩**压完仍在触发线上**（压不下去、压缩调用失败、没有一段有事可做）时记下的那一刻（2026-11-13）：
+ * 压完的占用与当时的窗口。自动压缩要等占用涨过它到窗口之间的一半才重试（`compactionRetryAt`）——否则不可压的部分
+ * 本身过线时每轮都压一次（每轮两次模型调用、缓存每轮断一次），压缩调用一直失败时每轮都重来一遍。
+ * 窗口不同（换了模型）、或此刻的占用比那一刻还小（估算被 usage 纠正、上下文变小了）就不作数。压完落到线下 = 没有这一刻（null）。
+ */
+export type CompactionFloor = Readonly<{ tokens: number; window: number }>;
 /**
  * auto / manual 的压缩目标（`goal`）的绝对上限（2026-11-03）。按窗口比例算的 goal 对大窗口太宽：百万窗口的模型
  * 压完仍长期带着约 90 万 token，每轮都按这个量付钱、等延迟。触发线不变，只是压的时候压到这里。

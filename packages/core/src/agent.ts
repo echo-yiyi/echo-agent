@@ -20,9 +20,6 @@ import { MEMORY_TOOL_NAME } from "./memory/tool.ts";
 import { agentMemory, notesMemory, userMemory } from "./memory/types.ts";
 import {
   DEFAULT_EXTRACT_DRAIN_MS,
-  DEFAULT_EXTRACT_EVERY_TURNS,
-  DEFAULT_EXTRACT_MAX_TURNS,
-  DEFAULT_EXTRACT_MIN_USER_WORDS,
   DEFAULT_EXTRACT_UNFINISHED_LIMIT,
   defaultExtractPrompt,
   firstUserText,
@@ -40,6 +37,7 @@ import type { ObservationValue, RuntimePhase, SubloopRunSource } from "./observa
 import type { ObservableStateInput } from "./observability/worker-protocol.ts";
 import { HookRuntime, type HookContext, type HookOrigin, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
+import { createSafetyClassifier, type SafetyClassifier, type SafetyClassifierOptions } from "./permission/classifier.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
 import { AgentPolicySlots, type AgentPolicyValues } from "./policies.ts";
 import { QuestionLedger } from "./question/ledger.ts";
@@ -54,7 +52,7 @@ import { StandaloneRunAdmission } from "./admission/standalone.ts";
 import { normalizeModelSnapshot } from "./admission/model-snapshot.ts";
 import type { AgentAdmissionExecuteScope, AgentAdmissionResult, AgentAdmissionTicket, RunModelBinding, RunSource } from "./admission/types.ts";
 import type { AgentContext, AgentLoopConfig, AttemptResult, LoopProbes, LoopResult, TransformContext, Emit } from "./loop/types.ts";
-import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
+import { EMPTY_COMPACTION, type CompactionFloor, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { calibrationFrom, fixedOverhead, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
 import { buildWorkingMessages, estimateTokens, prefixEstimate, projectRange } from "./compaction/view.ts";
@@ -339,6 +337,20 @@ export type AgentOptions = {
    */
   preemptible?: boolean;
   /**
+   * 显式续会话时**一定续得上**（2026-11-15 用户拍板）：拿不到锁、请让位也没让成，就强行接管
+   * （`StateLock.takeOver`）。缺省 `false`。
+   *
+   * 给**显式续会话**的那一方：人 `--resume` / `--continue`、沙箱异常退出后重新拉起。盘上的持有者多半已经
+   * 随旧进程一起没了、只是判不出来（机器名变了、pid 被复用）；万一它还活着，它那边丢锁、停手。
+   * 被叫醒的临时宿主（`preemptible`）一律不抢——给了也不生效。
+   */
+  takeover?: boolean;
+  /**
+   * 安全分类器（2026-11-15，`permission/classifier.ts`）：给了就开。权限策略放行之后、工具执行之前，名单之外的工具再让本会话的模型
+   * 判一次；判拦的不跑、理由交回模型，判不了或连着判拦就改问人。不给 = 不判（低层 `new Agent()` 不替产品做决定）。
+   */
+  safetyClassifier?: SafetyClassifierOptions;
+  /**
    * 哪个产品（2026-09-07，替代 `agentId` / `agentName`）。写进每个新建会话的
    * `SessionInfo.product`；产品（`echo-agent` / `echo-coding`）各给各的名字，同一目录里就各有各的
    * 对话（`--continue` 按 workspace + product 挑）。缺省 `"default"`。
@@ -390,6 +402,12 @@ export const DEFAULT_MAX_ITERATIONS = 20;
  * 保险丝量级：stop hook 最多贡献 3 条，其余留给一次 run 里 host 的 followUp。常量还是配置项，随 stop hook 三次那条记录同拍。
  */
 export const DEFAULT_MAX_REPLIES = 10;
+
+/** 子循环的压缩配置：主会话那份去掉「压完仍在线上」的冷却状态（`floor` / `onFloor`）——子循环的上下文是另一份。 */
+function subloopCompaction(main: AgentLoopConfig["compaction"]): AgentLoopConfig["compaction"] {
+  const { floor: _floor, onFloor: _onFloor, ...rest } = main;
+  return rest;
+}
 
 /**
  * `deliver()` 与 schedule adapter 的 dedupeKey 派生：有稳定事实身份（environment 的 source + ref，比如
@@ -582,6 +600,10 @@ export class Agent {
   private readonly clock: Clock;
   /** 见 `AgentOptions.preemptible`。 */
   private readonly preemptible: boolean;
+  /** 见 `AgentOptions.takeover`。可让位的实例恒为 false。 */
+  private readonly takeover: boolean;
+  /** 见 `AgentOptions.safetyClassifier`。`null` = 没开。判拦计数跟着它，一个实例一份。 */
+  private readonly safetyClassifier: SafetyClassifier | null;
   /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
   private inboxPollCancel?: () => void;
   /** 哪个产品（`AgentOptions.product`）。写进新建会话的 `SessionInfo.product`，也是 holder 与观测 scope 的那一半。 */
@@ -723,6 +745,11 @@ export class Agent {
    */
   private lastCalibration = 1;
   private lastPrefixEstimate = 0;
+  /**
+   * 上一次压缩压完仍在线上的那一刻（`CompactionFloor`，2026-11-13）：跨 run 记着，下一个 run 的自动压缩照它冷却——
+   * 不记的话，不可压的部分过线时每条新消息的首轮都白压一次。transcript 清空或换掉时归 null。
+   */
+  private compactionFloor: CompactionFloor | null = null;
   /**
    * 记忆正文那条开头消息，会话内冻结（`MemoryFreeze`）。压缩落地、transcript 清空或从盘上换掉时
    * 置回 null（`processEvents` 里），下一次组装重取。
@@ -1048,6 +1075,8 @@ export class Agent {
     this.sessionService?.attachDiagnostics((d) => this.reportDiagnostic(d));
     this.clock = opts.clock ?? systemClock;
     this.preemptible = opts.preemptible === true;
+    this.takeover = opts.takeover === true && !this.preemptible;
+    this.safetyClassifier = opts.safetyClassifier === undefined ? null : createSafetyClassifier(opts.safetyClassifier);
     this.stateLock = opts.stateLock;
     this.product = opts.product ?? "default";
     this.agentRef = opts.agent ?? DEFAULT_AGENT_REF;
@@ -1579,6 +1608,11 @@ export class Agent {
           code: "inbox_transcript_unsettled",
           message: `这批 inbox 消息没能写进会话账本，未 ack、留待重启后重投，已停止自动消费 inbox：${errText(e)}`,
         });
+        // run 里登记的收尾活（`afterRun`）照样排空（2026-11-13）：此前这里直接返回，模型触发的热部署要等下一个人开的 run
+        // 收尾才做，其间一直 reloadPending。先放票据再排空，与下面正常收尾同一个顺序；不排自主工作（自动消费已停）
+        this.inboxTicketOutstanding = false;
+        this.syncAvailability();
+        if (this.afterRunQueue.length > 0) void this.drainAfterRun();
         return settled.result;
       }
       // ack 的三态由账本裁决：pre-commit（整批仍 pending，下次重投）与 indeterminate（账本已 seal，后续 intake
@@ -1592,7 +1626,11 @@ export class Agent {
           this.enterInboxFailure(e); // 先进失败态，再清标记——中间不给任何新 run 可乘之机
           indeterminate = true;
         } else {
-          this.reportDiagnostic({ code: "inbox_ack_failed", message: errText(e) }); // pre-commit：整批仍 pending，下次重投
+          // pre-commit：整批仍 pending、盘上留着，重启后照常重投。同时停掉自动消费（2026-11-13）：不停的话下一轮又领到
+          // 同一批、再跑一遍模型、再 ack 失败——ack 写不进时就是一轮轮白跑模型，transcript 里同一条消息越堆越多。
+          // 与上面 transcript 写失败那一支同一条；人开的 prompt 不受影响
+          this.autoConsumeInbox = false;
+          this.reportDiagnostic({ code: "inbox_ack_failed", message: `这批 inbox 消息处理完了但 ack 没写成，留待重启后重投，已停止自动消费 inbox：${errText(e)}` });
         }
       }
       // 裁决出来了才放行：committed / pre-commit 先清标记再排下一轮；indeterminate 只清标记，一轮都不排
@@ -1662,6 +1700,7 @@ export class Agent {
     const inboxHad = this.inbox.pendingCount > 0;
     this.clearAllQueues();
     this.lastCalibration = 1;
+    this.compactionFloor = null;
     this.emitDetached({ type: "reset" });
     if (inboxHad) this.emitDetached({ type: "queue_update", queue: "inbox", size: 0 });
   }
@@ -1695,6 +1734,7 @@ export class Agent {
     }
     const outcome = box.outcome;
     if (outcome === null) return { kind: "done", stages: [], contextTokens: this._state.contextTokens };
+    this.compactionFloor = outcome.floor; // 手动压完落到线下，自动压缩的冷却随之解除；仍在线上就从这里起算
     return { kind: "done", stages: outcome.stages, contextTokens: outcome.contextTokens };
   }
 
@@ -1967,10 +2007,17 @@ export class Agent {
           if ((await this.stateLock.requestHandoff?.({ by: holder, timeoutMs: HANDOFF_TIMEOUT_MS })) === true) {
             lease = await this.stateLock.acquire({ holder, preemptible: this.preemptible });
           }
+          // **显式续会话一定续得上**（2026-11-15）：请过让位还拿不到，就强行接管。原持有者多半已经随旧进程
+          // （沙箱）一起没了、只是判不出来；还活着的话它那边 `lost` 触发、停手。
+          if (lease === null && this.takeover && this.stateLock.takeOver !== undefined) {
+            const was = (await this.stateLock.describeHolder?.()) ?? "持有者不明";
+            lease = await this.stateLock.takeOver({ holder, preemptible: this.preemptible });
+            this.reportDiagnostic({ code: "lease_takeover", message: `接管了这一段的写入权；原持有者：${was}` });
+          }
         }
         if (lease === null) {
-          // 拿不到就是拿不到——core 不抢占（持有者确认已死的锁，实现在 acquire 里就接管了）。
-          // 但**必须说清是谁占着**：对面还活着就该去找它；确认不了死活或锁坏了，人得先看得见对面是谁才能清。
+          // 拿不到就是拿不到（持有者已经不在的锁，实现在 acquire 里就接管了；显式续会话会走上面的接管）。
+          // 但**必须说清是谁占着**：对面还活着就该去找它；锁坏了，人得先看得见对面是谁才能清。
           const who = (await this.stateLock.describeHolder?.()) ?? null;
           throw new Error(
             `状态根已被另一个写者持有（${holder}）：拒绝启动` +
@@ -2240,7 +2287,8 @@ export class Agent {
   private async beginManagedWork(): Promise<void> {
     // 补跑的写只走 managed-activation（lane 表）：Schedule catch-up 的 delivery / cursor / expired 都在
     // 这条 lane 上，timer 不用它。**business 仍关着**——判据是 OR，先开 business 这条 lane 就形同虚设。
-    if (this.schedule !== undefined) {
+    // inbox 已封账（`enterInboxFailure`）就不起：提醒经 inbox 投递，起来也只是每拍被拒（暂停后恢复走的是这里）
+    if (this.schedule !== undefined && this.inboxFailure === null) {
       const closeActivation = this.gate?.openLane("managed-activation");
       try {
         await startSchedule(this.schedule);
@@ -2823,6 +2871,9 @@ export class Agent {
     this.inboxFailure = error;
     this.autoConsumeInbox = false;
     this.autoDream = false;
+    // 闹钟也停（2026-11-13）：到期的提醒要经 inbox 投递，封账之后每一拍都必然被拒——此前每秒一条 schedule_fire_failed，
+    // 直到重启。在飞的那一拍照常收尾；重启重新裁决时 schedule 随 managed work 一起起来
+    if (this.schedule !== undefined) stopSchedule(this.schedule);
     // 直写 lastError 是 `events.ts` 文件头登记的例外：此刻 ticket 仍在，清掉它的那一拍发 availability_changed，
     // reason 带的就是这条消息
     this._state.lastError = { source: "internal", code: "internal", retryable: false, message: error.message };
@@ -3121,7 +3172,8 @@ export class Agent {
 
   /**
    * reply 收尾时把材料定格、排进提取通道。真跑时两道门（2026-10-30 / 2026-11-03）：游标之后用户说的话攒够
-   * `DEFAULT_EXTRACT_MIN_USER_WORDS`，且攒满 `DEFAULT_EXTRACT_EVERY_TURNS` 轮——任一没过就不起模型调用、游标不动。
+   * `memory.extract.minUserWords`，且攒满 `memory.extract.everyTurns` 轮（产品可配，缺省 `DEFAULT_EXTRACT_SETTINGS`）——
+   * 任一没过就不起模型调用、游标不动。
    * `force` = 退出前那次补跑（`drainExtract`）：不看攒了几轮，之后不会再有下一次了。
    * **不进 admission**，走自己的通道——为什么见 `memory/channel.ts` 头注。
    */
@@ -3163,8 +3215,8 @@ export class Agent {
       if (from >= end) return skipped("empty_range");
       const fresh = messages.slice(from, end);
       // **两道门**：用户亲口说的话没攒够、轮数没攒满就不跑、游标不动——攒着，等下一次一并看
-      if (userProseWords(fresh) < DEFAULT_EXTRACT_MIN_USER_WORDS) return skipped("too_short");
-      if (!force && humanTurns(fresh) < DEFAULT_EXTRACT_EVERY_TURNS) return skipped("too_few_turns");
+      if (userProseWords(fresh) < memory.extract.minUserWords) return skipped("too_short");
+      if (!force && humanTurns(fresh) < memory.extract.everyTurns) return skipped("too_few_turns");
       // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
       const span = projectRange(messages, compaction, from, end);
       const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0 };
@@ -3267,7 +3319,15 @@ export class Agent {
 
   async drainExtract(): Promise<void> {
     if (!this.memoryWorkAllowed) return;
-    this.enqueueExtract({ force: true });
+    // 在跑的整理先中止（2026-11-13）：提取与整理排成一条（`oneBackgroundWriter`），补跑那次排在整理后面——
+    // 整理一般好几轮、多半超过上限，到点两个一起被中止，最后那段对话就没看到。整理被中止只是推迟到下次（锁过期后重来），
+    // 没看到的对话却可能再也没人看。中止也算在同一个上限里：整理卡在写盘上时收摊不被它拖住
+    const work = (async (): Promise<void> => {
+      await this.dreamChannel.settle();
+      if (!this.memoryWorkAllowed) return;
+      this.enqueueExtract({ force: true });
+      await this.extractChannel.idle();
+    })();
     let cancel = (): void => {};
     const deadline = new Promise<void>((resolve) => {
       cancel = this.clock.setInterval(() => {
@@ -3276,7 +3336,7 @@ export class Agent {
       }, DEFAULT_EXTRACT_DRAIN_MS);
     });
     try {
-      await Promise.race([this.extractChannel.idle(), deadline]);
+      await Promise.race([work, deadline]);
     } finally {
       cancel();
     }
@@ -3338,7 +3398,7 @@ export class Agent {
         seed: fork.seed,
         runId,
         source: { kind: "extract", parentRunId: scope.runId },
-        maxIterations: DEFAULT_EXTRACT_MAX_TURNS,
+        maxIterations: memory.extract.maxTurns,
         // 每轮注入不带：它们拼在消息末尾、不进 transcript，本来就不在共享前缀里；带上只是多发一段激活 skill 正文
         turnInjections: "none",
         compaction: "none",
@@ -3348,8 +3408,18 @@ export class Agent {
       async () => {},
     );
     if (result.outcome.kind === "completed") return "reviewed";
-    // aborted 不报、不算没跑完——那是 stop() / 丢锁在收摊
-    if (result.outcome.kind === "aborted") return "not_run";
+    if (result.outcome.kind === "aborted") {
+      // signal 中止了：stop() / 丢锁在收摊——不报、不算没跑完
+      if (signal.aborted) return "not_run";
+      // signal 没动却以 aborted 收场：送模前被 `contextBeforeBuild` hook 拦下了（子循环与主循环同一套 hooks）。
+      // 这不是收摊，照没跑完算——这段已攒够轮数，当成没跑的话之后每条 reply 都重装一次 prompt、再被拦一次，
+      // 没有诊断、也永远到不了放弃
+      this.reportDiagnostic({
+        code: "memory_extract_failed",
+        message: `记忆提取被 hook 拦下（${result.outcome.reason ?? "没给原因"}）；${written > 0 ? `此前已写入 ${written} 条，这段算看过了` : "没有写入"}`,
+      });
+      return written > 0 ? "reviewed" : "unfinished";
+    }
     // `runAgentLoop` 对失败不抛，结果在 outcome 里：没跑完（provider 错、轮数用完）要报出来，与通道兜住的抛错同一个 code。
     // 写成过的那几条是真的落了盘：这段按看过算（与整理撞上限按「做了一部分」记同一个口径）
     this.reportDiagnostic({
@@ -3490,7 +3560,8 @@ export class Agent {
             return tool === undefined ? { ok: false as const, reason: "not_found" as const } : { ok: true as const, tool };
           },
           ...(spec.turnInjections === "none" ? { getTurnInjections: () => [] } : {}),
-          compaction: { ...base.compaction, ...(spec.compaction === "none" ? { getStages: () => [] } : {}), notifyHooks: false },
+          // 主会话那份「压完仍在线上」不带进来：子循环的上下文是另一份，也不往回写
+          compaction: { ...subloopCompaction(base.compaction), ...(spec.compaction === "none" ? { getStages: () => [] } : {}), notifyHooks: false },
           // 不吃 steering / followUp：那些是给前台 run 的（gate 只认前台 run）
           intake: undefined,
         },
@@ -3795,7 +3866,7 @@ export class Agent {
       model: binding.model as Model, // RunModelSnapshot 与 Model 同形——JSON-like 的冻结副本
       runId: scope.runId,
       saveToolOutput: (file, text) => this.toolOutputs.write(file, text),
-      permission: this.permissionStage(),
+      permission: this.permissionStage(scope),
       sessionId: this._state.sessionId,
       thinkingLevel: binding.thinkingLevel,
       maxRetryDelayMs: binding.maxRetryDelayMs,
@@ -3853,6 +3924,10 @@ export class Agent {
         ...(this.compaction.reserveTokens !== undefined ? { reserveTokens: this.compaction.reserveTokens } : {}),
         getStages: () => [...this.compactionStages.values()],
         calibration: this.lastCalibration,
+        floor: this.compactionFloor,
+        onFloor: (floor) => {
+          this.compactionFloor = floor;
+        },
         now: () => this.clock.now(),
       },
       // **现读**：`setWorkspace()`（worktree 隔离）在轮中途改它，下一次工具执行就要看到新目录
@@ -4004,13 +4079,20 @@ export class Agent {
    * loop 看到的授权 stage：policy 只裁决，ask 的登记/超时/中止/回答全在本 Agent 的 ledger。
    * `responder:"none"` 的策略若返回 ask，这里把它折成 policy deny——诚实缺席，不生成 ask、不等人。
    */
-  private permissionStage(): PermissionStage {
+  private permissionStage(scope: AgentAdmissionExecuteScope): PermissionStage {
     // 每次建 stage 时现读：扩展在 mount 期换掉策略之后，下一次 run 就该用新的那份
     const policy = this.policySlots.values.permission;
+    const binding = scope.modelBinding;
     return {
       authorize: async (input) => {
+        // 策略多看两样（2026-11-15）：用户本人说的话、一次用本会话模型的调用。params 仍是 loop 冻结的同一份对象
+        const policyInput = Object.freeze({ ...input, userIntent: this.userIntent(), askModel: (r: { system: string; prompt: string }) => this.askModel(binding, r) });
         // 先验形再看 kind：策略返回 null/"bogus" 时，这里要给出「非法裁决」而不是 TypeError
-        const verdict = normalizeVerdict(await policy.authorize(input));
+        let verdict = normalizeVerdict(await policy.authorize(policyInput));
+        // 安全分类器排在策略之后：策略拒或问照它的；放行的、又不在免判名单上的，再判一次（扩展换了策略也照样判）
+        if (verdict.kind === "allow" && this.safetyClassifier?.covers(input.toolName) === true) {
+          verdict = normalizeVerdict(await this.safetyClassifier.judge(policyInput));
+        }
         if (verdict.kind === "ask" && policy.responder === "none") {
           return { kind: "deny", reason: `${verdict.reason} (the policy asks for approval, but no responder is configured: ask counts as deny)` };
         }
@@ -4023,6 +4105,39 @@ export class Agent {
       },
       ask: (input, signal) => this.permissions.openAsk(input, { timeoutMs: policy.askTimeoutMs, signal }),
     };
+  }
+
+  /**
+   * 本会话里用户本人说的话（`PermissionPolicyInput.userIntent`）：transcript 里 `human` / `steer` 用户消息的文字，旧的在前。
+   * harness 插的话、工具结果、模型正文、环境消息都不算——它们不是用户写的。
+   */
+  private userIntent(): readonly string[] {
+    const out: string[] = [];
+    for (const m of this._state.messages) {
+      if (m.role !== "user" || (m.source !== "human" && m.source !== "steer")) continue;
+      const text = m.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
+      if (text !== "") out.push(text);
+    }
+    return Object.freeze(out);
+  }
+
+  /**
+   * 一次不带工具的模型调用（`PermissionPolicyInput.askModel`）：用这个 run 冻结的模型装备，受 run 的 signal 管。
+   * 出错或被中止 → reject，不返回半截文字。不进 transcript、不记观测——它是授权的一部分，不是对话。
+   */
+  private async askModel(binding: RunModelBinding, request: { system: string; prompt: string }): Promise<string> {
+    const model = binding.model as Model;
+    const apiKey = await binding.getApiKey?.(model.provider);
+    const stream = await binding.streamFunction(
+      model,
+      { systemPrompt: request.system, messages: [{ role: "user", content: [{ type: "text", text: request.prompt }] }], tools: [] },
+      { ...(this.signal !== undefined ? { signal: this.signal } : {}), ...(apiKey !== undefined ? { apiKey } : {}), thinkingLevel: "off" },
+    );
+    const final = await stream.result();
+    if (final.stopReason === "error" || final.stopReason === "aborted") {
+      throw new Error(final.error?.message ?? `the model call ended with ${final.stopReason}`);
+    }
+    return final.content.map((b) => (b.type === "text" ? b.text : "")).join("");
   }
 
   /**
@@ -4203,6 +4318,7 @@ export class Agent {
         // 已加载的延迟工具从 transcript 里收回来（2026-11-03）：菜单与上个进程最后一次请求的相同，缓存不断
         this.loadedTools.clear();
         for (const name of loadedToolsIn(input.messages)) this.loadedTools.add(name);
+        this.compactionFloor = null; // 换了一份 transcript：上一份的「压完仍在线上」不作数
         this.invalidateMemoryFreeze(); // 换了一份 transcript：开头消息按此刻的记忆重取（完整内容），基线跟着重记
         this.foregroundReads.clear();
         // 游标先设到末尾（这个事件不带复盘下标）；经会话恢复时 `start()` 紧接着按盘上的 `memory_reviewed` 改回去

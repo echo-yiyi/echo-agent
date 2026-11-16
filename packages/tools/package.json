@@ -1,0 +1,48 @@
+{
+  "name": "@echo-agent/tools",
+  "version": "0.8.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "Echo's standard tool packs: workspace files and search, shell with an optional OS sandbox, web fetch and search. Any product mounts the ones it wants. Requires Bun.",
+  "dependencies": {
+    "@echo-agent/base": "workspace:*",
+    "@echo-agent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test"
+  },
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "agent",
+    "ai-agent",
+    "llm",
+    "llm-agent",
+    "tools",
+    "bun"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/echo-yiyi/echo-agent.git",
+    "directory": "packages/tools"
+  },
+  "homepage": "https://github.com/echo-yiyi/echo-agent#readme",
+  "bugs": "https://github.com/echo-yiyi/echo-agent/issues",
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}

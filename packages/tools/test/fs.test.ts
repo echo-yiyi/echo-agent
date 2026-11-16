@@ -6,8 +6,8 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelTool, ToolExecutionContext } from "@echo-agent/core";
-import { makeFsTools, resolveSafe } from "../src/tools/fs.ts";
-import { makeSearchTools } from "../src/tools/search.ts";
+import { makeFsTools, resolveSafe } from "../src/fs.ts";
+import { makeSearchTools } from "../src/search.ts";
 
 let root: string;
 beforeEach(async () => {

@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtemp, mkdir, writeFile, rm, chmod } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, chmod } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -915,6 +915,36 @@ test("续一段非 main 的段（sessionsRoot + sessionId）：createEcho 按盘
   expect([...agentOf(echo).tools.keys()]).toContain("session_send");
 });
 
+test("createEcho 的 safetyClassifier 一个参数开关安全分类器：true / 给形状就开，名单外的工具先判、判拦的不跑；不给就不判（2026-11-15）", async () => {
+  let ran = 0;
+  const deploy: ModelTool = {
+    kind: "model",
+    name: "deploy",
+    label: "deploy",
+    description: "deploy",
+    parameters: { type: "object", properties: {} },
+    execute: async () => (ran++, toolOk("ran")),
+  };
+  const base = { allowNetwork: false, withoutMemory: true, extensionDirs: [] as string[], agent: { tools: [deploy] } };
+  const on = await createEcho({ ...base, store: new InMemoryDir(), lock: new InMemoryStateLock(), provider: scripted([toolTurn("c1", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: not asked for"), textTurn("ok")]), safetyClassifier: true });
+  running.push(on);
+  await on.start();
+  await on.agent.prompt("修好测试");
+  expect(ran).toBe(0);
+
+  const shaped = await createEcho({ ...base, store: new InMemoryDir(), lock: new InMemoryStateLock(), provider: scripted([toolTurn("c1", "deploy", {}), textTurn("ok")]), safetyClassifier: { safeTools: ["deploy"] } });
+  running.push(shaped);
+  await shaped.start();
+  await shaped.agent.prompt("部署");
+  expect(ran).toBe(1); // 产品补的名单里有它：不判
+
+  const off = await createEcho({ ...base, store: new InMemoryDir(), lock: new InMemoryStateLock(), provider: scripted([toolTurn("c1", "deploy", {}), textTurn("ok")]) });
+  running.push(off);
+  await off.start();
+  await off.agent.prompt("部署");
+  expect(ran).toBe(2);
+});
+
 test("不越权比的是创建者此刻的工具集而不是池：被角色收紧挡掉的、被禁用的判红，没取过的延迟工具放行", async () => {
   // 走真接线：`sessions-face` 的单测给 `self().tools` 喂手写列表，分不出池与工具集。
   // 这里 `self().tools` 读的是 `agent.state.tools`——池里没被禁用、且过了角色收紧的，延迟工具取没取过都算。
@@ -927,12 +957,13 @@ test("不越权比的是创建者此刻的工具集而不是池：被角色收�
     execute: async () => toolOk(name),
     ...(deferred ? { deferred: true } : {}),
   });
+  const sessionsRoot = await tmp();
   const echo = await createEcho({
     provider: scripted([textTurn("ok")]),
     allowNetwork: false,
     withoutMemory: true,
     extensionDirs: [],
-    sessionsRoot: await tmp(),
+    sessionsRoot,
     sessions: {},
     agent: { tools: [tool("read_a"), tool("write_b"), tool("cold_c", true)] },
     agentDef: { name: "narrow", definition: { tools: ["read_a", "cold_c"] } },
@@ -943,6 +974,10 @@ test("不越权比的是创建者此刻的工具集而不是池：被角色收�
 
   await expect(create(["write_b"])).rejects.toThrow(/write_b/); // 在池里、被角色收紧挡掉——比池的话会放行
   expect((await create(["cold_c"])).id).toMatch(/^s-/); // 延迟、没取过、不在菜单上：创建者随时取得来，算它有
+  // 不点工具的新段：创建者被角色收紧过 → 继承它此刻的工具集，拿不回 write_b（2026-11-15）
+  const bare = await echo.sessions.create({ message: "干活", main: false });
+  const meta = JSON.parse(await readFile(join(sessionsRoot, bare.id, "meta.json"), "utf8")) as { agent: { definition: { tools?: string[] } } };
+  expect(meta.agent.definition.tools?.slice().sort()).toEqual(["cold_c", "read_a"]);
   disableTools(agentOf(echo).tools, ["read_a"], "test");
   await expect(create(["read_a"])).rejects.toThrow(/read_a/); // 在池里、已禁用
 });
@@ -1168,12 +1203,14 @@ test("续上一段会话：开头消息按此刻的记忆重取（完整内容�
 
   const last = seen[seen.length - 1]!;
   const texts = last.messages.map((m) => m.content.map((b) => (b.type === "text" ? b.text : "")).join(""));
-  // 完整的现行内容在对话最前面那条消息里，不在 system 里；它不落 session，所以续上的历史里也没有上个进程的那份
-  expect(texts[0]!.startsWith("# Memory contents")).toBe(true);
+  // 完整的现行内容在对话最前面那条消息里，不在 system 里；它不落 session，所以续上的历史里也没有上个进程的那份。
+  // 记忆正文与变化通知都是环境消息，出门包在来源标签里（2026-11-15）
+  const CONTENT_OPENING = "<environment source=\"memory\">\n# Memory contents";
+  expect(texts[0]!.startsWith(CONTENT_OPENING)).toBe(true);
   expect(texts[0]).toContain("偏好B");
   expect(last.systemPrompt).not.toContain("偏好B");
-  expect(texts.filter((t) => t.startsWith("# Memory contents"))).toHaveLength(1);
-  const notices = texts.filter((t) => t.startsWith("Memory files changed"));
+  expect(texts.filter((t) => t.startsWith(CONTENT_OPENING))).toHaveLength(1);
+  const notices = texts.filter((t) => t.startsWith("<environment source=\"memory\">\nMemory files changed"));
   expect(notices).toHaveLength(1); // 上个进程那条，原样还在；续上没有新变化，不补
   expect(notices[0]).toContain("added: user/user.md"); // 冻结那一刻它还不存在
   expect(notices[0]).not.toContain("偏好A"); // 通知不带内容
@@ -1291,5 +1328,69 @@ test("/clear 之后再续会话：复盘下标越过 reset 之前那几条（它
   expect(extractPrompts).toHaveLength(2);
   expect(extractPrompts[1]).toContain("«续上之后：发版前先看 CI»");
   expect(extractPrompts[1]).toContain("the last 2 messages"); // 记的是落盘下标 4，不是内存下标 2
+});
+
+/* ───────────── 记忆的可调取值经 createEcho 接到 Agent（2026-11-12） ───────────── */
+
+/** 记下提取与整理各发了几次请求：提取认指令开头，整理认它 prompt 的第一句。 */
+function backgroundCountingProvider(): { provider: ReturnType<typeof createProvider>; counts: { extract: number; dream: number } } {
+  const counts = { extract: 0, dream: 0 };
+  const dialect: Dialect = {
+    api: "fake",
+    async *request(_model, context) {
+      const text = JSON.stringify(context.messages);
+      const background = text.includes(EXTRACT_PROMPT_OPENING) ? "extract" : text.includes("Consolidate the ") ? "dream" : null;
+      if (background !== null) counts[background] += 1;
+      for (const ev of textTurn(background !== null ? "Nothing to change." : "好的")) yield structuredClone(ev);
+    },
+  };
+  const provider = createProvider({
+    id: "scripted",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams(dialect),
+  });
+  return { provider, counts };
+}
+
+async function eventually(cond: () => boolean, ms = 3_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !cond()) await new Promise((r) => setTimeout(r, 10));
+  return cond();
+}
+
+test("memory.extract 经 createEcho 接到 Agent：配了 everyTurns 1，一轮之后就提取（缺省要攒满三轮，第一轮不跑）", async () => {
+  const { provider, counts } = backgroundCountingProvider();
+  const echo = await createEcho({ provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [], memory: { extract: { everyTurns: 1 } } });
+  running.push(echo);
+  await echo.start();
+  await echo.agent.prompt("第一件事：我们的测试一律用 bun 跑");
+
+  expect(await eventually(() => counts.extract > 0), "配了每轮都看，第一轮之后却没提取").toBe(true);
+});
+
+test("memory.dream 经 createEcho 接到 Agent：写入数与文件数两道给 0，回到 idle 就整理（缺省要写满 5 次、10 个文件）", async () => {
+  const { provider, counts } = backgroundCountingProvider();
+  const echo = await createEcho({ provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [], memory: { dream: { minWritesSinceLast: 0, minFiles: 0 } } });
+  running.push(echo);
+  await echo.start();
+  await echo.agent.prompt("好");
+
+  expect(await eventually(() => counts.dream > 0), "门都放开了，回到 idle 却没整理").toBe(true);
+});
+
+test("memory.extract / memory.dream 配错：createEcho 当场报错，不回落到缺省", async () => {
+  const base = { provider: scripted([textTurn("ok")]), allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [] };
+  const failure = async (memory: Parameters<typeof createEcho>[0]["memory"]): Promise<string> => {
+    try {
+      running.push(await createEcho({ ...base, memory }));
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+    return "";
+  };
+  expect(await failure({ extract: { maxTurns: 0 } })).toContain("memory.extract.maxTurns 必须是 ≥ 1 的整数");
+  expect(await failure({ dream: { minFile: 3 } as never })).toContain("memory.dream 没有 'minFile' 这一项");
 });
 

@@ -250,8 +250,10 @@ function convertMessage(m: ProviderMessage, model: Model, alwaysSendReasoningFie
         toolCalls.push({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } });
       }
     }
-    // 什么都不剩（只有被丢掉的思考）：整条不发——`content: null` 又没有 `tool_calls` 的 assistant 消息各家会拒
-    if (texts.length === 0 && toolCalls.length === 0 && reasoning.size === 0) return [];
+    // 没有正文也没有工具调用：整条不发——`content: null` 又没有 `tool_calls` 的 assistant 消息各家会拒。
+    // 只剩可回放的思考时同样不发（模型某一轮只出了 reasoning，或截在思考里）：思考是挂在一条有内容的消息上带回去的，
+    // 单独一条发出去就是那条会被拒的消息，而它留在 transcript 里，之后每次请求都带着它
+    if (texts.length === 0 && toolCalls.length === 0) return [];
     const text = texts.join(TEXT_BLOCK_SEPARATOR);
     const out: Record<string, unknown> = { role: "assistant", content: text === "" ? null : text };
     // **原样带回上一轮的思考**：Z.AI Coding Plan、MiniMax M2.x 这类开着 preserved thinking 的家，
@@ -563,7 +565,7 @@ function mapStop(reason: string): StopReason | { error: AgentError } {
       return "max_tokens";
     case "content_filter":
     case "sensitive":
-      return { error: agentError("provider", "protocol", `上游以 finish_reason: ${reason} 收尾：输出被内容安全过滤拦下`, false) };
+      return { error: agentError("provider", "content_filter", `上游以 finish_reason: ${reason} 收尾：输出被内容安全过滤拦下`, false) };
     case "network_error":
     case "error":
       return { error: agentError("provider", "server", `上游以 finish_reason: ${reason} 收尾：服务端推理异常`, true) };
@@ -786,8 +788,24 @@ export type BuiltinProviderOptions = {
   fetchFn?: typeof fetch;
 };
 
+/* 各家认的 key 环境变量,**按声明顺序择一**。名字只在这里写一次:provider 读它,`BUILTIN_PROVIDER_KEY_ENV` 汇总它。 */
+const KIMI_KEY_ENV = ["MOONSHOT_API_KEY", "ECHO_LLM_API_KEY"] as const;
+const OPENAI_KEY_ENV = ["OPENAI_API_KEY", "ECHO_LLM_API_KEY"] as const;
+const ZAI_KEY_ENV = ["ZAI_CODING_CN_API_KEY", "ZHIPU_API_KEY", "ECHO_LLM_API_KEY"] as const;
+const MINIMAX_KEY_ENV = ["MINIMAX_API_KEY", "ECHO_LLM_API_KEY"] as const;
+const DEEPSEEK_KEY_ENV = ["DEEPSEEK_API_KEY"] as const;
+
+/**
+ * 内建 provider 认的全部 key 环境变量（2026-11-15）。产品起子进程跑模型给的命令时（coding 的 shell 工具）据此剥掉——
+ * 模型的 key 不该落到一条被注入的 `curl … $DEEPSEEK_API_KEY` 手里。只列 echo 自己认的：用户别的 token
+ * （`GITHUB_TOKEN`、`NPM_TOKEN`）是命令真要用的，不在这里。
+ */
+export const BUILTIN_PROVIDER_KEY_ENV: readonly string[] = Object.freeze([
+  ...new Set([...KIMI_KEY_ENV, ...OPENAI_KEY_ENV, ...ZAI_KEY_ENV, ...MINIMAX_KEY_ENV, ...DEEPSEEK_KEY_ENV]),
+]);
+
 /** 从环境变量取 key,**按声明顺序择一**。resolve 报告「配好了没」——undefined = 未配置,上层诚实拒跑。 */
-function envApiKey(...names: string[]): ProviderAuth {
+function envApiKey(names: readonly string[]): ProviderAuth {
   return {
     apiKey: {
       async resolve() {
@@ -825,7 +843,7 @@ export function kimiProvider(opts: BuiltinProviderOptions = {}): Provider {
     id: "kimi",
     name: "Kimi (Moonshot)",
     baseUrl,
-    auth: envApiKey("MOONSHOT_API_KEY", "ECHO_LLM_API_KEY"),
+    auth: envApiKey(KIMI_KEY_ENV),
     // 目录里不止一个模型，不声明缺省的话 `await createAgent({ provider })` 会 fail-loud（D17 第 4 级）。
     // 选 K3 是官方口径：「建议优先从 Kimi K3 开始」；追求出字速度的编程场景官方推 k2.7-code-highspeed。
     defaultModelId: "kimi-k3",
@@ -868,7 +886,7 @@ export function openaiProvider(opts: BuiltinProviderOptions = {}): Provider {
     id: "openai",
     name: "OpenAI",
     baseUrl,
-    auth: envApiKey("OPENAI_API_KEY", "ECHO_LLM_API_KEY"),
+    auth: envApiKey(OPENAI_KEY_ENV),
     // 官方 Codex 模型文档：「If you are unsure, start with Sol」；Terra 给子代理类轻活，Luna 最便宜
     defaultModelId: "gpt-5.6-sol",
     models: [
@@ -930,7 +948,7 @@ export function zaiCodingProvider(opts: BuiltinProviderOptions = {}): Provider {
     id: "zai-coding-cn",
     name: "Z.AI Coding CN (GLM)",
     baseUrl,
-    auth: envApiKey("ZAI_CODING_CN_API_KEY", "ZHIPU_API_KEY", "ECHO_LLM_API_KEY"),
+    auth: envApiKey(ZAI_KEY_ENV),
     // 官方旗舰；flash 是 1/10 价、唯一收图的那个
     defaultModelId: "glm-5.3",
     models: [
@@ -969,7 +987,7 @@ export function minimaxProvider(opts: BuiltinProviderOptions = {}): Provider {
     id: "minimax",
     name: "MiniMax",
     baseUrl,
-    auth: envApiKey("MINIMAX_API_KEY", "ECHO_LLM_API_KEY"),
+    auth: envApiKey(MINIMAX_KEY_ENV),
     defaultModelId: "MiniMax-M3",
     models: [
       // 不标 `reasoning: true`：thinking 是关掉的，标了就是许诺一个本批并不打开的通道。
@@ -1004,7 +1022,7 @@ export function deepseekProvider(opts: BuiltinProviderOptions = {}): Provider {
     id: "deepseek",
     name: "DeepSeek",
     baseUrl,
-    auth: envApiKey("DEEPSEEK_API_KEY"),
+    auth: envApiKey(DEEPSEEK_KEY_ENV),
     // flash 是官方的缺省名、价格是 pro 的四分之一左右；pro 官方自己的 agent 配置把它当主模型、flash 给子代理
     defaultModelId: "deepseek-flash",
     models: [

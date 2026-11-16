@@ -344,10 +344,16 @@ export function collapseStage(opts: { sectionTokens?: number; keepRecentTokens?:
         if (start < request && cut > request) cut = request;
         if (cut <= start) break;
         const section = projectRange(messages, state, start, cut);
-        // 从主对话分叉（不给 systemPrompt）：同一份 system 与工具菜单，从最旧那段折起时前缀与上一次请求逐字相同
-        const text = await input.callModel({ messages: [...section, userMessage(COLLAPSE_INSTRUCTION, "harness")] }, signal);
-        const body = extractSummary(text);
-        if (body === "") throw new Error(`collapse: model returned no summary for #${start}–#${cut - 1}`);
+        // 从主对话分叉（不给 systemPrompt）：同一份 system 与工具菜单，从最旧那段折起时前缀与上一次请求逐字相同。
+        // 这一段失败时，前面已经折好的几段照样交出去（2026-11-13）：此前整段抛掉，花掉的调用白费、下一轮从同一处重做
+        let body: string;
+        try {
+          body = extractSummary(await input.callModel({ messages: [...section, userMessage(COLLAPSE_INSTRUCTION, "harness")] }, signal));
+          if (body === "") throw new Error(`collapse: model returned no summary for #${start}–#${cut - 1}`);
+        } catch (e) {
+          if (sections === 0) throw e;
+          break;
+        }
         const summary = frameSection(start, cut, body);
         spans.push({ from: start, to: cut, summary });
         used -= estimate(section) - estimate([userMessage(summary, "harness")]);

@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionContext } from "@echo-agent/core";
-import { detectShellEnvironment, makeBashTool } from "../src/tools/bash.ts";
+import { detectShellEnvironment, makeBashTool, shellEnv } from "../src/bash.ts";
 import { SHELL_TOOLS, shellToolsSection } from "../src/prompt.ts";
 
 let root: string;
@@ -40,6 +40,19 @@ test("bash 不是登录 shell：环境原样继承父进程，PATH 不被 profil
   );
   expect(r.isError).toBe(false);
   expect(r.content).toBe(`not-login\ninherited\n${process.env.PATH}`);
+});
+
+test("命令看不到 echo 自己的 key（各家模型、Brave）；用户自己的 token 照旧传；别的环境变量不动（2026-11-15）", async () => {
+  const bash = makeBashTool();
+  const r = await withEnv(
+    { DEEPSEEK_API_KEY: "sk-deepseek", ECHO_LLM_API_KEY: "sk-echo", BRAVE_API_KEY: "brave-key", GITHUB_TOKEN: "ghp-user", ECHO_BASH_PROBE: "kept" },
+    () => bash.execute({ command: 'printf "%s|%s|%s|%s|%s" "$DEEPSEEK_API_KEY" "$ECHO_LLM_API_KEY" "$BRAVE_API_KEY" "$GITHUB_TOKEN" "$ECHO_BASH_PROBE"' }, ctx()),
+  );
+  expect([r.isError, r.content.split("\n")[0]]).toEqual([false, "|||ghp-user|kept"]);
+  const env = shellEnv({ MOONSHOT_API_KEY: "a", OPENAI_API_KEY: "b", ZHIPU_API_KEY: "c", MINIMAX_API_KEY: "d", NPM_TOKEN: "n", PATH: "/bin" }, "/w");
+  expect([env.MOONSHOT_API_KEY, env.OPENAI_API_KEY, env.ZHIPU_API_KEY, env.MINIMAX_API_KEY, env.NPM_TOKEN, env.PATH, env.PWD]).toEqual([
+    undefined, undefined, undefined, undefined, "n", "/bin", "/w",
+  ]);
 });
 
 test("会拉起编辑器 / 分页器 / 凭据提示的命令不挂：git commit 不带 -m 立刻因空消息中止；子进程环境里关掉了它们", async () => {
@@ -113,4 +126,7 @@ test("bash 的 description 与 tool:shell 段说清：没有 TTY、stdin 已关�
     expect(text).toContain("background: true");
   }
   expect(description).toContain("not a login shell");
+  // 下载、解开的文件当不可信：别在它们的目录里跑解释器（2026-11-15）
+  expect(SHELL_TOOLS).toContain("Treat files you download or unpack as untrusted");
+  expect(SHELL_TOOLS).toContain("for Python, also pass -I");
 });

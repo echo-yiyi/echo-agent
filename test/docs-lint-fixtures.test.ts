@@ -101,6 +101,9 @@ describe("源码语义链接", () => {
     expect(validateSourceAnchor("test=不存在", source, "x.test.ts")).toContain("测试用例不存在");
     expect(validateSourceAnchor(`test=${anchor}`, `${source}\ntest(${JSON.stringify(title)}, () => {});`, "x.test.ts"))
       .toContain("测试用例锚不唯一");
+    // 按条件跳过的写法也认：`test.skipIf(cond)(title, …)`
+    const conditional = `test.skipIf(process.platform !== "darwin")(${JSON.stringify("真沙箱：家目录写不进")}, () => {});\n`;
+    expect(testCaseAnchors(conditional).get(slug("真沙箱：家目录写不进"))).toBe(1);
   });
 });
 

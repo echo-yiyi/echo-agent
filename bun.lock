@@ -14,7 +14,7 @@
     },
     "packages/base": {
       "name": "@echo-agent/base",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "dependencies": {
         "@echo-agent/core": "workspace:*",
       },
@@ -25,13 +25,14 @@
     },
     "packages/cli": {
       "name": "echo-agent",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "bin": {
         "echo-agent": "./bin/echo-agent.ts",
       },
       "dependencies": {
         "@echo-agent/base": "workspace:*",
         "@echo-agent/core": "workspace:*",
+        "@echo-agent/tools": "workspace:*",
         "@echo-agent/tui": "workspace:*",
       },
       "devDependencies": {
@@ -41,13 +42,14 @@
     },
     "packages/coding": {
       "name": "@echo-agent/coding",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "bin": {
         "echo-coding": "./bin/echo-coding.ts",
       },
       "dependencies": {
         "@echo-agent/base": "workspace:*",
         "@echo-agent/core": "workspace:*",
+        "@echo-agent/tools": "workspace:*",
         "@echo-agent/tui": "workspace:*",
       },
       "devDependencies": {
@@ -57,15 +59,27 @@
     },
     "packages/core": {
       "name": "@echo-agent/core",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "devDependencies": {
         "@types/bun": "latest",
         "typescript": "^5.7.0",
       },
     },
+    "packages/tools": {
+      "name": "@echo-agent/tools",
+      "version": "0.8.0",
+      "dependencies": {
+        "@echo-agent/base": "workspace:*",
+        "@echo-agent/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.5.0",
+      },
+    },
     "packages/tui": {
       "name": "@echo-agent/tui",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "dependencies": {
         "@earendil-works/pi-tui": "^0.84.3",
         "@echo-agent/base": "workspace:*",
@@ -86,6 +100,8 @@
 
     "@echo-agent/core": ["@echo-agent/core@workspace:packages/core"],
 
+    "@echo-agent/tools": ["@echo-agent/tools@workspace:packages/tools"],
+
     "@echo-agent/tui": ["@echo-agent/tui@workspace:packages/tui"],
 
     "@types/bun": ["@types/bun@1.4.4", "", { "dependencies": { "bun-types": "1.4.4" } }, "sha512-9wkRDXUXK124pEnAutE6n/l18j+i9GC5IAHK8TmX/2nlySETmky0OU6yL5U8pW1AoKh++AN9auDCr647BfurjQ=="],
@@ -102,7 +118,7 @@
 
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
-    "undici-types": ["undici-types@8.12.3", "", {}, "sha512-EXE4ydL3S76dFb27UFjNVZHTyv/TLdATj/KUe29ptdcg6qXL48J2tZ3126E5kICj5jn781OR+XlVH1N6Mz8jbA=="],
+    "undici-types": ["undici-types@8.12.4", "", {}, "sha512-GNCQH3MbVGB8OAVAoTiLH8pu4wx5Ni3DWKpnBzGj3WDsi8EwmK0aOVBooNEt+g5YL1eHPxcS9XUTouwFU6j1kQ=="],
 
     "@types/node/undici-types": ["undici-types@8.9.0", "", {}, "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="],
   }

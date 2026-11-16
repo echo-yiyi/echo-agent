@@ -129,7 +129,14 @@ export type EchoSessionsDeps = {
    * `tools` 是**此刻**的工作集——不越权检查读它，所以它必须是现查的那一份，
    * 不能是装配时抄下来的（角色收紧过的段只能派出比自己更小的段）。
    */
-  readonly self: () => { sessionId: string | null; product: string; workspace: string; tools: readonly string[] };
+  readonly self: () => {
+    sessionId: string | null;
+    product: string;
+    workspace: string;
+    tools: readonly string[];
+    /** 创建者此刻的工具集是不是被收紧过（角色定义、inline 定义）。不给 = 没有。 */
+    restricted?: boolean;
+  };
   /**
    * 按名找一份 agent 定义（三处来源合并好的那张表）。
    * 不给 = 这个容器没有具名角色，`agent: "reviewer"` 一律判红。
@@ -190,6 +197,16 @@ export const NO_SESSION_FACE: SessionFace = Object.freeze({
   },
 });
 
+/**
+ * 被收紧过的创建者派出的新段，定义里没写 `tools` 时**按创建者此刻的工具集补上**（2026-11-15）。
+ * 不写 `tools` = 产品全套：此前一段被角色收紧过的 session 只要派一段「不点工具」的，就拿回了全套——收紧形同虚设。
+ * 补上的这份随定义写进新段的 meta，`--resume` 时照样生效。创建者自己没被收紧时原样返回。
+ */
+function inheritRestriction(ref: AgentRef, self: { readonly tools: readonly string[]; readonly restricted?: boolean }): AgentRef {
+  if (self.restricted !== true || ref.definition.tools !== undefined) return ref;
+  return { ...ref, definition: { ...ref.definition, tools: [...self.tools] } };
+}
+
 /** 会话面的实现。一个容器一个实例。 */
 export class EchoSessions implements SessionFace {
   /** 有 runner 才叫得醒（见 `SessionFace.canWake`）。 */
@@ -218,7 +235,7 @@ export class EchoSessions implements SessionFace {
   async create(input: CreateSessionInput): Promise<SessionRow> {
     const self = this.deps.self();
     // **先解析角色、先验越权，再动盘**：判红时 `~/.echo/sessions/` 下不许多出一个目录
-    const ref = this.resolveAgent(input.agent);
+    const ref = inheritRestriction(this.resolveAgent(input.agent), self);
     this.assertNotEscalating(ref, self.tools);
     const id = newSessionId();
     assertSafeSessionId(id);
@@ -301,6 +318,7 @@ export class EchoSessions implements SessionFace {
   /**
    * **不越权**（2026-09-03 拍板，2026-09-07 落到角色上）：新段的 `tools` 必须 ⊆ 创建者此刻的工具集。
    * 越权判红——否则一段被收紧过的 session 可以派出一段工具更多的，收紧就成了摆设。
+   * 定义里没写 `tools` = 产品全套：只有创建者自己没被收紧时才走得到这里（被收紧的已由 `inheritRestriction` 补上）。
    */
   private assertNotEscalating(ref: AgentRef, own: readonly string[]): void {
     const want = ref.definition.tools;

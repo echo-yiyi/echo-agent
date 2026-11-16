@@ -23,6 +23,7 @@ import type { Provider } from "../src/provider/types.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 import type { DurableDeliveryResult } from "../src/inbox/ingress.ts";
 import { SessionService } from "../src/session/service.ts";
+import { toolOk, type ModelTool } from "../src/tools/types.ts";
 /**
  * 造一个形状合法的 recordId：`<12 位十六进制毫秒>-<16 位十六进制随机>`（2026-09-03 起写者自己发号）。
  * 测试要**确定性**的 id 才能断言顺序，所以这里把随机尾巴固定成序号。
@@ -541,6 +542,18 @@ test("crash 矩阵：commit 后崩（marker 在、record 还在）→ restore �
   expect(restored).toEqual([]); // 整批逻辑已 ack
   expect(await recordFiles(dir)).toEqual([]); // cleanup 做掉
   expect(await ackFiles(dir)).toEqual([]); // records 全没了才删 marker
+});
+
+test("inbox/acks/ 下点开头的文件（Finder 的 .DS_Store）不是 marker：恢复照常；别的不合法文件名照旧封账", async () => {
+  // 此前任何认不出的文件名都封账、start() 判红：用 Finder 打开过这个目录，这段会话就再也起不来
+  const dir = new InMemoryDir();
+  const s = await ledger(dir);
+  const a = acceptedIdOf(await accept(s, "一", "k1"));
+  await dir.write("inbox/acks/.DS_Store", "\u0000\u0001Bud1");
+  const restored = await new InboxStore(dir).restore();
+  expect(restored.map((r) => r.recordId)).toEqual([a]);
+  await dir.write("inbox/acks/not-a-marker.json", "{}");
+  await expect(new InboxStore(dir).restore()).rejects.toThrow(/非法文件名/);
 });
 
 test("crash 矩阵：commit 前崩（没有 marker）→ 整批仍 pending，重启后重放", async () => {
@@ -1201,6 +1214,21 @@ test("clear() 丢掉的 pending，本进程的 refresh() 不再捡回来——�
   expect(await new InboxStore(dir).restore()).toHaveLength(1);
 });
 
+test("refresh() 读到一条坏档：报一次就不再收，之后每拍不再重读重报（此前轮询每秒一条 inbox_refresh_skipped，2026-11-13）", async () => {
+  const dir = new InMemoryDir();
+  const me = await ledger(dir);
+  const other = await ledger(dir); // 另一个进程里的写者落了一条，随后那个文件坏了
+  const id = acceptedIdOf(await accept(other, "回信", "peer:bad"));
+  await dir.write(`inbox/${id}.json`, "{这不是 JSON");
+  const diagnostics: string[] = [];
+  me.attachDiagnostics((d) => void diagnostics.push(d.code));
+
+  for (let i = 0; i < 3; i++) expect(await me.refresh()).toBe(0);
+
+  expect(diagnostics.filter((c) => c === "inbox_refresh_skipped")).toHaveLength(1);
+  expect(me.pendingCount).toBe(0);
+});
+
 test("两次 refresh() 并发：别的写者写进来的同一条 record 只进 pending 一次", async () => {
   const dir = new InMemoryDir();
   const me = await ledger(dir);
@@ -1250,6 +1278,105 @@ test("inbox run 的 transcript 写不进去：这批不 ack、留在盘上待重
   expect(inboxLeft).toHaveLength(1);
   expect(modelCalls).toBe(1);
   expect(notes.some((m) => m.startsWith("[inbox_transcript_unsettled]"))).toBe(true);
+  await agent.stop().catch(() => {});
+});
+
+test("inbox run 的 transcript 写不进去：run 里登记的收尾活（afterRun）照样排空——此前直接返回，要等下一个人开的 run 才做（2026-11-13）", async () => {
+  const sessionDisk = new InMemoryDir();
+  let failEntries = false;
+  const sessionDir: StorageDir = {
+    read: (p) => sessionDisk.read(p),
+    list: (p) => sessionDisk.list(p),
+    remove: (p) => sessionDisk.remove(p),
+    write: async (p, c) => {
+      if (failEntries && p.startsWith("entries/")) throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+      return sessionDisk.write(p, c);
+    },
+  };
+  const drained: string[] = [];
+  let agent: Agent | undefined;
+  // 模型在 inbox run 里调它：登记一件收尾后做的事（模型触发的热部署走的就是这条）
+  const later: ModelTool = {
+    kind: "model",
+    name: "later",
+    label: "later",
+    description: "登记一件收尾后做的事",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      registered.push(agent!.afterRun(async () => {
+        drained.push("ran");
+      }).kind);
+      failEntries = true; // 登记完之后盘满：这一轮的工具结果写不进会话账本
+      return toolOk("ok");
+    },
+  };
+  const registered: string[] = [];
+  agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: scriptedStreamFn([toolTurn("c1", "later", {}), textTurn("收到")]),
+    tools: [later],
+    sessionId: "s-after",
+    sessionService: new SessionService(sessionDir),
+    inboxStore: new InboxStore(new InMemoryDir()),
+    stateLock: new InMemoryStateLock(),
+  });
+  const notes: string[] = [];
+  agent.subscribeLifecycle((e) => {
+    if (e.type === "notification") notes.push(e.message);
+  });
+  await agent.start();
+  await agent.ingress.deliverDurable({ message: environmentMessage("外面来了一件事", "session", "s-peer:3"), dedupeKey: "session:s-peer:3" });
+
+  await waitFor(() => notes.some((m) => m.startsWith("[inbox_transcript_unsettled]")), "走到 transcript 写不进那一支", 1_000).catch((e) => {
+    throw new Error(`${String(e)}；通知：${JSON.stringify(notes)}；drained=${drained.length}`);
+  });
+  await waitFor(() => drained.length === 1, "transcript 写不进的 inbox run 收尾后排空 afterRun", 1_000).catch((e) => {
+    throw new Error(`${String(e)}；registered=${JSON.stringify(registered)}；通知：${JSON.stringify(notes)}`);
+  });
+  await agent.stop().catch(() => {});
+});
+
+test("inbox run 跑完、ack 一直写不进（pre-commit）：这批留在盘上待重投，且不再自动消费——此前同一批一轮轮重跑模型（2026-11-13）", async () => {
+  const inboxDisk = new InMemoryDir();
+  // ack marker 一直写不进（权限 / 宿主存储故障），读回是 not-found → pre-commit。写之前让出一拍事件循环：
+  // 此前那个循环在纯内存 store 上全是微任务，连测试自己的计时器都排不上
+  const inboxDir: StorageDir = {
+    read: (p) => inboxDisk.read(p),
+    list: (p) => inboxDisk.list(p),
+    remove: (p) => inboxDisk.remove(p),
+    write: async (p, c) => {
+      if (p.startsWith("inbox/acks/")) {
+        await new Promise((r) => setTimeout(r, 1));
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return inboxDisk.write(p, c);
+    },
+  };
+  let modelCalls = 0;
+  const stream = scriptedStreamFn(Array.from({ length: 50 }, () => textTurn("收到")));
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: (...args) => {
+      modelCalls++;
+      return stream(...args);
+    },
+    sessionId: "s-ack",
+    sessionService: new SessionService(new InMemoryDir()),
+    inboxStore: new InboxStore(inboxDir),
+    stateLock: new InMemoryStateLock(),
+  });
+  const notes: string[] = [];
+  agent.subscribeLifecycle((e) => {
+    if (e.type === "notification") notes.push(e.message);
+  });
+  await agent.start();
+  await agent.ingress.deliverDurable({ message: environmentMessage("重要的一条消息", "session", "s-peer:2"), dedupeKey: "session:s-peer:2" });
+  await new Promise((r) => setTimeout(r, 200));
+
+  expect(modelCalls).toBe(1);
+  expect(notes.filter((m) => m.startsWith("[inbox_ack_failed]"))).toHaveLength(1);
+  const inboxLeft = (await inboxDisk.list("inbox/")).filter((p) => !p.startsWith("inbox/acks/"));
+  expect(inboxLeft).toHaveLength(1); // 盘上留着，重启后重投
   await agent.stop().catch(() => {});
 });
 
@@ -1461,6 +1588,40 @@ test("indeterminate 之后 Agent 进入**可见失败**：不再消费 inbox、p
   expect(agent.autoConsumeInbox).toBe(false);
   await expect(agent.prompt("还能干活吗")).rejects.toThrow(/Inbox 账本无法裁决/);
   expect(await agent.consumeInbox()).toBeNull();
+});
+
+test("inbox 封账（indeterminate）之后闹钟也停：到期的提醒不再每拍白投一次、每拍一条 schedule_fire_failed（2026-11-13）", async () => {
+  const inner = new InMemoryDir();
+  const store: StorageDir = {
+    read: async (p) => {
+      if (p.startsWith("inbox/acks/")) throw new Error("读挂了");
+      return inner.read(p);
+    },
+    remove: (p) => inner.remove(p),
+    list: (p) => inner.list(p),
+    write: async (p, c) => {
+      if (p.startsWith("inbox/acks/")) throw new Error("盘挂了");
+      await inner.write(p, c);
+    },
+  };
+  const clock = new FakeClock(0);
+  const agent = await createAgent(opts(store, { clock }));
+  const notes: string[] = [];
+  agent.subscribeLifecycle((e) => {
+    if (e.type === "notification") notes.push(e.message);
+  });
+  await agent.start();
+  await deliverDurable(agent, environmentMessage("有事", "bg", "b-seal"));
+  await waitFor(() => agent.state.lastError !== null, "ack 裁决为 indeterminate、进入可见失败");
+
+  await addSchedule(agent.schedule!, { id: "late", kind: "at", at: 500, prompt: "该干活了", createdAt: 0 });
+  for (let i = 0; i < 3; i++) {
+    clock.advance(1_000);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  expect(notes.filter((m) => m.startsWith("[schedule_fire_failed]"))).toHaveLength(0);
+  await agent.stop().catch(() => {});
 });
 
 test("stop() 进行中返回 stopping，完全停下之后才是 runtime-disposed", async () => {

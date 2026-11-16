@@ -90,6 +90,8 @@ export type CliOptions = {
    * 工具参数与结果正文明文写进状态根的观测文档（observability/）——看 `echo-agent observe serve` 时才需要。
    */
   observe?: ObservationCapturePolicy;
+  /** 安全分类器开不开：来自设置文件的 `safetyClassifier`（没有对应的命令行旗子）。不给 = 没说，按形态（`presetForm`）。 */
+  safetyClassifier?: boolean;
 };
 
 /** `--observe` 能接的值。与 `ObservationCapturePolicy` 同一份枚举——多写少写 `satisfies` 都会报。 */
@@ -150,6 +152,9 @@ export function usage(name: string): string {
 **工作区信任**：没给 --extensions 时，./extensions 里的扩展只在受信的工作区里加载——装配会执行它们的代码。
 交互形态第一次遇到会列出文件问一次，信任就按目录记进 $ECHO_HOME/settings.json；管道与 --serve 没人可问，
 不受信就不加载，并在 stderr 说一行怎么信任。
+
+**安全分类器**：$ECHO_HOME/settings.json 里写 "safetyClassifier": true 或 false。开着时，工具执行前先让模型判一次
+该不该自动执行，判拦的不跑、判不了或连着判拦就问你。不写就按形态：交互开、管道关；写了两种形态都照写的来。
 
 上次在界面里选的模型记在 $ECHO_HOME/settings.json（D7）：**显式 --provider / --model 永远赢**，
 设置只是「没说就用上次的」；文件坏了不挡启动，如实说一句然后用缺省。
@@ -311,7 +316,16 @@ export function echoOptions(
     // 产品 preset 自己定了 questions 就用它的（类型允许，不能静默盖掉）；没定才按形态给
     // 记忆的**形状**（装哪些模块、分哪几层）归产品；**开关**（`--no-memory` → `withoutMemory`）归用户，产品碰不到
     ...(preset.memory !== undefined ? { memory: preset.memory } : {}),
-    agent: { ...(preset.agent ?? {}), questions: preset.agent?.questions ?? { responder: form.interactive ? "host" : "none", askTimeoutMs: null } },
+    agent: {
+      ...(preset.agent ?? {}),
+      questions: preset.agent?.questions ?? { responder: form.interactive ? "host" : "none", askTimeoutMs: null },
+      // 分类器判不了、连着判拦时要问人：产品没给权限策略就补一份「全放行、问谁按形态」的，让那一问有人接（2026-11-15）
+      ...(form.safetyClassifier === true && preset.agent?.permission === undefined
+        ? { permission: { authorize: () => ({ kind: "allow" as const }), askTimeoutMs: null, responder: form.interactive ? ("host" as const) : ("none" as const) } }
+        : {}),
+    },
+    // 安全分类器（2026-11-15）：内核的能力，开不开归使用者（`form.safetyClassifier`），形状归产品（自己哪些工具不用判、给它的说明）
+    safetyClassifier: form.safetyClassifier === true ? (preset.safetyClassifier ?? true) : false,
     // `echo-agent` 恒挂的两段（纪律、项目指令）在前，产品自带的在后。顺序只影响 `echo.extensions`
     // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。
     // 纪律段**不在这里**（2026-09-09）：它归产品，产品自己挂。项目指令留在装配层——
@@ -520,11 +534,13 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
 
       // 工作区信任（2026-11-03）：约定目录里的扩展只在受信的工作区里加载。交互形态要问人，所以在装配之前定。
       const trusted = await trustConventionDir(product, shell, opts, interactive, settingsRead.settings.trustedWorkspaces ?? [], notices, controller.signal, deps);
-      const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
+      // 安全分类器开不开只有设置文件这一个入口（2026-11-15）：不写 = 没说，按形态（`presetForm`）
+      const safetyClassifier = settingsRead.settings.safetyClassifier;
+      const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}), ...(safetyClassifier !== undefined ? { safetyClassifier } : {}) };
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
-      const form: PresetForm = { interactive };
+      const form = presetForm(interactive, effective);
       // 观测过期：产品给了规则才清，**不等它**——观测的任何功能都不许让启动多等一拍（observability.md §5）。
       // 扫的是会话根下每一段：缺省每次启动都新建一段，只清自己这一段等于什么都不清。
       if (product.observationExpiry !== undefined) {
@@ -546,6 +562,16 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
   };
 }
 
+
+/**
+ * 交给产品的形态（导出只为判据）。`--serve` 不装壳、没人能答：哪怕是在终端里起的也不算交互形态——
+ * 否则按「有人答」装的权限、提问策略与安全分类器的「问人」没人兑现，run 入口当场拒跑（2026-11-15）。
+ */
+export function presetForm(interactive: boolean, opts: Pick<CliOptions, "serve" | "safetyClassifier">): PresetForm {
+  const attended = interactive && opts.serve !== true;
+  // 安全分类器：使用者说了算；没说按形态——有人在就开（判不了能问人），管道 / CI 不开（没人可问，每步多一两次模型调用也改评测的成本）
+  return { interactive: attended, safetyClassifier: opts.safetyClassifier ?? attended };
+}
 
 /**
  * 叫醒一段会话时给副本的 argv（导出只为判据）：与父进程**同一家、同一模型**、同状态根、同扩展目录
@@ -597,7 +623,7 @@ export function sessionRunner(opts: CliOptions, providerName: string | undefined
     const child = spawn([process.execPath, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
     child.unref();
 
-    const lock = join(expandHome(opts.stateDir ?? resolveSessionsRoot()), row.id, ".lock");
+    const lock = sessionLockPath(opts, row.id);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       // 先看进程：它退了就是没跑起来——哪怕盘上留着一把别人的 / 坏的锁
@@ -617,6 +643,31 @@ export function sessionRunner(opts: CliOptions, providerName: string | undefined
     await child.exited;
     throw new Error(`会话 ${row.id} 的容器 ${timeoutMs}ms 内没拿到锁，已杀掉`);
   };
+}
+
+/** 某一段会话的锁目录。 */
+function sessionLockPath(opts: CliOptions, id: string): string {
+  return join(expandHome(opts.stateDir ?? resolveSessionsRoot()), id, ".lock");
+}
+
+/**
+ * 显式续会话之前看一眼锁（2026-11-15）：值得问一句「要接管吗」的只有两种——占着它的进程**还活着**、又**不可让位**
+ * （另一个终端开着它，或沙箱刚异常退出、心跳还没过期），或者锁是坏的。返回给人看的一句；不用问的（没人占、持有者已经
+ * 不在了、可让位的后台宿主会自己让开）返回 `null`。
+ */
+export async function takeoverQuestion(lockPath: string, now: number = Date.now()): Promise<string | null> {
+  const cur = await inspectStateLock(lockPath);
+  if (cur.state === "missing") return null;
+  if (cur.state === "corrupt") return `锁是坏的（${cur.why}）`;
+  if (!cur.alive || cur.record.preemptible === true) return null;
+  const r = cur.record;
+  const since = new Date(r.at);
+  return (
+    `进程 ${r.pid}` +
+    (r.host !== undefined ? `（${r.host}）` : "") +
+    (Number.isNaN(since.getTime()) ? "" : `，${since.toLocaleString()} 起`) +
+    (r.beat !== undefined ? `，${Math.max(0, Math.round((now - r.beat) / 1000))} 秒前还有心跳` : "，旧版本写的锁、没有心跳记录")
+  );
 }
 
 /** SIGKILL 一个进程组（组长 pid 取负）。组已经不在了（ESRCH）不算错。 */
@@ -704,8 +755,13 @@ async function runPiped(
   }
   // **唯一 composition root**：壳子不自己装配，只把装好的 Echo 接到进程与输入源上。
   const base = echoOptions(product, form, opts, provider, choices, credentials, sessionId, workspaceTrusted);
-  // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥
-  const echo = await createEcho({ ...base, extensions: [...(base.extensions ?? []), pipeSurfaceEntry()] });
+  // 管道形态的交互面段（`echo:pipe`）：与交互形态的 `echo:tui` 注册的是同名 `surface` 段，两者互斥。
+  // 显式续会话一定续得上（2026-11-15）：没人可问，占着它的进程（多半已随沙箱一起没了）一律接管
+  const echo = await createEcho({
+    ...base,
+    ...(sessionId !== undefined ? { takeover: true } : {}),
+    extensions: [...(base.extensions ?? []), pipeSurfaceEntry()],
+  });
   // 启动口信（设置读不动等）与装配诊断（坏扩展被跳过，D6）都走 stderr：说了才算没静默，但不挡启动、不改退出码
   if (sessionId !== undefined) process.stderr.write(`[会话] 续 ${sessionId}\n`); // 续了就说，无声恢复是禁止的
   for (const n of notices) process.stderr.write(`${n}\n`);
@@ -745,6 +801,15 @@ async function runInteractive(
   /** 上一段的 id。只在「刚换过段」时有值——换不成就退回它，退一次。 */
   let fallback: string | undefined;
   for (;;) {
+    // 显式续会话一定续得上（2026-11-15）：占着它的进程还活着、又不肯让，才问一句；不用问的（没人占、持有者已经不在了、
+    // 可让位的后台宿主）一律准许接管——请过让位还拿不到时接管。问要在开界面**之前**：那一屏与主界面不同时在
+    let takeover = false;
+    if (toOpen !== undefined) {
+      const question = await takeoverQuestion(sessionLockPath(opts, toOpen));
+      takeover =
+        question === null ||
+        (await shell.confirmTakeover?.({ product, sessionId: toOpen, holder: question, signal, ...(deps.ui !== undefined ? { ui: deps.ui } : {}) })) === true;
+    }
     const ui = shell.open({
       product,
       signal,
@@ -764,6 +829,7 @@ async function runInteractive(
     const base = echoOptions(product, form, opts, chosen.provider, choices, credentials, toOpen, workspaceTrusted);
     const echo = await createEcho({
       ...base,
+      ...(takeover ? { takeover: true } : {}),
       // 产品自带的 Extension 在前、壳在最后：壳也只是一条 Extension（`echo:tui`），它 inject 的
       // `AgentRuntime` 由 builtin 那一代提供（`create-echo.ts`），与同代里谁先谁后无关。
       extensions: [...(base.extensions ?? []), { entryId: "echo:tui", definition: ui.definition }],
