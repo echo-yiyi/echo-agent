@@ -135,6 +135,46 @@ test("每行输入跑一轮:正文进 out、工具旁白进 err、退出码 0", 
   expect(out.text, "工具旁白混进正文了").not.toContain("[工具]");
 });
 
+test("管道形态等后台子 agent 跑完、收尾被处理完才收摊（2026-11-16）：此前主回复一结束就 stop()，后台子 agent 被一起停掉、结果回不来", async () => {
+  const CHILD = "You are slow.";
+  const parentTurns = [
+    toolTurn("c1", "subagent", { prompt: "slow task", system: CHILD, tools: [], background: true }),
+    textTurn("派出去了"),
+    textTurn("收到子 agent 的结果"),
+    textTurn("备用"),
+  ];
+  const childTurns = [toolTurn("k1", "report", { status: "done", summary: "slow result" }), textTurn("child end")];
+  let pi = 0;
+  let ci = 0;
+  const provider = createProvider({
+    id: "runner-test",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "runner-test" }],
+    api: createProviderStreams({
+      api: "runner-test",
+      async *request(_model: Model, context: Context): AsyncGenerator<ProviderEvent> {
+        const isChild = context.systemPrompt === CHILD;
+        // 子 agent 第一句慢 300 ms：父那一轮早就结束了，它还在跑
+        if (isChild && ci === 0) await new Promise((r) => setTimeout(r, 300));
+        const turn = isChild ? childTurns[ci++] : parentTurns[pi++];
+        if (turn === undefined) {
+          yield { type: "error", error: { source: "provider", code: "protocol", retryable: false, message: "脚本用尽" } };
+          return;
+        }
+        for (const ev of turn) yield structuredClone(ev);
+      },
+    }),
+  });
+  const echo = await createEcho({ provider, stateDir: dir, allowNetwork: false, withoutMemory: true, extensionDirs: [] });
+  const out = sink();
+  const code = await run({ echo, input: ["开始"], out, err: sink() });
+  expect(code).toBe(0);
+  expect(out.text).toContain("派出去了");
+  expect(out.text).toContain("收到子 agent 的结果"); // 收尾通知那一轮也跑了、正文照样打出来
+  expect(ci).toBe(2); // 子 agent 两轮都跑完了，不是半路被停
+});
+
 test("空行跳过,不白跑一轮模型", async () => {
   const out = sink();
   // 脚本只有一轮:空行如果也进 prompt,第二轮会「脚本用尽」而报错

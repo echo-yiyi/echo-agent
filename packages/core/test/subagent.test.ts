@@ -7,7 +7,8 @@
 import { expect, test } from "bun:test";
 import { Agent } from "../src/agent.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
-import { listBackground } from "../src/background/harness.ts";
+import { listBackground, startBackground } from "../src/background/harness.ts";
+import { environmentMessage } from "../src/messages.ts";
 import { errorTurn, scriptedDialect, scriptedStreamFn, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { disableTools, restrictTools, visibleTools } from "../src/tools/harness.ts";
@@ -463,4 +464,66 @@ test("fork 的工具菜单与父逐字节相同、report 接在末尾（厂商�
   expect(last).toContain("Tool 'subagent' is not available to a forked subagent");
   expect(last).toContain("Tool 'tool_search' is not available to a forked subagent");
   expect(toolResults(agent)).toEqual([{ name: "subagent", content: "#1 [done] tried", isError: false }]);
+});
+
+/* ══════════ 手上还有没有活（hasPendingWork，2026-11-16）与子 agent 的缺省预算 ══════════ */
+
+test("hasPendingWork：后台子 agent 在跑就算有活；它的收尾通知被父处理完才变 false；后台的普通作业（dev server 之类）不算", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const parent = scriptedStreamFn([
+    toolTurn("c1", "subagent", { prompt: "slow task", system: "You are slow.", tools: [], background: true }),
+    textTurn("started it"),
+    textTurn("got the notice"),
+    textTurn("spare"),
+  ]);
+  const child = scriptedStreamFn([toolTurn("k1", "report", { status: "done", summary: "slow result" }), textTurn("child end")]);
+  const parentSeen: string[] = [];
+  const fn: StreamFn = async (model, context, options) => {
+    if (context.systemPrompt === "You are slow.") {
+      await gate; // 子 agent 卡在这里：父这一轮早就结束了，它还在跑
+      return child(model, context, options);
+    }
+    parentSeen.push(JSON.stringify(context.messages));
+    return parent(model, context, options);
+  };
+  const agent = await agentWith(fn);
+  expect((await agent.prompt("go")).outcome.kind).toBe("completed");
+  expect(agent.state.status).toBe("idle");
+  expect(agent.hasPendingWork).toBe(true); // 父空闲了，但后台子 agent 还在跑
+
+  // 不会自己结束的普通后台作业不算：算进来管道形态就永远退不出
+  startBackground(agent.background, { kind: "process", label: "dev server", run: (bg) => new Promise<void>((r) => bg.signal.addEventListener("abort", () => r())) });
+
+  release();
+  await until(() => !agent.hasPendingWork, "子 agent 跑完、收尾被父处理完");
+  // 变 false 的那一刻，收尾通知已经进过父的一轮——不是「子 agent 一结束就算完」
+  expect(parentSeen.some((b) => b.includes("slow result"))).toBe(true);
+  await agent.stop();
+});
+
+test("hasPendingWork：inbox 停了自动消费时不算 inbox 里的消息——没人会消费，等也等不到", async () => {
+  const agent = await agentWith(scriptedStreamFn([textTurn("x")]));
+  agent.autoConsumeInbox = false;
+  agent.deliver(environmentMessage("something happened", "test"));
+  const inbox = (agent as unknown as { inbox: { pendingCount: number } }).inbox; // 只读一眼：消息确实躺在 inbox 里
+  await until(() => inbox.pendingCount > 0, "投进 inbox");
+  expect(agent.hasPendingWork).toBe(false);
+  await agent.stop();
+});
+
+test("子 agent 没给 max_iterations 时预算是 100，不跟父的每轮上限走——父只有 3 轮，子做 5 轮照样做完", async () => {
+  const pingTurns = Array.from({ length: 5 }, (_, i) => toolTurn(`p${i}`, "ping", {}));
+  const { fn } = routed(
+    [toolTurn("c1", "subagent", { prompt: "ping five times", system: "You ping.", tools: ["ping"] }), textTurn("parent done")],
+    [...pingTurns, textTurn("child pinged 5 times")],
+    "You ping.",
+  );
+  const agent = new Agent({ model: { provider: "t", id: "only", api: "scripted" }, streamFunction: fn, tools: [ping], maxIterations: 3 });
+  await mountBuiltinTools(agent);
+  await agent.start();
+  await agent.prompt("go");
+  const r = toolResults(agent).find((t) => t.name === "subagent")!;
+  expect([r.isError, r.content]).toEqual([false, "child pinged 5 times"]); // 此前：Subagent failed: 迭代上限 3
+  await agent.stop();
 });

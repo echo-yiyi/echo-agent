@@ -731,7 +731,9 @@ async function runServe(
       while (!signal.aborted && !gone) {
         await new Promise((r) => setTimeout(r, SERVE_TICK_MS));
         // 忙 = 跑着，或 admission 还没把这一段放回可接活（inbox 的 ack 裁决窗口里 status 已是 idle 而 acceptsWork 仍 false）
-        const busy = echo.agent.state.status !== "idle" || !echo.agent.acceptsWork;
+        // 后台子 agent 还在跑、它们的回执还没处理完也算忙（2026-11-16）：此前只看主 agent 的状态，主回复一结束 60 秒就收摊，
+        // 把还在跑的后台子 agent 一起停了
+        const busy = echo.agent.state.status !== "idle" || !echo.agent.acceptsWork || echo.agent.hasPendingWork;
         if (busy) idleSince = Date.now();
         else if (Date.now() - idleSince >= SERVE_IDLE_MS) break;
       }

@@ -154,6 +154,9 @@ function runtimeOf(echo: Echo, overrides: Partial<AgentRuntime> = {}): AgentRunt
     get acceptsWork() {
       return acceptsPins.get(echo) ?? base.acceptsWork;
     },
+    get hasPendingWork() {
+      return base.hasPendingWork;
+    },
     subscribe: (l) => {
       const list = eventListeners.get(echo) ?? [];
       list.push(l);

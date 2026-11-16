@@ -1,6 +1,6 @@
 # subagent 的回执与模式：`report` 多次提交不停循环、fork 继承父上下文、并行扇出
 
-> 状态：implemented · 提出 2026-09-14 · 拍板 2026-09-14（口头）· 实现并合入 2026-09-14（PR #4）· 相关 [并行工具](2026-09-07-parallel-tools.md)（`concurrent` 声明制，本条照抄它的形）、[角色定义](2026-09-07-role-agent.md)（那条挂着的「subagent 要不要接受角色名」由本条关闭）
+> 状态：implemented · 提出 2026-09-14 · 拍板 2026-09-14（口头）· 实现并合入 2026-09-14（PR #4）· 相关 [并行工具](2026-09-07-parallel-tools.md)（`concurrent` 声明制，本条照抄它的形）、[角色定义](2026-09-07-role-agent.md)（那条挂着的「subagent 要不要接受角色名」由本条关闭） · 后续 2026-11-16：子 agent 缺省 100 轮、宿主等后台子 agent 跑完才收摊（[后台子 agent 跑完才收摊](2026-11-16-subagents-outlive-the-reply.md)）
 
 ## 现状（拍板前）
 

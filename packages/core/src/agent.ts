@@ -107,7 +107,7 @@ import { activeTools, effectiveRestriction, registerTool, registerTools, resolve
 import { loadedToolsIn, makeToolSearchTool, TOOL_SEARCH_NAME } from "./tools/tool-search.ts";
 import { makeAskUserTool } from "./question/tool.ts";
 import type { ScheduleResult } from "./extension/reload.ts";
-import { makeSubagentTool, makeReceiptBook, renderReceiptLine, finalStatusOf, SUBAGENT_NAME, REPORT_NAME, type Receipt, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
+import { makeSubagentTool, makeReceiptBook, renderReceiptLine, finalStatusOf, SUBAGENT_DEFAULT_MAX_ITERATIONS, SUBAGENT_NAME, REPORT_NAME, type Receipt, type SubagentOutcome, type SubagentSpec } from "./subagent/tool.ts";
 import type { Diagnostic } from "./errors.ts";
 import type { StorageDir } from "./storage/types.ts";
 import { InMemoryDir } from "./storage/in-memory-dir.ts";
@@ -1161,6 +1161,14 @@ export class Agent {
    */
   get acceptsWork(): boolean {
     return this.refuseWorkReason() === null;
+  }
+
+  /** 见 `AgentRuntime.hasPendingWork`。 */
+  get hasPendingWork(): boolean {
+    if (this.activeRun !== undefined || this._state.status !== "idle" || this.inboxConsumeInFlight !== undefined) return true;
+    for (const t of this.background.tasks.values()) if (t.kind === "subagent" && t.status === "running") return true;
+    // 投进 inbox 的消息只有在会被自动消费时才算：自动消费停了（失败、让位），等它也等不到
+    return this.autoConsumeInbox && (this.pendingWrites.size > 0 || this.inbox.pendingCount > 0);
   }
 
   /**
@@ -3676,7 +3684,7 @@ export class Agent {
         source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: ctx.toolCallId, background: false },
         turnInjections: prepared.turnInjections,
         compaction: "inherit",
-        ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
+        maxIterations: spec.maxIterations ?? SUBAGENT_DEFAULT_MAX_ITERATIONS,
       },
       scope,
       ctx.signal ?? scope.signal,
@@ -3718,7 +3726,7 @@ export class Agent {
             source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: toolCallId, background: true },
             turnInjections: prepared.turnInjections,
             compaction: "inherit",
-            ...(spec.maxIterations === undefined ? {} : { maxIterations: spec.maxIterations }),
+            maxIterations: spec.maxIterations ?? SUBAGENT_DEFAULT_MAX_ITERATIONS,
           },
           scope,
           bg.signal,

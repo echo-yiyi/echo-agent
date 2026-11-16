@@ -175,6 +175,14 @@ export interface AgentRuntime {
    * 全都不在公共面上——壳子自己维护一份必然漂（那是 review 连折腾四轮的东西）。
    */
   readonly acceptsWork: boolean;
+  /**
+   * 手上还有没收完的活（2026-11-16）：在跑的 run、在跑的后台子 agent、inbox 里会被自动消费却还没消费的消息（含正在落盘的投递）。
+   *
+   * 宿主收摊前看它：管道形态等它变 false 再退出，`--serve` 把它算进「忙」。不看的话，后台子 agent 跑到一半就随收摊被停，
+   * 它的回执与收尾通知也没人处理。**不算后台 `bash` 作业**：dev server、watcher 这类不会自己结束，算进来管道形态就永远退不出——
+   * 它们照旧随收摊停。inbox 停了自动消费（失败、让位）时也不算 inbox：没人会消费，等也等不到。
+   */
+  readonly hasPendingWork: boolean;
 }
 
 /**

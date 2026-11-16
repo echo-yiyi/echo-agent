@@ -19,6 +19,12 @@ export const SUBAGENT_NAME = "subagent";
 export const REPORT_NAME = "report";
 /** 子 agent 的迭代上限封顶：模型可以少要，不能无限要。 */
 const MAX_ITERATIONS_CAP = 500;
+/**
+ * 模型没给 `max_iterations` 时子 agent 的预算（2026-11-16）。此前沿用父的——echo-agent 是内核缺省 20，
+ * 查代码、读文件这类委派二十来次工具调用就撞顶，以「迭代上限 20」失败收场，看上去像被关了。子 agent 的活本来就是
+ * 把一段长探索从父的上下文里拿出去，预算不该跟父的每轮上限绑在一起。
+ */
+export const SUBAGENT_DEFAULT_MAX_ITERATIONS = 100;
 
 /** 回执的四档 status（封闭，2026-09-14 拍板）：working = 中间成果、还在做；其余三档是终态。 */
 export type ReceiptStatus = "working" | "done" | "blocked" | "failed";
@@ -75,7 +81,7 @@ export function makeSubagentTool(deps: SubagentDeps): ModelTool<Params, Subagent
         mode: { type: "string", enum: ["fresh", "fork"], description: "fresh: empty context, you supply system and tools (default). fork: inherits your system, conversation and tools" },
         system: { type: "string", description: "fresh only: the child's system prompt (its role and rules); omit for none" },
         tools: { type: "array", items: { type: "string" }, description: "fresh only: tool names from your own list the child may use; [] for none" },
-        max_iterations: { type: "number", description: `Iteration budget for the child (default: yours, max ${MAX_ITERATIONS_CAP})` },
+        max_iterations: { type: "number", description: `Iteration budget for the child (default ${SUBAGENT_DEFAULT_MAX_ITERATIONS}, max ${MAX_ITERATIONS_CAP})` },
         background: { type: "boolean", description: "Run in the background; receipts and the final notice reach you as they happen (default false)" },
       },
       required: ["prompt"],

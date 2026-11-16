@@ -99,6 +99,10 @@ export async function run(opts: RunOptions): Promise<number> {
       err.write(`[run] ${result.runId}\n`);
       if (aborted()) break;
     }
+    // 输入耗尽之后**先等手上的活收完再收摊**（2026-11-16）：后台子 agent 还在跑、它的回执与收尾通知还没交给主 agent 处理完，
+    // 这时 `stop()` 会把它们一起停掉，结果永远回不来。那几轮由 inbox 自动消费触发，正文照样经上面的订阅打出来。
+    // 中止信号照样能打断这段等待。
+    while (!aborted() && agent.hasPendingWork) await sleep(PENDING_POLL_MS);
   } finally {
     signal?.removeEventListener("abort", onAbort);
     unsubscribe();
@@ -106,6 +110,13 @@ export async function run(opts: RunOptions): Promise<number> {
   }
 
   return failed ? 1 : 0;
+}
+
+/** 收摊前看一眼「手上还有没有活」的间隔。只在输入耗尽之后用，不影响前台那一轮。 */
+const PENDING_POLL_MS = 100;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** 定稿消息里的纯文本。线上形状里 content 可能是字符串或块数组。 */
