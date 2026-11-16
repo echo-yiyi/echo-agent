@@ -904,6 +904,30 @@ test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 
   }
 });
 
+test("mainFor：settings.json 里的 safetyReview 进了交给产品的形态——使用者的开关到得了产品（2026-11-15）", async () => {
+  const restore = isolate();
+  const ui = fakeTui();
+  try {
+    const credentials = new FileCredentialStore(join(dir, "credentials.json"));
+    await credentials.write("kimi", { type: "api_key", key: "sk-FROM-FILE" });
+    mkdirSync(join(dir, "home"), { recursive: true });
+    writeFileSync(join(dir, "home", "settings.json"), JSON.stringify({ safetyReview: false }));
+    const forms: PresetForm[] = [];
+    const productMain = mainFor({ name: "echo-试产品", version: "9.9.9", preset: (form) => (forms.push(form), {}) }, terminalShell);
+    const running = productMain(["--state-dir", join(dir, "state"), "--no-memory", "--extensions", dir], true, {
+      ui,
+      credentials,
+      verify: async () => ({ ok: true }),
+    });
+    await waitFor(() => ui.screen().includes("模型 kimi-k3 · kimi"), "主界面");
+    expect(forms).toEqual([{ interactive: true, safetyReview: false }]);
+    ui.feed(String.fromCharCode(4));
+    expect(await running).toBe(0);
+  } finally {
+    restore();
+  }
+});
+
 test("mainFor：preset 的 Extension 装不上 → 整个启动失败、退出码 1（fail-loud，不是装了一半）", async () => {
   const restore = isolate();
   const ui = fakeTui();
@@ -1101,6 +1125,9 @@ test("交给产品的形态：--serve 不装壳、没人能答，哪怕在终端
   expect(presetForm(true, { serve: false })).toEqual({ interactive: true });
   expect(presetForm(true, { serve: true })).toEqual({ interactive: false });
   expect(presetForm(false, { serve: false })).toEqual({ interactive: false });
+  // 安全审查的选择照传（来自 settings.json）；没说就不带这一项，产品按自己的缺省
+  expect(presetForm(true, { serve: false, safetyReview: false })).toEqual({ interactive: true, safetyReview: false });
+  expect(presetForm(false, { serve: false, safetyReview: true })).toEqual({ interactive: false, safetyReview: true });
 });
 
 test("CLI 给了会话面**与 runner**：能看见别的会话、能带话，也能把没在跑的那段叫起来", async () => {

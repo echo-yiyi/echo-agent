@@ -90,6 +90,8 @@ export type CliOptions = {
    * 工具参数与结果正文明文写进状态根的观测文档（observability/）——看 `echo-agent observe serve` 时才需要。
    */
   observe?: ObservationCapturePolicy;
+  /** 安全审查开不开：来自设置文件的 `safetyReview`（没有对应的命令行旗子）。不给 = 没说，产品按自己的缺省。 */
+  safetyReview?: boolean;
 };
 
 /** `--observe` 能接的值。与 `ObservationCapturePolicy` 同一份枚举——多写少写 `satisfies` 都会报。 */
@@ -150,6 +152,9 @@ export function usage(name: string): string {
 **工作区信任**：没给 --extensions 时，./extensions 里的扩展只在受信的工作区里加载——装配会执行它们的代码。
 交互形态第一次遇到会列出文件问一次，信任就按目录记进 $ECHO_HOME/settings.json；管道与 --serve 没人可问，
 不受信就不加载，并在 stderr 说一行怎么信任。
+
+**安全审查**：$ECHO_HOME/settings.json 里写 "safetyReview": true 或 false，开关产品的模型审查（先让模型审一步再执行，
+审不过问你）。不写就按产品缺省——echo-coding 交互形态开、管道形态关；写了两种形态都照写的来。
 
 上次在界面里选的模型记在 $ECHO_HOME/settings.json（D7）：**显式 --provider / --model 永远赢**，
 设置只是「没说就用上次的」；文件坏了不挡启动，如实说一句然后用缺省。
@@ -520,11 +525,13 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
 
       // 工作区信任（2026-11-03）：约定目录里的扩展只在受信的工作区里加载。交互形态要问人，所以在装配之前定。
       const trusted = await trustConventionDir(product, shell, opts, interactive, settingsRead.settings.trustedWorkspaces ?? [], notices, controller.signal, deps);
-      const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}) };
+      // 安全审查开不开只有设置文件这一个入口（2026-11-15）：不写 = 没说，产品按自己的缺省
+      const safetyReview = settingsRead.settings.safetyReview;
+      const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}), ...(safetyReview !== undefined ? { safetyReview } : {}) };
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
-      const form = presetForm(interactive, opts);
+      const form = presetForm(interactive, effective);
       // 观测过期：产品给了规则才清，**不等它**——观测的任何功能都不许让启动多等一拍（observability.md §5）。
       // 扫的是会话根下每一段：缺省每次启动都新建一段，只清自己这一段等于什么都不清。
       if (product.observationExpiry !== undefined) {
@@ -551,8 +558,8 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
  * 交给产品的形态（导出只为判据）。`--serve` 不装壳、没人能答：哪怕是在终端里起的也不算交互形态——
  * 否则产品按「有人答」装的权限策略（echo-coding 审不过就问人）与提问策略没人兑现，run 入口当场拒跑（2026-11-15）。
  */
-export function presetForm(interactive: boolean, opts: Pick<CliOptions, "serve">): PresetForm {
-  return { interactive: interactive && opts.serve !== true };
+export function presetForm(interactive: boolean, opts: Pick<CliOptions, "serve" | "safetyReview">): PresetForm {
+  return { interactive: interactive && opts.serve !== true, ...(opts.safetyReview !== undefined ? { safetyReview: opts.safetyReview } : {}) };
 }
 
 /**

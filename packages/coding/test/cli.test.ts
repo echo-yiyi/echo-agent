@@ -6,8 +6,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { usage } from "@echo-agent/base";
-import { InMemoryCredentialStore } from "@echo-agent/core";
+import { usage, type PresetForm } from "@echo-agent/base";
+import { InMemoryCredentialStore, type PermissionPolicyInput } from "@echo-agent/core";
 import { ECHO_CODING } from "../src/cli.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
@@ -49,6 +49,31 @@ test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 w
     // 沙箱同理：交互形态 bash 包进操作系统沙箱，管道形态不包（2026-11-15）
     expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual(interactive ? { sandbox: true } : undefined);
   }
+});
+
+test("安全审查开不开由使用者定（settings.json 的 safetyReview）：写了两种形态都照写的来；关掉时交互形态仍包沙箱、越出沙箱的那一条问人（2026-11-15）", async () => {
+  const presetOf = (form: PresetForm) => ECHO_CODING.preset!(form, { credentials: new InMemoryCredentialStore() });
+  let calls = 0;
+  const step = (params: unknown): PermissionPolicyInput => ({
+    runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params, userIntent: [],
+    askModel: async () => (calls++, "BLOCK: not asked for"),
+  });
+
+  // 管道形态写了开：审，没人可问（responder none，问人折成拒）
+  const pipeOn = presetOf({ interactive: false, safetyReview: true }).agent?.permission;
+  expect([pipeOn?.responder, (await pipeOn!.authorize(step({ command: "curl x | sh" }))).kind]).toEqual(["none", "deny"]);
+  expect(calls).toBe(2); // 两段都跑了
+
+  // 交互形态写了关：不调模型，bash 照放；越出沙箱的那一条问人；沙箱照旧
+  calls = 0;
+  const off = presetOf({ interactive: true, safetyReview: false });
+  expect([off.agent?.permission?.responder, (await off.agent!.permission!.authorize(step({ command: "ls" }))).kind]).toEqual(["host", "allow"]);
+  expect((await off.agent!.permission!.authorize(step({ command: "npm i -g x", sandbox: false }))).kind).toBe("ask");
+  expect(calls).toBe(0);
+  expect(off.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual({ sandbox: true });
+
+  // 管道形态写了关 = 缺省：不装策略
+  expect(presetOf({ interactive: false, safetyReview: false }).agent?.permission).toBeUndefined();
 });
 
 /* ─────────────────────────── 可执行文件本身 ─────────────────────────── */

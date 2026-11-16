@@ -8,11 +8,12 @@
 // （`terminalShell`），装配层不写死。
 //
 // **权限**：2026-09-01 定的是两种形态都全放行——每一步都问只会让人按到麻木，管道形态更是没人可问。
-// 2026-11-15 起**交互形态改由模型先审**（`REVIEWED_PERMISSION`），**命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，
-// `tools/sandbox.ts`）：bash 与 web_fetch 先让本会话的模型对着用户说过的话
-// 审一遍，日常开发放行、用户没要的高风险动作拦下；人只在连着被拦、或审不了的时候被问到。全放行时模型一旦被
-// 仓库里、网页里的字骗了，后面没有任何一层拦得住。**管道形态仍全放行**（`permission: false`）：评测与 CI 没人可问，
-// 每条命令多一次模型调用也会改掉评测的成本与结果。
+// 2026-11-15 起**交互形态缺省由模型先审**（`REVIEWED_PERMISSION`），**命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，
+// `tools/sandbox.ts`）：名单之外的工具先让本会话的模型对着用户说过的话审一遍（两段），日常开发放行、用户没要的高风险动作拦下；
+// 人只在连着被拦、或审不了的时候被问到。全放行时模型一旦被仓库里、网页里的字骗了，后面没有任何一层拦得住。
+// **管道形态缺省不审**：评测与 CI 没人可问，每条命令多一次模型调用也会改掉评测的成本与结果。
+// **开不开由使用者定**（settings.json 的 `safetyReview`，`PresetForm.safetyReview`）：写了两种形态都照写的来；
+// 关掉审查时沙箱照旧（交互形态），越出沙箱的那一条问人（`permissionPolicyFor` 的规矩）。
 // `permission.ts` 的 `DEFAULT_PERMISSION`（三件先问的黑名单）**不是这条命令的行为**：它只在嵌入方调 `codingPreset()`
 // 而不传 `permission` 时生效（评测、别的宿主）。
 
@@ -39,8 +40,15 @@ export const ECHO_CODING: Product = Object.freeze({
   // 共用的纪律段由**产品**挂（2026-09-09 拍板）：装配层不再恒挂，形态决定「有没有人能答」那一条。
   // `codingPreset()` 自己只依赖 core，所以这一条加在这里，不加进它。
   preset: (form, host) => {
-    // 交互形态由模型先审、审不过问终端里的人，命令进操作系统沙箱；管道形态全放行、不包沙箱（见文件头）
-    const permission = form.interactive ? ({ ...REVIEWED_PERMISSION, responder: "host" } as const) : false;
+    // 审不审：使用者说了算，没说按形态（交互开、管道关）；审不过问终端里的人，管道形态没人可问就拒。
+    // 沙箱跟形态走：交互形态包、管道形态不包（见文件头）
+    const responder = form.interactive ? "host" : "none";
+    const permission =
+      (form.safetyReview ?? form.interactive)
+        ? ({ ...REVIEWED_PERMISSION, responder } as const)
+        : form.interactive
+          ? ({ fallback: "allow", responder } as const) // 不审，但越出沙箱的那一条仍要问人
+          : false;
     const preset = codingPreset({ permission, sandbox: form.interactive, maxIterations: 200, credentials: host.credentials });
     return { ...preset, extensions: [conductEntry(form), ...preset.extensions] };
   },

@@ -19,6 +19,11 @@ import type { CreateEchoOptions, CredentialStore, ObservationExpiryRule } from "
 export type PresetForm = Readonly<{
   /** `true` = 交互形态（有人坐在终端前）；`false` = 管道 / CI。判据只有 `main()` 那一个。 */
   interactive: boolean;
+  /**
+   * 使用者对安全审查的选择（2026-11-15，`settings.json` 的 `safetyReview`）：`true` 开、`false` 关、不给 = 没说，产品按自己的缺省。
+   * 产品据此装权限策略；没有这类策略的产品不看它。
+   */
+  safetyReview?: boolean;
 }>;
 
 /**

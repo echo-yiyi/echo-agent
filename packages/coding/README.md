@@ -22,13 +22,20 @@ The command name stays `echo-coding` even though the package is scoped — the u
 already taken on npm by an unrelated project.
 
 `echo-coding` accepts the same options as `echo-agent` (`--help`). In the interactive UI, every
-shell command and web fetch is first reviewed by the session's model against what you asked for;
-you are asked only when the review keeps blocking or cannot run. Shell commands run in an OS
-sandbox (macOS `sandbox-exec`, Linux bubblewrap) that can write only inside the working directory,
-temporary directories and package caches, and cannot read echo's credential file. Where no sandbox
-works (inside most containers), each command has to run explicitly outside it and is reviewed the
-same way. **Through a pipe it runs every tool without asking** — treat it there as a script that
-may change files in the current directory.
+shell command, web fetch and any tool it does not know to be safe (MCP and extension tools
+included) is first reviewed by the session's model against what you asked for: a one-word quick
+check, and a careful second look only for what the quick check flags. You are asked only when the
+review keeps blocking or cannot run. Shell commands run in an OS sandbox (macOS `sandbox-exec`,
+Linux bubblewrap) that can write only inside the working directory, temporary directories and
+package caches, and cannot read echo's credential file. Where no sandbox works (inside most
+containers), each command has to run explicitly outside it and is reviewed the same way.
+**Through a pipe it runs every tool without asking** — treat it there as a script that may change
+files in the current directory.
+
+Whether the review runs is your call: set `"safetyReview": false` (or `true`) in
+`$ECHO_HOME/settings.json`. Unset, it is on in the interactive UI and off through a pipe; set, it
+applies to both. With the review off, the sandbox still applies in the interactive UI, and a
+command that asks to run outside it asks you first.
 
 Sessions belong to a directory *and* a command, so `echo-agent` and `echo-coding` never share a
 conversation even in the same directory.
