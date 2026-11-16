@@ -40,7 +40,7 @@ test("写 → 读一轮；合并写不丢别的键；写完不留临时文件", 
   const after = JSON.parse(readFileSync(settingsPath(), "utf8")) as Record<string, unknown>;
   expect(after["model"]).toEqual({ provider: "kimi", id: "kimi-k3" });
   // 认不出的键读的时候不进 settings，但**写的时候不该被抹掉**……的前提是读得回来——
-  // readSettings 只认 model、trustedWorkspaces 与 safetyReview，所以 futureKey 会丢。这是已知取舍：合并基于「读得懂的那份」，
+  // readSettings 只认 model、trustedWorkspaces 与 safetyClassifier，所以 futureKey 会丢。这是已知取舍：合并基于「读得懂的那份」，
   // 宁可丢未知键也不把坏内容原样并回去。
   expect(readdirSync(home).filter((n) => n.endsWith(".tmp"))).toEqual([]);
 });
@@ -67,16 +67,16 @@ test("信任的工作区（2026-11-03）：写 → 读回；与 model 互不覆�
   expect((await readSettings()).settings.trustedWorkspaces).toEqual(["/work/a", "/work/b"]);
 });
 
-test("安全审查开关（2026-11-15）：手写进文件读得回；切模型写回时不丢——它是认得的键；不是布尔就口信 + 空缺省", async () => {
-  writeFileSync(settingsPath(), JSON.stringify({ safetyReview: false }));
-  expect(await readSettings()).toEqual({ settings: { safetyReview: false } });
+test("安全分类器开关（2026-11-15）：手写进文件读得回；切模型写回时不丢——它是认得的键；不是布尔就口信 + 空缺省", async () => {
+  writeFileSync(settingsPath(), JSON.stringify({ safetyClassifier: false }));
+  expect(await readSettings()).toEqual({ settings: { safetyClassifier: false } });
   await writeSettings({ model: { provider: "kimi", id: "kimi-k3" } }); // 界面里切模型会走这一下
-  expect((await readSettings()).settings).toEqual({ safetyReview: false, model: { provider: "kimi", id: "kimi-k3" } });
+  expect((await readSettings()).settings).toEqual({ safetyClassifier: false, model: { provider: "kimi", id: "kimi-k3" } });
 
-  writeFileSync(settingsPath(), JSON.stringify({ safetyReview: "off" }));
+  writeFileSync(settingsPath(), JSON.stringify({ safetyClassifier: "off" }));
   const r = await readSettings();
   expect(r.settings).toEqual({});
-  expect(r.problem).toContain("safetyReview");
+  expect(r.problem).toContain("safetyClassifier");
 });
 
 test("trustedWorkspaces 形状不对：口信 + 空缺省（不是字符串列表就一条都不信）", async () => {

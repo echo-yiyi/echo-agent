@@ -37,6 +37,7 @@ import type { ObservationValue, RuntimePhase, SubloopRunSource } from "./observa
 import type { ObservableStateInput } from "./observability/worker-protocol.ts";
 import { HookRuntime, type HookContext, type HookOrigin, type LifecycleEventListener } from "./hooks/runtime.ts";
 import { PermissionLedger, normalizeVerdict } from "./permission/ledger.ts";
+import { createSafetyClassifier, type SafetyClassifier, type SafetyClassifierOptions } from "./permission/classifier.ts";
 import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, PermissionStage } from "./permission/types.ts";
 import { AgentPolicySlots, type AgentPolicyValues } from "./policies.ts";
 import { QuestionLedger } from "./question/ledger.ts";
@@ -344,6 +345,11 @@ export type AgentOptions = {
    */
   takeover?: boolean;
   /**
+   * 安全分类器（2026-11-15，`permission/classifier.ts`）：给了就开。权限策略放行之后、工具执行之前，名单之外的工具再让本会话的模型
+   * 判一次；判拦的不跑、理由交回模型，判不了或连着判拦就改问人。不给 = 不判（低层 `new Agent()` 不替产品做决定）。
+   */
+  safetyClassifier?: SafetyClassifierOptions;
+  /**
    * 哪个产品（2026-09-07，替代 `agentId` / `agentName`）。写进每个新建会话的
    * `SessionInfo.product`；产品（`echo-agent` / `echo-coding`）各给各的名字，同一目录里就各有各的
    * 对话（`--continue` 按 workspace + product 挑）。缺省 `"default"`。
@@ -595,6 +601,8 @@ export class Agent {
   private readonly preemptible: boolean;
   /** 见 `AgentOptions.takeover`。可让位的实例恒为 false。 */
   private readonly takeover: boolean;
+  /** 见 `AgentOptions.safetyClassifier`。`null` = 没开。判拦计数跟着它，一个实例一份。 */
+  private readonly safetyClassifier: SafetyClassifier | null;
   /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
   private inboxPollCancel?: () => void;
   /** 哪个产品（`AgentOptions.product`）。写进新建会话的 `SessionInfo.product`，也是 holder 与观测 scope 的那一半。 */
@@ -1067,6 +1075,7 @@ export class Agent {
     this.clock = opts.clock ?? systemClock;
     this.preemptible = opts.preemptible === true;
     this.takeover = opts.takeover === true && !this.preemptible;
+    this.safetyClassifier = opts.safetyClassifier === undefined ? null : createSafetyClassifier(opts.safetyClassifier);
     this.stateLock = opts.stateLock;
     this.product = opts.product ?? "default";
     this.agentRef = opts.agent ?? DEFAULT_AGENT_REF;
@@ -4049,7 +4058,11 @@ export class Agent {
         // 策略多看两样（2026-11-15）：用户本人说的话、一次用本会话模型的调用。params 仍是 loop 冻结的同一份对象
         const policyInput = Object.freeze({ ...input, userIntent: this.userIntent(), askModel: (r: { system: string; prompt: string }) => this.askModel(binding, r) });
         // 先验形再看 kind：策略返回 null/"bogus" 时，这里要给出「非法裁决」而不是 TypeError
-        const verdict = normalizeVerdict(await policy.authorize(policyInput));
+        let verdict = normalizeVerdict(await policy.authorize(policyInput));
+        // 安全分类器排在策略之后：策略拒或问照它的；放行的、又不在免判名单上的，再判一次（扩展换了策略也照样判）
+        if (verdict.kind === "allow" && this.safetyClassifier?.covers(input.toolName) === true) {
+          verdict = normalizeVerdict(await this.safetyClassifier.judge(policyInput));
+        }
         if (verdict.kind === "ask" && policy.responder === "none") {
           return { kind: "deny", reason: `${verdict.reason} (the policy asks for approval, but no responder is configured: ask counts as deny)` };
         }

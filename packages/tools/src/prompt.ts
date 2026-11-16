@@ -44,11 +44,11 @@ export function workspaceToolsSection(): PromptSection {
  */
 export function sandboxText(backend: ShellBackend): string {
   if (backend.name === "unavailable") {
-    return "Commands are meant to run in a sandbox, but none is available on this machine, so bash refuses to run them as they are: pass sandbox: false on every call. Each such call is reviewed before it runs.";
+    return "Commands are meant to run in a sandbox, but none is available on this machine, so bash refuses to run them as they are: pass sandbox: false on every call. Each such call is checked before it runs.";
   }
   return (
     `Commands run in a sandbox (${backend.name}): they can write only inside the workspace, temporary directories and package caches, and cannot read echo's credential file; reading elsewhere and the network work as usual. ` +
-    'A write elsewhere fails with "Operation not permitted" or "Read-only file system". If the task really needs it (a global install, a file in the home directory), run the command again with sandbox: false; that call is reviewed before it runs.'
+    'A write elsewhere fails with "Operation not permitted" or "Read-only file system". If the task really needs it (a global install, a file in the home directory), run the command again with sandbox: false; that call is checked before it runs.'
   );
 }
 

@@ -32,7 +32,7 @@
 
 - **不改 `echo-agent` 的工具集**。通用产品仍然一件对外的工具都不挂；它要不要挂、挂哪几条是另一个决定。
 - **不把工作区越界判定、echo 凭据的名单、外来内容的来源说明搬进 core**。搬出产品之后它们已经是所有产品共用的一份；再进 core 要等出现「不装 tools 也需要它」的消费者。
-- **不动权限策略与安全分类器**。规则表与分类器的归属另有一条线在做，本条不碰 `packages/coding/src/permission.ts`。
+- **不动权限策略与安全分类器**。分类器同日由另一条线搬进了 core（[安全加固](2026-11-15-security-hardening.md)）；规则表（allow / deny / ask）的归属本条不碰，`packages/coding/src/permission.ts` 没有改动。
 - 不改任何工具的行为、描述与 prompt 文本（`user-agent` 除外）。
 
 ## 已知代价

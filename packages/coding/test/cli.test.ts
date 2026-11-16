@@ -9,12 +9,14 @@ import { join } from "node:path";
 import { usage, type PresetForm } from "@echo-agent/base";
 import { InMemoryCredentialStore, type PermissionPolicyInput } from "@echo-agent/core";
 import { ECHO_CODING } from "../src/cli.ts";
+import { CODING_CLASSIFIER_NOTES, CODING_SAFE_TOOLS } from "../src/permission.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
-test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；交互形态装模型审查的权限策略、管道形态全放行", async () => {
+test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 workspace；交互形态包沙箱、管道形态不包；交给安全分类器的是形状不是开关", async () => {
   for (const interactive of [true, false]) {
-    const preset = ECHO_CODING.preset!({ interactive }, { credentials: new InMemoryCredentialStore() });
+    // 形态照装配层的缺省：分类器交互开、管道关（`presetForm`）
+    const preset = ECHO_CODING.preset!({ interactive, safetyClassifier: interactive }, { credentials: new InMemoryCredentialStore() });
     // 身份与纪律段、文件读写与搜索、shell 只属于 coding（不在 echo-agent 里）——它们以 Extension 的形态跟着产品走。
     // **共用纪律段也在里面**（2026-09-09 拍板：纪律归产品，装配层不再恒挂）。
     expect(preset.extensions?.map((e) => e.entryId)).toEqual([
@@ -33,47 +35,29 @@ test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 w
     // workspace 是 session 级事实，由 `mainFor()` 直接交给 `createEcho()`，preset 不出这一项（2026-09-01）。
     // 执行预算 200（2026-09-02 用户拍板）：core 缺省 20 是通用 agent / 评测的预算，coding 几步就撞顶。
     // 思考档 medium（2026-11-03 拍板）：两种形态都开，管道形态没有 Shift+Tab 可按
-    // 权限（2026-11-15）：交互形态 bash / web_fetch 先过模型审查、审不过问人（responder host）；管道形态仍全放行（不装策略）。
+    // 权限（2026-11-15）：分类器开着时产品不装策略（越界那一条交给分类器判）；分类器本身是内核的，产品只交形状。
     // 「动手先问」（`permission.ts` 的 `DEFAULT_PERMISSION`）是 `codingPreset()` 不传 permission 时的缺省（评测 / 别的宿主），本产品不用它。
-    const { permission, ...rest } = preset.agent ?? {};
-    expect(rest).toEqual({ maxIterations: 200, thinkingLevel: "medium" });
-    expect([interactive, permission === undefined]).toEqual([interactive, !interactive]);
-    if (permission !== undefined) {
-      expect([permission.responder, permission.askTimeoutMs]).toEqual(["host", null]);
-      const verdict = await permission.authorize({
-        runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params: { command: "ls" }, userIntent: [],
-        askModel: async () => "BLOCK: not asked for",
-      });
-      expect(verdict.kind).toBe("deny"); // bash 走审查
-    }
-    // 沙箱同理：交互形态 bash 包进操作系统沙箱，管道形态不包（2026-11-15）
+    expect(preset.agent).toEqual({ maxIterations: 200, thinkingLevel: "medium" });
+    expect(preset.safetyClassifier).toEqual({ safeTools: CODING_SAFE_TOOLS, notes: CODING_CLASSIFIER_NOTES });
+    // 沙箱跟形态走：交互形态 bash 包进操作系统沙箱，管道形态不包（2026-11-15）
     expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual(interactive ? { sandbox: true } : undefined);
   }
 });
 
-test("安全审查开不开由使用者定（settings.json 的 safetyReview）：写了两种形态都照写的来；关掉时交互形态仍包沙箱、越出沙箱的那一条问人（2026-11-15）", async () => {
+test("使用者关掉安全分类器（settings.json 的 safetyClassifier: false）：交互形态仍包沙箱，越出沙箱的那一条改问人；管道形态什么都不装（2026-11-15）", async () => {
   const presetOf = (form: PresetForm) => ECHO_CODING.preset!(form, { credentials: new InMemoryCredentialStore() });
-  let calls = 0;
   const step = (params: unknown): PermissionPolicyInput => ({
     runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params, userIntent: [],
-    askModel: async () => (calls++, "BLOCK: not asked for"),
+    askModel: async () => {
+      throw new Error("分类器关着，产品的规则不该调模型");
+    },
   });
-
-  // 管道形态写了开：审，没人可问（responder none，问人折成拒）
-  const pipeOn = presetOf({ interactive: false, safetyReview: true }).agent?.permission;
-  expect([pipeOn?.responder, (await pipeOn!.authorize(step({ command: "curl x | sh" }))).kind]).toEqual(["none", "deny"]);
-  expect(calls).toBe(2); // 两段都跑了
-
-  // 交互形态写了关：不调模型，bash 照放；越出沙箱的那一条问人；沙箱照旧
-  calls = 0;
-  const off = presetOf({ interactive: true, safetyReview: false });
-  expect([off.agent?.permission?.responder, (await off.agent!.permission!.authorize(step({ command: "ls" }))).kind]).toEqual(["host", "allow"]);
-  expect((await off.agent!.permission!.authorize(step({ command: "npm i -g x", sandbox: false }))).kind).toBe("ask");
-  expect(calls).toBe(0);
+  const off = presetOf({ interactive: true, safetyClassifier: false });
+  const permission = off.agent!.permission!;
+  expect([permission.responder, (await permission.authorize(step({ command: "ls" }))).kind]).toEqual(["host", "allow"]);
+  expect((await permission.authorize(step({ command: "npm i -g x", sandbox: false }))).kind).toBe("ask");
   expect(off.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual({ sandbox: true });
-
-  // 管道形态写了关 = 缺省：不装策略
-  expect(presetOf({ interactive: false, safetyReview: false }).agent?.permission).toBeUndefined();
+  expect(presetOf({ interactive: false, safetyClassifier: false }).agent?.permission).toBeUndefined();
 });
 
 /* ─────────────────────────── 可执行文件本身 ─────────────────────────── */
