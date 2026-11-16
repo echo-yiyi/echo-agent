@@ -2,7 +2,7 @@
 //
 // 三个键：上次选的模型（**显式 `--provider` / `--model` 永远赢**——设置只是「没说就用上次的」），
 // 受信的工作区（2026-11-03：约定目录 `<cwd>/extensions` 只在受信的工作区里才加载），
-// 与安全审查的开关（2026-11-15：使用者自己定开不开，产品据此装权限策略）。
+// 与安全分类器的开关（2026-11-15：使用者自己定开不开，装配层把它交给 `createEcho({ safetyClassifier })`）。
 // 为什么在 cli 不在 core：记住哪个模型是**壳的启动策略**（选装配入参），core 没有对应的端口；
 // 凭据不同——`CredentialStore` 端口在 core，所以它的文件实现在 core。
 //
@@ -25,10 +25,10 @@ export type CliSettings = Readonly<{
    */
   trustedWorkspaces?: readonly string[];
   /**
-   * 安全审查（模型先审一步再执行）开不开（2026-11-15）。**不设 = 产品缺省**（echo-coding：交互形态开、管道形态关）；
+   * 安全分类器（工具执行前先让模型判一次）开不开（2026-11-15）。**不设 = 按形态**：交互形态开、管道形态关；
    * 设了两种形态都照设的来。只有手写这一个入口——没有界面替你改它。
    */
-  safetyReview?: boolean;
+  safetyClassifier?: boolean;
 }>;
 
 export type SettingsReadResult = Readonly<{
@@ -61,7 +61,7 @@ export async function readSettings(): Promise<SettingsReadResult> {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return { settings: {}, problem: `设置文件的顶层应当是一个对象：${path}——先用缺省` };
   }
-  const raw = parsed as { model?: unknown; trustedWorkspaces?: unknown; safetyReview?: unknown };
+  const raw = parsed as { model?: unknown; trustedWorkspaces?: unknown; safetyClassifier?: unknown };
   let model: CliSettings["model"];
   if (raw.model !== undefined) {
     const m = raw.model as { provider?: unknown; id?: unknown };
@@ -79,15 +79,15 @@ export async function readSettings(): Promise<SettingsReadResult> {
     }
     trustedWorkspaces = t;
   }
-  if (raw.safetyReview !== undefined && typeof raw.safetyReview !== "boolean") {
-    return { settings: {}, problem: `设置文件里 safetyReview 那条认不出来（应是 true 或 false）：${path}——先用缺省` };
+  if (raw.safetyClassifier !== undefined && typeof raw.safetyClassifier !== "boolean") {
+    return { settings: {}, problem: `设置文件里 safetyClassifier 那条认不出来（应是 true 或 false）：${path}——先用缺省` };
   }
-  const safetyReview = raw.safetyReview as boolean | undefined;
+  const safetyClassifier = raw.safetyClassifier as boolean | undefined;
   return {
     settings: {
       ...(model === undefined ? {} : { model }),
       ...(trustedWorkspaces === undefined ? {} : { trustedWorkspaces }),
-      ...(safetyReview === undefined ? {} : { safetyReview }),
+      ...(safetyClassifier === undefined ? {} : { safetyClassifier }),
     },
   };
 }

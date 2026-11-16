@@ -90,8 +90,8 @@ export type CliOptions = {
    * 工具参数与结果正文明文写进状态根的观测文档（observability/）——看 `echo-agent observe serve` 时才需要。
    */
   observe?: ObservationCapturePolicy;
-  /** 安全审查开不开：来自设置文件的 `safetyReview`（没有对应的命令行旗子）。不给 = 没说，产品按自己的缺省。 */
-  safetyReview?: boolean;
+  /** 安全分类器开不开：来自设置文件的 `safetyClassifier`（没有对应的命令行旗子）。不给 = 没说，按形态（`presetForm`）。 */
+  safetyClassifier?: boolean;
 };
 
 /** `--observe` 能接的值。与 `ObservationCapturePolicy` 同一份枚举——多写少写 `satisfies` 都会报。 */
@@ -153,8 +153,8 @@ export function usage(name: string): string {
 交互形态第一次遇到会列出文件问一次，信任就按目录记进 $ECHO_HOME/settings.json；管道与 --serve 没人可问，
 不受信就不加载，并在 stderr 说一行怎么信任。
 
-**安全审查**：$ECHO_HOME/settings.json 里写 "safetyReview": true 或 false，开关产品的模型审查（先让模型审一步再执行，
-审不过问你）。不写就按产品缺省——echo-coding 交互形态开、管道形态关；写了两种形态都照写的来。
+**安全分类器**：$ECHO_HOME/settings.json 里写 "safetyClassifier": true 或 false。开着时，工具执行前先让模型判一次
+该不该自动执行，判拦的不跑、判不了或连着判拦就问你。不写就按形态：交互开、管道关；写了两种形态都照写的来。
 
 上次在界面里选的模型记在 $ECHO_HOME/settings.json（D7）：**显式 --provider / --model 永远赢**，
 设置只是「没说就用上次的」；文件坏了不挡启动，如实说一句然后用缺省。
@@ -316,7 +316,16 @@ export function echoOptions(
     // 产品 preset 自己定了 questions 就用它的（类型允许，不能静默盖掉）；没定才按形态给
     // 记忆的**形状**（装哪些模块、分哪几层）归产品；**开关**（`--no-memory` → `withoutMemory`）归用户，产品碰不到
     ...(preset.memory !== undefined ? { memory: preset.memory } : {}),
-    agent: { ...(preset.agent ?? {}), questions: preset.agent?.questions ?? { responder: form.interactive ? "host" : "none", askTimeoutMs: null } },
+    agent: {
+      ...(preset.agent ?? {}),
+      questions: preset.agent?.questions ?? { responder: form.interactive ? "host" : "none", askTimeoutMs: null },
+      // 分类器判不了、连着判拦时要问人：产品没给权限策略就补一份「全放行、问谁按形态」的，让那一问有人接（2026-11-15）
+      ...(form.safetyClassifier === true && preset.agent?.permission === undefined
+        ? { permission: { authorize: () => ({ kind: "allow" as const }), askTimeoutMs: null, responder: form.interactive ? ("host" as const) : ("none" as const) } }
+        : {}),
+    },
+    // 安全分类器（2026-11-15）：内核的能力，开不开归使用者（`form.safetyClassifier`），形状归产品（自己哪些工具不用判、给它的说明）
+    safetyClassifier: form.safetyClassifier === true ? (preset.safetyClassifier ?? true) : false,
     // `echo-agent` 恒挂的两段（纪律、项目指令）在前，产品自带的在后。顺序只影响 `echo.extensions`
     // 清单的可读性——prompt 里的先后由各段的 order 决定，不由挂载顺序决定。
     // 纪律段**不在这里**（2026-09-09）：它归产品，产品自己挂。项目指令留在装配层——
@@ -525,9 +534,9 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
 
       // 工作区信任（2026-11-03）：约定目录里的扩展只在受信的工作区里加载。交互形态要问人，所以在装配之前定。
       const trusted = await trustConventionDir(product, shell, opts, interactive, settingsRead.settings.trustedWorkspaces ?? [], notices, controller.signal, deps);
-      // 安全审查开不开只有设置文件这一个入口（2026-11-15）：不写 = 没说，产品按自己的缺省
-      const safetyReview = settingsRead.settings.safetyReview;
-      const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}), ...(safetyReview !== undefined ? { safetyReview } : {}) };
+      // 安全分类器开不开只有设置文件这一个入口（2026-11-15）：不写 = 没说，按形态（`presetForm`）
+      const safetyClassifier = settingsRead.settings.safetyClassifier;
+      const effective: CliOptions = { ...opts, ...(model !== undefined ? { model } : {}), ...(safetyClassifier !== undefined ? { safetyClassifier } : {}) };
       // 会话（2026-09-01 用户拍板）：缺省新建一段；`--continue` / `--resume` 才续。续哪段要在装配前定。
       const sessionId = await resolveSessionId(product, opts);
       // 形态到这里已经定了；产品层据此出它的装配片段（`echoOptions` 里调 `preset`）。
@@ -556,10 +565,12 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
 
 /**
  * 交给产品的形态（导出只为判据）。`--serve` 不装壳、没人能答：哪怕是在终端里起的也不算交互形态——
- * 否则产品按「有人答」装的权限策略（echo-coding 审不过就问人）与提问策略没人兑现，run 入口当场拒跑（2026-11-15）。
+ * 否则按「有人答」装的权限、提问策略与安全分类器的「问人」没人兑现，run 入口当场拒跑（2026-11-15）。
  */
-export function presetForm(interactive: boolean, opts: Pick<CliOptions, "serve" | "safetyReview">): PresetForm {
-  return { interactive: interactive && opts.serve !== true, ...(opts.safetyReview !== undefined ? { safetyReview: opts.safetyReview } : {}) };
+export function presetForm(interactive: boolean, opts: Pick<CliOptions, "serve" | "safetyClassifier">): PresetForm {
+  const attended = interactive && opts.serve !== true;
+  // 安全分类器：使用者说了算；没说按形态——有人在就开（判不了能问人），管道 / CI 不开（没人可问，每步多一两次模型调用也改评测的成本）
+  return { interactive: attended, safetyClassifier: opts.safetyClassifier ?? attended };
 }
 
 /**

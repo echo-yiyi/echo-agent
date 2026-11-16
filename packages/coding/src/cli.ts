@@ -8,12 +8,12 @@
 // （`terminalShell`），装配层不写死。
 //
 // **权限**：2026-09-01 定的是两种形态都全放行——每一步都问只会让人按到麻木，管道形态更是没人可问。
-// 2026-11-15 起**交互形态缺省由模型先审**（`REVIEWED_PERMISSION`），**命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，
-// `tools/sandbox.ts`）：名单之外的工具先让本会话的模型对着用户说过的话审一遍（两段），日常开发放行、用户没要的高风险动作拦下；
-// 人只在连着被拦、或审不了的时候被问到。全放行时模型一旦被仓库里、网页里的字骗了，后面没有任何一层拦得住。
-// **管道形态缺省不审**：评测与 CI 没人可问，每条命令多一次模型调用也会改掉评测的成本与结果。
-// **开不开由使用者定**（settings.json 的 `safetyReview`，`PresetForm.safetyReview`）：写了两种形态都照写的来；
-// 关掉审查时沙箱照旧（交互形态），越出沙箱的那一条问人（`permissionPolicyFor` 的规矩）。
+// 2026-11-15 起两层兜底，都不是本产品自己的机制：
+//   · **安全分类器**是内核的（`createEcho({ safetyClassifier })`），开不开归使用者（settings.json 的 `safetyClassifier`，
+//     不写按形态：交互开、管道关——装配层 `presetForm` 定）。本产品只交**形状**：自己哪些工具不用判（`CODING_SAFE_TOOLS`）、
+//     bash 的 `sandbox: false` 是什么意思（`CODING_CLASSIFIER_NOTES`）。
+//   · **交互形态命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，`tools/sandbox.ts`）。分类器关着时，越出沙箱的那一条
+//     由人看（`permissionPolicyFor` 的规矩）；开着时由分类器判，不另装策略。
 // `permission.ts` 的 `DEFAULT_PERMISSION`（三件先问的黑名单）**不是这条命令的行为**：它只在嵌入方调 `codingPreset()`
 // 而不传 `permission` 时生效（评测、别的宿主）。
 
@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { conductEntry, mainFor, retainRecentDays, type Product } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { codingPreset } from "./agent.ts";
-import { REVIEWED_PERMISSION } from "./permission.ts";
+import { CODING_CLASSIFIER_NOTES, CODING_SAFE_TOOLS } from "./permission.ts";
 
 /** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置。 */
 const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
@@ -40,17 +40,14 @@ export const ECHO_CODING: Product = Object.freeze({
   // 共用的纪律段由**产品**挂（2026-09-09 拍板）：装配层不再恒挂，形态决定「有没有人能答」那一条。
   // `codingPreset()` 自己只依赖 core，所以这一条加在这里，不加进它。
   preset: (form, host) => {
-    // 审不审：使用者说了算，没说按形态（交互开、管道关）；审不过问终端里的人，管道形态没人可问就拒。
-    // 沙箱跟形态走：交互形态包、管道形态不包（见文件头）
-    const responder = form.interactive ? "host" : "none";
-    const permission =
-      (form.safetyReview ?? form.interactive)
-        ? ({ ...REVIEWED_PERMISSION, responder } as const)
-        : form.interactive
-          ? ({ fallback: "allow", responder } as const) // 不审，但越出沙箱的那一条仍要问人
-          : false;
+    // 沙箱跟形态走：交互形态包、管道形态不包。分类器关着时越出沙箱的那一条问终端里的人；开着时交给分类器（见文件头）
+    const permission = form.interactive && !form.safetyClassifier ? ({ fallback: "allow", responder: "host" } as const) : false;
     const preset = codingPreset({ permission, sandbox: form.interactive, maxIterations: 200, credentials: host.credentials });
-    return { ...preset, extensions: [conductEntry(form), ...preset.extensions] };
+    return {
+      ...preset,
+      extensions: [conductEntry(form), ...preset.extensions],
+      safetyClassifier: { safeTools: CODING_SAFE_TOOLS, notes: CODING_CLASSIFIER_NOTES },
+    };
   },
   // 观测留 30 天（2026-09-15 用户拍板，与 echo-agent 同一条规则；两个产品平级，各自声明各自的）。
   observationExpiry: retainRecentDays(30),

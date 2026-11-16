@@ -97,7 +97,7 @@ export type BashDeps = {
   background?: AgentBackground;
   /**
    * 命令怎么起（`sandbox.ts`）。缺省直接起。给的是沙箱时 bash 多一个 `sandbox` 参数：`false` = 这一条在沙箱外跑——
-   * 参数明着写在调用里，权限策略看得见（echo-coding 的模型审查就按它审）。
+   * 参数明着写在调用里，看得见它：安全分类器开着时由分类器判，关着时 echo-coding 的权限规则让人看（`permission.ts`）。
    */
   backend?: ShellBackend;
 };
@@ -153,7 +153,7 @@ export function makeBashTool(
         background: { type: "boolean", description: "Run in the background (does not block this turn)" },
         // 沙箱后端才有这个参数：没有沙箱时它什么也不改，摆出来只会让模型以为有
         ...(backend.sandboxed
-          ? { sandbox: { type: "boolean", description: "false runs this command outside the sandbox; it is reviewed before it runs. Default true" } }
+          ? { sandbox: { type: "boolean", description: "false runs this command outside the sandbox; it is checked before it runs. Default true" } }
           : {}),
       },
       required: ["command"],
@@ -239,7 +239,7 @@ function spawnShell(command: string, at: { cwd: string; workspace: string }, bac
 
 /** 沙箱起不来时给模型的话：为什么、怎么办（带 `sandbox: false` 重跑，那一步会被审）。 */
 function sandboxRefusal(reason: string): string {
-  return `Not run: commands are meant to run in a sandbox, but none is available on this machine (${reason}). Run it again with sandbox: false; that call is reviewed before it runs.`;
+  return `Not run: commands are meant to run in a sandbox, but none is available on this machine (${reason}). Run it again with sandbox: false; that call is checked before it runs.`;
 }
 
 /** 输出里摘掉最后一个 cwd 标记（连同它前后各一个换行），返回标记里的目录。没有标记 = 命令没跑到末尾（exec / 被杀 / 语法错）。 */

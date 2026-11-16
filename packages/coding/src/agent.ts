@@ -57,7 +57,7 @@ export type CodingPresetOptions = {
   credentials?: CredentialStore;
   /**
    * bash 的命令包进操作系统沙箱跑（2026-11-15，`tools/sandbox.ts`）：只能写工作区、临时目录与包管理器缓存，读不到 echo 的凭据文件。
-   * 缺省不开。开了之后模型能带 `sandbox: false` 让某一条在沙箱外跑——那一条要靠权限策略把关（出厂交互形态是模型审查），
+   * 缺省不开。开了之后模型能带 `sandbox: false` 让某一条在沙箱外跑——那一条要有人把关（内核的安全分类器，或权限策略问人），
    * 只开沙箱、不装权限策略的话这扇门没人看。
    */
   sandbox?: boolean;

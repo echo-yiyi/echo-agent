@@ -915,6 +915,36 @@ test("续一段非 main 的段（sessionsRoot + sessionId）：createEcho 按盘
   expect([...agentOf(echo).tools.keys()]).toContain("session_send");
 });
 
+test("createEcho 的 safetyClassifier 一个参数开关安全分类器：true / 给形状就开，名单外的工具先判、判拦的不跑；不给就不判（2026-11-15）", async () => {
+  let ran = 0;
+  const deploy: ModelTool = {
+    kind: "model",
+    name: "deploy",
+    label: "deploy",
+    description: "deploy",
+    parameters: { type: "object", properties: {} },
+    execute: async () => (ran++, toolOk("ran")),
+  };
+  const base = { allowNetwork: false, withoutMemory: true, extensionDirs: [] as string[], agent: { tools: [deploy] } };
+  const on = await createEcho({ ...base, store: new InMemoryDir(), lock: new InMemoryStateLock(), provider: scripted([toolTurn("c1", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: not asked for"), textTurn("ok")]), safetyClassifier: true });
+  running.push(on);
+  await on.start();
+  await on.agent.prompt("修好测试");
+  expect(ran).toBe(0);
+
+  const shaped = await createEcho({ ...base, store: new InMemoryDir(), lock: new InMemoryStateLock(), provider: scripted([toolTurn("c1", "deploy", {}), textTurn("ok")]), safetyClassifier: { safeTools: ["deploy"] } });
+  running.push(shaped);
+  await shaped.start();
+  await shaped.agent.prompt("部署");
+  expect(ran).toBe(1); // 产品补的名单里有它：不判
+
+  const off = await createEcho({ ...base, store: new InMemoryDir(), lock: new InMemoryStateLock(), provider: scripted([toolTurn("c1", "deploy", {}), textTurn("ok")]) });
+  running.push(off);
+  await off.start();
+  await off.agent.prompt("部署");
+  expect(ran).toBe(2);
+});
+
 test("不越权比的是创建者此刻的工具集而不是池：被角色收紧挡掉的、被禁用的判红，没取过的延迟工具放行", async () => {
   // 走真接线：`sessions-face` 的单测给 `self().tools` 喂手写列表，分不出池与工具集。
   // 这里 `self().tools` 读的是 `agent.state.tools`——池里没被禁用、且过了角色收紧的，延迟工具取没取过都算。

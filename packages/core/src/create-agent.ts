@@ -13,6 +13,7 @@
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Agent, type AgentOptions } from "./agent.ts";
+import type { SafetyClassifierOptions } from "./permission/classifier.ts";
 import { errText } from "./errors.ts";
 import { Models } from "./provider/models.ts";
 import type { CredentialStore, Model, Provider } from "./provider/types.ts";
@@ -229,6 +230,11 @@ export type CreateAgentOptions = {
    * 透传给 `Agent`（见 `AgentOptions.takeover`）。
    */
   takeover?: boolean;
+  /**
+   * 安全分类器（2026-11-15）：`true` 或给形状就开，`false` / 不给就不开。权限策略放行之后，名单之外的工具再让本会话的模型判一次
+   * （`permission/classifier.ts`）。产品经形状补自己的免判工具与说明；开不开归使用者。透传给 `Agent`。
+   */
+  safetyClassifier?: boolean | SafetyClassifierOptions;
   /** 时间与定时器。不给用真时钟；测试给 `FakeClock` 才能零 sleep 地驱动 schedule。 */
   clock?: Clock;
   /** 凭据存储，透传给 `Models`。 */
@@ -273,7 +279,7 @@ export type CreateAgentOptions = {
  * `createEcho({ agent })` 收的那组选项：工具、skill、权限、hooks、执行预算、压缩等**装备与决策点**。
  *
  * 由 core 按状态根装配的端口不在这里——`model` / `sessionService` / `stateLock` / `memory` / `taskStore` /
- * `schedule` / `inboxStore` / `skillStore` / `toolOutputStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible` / `takeover`。
+ * `schedule` / `inboxStore` / `skillStore` / `toolOutputStore`，以及顶层已经收的 `sessionId` / `product` / `agent` / `preemptible` / `takeover` / `safetyClassifier`。
  * 嵌套里再给一个只会被**静默覆盖**，写了没生效是最坏的一种参数。
  *
  * 它有自己的名字，是因为 `Agent` 类在 core 内部（2026-09-17）：仓外念不出 `AgentOptions`，
@@ -288,6 +294,7 @@ export type EchoAgentOptions = Omit<
   | "agent"
   | "preemptible"
   | "takeover"
+  | "safetyClassifier"
   | "sessionId"
   | "memory"
   | "taskStore"
@@ -567,6 +574,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
       ...(opts.agentDef !== undefined ? { agent: opts.agentDef } : {}),
       ...(opts.preemptible === true ? { preemptible: true } : {}),
       ...(opts.takeover === true ? { takeover: true } : {}),
+      ...(opts.safetyClassifier === true ? { safetyClassifier: {} } : typeof opts.safetyClassifier === "object" ? { safetyClassifier: opts.safetyClassifier } : {}),
       // Agent 拿 clock 只做一件事：定期重扫 inbox（别的进程写进来的消息靠它才看得见）。
       // 与 schedule 拿到的是**同一个**——测试拨一次 FakeClock，两边一起动。
       clock: opts.clock ?? systemClock,

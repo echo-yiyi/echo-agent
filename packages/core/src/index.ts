@@ -127,6 +127,7 @@ export type {
   PermissionStage,
   PermissionVerdict,
 } from "./permission/types.ts";
+export type { SafetyClassifierOptions } from "./permission/classifier.ts";
 export type {
   QuestionAnswer,
   QuestionAnswerResult,

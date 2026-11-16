@@ -12,7 +12,7 @@ import { makeBashTool } from "../src/tools/bash.ts";
 import { DIRECT_BACKEND, detectSandbox, macProfile, writableRoots, type ShellBackend } from "../src/tools/sandbox.ts";
 import { shellToolsSection } from "../src/prompt.ts";
 import { codingPreset } from "../src/agent.ts";
-import { REVIEW_SYSTEM } from "../src/permission.ts";
+import { CODING_CLASSIFIER_NOTES } from "../src/permission.ts";
 
 let root: string;
 let echoHomeDir: string;
@@ -124,7 +124,7 @@ test.skipIf(!realSandbox)("真沙箱：命令自己再起的子进程也在沙�
   expect(existsSync(outside)).toBe(false);
 });
 
-/* ══════════ 段、preset、审查 ══════════ */
+/* ══════════ 段、preset、交给分类器的说明 ══════════ */
 
 test("tool:shell 段：沙箱后端才多一句沙箱（能写哪、读不到什么、撞上了怎么办）；不可用时说每条都要 sandbox: false", () => {
   const env = { platform: "darwin" as const, bashVersion: "5.2" };
@@ -138,9 +138,9 @@ test("tool:shell 段：沙箱后端才多一句沙箱（能写哪、读不到什
   expect(render(unavailable)).toContain("pass sandbox: false on every call");
 });
 
-test("codingPreset：sandbox: true 才给 echo:shell 配沙箱，缺省不配；审查规则说清 sandbox: false 是在沙箱外跑", () => {
+test("codingPreset：sandbox: true 才给 echo:shell 配沙箱，缺省不配；交给安全分类器的说明讲清 sandbox: false 是在沙箱外跑", () => {
   const shell = (p: ReturnType<typeof codingPreset>) => p.extensions.find((e) => e.entryId === "echo:shell")!;
   expect(shell(codingPreset({ permission: false })).config).toBeUndefined();
   expect(shell(codingPreset({ permission: false, sandbox: true })).config).toEqual({ sandbox: true });
-  expect(REVIEW_SYSTEM).toContain('"sandbox": false runs outside the sandbox');
+  expect(CODING_CLASSIFIER_NOTES).toContain('"sandbox": false runs outside the sandbox');
 });

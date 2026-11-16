@@ -43,7 +43,7 @@ bun add -g @echo-agent/coding
 MOONSHOT_API_KEY=sk-... echo-coding
 ```
 
-Both commands accept the same options (`--help`). In the interactive UI, `echo-coding` has its model review every shell command and web fetch against what you asked for before it runs, and asks you only when the review keeps blocking or cannot run; shell commands run in an OS sandbox that can write only inside the working directory, temporary directories and package caches. Through a pipe it runs every tool without asking — treat it there as a script that may change files in the current directory.
+Both commands accept the same options (`--help`). In the interactive UI, the runtime's safety classifier has the model check every tool call not known to be safe against what you asked for before it runs, and asks you only when it keeps blocking or cannot run; turn it on or off with `"safetyClassifier"` in `$ECHO_HOME/settings.json`. `echo-coding` also runs shell commands in an OS sandbox that can write only inside the working directory, temporary directories and package caches. Through a pipe nothing is checked by default and `echo-coding` runs every tool without asking — treat it there as a script that may change files in the current directory.
 
 ## Use the CLI
 

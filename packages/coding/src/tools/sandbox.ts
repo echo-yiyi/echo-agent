@@ -4,8 +4,8 @@
 // 读别处、出网照旧。macOS 用系统自带的 `sandbox-exec`，Linux 用 bubblewrap（`bwrap`）。
 //
 // **没有可用的沙箱时不悄悄退回直接起**：带沙箱的那次 bash 拒跑并说明原因，模型要带 `sandbox: false` 重跑——
-// 那一步明着写在参数里，权限策略（echo-coding 的模型审查）看得见它是在沙箱外跑。容器里（bubblewrap 通常起不来）
-// 走的就是这条路：每条命令都带 `sandbox: false`、都过审查，与没有沙箱时一样。
+// 那一步明着写在参数里，看得见它是在沙箱外跑：内核的安全分类器开着时由它判，关着时 echo-coding 的权限规则让人看。
+// 容器里（bubblewrap 通常起不来）走的就是这条路：每条命令都带 `sandbox: false`、每条都过分类器（或问人）。
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
