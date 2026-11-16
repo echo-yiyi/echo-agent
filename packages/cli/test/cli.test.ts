@@ -36,6 +36,8 @@ import { AgentRuntimeService, defineExtension } from "@echo-agent/core/extension
 import { PassThrough } from "node:stream";
 import { echoOptions, mainFor, parseArgs, presetForm, retainRecentDays, usage, wakeArgs, type PresetForm, type Product } from "@echo-agent/base";
 import { ECHO_AGENT, main } from "../src/product.ts";
+import { SHELL_CLASSIFIER_NOTES, TOOLS_SAFE_TOOLS } from "@echo-agent/tools";
+import { InMemoryCredentialStore, type PermissionPolicyInput } from "@echo-agent/core";
 import { isConfigured } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { fakeTui } from "@echo-agent/tui/testing";
@@ -636,20 +638,51 @@ function workspaceWithProbe(name: string): string {
 test("echoOptions：安全分类器开不开照形态里定好的交给 createEcho，形状取产品给的；产品没装权限策略时补一份全放行的，让「问人」有人接（2026-11-15）", async () => {
   const credentials = new FileCredentialStore(join(dir, "credentials.json"));
   const none = { withoutMemory: true, extensionDirs: [], continueLast: false, serve: false };
-  // echo-agent 不交形状：开着就是内核缺省（true）；交互形态补的策略问终端里的人
-  const on = echoOptions(ECHO_AGENT, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
+  // 一个什么都不交的产品（不交形状、不装策略）：开着就是内核缺省（true）；交互形态补的策略问终端里的人
+  const bare: Product = { name: "bare", version: "0" };
+  const on = echoOptions(bare, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
   expect(on.safetyClassifier).toBe(true);
   expect(on.agent?.permission?.responder).toBe("host");
   expect(await on.agent!.permission!.authorize({} as never)).toEqual({ kind: "allow" });
   // 管道形态开着：没人可问
-  const piped = echoOptions(ECHO_AGENT, { interactive: false, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
+  const piped = echoOptions(bare, { interactive: false, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
   expect([piped.safetyClassifier, piped.agent?.permission?.responder]).toEqual([true, "none"]);
   // 关着：不交给内核，也不补策略
-  const off = echoOptions(ECHO_AGENT, { interactive: true, safetyClassifier: false }, none, kimiProvider(), [], credentials, undefined, true);
+  const off = echoOptions(bare, { interactive: true, safetyClassifier: false }, none, kimiProvider(), [], credentials, undefined, true);
   expect([off.safetyClassifier, off.agent?.permission]).toEqual([false, undefined]);
+  // echo-agent 自己交了形状（工具包那一份）：开着时交给内核的就是它
+  const own = echoOptions(ECHO_AGENT, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true);
+  expect(own.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
   // 产品交了形状就用它的
   const shaped: Product = { name: "x", version: "0", preset: () => ({ safetyClassifier: { safeTools: ["read_file"] } }) };
   expect(echoOptions(shaped, { interactive: true, safetyClassifier: true }, none, kimiProvider(), [], credentials, undefined, true).safetyClassifier).toEqual({ safeTools: ["read_file"] });
+});
+
+test("preset：echo-agent 自带身份段、纪律段与工具包的三条（文件与搜索、shell、web）；交互形态包沙箱、管道形态不包；分类器关着时交互形态越出沙箱的那一条问人，管道形态什么都不装（2026-11-15）", async () => {
+  const presetOf = (form: PresetForm) => ECHO_AGENT.preset!(form, { credentials: new InMemoryCredentialStore() });
+  const step = (params: unknown): PermissionPolicyInput => ({
+    runId: "r", turnId: "t", toolCallId: "c", toolName: "bash", params, userIntent: [],
+    askModel: async () => {
+      throw new Error("产品的规则不该调模型");
+    },
+  });
+  for (const interactive of [true, false]) {
+    // 形态照装配层的缺省：分类器交互开、管道关
+    const preset = presetOf({ interactive, safetyClassifier: interactive });
+    // 没有 echo:coding、没有 echo:worktree：那两条是 coding 产品自己的
+    expect(preset.extensions?.map((e) => e.entryId)).toEqual(["echo:identity", "echo:conduct", "echo:workspace", "echo:shell", "echo:web"]);
+    expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual(interactive ? { sandbox: true } : undefined);
+    // 分类器开着（交互）或压根没人（管道）：产品不装策略；交给分类器的是形状，开不开不归它
+    expect(preset.agent).toBeUndefined();
+    expect(preset.safetyClassifier).toEqual({ safeTools: TOOLS_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
+  }
+  // 使用者关掉分类器：交互形态仍包沙箱，全放行但越出沙箱的那一条问终端里的人
+  const off = presetOf({ interactive: true, safetyClassifier: false });
+  const permission = off.agent!.permission!;
+  expect([permission.responder, (await permission.authorize(step({ command: "ls" }))).kind]).toEqual(["host", "allow"]);
+  expect((await permission.authorize(step({ command: "npm i -g x", sandbox: false }))).kind).toBe("ask");
+  expect(off.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual({ sandbox: true });
+  expect(presetOf({ interactive: false, safetyClassifier: false }).agent).toBeUndefined();
 });
 
 test("echoOptions：没给 --extensions 时，受信才把约定目录交给 createEcho，不受信显式给 []；给了 --extensions 不看信任", () => {

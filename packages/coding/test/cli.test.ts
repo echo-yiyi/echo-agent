@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { usage, type PresetForm } from "@echo-agent/base";
 import { InMemoryCredentialStore, type PermissionPolicyInput } from "@echo-agent/core";
 import { ECHO_CODING } from "../src/cli.ts";
-import { CODING_CLASSIFIER_NOTES, CODING_SAFE_TOOLS } from "../src/permission.ts";
+import { SHELL_CLASSIFIER_NOTES } from "@echo-agent/tools";
+import { CODING_SAFE_TOOLS } from "../src/permission.ts";
 
 const BIN = join(import.meta.dir, "..", "bin", "echo-coding.ts");
 
@@ -17,7 +18,7 @@ test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 w
   for (const interactive of [true, false]) {
     // 形态照装配层的缺省：分类器交互开、管道关（`presetForm`）
     const preset = ECHO_CODING.preset!({ interactive, safetyClassifier: interactive }, { credentials: new InMemoryCredentialStore() });
-    // 身份与纪律段、文件读写与搜索、shell 只属于 coding（不在 echo-agent 里）——它们以 Extension 的形态跟着产品走。
+    // 身份与编码纪律段、worktree 是 coding 自己的；文件读写与搜索、shell、web 来自工具包（echo-agent 也挂）——都以 Extension 的形态进装配。
     // **共用纪律段也在里面**（2026-09-09 拍板：纪律归产品，装配层不再恒挂）。
     expect(preset.extensions?.map((e) => e.entryId)).toEqual([
       "echo:conduct",
@@ -38,7 +39,7 @@ test("preset：产品自带 echo:coding / echo:workspace / echo:shell；不碰 w
     // 权限（2026-11-15）：分类器开着时产品不装策略（越界那一条交给分类器判）；分类器本身是内核的，产品只交形状。
     // 「动手先问」（`permission.ts` 的 `DEFAULT_PERMISSION`）是 `codingPreset()` 不传 permission 时的缺省（评测 / 别的宿主），本产品不用它。
     expect(preset.agent).toEqual({ maxIterations: 200, thinkingLevel: "medium" });
-    expect(preset.safetyClassifier).toEqual({ safeTools: CODING_SAFE_TOOLS, notes: CODING_CLASSIFIER_NOTES });
+    expect(preset.safetyClassifier).toEqual({ safeTools: CODING_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES });
     // 沙箱跟形态走：交互形态 bash 包进操作系统沙箱，管道形态不包（2026-11-15）
     expect(preset.extensions?.find((e) => e.entryId === "echo:shell")?.config).toEqual(interactive ? { sandbox: true } : undefined);
   }

@@ -28,22 +28,22 @@ Each session is its own state root: `$ECHO_HOME/sessions/<session-id>`, or `~/.e
 
 ## Two products
 
-The repository ships two commands on the same runtime. They are siblings: neither depends on the other. `echo-agent` is the general agent; `echo-coding` adds file, search, shell and web tools, and its own identity and conduct. Both are assembled from `@echo-agent/base` and pick the same terminal shell, `@echo-agent/tui`.
+The repository ships two commands on the same runtime. They are siblings: neither depends on the other. `echo-agent` is the general agent; `echo-coding` has the same tools and adds a coding identity, coding conduct and git worktree isolation. Both are assembled from `@echo-agent/base` and pick the same terminal shell, `@echo-agent/tui`.
 
 | | `echo-agent` | `echo-coding` |
 |---|---|---|
-| Capabilities | Memory, tasks, schedule, and skills (built into core) | All of the above, plus file read/write, search, and shell |
-| Tools | Core's `echo:*` builtins | The builtins plus `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` |
+| Capabilities | Memory, tasks, schedule, and skills (built into core), plus file read/write, search, shell and web | All of the above, plus coding conduct and git worktree isolation |
+| Tools | Core's `echo:*` builtins plus `echo:workspace`, `echo:shell` and `echo:web` | The same, plus `echo:worktree` |
 | Command | `echo-agent` | `echo-coding` |
 
-The file, search, shell and web tools live in `@echo-agent/tools` and belong to no product; of the two commands, only `echo-coding` mounts them. A product owns its identity section, its conduct section, its own extensions and its executable; the launcher parts, the host capabilities and the pipe shell come from `@echo-agent/base`, and the interactive form is whichever `Shell` implementation its executable hands in. A third-party product builds on this runtime the same way — and one that draws its own interface depends on `@echo-agent/base` alone, without installing a terminal library.
+The file, search, shell and web tools live in `@echo-agent/tools` and belong to no product; both commands mount them. A product owns its identity section, its conduct section, its own extensions and its executable; the launcher parts, the host capabilities and the pipe shell come from `@echo-agent/base`, and the interactive form is whichever `Shell` implementation its executable hands in. A third-party product builds on this runtime the same way — and one that draws its own interface depends on `@echo-agent/base` alone, without installing a terminal library.
 
 ```bash
 bun add -g @echo-agent/coding
 MOONSHOT_API_KEY=sk-... echo-coding
 ```
 
-Both commands accept the same options (`--help`). In the interactive UI, the runtime's safety classifier has the model check every tool call not known to be safe against what you asked for before it runs, and asks you only when it keeps blocking or cannot run; turn it on or off with `"safetyClassifier"` in `$ECHO_HOME/settings.json`. `echo-coding` also runs shell commands in an OS sandbox that can write only inside the working directory, temporary directories and package caches. Through a pipe nothing is checked by default and `echo-coding` runs every tool without asking — treat it there as a script that may change files in the current directory.
+Both commands accept the same options (`--help`). In the interactive UI, the runtime's safety classifier has the model check every tool call not known to be safe against what you asked for before it runs, and asks you only when it keeps blocking or cannot run; turn it on or off with `"safetyClassifier"` in `$ECHO_HOME/settings.json`. In the interactive UI, both commands also run shell commands in an OS sandbox that can write only inside the working directory, temporary directories and package caches. Through a pipe nothing is checked or sandboxed by default and both commands run every tool without asking — treat either one there as a script that may run commands and change files in the current directory.
 
 ## Use the CLI
 
@@ -133,7 +133,7 @@ try {
 | `@echo-agent/base` | Assembly layer: the product contract, launcher parts, host capabilities (credentials, settings, project instructions, the observe panel) and the pipe shell. No terminal dependency |
 | `@echo-agent/tools` | Standard tool packs any product can mount: `echo:workspace` (files and search), `echo:shell` (bash, background jobs and the OS sandbox) and `echo:web` (fetch and search). Depends on core and base only |
 | `@echo-agent/tui` | Terminal shell: the interactive TUI and first-run setup, packaged as the terminal implementation of the shell port |
-| `echo-agent` | General agent product: its identity and conduct sections, its `Product`, and the `echo-agent` command |
+| `echo-agent` | General agent product: its identity and conduct sections, its `Product`, and the `echo-agent` command. It mounts the three tool packs from `@echo-agent/tools` |
 | `@echo-agent/coding` | Coding agent product: its identity and conduct sections, its permission policy, the `echo:worktree` extension, and the `echo-coding` command. It mounts the three tool packs from `@echo-agent/tools` |
 
 Runnable consumers live in [`examples/`](examples/): a real-provider hello world, a credential-free scripted agent, and extension auto-discovery. The distribution test packs the workspaces, installs the tarballs in clean projects, type-checks all three examples, and runs the two credential-free ones with Bun; Node runs a generated smoke script against the installed package instead (the hello example needs a real key, so it is only type-checked).

@@ -7,6 +7,9 @@
 /** 三条 Extension：产品列进 `createEcho({ extensions })`。 */
 export { ECHO_SHELL, ECHO_WEB, ECHO_WORKSPACE } from "./extensions.ts";
 export type { ShellConfig } from "./extensions.ts";
+/** 产品挂这三组工具的共用件：三条的条目、交给安全分类器的形状、「越出沙箱必须问人」那一条。 */
+export { SHELL_CLASSIFIER_NOTES, TOOLS_SAFE_TOOLS, askOutsideSandbox, toolsEntries } from "./preset.ts";
+export type { ToolsEntriesOptions } from "./preset.ts";
 
 /** 工作区文件：`read_file` / `write_file` / `edit_file`，以及它们与搜索共用的越界守卫。 */
 export { makeFsTools, resolveSafe } from "./fs.ts";

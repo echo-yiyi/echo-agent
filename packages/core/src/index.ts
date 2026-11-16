@@ -128,6 +128,8 @@ export type {
   PermissionVerdict,
 } from "./permission/types.ts";
 export type { SafetyClassifierOptions } from "./permission/classifier.ts";
+export { permissionPolicyFromRules } from "./permission/rules.ts";
+export type { PermissionRule, PermissionRules } from "./permission/rules.ts";
 export type {
   QuestionAnswer,
   QuestionAnswerResult,

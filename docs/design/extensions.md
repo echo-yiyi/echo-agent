@@ -169,7 +169,7 @@ import、定义验形、config 解析与依赖图（Host 的 PREPARE）失败时
 
 createEcho 把实际报告作为 source 为 echo:reload 的 environment 消息投进自己的 durable inbox，之后由正常自主消费路径带给模型。若安全时机被其他工作占用，报告会说本次没有完成；投递失败报诊断，不保证总有下一条模型回复。模型是否再调用新工具验证仍是模型行为，系统不自动替它跑验收。
 
-这一入口只在装配提供登记能力时出现。工具本身不带权限声明，放不放行由产品的权限策略按工具名裁决（echo-coding 没写规则的工具 fallback 是 allow，见 [`permissionPolicyFor()`](../../packages/coding/src/permission.ts#symbol=permissionPolicyFor)）；这不是代码沙箱，加载任意扩展代码仍使用宿主进程权限。完整取舍见 [热重载决策](../decisions/implemented/2026-09-14-extension-hot-reload.md) 与 [模型触发决策](../decisions/implemented/2026-09-14-model-triggered-reload.md)。
+这一入口只在装配提供登记能力时出现。工具本身不带权限声明，放不放行由产品的权限策略按工具名裁决（规则表是内核的 [`permissionPolicyFromRules()`](../../packages/core/src/permission/rules.ts#symbol=permissionPolicyFromRules)，没写规则的工具走 fallback，缺省 allow；echo-coding 的缺省表见 [`DEFAULT_PERMISSION`](../../packages/coding/src/permission.ts#symbol=DEFAULT_PERMISSION)）；这不是代码沙箱，加载任意扩展代码仍使用宿主进程权限。完整取舍见 [热重载决策](../decisions/implemented/2026-09-14-extension-hot-reload.md) 与 [模型触发决策](../decisions/implemented/2026-09-14-model-triggered-reload.md)。
 
 ## 8. 观测与排障
 

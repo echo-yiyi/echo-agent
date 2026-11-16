@@ -604,8 +604,8 @@ describe("Distribution Gate：打包产物能被真实消费", () => {
   test(
     "tui 隔离消费：把 workspace 链接换成 tarball 之后，它的 typecheck 与全套单测仍绿",
     () => {
-      // pi-tui 是它真实的外部依赖（终端差分渲染），显式写出来——判据仍是「恰好等于」
-      isolatedConsumer("packages/cli", 3, ["@echo-agent/base", "@echo-agent/tui"]);
+      // base、tools 与 tui 是它真实的依赖（启动器部件、文件 / shell / web 工具、终端壳），显式写出来——判据仍是「恰好等于」
+      isolatedConsumer("packages/cli", 3, ["@echo-agent/base", "@echo-agent/tools", "@echo-agent/tui"]);
     },
     300_000,
   );
