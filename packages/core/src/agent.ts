@@ -115,7 +115,7 @@ import { makeToolOutputReadTool } from "./tools/output.ts";
 import type { ResourceChange } from "./events.ts";
 import { addSkills, listActiveSkills, type ActiveSkillMap, type SkillMap } from "./skill/harness.ts";
 import { makeSkillTools } from "./skill/tools.ts";
-import { renderSkillCatalog, renderSkillInjections } from "./skill/compose.ts";
+import { renderSkillCatalog, renderSkillInjections, renderSkillRules } from "./skill/compose.ts";
 import type { ActiveSkill, Skill } from "./skill/types.ts";
 import { parseSkillText, roundTripError, serializeSkill, skillEntryPath, skillNameOfEntry } from "./skill/format.ts";
 import type { AgentMcpPort, McpServerSnapshot } from "./mcp/port.ts";
@@ -989,15 +989,20 @@ export class Agent {
       scheduleTools = makeScheduleTools(this.schedule);
     }
     // 每组带上它自己的 prompt 段（谁拥有工具，谁拥有讲它怎么用的段）：
-    //   · skills：目录段。字节何时变：池增删时；**激活/停用不影响本段**（激活不打 system 缓存）。
-    //     门控按真实状态：skill_activate 不在工具面，目录就是死文本（教模型用它没有的工具）。
+    //   · skills：两段（格式归 skill/compose.ts）——规则段进 system；目录段是 `carrier: "messages"`，不进 system
+    //     （目录里的描述是各个 SKILL.md 的作者写的）。池增删只换目录那条消息，system 不变；激活/停用两段都不动。
+    //     门控按真实状态：skill_activate 不在工具面，两段都不出（否则是教模型用它没有的工具）。
     //   · memory：两段（格式归 memory/compose.ts）——规则段进 system；正文段是 `carrier: "messages"`，不进 system。
     //   · tasks / scheduler：不出段——description 已经装下契约。
-    const skillsSection: PromptSection = {
-      name: "skills",
-      order: PROMPT_ORDER.skills,
-      render: () => (this.tools.has("skill_activate") ? renderSkillCatalog(this.skills) : ""),
-    };
+    const skillsSections: PromptSection[] = [
+      { name: "skills", order: PROMPT_ORDER.skills, render: () => (this.tools.has("skill_activate") ? renderSkillRules(this.skills) : "") },
+      {
+        name: "skills-catalog",
+        order: PROMPT_ORDER.skills,
+        carrier: "messages",
+        render: () => (this.tools.has("skill_activate") ? renderSkillCatalog(this.skills) : ""),
+      },
+    ];
     // 三项的初值在这里定形（验形与从前同一套函数），之后由 `AgentPolicies` 声明覆盖
     const initialPolicies: AgentPolicyValues = {
       permission: validatePermissionPolicy(opts.permission),
@@ -1011,7 +1016,7 @@ export class Agent {
 
     this.builtinTools = {
       tasks: { tools: taskTools },
-      skills: { tools: skillTools, sections: [skillsSection] },
+      skills: { tools: skillTools, sections: skillsSections },
       // 内建三个模块与工具、段同一组：整组一起装、一起撤，与第三方模块走同一条 `AgentMemory.module()`。
       // 传了自定义 `memories` = 完全接管，那时 `builtinModules` 为 false、这里一个模块都不给。
       memory:

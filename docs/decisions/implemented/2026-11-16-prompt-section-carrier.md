@@ -37,7 +37,7 @@
 
 ## Non-Goals
 
-- **skill 目录不动**，仍是 system 的 `skills` 段。它装的是已安装 skill 的描述；skill 的安装就是信任决定，这次不重新划。
+- **skill 目录不动**，仍是 system 的 `skills` 段。它装的是已安装 skill 的描述；skill 的安装就是信任决定，这次不重新划。（同日随后推翻：目录拆成规则与列表两段，列表走 messages，见 [skill 目录不进 system](2026-11-16-skill-catalog-out-of-system.md)。）
 - **fresh 的子 agent、自带 system 的压缩调用、Dream 仍然不带**主循环的任何段——与改之前一样（它们以前也拿不到 system 里的项目指令）。
 - **不改 `PROMPT_ORDER` 的数值**，不改项目指令的读取范围（只看 workspace 根，`AGENTS.md` → `CLAUDE.md`）。
 - **不给 messages 的段单独的失败档位或预算**：与 system 的段同一套。

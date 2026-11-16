@@ -20,11 +20,11 @@
 | --- | --- | --- | --- |
 | `tools` | 本 turn 冻结的有效工具工作集，再投影为 schema | 每个 turn 一次 | 单工具名字、description、参数与返回契约 |
 | `systemPrompt` | `AgentPrompt` registry 中 `carrier` 为 `system`（缺省）的 sections + variables | Agent 路径每个 run 一次 | 身份、纪律、交互面、相对稳定的环境事实与跨工具习惯 |
-| `messages` | `carrier` 为 `messages` 的 sections + 压缩后的 transcript 视图 + attempt injection，再经 transform / hook / projection | 每个 attempt 一次（messages 的段每个 run 装一次，run 内原样复用） | 对话事实、运行中会变化但不应入账的临时材料，以及不是开发者写的常驻文本（项目指令、记忆正文） |
+| `messages` | `carrier` 为 `messages` 的 sections + 压缩后的 transcript 视图 + attempt injection，再经 transform / hook / projection | 每个 attempt 一次（messages 的段每个 run 装一次，run 内原样复用） | 对话事实、运行中会变化但不应入账的临时材料，以及不是开发者写的常驻文本（项目指令、skill 目录、记忆正文） |
 
 **prompt 段有两种载体，段自己声明**（[`PromptSection.carrier`](../../packages/core/src/prompt/types.ts#symbol=PromptCarrier)）。不写是 `system`：拼进 system prompt。写 `messages` 的段不进 system：每段渲染成一条环境消息（`source` 是段名），按 order 排在 transcript 视图之前，每个 run 装一次，不进 transcript 也不落 session，压缩不动它（`AgentContext.promptMessages`，由 [`Agent.assemble()`](../../packages/core/src/agent.ts#symbol=Agent.assemble) 与 system 一起装）。
 
-**system 只放开发者写的东西**——产品、extension、角色自己写的段。装着模型写的、或随仓库来的文本的段用 `messages`：现在是项目指令（`instructions`）与记忆正文（`memory-contents`）。两种载体同一个注册口、同一张表、同一套规则（§2、§3.2）。决策见 [prompt 段的载体](../decisions/implemented/2026-11-16-prompt-section-carrier.md) 与 [记忆正文不进 system](../decisions/implemented/2026-11-13-memory-content-out-of-system.md)。
+**system 只放开发者写的东西**——产品、extension、角色自己写的段。装着模型写的、随仓库来的、或第三方写的文本的段用 `messages`：现在是项目指令（`instructions`）、skill 目录（`skills-catalog`）与记忆正文（`memory-contents`）。skill 与记忆各拆成两段：我们写的规则留在 system，内容走 messages。两种载体同一个注册口、同一张表、同一套规则（§2、§3.2）。决策见 [prompt 段的载体](../decisions/implemented/2026-11-16-prompt-section-carrier.md)、[记忆正文不进 system](../decisions/implemented/2026-11-13-memory-content-out-of-system.md) 与 [skill 目录不进 system](../decisions/implemented/2026-11-16-skill-catalog-out-of-system.md)。
 
 主调用顺序见 [`Agent.createContextSnapshot()`](../../packages/core/src/agent.ts#symbol=Agent.createContextSnapshot) 与 [`runAttempt()`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt)：
 
@@ -70,7 +70,7 @@ flowchart LR
 | pipe 的交互说明 | 装配层 | [`pipeSurfaceSection()`](../../packages/base/src/prompt.ts#symbol=pipeSurfaceSection)（非交互形态由 `runPiped()` 挂） |
 | workspace、model、provider | core Agent | [`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection) |
 | AGENTS.md / CLAUDE.md（`carrier: "messages"`，不在 system） | 能读 workspace 的 CLI 层 | [`instructionsSection()`](../../packages/base/src/instructions.ts#symbol=instructionsSection) |
-| skill 目录与激活正文 | skill module | [`renderSkillCatalog()`](../../packages/core/src/skill/compose.ts#symbol=renderSkillCatalog)、[`renderSkillInjections()`](../../packages/core/src/skill/compose.ts#symbol=renderSkillInjections) |
+| skill 的规则（`skills` 段）、目录（`skills-catalog` 段，`carrier: "messages"`，不在 system）与激活正文 | skill module | [`renderSkillRules()`](../../packages/core/src/skill/compose.ts#symbol=renderSkillRules)、[`renderSkillCatalog()`](../../packages/core/src/skill/compose.ts#symbol=renderSkillCatalog)、[`renderSkillInjections()`](../../packages/core/src/skill/compose.ts#symbol=renderSkillInjections) |
 | memory 规则（`memory` 段：模块、层、怎么写、正文的地位） | memory模块| [`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections) |
 | memory 正文（`memory-contents` 段，`carrier: "messages"`，不在 system） | memory模块| 同上；文本出自 [`memoryContents()`](../../packages/core/src/memory/harness.ts#symbol=memoryContents) |
 | task 快照 | task module | [`renderTaskInjection()`](../../packages/core/src/task/tools.ts#symbol=renderTaskInjection) |
@@ -94,12 +94,12 @@ flowchart LR
 | 100–199 | 工具的跨调用习惯 | system | workspace、shell、sessions、compaction |
 | 300 | run / session 环境事实 | system | workspace、model、provider |
 | 400 | workspace 项目指令 | messages | `instructions`：AGENTS.md，找不到才看 CLAUDE.md |
-| 500 | skill 目录 | system | 只列 model-invocable skills |
+| 500 | skill | system 与 messages 各一段 | `skills`（规则：是什么、匹配了先激活、描述是作者写的）；`skills-catalog`（目录：只列 model-invocable skills，每个一行） |
 | 900 | memory | system 与 messages 各一段 | `memory`（规则：模块、层、怎么写、正文的地位）；`memory-contents`（各模块存着的内容） |
 
-数值越小越靠前；同数保注册序。**两种载体各排各的**：system 的段按 order 连成一条字符串，messages 的段按 order 排成几条消息（现在是项目指令在前、记忆正文在后）。排序意图是把更稳定的字节留在前缀，不代表 core 提供或承诺 provider cache。`order` 也不决定刷新频率：刷新由 system / turn / attempt 所在的生命周期决定。
+数值越小越靠前；同数保注册序。**两种载体各排各的**：system 的段按 order 连成一条字符串，messages 的段按 order 排成几条消息（现在是项目指令、skill 目录、记忆正文）。排序意图是把更稳定的字节留在前缀，不代表 core 提供或承诺 provider cache。`order` 也不决定刷新频率：刷新由 system / turn / attempt 所在的生命周期决定。
 
-约定带分两半（2026-11-03 复核）：0–199 是只随产品 / 角色变的静态段（身份、纪律、交互面、工具习惯），300 起是随项目或会话变的段（环境里的 workspace、skill 目录）；记忆的规则段虽排在 900，只随模块表与作用域表变，不随记忆内容变。项目指令与记忆正文不在 system 里，它们变了 system 逐字不变。前一半整段在后一半之前，换项目或换会话时 system 只从环境段起变；内建与两个产品的段都落在各自的带里，当前实现不需要调序。工具 schema 不在 system 里：在把工具渲染在 system 之后的 provider 上，环境段一变，其后的工具定义同样吃不到缓存，这不是段排序能解决的（实测换项目后首次调用只命中约 1.1k，正是环境段之前的静态段）。
+约定带分两半（2026-11-03 复核）：0–199 是只随产品 / 角色变的静态段（身份、纪律、交互面、工具习惯），300 起是随项目或会话变的段（环境里的 workspace）；skill 与记忆的规则段虽排在 500 / 900，只随「池里有没有可列的 skill」、模块表与作用域表变，不随目录或记忆内容变。项目指令、skill 目录与记忆正文不在 system 里，它们变了 system 逐字不变。前一半整段在后一半之前，换项目或换会话时 system 只从环境段起变；内建与两个产品的段都落在各自的带里，当前实现不需要调序。工具 schema 不在 system 里：在把工具渲染在 system 之后的 provider 上，环境段一变，其后的工具定义同样吃不到缓存，这不是段排序能解决的（实测换项目后首次调用只命中约 1.1k，正是环境段之前的静态段）。
 
 ### 3.2 精确装配语义
 
@@ -113,7 +113,7 @@ flowchart LR
 
 前四步对两种载体一视同仁。messages 的段由 `Agent` 包成环境消息：段的文本与上一次相同就复用同一个消息对象，所以文件或记忆没变时，每个 run、每次分叉（压缩、提取、fork）送出去的是逐字相同的那一条；判据见 [messages 的段](../../packages/core/test/prompt.test.ts#test=carrier-为-messages-的段不进-system是对话最前面的一条消息包在来源标签里按-order-排不进-transcript文本没变跨-run-逐字不变变了才换) 与 [两种载体同一套规则](../../packages/core/test/prompt.test.ts#test=两种载体carrier-为-messages-的段不进-system一段一份按-order排序空段失败插值与-system-的段同一套规则)。
 
-**插值只在段自己声明时做**（2026-11-03，决策见 [插值由段声明](../decisions/implemented/2026-11-03-prompt-interpolation-opt-in.md)）。声明的只有作者有意写变量的段：内建环境段（[`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection)）与产品导入的 md 段（`sectionFromMarkdown()`）。装进第三方文本的段——项目指令、记忆的规则（带着各模块自己的说明）、skill 目录、角色 identity——不声明，正文里的 `${{ secrets.X }}`、`{{ .Values.x }}` 是普通字符；此前对所有段插值，这样一行就让每个 run 在调用模型前失败，连记忆提取都起不来。
+**插值只在段自己声明时做**（2026-11-03，决策见 [插值由段声明](../decisions/implemented/2026-11-03-prompt-interpolation-opt-in.md)）。声明的只有作者有意写变量的段：内建环境段（[`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection)）与产品导入的 md 段（`sectionFromMarkdown()`）。装进第三方文本的段——项目指令、记忆的规则（带着各模块自己的说明）与记忆正文、skill 目录、角色 identity——不声明，正文里的 `${{ secrets.X }}`、`{{ .Values.x }}` 是普通字符；此前对所有段插值，这样一行就让每个 run 在调用模型前失败，连记忆提取都起不来。
 
 声明了插值的段里，完整的 `{{name}}` 必须名字合法、已经注册且本次有值，否则抛 `PromptVariableError`；孤立且没有 `}}` 的 `{{` 作为普通文本保留；替换值不二次扫描。现有门见 [排序与空段](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null)、[严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名) 和 [未声明的段原样](../../packages/core/test/prompt.test.ts#test=没声明-interpolate-的段原样第三方文本里的-secretsx-valuesx-workspace-都不当变量)。
 
@@ -188,6 +188,7 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 | --- | --- | --- | --- |
 | 产品 / extension 字面量 | 产品代码 | 无；视为受信 | 改文案就是改模型行为，应与代码一起 review |
 | workspace 的 AGENTS.md / CLAUDE.md | 这个仓库的约定：照守「在这里怎么干活」；不在 system 里，是对话最前面的一条消息（`carrier: "messages"`，2026-11-16）。段头说清它随仓库来、不是用户的话，批准不了用户没要的动作（2026-11-15），也不覆盖 system prompt | 正文前缀 65 536 字符、XML-like 标签定界、正文里冒充闭合标签的字样中和；段头写实际加载的文件名；出门时与别的环境消息一样包来源标签 | 段头只是 prompt 层的约束：模型照不照守靠它自己，第三方仓库的真正信任决定在权限、确认与沙箱层 |
+| skill 目录里的描述 | 材料：用来判断这个 skill 合不合用，不是指令；不在 system 里，是 `skills-catalog` 段（`carrier: "messages"`）装成的一条环境消息，system 的规则段说清这一点（2026-11-16） | 描述单行化、单条 1024 字符、目录总量 8000；出门时与别的环境消息一样包来源标签 | 描述是 skill 作者写的任意文本；规则里那句是写给模型的话，不是隔离 |
 | skill 正文与激活参数 | 被激活后作为工作指令执行 | 与起止标记同形的行转义、单条和总预算、参数单行化 | 起止标记不是安全沙箱；skill 的安装 / 激活就是信任决定 |
 | memory 正文 | 跨 run 的持久背景；不在 system 里，是 `memory-contents` 段（`carrier: "messages"`）装成的一条环境消息。system 的规则段说清它不是用户的指令、记着的「用户允许过」不是此刻的许可（2026-11-15），也不覆盖 system 与用户这次说的话（2026-11-13） | resident / index 各自有预算；索引描述单行化；提取指令要求许可与偏好只记用户亲口说的；出门时与别的环境消息一样包来源标签 | 正文有意保留多行并直接影响模型，旧记忆可能陈旧或被污染；规则里那几句是写给模型的话，不是隔离——模型在冲突时实际听谁的没有评测 |
 | environment 消息（后台任务、提醒到点、别的会话来信、记忆正文与记忆变化、skill 正文、任务清单） | 材料：纪律段讲清只有用户本人的消息是指令（2026-11-15） | 出门时包 `<environment source="…">` 标签，正文里冒充闭合标签的字样中和（[`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)） | 标签只让模型分得清来源，不阻止它照做；照不照做靠模型守纪律段 |
@@ -221,7 +222,7 @@ PromptSection 不区分 required / optional，render 异常统一省略。产品
 - **生命周期命名有历史差异。** getTurnInjections 实际每个 attempt 调用，重试时会重算。这是已确认的上下文重建行为，不应改回每 turn 只算一次；PromptSource 仍是公开但没有外部注册入口的内部来源类型。
 - **上下文字段含义需按实现读取。** AssembleContext.agentId 当前赋值为 product，不代表角色身份。
 - **预算与信任有限。** task 标题和 executor 未建立注入字符总上界；格式定界与反引号替换不能证明外部文本不会影响模型指令理解。
-- **「system 只放开发者写的」是纪律，不是机器门。** 记忆正文与项目指令已经是 messages 载体的段；skill 目录（装着已安装 skill 的描述）仍在 system。一个 extension 把第三方文本注册成 system 的段，registry 不拦——`carrier` 由段的作者声明，没有按内容来源判定的机制。
+- **「system 只放开发者写的」是纪律，不是机器门。** 项目指令、skill 目录与记忆正文已经是 messages 载体的段，内建的段里不再有第三方或模型写的正文留在 system；但一个 extension 把第三方文本注册成 system 的段，registry 不拦——`carrier` 由段的作者声明，没有按内容来源判定的机制。
 - **messages 载体的段没有自己的预算。** 记忆正文受各模块预算约束、项目指令有正文截断阈值，都在各自的 `render()` 里；装配器不设这类段的总上界。
 
 角色替换顺序已由 createEcho 的产品先、角色后挂载解决，不再列作当前缺陷。历史审阅命令见 [复核记录](../code-review/2026-09-15-doc-probes.md)；其中旧失败输出不代表当前行为。
@@ -240,7 +241,7 @@ PromptSection 不区分 required / optional，render 异常统一省略。产品
 | 段的载体：`carrier` 只收两种；messages 的段与 system 的段同一套装配规则；文本没变跨 run 是同一条消息 | [注册](../../packages/core/test/prompt.test.ts#test=段与变量注册进两张表同名抛disposer-只卸自己那个对象)、[两种载体](../../packages/core/test/prompt.test.ts#test=两种载体carrier-为-messages-的段不进-system一段一份按-order排序空段失败插值与-system-的段同一套规则)、[Agent 接线](../../packages/core/test/prompt.test.ts#test=carrier-为-messages-的段不进-system是对话最前面的一条消息包在来源标签里按-order-排不进-transcript文本没变跨-run-逐字不变变了才换) |
 | prompt / tool pack 原子注册、卸载、撞名回滚 | [pack 测试](../../packages/core/test/prompt.test.ts#test=definepromptpack-definetoolpack-带段mount-进表unmount-撤走撞名整包回滚) |
 | role identity 的受控替换与复原 | [agent definition 测试](../../packages/core/test/agent-def.test.ts#test=identity-被替换工具收成子集unmount-两样都复原) |
-| skill / task 动态材料不进 transcript，system 在 run 内不随其变化 | [主接线测试](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)、[task 测试](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |
+| skill / task 动态材料不进 transcript，system 在 run 内不随其变化 | [主接线测试](../../packages/core/test/prompt.test.ts#test=内建段经-echo-装进-prompt环境段带-workspacemodelskill-的规则在-system目录是对话最前面的一条消息激活后下一轮注入可见system-逐字节不变)、[task 测试](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |
 | 注入里的工具门控使用本 turn 冻结菜单 | [冻结菜单测试](../../packages/core/test/prompt.test.ts#test=注入的工具门控读本轮冻结的菜单turnstart-里才注册的-tasklist本轮菜单与清单都没有下一轮一起出现) |
 | 默认 coding 产品的 prompt 文本、工具集与执行预算同源 | [identity 漂移测试](../../packages/coding/test/identity.test.ts#test=identity-的工具集与-prompt-与真装出来的-coding-agent-一致漂移即红) |
 

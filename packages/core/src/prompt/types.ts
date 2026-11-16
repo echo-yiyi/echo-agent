@@ -9,7 +9,7 @@
 //
 // 段有两种载体(`PromptSection.carrier`,2026-11-16):缺省进 system;声明 `"messages"` 的段不进 system,
 // 每段渲染成一条环境消息排在对话最前面。system 只放开发者写的东西;装着模型或仓库文件写的内容的段
-// (记忆正文、项目指令)用 messages。两种段同一个注册口、同一套排序 / 插值 / 失败规则。
+// (项目指令、skill 目录、记忆正文)用 messages。两种段同一个注册口、同一套排序 / 插值 / 失败规则。
 //
 // 缓存按请求体三个载体保证(tools → system → messages,任何一处字节变,其后全失效):
 //   tools    一轮内集合不变(轮边界调和)+ **投影按名排序**(注册时序天然不稳定,尤其 MCP 异步连接)
@@ -51,7 +51,7 @@ export const PROMPT_ORDER = Object.freeze({
   environment: 300,
   /** 项目指令文件(AGENTS.md)。改文件才变。messages 载体。 */
   instructions: 400,
-  /** skill 目录。池增删才变。 */
+  /** skill:规则段(system)与目录段(messages)。目录在池增删时变。 */
   skills: 500,
   /** 记忆:规则段(system)与正文段(messages)。正文最常变,沉底。 */
   memory: 900,
@@ -61,13 +61,13 @@ export const PROMPT_ORDER = Object.freeze({
  * 一段放在哪(2026-11-16):
  *   · `"system"`(缺省):拼进 system prompt。给开发者写的东西——身份、纪律、交互面、工具习惯、规则。
  *   · `"messages"`:不进 system。每段渲染成一条环境消息(`source` 是段名),按 order 排在对话最前面;
- *     不进 transcript、不落 session、压缩不动它。给装着模型或仓库文件写的内容的段——记忆正文、项目指令。
+ *     不进 transcript、不落 session、压缩不动它。给装着模型、仓库文件或第三方写的内容的段——项目指令、skill 目录、记忆正文。
  * 封闭的两种:模型请求里放得下常驻文本的载体只有这两个(工具 schema 不是文本段)。
  */
 export type PromptCarrier = "system" | "messages";
 
 export type PromptSection = {
-  /** 段名。同一 Agent 内唯一——registry 同名注册抛。内建:"environment" / "skills" / "memory" / "memory-contents"。 */
+  /** 段名。同一 Agent 内唯一——registry 同名注册抛。内建:"environment" / "skills" / "skills-catalog" / "memory" / "memory-contents"。 */
   readonly name: string;
   /** 升序拼接;约定带见 {@link PROMPT_ORDER}。同数按注册序。 */
   readonly order: number;

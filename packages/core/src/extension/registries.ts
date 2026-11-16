@@ -61,7 +61,7 @@ export interface AgentSkillsRegistry {
  * 以及工具的**跨调用习惯**——由拥有该工具的 extension 出。
  *
  * 段放在哪由段自己声明（`PromptSection.carrier`，2026-11-16）：缺省进 system；`"messages"` 的段不进 system，
- * 渲染成对话最前面的一条环境消息——装着模型或仓库文件写的内容的段（记忆正文、项目指令）用它。
+ * 渲染成对话最前面的一条环境消息——装着模型、仓库文件或第三方写的内容的段（项目指令、skill 目录、记忆正文）用它。
  */
 export interface AgentPromptRegistry {
   /**

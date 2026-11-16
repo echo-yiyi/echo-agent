@@ -26,7 +26,7 @@ import type { ContextMirror } from "../observability/context-mirror.ts";
  *
  * `promptMessages` 是 **messages 载体的 prompt 段**（`PromptSection.carrier: "messages"`）装配出来的消息，一段一条：
  * 与 system 一样每个 run 装一次、run 内不变，送模时排在 transcript 视图之前，不进 transcript、不落 session、
- * 压缩不动它。system 只放开发者写的段；装着模型或仓库文件写的内容的段（记忆正文、项目指令）在这里
+ * 压缩不动它。system 只放开发者写的段；装着模型、仓库文件或第三方写的内容的段（项目指令、skill 目录、记忆正文）在这里
  * （`docs/decisions/implemented/2026-11-16-prompt-section-carrier.md`）。没有就是空数组。
  */
 export type AgentContext = {

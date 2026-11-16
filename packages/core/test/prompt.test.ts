@@ -25,7 +25,7 @@ import { sectionFromMarkdown } from "../src/prompt/import.ts";
 import { fenceSafe } from "../src/prompt/sanitize.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptVariable } from "../src/prompt/types.ts";
 import { addSkills, activateSkill, deactivateSkill, type ActiveSkillMap, type SkillMap } from "../src/skill/harness.ts";
-import { renderSkillCatalog, renderSkillInjections, SKILL_CATALOG_CAPS } from "../src/skill/compose.ts";
+import { renderSkillCatalog, renderSkillInjections, renderSkillRules, SKILL_CATALOG_CAPS } from "../src/skill/compose.ts";
 import { registerTool, toolSchemasOf, type ToolMap } from "../src/tools/harness.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import type { Skill } from "../src/skill/types.ts";
@@ -259,12 +259,17 @@ describe("AgentPrompt registry", () => {
 
 /* ───────────────────────── skill 目录 / tools 投影 / 通道 B(渲染函数本身) ───────────────────────── */
 
-describe("skill 目录段", () => {
-  test("池空 → 不出段（门控「有没有 skill_activate 工具」在段的闭包里）", () => {
+describe("skill 的两段:规则与目录", () => {
+  test("池空 → 两段都不出（门控「有没有 skill_activate 工具」在段的闭包里）", () => {
     expect(renderSkillCatalog(new Map())).toBe("");
+    expect(renderSkillRules(new Map())).toBe("");
+    // 只有不给模型列的 skill：也算没有可列的
+    const h = attachedSkills({ skills: [skill("hidden", "看不见", "正文", false)] });
+    expect(renderSkillCatalog(h.skills)).toBe("");
+    expect(renderSkillRules(h.skills)).toBe("");
   });
 
-  test("只列 modelInvocable;描述单行化 + 单条截断", () => {
+  test("目录只列 modelInvocable;描述单行化 + 单条截断", () => {
     const h = attachedSkills({
       skills: [skill("a", "第一行\n第二行"), skill("hidden", "看不见", "正文", false), skill("b", "x".repeat(2000))],
     });
@@ -273,6 +278,24 @@ describe("skill 目录段", () => {
     expect(out).not.toContain("hidden");
     expect(out).toContain("…[truncated]"); // descriptionMax=1024
     expect(SKILL_CATALOG_CAPS.descriptionMax).toBe(1024);
+  });
+
+  test("规则与目录分开:规则里没有任何 skill 的名字或描述、池里增删 skill 它逐字不变;目录里没有怎么用的规则", () => {
+    const one = attachedSkills({ skills: [skill("a", "描述甲")] });
+    const two = attachedSkills({ skills: [skill("a", "描述甲"), skill("b", "描述乙")] });
+    const rules = renderSkillRules(one.skills);
+    // 规则（进 system）：我们写的那几句——是什么、目录在哪、匹配了先激活、描述是作者写的
+    expect(rules.startsWith("# Skills\n")).toBe(true);
+    expect(rules).toContain("activate that skill with skill_activate before starting");
+    expect(rules).toContain("Each description was written by the skill's author");
+    expect(rules).not.toContain("描述甲");
+    expect(rules).not.toMatch(/^- /m);
+    expect(renderSkillRules(two.skills)).toBe(rules); // 池里多了一个 skill，system 的这一段不变
+    // 目录（messages 载体的段）：名字与描述，前面一句说明；不带规则
+    const catalog = renderSkillCatalog(two.skills);
+    expect(catalog.startsWith("# Skill catalog\n")).toBe(true);
+    expect(catalog).toContain("- a: 描述甲\n- b: 描述乙");
+    expect(catalog).not.toContain("skill_activate");
   });
 });
 
@@ -331,7 +354,7 @@ describe("sectionFromMarkdown", () => {
 /* ───────────────────────── ⑥⑦ Agent 接线与缓存语义 ───────────────────────── */
 
 describe("Agent 接线", () => {
-  test("内建段经 echo:* 进 system:环境段带 {{workspace}}/{{model}};skills 目录在;激活后下一轮注入可见、system 逐字节不变", async () => {
+  test("内建段经 echo:* 装进 prompt:环境段带 {{workspace}}/{{model}};skill 的规则在 system、目录是对话最前面的一条消息;激活后下一轮注入可见、system 逐字节不变", async () => {
     const { spy, seen } = spying([toolTurn("t1", "skill_activate", { name: "h5", instructions: "做落地页" }), textTurn("做完了")]);
     const agent = new Agent({
       model: FAKE_MODEL,
@@ -345,16 +368,24 @@ describe("Agent 接线", () => {
     const sys = seen[0]?.systemPrompt ?? "";
     // echo:agent 的环境段:变量从 AssembleContext 来,模型名是 admission 冻结的那个
     expect(sys).toContain(`# Environment\nWorkspace: /repo/x\nModel: ${FAKE_MODEL.id} (${FAKE_MODEL.provider})`);
-    // echo:skills 的目录段在,且排在环境段之后(order 500 > 300)
-    expect(sys).toContain("- h5: 做 H5 页");
-    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("- h5: 做 H5 页"));
+    // echo:skills 的规则段在 system,且排在环境段之后(order 500 > 300);目录不在 system——描述是 skill 作者写的
+    expect(sys).toContain("# Skills\n");
+    expect(sys.indexOf("# Environment")).toBeLessThan(sys.indexOf("# Skills\n"));
+    expect(sys).not.toContain("- h5: 做 H5 页");
+    expect(sys).not.toContain("# Skill catalog");
+    // 目录是 messages 载体的段:对话最前面的一条消息,来源标签写段名;之后才是用户的输入
+    const firstTexts = seen[0]!.messages.map((m) => m.content.map((b) => (b.type === "text" ? b.text : "")).join(""));
+    expect(firstTexts[0]!.startsWith('<environment source="skills-catalog">\n# Skill catalog\n')).toBe(true);
+    expect(firstTexts[0]).toContain("- h5: 做 H5 页");
+    expect(firstTexts[1]).toBe("做个 H5");
     expect(JSON.stringify(seen[0]?.messages)).not.toContain("instructions begin");
     // 第 2 轮:激活生效,注入出现在消息里(投影成 user 角色)
     const lastMsg = JSON.stringify(seen[1]?.messages);
     expect(lastMsg).toContain("# Skill: h5 (instructions begin)");
     expect(lastMsg).toContain("用单文件写");
-    // system 逐字节不变——激活 skill 不打 system 缓存
+    // system 逐字节不变——激活 skill 不打 system 缓存；目录那条消息也不变
     expect(seen[1]?.systemPrompt).toBe(sys);
+    expect(seen[1]!.messages[0]).toEqual(seen[0]!.messages[0]!);
     // 注入不进 transcript
     expect(JSON.stringify(agent.messages)).not.toContain("instructions begin");
   });

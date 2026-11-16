@@ -280,10 +280,11 @@ test("装配面:四类工具都在(fs/bash/搜索/任务清单);skill 目录空�
   // 它按状态根装了 skillStore ⇒ 支持**创建** skill ⇒ 两件工具都装（池空也装，因为 create 用得上）。
   // 用户拍板接受这个变化，所以这里改成断言现状，而不是给评测另留一条装配路径。
   expect(offered).toContain("skill_create");
-  // 池确实是空的——工具在不等于有 skill：skill_activate 在菜单上（目录段的门开着），system 里却没有目录段
+  // 池确实是空的——工具在不等于有 skill：skill_activate 在菜单上（两段的门开着），system 里却没有规则段，消息里也没有目录
   expect(menu).toContain("skill_activate");
   const sys = first.systemPrompt ?? "";
   expect(sys).not.toContain("# Skills");
+  expect(JSON.stringify(first.messages)).not.toContain("# Skill catalog");
   // 产品层那几条真的进了清单（不是只把工具塞进 Map）——「清单 = Host 实际挂上的那一份」
   expect(echo.extensions.map((e) => e.entryId)).toContain("echo:coding");
   expect(echo.extensions.map((e) => e.entryId)).toContain("echo:workspace");
@@ -330,8 +331,12 @@ test("skill 目录有货:加载进池 + 装 skill 工具", async () => {
   // **扫盘归调用方**（2026-08-31）：`codingPreset()` 是同步的一份配置，不读盘。
   const { echo, seen } = await echoWith({ permission: false, skillDirs: [join(root, ".echo/skills")] });
   await echo.agent.prompt("看看");
-  // 进了池 = 模型在 system 的目录段里看得到它，且手里有激活它的工具
-  expect(seen[0]!.systemPrompt ?? "").toContain("- fmt: 格式化流程");
+  // 进了池 = 模型在目录里看得到它，且手里有激活它的工具。目录是对话前面的一条消息、不在 system 里；system 里是规则（2026-11-16）
+  const messages = JSON.stringify(seen[0]!.messages);
+  expect(messages).toContain("# Skill catalog");
+  expect(messages).toContain("- fmt: 格式化流程");
+  expect(seen[0]!.systemPrompt ?? "").not.toContain("- fmt: 格式化流程");
+  expect(seen[0]!.systemPrompt ?? "").toContain("# Skills\n");
   expect(menuOf(seen[0]!)).toContain("skill_activate");
   await echo.stop();
 });

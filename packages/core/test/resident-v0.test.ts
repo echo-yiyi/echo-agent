@@ -149,14 +149,19 @@ test(
     // ⑨ **第二轮模型调用真的用得上第一轮的东西**——判据落在模型收到的 Context 上，
     // 不是「盘上有」。「东西回来了」与「东西进了 context」是两件事，此前只验过前者。
     const last = rc.seen.at(-1)!;
-    // Memory：A 进程写的那条，出现在 C 进程对话最前面那条记忆正文里（2026-11-13 起记忆内容不进 system，system 只留规则）
-    expect(last.texts[0], "A 进程写的记忆没进 C 进程对话最前面那条记忆正文").toContain("项目笔记");
+    // Memory：A 进程写的那条，出现在 C 进程对话前面那条记忆正文里（2026-11-13 起记忆内容不进 system，system 只留规则）。
+    // 它前面还有 skill 目录那条（order 500 < 900），所以按来源标签找，不按下标
+    const memoryContents = last.texts.find((t) => t.startsWith('<environment source="memory-contents">'));
+    expect(memoryContents, "A 进程写的记忆没进 C 进程对话前面那条记忆正文").toContain("项目笔记");
     expect(last.systemPrompt, "记忆内容不该在 system 里").not.toContain("项目笔记");
     expect(last.systemPrompt, "记忆的规则段没进 system").toContain("# Memory");
     // Session：第一轮的对话回到了 context
     expect(last.texts.join("\n"), "第一轮的对话没进 context").toContain("把「用户在做 Echo」记进记忆");
-    // Skill：目录段进 system（激活是运行态、不跨进程；宿主每次启动重新交 skill）
-    expect(last.systemPrompt, "skill 目录没进 system").toContain("写提交信息");
+    // Skill：目录是对话最前面的一条消息、不在 system 里，system 只留规则（2026-11-16；激活是运行态、不跨进程；宿主每次启动重新交 skill）
+    expect(last.texts[0], "skill 目录没送到模型").toContain('<environment source="skills-catalog">');
+    expect(last.texts[0], "skill 目录没送到模型").toContain("写提交信息");
+    expect(last.systemPrompt, "skill 目录不该在 system 里").not.toContain("写提交信息");
+    expect(last.systemPrompt, "skill 的规则段没进 system").toContain("# Skills");
 
     // Task：A 进程建的那条，回到盘上**并且**进了 C 进程的 context（2026-08-24 落地前，
     // 这里只验得到前半句）。**进的是消息末尾的注入，不是 system**——清单每轮都在变，
