@@ -10,8 +10,8 @@
 // **权限**：2026-09-01 定的是两种形态都全放行——每一步都问只会让人按到麻木，管道形态更是没人可问。
 // 2026-11-15 起两层兜底，都不是本产品自己的机制：
 //   · **安全分类器**是内核的（`createEcho({ safetyClassifier })`），开不开归使用者（settings.json 的 `safetyClassifier`，
-//     不写按形态：交互开、管道关——装配层 `presetForm` 定）。本产品只交**形状**：自己哪些工具不用判（`CODING_SAFE_TOOLS`）、
-//     bash 的 `sandbox: false` 是什么意思（`CODING_CLASSIFIER_NOTES`）。
+//     不写按形态：交互开、管道关——装配层 `presetForm` 定）。本产品只交**形状**：哪些工具不用判（`CODING_SAFE_TOOLS`：
+//     工具包那份加上本产品的 worktree 两件）、bash 的 `sandbox: false` 是什么意思（工具包的 `SHELL_CLASSIFIER_NOTES`）。
 //   · **交互形态命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，`@echo-agent/tools` 的 `sandbox.ts`）。分类器关着时，越出沙箱的那一条
 //     由人看（`permissionPolicyFor` 的规矩）；开着时由分类器判，不另装策略。
 // `permission.ts` 的 `DEFAULT_PERMISSION`（三件先问的黑名单）**不是这条命令的行为**：它只在嵌入方调 `codingPreset()`
@@ -21,7 +21,8 @@ import { readFileSync } from "node:fs";
 import { conductEntry, mainFor, retainRecentDays, type Product } from "@echo-agent/base";
 import { terminalShell } from "@echo-agent/tui";
 import { codingPreset } from "./agent.ts";
-import { CODING_CLASSIFIER_NOTES, CODING_SAFE_TOOLS } from "./permission.ts";
+import { SHELL_CLASSIFIER_NOTES } from "@echo-agent/tools";
+import { CODING_SAFE_TOOLS } from "./permission.ts";
 
 /** 本包的版本，欢迎头里显示。`../package.json` 在源码树和 tarball 里都在这个相对位置。 */
 const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
@@ -46,7 +47,7 @@ export const ECHO_CODING: Product = Object.freeze({
     return {
       ...preset,
       extensions: [conductEntry(form), ...preset.extensions],
-      safetyClassifier: { safeTools: CODING_SAFE_TOOLS, notes: CODING_CLASSIFIER_NOTES },
+      safetyClassifier: { safeTools: CODING_SAFE_TOOLS, notes: SHELL_CLASSIFIER_NOTES },
     };
   },
   // 观测留 30 天（2026-09-15 用户拍板，与 echo-agent 同一条规则；两个产品平级，各自声明各自的）。

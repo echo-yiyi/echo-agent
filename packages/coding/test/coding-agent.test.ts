@@ -12,7 +12,7 @@ import { AgentRuntimeService, defineExtension, type ExtensionEntry } from "@echo
 import { detectSandbox } from "@echo-agent/tools";
 import { codingPreset } from "../src/agent.ts";
 import { loadSkills } from "@echo-agent/core";
-import type { PermissionPolicy } from "../src/permission.ts";
+import type { PermissionRules } from "@echo-agent/core";
 import { mkdtempSync } from "node:fs";
 
 // **user 层要隔离**（2026-09-03）：`stateDir` 只管这一段 session 的目录，记忆与技能在 ECHO_HOME 下，
@@ -112,7 +112,7 @@ async function idle(echo: Echo): Promise<void> {
  */
 async function echoWith(opts: {
   turns?: ScriptedTurn[];
-  permission?: PermissionPolicy | false;
+  permission?: PermissionRules | false;
   sandbox?: boolean;
   skillDirs?: readonly string[];
   /** 排在产品那几条**之前**的额外 extension（同一代里卸载是 LIFO，所以它们晚于产品的卸）。 */

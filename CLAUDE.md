@@ -16,7 +16,7 @@ This is not a license to widen the change: before altering a public API, a persi
 | `packages/base/` | `@echo-agent/base`: the assembly layer. Launcher parts, the product contract, the shell port, host capabilities (credentials, settings, project instructions, the observe panel) and the pipe form. No terminal dependency |
 | `packages/tools/` | `@echo-agent/tools`: the standard tool packs for acting on the outside world — `echo:workspace` (files and search), `echo:shell` (bash, background jobs, the OS sandbox) and `echo:web`. They belong to no product; a product mounts the ones it wants. Depends on `packages/core` and `packages/base` only |
 | `packages/tui/` | `@echo-agent/tui`: the terminal shell — the interactive TUI and the first-run setup, packaged as the terminal implementation of the shell port |
-| `packages/cli/` | `echo-agent`: the general agent product. Its identity section, its `Product`, its executable. It picks the terminal shell like any other product would |
+| `packages/cli/` | `echo-agent`: the general agent product. Its identity section, its `Product`, its executable. It picks the terminal shell and mounts the tool packs from `packages/tools` like any other product would |
 | `packages/coding/` | `echo-coding`: the coding agent product, a sibling of `echo-agent`. It depends on `packages/base`, `packages/tools` and `packages/tui`, never on another product. It owns the `echo:coding` prompt pack, `echo:worktree` and its permission defaults, and mounts `echo:workspace` / `echo:shell` / `echo:web` from `packages/tools` |
 | `examples/` | Runnable samples that consume the public API from tarballs |
 | `test/` | Repository-level distribution and documentation gates |

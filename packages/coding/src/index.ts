@@ -11,5 +11,5 @@
 export { main, ECHO_CODING } from "./cli.ts";
 export { codingPreset, CODING_DEFAULT_MODEL } from "./agent.ts";
 export type { CodingPreset, CodingPresetOptions } from "./agent.ts";
+// 规则表的类型（`PermissionRules` / `PermissionRule`）与换成策略的函数是内核的，从 `@echo-agent/core` 拿；这里只有本产品的内容
 export { permissionPolicyFor, DEFAULT_PERMISSION } from "./permission.ts";
-export type { PermissionPolicy, PermissionRule } from "./permission.ts";

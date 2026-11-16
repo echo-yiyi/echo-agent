@@ -13,7 +13,7 @@
 | 路径 | 职责 |
 |---|---|
 | `packages/core/` | Runtime、engine、provider adapters、状态、记忆、任务与 extension API |
-| `packages/cli/` | `echo-agent`：通用 agent 产品，官方 CLI 与交互式 TUI；高层装配的消费者，不认识任何具体产品 |
+| `packages/cli/` | `echo-agent`：通用 agent 产品，官方 CLI 与交互式 TUI；高层装配的消费者，不认识任何具体产品；挂上 `packages/tools` 的三条工具 extension |
 | `packages/tools/` | `@echo-agent/tools`：对外部世界动手的标准工具包——`echo:workspace`（文件与搜索）、`echo:shell`（bash、后台作业、操作系统沙箱）、`echo:web`。不属于任何产品，产品按需挂；只依赖 `packages/core` 与 `packages/base` |
 | `packages/coding/` | `echo-coding`：coding agent 产品，与 `echo-agent` 平级、不依赖别的产品。自己拥有 prompt pack `echo:coding`、`echo:worktree` 与权限缺省，挂上 `packages/tools` 的 `echo:workspace` / `echo:shell` / `echo:web` |
 | `examples/` | 从 tarball 消费公共 API 的可运行示例 |

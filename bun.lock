@@ -32,6 +32,7 @@
       "dependencies": {
         "@echo-agent/base": "workspace:*",
         "@echo-agent/core": "workspace:*",
+        "@echo-agent/tools": "workspace:*",
         "@echo-agent/tui": "workspace:*",
       },
       "devDependencies": {
