@@ -57,7 +57,7 @@ import type { AgentContext, AgentLoopConfig, AttemptResult, LoopProbes, LoopResu
 import { EMPTY_COMPACTION, type CompactionOptions, type CompactionStage, type CompactionState } from "./compaction/types.ts";
 import { defaultCompactionPack } from "./compaction/builtin.ts";
 import { calibrationFrom, fixedOverhead, runCompaction, type CompactionOutcome } from "./compaction/pipeline.ts";
-import { buildWorkingMessages, estimateText, estimateTokens, projectRange } from "./compaction/view.ts";
+import { buildWorkingMessages, estimateTokens, prefixEstimate, projectRange } from "./compaction/view.ts";
 import type { CompactResult } from "./extension/runtime.ts";
 import type { SessionEntryInput, SessionService } from "./session/service.ts";
 import type { SessionPhase } from "./session/status.ts";
@@ -80,14 +80,15 @@ import {
   listMemories,
   memoryObserver,
   memoryScopeTableOf,
+  memoryPreamble,
   memoryPromptSections,
   memoryTool,
   memoryUpdateMessage,
   dreamGate,
   shownResidentContents,
   type AgentMemories,
+  type MemoryFreeze,
   type MemoryReads,
-  type MemorySystemFreeze,
 } from "./memory/harness.ts";
 import {
   disposeSchedule,
@@ -717,16 +718,16 @@ export class Agent {
    */
   readonly compactionStages: Map<string, CompactionStage> = new Map();
   /**
-   * 上一次 usage 算出的校准比（真 token / 字符估）与当时 system prompt 的字符估。手动压缩发生在 run 之外、
+   * 上一次 usage 算出的校准比（真 token / 字符估）与当时 system prompt 加开头消息的字符估。手动压缩发生在 run 之外、
    * 新 run 的首轮还没有 usage——这两处没有基准，裸字符估对中文会低 2–4 倍，就沿用这份。`reset()` 归 1。
    */
   private lastCalibration = 1;
-  private lastSystemEstimate = 0;
+  private lastPrefixEstimate = 0;
   /**
-   * system 里那份记忆段，会话内冻结（`MemorySystemFreeze`）。压缩落地、transcript 清空或从盘上换掉时
+   * 记忆正文那条开头消息，会话内冻结（`MemoryFreeze`）。压缩落地、transcript 清空或从盘上换掉时
    * 置回 null（`processEvents` 里），下一次组装重取。
    */
-  private readonly memorySystem: MemorySystemFreeze = { text: null, files: null };
+  private readonly memoryFreeze: MemoryFreeze = { preamble: null, files: null };
   /** 大工具结果的外存目录（`AgentOptions.toolOutputStore`，不给就是进程内存）。 */
   private readonly toolOutputs: StorageDir;
 
@@ -959,7 +960,7 @@ export class Agent {
     // 每组带上它自己的 prompt 段（谁拥有工具，谁拥有讲它怎么用的段）：
     //   · skills：目录段。字节何时变：池增删时；**激活/停用不影响本段**（激活不打 system 缓存）。
     //     门控按真实状态：skill_activate 不在工具面，目录就是死文本（教模型用它没有的工具）。
-    //   · memory：记忆段（格式归 memory/compose.ts），沉底。
+    //   · memory：记忆的规则段（格式归 memory/compose.ts）。记忆正文不进 system，走开头消息（`contextPreamble`）。
     //   · tasks / scheduler：不出段——description 已经装下契约。
     const skillsSection: PromptSection = {
       name: "skills",
@@ -987,7 +988,7 @@ export class Agent {
           ? undefined
           : {
               tools: memoryTools,
-              sections: memoryPromptSections(this.memory, this.memorySystem),
+              sections: memoryPromptSections(this.memory),
               modules: this.memory.builtinModules ? [agentMemory, userMemory, notesMemory] : [],
             },
       scheduler: scheduleTools === undefined ? undefined : { tools: scheduleTools },
@@ -2793,8 +2794,8 @@ export class Agent {
         // 全部被拦下：**不进 transcript、不起循环**——没有 agent_start，也就没有半截 run。
         return { outcome: { kind: "aborted", reason: `userPromptSubmit（${source}）被 hook 拦下` }, messages: [] };
       }
-      // 先组装（system 里的记忆段此刻冻结或复用），再看记忆是否已变：变了就在本 run 的输入前追加一条，
-      // system 不动——请求只在末尾长，缓存不断。续跑（`runContinuation`）不追加：它接的是被打断的那个 run。
+      // 先组装（记忆正文那条开头消息此刻冻结或复用），再看记忆是否已变：变了就在本 run 的输入前追加一条，
+      // system 与开头消息都不动——请求只在末尾长，缓存不断。续跑（`runContinuation`）不追加：它接的是被打断的那个 run。
       const context = await this.createContextSnapshot(scope);
       const update = await this.memoryUpdate();
       return runAgentLoop(
@@ -3298,7 +3299,7 @@ export class Agent {
   ): Promise<ExtractPass> {
     if (fork.range.messages === 0 || !this.memoryWorkAllowed || signal.aborted) return "not_run";
     const table = memoryScopeTableOf(memory);
-    // 此刻存着什么由 prompt 自带：system 里的记忆段是会话开头冻结的那一版，之后写的看不到；不给就只能一个个 view 去摸
+    // 此刻存着什么由 prompt 自带：上文开头那条记忆正文是会话开头冻结的那一版，之后写的看不到；不给就只能一个个 view 去摸
     const prompt = defaultExtractPrompt(listMemories(memory), table, fork.range, await memoryManifest(memory));
     const runId = `extract-${crypto.randomUUID()}`;
     const observe = this.memoryFactsFor(runId);
@@ -3330,8 +3331,9 @@ export class Agent {
     const result = await this.runSubagent(
       {
         prompt,
-        // 主循环每个 run 装一次的那份（记忆段是冻结的那一版）：与主循环最后一次请求逐字相同
+        // 主循环每个 run 装一次的那份 system 与开头消息（记忆正文是冻结的那一版）：与主循环最后一次请求逐字相同
         systemPrompt: await this.assemblePrompt(scope.modelBinding.model),
+        preamble: await this.contextPreamble(),
         tools: menu,
         seed: fork.seed,
         runId,
@@ -3459,6 +3461,8 @@ export class Agent {
        */
       compaction: "inherit" | "none";
       seed?: readonly AgentMessage[];
+      /** 开头消息（`AgentContext.preamble`）：沿用主循环那份 system 的（提取、fork）一起带上主循环的；自带 system 的不给。 */
+      preamble?: readonly AgentMessage[];
     },
     scope: AgentAdmissionExecuteScope,
     signal: AbortSignal,
@@ -3474,7 +3478,7 @@ export class Agent {
     try {
       const result = await runAgentLoop(
         [userMessage(spec.prompt)],
-        { systemPrompt: spec.systemPrompt, messages: [...(spec.seed ?? [])], compaction: EMPTY_COMPACTION },
+        { systemPrompt: spec.systemPrompt, preamble: spec.preamble ?? [], messages: [...(spec.seed ?? [])], compaction: EMPTY_COMPACTION },
         {
           ...base,
           runId,
@@ -3573,6 +3577,11 @@ export class Agent {
     return system.kind === "given" ? Promise.resolve(system.prompt) : this.assemblePrompt(scope.modelBinding.model);
   }
 
+  /** fork 连父的开头消息一起带（记忆正文，冻结的那份）；fresh 的 system 是模型给的，不带。 */
+  private subagentPreamble(system: SubagentSystem): Promise<readonly AgentMessage[]> {
+    return system.kind === "given" ? Promise.resolve([]) : this.contextPreamble();
+  }
+
   /** 前台委派：嵌在父 run 的这次工具执行里跑到完；父的 abort 一路级联进来（用的是工具拿到的 signal）。回执逐条推进度。 */
   private async spawnSubagentForeground(spec: SubagentSpec, ctx: { toolCallId: string; signal?: AbortSignal; onProgress?: (text: string) => void }): Promise<SubagentOutcome> {
     const scope = this.activeScope;
@@ -3585,6 +3594,7 @@ export class Agent {
       {
         prompt: spec.prompt,
         systemPrompt: await this.subagentSystem(prepared.system, scope),
+        preamble: await this.subagentPreamble(prepared.system),
         tools: [...prepared.tools, book.tool],
         seed: prepared.seed,
         source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: ctx.toolCallId, background: false },
@@ -3627,6 +3637,7 @@ export class Agent {
           {
             prompt: spec.prompt,
             systemPrompt: await this.subagentSystem(prepared.system, scope),
+            preamble: await this.subagentPreamble(prepared.system),
             tools: [...prepared.tools, book.tool],
             seed: prepared.seed,
             source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: toolCallId, background: true },
@@ -3674,29 +3685,48 @@ export class Agent {
         text: systemPrompt ?? null,
       });
     }
-    this.lastSystemEstimate = estimateText(systemPrompt); // usage 到达时算校准比要用同一份 system 的字符估
+    const preamble = await this.contextPreamble();
+    this.lastPrefixEstimate = prefixEstimate({ systemPrompt, preamble }); // usage 到达时算校准比要用同一份 system 与开头消息的字符估
     return {
       systemPrompt,
+      preamble,
       messages: [...this._state.messages], // 快照：循环拿的是那一刻的副本
       compaction: this._state.compaction, // 视图状态随快照走；流水线改了它会经 compaction_end 写回 _state
       // 工具**不进快照**：它是装备，每轮经 config.getTools() 重取
     };
   }
 
-  /** 冻结的记忆段作废：段与通知基线一起清，下一次组装重取（`MemorySystemFreeze`）。 */
-  private invalidateMemorySystem(): void {
-    this.memorySystem.text = null;
-    this.memorySystem.files = null;
+  /**
+   * 开头消息：送模时排在 transcript 视图之前、不进 transcript 的那几条（`AgentContext.preamble`）。
+   * 现在只有记忆正文一条（会话内冻结，`memoryPreamble`）：system 只放开发者写的段，模型写的记忆正文走这里。
+   * 跟着记忆的规则段走——没装 `echo:memory` 就没有。主循环每个 run 取一次；提取与 fork 的子 agent 也从这里取，
+   * 拿到的是同一批对象，前缀与主循环逐字相同。
+   * 与段 `render()` 抛错同一个档位：读盘失败只留诊断、不挡这个 run——模型仍可用 `view` 读记忆。
+   */
+  private async contextPreamble(): Promise<readonly AgentMessage[]> {
+    if (this.memory === undefined || !this.promptSections.has("memory")) return [];
+    try {
+      return await memoryPreamble(this.memory, this.memoryFreeze);
+    } catch (e) {
+      this.reportDiagnostic({ code: "memory_preamble_failed", message: errText(e) });
+      return [];
+    }
+  }
+
+  /** 冻结的记忆正文作废：开头消息与通知基线一起清，下一次组装重取（`MemoryFreeze`）。 */
+  private invalidateMemoryFreeze(): void {
+    this.memoryFreeze.preamble = null;
+    this.memoryFreeze.files = null;
   }
 
   /**
-   * 两次 run 之间记忆变了：给本 run 追加的那条变化通知（`memoryUpdateMessage`，只列路径）。没变 / 没装记忆段 = null。
+   * 两次 run 之间记忆变了：给本 run 追加的那条变化通知（`memoryUpdateMessage`，只列路径）。没变 / 没装记忆 = null。
    * 与段 `render()` 抛错同一个档位：失败只留诊断、不挡这个 run——模型仍可用 `view` 读到新内容。
    */
   private async memoryUpdate(): Promise<AgentMessage | null> {
     if (this.memory === undefined || !this.promptSections.has("memory")) return null;
     try {
-      return await memoryUpdateMessage(this.memory, this.memorySystem);
+      return await memoryUpdateMessage(this.memory, this.memoryFreeze);
     } catch (e) {
       this.reportDiagnostic({ code: "memory_update_failed", message: errText(e) });
       return null;
@@ -4112,8 +4142,8 @@ export class Agent {
         this._state.status = "generating";
         if (input.stages.length > 0) {
           this._state.compaction = input.compaction;
-          // 历史被改写，缓存本来就断了：顺势让 system 重取一次记忆——完整的现行内容随之回来，之前的变化通知不再需要
-          this.invalidateMemorySystem();
+          // 历史被改写，缓存本来就断了：顺势让开头消息重取一次记忆——完整的现行内容随之回来，之前的变化通知不再需要
+          this.invalidateMemoryFreeze();
         }
         this._state.contextTokens = input.contextTokens;
         break;
@@ -4124,10 +4154,10 @@ export class Agent {
         // 这一轮送模的上下文有多大，provider 说了算（输入 + 它自己的输出 = 下一轮至少这么大）
         const tokens = input.usage.inputTokens + input.usage.outputTokens;
         this._state.contextTokens = tokens;
-        // 校准比：真值扣掉固定开销（工具 schema、每轮注入），与同一份视图（system + 到这条 assistant 为止的投影；
+        // 校准比：真值扣掉固定开销（工具 schema、每轮注入），与同一份视图（system + 开头消息 + 到这条 assistant 为止的投影；
         // usage 事件紧跟它的 message_end）的字符估之比——与压缩流水线同一个算法（`calibrationFrom`）。
         // 记下来给手动压缩与下一个 run 的首轮用——那两处没有 usage 基准
-        const raw = this.lastSystemEstimate + estimateTokens(buildWorkingMessages(this._state.messages, this._state.compaction));
+        const raw = this.lastPrefixEstimate + estimateTokens(buildWorkingMessages(this._state.messages, this._state.compaction));
         if (raw > 0) {
           const menu = visibleTools(this.tools, this.loadedTools, this.restriction());
           const names = new Set(menu.map((t) => t.name));
@@ -4153,7 +4183,7 @@ export class Agent {
         break;
       case "reset":
         this.loadedTools.clear(); // 「取过 schema」是这段对话里的事实，对话清空它就跟着没了（与 transcript 同步）
-        this.invalidateMemorySystem(); // 之前追加的变化通知随 transcript 一起没了
+        this.invalidateMemoryFreeze(); // 之前追加的变化通知随 transcript 一起没了
         this.foregroundReads.clear(); // 前台「看过」的那些随对话一起没了：账不能替一段已经清掉的对话作保
         this.extractCursor = 0;
         this.extractUnfinished = 0;
@@ -4173,7 +4203,7 @@ export class Agent {
         // 已加载的延迟工具从 transcript 里收回来（2026-11-03）：菜单与上个进程最后一次请求的相同，缓存不断
         this.loadedTools.clear();
         for (const name of loadedToolsIn(input.messages)) this.loadedTools.add(name);
-        this.invalidateMemorySystem(); // 换了一份 transcript：system 按此刻的记忆重取（完整内容），基线跟着重记
+        this.invalidateMemoryFreeze(); // 换了一份 transcript：开头消息按此刻的记忆重取（完整内容），基线跟着重记
         this.foregroundReads.clear();
         // 游标先设到末尾（这个事件不带复盘下标）；经会话恢复时 `start()` 紧接着按盘上的 `memory_reviewed` 改回去
         this.extractCursor = input.messages.length;

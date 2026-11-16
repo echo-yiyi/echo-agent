@@ -35,6 +35,8 @@ const roleZh = (s: string | undefined): string => (s === undefined ? "" : (ROLE_
 
 function partLabel(p: Part): string {
   switch (p.kind) {
+    case "preamble":
+      return `开头消息 · ${p.source ?? ""}`;
     case "transcript":
       return `历史 · ${roleZh(p.source)}`;
     case "summary":

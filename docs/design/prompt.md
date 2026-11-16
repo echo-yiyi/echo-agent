@@ -20,7 +20,9 @@
 | --- | --- | --- | --- |
 | `tools` | 本 turn 冻结的有效工具工作集，再投影为 schema | 每个 turn 一次 | 单工具名字、description、参数与返回契约 |
 | `systemPrompt` | `AgentPrompt` registry 中的 sections + variables | Agent 路径每个 run 一次 | 身份、纪律、交互面、相对稳定的环境事实与跨工具习惯 |
-| `messages` | 压缩后的 transcript 视图 + attempt injection，再经 transform / hook / projection | 每个 attempt 一次 | 对话事实与运行中会变化、但不应入账的临时材料 |
+| `messages` | 开头消息 + 压缩后的 transcript 视图 + attempt injection，再经 transform / hook / projection | 每个 attempt 一次（开头消息每个 run 装一次，run 内原样复用） | 对话事实、运行中会变化但不应入账的临时材料，以及不是开发者写的常驻背景（记忆正文） |
+
+**system 只放开发者写的东西**——产品、extension、角色注册的段。模型写的或最终使用者写的常驻文本不进 system：记忆正文走**开头消息**，即排在 transcript 视图之前、每个 run 装一次、不进 transcript 也不落 session 的消息（`AgentContext.preamble`，由 [`Agent.contextPreamble()`](../../packages/core/src/agent.ts#symbol=Agent.contextPreamble) 装）。现在只有记忆正文一个来源，extension 没有注册口；项目指令（AGENTS.md）仍在 system，见 §9。决策见 [记忆正文不进 system](../decisions/implemented/2026-11-13-memory-content-out-of-system.md)。
 
 主调用顺序见 [`Agent.createContextSnapshot()`](../../packages/core/src/agent.ts#symbol=Agent.createContextSnapshot) 与 [`runAttempt()`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt)：
 
@@ -29,7 +31,7 @@ flowchart LR
     S["PromptSection / PromptVariable"] --> A["每个 run assembleSystem"]
     A --> SYS["systemPrompt"]
     T["本 turn 有效工具工作集"] --> SCH["ToolSchema[]"]
-    L["transcript + compaction view"] --> INJ["每个 attempt 追加 injections"]
+    L["开头消息 + transcript 的 compaction view"] --> INJ["每个 attempt 追加 injections"]
     INJ --> X["transformContext"]
     X --> H["contextBeforeBuild"]
     H --> P["convertToLlm"]
@@ -42,8 +44,8 @@ flowchart LR
 
 另有三条刻意不走主 Agent 装配器的调用路径，各自定义 system 的来源与刷新规则：
 
-- `subagent` 的任务、system 与工具集由父模型在调用时给出（fresh），或整套继承父这次 run 的装配（fork），见 [`SubagentSpec`](../../packages/core/src/subagent/tool.ts#symbol=SubagentSpec) 与 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。fork 的工具菜单与父逐项相同（交不出去的几件是同名同 schema、点名就拒的替身，`report` 接在末尾），前缀缓存接得上。
-- compaction 的 collapse / summary 从主对话分叉：同一份 system 与工具菜单，压缩指令（归压缩策略所有）作为末尾一条 harness 消息，见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages) 与 [Compaction](compaction.md) §5。
+- `subagent` 的任务、system 与工具集由父模型在调用时给出（fresh），或整套继承父这次 run 的装配（fork：system 连同开头消息），见 [`SubagentSpec`](../../packages/core/src/subagent/tool.ts#symbol=SubagentSpec) 与 [`Agent.runSubagent()`](../../packages/core/src/agent.ts#symbol=Agent.runSubagent)。fork 的工具菜单与父逐项相同（交不出去的几件是同名同 schema、点名就拒的替身，`report` 接在末尾），前缀缓存接得上。
+- compaction 的 collapse / summary 从主对话分叉：同一份 system、开头消息与工具菜单，压缩指令（归压缩策略所有）作为末尾一条 harness 消息，见 [`defaultCompactionStages()`](../../packages/core/src/compaction/builtin.ts#symbol=defaultCompactionStages) 与 [Compaction](compaction.md) §5。
 - Dream 复用隔离循环但 system 为 `null`；它的整理指令由 memory模块提供，见 [`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask)。
 
 ## 2. 注册接口与所有权
@@ -65,7 +67,8 @@ flowchart LR
 | workspace、model、provider | core Agent | [`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection) |
 | AGENTS.md / CLAUDE.md | 能读 workspace 的 CLI 层 | [`instructionsSection()`](../../packages/base/src/instructions.ts#symbol=instructionsSection) |
 | skill 目录与激活正文 | skill module | [`renderSkillCatalog()`](../../packages/core/src/skill/compose.ts#symbol=renderSkillCatalog)、[`renderSkillInjections()`](../../packages/core/src/skill/compose.ts#symbol=renderSkillInjections) |
-| memory 规则与内容 | memory模块| [`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections) |
+| memory 规则（模块、层、怎么写、正文的地位） | memory模块| [`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections) |
+| memory 正文（不在 system：开头消息） | memory模块| [`memoryPreamble()`](../../packages/core/src/memory/harness.ts#symbol=memoryPreamble) |
 | task 快照 | task module | [`renderTaskInjection()`](../../packages/core/src/task/tools.ts#symbol=renderTaskInjection) |
 | 某组工具的跨调用习惯 | 拥有该工具组的 extension | [`sessionToolsSection()`](../../packages/core/src/session/tools.ts#symbol=sessionToolsSection)、[`compactionSection()`](../../packages/core/src/compaction/tool.ts#symbol=compactionSection) |
 
@@ -88,11 +91,11 @@ flowchart LR
 | 300 | run / session 环境事实 | workspace、model、provider |
 | 400 | workspace 项目指令 | AGENTS.md，找不到才看 CLAUDE.md |
 | 500 | skill 目录 | 只列 model-invocable skills |
-| 900 | memory | 会话内冻结，作废重取时才变；放在末尾 |
+| 900 | memory 的规则 | 模块、层、怎么写、正文的地位；不含任何记忆内容（内容是开头消息，见 §1） |
 
 数值越小越靠前；同数保注册序。排序意图是把更稳定的字节留在前缀，不代表 core 提供或承诺 provider cache。`order` 也不决定刷新频率：刷新由 system / turn / attempt 所在的生命周期决定。
 
-约定带分两半（2026-11-03 复核）：0–199 是只随产品 / 角色变的静态段（身份、纪律、交互面、工具习惯），300 起是随项目或会话变的段（环境里的 workspace、项目指令、skill 目录、记忆）。前一半整段在后一半之前，换项目或换会话时 system 只从环境段起变；内建与两个产品的段都落在各自的带里，当前实现不需要调序。工具 schema 不在 system 里：在把工具渲染在 system 之后的 provider 上，环境段一变，其后的工具定义同样吃不到缓存，这不是段排序能解决的（实测换项目后首次调用只命中约 1.1k，正是环境段之前的静态段）。
+约定带分两半（2026-11-03 复核）：0–199 是只随产品 / 角色变的静态段（身份、纪律、交互面、工具习惯），300 起是随项目或会话变的段（环境里的 workspace、项目指令、skill 目录）；记忆的规则段虽排在 900，只随模块表与作用域表变，不随记忆内容变。前一半整段在后一半之前，换项目或换会话时 system 只从环境段起变；内建与两个产品的段都落在各自的带里，当前实现不需要调序。工具 schema 不在 system 里：在把工具渲染在 system 之后的 provider 上，环境段一变，其后的工具定义同样吃不到缓存，这不是段排序能解决的（实测换项目后首次调用只命中约 1.1k，正是环境段之前的静态段）。
 
 ### 3.2 精确装配语义
 
@@ -104,7 +107,7 @@ flowchart LR
 4. 声明了 `interpolate: true` 的段对成功结果做严格 `{{name}}` 插值，其余段原样；再 `trim()`；空结果不占位。
 5. 非空段用两个换行连接；全空返回 `null`。
 
-**插值只在段自己声明时做**（2026-11-03，决策见 [插值由段声明](../decisions/implemented/2026-11-03-prompt-interpolation-opt-in.md)）。声明的只有作者有意写变量的段：内建环境段（[`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection)）与产品导入的 md 段（`sectionFromMarkdown()`）。装进第三方或模型写的文本的段——项目指令、记忆、skill 目录、角色 identity——不声明，正文里的 `${{ secrets.X }}`、`{{ .Values.x }}` 是普通字符；此前对所有段插值，这样一行就让每个 run 在调用模型前失败，连记忆提取都起不来。
+**插值只在段自己声明时做**（2026-11-03，决策见 [插值由段声明](../decisions/implemented/2026-11-03-prompt-interpolation-opt-in.md)）。声明的只有作者有意写变量的段：内建环境段（[`environmentSection()`](../../packages/core/src/prompt/sections.ts#symbol=environmentSection)）与产品导入的 md 段（`sectionFromMarkdown()`）。装进第三方文本的段——项目指令、记忆的规则（带着各模块自己的说明）、skill 目录、角色 identity——不声明，正文里的 `${{ secrets.X }}`、`{{ .Values.x }}` 是普通字符；此前对所有段插值，这样一行就让每个 run 在调用模型前失败，连记忆提取都起不来。
 
 声明了插值的段里，完整的 `{{name}}` 必须名字合法、已经注册且本次有值，否则抛 `PromptVariableError`；孤立且没有 `}}` 的 `{{` 作为普通文本保留；替换值不二次扫描。现有门见 [排序与空段](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null)、[严格插值](../../packages/core/test/prompt.test.ts#test=未注册-无值-畸形三种都抛-promptvariableerror带段名) 和 [未声明的段原样](../../packages/core/test/prompt.test.ts#test=没声明-interpolate-的段原样第三方文本里的-secretsx-valuesx-workspace-都不当变量)。
 
@@ -123,7 +126,7 @@ flowchart LR
 | 数据 | 何时取快照 | 同一 run 内变化何时可见 |
 | --- | --- | --- |
 | system sections / variables | admission 后、run 开始前装配一次 | 本 run 不变；下一 run 重装配 |
-| system 里的 memory 段 | 会话内第一次装配时取一次；压缩落地、`reset`、续会话后重取 | system 不变；下一个前台 run 的输入前追加一条 `source: "memory"` 的 environment 消息（见 [memory §3](memory.md)） |
+| 记忆正文那条开头消息 | 会话内第一次装配时取一次；压缩落地、`reset`、续会话后重取 | system 与开头消息都不变；下一个前台 run 的输入前追加一条 `source: "memory"` 的 environment 消息（见 [memory §3](memory.md)） |
 | 工具工作集 | 每个 turn 开头冻结 | 下一 turn |
 | skill / task injections | 每个 attempt 构建 working context 时重算 | 下一 attempt；通常就是下一 turn，重试时可能仍是同一 turn |
 | transcript / compaction view | 每个 attempt 重建 | 按账本与压缩流水线的时序 |
@@ -131,9 +134,9 @@ flowchart LR
 
 因此“每轮注入”只是历史名字，不是准确生命周期。重试属于同一个 turn 的下一个 attempt，[`callModel()`](../../packages/core/src/loop/run-turn.ts#symbol=callModel) 会重新取 injection、重新 transform、重新过 hook 与 projection。任何有副作用的回调都必须自行幂等。
 
-system 的“冻结”只指主 Agent 从 registry 装配的快照。内部 loop 边界 的 `prepareNextTurn` 仍能直接替换 `AgentContext.systemPrompt`，但 Agent 没有把它暴露为产品或 extension 的 prompt 写入口。fresh 子 agent 与 Dream 使用独立 system（fork 子 agent、记忆提取与内建压缩调用沿用这次 run 的那份），不能据此声称“进程里所有模型调用的 system 每 run 都不变”。
+system 的“冻结”只指主 Agent 从 registry 装配的快照。内部 loop 边界 的 `prepareNextTurn` 仍能直接替换 `AgentContext.systemPrompt`，但 Agent 没有把它暴露为产品或 extension 的 prompt 写入口。fresh 子 agent 与 Dream 使用独立 system、不带开头消息（fork 子 agent、记忆提取与内建压缩调用沿用这次 run 的那份 system 与开头消息），不能据此声称“进程里所有模型调用的 system 每 run 都不变”。
 
-缓存层面只承诺仓库自己的确定性：sections 稳定排序、时间戳不进固定 prompt、injection 追加在消息尾部，以及工具菜单的顺序（[`visibleTools()`](../../packages/core/src/tools/harness.ts#symbol=visibleTools)，`toolSchemas()` 按给定顺序投影）：常驻工具按名排，已加载的延迟工具按加载顺序追加在后，`tool_search` 垫底（它的描述随加载变）。加载一件延迟工具只动菜单尾巴——此前全体按名排，新加载的一件插进中间，它之后的工具、system 与整段对话一起失去缓存（本机会话实测命中从 9 600 掉到 896）；判据见 [菜单顺序](../../packages/core/test/tool-search.test.ts#test=菜单顺序常驻工具按名排已加载的延迟工具按加载顺序追加在后toolsearch-垫底加载一件只动菜单尾巴前面的字节与-provider-缓存不动)。是否命中、命中多少以及 tools / system / messages 在厂商缓存里的相对位置，都是 provider 行为，不是 core 契约。
+缓存层面只承诺仓库自己的确定性：sections 稳定排序、时间戳不进固定 prompt、开头消息会话内是同一份、injection 追加在消息尾部，以及工具菜单的顺序（[`visibleTools()`](../../packages/core/src/tools/harness.ts#symbol=visibleTools)，`toolSchemas()` 按给定顺序投影）：常驻工具按名排，已加载的延迟工具按加载顺序追加在后，`tool_search` 垫底（它的描述随加载变）。加载一件延迟工具只动菜单尾巴——此前全体按名排，新加载的一件插进中间，它之后的工具、system 与整段对话一起失去缓存（本机会话实测命中从 9 600 掉到 896）；判据见 [菜单顺序](../../packages/core/test/tool-search.test.ts#test=菜单顺序常驻工具按名排已加载的延迟工具按加载顺序追加在后toolsearch-垫底加载一件只动菜单尾巴前面的字节与-provider-缓存不动)。是否命中、命中多少以及 tools / system / messages 在厂商缓存里的相对位置，都是 provider 行为，不是 core 契约。
 
 ## 5. 工具与 prompt 必须同真同假
 
@@ -179,7 +182,7 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 | 产品 / extension 字面量 | 产品代码 | 无；视为受信 | 改文案就是改模型行为，应与代码一起 review |
 | workspace 的 AGENTS.md / CLAUDE.md | 作为用户自己的项目指令执行 | 正文前缀 65 536 字符、XML-like 标签定界、正文里冒充闭合标签的字样中和；段头写实际加载的文件名 | 第三方仓库本身不可信时，靠 prompt 包装无法授权它 |
 | skill 正文与激活参数 | 被激活后作为工作指令执行 | 与起止标记同形的行转义、单条和总预算、参数单行化 | 起止标记不是安全沙箱；skill 的安装 / 激活就是信任决定 |
-| memory | 跨 run 的持久背景 | resident / index 各自有预算；索引描述单行化 | 正文有意保留多行并直接影响模型，旧记忆可能陈旧或被污染 |
+| memory 正文 | 跨 run 的持久背景，不是指令；不在 system 里（开头消息），地位由 system 的规则段写明：不覆盖 system 与用户这次说的话 | resident / index 各自有预算；索引描述单行化 | 正文有意保留多行并直接影响模型，旧记忆可能陈旧或被污染；规则里那句是写给模型的话，不是隔离——模型在冲突时实际听谁的没有评测 |
 | task title / executor | 只应是清单数据 | 只有条数上限 | 当前可换行、可无界增长，能伪装成额外指令段 |
 | prompt variables | section 引用的运行事实 | 无转义，替换值不重扫 | workspace 等字符串原样进入 system；它们不是模板代码，但仍能包含换行 |
 
@@ -200,7 +203,7 @@ Dream 继承父 Agent 的 injections；fresh 模式的 subagent 明确关闭它�
 
 PromptSection 不区分 required / optional，render 异常统一省略。产品若将关键策略放在可能失败的动态 render 中，必须自行处理失败；段名 identity 不会自动得到更强的失败保护。
 
-装配出的 system 本身不写入 session。角色定义快照存在 session 元数据中，memory 与 workspace 文件在各自位置维护，不是本次请求的逐字快照。这意味着同一 session 在下个 run 可能因项目指令文件、extension 或模型装备变化得到不同 system，符合“每 run 装配”的设计（记忆文件除外：memory 段会话内冻结，变化走追加消息，见 §4），但排障需要能看到当次实际请求或稳定 digest。当前 prompt 单测证明字节与行为，不能替代生产观测对“这次到底发了什么”的回答。
+装配出的 system 本身不写入 session。角色定义快照存在 session 元数据中，memory 与 workspace 文件在各自位置维护，不是本次请求的逐字快照。这意味着同一 session 在下个 run 可能因项目指令文件、extension 或模型装备变化得到不同 system，符合“每 run 装配”的设计（记忆内容不在 system 里：它是开头消息，会话内冻结、同样不写入 session，变化走追加消息，见 §4），但排障需要能看到当次实际请求或稳定 digest。当前 prompt 单测证明字节与行为，不能替代生产观测对“这次到底发了什么”的回答。
 
 ## 9. 当前限制
 
@@ -209,6 +212,7 @@ PromptSection 不区分 required / optional，render 异常统一省略。产品
 - **生命周期命名有历史差异。** getTurnInjections 实际每个 attempt 调用，重试时会重算。这是已确认的上下文重建行为，不应改回每 turn 只算一次；PromptSource 仍是公开但没有外部注册入口的内部来源类型。
 - **上下文字段含义需按实现读取。** AssembleContext.agentId 当前赋值为 product，不代表角色身份。
 - **预算与信任有限。** task 标题和 executor 未建立注入字符总上界；格式定界与反引号替换不能证明外部文本不会影响模型指令理解。
+- **「system 只放开发者写的」只落实了记忆。** 项目指令（AGENTS.md / CLAUDE.md）是最终使用者写的，仍是 system 的 `instructions` 段；开头消息只有记忆正文一个来源、由 Agent 内部装，extension 没有注册口。两件都待拍板，见 [记忆正文不进 system](../decisions/implemented/2026-11-13-memory-content-out-of-system.md)「待拍板」。
 
 角色替换顺序已由 createEcho 的产品先、角色后挂载解决，不再列作当前缺陷。历史审阅命令见 [复核记录](../code-review/2026-09-15-doc-probes.md)；其中旧失败输出不代表当前行为。
 
@@ -220,7 +224,8 @@ PromptSection 不区分 required / optional，render 异常统一省略。产品
 | --- | --- |
 | section 排序、空段、render 失败 | [prompt 装配测试](../../packages/core/test/prompt.test.ts#test=按-order-升序同数保注册序空段丢弃全空返回-null) |
 | 严格变量引用使错误 run 在调用模型前结束 | [变量错误测试](../../packages/core/test/prompt.test.ts#test=变量错-run-以-error-收场不静默发一份错的-system) |
-| 项目指令与记忆里的 `{{…}}` 原样进 system，run 照常 | [项目指令](../../packages/cli/test/prompt.test.ts#test=instructionsagentsmd-里一行-github-actions-的-secretsx-原样进-systemrun-照常跑完项目指令不插值)、[记忆](../../packages/core/test/memory.test.ts#test=记忆正文里写着-username-secretsx-原样进-systemrun-照常跑完记忆段不插值) |
+| 项目指令里的 `{{…}}` 原样进 system、记忆正文里的原样送到模型，run 照常 | [项目指令](../../packages/cli/test/prompt.test.ts#test=instructionsagentsmd-里一行-github-actions-的-secretsx-原样进-systemrun-照常跑完项目指令不插值)、[记忆](../../packages/core/test/memory.test.ts#test=记忆正文里写着-username-secretsx-原样送到模型run-照常跑完记忆正文不插值) |
+| 记忆内容不在 system 里：system 只有规则，内容是对话最前面的一条消息、不进 transcript | [记忆正文不进 system](../../packages/core/test/memory.test.ts#test=记忆正文不进-systemsystem-只有规则存着的东西是对话最前面的一条消息不进-transcript)、[规则与正文分开](../../packages/core/test/memory.test.ts#test=规则与正文分开规则里没有任何记忆内容正文里没有规则正文的地位写在规则里) |
 | prompt / tool pack 原子注册、卸载、撞名回滚 | [pack 测试](../../packages/core/test/prompt.test.ts#test=definepromptpack-definetoolpack-带段mount-进表unmount-撤走撞名整包回滚) |
 | role identity 的受控替换与复原 | [agent definition 测试](../../packages/core/test/agent-def.test.ts#test=identity-被替换工具收成子集unmount-两样都复原) |
 | skill / task 动态材料不进 transcript，system 在 run 内不随其变化 | [主接线测试](../../packages/core/test/prompt.test.ts#test=内建段经-echo-进-system环境段带-workspacemodelskills-目录在激活后下一轮注入可见system-逐字节不变)、[task 测试](../../packages/core/test/prompt.test.ts#test=任务清单每轮注入空清单不占位建完下一轮就可见不打-system-缓存不进-transcript) |

@@ -23,7 +23,7 @@ import {
 } from "./types.ts";
 import { probeCompaction, type CompactionDecision, type CompactionFactBody } from "./observe.ts";
 import { loopProbeFor } from "../loop/observe.ts";
-import { estimateText, estimateTokens, buildWorkingMessages, measureContext, normalizeCompaction, sameCompaction, type ContextAnchor } from "./view.ts";
+import { estimateText, estimateTokens, buildWorkingMessages, measureContext, normalizeCompaction, prefixEstimate, sameCompaction, type ContextAnchor } from "./view.ts";
 import type { LoopDeps, TurnResult } from "../loop/types.ts";
 import { clampDelay, sleep } from "../loop/backoff.ts";
 import { defaultConvertToLlm, type AgentMessage } from "../messages.ts";
@@ -100,9 +100,10 @@ export function modelCallFor(deps: LoopDeps, where: Readonly<{ stage?: string; t
   const probe = loopProbeFor(deps.observe?.loop, config.runId);
   const mirror = deps.observe?.mirror;
   return async ({ systemPrompt, messages }, signal) => {
-    // 不给 system = 从这条循环分叉（见 `CompactionModelCall`）：system、菜单、thinking 档位都与循环的请求相同，前缀缓存接得上
+    // 不给 system = 从这条循环分叉（见 `CompactionModelCall`）：system、开头消息、菜单、thinking 档位都与循环的请求相同，前缀缓存接得上
     const fork = systemPrompt === undefined;
-    const llm = await config.convertToLlm([...messages]);
+    const sent: readonly AgentMessage[] = fork ? [...context.preamble, ...messages] : messages;
+    const llm = await config.convertToLlm([...sent]);
     const menu = fork ? config.getTools() : [];
     const tools = toolSchemas(menu);
     const sentSystem = fork ? context.systemPrompt : systemPrompt;
@@ -113,7 +114,7 @@ export function modelCallFor(deps: LoopDeps, where: Readonly<{ stage?: string; t
         probe(
           {
             kind: "context_built",
-            handoff: mirror.explicit({ systemPrompt: sentSystem, messages, tools: menu }),
+            handoff: mirror.explicit({ systemPrompt: sentSystem, messages: sent, tools: menu }),
             meta: {
               purpose: "compaction",
               attempt,
@@ -192,15 +193,15 @@ export async function runCompaction(
     return null;
   }
 
-  /** 纯字符估（system + 视图），未校准。 */
+  /** 纯字符估（system + 开头消息 + 视图），未校准。 */
   const raw = (state: CompactionState): number =>
-    measureContext({ messages: context.messages, state, systemPrompt: context.systemPrompt, anchor: null });
+    measureContext({ messages: context.messages, state, systemPrompt: context.systemPrompt, preamble: context.preamble, anchor: null });
   // 工具 schema 与每轮注入：usage 里有、字符估里没有，单独加，不乘校准比
   const overhead = await overheadNow(deps);
   let calibration = clampCalibration(opts.calibration ?? 1);
   let used: number;
   if (opts.anchor !== null) {
-    used = measureContext({ messages: context.messages, state: context.compaction, systemPrompt: context.systemPrompt, anchor: opts.anchor, calibration });
+    used = measureContext({ messages: context.messages, state: context.compaction, systemPrompt: context.systemPrompt, preamble: context.preamble, anchor: opts.anchor, calibration });
     const r = raw(context.compaction);
     if (r > 0) calibration = calibrationFrom(used, r, overhead);
   } else {
@@ -361,9 +362,9 @@ export function createCompactor(deps: LoopDeps): {
       const index = deps.context.messages.length - turn.toolResults.length;
       const tokens = usage.inputTokens + usage.outputTokens;
       anchor = { index, tokens };
-      // 校准比：provider 说的真值扣掉固定开销，与同一份视图（system + 到那条 assistant 为止的投影）的字符估之比。
+      // 校准比：provider 说的真值扣掉固定开销，与同一份视图（system + 开头消息 + 到那条 assistant 为止的投影）的字符估之比。
       // 记住它——压缩之后 anchor 作废、上一轮报错没 usage 时，字符估还能按本会话的语言密度换算。
-      const raw = estimateText(deps.context.systemPrompt) + estimateTokens(buildWorkingMessages(deps.context.messages.slice(0, index), deps.context.compaction));
+      const raw = prefixEstimate(deps.context) + estimateTokens(buildWorkingMessages(deps.context.messages.slice(0, index), deps.context.compaction));
       if (raw > 0) calibration = calibrationFrom(tokens, raw, overhead);
     },
     async recover(turnId, signal) {

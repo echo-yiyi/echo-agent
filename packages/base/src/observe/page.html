@@ -873,6 +873,7 @@ const ROLE_ZH = { "user/human": "用户", "user/steer": "用户插话", "user/ha
 const roleZh = (s) => ROLE_ZH[s] ?? s ?? "";
 function partLabel(p) {
   switch (p.kind) {
+    case "preamble": return `开头消息 · ${p.source ?? ""}`;
     case "transcript": return `历史 · ${roleZh(p.source)}`;
     case "summary": return "压缩摘要";
     case "omitted": return "压缩省略";

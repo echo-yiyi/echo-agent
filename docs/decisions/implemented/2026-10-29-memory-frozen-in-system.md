@@ -1,6 +1,6 @@
 # 记忆段会话内冻结：system 不随记忆变，变化以一条追加消息送到
 
-> 状态:implemented · 提出 2026-10-28（用户报缓存命中率低，实测定位到记忆段）· 拍板 2026-10-29（用户，选项 A）· 落地 `packages/core/src/memory/harness.ts` / `agent.ts`，判据 `packages/core/test/memory.test.ts`、`packages/core/test/create-echo.test.ts` · **后续** 2026-11-03 [变化只发路径通知](2026-11-03-memory-change-notice-and-reads.md)：第 3 条追加的不再是整段新记忆，而是「哪些文件变了」；「比模型最后看到的那一版」改为比冻结时（或上一条通知时）记下的文件基线
+> 状态:implemented · 提出 2026-10-28（用户报缓存命中率低，实测定位到记忆段）· 拍板 2026-10-29（用户，选项 A）· 落地 `packages/core/src/memory/harness.ts` / `agent.ts`，判据 `packages/core/test/memory.test.ts`、`packages/core/test/create-echo.test.ts` · **后续** 2026-11-03 [变化只发路径通知](2026-11-03-memory-change-notice-and-reads.md)：第 3 条追加的不再是整段新记忆，而是「哪些文件变了」；「比模型最后看到的那一版」改为比冻结时（或上一条通知时）记下的文件基线 · 2026-11-13 [记忆正文不进 system](2026-11-13-memory-content-out-of-system.md)：冻结的那份不再是 system 的段，而是对话最前面的一条开头消息；下文的「记忆段」「system 重取」读作那条消息，`MemorySystemFreeze` 改名 `MemoryFreeze`，冻结、作废、追加三条的时机不变
 
 **给谁看**：改 system 装配、记忆注入或 provider 缓存相关代码的人。假设已知 [Prompt 的刷新语义](../../design/prompt.md)（§4）与 [记忆的模块与召回](../../design/memory.md)（§3）。
 
@@ -39,11 +39,11 @@
 
 ## 验收
 
-判据随 2026-11-03 的修改改了名（同一件事，通知只列路径的版本）：
+判据随 2026-11-03 的修改改了名（同一件事，通知只列路径的版本），2026-11-13 又随记忆正文移出 system 改了一次名（冻结的是对话最前面那条开头消息）：
 
-- system 跨 run 逐字不变、变化以一条消息追加在输入之前：[会话内冻结](../../../packages/core/test/memory.test.ts#test=会话内冻结run-内写记忆本-run-system-不变下个-run-system-仍逐字不变变化以一条只列路径的通知追加在输入之前)
-- 记忆没变不追加：[记忆没变](../../../packages/core/test/memory.test.ts#test=记忆没变下个-run-什么都不追加system-逐字不变消息只在末尾长)
+- system 与开头消息跨 run 逐字不变、变化以一条消息追加在输入之前：[会话内冻结](../../../packages/core/test/memory.test.ts#test=会话内冻结run-内写记忆本-run-的-system-与开头消息不变下个-run-两样仍逐字不变变化以一条只列路径的通知追加在输入之前)
+- 记忆没变不追加：[记忆没变](../../../packages/core/test/memory.test.ts#test=记忆没变下个-run-什么都不追加system-与开头消息逐字不变消息只在末尾长)
 - 一次变化只送一次：[只送一次](../../../packages/core/test/memory.test.ts#test=一次变化只送一次之后记忆不变就不再追加再变一次再送一条)
-- 压缩后重取（2026-11-03 起不再补通知：完整内容已在 system）：[压缩后重取](../../../packages/core/test/memory.test.ts#test=压缩落地后-system-重取一次记忆完整的现行内容回到-system基线跟着重记不再补通知)
-- `reset` 后重取、不追加：[reset 后重取](../../../packages/core/test/memory.test.ts#test=清空-transcriptreset后-system-重取记忆不追加更新)
-- 续会话：system 按此刻重取（2026-11-03 起不再补通知）：[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话system-按此刻的记忆重取完整内容回到-system上个进程那条变化通知原样留在历史里续上不再补)
+- 压缩后重取（2026-11-03 起不再补通知：完整内容已在重取的那份里）：[压缩后重取](../../../packages/core/test/memory.test.ts#test=压缩落地后开头消息重取一次记忆完整的现行内容回到开头消息system-不变基线跟着重记不再补通知)
+- `reset` 后重取、不追加：[reset 后重取](../../../packages/core/test/memory.test.ts#test=清空-transcriptreset后开头消息重取记忆不追加更新)
+- 续会话：按此刻重取（2026-11-03 起不再补通知）：[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话开头消息按此刻的记忆重取完整内容不进-system上个进程那条变化通知原样留在历史里续上不再补)

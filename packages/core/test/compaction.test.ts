@@ -10,7 +10,7 @@
 import { test, expect } from "bun:test";
 import { Agent } from "../src/agent.ts";
 import { FAKE_MODEL, errorTurn, scriptedStreamFn, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
-import { assistantMessage, toolResultMessage, userMessage, type AgentMessage, type Context } from "../src/messages.ts";
+import { assistantMessage, environmentMessage, toolResultMessage, userMessage, type AgentMessage, type Context } from "../src/messages.ts";
 import type { Model, StreamFn } from "../src/provider/types.ts";
 import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
@@ -180,14 +180,18 @@ test("投影：段 → 一条 user/harness；清掉的 toolResult 换占位但 t
   expect(omitted.role === "user" && omitted.content[0]!.type === "text" && omitted.content[0]!.text).toBe(omissionNotice(0, 4));
 });
 
-test("measureContext：有 usage 基准 = 基准 + 基准之后的字符估；没有 = system + 整个视图的字符估；校准比只乘字符估的部分", () => {
+test("measureContext：有 usage 基准 = 基准 + 基准之后的字符估；没有 = system + 开头消息 + 整个视图的字符估；校准比只乘字符估的部分", () => {
   const m = twoTurns();
-  const noAnchor = measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: "s".repeat(40), anchor: null });
+  const noAnchor = measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: "s".repeat(40), preamble: [], anchor: null });
   expect(noAnchor).toBe(10 + estimateTokens(m));
-  const anchored = measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: "s".repeat(40), anchor: { index: 6, tokens: 1000 } });
+  const anchored = measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: "s".repeat(40), preamble: [], anchor: { index: 6, tokens: 1000 } });
   expect(anchored).toBe(1000 + estimateTokens(m.slice(6)));
-  expect(measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: null, anchor: null, calibration: 3 })).toBe(Math.ceil(estimateTokens(m) * 3));
-  expect(measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: null, anchor: { index: 6, tokens: 1000 }, calibration: 3 })).toBe(1000 + Math.ceil(estimateTokens(m.slice(6)) * 3));
+  expect(measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: null, preamble: [], anchor: null, calibration: 3 })).toBe(Math.ceil(estimateTokens(m) * 3));
+  expect(measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: null, preamble: [], anchor: { index: 6, tokens: 1000 }, calibration: 3 })).toBe(1000 + Math.ceil(estimateTokens(m.slice(6)) * 3));
+  // 开头消息每次请求都带：没有基准时与 system 一样算进字符估；有基准时它已经在 provider 报的数里，不重复加
+  const preamble = [environmentMessage("p".repeat(400), "memory", undefined, 0)];
+  expect(measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: "s".repeat(40), preamble, anchor: null })).toBe(10 + estimateTokens(preamble) + estimateTokens(m));
+  expect(measureContext({ messages: m, state: EMPTY_COMPACTION, systemPrompt: "s".repeat(40), preamble, anchor: { index: 6, tokens: 1000 } })).toBe(anchored);
 });
 
 test("估算：图片按固定值不按 base64 长度；toolResult 挂在 images 上的图也算进去", () => {

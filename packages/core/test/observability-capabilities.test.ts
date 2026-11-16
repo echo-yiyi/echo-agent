@@ -15,7 +15,7 @@ import {
   memoryStrReplace,
   type AgentMemories,
 } from "../src/memory/harness.ts";
-import { renderMemorySystem } from "../src/memory/compose.ts";
+import { renderMemoryContent } from "../src/memory/compose.ts";
 import { indexedMemory, residentMemory } from "../src/memory/types.ts";
 import { memoryScopeTable } from "../src/memory/scope.ts";
 import { memoryFactDescriptor, type MemoryFact } from "../src/memory/observe.ts";
@@ -173,11 +173,11 @@ describe("Memory：五种 mutation 各恰发一条，typed outcome 不靠解析�
     expect(diags).toContain("memory_index_rebuild_failed");
   });
 
-  test("compose：renderMemorySystem 出数据时发一条 compose 计数", async () => {
+  test("compose：renderMemoryContent 出数据时发一条 compose 计数", async () => {
     const { ctx, facts } = memoriesWith(new InMemoryDir());
     await memoryCreate(ctx, "user/agent.md", "who I am");
     facts.length = 0;
-    const text = await renderMemorySystem(ctx);
+    const text = await renderMemoryContent(ctx);
     expect(text).toContain("who I am");
     expect(facts).toEqual([expect.objectContaining({ kind: "compose", regions: 2, blocks: 1 })]);
   });

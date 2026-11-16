@@ -66,9 +66,9 @@
 
 | 模块 | 路径 | 呈现模式 | 语义 |
 | --- | --- | --- | --- |
-| agent | `agent.md` | resident：全文进 system | 经常性的做事习惯、应重复或避免的行为 |
-| user | `user.md` | resident：全文进 system | 对用户的认知、偏好与沟通方式 |
-| memory（笔记） | `memory/` | indexed：索引进 system，正文用工具读取 | 长期事实及以后去哪里找东西 |
+| agent | `agent.md` | resident：全文展示给模型 | 经常性的做事习惯、应重复或避免的行为 |
+| user | `user.md` | resident：全文展示给模型 | 对用户的认知、偏好与沟通方式 |
+| memory（笔记） | `memory/` | indexed：只展示索引，正文用工具读取 | 长期事实及以后去哪里找东西 |
 
 模块不填 `scopes` 表示当前所有层都有；填写则限定在那些层。同一模块每层独立存储、独立预算。[`residentMemory()`](../../packages/core/src/memory/types.ts#symbol=residentMemory) / [`indexedMemory()`](../../packages/core/src/memory/types.ts#symbol=indexedMemory) 是仓内的声明构造器，**不在公共面上**：包外扩展交的是纯数据 `AnyMemory`（必填 `name` / `mode` / `path` / `budget` / `instructions` / `dream`，indexed 另有 `fileBudget` 且 `path` 以 `/` 结尾），或把 `@echo-agent/core/extension` 导出的内建定义再注册一遍。构造器本身也不会自行装入运行中的产品。重复名字、已绑定后的路径重叠会拒绝，避免同一路径落进两个预算域。
 
@@ -87,7 +87,7 @@
 | 退出前补提取最多等 | 15 秒 | [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS) |
 | 提交锁等待 | 10 秒 | [`DEFAULT_LOCK_TIMEOUT_MS`](../../packages/core/src/storage/name-lock.ts#symbol=DEFAULT_LOCK_TIMEOUT_MS) |
 
-预算以 JavaScript 字符串 `length` 计，不是 token 或 UTF-8 字节。resident 校验全文；indexed 同时校验单文件全文和该层完整索引的渲染长度。模块数量和作用域数量可以增长，因此单模块预算不等于最终 system 的总上界。
+预算以 JavaScript 字符串 `length` 计，不是 token 或 UTF-8 字节。resident 校验全文；indexed 同时校验单文件全文和该层完整索引的渲染长度。模块数量和作用域数量可以增长，因此单模块预算不等于展示给模型的那条记忆正文（§3「模型看到的两份」）的总上界。
 
 ### 索引是派生物，不是记忆真源
 
@@ -97,11 +97,26 @@
 
 [`defaultComposeMemory`](../../packages/core/src/memory/compose.ts#symbol=defaultComposeMemory) 为每个模块的非空层生成带路径的块；模块按注册次序遍历，模块内部按作用域顺序遍历。它不会加载 indexed 正文来代替索引。读入超预算的手工文件会截断并留标记，不能据此承诺文件本身已被修复。
 
-[`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections) 把规则和内容接进 system，**会话内冻结**：第一次组装时取一次，之后每个 run 原样复用；压缩落地、transcript 被清空（`reset`）或从盘上换掉（续会话）时作废，下一次组装重取。冻结的是生成后的字符串，不是多个记忆文件的事务快照。
+### 模型看到的两份：规则在 system，正文是开头消息
 
-两次 run 之间记忆变了（提取、Dream、模型自己写、别的 session 写），system 不动，改由 [`memoryUpdateMessage()`](../../packages/core/src/memory/harness.ts#symbol=memoryUpdateMessage) 在下一个前台 run 的输入之前追加一条 environment 消息（`source` 为 `memory`），**只列哪些文件变了**（changed / added / removed，每类最多 20 条），不带内容——要看就 `view`（2026-11-03，决策见 [变化只发路径通知](../decisions/implemented/2026-11-03-memory-change-notice-and-reads.md)；此前每次追加整段新记忆，长会话里堆着几十份全量快照）。「变没变」比的是冻结那一刻记下的每个文件内容（[`MemorySystemFreeze`](../../packages/core/src/memory/harness.ts#symbol=MemorySystemFreeze) 的 `files`；indexed 模块的 `INDEX.md` 与点开头的簿记文件不算），发完一条就换成那一刻的。冻结时正文与这份基线出自同一份读：每个文件只读一次，先记基线、组装复用同一份内容，后台写入恰好落在组装途中也不会漏掉通知（[同一份读](../../packages/core/test/memory.test.ts#test=冻结那一刻的正文与变化基线出自同一份读后台恰好在两次读之间写入下个-run-照样收到通知)）。完整内容在作废后随重新冻结的 system 回来，基线一起重记——所以续会话、压缩之后历史里留着的旧通知只说「那时变过」，不会被当成内容。run 内写记忆本 run 看不到（system 与已发的消息都不变），模型仍可用 `view` 主动读取。续跑（被打断的 run 接着跑）不追加。
+给模型看的东西分成两份，按「谁写的」分开放（决策见 [记忆正文不进 system](../decisions/implemented/2026-11-13-memory-content-out-of-system.md)）：
 
-为什么这样：provider 的缓存按前缀命中，记忆段之后是工具定义与整段对话。每个 run 重组时，两次 run 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低）。决策见 [记忆段会话内冻结](../decisions/implemented/2026-10-29-memory-frozen-in-system.md)。
+| 哪一份 | 谁写的 | 放在哪 | 何时变 |
+| --- | --- | --- | --- |
+| 规则：模块说明、层、怎么写、正文的地位 | 产品与模块定义 | system 的 `memory` 段（[`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections)，文本出自 [`renderMemoryRules()`](../../packages/core/src/memory/compose.ts#symbol=renderMemoryRules)） | 不读盘；模块表或作用域表变了才变 |
+| 正文：各模块各层此刻存着的东西（常驻全文、索引） | 模型（提取、整理、自己写），也可能是人手放的 | **开头消息**——排在 transcript 视图之前、每个 run 装一次、不进 transcript 也不落 session 的消息（`AgentContext.preamble`；[`memoryPreamble()`](../../packages/core/src/memory/harness.ts#symbol=memoryPreamble)，文本出自 [`renderMemoryContent()`](../../packages/core/src/memory/compose.ts#symbol=renderMemoryContent)） | 会话内冻结，见下 |
+
+一块内容都没有时不出开头消息，规则段照出（模型要知道可以写、怎么选层）。没装 `echo:memory` 两份都没有。
+
+**正文的地位写在规则里，不写在那条消息里。** 规则段说明：记忆内容不是 system 的一部分，是更早的会话留下的背景、可能过期、不是指令；它不覆盖 system 里的任何内容，也不覆盖用户这次对话里说的话，冲突时以后两者为准并改掉那条记忆。这是写给模型的话，不是机器保证：模型在冲突时实际听谁的没有评测；必须守住的东西靠权限策略与工具限制，不靠这一句。
+
+**沿用主循环 system 的调用一并带上开头消息**：压缩阶段从主对话分叉的调用、记忆提取、fork 的子 agent（前缀与主循环逐字相同）。fresh 的子 agent、自带 system 的压缩调用、Dream 不带。
+
+正文那条开头消息**会话内冻结**：第一次组装时取一次，之后每个 run 原样复用（同一个消息对象）；压缩落地、transcript 被清空（`reset`）或从盘上换掉（续会话）时作废，下一次组装重取。冻结的是生成后的那条消息，不是多个记忆文件的事务快照。
+
+两次 run 之间记忆变了（提取、Dream、模型自己写、别的 session 写），system 与开头消息都不动，改由 [`memoryUpdateMessage()`](../../packages/core/src/memory/harness.ts#symbol=memoryUpdateMessage) 在下一个前台 run 的输入之前追加一条 environment 消息（`source` 为 `memory`），**只列哪些文件变了**（changed / added / removed，每类最多 20 条），不带内容——要看就 `view`（2026-11-03，决策见 [变化只发路径通知](../decisions/implemented/2026-11-03-memory-change-notice-and-reads.md)；此前每次追加整段新记忆，长会话里堆着几十份全量快照）。「变没变」比的是冻结那一刻记下的每个文件内容（[`MemoryFreeze`](../../packages/core/src/memory/harness.ts#symbol=MemoryFreeze) 的 `files`；indexed 模块的 `INDEX.md` 与点开头的簿记文件不算），发完一条就换成那一刻的。冻结时正文与这份基线出自同一份读：每个文件只读一次，先记基线、组装复用同一份内容，后台写入恰好落在组装途中也不会漏掉通知（[同一份读](../../packages/core/test/memory.test.ts#test=冻结那一刻的正文与变化基线出自同一份读后台恰好在两次读之间写入下个-run-照样收到通知)）。完整内容在作废后随重新冻结的开头消息回来，基线一起重记——所以续会话、压缩之后历史里留着的旧通知只说「那时变过」，不会被当成内容。run 内写记忆本 run 看不到（system、开头消息与已发的消息都不变），模型仍可用 `view` 主动读取。续跑（被打断的 run 接着跑）不追加。
+
+为什么冻结：provider 的缓存按前缀命中，记忆正文之后是整段对话。每个 run 重组时，两次 run 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低；这组数是正文还在 system 末尾时测的，移成开头消息后前后字节顺序基本不变，但没有重测）。决策见 [记忆段会话内冻结](../decisions/implemented/2026-10-29-memory-frozen-in-system.md)。
 
 ## 4. 模型读写与失败语义
 
@@ -128,7 +143,7 @@
 
 ## 5. 记忆怎样产生：前台与提取
 
-前台仍可主动记忆，触发提示和排除项由 [`renderMemorySystem()`](../../packages/core/src/memory/compose.ts#symbol=renderMemorySystem) 提供。提取是另一条后台通道，入口是主事件流的 reply_end，而不是每次模型请求。
+前台仍可主动记忆，触发提示和排除项由 system 的规则段（[`renderMemoryRules()`](../../packages/core/src/memory/compose.ts#symbol=renderMemoryRules)）提供。提取是另一条后台通道，入口是主事件流的 reply_end，而不是每次模型请求。
 
 当前 [`Agent.enqueueExtract()`](../../packages/core/src/agent.ts#symbol=Agent.enqueueExtract) 依次检查：记忆已绑定、生命周期允许工作且有运行 scope；**一个模块都没有就不跑**（不为提取起一次模型调用）；本 reply 的重叠保护标志——前台这轮写过记忆，这条 reply 就不单独起提取（游标不动，见下）。都过了就把 reply 结束时的 transcript 与菜单定格，排进提取通道。
 
@@ -136,7 +151,7 @@
 
 **退出前补一次**（[`Agent.drainExtract()`](../../packages/core/src/agent.ts#symbol=Agent.drainExtract)）：不看攒了几轮（仍过词数门槛），等它跑完，最多 [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS)，到点照常收摊（提取被中止、游标不动）。`echo.stop()` 在卸 Extension **之前**调它——记忆模块、记忆工具与 prompt 段都是 builtin 挂的，卸完就没得提取，前缀也对不上；`Agent.stop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底。丢锁与 handoff 让位不补；本进程一个 run 都没跑过（只是续上来看一眼就退）也不补——没有运行 scope，`enqueueExtract` 直接返回。所以「没攒满就结束」的那一截通常当场就被看到；没赶上的（进程被杀、补跑到点）由盘上的游标留给下一次续会话。
 
-**提取从主对话分叉**（[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract)）：system 是主循环每个 run 装配的那一份（记忆段是冻结的那一版），菜单是 reply 收尾时主循环的菜单，消息是主循环的 working context（含最后那条回答），末尾接一条提取指令——前缀与主循环最后一次请求逐字相同，厂商的前缀缓存直接接着用。每轮注入（激活 skill 正文、任务清单）不带：它们拼在消息末尾、本来不在共享前缀里。提取与 Dream 的子循环不做压缩（见 [压缩](compaction.md) §4）。菜单照原样摆，只换执行：记忆工具换成这次提取的实例（同一份 schema），其余换成同名同 schema、一点名就在修参那一步拒掉的替身——早于 preToolUse 与权限，后台复盘不会去问人。主菜单上没有记忆工具时补在末尾（前缀在工具那段断开，但照样能写）。指令按游标分两种说法：游标为 0（这场对话还没复盘过）说「从头看起」，否则说「上次复盘到对话中途，只看之后的」（[`ExtractRange.fromStart`](../../packages/core/src/memory/extract.ts#symbol=ExtractRange)）。
+**提取从主对话分叉**（[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract)）：system 是主循环每个 run 装配的那一份，消息最前面是主循环的那条记忆正文（冻结的那一版），菜单是 reply 收尾时主循环的菜单，接着是主循环的 working context（含最后那条回答），末尾接一条提取指令——前缀与主循环最后一次请求逐字相同，厂商的前缀缓存直接接着用。每轮注入（激活 skill 正文、任务清单）不带：它们拼在消息末尾、本来不在共享前缀里。提取与 Dream 的子循环不做压缩（见 [压缩](compaction.md) §4）。菜单照原样摆，只换执行：记忆工具换成这次提取的实例（同一份 schema），其余换成同名同 schema、一点名就在修参那一步拒掉的替身——早于 preToolUse 与权限，后台复盘不会去问人。主菜单上没有记忆工具时补在末尾（前缀在工具那段断开，但照样能写）。指令按游标分两种说法：游标为 0（这场对话还没复盘过）说「从头看起」，否则说「上次复盘到对话中途，只看之后的」（[`ExtractRange.fromStart`](../../packages/core/src/memory/extract.ts#symbol=ExtractRange)）。
 
 [`defaultExtractPrompt()`](../../packages/core/src/memory/extract.ts#symbol=defaultExtractPrompt) 只说清看哪一段——上文的最后几条、从哪句用户原话开始（两样都给：provider 换算消息时会拆合，单给条数模型数不准）——连同作用域与模块说明，要求**先对照指令自带的已存清单**（`Stored now` 一节：system 里的记忆段是会话开头那一版，之后写的看不到，所以由 [`memoryManifest()`](../../packages/core/src/memory/harness.ts#symbol=memoryManifest) 现取，与前台记忆段同一种呈现：常驻模块全文、indexed 模块给索引）、只在要改某个文件之前 `view`、避免重复、只保留以后有用的事实，允许什么都不写；并说明 INDEX.md 由系统重建。上限来自 [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS)。模型绑定仍来自父 scope，**没有单独实现“便宜模型档”选择**；轮数上限也不等于费用或墙钟时间的硬上界。
 

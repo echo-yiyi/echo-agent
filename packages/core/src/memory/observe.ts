@@ -2,7 +2,7 @@
 //
 // 事实只在**唯一 emission point** 产生——五种公开 mutation 的最外层 `finishMemoryMutation()`（harness.ts），
 // 在 semantic reject、primary storage settle 与 index refresh outcome 都已知之后恰发一次；compose 在
-// `renderMemorySystem()` 出数据的那一刻（或沿用冻结那份的那一刻）发一次。这里不 import Sequencer，也不知道 tap 长什么样。
+// `renderMemoryContent()` 出数据的那一刻（或沿用冻结那份的那一刻）发一次。这里不 import Sequencer，也不知道 tap 长什么样。
 //
 // 后台两件事的**门**（观测白盒化 B）：提取没跑（`extract_skipped`）、整理每一层判了什么（`dream_evaluated`），
 // 各带一个封闭的原因码，放行的提取不记（它自己是一个子循环 run）。这两条是 run 之外的活动：判的那一刻
@@ -76,8 +76,8 @@ export type MemoryFact =
   | Readonly<{
       kind: "compose";
       /**
-       * true = 沿用会话里冻结的那份（`MemorySystemFreeze`），没重读盘——这时没有组装，模块数 / 块数 / 字数都没有
-       * （这一段在 system 里多大，看同一个 run 的 `prompt.assembled` 里 `memory` 那段）。
+       * true = 沿用会话里冻结的那份（`MemoryFreeze`），没重读盘——这时没有组装，模块数 / 块数 / 字数都没有
+       * （那条记忆正文多大，看同一个 run 的 `context.built` 构成里 `preamble` 那一块）。
        */
       reused: boolean;
       regions?: number;

@@ -114,7 +114,9 @@ test("攒满三轮 → 提取起来、从主对话分叉：上文就是这几轮
 
 test("提取请求的前缀与前台最后一次请求逐字相同：同一份 system、同一份工具菜单，消息是它的延续（厂商前缀缓存接得上）", async () => {
   const { fn, extracts, foreground } = recording();
-  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()) });
+  const dir = new InMemoryDir();
+  await dir.write("user.md", "回答要简短"); // 记忆里有东西：前台的请求最前面有那条记忆正文，提取也得原样带着
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(dir) });
   await mountBuiltinTools(agent); // 主菜单上真有 memory 工具：提取换掉的是同一位置上的同名工具
 
   await say(agent, ...THREE);
@@ -123,6 +125,8 @@ test("提取请求的前缀与前台最后一次请求逐字相同：同一份 s
   expect(extracts).toHaveLength(1);
   const last = foreground.at(-1)!;
   const ex = extracts[0]!;
+  expect(JSON.stringify(last.messages[0])).toContain("# Memory contents");
+  expect(JSON.stringify(last.messages[0])).toContain("回答要简短");
   expect(ex.systemPrompt).toBe(last.systemPrompt);
   expect(ex.tools).toEqual(last.tools);
   expect(ex.tools.map((t) => t.name)).toContain("memory");

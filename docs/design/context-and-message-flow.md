@@ -96,14 +96,15 @@ toolResult 与 environment 在账本中保留独立角色，provider 的角色�
 
 因此恢复期拒绝坏消息，不代表程序化 prompt 入站已经具备同等校验。JavaScript 调用方和反序列化入口需要在提交前验证内建消息形状；补齐所有 durable ingress 的统一验形仍是实现限制。恢复校验继续负责发现旧数据或外部坏写。
 
-## 3. Prompt 通过两条通道进入 context
+## 3. Prompt 通过三条通道进入 context
 
-prompt 的内容、所有权、排序、变量、信任、失败与预算只有一份权威说明：[Prompt 设计](prompt.md)。本文只保留它与消息流水线相交的两条事实：
+prompt 的内容、所有权、排序、变量、信任、失败与预算只有一份权威说明：[Prompt 设计](prompt.md)。本文只保留它与消息流水线相交的三条事实：
 
 - system sections 在主 Agent 的 run 开始前装配成 `AgentContext.systemPrompt`；该快照不进入 transcript。
+- 开头消息（`AgentContext.preamble`，现在只有记忆正文一条）与 system 同时装好，每个 attempt 构建 working context 时排在压缩视图之前；不发 `message_end`，不进入 transcript 或 session，压缩不动它。
 - 动态 injection 在每个 attempt 构建 working context 时追加到压缩视图末尾，不发 `message_end`，因此不进入 transcript 或 session；工具门控读取本 turn 冻结的菜单。
 
-随后 injection 与 transcript 一起经过 `transformContext → contextBeforeBuild → convertToLlm`。工具 schema 由同一 turn 的工作集单独投影，不从 prompt module 生成。接线见 [`Agent.createContextSnapshot()`](../../packages/core/src/agent.ts#symbol=Agent.createContextSnapshot) 与 [`runAttempt()`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt)。
+随后开头消息、transcript 视图与 injection 一起经过 `transformContext → contextBeforeBuild → convertToLlm`。工具 schema 由同一 turn 的工作集单独投影，不从 prompt module 生成。接线见 [`Agent.createContextSnapshot()`](../../packages/core/src/agent.ts#symbol=Agent.createContextSnapshot) 与 [`runAttempt()`](../../packages/core/src/loop/run-turn.ts#symbol=runAttempt)。
 
 ## 4. Working context 与对象所有权
 
