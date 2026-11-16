@@ -14,13 +14,23 @@ import { lexicon, recordMark } from "../src/observe/lexicon.ts";
 import type { Sink } from "@echo-agent/base";
 
 let dir: string;
+let home: string;
+let savedHome: string | undefined;
 const running: Echo[] = [];
+// 用户层（记忆、技能、角色）都在 ECHO_HOME 下：每条测试换到临时目录，绝不读开发机上真的 ~/.echo——
+// 此前只有一条测试这么做，别的测试会把本机装的 skill 目录读进送模视图（2026-11-16：视图里多出一条开头消息）
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "echo-observe-serve-"));
+  home = mkdtempSync(join(tmpdir(), "echo-home-serve-"));
+  savedHome = process.env["ECHO_HOME"];
+  process.env["ECHO_HOME"] = home;
 });
 afterEach(async () => {
   for (const e of running.splice(0)) await e.stop().catch(() => {});
+  if (savedHome === undefined) delete process.env["ECHO_HOME"];
+  else process.env["ECHO_HOME"] = savedHome;
   rmSync(dir, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
 });
 
 function sink(): Sink & { text: string } {
@@ -187,10 +197,8 @@ test("面板：/api/runs/<id>/records/<seq>/content 给出那次送模的原文�
 });
 
 test("面板：记忆写入的正文（content 档）——/records/<seq>/content 给写成的整份与写之前的那份；页面有逐行改动视图", async () => {
-  // 记忆的用户层在 ECHO_HOME 下：只在这条测试里换到临时目录，绝不碰开发机上真的 ~/.echo
-  const savedHome = process.env["ECHO_HOME"];
-  process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-serve-"));
-  try {
+  // 记忆的用户层在 ECHO_HOME 下：文件级的 beforeEach 已经换到临时目录
+  {
     const create = { command: "create", path: "user/memory/panel-style.md", file_text: "---\ndescription: 回答风格\n---\n\n回答尽量简短。" };
     const replace = { command: "str_replace", path: "user/memory/panel-style.md", old_str: "尽量简短", new_str: "简短、先给结论" };
     const echo = await echoAt([toolTurn("m1", "memory", create), toolTurn("m2", "memory", replace), textTurn("改好了")], { withoutMemory: false, observation: { capture: "content" } });
@@ -210,9 +218,6 @@ test("面板：记忆写入的正文（content 档）——/records/<seq>/conten
       await server.stop();
       await reader.close();
     }
-  } finally {
-    if (savedHome === undefined) delete process.env["ECHO_HOME"];
-    else process.env["ECHO_HOME"] = savedHome;
   }
   const html = observePageHtml();
   for (const marker of ["box.append(...memoryWriteView(vm, t))", "lineDiff(before, after)", "EXTRACT_SKIP[attrs.reason]", "DREAM_DECISION[attrs.decision]"]) expect(html).toContain(marker);
