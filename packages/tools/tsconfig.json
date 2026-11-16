@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // 仓内解析必须走 `@echo-agent/core` exports 的 `bun` 支（指源码）。缺了这条，tsc 会取
+    // `types` 支的 `dist/`——那是构建产物、不进仓，**新检出必红**。
+    "customConditions": ["bun"],
+    "types": ["bun"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "test"]
+}

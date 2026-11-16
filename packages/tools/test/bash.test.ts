@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionContext } from "@echo-agent/core";
-import { detectShellEnvironment, makeBashTool, shellEnv } from "../src/tools/bash.ts";
+import { detectShellEnvironment, makeBashTool, shellEnv } from "../src/bash.ts";
 import { SHELL_TOOLS, shellToolsSection } from "../src/prompt.ts";
 
 let root: string;

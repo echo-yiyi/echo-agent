@@ -1,6 +1,6 @@
 ---
 name: release
-description: 发布 echo-agent 的新版本到 npm：五个包锁步升版本 → 本地演练 → 推 tag 让 CI 用 trusted publishing 发布 → 从 registry 实装验证。
+description: 发布 echo-agent 的新版本到 npm：六个包锁步升版本 → 本地演练 → 推 tag 让 CI 用 trusted publishing 发布 → 从 registry 实装验证。
 argument-hint: "<版本号，如 0.2.0>"
 disable-model-invocation: true
 ---
@@ -19,11 +19,12 @@ disable-model-invocation: true
 - CI 那条要分清三种情况：**绿**就往下走；**红**先查清再说，别急着发；**长时间 queued 且没分配 job**（`gh run view <id> --json jobs` 为空）是 GitHub 调度侧的事，跟本仓无关——此时 main 并没有红，而 `v*` tag 触发的 Release 自己会重跑 typecheck 与全套测试，可以继续，但要如实告诉用户这一条没跑完。
 - 目标版本合法且比线上新：`npm dist-tag ls echo-agent` 看当前 `latest`。0.x 阶段，有破坏性变更就升次版本号（0.1 → 0.2），否则升修订号。
 - trusted publishing **没法从命令行核对**，别浪费时间试。这个账号的包设了「要求 2FA 并禁用 token」，本机 npm CLI 恒为 401：`npm whoami` / `token list` / `trust list` / `stage list` 全部用不了；而 `npm view`、`npm dist-tag ls`、安装这些公开读不受影响（发布脚本判断「版本发过没有」照常工作）。
-- 所以这一条的实际做法：问用户五个包是否都在 npmjs.com 网页上配好了，**尤其「Allowed actions」要勾上允许 `npm publish`**（只给 stage 的话发布会停在待批准）。账户类操作一律走网页——用户的 2FA 只有 passkey、没有一次性码，服务端不给命令行认证机会。没配好也不会造成半套发布：CI 会在第一个包就失败。
+- 所以这一条的实际做法：问用户六个包是否都在 npmjs.com 网页上配好了，**尤其「Allowed actions」要勾上允许 `npm publish`**（只给 stage 的话发布会停在待批准）。账户类操作一律走网页——用户的 2FA 只有 passkey、没有一次性码，服务端不给命令行认证机会。没配好也不会造成半套发布：CI 会在第一个包就失败。
+- **新加的包第一次发版是例外**（`@echo-agent/tools` 是 2026-11-15 加的，v0.7.0 时还不存在）：它排在发布顺序中间，没配好的话前面的包已经发出去、到它才失败。发布脚本能原样重跑（已发的跳过），但别等到那一步——推 tag 之前单独问用户这个新包在网页上配好没有。
 
 完成判据：一张小表列出以上每项的实际状态；全部满足，或者不满足的项已经由用户拍板。
 
-## 2. 五个包锁步升版本，重建 lockfile
+## 2. 六个包锁步升版本，重建 lockfile
 
 ```bash
 V=<版本号>
@@ -32,7 +33,7 @@ rm bun.lock && bun install
 ```
 
 - perl 只替换每个文件里第一处 `"version"`，也就是顶层那个字段，其余字节原样不动。不用 `npm pkg set`：它会顺手整理包清单（删掉 core 的空 `dependencies`、把 tui 的依赖按字母重排），这些改动会混进发版提交。
-- 包之间是精确版本依赖，五个包必须同一个版本号。
+- 包之间是精确版本依赖，六个包必须同一个版本号。
 - **必须删掉 `bun.lock` 再重建**：`bun install` 连同 `--force` 都不会刷新 lockfile 里记录的 workspace 版本，不重建的话，发出去的包会依赖一个永远不存在的旧版本。第 3 步的演练守卫能抓住它，但在这一步就做对。
 
 完成判据：`git diff -U0 -- 'packages/*/package.json'` 里每个文件恰好改了一行，而且就是 `version` 那一行；`git diff --stat` 除此之外只有 `bun.lock`。
@@ -44,19 +45,19 @@ bun install --frozen-lockfile
 bun run typecheck
 bun test
 bun scripts/docs-lint.ts
-bun scripts/release.ts            # 演练：五个包打包、过守卫、npm publish --dry-run
+bun scripts/release.ts            # 演练：六个包打包、过守卫、npm publish --dry-run
 ```
 
 - 判绿看每条命令的真实退出码。
 - `bun test` 有几条已知的并跑抖动（resident-v0、cli setup、cli serve）。只红这几条时单独重跑，重跑绿了就按抖动处理。
 - **但「重跑还红」就不是抖动。** 判据是三方对照：本地多次、CI 的另一个平台、CI 的同一平台重跑。2026-09-13 那次 ubuntu 连红 4 次而 macOS 与本地全绿，根因是测试等错了就绪判据（等「inbox 账本空了」而不是 `agent.acceptsWork`）——那种情况要去读代码，别靠一遍遍重跑。
-- 演练要对五个包都打出「✓ 演练」，最后一行是「演练完成」。
+- 演练要对六个包都打出「✓ 演练」，最后一行是「演练完成」。
 
-完成判据：五条命令退出码全是 0，演练输出覆盖五个包。
+完成判据：五条命令退出码全是 0，演练输出覆盖六个包。
 
 ## 4. 提交并推 main，等 CI
 
-- 只暂存五个 `package.json` 和 `bun.lock`。提交信息按仓库格式：中文标题句、要点、门禁读数、`Co-Authored-By` 与 `Claude-Session` 两行 trailer。
+- 只暂存六个 `package.json` 和 `bun.lock`。提交信息按仓库格式：中文标题句、要点、门禁读数、`Co-Authored-By` 与 `Claude-Session` 两行 trailer。
 - `git push origin main`，等这个提交在 main 上的 CI 双平台都绿。
 
 完成判据：`origin/main` 就是这个版本提交，并且它的 CI 两个 job 都是 success。
@@ -87,7 +88,7 @@ git push origin "v$V"
   - npm 装 `@echo-agent/core@$V`，用 Node import，能拿到导出；
   - bun 装 `echo-agent@$V` 和 `@echo-agent/coding@$V`，`echo-agent --help` 与 `echo-coding --help` 都能打出用法。
 
-完成判据：五个包的 `latest` 都是 `$V`，五个 tarball 都返回 200，三项冒烟全部通过。
+完成判据：六个包的 `latest` 都是 `$V`，六个 tarball 都返回 200，三项冒烟全部通过。
 
 ## 8. 汇报
 

@@ -8,7 +8,7 @@
 // 更要命的是它会分家：`createEcho()` 后来补的每一条（inline 工具转 Extension、
 // 清单与真相相等、失败路径逆序卸载），这边都得再补一遍，漏一条就是两种行为。
 //
-// 现在这里只出**数据**：权限策略、三条 Extension 的 Entry（产品的 prompt 段也在其中）。
+// 现在这里只出**数据**：权限策略、五条 Extension 的 Entry（产品的 prompt 段也在其中）。
 // 装配归 `createEcho()`，一处。
 //
 // ```ts
@@ -21,20 +21,29 @@
 // ```
 //
 // system prompt（2026-09-01）：不再有 `systemPrompt` 字符串。产品的身份与编码纪律是 `echo:coding`
-// 这条 prompt pack 的两段；文件 / shell 工具的习惯段随 `echo:workspace` / `echo:shell` 走
-// （文本都在 `prompt.ts`）。工具目录不进 system。
+// 这条 prompt pack 的两段（文本在 `prompt.ts`）；文件 / shell 工具的习惯段随 `echo:workspace` / `echo:shell` 走
+// （文本在 `@echo-agent/tools`）。工具目录不进 system。
 
 import { DEFAULT_MAX_ITERATIONS, type AssembleContext } from "@echo-agent/core"; // 执行预算的唯一出处(identity 读它)
 import { definePromptPack, type ExtensionEntry } from "@echo-agent/core/extension";
 import type { CredentialStore, PermissionPolicy as CorePermissionPolicy, PromptSection, Skill, ThinkingLevel } from "@echo-agent/core";
-import { detectShellEnvironment, makeBashTool, makeShellTools } from "./tools/bash.ts";
-import { makeFsTools } from "./tools/fs.ts";
-import { makeSearchTools } from "./tools/search.ts";
-import { makeWebTools } from "./tools/web.ts";
+// 文件 / 搜索 / shell / web 四组工具、它们的 Extension 与习惯段不是本产品的，来自 `@echo-agent/tools`；本产品只决定挂哪几条
+import {
+  ECHO_SHELL,
+  ECHO_WEB,
+  ECHO_WORKSPACE,
+  detectShellEnvironment,
+  makeFsTools,
+  makeSearchTools,
+  makeShellTools,
+  makeWebTools,
+  shellToolsSection,
+  workspaceToolsSection,
+} from "@echo-agent/tools";
 import { makeWorktreeTools } from "./tools/worktree.ts";
-import { ECHO_SHELL, ECHO_WEB, ECHO_WORKSPACE, ECHO_WORKTREE } from "./extensions.ts";
+import { ECHO_WORKTREE } from "./extensions.ts";
 import { permissionPolicyFor, type PermissionPolicy } from "./permission.ts";
-import { codingConductSection, codingIdentitySection, shellToolsSection, workspaceToolsSection } from "./prompt.ts";
+import { codingConductSection, codingIdentitySection } from "./prompt.ts";
 
 export type CodingPresetOptions = {
   /**
@@ -206,6 +215,3 @@ export function codingPreset(opts: CodingPresetOptions = {}): CodingPreset {
     ],
   };
 }
-
-/** `bash` 单独造一把（不经 Extension）。`makeShellTools()` 与测试都从这里造。 */
-export { makeBashTool };

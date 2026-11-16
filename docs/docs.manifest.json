@@ -46,6 +46,10 @@
       "bilingual": false
     },
     {
+      "path": "packages/tools/README.md",
+      "bilingual": false
+    },
+    {
       "path": "packages/tui/README.md",
       "bilingual": false
     },
@@ -331,6 +335,10 @@
     },
     {
       "path": "docs/decisions/implemented/2026-11-15-security-hardening.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/implemented/2026-11-15-tools-package.md",
       "bilingual": false
     },
     {

@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelTool, ToolExecutionContext } from "@echo-agent/core";
-import { makeSearchTools } from "../src/tools/search.ts";
+import { makeSearchTools } from "../src/search.ts";
 
 let root: string;
 beforeEach(async () => {

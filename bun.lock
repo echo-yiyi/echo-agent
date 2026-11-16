@@ -48,6 +48,7 @@
       "dependencies": {
         "@echo-agent/base": "workspace:*",
         "@echo-agent/core": "workspace:*",
+        "@echo-agent/tools": "workspace:*",
         "@echo-agent/tui": "workspace:*",
       },
       "devDependencies": {
@@ -61,6 +62,18 @@
       "devDependencies": {
         "@types/bun": "latest",
         "typescript": "^5.7.0",
+      },
+    },
+    "packages/tools": {
+      "name": "@echo-agent/tools",
+      "version": "0.7.0",
+      "dependencies": {
+        "@echo-agent/base": "workspace:*",
+        "@echo-agent/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.5.0",
       },
     },
     "packages/tui": {
@@ -85,6 +98,8 @@
     "@echo-agent/coding": ["@echo-agent/coding@workspace:packages/coding"],
 
     "@echo-agent/core": ["@echo-agent/core@workspace:packages/core"],
+
+    "@echo-agent/tools": ["@echo-agent/tools@workspace:packages/tools"],
 
     "@echo-agent/tui": ["@echo-agent/tui@workspace:packages/tui"],
 

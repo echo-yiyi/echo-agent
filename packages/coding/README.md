@@ -1,7 +1,7 @@
 # @echo-agent/coding
 
 Echo's coding agent: file, search, shell and web tools, as a product built from
-`@echo-agent/base` and `@echo-agent/tui`. Installs the `echo-coding` command.
+`@echo-agent/base`, `@echo-agent/tools` and `@echo-agent/tui`. Installs the `echo-coding` command.
 
 > **Requires [Bun](https://bun.sh/).** The executable is TypeScript with a `#!/usr/bin/env bun`
 > shebang, and the package entry point is TypeScript source. Node is not supported for this
@@ -43,10 +43,11 @@ conversation even in the same directory.
 ## What this package is
 
 A **product**, not a framework layer. It owns its identity and conduct sections, its permission
-policy and the `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions; the
-launcher parts come from `@echo-agent/base` and the terminal shell from `@echo-agent/tui`. It does
-not depend on `echo-agent` — the two are siblings, which is exactly the path a third-party product
-would take on this runtime.
+policy and the `echo:worktree` extension (git worktree isolation). The file, search, shell and web
+tools are not its own: the `echo:workspace`, `echo:shell` and `echo:web` extensions come from
+`@echo-agent/tools`, and this product mounts them. The launcher parts come from `@echo-agent/base`
+and the terminal shell from `@echo-agent/tui`. It does not depend on `echo-agent` — the two are
+siblings, which is exactly the path a third-party product would take on this runtime.
 
 Full documentation is in the
 [repository README](https://github.com/echo-yiyi/echo-agent#readme).

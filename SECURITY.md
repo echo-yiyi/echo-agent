@@ -32,7 +32,7 @@ machine by design. "The agent ran a command" is the product, not a vulnerability
 to hear about:
 
 - **Escaping the workspace root.** File tools resolve every path against a configured root and
-  reject anything outside it (`packages/coding/src/tools/fs.ts`). A path, symlink, or
+  reject anything outside it (`packages/tools/src/fs.ts`). A path, symlink, or
   encoding that gets through is in scope.
 - **Bypassing the permission layer.** A tool call that should have required approval and did not
   (`packages/core/src/permission/ledger.ts`).
