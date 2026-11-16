@@ -336,6 +336,10 @@ test("过期清扫：删掉一个 run 后，剩下的记录引用到的正文一
   await echo.observations.flush(); // r1 的记录先落成批：两个 run 不同批，删 r1 才删得干净
   const r2 = await echo.send("again");
   await echo.stop();
+  // **先等观测写完再清扫**（`EchoObservations.flush()` 的契约：stop() 之后别处要读、要删之前先 flush）。下面拿「24 小时之后」去清扫，
+  // 宽限期护不住还在路上的那批：r2 最后一批还没落盘时，它引用的正文在清扫看来没人引用、被删掉，批随后落盘、引用指向不存在的文件。
+  // 慢机器上偶发红过三次（ubuntu、macOS 都有）；把批文件延迟 300 ms 落盘能稳定复现。真实的清扫用的是此刻的时钟，宽限期护得住。
+  await echo.observations.flush();
   const blobFiles = async (): Promise<string[]> => (await readdir(join(stateDir, "observability", "blobs")).catch(() => [])).sort();
   const before = await blobFiles();
   expect(before.length).toBeGreaterThan(0);
