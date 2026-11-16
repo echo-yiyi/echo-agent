@@ -3,13 +3,14 @@
   "version": "0.7.0",
   "license": "MIT",
   "type": "module",
-  "description": "Echo's coding agent: file, search, shell and web tools, its own identity and conduct. Installs the `echo-coding` command. Requires Bun.",
+  "description": "Echo's coding agent: its own identity and conduct on top of the standard file, search, shell and web tools, plus git worktree isolation. Installs the `echo-coding` command. Requires Bun.",
   "bin": {
     "echo-coding": "./bin/echo-coding.ts"
   },
   "dependencies": {
     "@echo-agent/base": "workspace:*",
     "@echo-agent/core": "workspace:*",
+    "@echo-agent/tools": "workspace:*",
     "@echo-agent/tui": "workspace:*"
   },
   "devDependencies": {

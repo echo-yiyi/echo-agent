@@ -1,6 +1,6 @@
 // shell 一组:bash(前台跑命令;background: true 时挂进 agent.background)+ job_output / job_stop(后台作业的回读与停止)。
 //
-// **执行体在这层,队列在 core**——这正是「队列在 core,跑什么在产品」那句话的落地:
+// **执行体在这层,队列在 core**——这正是「队列在 core,跑什么在产品」那句话的落地（core 的 `background/types.ts`；这个包就是产品共用的那一份「跑什么」）:
 // core 的 startBackground / getBackground / killBackground 管闸/缓冲/收摊,这里只填「怎么起一个进程」
 // 和「怎么把缓冲与取消口摆给模型」。
 //
@@ -108,7 +108,7 @@ export type BashDeps = {
  */
 export type ShellState = { cwd: string | undefined; workspace: string | undefined };
 
-/** shell 一组的全部工具。`echo:shell` 注册的与 `codingAgentIdentity()` 列的是**同一份**,不各写各的名单。 */
+/** shell 一组的全部工具。`echo:shell` 注册的与产品算行为 digest 时列的（`echo-coding` 的 `codingAgentIdentity()`）是**同一份**,不各写各的名单。 */
 export function makeShellTools(deps: BashDeps = {}): ModelTool[] {
   const state: ShellState = { cwd: undefined, workspace: undefined };
   return [makeBashTool(deps, state), jobOutputTool(deps), jobStopTool(deps)] as ModelTool[];
@@ -221,7 +221,7 @@ function withCwdMarker(command: string): string {
  * 不然 `sleep 10`、dev server 这类由 bash 再起的子进程会活过 bash，攥着输出管道不放——超时/中止要等它自己结束，job_stop 也留孤儿。
  *
  * `bash -c`，不是登录 shell：登录 shell 会读 profile，macOS 上 `path_helper` 还会把系统目录排到 PATH 前面，
- * 用户装的 git / ruby / node 就变成了系统那一份。命令看到的环境与启动 echo-coding 的那个 shell 一致，只少 echo 自己的 key（`shellEnv`）。
+ * 用户装的 git / ruby / node 就变成了系统那一份。命令看到的环境与启动 agent 的那个 shell 一致，只少 echo 自己的 key（`shellEnv`）。
  * `PWD` 例外，设成本次的起点：继承来的是父进程的目录，bash 发现它不指向当前目录就改用物理路径——
  * 工作区经软链时（macOS 的 `/var` → `/private/var`）`$PWD` 成了展开后的路径，第一条命令就被当成「cd 过了」。
  */

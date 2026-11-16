@@ -36,7 +36,7 @@ printf 'Introduce yourself in one sentence.\n' |
 | 工具 | core 的 `echo:*` builtin | builtin 之外再加 `echo:workspace`、`echo:shell`、`echo:worktree` 与 `echo:web` |
 | 命令 | `echo-agent` | `echo-coding` |
 
-文件工具和 shell 工具只属于 `echo-coding`。一个产品自己拥有身份段、纪律段、自带的 extension 与可执行文件；启动器部件、宿主能力与管道壳来自 `@echo-agent/base`，交互形态则由它的可执行文件交进来的那个 `Shell` 实现决定。第三方基于这个 runtime 做产品走的是同一条路——自己画界面的产品只依赖 `@echo-agent/base`，不必装一个终端库。
+文件、搜索、shell 与 web 工具住在 `@echo-agent/tools` 里，不属于任何产品；两个命令里只有 `echo-coding` 挂了它们。一个产品自己拥有身份段、纪律段、自带的 extension 与可执行文件；启动器部件、宿主能力与管道壳来自 `@echo-agent/base`，交互形态则由它的可执行文件交进来的那个 `Shell` 实现决定。第三方基于这个 runtime 做产品走的是同一条路——自己画界面的产品只依赖 `@echo-agent/base`，不必装一个终端库。
 
 ```bash
 bun add -g @echo-agent/coding
@@ -131,9 +131,10 @@ try {
 |---|---|
 | `@echo-agent/core` | Runtime、engine、provider adapters、持久化、记忆、任务与 extension API |
 | `@echo-agent/base` | 装配层：产品契约、启动器部件、宿主能力（凭据、设置、项目指令、observe 面板）与管道壳。不依赖任何终端库 |
+| `@echo-agent/tools` | 任何产品都能挂的标准工具包：`echo:workspace`（文件与搜索）、`echo:shell`（bash、后台作业与操作系统沙箱）、`echo:web`（取网页与搜索）。只依赖 core 与 base |
 | `@echo-agent/tui` | 终端壳：交互 TUI 与首次运行引导，作为壳端口的终端实现打包 |
 | `echo-agent` | 通用 agent 产品：身份段与纪律段、它的 `Product`、以及 `echo-agent` 命令 |
-| `@echo-agent/coding` | coding agent 产品：身份段与纪律段、`echo:workspace`、`echo:shell`、`echo:worktree`、`echo:web` 四条 extension，以及 `echo-coding` 命令 |
+| `@echo-agent/coding` | coding agent 产品：身份段与纪律段、它的权限策略、`echo:worktree` 这条 extension，以及 `echo-coding` 命令。它挂上 `@echo-agent/tools` 的三个工具包 |
 
 可运行的消费者在 [`examples/`](examples/) 中：真实 provider 的 hello world、无需凭据的 scripted agent，以及 extension 自动发现示例。分发测试会打包各 workspace，在干净项目中安装 tarball，三个样例都做类型检查，用 Bun 跑其中两个无需凭据的；Node 则另跑一段生成的冒烟脚本验证装好的包（hello 要真 key，只做类型检查）。
 
@@ -143,9 +144,10 @@ try {
 |---|---|
 | [`packages/core/`](packages/core/) | `@echo-agent/core` runtime 与 SDK |
 | [`packages/base/`](packages/base/) | `@echo-agent/base` 装配层 |
+| [`packages/tools/`](packages/tools/) | `@echo-agent/tools` 标准工具包 |
 | [`packages/tui/`](packages/tui/) | `@echo-agent/tui` 终端壳 |
 | [`packages/cli/`](packages/cli/) | `echo-agent`：通用 agent 产品 |
-| [`packages/coding/`](packages/coding/) | `echo-coding`：coding agent 产品、它的四条工具 extension、它的 prompt pack 与命令 |
+| [`packages/coding/`](packages/coding/) | `echo-coding`：coding agent 产品、它的 prompt pack、它的 worktree extension 与命令 |
 | [`examples/`](examples/) | 可执行的 package consumers |
 | [`test/`](test/) | 仓库级分发门与文档检查 |
 

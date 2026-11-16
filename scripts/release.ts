@@ -46,7 +46,7 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 
 /** 发布顺序即依赖顺序：每个包只依赖排在它前面的。 */
-const ORDER = ["core", "base", "tui", "cli", "coding"] as const;
+const ORDER = ["core", "base", "tools", "tui", "cli", "coding"] as const;
 
 type Manifest = { name: string; version: string; dependencies?: Record<string, string> };
 type Packed = { name: string; version: string; tgz: string };

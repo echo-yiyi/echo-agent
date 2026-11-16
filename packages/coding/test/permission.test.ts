@@ -4,8 +4,7 @@
 import { expect, test } from "bun:test";
 import type { PermissionPolicyInput } from "@echo-agent/core";
 import { CODING_CLASSIFIER_NOTES, CODING_SAFE_TOOLS, DEFAULT_PERMISSION, permissionPolicyFor, type PermissionPolicy } from "../src/permission.ts";
-import { makeFsTools } from "../src/tools/fs.ts";
-import { makeSearchTools } from "../src/tools/search.ts";
+import { makeFsTools, makeSearchTools } from "@echo-agent/tools";
 
 const input = (toolName: string, params: unknown): PermissionPolicyInput => ({
   runId: "r",

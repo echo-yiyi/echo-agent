@@ -36,7 +36,7 @@ The repository ships two commands on the same runtime. They are siblings: neithe
 | Tools | Core's `echo:*` builtins | The builtins plus `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` |
 | Command | `echo-agent` | `echo-coding` |
 
-File and shell tools belong to `echo-coding` only. A product owns its identity section, its conduct section, its own extensions and its executable; the launcher parts, the host capabilities and the pipe shell come from `@echo-agent/base`, and the interactive form is whichever `Shell` implementation its executable hands in. A third-party product builds on this runtime the same way — and one that draws its own interface depends on `@echo-agent/base` alone, without installing a terminal library.
+The file, search, shell and web tools live in `@echo-agent/tools` and belong to no product; of the two commands, only `echo-coding` mounts them. A product owns its identity section, its conduct section, its own extensions and its executable; the launcher parts, the host capabilities and the pipe shell come from `@echo-agent/base`, and the interactive form is whichever `Shell` implementation its executable hands in. A third-party product builds on this runtime the same way — and one that draws its own interface depends on `@echo-agent/base` alone, without installing a terminal library.
 
 ```bash
 bun add -g @echo-agent/coding
@@ -131,9 +131,10 @@ try {
 |---|---|
 | `@echo-agent/core` | Runtime, engine, provider adapters, persistence, memory, tasks, and the extension API |
 | `@echo-agent/base` | Assembly layer: the product contract, launcher parts, host capabilities (credentials, settings, project instructions, the observe panel) and the pipe shell. No terminal dependency |
+| `@echo-agent/tools` | Standard tool packs any product can mount: `echo:workspace` (files and search), `echo:shell` (bash, background jobs and the OS sandbox) and `echo:web` (fetch and search). Depends on core and base only |
 | `@echo-agent/tui` | Terminal shell: the interactive TUI and first-run setup, packaged as the terminal implementation of the shell port |
 | `echo-agent` | General agent product: its identity and conduct sections, its `Product`, and the `echo-agent` command |
-| `@echo-agent/coding` | Coding agent product: its identity and conduct sections, the four `echo:workspace`, `echo:shell`, `echo:worktree` and `echo:web` extensions, and the `echo-coding` command |
+| `@echo-agent/coding` | Coding agent product: its identity and conduct sections, its permission policy, the `echo:worktree` extension, and the `echo-coding` command. It mounts the three tool packs from `@echo-agent/tools` |
 
 Runnable consumers live in [`examples/`](examples/): a real-provider hello world, a credential-free scripted agent, and extension auto-discovery. The distribution test packs the workspaces, installs the tarballs in clean projects, type-checks all three examples, and runs the two credential-free ones with Bun; Node runs a generated smoke script against the installed package instead (the hello example needs a real key, so it is only type-checked).
 
@@ -143,9 +144,10 @@ Runnable consumers live in [`examples/`](examples/): a real-provider hello world
 |---|---|
 | [`packages/core/`](packages/core/) | `@echo-agent/core` runtime and SDK |
 | [`packages/base/`](packages/base/) | `@echo-agent/base` assembly layer |
+| [`packages/tools/`](packages/tools/) | `@echo-agent/tools` standard tool packs |
 | [`packages/tui/`](packages/tui/) | `@echo-agent/tui` terminal shell |
 | [`packages/cli/`](packages/cli/) | `echo-agent`: the general agent product |
-| [`packages/coding/`](packages/coding/) | `echo-coding`: the coding agent product, its four tool extensions, its prompt pack and the command |
+| [`packages/coding/`](packages/coding/) | `echo-coding`: the coding agent product, its prompt pack, its worktree extension and the command |
 | [`examples/`](examples/) | Executable package consumers |
 | [`test/`](test/) | Repository-level distribution and documentation checks |
 

@@ -265,7 +265,7 @@ function webFetchTool(deps: WebDeps): ModelTool<{ url: string; max_chars?: numbe
           res = await fetch(current, {
             signal,
             redirect: "manual",
-            headers: { "user-agent": "echo-coding", accept: "text/html, text/plain, application/json;q=0.9, */*;q=0.5" },
+            headers: { "user-agent": "echo-agent", accept: "text/html, text/plain, application/json;q=0.9, */*;q=0.5" },
           });
           const location = res.headers.get("location");
           if (!REDIRECT_STATUSES.has(res.status) || location === null) break;

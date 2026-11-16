@@ -1,6 +1,6 @@
 # 大工具结果与图片做成 core 的基础能力（照 Claude Code）
 
-> 状态:implemented · 提出 2026-11-02（用户反馈大工具结果与图片「很差劲」）· 拍板 2026-11-02（用户：「按照 claude code 的方法去做，同时把图片也处理一下」）· 落地 `packages/core/src/tools/output.ts` / `image.ts` / `loop/run-turn.ts` / `compaction/pipeline.ts`、`packages/base/src/image.ts`、`packages/coding/src/tools/{bash,fs}.ts`、`packages/tui/src/app.ts`，判据见文末
+> 状态:implemented · 提出 2026-11-02（用户反馈大工具结果与图片「很差劲」）· 拍板 2026-11-02（用户：「按照 claude code 的方法去做，同时把图片也处理一下」）· 落地 `packages/core/src/tools/output.ts` / `image.ts` / `loop/run-turn.ts` / `compaction/pipeline.ts`、`packages/base/src/image.ts`、`packages/tools/src/{bash,fs}.ts`、`packages/tui/src/app.ts`，判据见文末
 
 **给谁看**：改工具结果入账、压缩、图片入口的人。假设已知 [消息账本](../../design/context-and-message-flow.md) §2 与 [压缩](../../design/compaction.md) §4–§5。
 
@@ -53,4 +53,4 @@
 - 读回：[外存文件与 transcript 原文](../../../packages/core/test/tool-output.test.ts#test=读回先找外存文件找不到再去-transcript-按-id-找原文分页按关键词查id-不存在都说清)
 - 空闲清理：[清](../../../packages/core/test/tool-output.test.ts#test=空闲清理停了够久最近-3-批之前的旧结果又够多-只清那些旧结果保留最近-3-批原因记-idle占位带工具调用-id)、[缓存热不清](../../../packages/core/test/tool-output.test.ts#test=空闲清理缓存还热没停够不清清了会让之后整段历史按未命中重付)、[不够量不清](../../../packages/core/test/tool-output.test.ts#test=空闲清理停够了但可清的不够量就不清)、[没有清工具结果的阶段不触发](../../../packages/core/test/tool-output.test.ts#test=空闲清理产品关掉内建压缩换了自己的阶段没有清工具结果的那个就不触发也不发失败通知)
 - 图片基础件：[认格式读尺寸](../../../packages/core/test/image.test.ts#test=认格式读宽高png-gif-jpeg要跳过前面的段-webp-三种块)、[太大](../../../packages/core/test/image.test.ts#test=太大长边超上限或字节超上限-toolarge带上认出的尺寸调用方缩放后再交回来)、[按尺寸估](../../../packages/core/test/image.test.ts#test=估-token按尺寸宽-高-750认不出尺寸退回固定值估算里用的就是它)
-- 缩放与入口：[缩放](../../../packages/base/test/image.test.ts#test=长边超过上限的图有-sips-imagemagick-就缩到上限以内并记下原尺寸macos-上-sips-一定在)、[认路径](../../../packages/base/test/image.test.ts#test=从输入里认图片路径反斜杠转义的空格单双引号相对路径不存在的不是图片的不算去重保序)、[read_file 读图](../../../packages/coding/test/coding-agent.test.ts#test=readfile-读图片2026-11-02照-claude-code-的-read返回图片本身加一行说明扩展名是图片但内容不是就按文本读太大报错并教缩小)、[TUI 附图](../../../packages/tui/test/tui.test.ts#test=输入里有指向已存在图片文件的路径读出来作为图片附上原文照发屏幕上说附上了哪张)、[模型不收图](../../../packages/tui/test/tui.test.ts#test=当前模型不收图片一张都不附屏幕上说清楚文字照发)
+- 缩放与入口：[缩放](../../../packages/base/test/image.test.ts#test=长边超过上限的图有-sips-imagemagick-就缩到上限以内并记下原尺寸macos-上-sips-一定在)、[认路径](../../../packages/base/test/image.test.ts#test=从输入里认图片路径反斜杠转义的空格单双引号相对路径不存在的不是图片的不算去重保序)、[read_file 读图](../../../packages/tools/test/tools.test.ts#test=readfile-读图片2026-11-02照-claude-code-的-read返回图片本身加一行说明扩展名是图片但内容不是就按文本读太大报错并教缩小)、[TUI 附图](../../../packages/tui/test/tui.test.ts#test=输入里有指向已存在图片文件的路径读出来作为图片附上原文照发屏幕上说附上了哪张)、[模型不收图](../../../packages/tui/test/tui.test.ts#test=当前模型不收图片一张都不附屏幕上说清楚文字照发)

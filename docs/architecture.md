@@ -12,13 +12,14 @@
 
 **边界。** 本文不复制 API 清单、子系统算法或历史实施计划。设计取舍保存在 decisions，代码审阅快照保存在 code-review；术语以 [CONTEXT](../CONTEXT.md) 为准。
 
-## 1. 五个包，一个方向
+## 1. 六个包，一个方向
 
-依赖只有一个方向：`@echo-agent/core` ← `@echo-agent/base` ← `@echo-agent/tui` ← 各产品（`echo-agent` 与 `echo-coding`，两者平级、互不依赖）。包边界取舍见 [装配层独立成包](decisions/implemented/2026-09-09-assembly-layer-packages.md)。各包的职责见 [CLAUDE.md](../CLAUDE.md) 的仓库地图，这里只说边界：
+依赖只有一个方向：`@echo-agent/core` ← `@echo-agent/base` ← `@echo-agent/tui` 与 `@echo-agent/tools`（两者互不依赖）← 各产品（`echo-agent` 与 `echo-coding`，两者平级、互不依赖）。包边界取舍见 [装配层独立成包](decisions/implemented/2026-09-09-assembly-layer-packages.md) 与 [工具独立成包](decisions/implemented/2026-11-15-tools-package.md)。各包的职责见 [CLAUDE.md](../CLAUDE.md) 的仓库地图，这里只说边界：
 
 - **core 是纯库**：零运行时依赖（门：`packages/core/test/zero-runtime-deps.test.ts`），不出可执行文件。
 - **base 是装配层**：启动器部件、产品契约、壳端口、宿主能力（凭据、设置、项目指令、`observe` 面板）、管道形态。**它不认识任何界面技术**——交互形态由产品挑一个 `Shell` 实现交进来，所以做 web 界面的产品依赖它而不必装终端库。
 - **tui 是终端壳**：界面本体与引导设置，打成 `terminalShell` 一件东西。它是壳端口的终端实现，换壳就是换这个包。
+- **tools 是对外部世界动手的工具**：文件与搜索、shell（含操作系统沙箱）、web 三条 extension（`packages/tools/src/extensions.ts`）。它们不进 core（core 不碰子进程与网络），也不属于哪个产品——产品之间互不依赖，放在一个产品里别的产品就拿不到；哪个产品要就在 preset 里挂。隔离消费门（`test/distribution-gate.test.ts` 的「tools 隔离消费」）断言它的依赖恰好是 core 与 base。
 - **两个产品都很薄**：各出自己的身份段、纪律段的挂载与可执行文件。`Product = { name, version, preset }`（`packages/base/src/product.ts`），`preset` 返回 createEcho 的 agent、extensions 与 memory 装配片段（`packages/coding/src/agent.ts` 的 `codingPreset`）；可执行文件是 `mainFor(产品, 壳)`，参数解析、凭据、形态分叉、装配、收摊一行不复制。
 
 ## 2. 一个装配现场
@@ -67,7 +68,7 @@
 
 **壳也是 extension**：`echo:agent` provide 封闭协议 `AgentRuntime`（`packages/core/src/extension/runtime.ts`：看、说、答、换、停五组，没有 `start` / `stop` / `deliver`），`echo:tui`（`packages/tui/src/extension.ts`）inject 它。换壳只是换一条 inject 同一个 Service 的 extension。
 
-仓内的消费者：cli 的 `echo:tui` / `echo:identity` / `echo:conduct` / `echo:pipe` / `echo:instructions`；coding 的 `echo:coding` / `echo:workspace` / `echo:shell` / `echo:worktree` / `echo:web`（`packages/coding/src/extensions.ts`）；`examples/extension` 是第一个仓外样例。
+仓内的消费者：cli 的 `echo:tui` / `echo:identity` / `echo:conduct` / `echo:pipe` / `echo:instructions`；tools 的 `echo:workspace` / `echo:shell` / `echo:web`（`packages/tools/src/extensions.ts`）；coding 的 `echo:coding` / `echo:worktree`（`packages/coding/src/extensions.ts`），外加它挂上的 tools 那三条；`examples/extension` 是第一个仓外样例。
 
 ## 6. 状态落在哪
 

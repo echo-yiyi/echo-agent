@@ -12,7 +12,7 @@
 //   · **安全分类器**是内核的（`createEcho({ safetyClassifier })`），开不开归使用者（settings.json 的 `safetyClassifier`，
 //     不写按形态：交互开、管道关——装配层 `presetForm` 定）。本产品只交**形状**：自己哪些工具不用判（`CODING_SAFE_TOOLS`）、
 //     bash 的 `sandbox: false` 是什么意思（`CODING_CLASSIFIER_NOTES`）。
-//   · **交互形态命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，`tools/sandbox.ts`）。分类器关着时，越出沙箱的那一条
+//   · **交互形态命令包进操作系统沙箱**（只能写工作区、临时目录与缓存，`@echo-agent/tools` 的 `sandbox.ts`）。分类器关着时，越出沙箱的那一条
 //     由人看（`permissionPolicyFor` 的规矩）；开着时由分类器判，不另装策略。
 // `permission.ts` 的 `DEFAULT_PERMISSION`（三件先问的黑名单）**不是这条命令的行为**：它只在嵌入方调 `codingPreset()`
 // 而不传 `permission` 时生效（评测、别的宿主）。
