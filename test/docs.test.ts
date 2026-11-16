@@ -33,7 +33,7 @@ describe("文档门", () => {
   test("代码块:文档里的 ts 围栏能独立编译", () => {
     const v = checkCodeBlocks(manifest);
     expect(v.map(x => x.path), `代码块编译失败:${fmt(v)}\n`).toEqual([]);
-  });
+  }, 30_000); // 每个 ts 围栏都要起一次编译：ubuntu CI 约 3.3 秒，macOS CI 到过 5.5 秒，缺省 5 秒不够
 
   test("引用:注释与散文里写到的文件路径真实存在", () => {
     const v = checkFileRefs(manifest);
