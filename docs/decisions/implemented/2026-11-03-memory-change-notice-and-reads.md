@@ -1,6 +1,6 @@
 # 记忆变化只发路径通知；stale_read 冲突：拒绝带回现行内容、提取继承前台的已读账、后台写记忆排成一条
 
-> 状态:implemented · 提出 2026-11-03（用户转述的反馈：「stale_read 冲突」「旧的记忆快照累计」；同批的「持续活跃的旧工具结果怎么回收」「大工具参数累计」暂不做）· 参照本机 Claude Code 2.1.317 的机制与 Anthropic 文档（只看机制、不抄措辞）· 拍板 2026-11-03（用户：「1，2 暂时先不做吧，我们先把 3 和 4 做掉」）· 落地 `packages/core/src/memory/harness.ts` / `tool.ts` / `agent.ts`，判据 `packages/core/test/memory.test.ts`、`packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [记忆段会话内冻结](2026-10-29-memory-frozen-in-system.md) 的第 3 条（追加的内容）与 [覆写前核对读到的版本](2026-09-11-memory-read-version-check.md) 的拒绝行为 · **后续** 2026-11-13 [记忆正文不进 system](2026-11-13-memory-content-out-of-system.md)：冻结的那份改成对话最前面的一条开头消息，下文「system 里那份」「回到 system」读作那条消息，`MemorySystemFreeze` 改名 `MemoryFreeze`；通知的时机与内容不变
+> 状态:implemented · 提出 2026-11-03（用户转述的反馈：「stale_read 冲突」「旧的记忆快照累计」；同批的「持续活跃的旧工具结果怎么回收」「大工具参数累计」暂不做）· 参照本机 Claude Code 2.1.317 的机制与 Anthropic 文档（只看机制、不抄措辞）· 拍板 2026-11-03（用户：「1，2 暂时先不做吧，我们先把 3 和 4 做掉」）· 落地 `packages/core/src/memory/harness.ts` / `tool.ts` / `agent.ts`，判据 `packages/core/test/memory.test.ts`、`packages/core/test/memory-extract.test.ts`、`packages/core/test/create-echo.test.ts` · 修改 [记忆段会话内冻结](2026-10-29-memory-frozen-in-system.md) 的第 3 条（追加的内容）与 [覆写前核对读到的版本](2026-09-11-memory-read-version-check.md) 的拒绝行为 · **后续** 2026-11-13 [记忆正文不进 system](2026-11-13-memory-content-out-of-system.md)：冻结的那份改成对话最前面的一条消息（`memory-contents` 段），下文「system 里那份」「回到 system」读作那条消息，`MemorySystemFreeze` 改名 `MemoryFreeze`；通知的时机与内容不变
 
 **给谁看**：改记忆注入、记忆工具的读写核对或后台记忆任务的人。假设已知 [记忆设计](../../design/memory.md) §3、§5、§7。
 
@@ -35,8 +35,8 @@
 
 ## 验收
 
-- 通知只列路径、不带内容：[会话内冻结](../../../packages/core/test/memory.test.ts#test=会话内冻结run-内写记忆本-run-的-system-与开头消息不变下个-run-两样仍逐字不变变化以一条只列路径的通知追加在输入之前)、[分得清改增删](../../../packages/core/test/memory.test.ts#test=通知分得清改了新增删掉indexed-模块的文件增删也报索引本身不报)、[只送一次](../../../packages/core/test/memory.test.ts#test=一次变化只送一次之后记忆不变就不再追加再变一次再送一条)
-- 作废后完整内容回到重取的那份、不补通知：[压缩后](../../../packages/core/test/memory.test.ts#test=压缩落地后开头消息重取一次记忆完整的现行内容回到开头消息system-不变基线跟着重记不再补通知)、[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话开头消息按此刻的记忆重取完整内容不进-system上个进程那条变化通知原样留在历史里续上不再补)
+- 通知只列路径、不带内容：[会话内冻结](../../../packages/core/test/memory.test.ts#test=会话内冻结run-内写记忆本-run-的-system-与记忆正文那条消息不变下个-run-两样仍逐字不变变化以一条只列路径的通知追加在输入之前)、[分得清改增删](../../../packages/core/test/memory.test.ts#test=通知分得清改了新增删掉indexed-模块的文件增删也报索引本身不报)、[只送一次](../../../packages/core/test/memory.test.ts#test=一次变化只送一次之后记忆不变就不再追加再变一次再送一条)
+- 作废后完整内容回到重取的那份、不补通知：[压缩后](../../../packages/core/test/memory.test.ts#test=压缩落地后记忆正文那条消息重取一次记忆完整的现行内容回到记忆正文那条消息system-不变基线跟着重记不再补通知)、[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话记忆正文那条消息按此刻的记忆重取完整内容不进-system上个进程那条变化通知原样留在历史里续上不再补)
 - 拒绝带回内容并算看过：[没看过的已有文件](../../../packages/core/test/memory.test.ts#test=没看过的已有文件整份覆写-按行插-删都先被拒一次拒绝里带着现行内容并记成看过照着重做就放行不必再-view新建文件不用先看)、[超长不带](../../../packages/core/test/memory.test.ts#test=拒绝只交得起短文件超过上限的不带正文也不记成看过模型得自己-view-全文)
 - 提取的账：[克隆前台](../../../packages/core/test/memory-extract.test.ts#test=前台-view-过的文件分叉出来的提取直接覆写就放行账从前台克隆过来此前空账起步一覆写就是-notread5-轮白花一轮)、[预记常驻全文](../../../packages/core/test/memory-extract.test.ts#test=提取指令里全文展示过的常驻文件提取直接覆写就放行账上预记了那一版)
 - 排成一条：[提取与整理](../../../packages/core/test/memory-extract.test.ts#test=提取与整理排成一条提取还在跑时整理不起模型调用提取跑完它才开始同一层并发写会互相-staleread)

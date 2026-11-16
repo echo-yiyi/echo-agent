@@ -77,7 +77,7 @@ export type MemoryFact =
       kind: "compose";
       /**
        * true = 沿用会话里冻结的那份（`MemoryFreeze`），没重读盘——这时没有组装，模块数 / 块数 / 字数都没有
-       * （那条记忆正文多大，看同一个 run 的 `context.built` 构成里 `preamble` 那一块）。
+       * （那条记忆正文多大，看同一个 run 的 `context.built` 构成里 `prompt` · `memory-contents` 那一块）。
        */
       reused: boolean;
       regions?: number;

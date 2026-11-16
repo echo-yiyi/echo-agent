@@ -607,7 +607,7 @@ test("shouldStopAfterTurn：reply 以 completed 收场、run 直接关门，不�
   };
   const result = await runAgentLoop(
     [userMessage("go", "human")],
-    { systemPrompt: null, preamble: [], messages: [], compaction: EMPTY_COMPACTION },
+    { systemPrompt: null, promptMessages: [], messages: [], compaction: EMPTY_COMPACTION },
     config,
     async (e) => {
       events.push({ ...e, seq: seq++, at: 0 } as AgentEvent);
@@ -666,7 +666,7 @@ test("工具轮不问 shouldStopAfterTurn / prepareNextTurn：tool_use / max_tok
   };
   const result = await runAgentLoop(
     [userMessage("go", "human")],
-    { systemPrompt: null, preamble: [], messages: [], compaction: EMPTY_COMPACTION },
+    { systemPrompt: null, promptMessages: [], messages: [], compaction: EMPTY_COMPACTION },
     config,
     async (e) => {
       events.push({ ...e, seq: seq++, at: 0 } as AgentEvent);

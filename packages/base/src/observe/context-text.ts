@@ -24,7 +24,7 @@ type ContextBody = Readonly<{
   content?: ContextBuiltContent;
 }>;
 type PromptBody = Readonly<{
-  sections: readonly Readonly<{ name: string; order: number; owner: string | null; status: string; chars: number }>[];
+  sections: readonly Readonly<{ name: string; order: number; carrier?: string; owner: string | null; status: string; chars: number }>[];
   variables: readonly string[];
   chars: number;
   text?: ObservationBlobRef;
@@ -35,8 +35,8 @@ const roleZh = (s: string | undefined): string => (s === undefined ? "" : (ROLE_
 
 function partLabel(p: Part): string {
   switch (p.kind) {
-    case "preamble":
-      return `开头消息 · ${p.source ?? ""}`;
+    case "prompt":
+      return `prompt 段（消息） · ${p.source ?? ""}`;
     case "transcript":
       return `历史 · ${roleZh(p.source)}`;
     case "summary":
@@ -99,9 +99,9 @@ function messageLabel(m: Record<string, unknown>, i: number): string {
   return `#${i + 1} ${who}`;
 }
 
-/** 拼好的 system 按段切开（段之间一个空行，空段与失败段不占字）；对不上返回 null。 */
+/** 拼好的 system 按段切开（段之间一个空行，空段与失败段不占字；messages 载体的段不在 system 里）；对不上返回 null。 */
 function splitPrompt(text: string, sections: PromptBody["sections"]): { name: string; part: string }[] | null {
-  const rendered = sections.filter((s) => s.status === "rendered");
+  const rendered = sections.filter((s) => s.status === "rendered" && s.carrier !== "messages");
   const sum = rendered.reduce((n, s) => n + s.chars, 0) + Math.max(0, rendered.length - 1) * 2;
   if (sum !== text.length) return null;
   let at = 0;
@@ -114,10 +114,12 @@ function splitPrompt(text: string, sections: PromptBody["sections"]): { name: st
 
 function promptBlock(rec: ObservationEnvelope): string[] {
   const b = rec.body as PromptBody;
-  const lines = [`system 组装 · ${b.sections.length} 段 · ${num(b.chars)} 字（按 order 从上到下）`];
+  const lines = [`prompt 组装 · ${b.sections.length} 段 · system ${num(b.chars)} 字（按 order 从上到下）`];
   for (const s of b.sections) {
     const size = s.status === "rendered" ? `${num(s.chars)} 字` : s.status === "empty" ? "空" : "失败";
-    lines.push(`  ${padDisplay(s.name, 22)} ${padDisplay(s.owner ?? "（未登记）", 22)} ${size.padStart(10)}`);
+    // messages 载体的段不在 system 里：它是对话最前面的一条消息，标出来
+    const where = s.carrier === "messages" ? "  → 消息" : "";
+    lines.push(`  ${padDisplay(s.name, 22)} ${padDisplay(s.owner ?? "（未登记）", 22)} ${size.padStart(10)}${where}`);
   }
   if (b.variables.length > 0) lines.push(`  用到的变量：${b.variables.map((v) => `{{${v}}}`).join(" ")}`);
   return lines;

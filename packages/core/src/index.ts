@@ -146,7 +146,7 @@ export type {
 export type { StorageDir } from "./storage/types.ts";
 export type { Lease, StateLock } from "./storage/lock.ts";
 export type { AgentMcpPort, McpConnectOutcome, McpServerSnapshot } from "./mcp/port.ts";
-export { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
+export { PROMPT_ORDER, type AssembleContext, type PromptCarrier, type PromptSection, type PromptSource, type PromptVariable } from "./prompt/types.ts";
 export { PromptVariableError } from "./prompt/assemble.ts";
 export { sectionFromMarkdown } from "./prompt/import.ts";
 export { fenceSafe, neutralizeClosingTag, truncateMarked } from "./prompt/sanitize.ts";

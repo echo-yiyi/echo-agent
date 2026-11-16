@@ -310,6 +310,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-16-prompt-section-carrier.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-02-large-tool-results-and-images.md",
       "bilingual": false
     },

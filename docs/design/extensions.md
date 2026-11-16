@@ -98,6 +98,8 @@ export default defineExtension({
 });
 ```
 
+这一段是开发者自己写的指令，不写 `carrier`，进 system。段里装的若是模型写的、或随仓库 / 用户数据来的文本，就写 `carrier: "messages"`：它不进 system，装成对话最前面的一条消息——注册、卸载、撞名规则都一样，见 [Prompt](prompt.md) §1。
+
 get / tryGet / provide 只能用声明过的 key。恒有的 Service（Host 自带的 registry、能力端口）声明 `required: true`；只有真会缺席的（没装记忆时的 AgentMemory、没给 skill 池时的 AgentSkills）才省略 required、用 `tryGet()` 读。effect 的 boundary 缺省是 agent，不能比 extension 声明的 reload 更强；只写 `reload: "run"` 却漏写 effect boundary，会因缺省 agent 而被拒。工具或 prompt pack 可复用 [`defineToolPack()`](../../packages/core/src/extension/builtin.ts#symbol=defineToolPack) / [`definePromptPack()`](../../packages/core/src/extension/builtin.ts#symbol=definePromptPack)，但不要把 pack 内弱 effect 边界误认为 definition 已承诺可重载。
 
 **注册成功不等于 Host 已经拥有撤销动作。** registry 返回 disposer 后必须把它作为 lease.dispose 交还；直接注册而不登记 effect，卸载不会自动替作者查出并删除内容。provide 自动撤掉发布关系，也不自动 close 被发布的连接。

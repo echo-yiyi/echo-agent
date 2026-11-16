@@ -56,13 +56,16 @@ export interface AgentSkillsRegistry {
 }
 
 /**
- * system prompt 的注册口（2026-09-01）：段与变量都从这里进，**内建的 `echo:*` 也不例外**。
+ * prompt 的注册口（2026-09-01）：段与变量都从这里进，**内建的 `echo:*` 也不例外**。
  * 工具目录不进 system；单工具语义只在 description；这里放的是身份、纪律、交互面、事实、
  * 以及工具的**跨调用习惯**——由拥有该工具的 extension 出。
+ *
+ * 段放在哪由段自己声明（`PromptSection.carrier`，2026-11-16）：缺省进 system；`"messages"` 的段不进 system，
+ * 渲染成对话最前面的一条环境消息——装着模型或仓库文件写的内容的段（记忆正文、项目指令）用它。
  */
 export interface AgentPromptRegistry {
   /**
-   * 同名已存在 → 抛；order 非有限数 → 抛。返回的 disposer 只卸这个对象。
+   * 同名已存在 → 抛；order 非有限数 → 抛；`carrier` 不是两种之一 → 抛。返回的 disposer 只卸这个对象。
    *
    * **`replace: true` 反过来**（2026-09-07，角色定义）：同名**必须**已存在才成功，
    * 换掉它，disposer 把原来那段放回去。这是 O1a 注释里等的那个「真实消费者」——
@@ -420,6 +423,9 @@ function promptRegistry(sections: Map<string, PromptSection>, variables: Map<str
     section: (section, opts) => {
       if (typeof section.name !== "string" || section.name === "") throw new Error("prompt 段缺 name");
       if (!Number.isFinite(section.order)) throw new Error(`prompt 段 '${section.name}' 的 order 必须是有限数`);
+      if (section.carrier !== undefined && section.carrier !== "system" && section.carrier !== "messages") {
+        throw new Error(`prompt 段 '${section.name}' 的 carrier 只能是 "system" 或 "messages"`);
+      }
       if (owner !== undefined) owners.set(section, owner);
       const name = section.name;
       const existing = sections.get(name);

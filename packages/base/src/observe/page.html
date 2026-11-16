@@ -873,7 +873,7 @@ const ROLE_ZH = { "user/human": "用户", "user/steer": "用户插话", "user/ha
 const roleZh = (s) => ROLE_ZH[s] ?? s ?? "";
 function partLabel(p) {
   switch (p.kind) {
-    case "preamble": return `开头消息 · ${p.source ?? ""}`;
+    case "prompt": return `prompt 段（消息） · ${p.source ?? ""}`;
     case "transcript": return `历史 · ${roleZh(p.source)}`;
     case "summary": return "压缩摘要";
     case "omitted": return "压缩省略";
@@ -993,9 +993,9 @@ function contextBuiltView(vm, t) {
   return out;
 }
 
-/** 拼好的 system 按段切开：段之间一个空行（`assembleSystem` 的拼法），空段与失败段不占字。对不上就不切，整段给。 */
+/** 拼好的 system 按段切开：段之间一个空行（装配器的拼法），空段与失败段不占字，messages 载体的段不在 system 里。对不上就不切，整段给。 */
 function splitPrompt(text, sections) {
-  const rendered = sections.filter((s) => s.status === "rendered");
+  const rendered = sections.filter((s) => s.status === "rendered" && s.carrier !== "messages");
   const sum = rendered.reduce((n, s) => n + s.chars, 0) + Math.max(0, rendered.length - 1) * 2;
   if (sum !== text.length) return null;
   let at = 0;
@@ -1008,14 +1008,15 @@ function promptAssembledView(vm, t) {
   const out = [];
   const statusZh = { rendered: "", empty: "空", failed: "失败" };
   const rows = sections.map((s) => ({
-    label: s.name, owner: s.owner ?? "（未登记）", value: s.chars, unit: " 字",
+    // messages 载体的段不在 system 里：它是对话最前面的一条消息，名字后面标出来
+    label: s.carrier === "messages" ? `${s.name} → 消息` : s.name, owner: s.owner ?? "（未登记）", value: s.chars, unit: " 字",
     text: s.status === "rendered" ? undefined : statusZh[s.status],
     tone: s.status === "failed" ? "bad" : s.status === "empty" ? "dim" : undefined,
-    title: `order ${s.order} · ${s.owner ?? "不经 extension 直接塞进表的段"}${s.status === "rendered" ? ` · ${s.chars.toLocaleString()} 字` : ` · ${s.status}`}`,
+    title: `order ${s.order} · ${s.carrier === "messages" ? "不进 system，作为对话最前面的一条消息" : "进 system"} · ${s.owner ?? "不经 extension 直接塞进表的段"}${s.status === "rendered" ? ` · ${s.chars.toLocaleString()} 字` : ` · ${s.status}`}`,
   }));
   out.push(el("div", { class: "tl-sec" },
-    el("span", { class: "tl-sec-label", text: `${sections.length} 段 · 共 ${(b.chars ?? 0).toLocaleString()} 字 · 按 order 从上到下` }),
-    mixTable(rows, b.chars ?? 0, "system 由哪些段拼成")));
+    el("span", { class: "tl-sec-label", text: `${sections.length} 段 · system 共 ${(b.chars ?? 0).toLocaleString()} 字 · 按 order 从上到下` }),
+    mixTable(rows, b.chars ?? 0, "prompt 由哪些段拼成")));
   if (Array.isArray(b.variables) && b.variables.length > 0) out.push(el("p", { class: "markwhy", text: `用到的变量：${b.variables.map((v) => `{{${v}}}`).join(" ")}` }));
   const orig = el("div", { class: "orig" });
   const status = contentStatus(vm, t, b.text !== undefined);

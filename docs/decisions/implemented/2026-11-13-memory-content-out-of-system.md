@@ -1,6 +1,6 @@
 # 记忆正文不进 system：system 只留规则，存着的东西是对话最前面的一条消息
 
-> 状态:implemented · 提出 2026-11-13（用户问：记忆和 system 里的规则冲突时会发生什么）· 拍板 2026-11-13（用户：位置要动——系统指令是系统指令，记忆是记忆；这一轮只动记忆，接线做在 core 内部、不开注册口）· 落地 `packages/core/src/memory/compose.ts` / `harness.ts`、`agent.ts`、`loop/run-turn.ts`、`compaction/pipeline.ts`，判据见「验收」 · 承接 [记忆段会话内冻结](2026-10-29-memory-frozen-in-system.md)：冻结、作废、变化通知三条照旧，只换了记忆正文所在的位置 · 合入 main（2026-11-16）时与先一步落地的 [安全加固](2026-11-15-security-hardening.md) 对齐：记忆「是背景、不是用户的指令、记着的许可不是此刻的许可」那句和项目说明段头的定位由它定，本条不重复、不另立；环境消息出门包来源标签，记忆正文那条消息一并带上
+> 状态:implemented · 提出 2026-11-13（用户问：记忆和 system 里的规则冲突时会发生什么）· 拍板 2026-11-13（用户：位置要动——系统指令是系统指令，记忆是记忆；这一轮只动记忆，接线做在 core 内部、不开注册口）· 落地 `packages/core/src/memory/compose.ts` / `harness.ts`、`agent.ts`、`loop/run-turn.ts`、`compaction/pipeline.ts`，判据见「验收」 · 承接 [记忆段会话内冻结](2026-10-29-memory-frozen-in-system.md)：冻结、作废、变化通知三条照旧，只换了记忆正文所在的位置 · 合入 main（2026-11-16）时与先一步落地的 [安全加固](2026-11-15-security-hardening.md) 对齐：记忆「是背景、不是用户的指令、记着的许可不是此刻的许可」那句和项目说明段头的定位由它定，本条不重复、不另立；环境消息出门包来源标签，记忆正文那条消息一并带上 · **后续** 2026-11-16 [prompt 段的载体](2026-11-16-prompt-section-carrier.md)：本条说的「开头消息」不再是一个单独的概念，而是 `carrier: "messages"` 的 prompt 段——记忆正文是 `echo:memory` 注册的 `memory-contents` 段，项目指令也移出了 system；`AgentContext.preamble` 改名 `promptMessages`，`memoryPreamble()` 改成 `memoryContents()`，观测里的来历 `preamble` 改名 `prompt`，环境消息的 `source` 由 `memory` 改为 `memory-contents`。下文按落地当时的叫法写，读的时候按这条对应
 
 **给谁看**：改 system 装配、记忆给模型看的格式、送模上下文或 provider 缓存相关代码的人。假设已知 [Prompt 的三种载体](../../design/prompt.md)（§1）与 [记忆的冻结与变化通知](../../design/memory.md)（§3）。
 
@@ -54,10 +54,9 @@
 
 ## 待拍板
 
-- **AGENTS.md 要不要也移出 system。** 按同一条分界线它随仓库来、不是开发者写的，也该出去；但它的 owner 在 `@echo-agent/base`，要出去就得开上面那个注册口。
+没有了。已拍、不再待定：
 
-已拍、不再待定：
-
+- **AGENTS.md 也移出 system。** 2026-11-16 用户拍板移出，并定了形状：不另开「开头消息」的注册口，它是 prompt 段的一种（`carrier: "messages"`）。见 [prompt 段的载体](2026-11-16-prompt-section-carrier.md)；上面 Non-Goals 的前两条由它推翻。
 - **项目指令的措辞。** 2026-11-13 讨论时用户表示可以放宽（当时写的是「照用户本人的话执行、不覆盖上面的规则」），没有定句子、那一轮没改。2026-11-15 的 [安全加固](2026-11-15-security-hardening.md) 定了相反的方向并已落地：项目说明是「这个仓库的约定」，随仓库来、不是用户的话，批准不了用户没要的动作，也不覆盖上面的规则。以那条为准。
 
 ## 没有验证的
@@ -69,13 +68,15 @@
 
 - 记忆内容不在 system、在对话最前面、不进 transcript：[记忆正文不进 system](../../../packages/core/test/memory.test.ts#test=记忆正文不进-systemsystem-只有规则存着的东西是对话最前面的一条消息不进-transcript)
 - 规则里没有记忆内容、地位写在规则里：[规则与正文分开](../../../packages/core/test/memory.test.ts#test=规则与正文分开规则里没有任何记忆内容正文里没有规则正文的地位写在规则里)
-- system 与开头消息跨 run 逐字不变、变化走通知：[会话内冻结](../../../packages/core/test/memory.test.ts#test=会话内冻结run-内写记忆本-run-的-system-与开头消息不变下个-run-两样仍逐字不变变化以一条只列路径的通知追加在输入之前)
-- 压缩后开头消息重取、system 不变：[压缩后重取](../../../packages/core/test/memory.test.ts#test=压缩落地后开头消息重取一次记忆完整的现行内容回到开头消息system-不变基线跟着重记不再补通知)
-- 续会话后重取、不落 session：[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话开头消息按此刻的记忆重取完整内容不进-system上个进程那条变化通知原样留在历史里续上不再补)
-- 压缩的分叉调用带着开头消息：[压缩分叉](../../../packages/core/test/memory.test.ts#test=压缩的摘要调用从主对话分叉时带着开头消息同一份-system消息仍是上一次请求的前缀记忆正文在最前指令接在末尾)
-- 提取带着开头消息：[提取前缀](../../../packages/core/test/memory-extract.test.ts#test=提取请求的前缀与前台最后一次请求逐字相同同一份-system同一份工具菜单消息是它的延续厂商前缀缓存接得上)
-- fork 带、fresh 不带：[子 agent](../../../packages/core/test/memory.test.ts#test=fork-的子-agent-带着父的开头消息前缀与父逐字相同fresh-的-system-是模型给的不带记忆正文)
-- 估算算进开头消息：[measureContext](../../../packages/core/test/compaction.test.ts#test=measurecontext有-usage-基准-基准-基准之后的字符估没有-system-开头消息-整个视图的字符估校准比只乘字符估的部分)
-- 观测的构成里有 `preamble`：[重建](../../../packages/core/test/observability-context.test.ts#test=重建开头消息排最前记-preamble压缩折掉的段记-summary清掉的旧结果记-clearedplaceholder注入按来源token-与压缩同一个估算器)
+判据随 2026-11-16 的改名换了标题（同一件事）：
+
+- system 与记忆正文那条消息跨 run 逐字不变、变化走通知：[会话内冻结](../../../packages/core/test/memory.test.ts#test=会话内冻结run-内写记忆本-run-的-system-与记忆正文那条消息不变下个-run-两样仍逐字不变变化以一条只列路径的通知追加在输入之前)
+- 压缩后那条消息重取、system 不变：[压缩后重取](../../../packages/core/test/memory.test.ts#test=压缩落地后记忆正文那条消息重取一次记忆完整的现行内容回到记忆正文那条消息system-不变基线跟着重记不再补通知)
+- 续会话后重取、不落 session：[续会话](../../../packages/core/test/create-echo.test.ts#test=续上一段会话记忆正文那条消息按此刻的记忆重取完整内容不进-system上个进程那条变化通知原样留在历史里续上不再补)
+- 压缩的分叉调用带着它：[压缩分叉](../../../packages/core/test/memory.test.ts#test=压缩的摘要调用从主对话分叉时带着记忆正文那条消息同一份-system消息仍是上一次请求的前缀记忆正文在最前指令接在末尾)
+- 提取带着它：[提取前缀](../../../packages/core/test/memory-extract.test.ts#test=提取请求的前缀与前台最后一次请求逐字相同同一份-system同一份工具菜单消息是它的延续厂商前缀缓存接得上)
+- fork 带、fresh 不带：[子 agent](../../../packages/core/test/memory.test.ts#test=fork-的子-agent-带着父的记忆正文那条消息前缀与父逐字相同fresh-的-system-是模型给的不带记忆正文)
+- 估算把它算进去：[measureContext](../../../packages/core/test/compaction.test.ts#test=measurecontext有-usage-基准-基准-基准之后的字符估没有-system-prompt-消息-整个视图的字符估校准比只乘字符估的部分)
+- 观测的构成里有这一块：[重建](../../../packages/core/test/observability-context.test.ts#test=重建messages-载体的-prompt-段排最前记-prompt压缩折掉的段记-summary清掉的旧结果记-clearedplaceholder注入按来源token-与压缩同一个估算器)
 
 压缩、提取、fork 三条在落地时做过反证：去掉对应那一处接线，这三条各自变红。

@@ -46,7 +46,7 @@ test("开销：transcript 10 条与 10,000 条，再来一条时主线程交出�
   const bytesOfSecondHandoff = (n: number): number => {
     const mirror = new ContextMirror();
     const list = transcript(n);
-    const input = { systemPrompt: "你是测试员", preamble: [], compaction: NO_COMPACTION, injections: [], tools: [] };
+    const input = { systemPrompt: "你是测试员", promptMessages: [], compaction: NO_COMPACTION, injections: [], tools: [] };
     mirror.handoff({ ...input, transcript: list }); // 第一次：整段都是新的
     list.push(userMessage("再问一句"));
     return JSON.stringify(mirror.handoff({ ...input, transcript: list })).length;
@@ -58,22 +58,22 @@ test("开销：transcript 10 条与 10,000 条，再来一条时主线程交出�
   expect(big).toBeLessThan(300);
 });
 
-test("同一个对象只交一次值：system 串、开头消息、压缩状态、工具第二次只交编号；换了新 run 的数组，前缀仍是同一批消息，不重交", () => {
+test("同一个对象只交一次值：system 串、prompt 消息、压缩状态、工具第二次只交编号；换了新 run 的数组，前缀仍是同一批消息，不重交", () => {
   const mirror = new ContextMirror();
   const list = transcript(4);
   const tool: ModelTool = { kind: "model", name: "t", label: "t", description: "d", parameters: { type: "object", properties: {} }, execute: async () => toolOk("x") };
-  const preamble = [environmentMessage("记忆正文", "memory", undefined, 0)];
-  const first = mirror.handoff({ systemPrompt: "S", preamble, transcript: list, compaction: NO_COMPACTION, injections: [], tools: [tool] });
-  expect(first.fresh.length).toBe(4 + 1 + 1 + 1 + 1); // 4 条消息 + 开头消息 + system + 压缩状态 + 工具
-  // 下一个 run：开头消息是冻结的同一个对象（数组可以是新的），不重交
-  const again = mirror.handoff({ systemPrompt: "S", preamble: [...preamble], transcript: [...list], compaction: NO_COMPACTION, injections: [], tools: [tool] });
+  const promptMessages = [environmentMessage("记忆正文", "memory-contents", undefined, 0)];
+  const first = mirror.handoff({ systemPrompt: "S", promptMessages, transcript: list, compaction: NO_COMPACTION, injections: [], tools: [tool] });
+  expect(first.fresh.length).toBe(4 + 1 + 1 + 1 + 1); // 4 条消息 + prompt 消息 + system + 压缩状态 + 工具
+  // 下一个 run：段的文本没变，prompt 消息是同一个对象（数组可以是新的），不重交
+  const again = mirror.handoff({ systemPrompt: "S", promptMessages: [...promptMessages], transcript: [...list], compaction: NO_COMPACTION, injections: [], tools: [tool] });
   expect(again.fresh).toEqual([]);
   expect(again.view).toEqual(first.view); // 新数组、同一批消息：编号一样
 });
 
 /* ─────────────── 观测线程：重建视图、分清来历 ─────────────── */
 
-test("重建：开头消息排最前记 preamble、压缩折掉的段记 summary、清掉的旧结果记 cleared_placeholder、注入按来源；token 与压缩同一个估算器", () => {
+test("重建：messages 载体的 prompt 段排最前记 prompt、压缩折掉的段记 summary、清掉的旧结果记 cleared_placeholder、注入按来源；token 与压缩同一个估算器", () => {
   const messages: AgentMessage[] = [
     userMessage("最早的问题"),
     assistantMessage([{ type: "text", text: "最早的回答" }], "end_turn"),
@@ -84,20 +84,22 @@ test("重建：开头消息排最前记 preamble、压缩折掉的段记 summary
   ];
   const state: CompactionState = { spans: [{ from: 0, to: 2, summary: "前面问过一个问题" }], clearedBefore: 5 };
   const injection = environmentMessage("技能正文", "skill", "review");
-  const memory = environmentMessage("记忆正文", "memory", undefined, 0);
+  const instructions = environmentMessage("项目指令", "instructions", undefined, 0);
+  const memory = environmentMessage("记忆正文", "memory-contents", undefined, 0);
   const mirror = new ContextMirror();
   const store = new ContextMirrorStore();
-  const body = store.resolve(mirror.handoff({ systemPrompt: "SYS", preamble: [memory], transcript: messages, compaction: state, injections: [injection], tools: [] }), META);
+  const body = store.resolve(mirror.handoff({ systemPrompt: "SYS", promptMessages: [instructions, memory], transcript: messages, compaction: state, injections: [injection], tools: [] }), META);
 
   expect(body.parts.map((p) => [p.kind, p.source ?? null, p.count])).toEqual([
-    ["preamble", "memory", 1],
+    ["prompt", "instructions", 1],
+    ["prompt", "memory-contents", 1],
     ["summary", null, 1],
     ["transcript", "user/human", 1],
     ["transcript", "assistant", 2],
     ["cleared_placeholder", null, 1],
     ["injection", "skill:review", 1],
   ]);
-  const view = [memory, ...buildWorkingMessages(messages, state), injection];
+  const view = [instructions, memory, ...buildWorkingMessages(messages, state), injection];
   expect(body.messages).toBe(view.length);
   expect(body.parts.reduce((n, p) => n + p.tokens, 0)).toBe(view.reduce((n, m) => n + estimateMessage(m), 0));
   expect(body.converter).toMatchObject({ kind: "default", outputMessages: (defaultConvertToLlm(view) as unknown[]).length, dropped: 0, healedOrphans: 0 });
@@ -114,7 +116,7 @@ test("每轮注入用完就丢：同一段 transcript 调 500 次模型、每次
   const list = [userMessage("问题")];
   const call = (): ContextBuiltBody =>
     store.resolve(
-      mirror.handoff({ systemPrompt: "SYS", preamble: [], transcript: list, compaction: NO_COMPACTION, injections: [environmentMessage("技能正文".repeat(100), "skill", "review")], tools: [] }),
+      mirror.handoff({ systemPrompt: "SYS", promptMessages: [], transcript: list, compaction: NO_COMPACTION, injections: [environmentMessage("技能正文".repeat(100), "skill", "review")], tools: [] }),
       META,
     );
   const first = call();
@@ -134,7 +136,7 @@ test("被换掉的 system 用完就丢：主循环与子 agent 交替送模（�
   const store = new ContextMirrorStore();
   const list = [userMessage("问题")];
   const systems = ["主循环的 system", "子 agent 的 system，长一些"];
-  const call = (system: string): ContextBuiltBody => store.resolve(mirror.handoff({ systemPrompt: system, preamble: [], transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META);
+  const call = (system: string): ContextBuiltBody => store.resolve(mirror.handoff({ systemPrompt: system, promptMessages: [], transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META);
   call(systems[0]!);
   const settled = store.size;
   for (let i = 1; i <= 200; i++) {
@@ -147,31 +149,31 @@ test("被换掉的 system 用完就丢：主循环与子 agent 交替送模（�
   expect(store.size).toBe(settled);
 });
 
-test("开头消息只交一次：冻结的同一份调 200 次模型，镜像里留着的值不随调用次数涨；作废重取换了对象才多一份", () => {
-  // 开头消息按对象身份记编号（与 transcript 消息同一种）：会话内冻结期间是同一个对象，不像每轮注入那样每次都是新的
+test("prompt 消息只交一次：文本没变的同一条调 200 次模型，镜像里留着的值不随调用次数涨；段的文本变了、换了对象才多一份", () => {
+  // prompt 消息按对象身份记编号（与 transcript 消息同一种）：段的文本没变就是同一个对象，不像每轮注入那样每次都是新的
   const mirror = new ContextMirror();
   const store = new ContextMirrorStore();
   const list = [userMessage("问题")];
-  const call = (preamble: AgentMessage[]): ContextBuiltBody =>
-    store.resolve(mirror.handoff({ systemPrompt: "SYS", preamble, transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META);
-  const frozen = environmentMessage("记忆正文".repeat(100), "memory", undefined, 0);
+  const call = (promptMessages: AgentMessage[]): ContextBuiltBody =>
+    store.resolve(mirror.handoff({ systemPrompt: "SYS", promptMessages, transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META);
+  const frozen = environmentMessage("记忆正文".repeat(100), "memory-contents", undefined, 0);
   const first = call([frozen]);
   const settled = store.size;
-  expect(settled).toBe(4); // 开头消息 + 一条消息 + system + 压缩状态
+  expect(settled).toBe(4); // prompt 消息 + 一条消息 + system + 压缩状态
   for (let i = 0; i < 200; i++) {
     const body = call([frozen]); // 每个 run 的数组可以是新的，对象是同一个
     expect(body.unresolved).toBeUndefined();
-    expect(body.parts.find((p) => p.kind === "preamble")).toEqual(first.parts.find((p) => p.kind === "preamble")!);
+    expect(body.parts.find((p) => p.kind === "prompt")).toEqual(first.parts.find((p) => p.kind === "prompt")!);
   }
   expect(store.size).toBe(settled);
-  call([environmentMessage("重取之后的记忆正文", "memory", undefined, 0)]); // 压缩落地 / reset / 续会话：换了一个对象
+  call([environmentMessage("重取之后的记忆正文", "memory-contents", undefined, 0)]); // 记忆作废重取、或项目指令文件改了：换了一个对象
   expect(store.size).toBe(settled + 1);
 });
 
 test("主线程：注入每次都交值、编号只在那一次交接里有效；system 换了才在 drop 里报出被换掉的编号", () => {
   const mirror = new ContextMirror();
   const injection = environmentMessage("技能正文", "skill", "review");
-  const input = { preamble: [], transcript: [userMessage("问")], compaction: NO_COMPACTION, tools: [] };
+  const input = { promptMessages: [], transcript: [userMessage("问")], compaction: NO_COMPACTION, tools: [] };
   const injectionsOf = (h: ReturnType<ContextMirror["handoff"]>): readonly number[] => (h.view.kind === "rebuild" ? h.view.injections : []);
   const a = mirror.handoff({ ...input, systemPrompt: "S1", injections: [injection] });
   const b = mirror.handoff({ ...input, systemPrompt: "S1", injections: [injection] });
@@ -189,7 +191,7 @@ test("hook 改过的视图按给出的顺序记、来历只分角色；镜像里
   const mirror = new ContextMirror();
   const store = new ContextMirrorStore();
   const replaced = [userMessage("hook 塞的"), assistantMessage([{ type: "text", text: "嗯" }], "end_turn")];
-  const body: ContextBuiltBody = store.resolve(mirror.handoff({ systemPrompt: null, preamble: [], transcript: [], compaction: NO_COMPACTION, injections: [], final: replaced, tools: [] }), META);
+  const body: ContextBuiltBody = store.resolve(mirror.handoff({ systemPrompt: null, promptMessages: [], transcript: [], compaction: NO_COMPACTION, injections: [], final: replaced, tools: [] }), META);
   expect(body.parts.map((p) => [p.kind, p.source])).toEqual([
     ["message", "user/human"],
     ["message", "assistant"],
@@ -197,7 +199,7 @@ test("hook 改过的视图按给出的顺序记、来历只分角色；镜像里
   expect(body.system).toBeNull();
 
   // 第二份镜像没见过这两条：编号对不上的不算进构成，只计数
-  const lost = new ContextMirrorStore().resolve({ ...mirror.handoff({ systemPrompt: null, preamble: [], transcript: [], compaction: NO_COMPACTION, injections: [], final: replaced, tools: [] }) }, META);
+  const lost = new ContextMirrorStore().resolve({ ...mirror.handoff({ systemPrompt: null, promptMessages: [], transcript: [], compaction: NO_COMPACTION, injections: [], final: replaced, tools: [] }) }, META);
   expect([lost.messages, lost.unresolved]).toEqual([0, 2]);
 });
 
@@ -234,7 +236,7 @@ function compactionDeps(opts: { window?: number | null; stages?: CompactionStage
     workspace: process.cwd(),
   };
   const deps: LoopDeps = {
-    context: { systemPrompt: "SYS", preamble: [], messages: opts.messages ?? [userMessage("x".repeat(40_000))], compaction: NO_COMPACTION },
+    context: { systemPrompt: "SYS", promptMessages: [], messages: opts.messages ?? [userMessage("x".repeat(40_000))], compaction: NO_COMPACTION },
     config,
     emit: async () => {},
     signal: new AbortController().signal,

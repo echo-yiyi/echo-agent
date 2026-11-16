@@ -226,7 +226,7 @@ test("observe show --context：system 由哪些段拼成、每次调模型的构
   const err = sink();
   expect(await runObserve(["show", r.runId, "--context", "--state-dir", dir], "echo-agent", { out, err })).toBe(0);
   const text = out.text;
-  expect(text).toContain("system 组装");
+  expect(text).toContain("prompt 组装");
   expect(text).toContain("── 调模型 #1");
   expect(text).toContain("── 调模型 #2");
   expect(text).toContain("历史 · 工具结果");

@@ -60,7 +60,7 @@ export type ContextAnchor = { readonly index: number; readonly tokens: number };
 
 /**
  * 当前送模上下文的估算。有基准（本 run 最近一次 usage）就用基准 + 基准之后新入账消息的字符估；
- * 没有（run 刚开始、或刚压缩过）就按 system + 开头消息 + 整个视图的字符估（`prefixEstimate`）。
+ * 没有（run 刚开始、或刚压缩过）就按 system + prompt 消息 + 整个视图的字符估（`prefixEstimate`）。
  * `calibration` 是「真 token / 字符估」的校准比（`pipeline.ts` 从 usage 算出来），字符估的部分都乘它——
  * 不乘的话中文会话低估 2–4 倍，阶段循环的「够了就停」会在第一段就停。
  */
@@ -68,8 +68,8 @@ export function measureContext(input: {
   readonly messages: readonly AgentMessage[];
   readonly state: CompactionState;
   readonly systemPrompt: string | null;
-  /** 开头消息（`AgentContext.preamble`）：每次请求都带、压缩不动，与 system 同样算进字符估。 */
-  readonly preamble: readonly AgentMessage[];
+  /** messages 载体的 prompt 段装配出的消息（`AgentContext.promptMessages`）：每次请求都带、压缩不动，与 system 同样算进字符估。 */
+  readonly promptMessages: readonly AgentMessage[];
   readonly anchor: ContextAnchor | null;
   readonly calibration?: number;
 }): number {
@@ -81,9 +81,9 @@ export function measureContext(input: {
   return Math.ceil((prefixEstimate(input) + estimateTokens(buildWorkingMessages(messages, state))) * calibration);
 }
 
-/** transcript 视图之前那一截的字符估：system 加开头消息。每次请求都原样带上，压缩动不了它。 */
-export function prefixEstimate(context: { readonly systemPrompt: string | null; readonly preamble: readonly AgentMessage[] }): number {
-  return estimateText(context.systemPrompt) + estimateTokens(context.preamble);
+/** transcript 视图之前那一截的字符估：两种载体的 prompt 段——system 加 prompt 消息。每次请求都原样带上，压缩动不了它。 */
+export function prefixEstimate(context: { readonly systemPrompt: string | null; readonly promptMessages: readonly AgentMessage[] }): number {
+  return estimateText(context.systemPrompt) + estimateTokens(context.promptMessages);
 }
 
 /* ───────────────────────── 切点 ───────────────────────── */

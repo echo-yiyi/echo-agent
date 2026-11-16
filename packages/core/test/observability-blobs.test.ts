@@ -64,7 +64,7 @@ test("content 档：压缩摘要、清掉的占位、每轮注入、system、工
   const store = new ContextMirrorStore();
   const { writer, read } = memoryBlobs();
   const batch = writer.batch();
-  const body = store.resolve(mirror.handoff({ systemPrompt: "SYS", preamble: [], transcript: messages, compaction: state, injections: [injection], tools: [tool] }), META, batch);
+  const body = store.resolve(mirror.handoff({ systemPrompt: "SYS", promptMessages: [], transcript: messages, compaction: state, injections: [injection], tools: [tool] }), META, batch);
   await batch.commit();
 
   const restored = await readContextContent(read, body.content!);
@@ -73,7 +73,7 @@ test("content 档：压缩摘要、清掉的占位、每轮注入、system、工
   expect(restored!.view).toEqual([...buildWorkingMessages(messages, state), injection]);
   expect(restored!.tools).toEqual([{ name: "read", description: "读文件", input_schema: tool.parameters }]);
   // 不给批（metadata 档）：body 里没有 content
-  expect(new ContextMirrorStore().resolve(new ContextMirror().handoff({ systemPrompt: "S", preamble: [], transcript: messages, compaction: NO_COMPACTION, injections: [], tools: [] }), META).content).toBeUndefined();
+  expect(new ContextMirrorStore().resolve(new ContextMirror().handoff({ systemPrompt: "S", promptMessages: [], transcript: messages, compaction: NO_COMPACTION, injections: [], tools: [] }), META).content).toBeUndefined();
 });
 
 test("长视图分块成引用树：5,000 条逐条还原；再来一条只多写这条消息与沿途变了的块，记录里始终只有一个引用", async () => {
@@ -84,7 +84,7 @@ test("长视图分块成引用树：5,000 条逐条还原；再来一条只多�
   const { writer, read, writes } = memoryBlobs();
   const resolve = async (): Promise<ContextBuiltBody> => {
     const batch = writer.batch();
-    const body = store.resolve(mirror.handoff({ systemPrompt: "S", preamble: [], transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META, batch);
+    const body = store.resolve(mirror.handoff({ systemPrompt: "S", promptMessages: [], transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META, batch);
     await batch.commit();
     return body;
   };
@@ -123,7 +123,7 @@ test("同一份正文在重写间隔之内只写一次；过了间隔再被引�
   const list = [userMessage("一句话")];
   const resolve = async (): Promise<void> => {
     const batch = writer.batch();
-    store.resolve(mirror.handoff({ systemPrompt: "S", preamble: [], transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META, batch);
+    store.resolve(mirror.handoff({ systemPrompt: "S", promptMessages: [], transcript: list, compaction: NO_COMPACTION, injections: [], tools: [] }), META, batch);
     await batch.commit();
   };
   writes.length = 0;

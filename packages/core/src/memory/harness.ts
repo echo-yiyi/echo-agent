@@ -5,7 +5,7 @@
 //   harness 上的真方法;六动词工具逐个调它们。上层复写工具(比如自己的 remember),
 //   里面调我们的 create 即可——计数、索引重建都在方法里,换工具断不了。
 //   **给模型看的格式不归这里**——MemoryHarness 只管操作与数据;规则与正文怎么写见 compose.ts 的
-//   renderMemoryRules(system 的段)与 renderMemoryContent(开头消息)。
+//   renderMemoryRules(system 的规则段)与 renderMemoryContent(messages 载体的正文段)。
 //
 // 一致性(继承 Hermes 的取舍):盘上 read-after-write,给模型看的那份正文会话内冻结——
 // run 中途写盘,工具立刻读得到;开头那条记忆正文到作废重取时才变,不破 prompt cache。
@@ -479,63 +479,65 @@ export async function memoryRename(ctx: AgentMemories, rawFrom: string, rawTo: s
   });
 }
 
-/* ───────────── 记忆给模型看的两份(格式在 compose.ts):规则是 system 的段,正文是开头消息 ───────────── */
+/* ───────────── 记忆给模型看的两段(格式在 compose.ts):规则段进 system,正文段是 messages 载体 ───────────── */
+
+/** 记忆正文段的名字（也是那条环境消息出门时的 `source`）。规则段叫 `memory`。 */
+export const MEMORY_CONTENTS_SECTION = "memory-contents";
 
 /**
- * 记忆的规则段（由 `echo:memory` builtin 注册）：模块、层、怎么写、正文的地位。不含任何记忆内容——
- * 内容是模型写的，不进 system（`docs/decisions/implemented/2026-11-13-memory-content-out-of-system.md`）。
- * 不读盘、会话内逐字不变，所以不用冻结。
+ * 记忆的两段 prompt（由 `echo:memory` builtin 注册）：
+ *   · `memory`（system）：规则——模块、层、怎么写、正文的地位。不读盘、会话内逐字不变。
+ *   · `memory-contents`（`carrier: "messages"`）：各模块存着的内容。内容是模型写的，不进 system，
+ *     是对话最前面的一条消息（`docs/decisions/implemented/2026-11-13-memory-content-out-of-system.md`）；会话内冻结，见 `MemoryFreeze`。
  */
-export function memoryPromptSections(ctx: AgentMemories): readonly PromptSection[] {
-  return [{ name: "memory", order: PROMPT_ORDER.memory, render: () => renderMemoryRules(ctx) }];
+export function memoryPromptSections(ctx: AgentMemories, frozen: MemoryFreeze): readonly PromptSection[] {
+  return [
+    { name: "memory", order: PROMPT_ORDER.memory, render: () => renderMemoryRules(ctx) },
+    { name: MEMORY_CONTENTS_SECTION, order: PROMPT_ORDER.memory, carrier: "messages", render: () => memoryContents(ctx, frozen) },
+  ];
 }
 
 /**
- * 记忆正文那条开头消息：**会话内冻结**（2026-10-29 用户拍板，决策见
- * `docs/decisions/implemented/2026-10-29-memory-frozen-in-system.md`；2026-11-13 从 system 的段改成开头消息，冻结照旧）。
+ * 记忆正文段：**会话内冻结**（2026-10-29 用户拍板，决策见
+ * `docs/decisions/implemented/2026-10-29-memory-frozen-in-system.md`；2026-11-13 起它不在 system 里，冻结照旧）。
  *
  * 为什么不每个 run 重组：provider 的缓存按前缀命中，这条消息之后是整段对话——两次 run
  * 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低）。所以第一次组装时
  * 取一次，之后原样复用；记忆的变化由 `memoryUpdateMessage` 在下一个 run 开头追加一条**通知**——
  * 只列哪些文件变了，不带内容（2026-11-03；此前每次都追加整段新记忆，长会话里堆着几十份几乎一样的全量快照）。
  *
- * `preamble`：冻结的那份——`null` = 没冻结（会话里还没装过，或刚作废）；空数组 = 冻结那一刻没有可展示的内容。
- * 存的是消息对象而不是文本：同一个对象每次原样交给循环，观测镜像只在第一次交值。
+ * `text`：冻结的那份正文——`null` = 没冻结（会话里还没装过，或刚作废）；`""` = 冻结那一刻没有可展示的内容。
  * `files`：冻结那一刻每个记忆文件的内容，通知按它比出变化；发过一次通知就换成那一刻的。
  *
  * 由 Agent 持有：只有它知道何时作废——压缩改写了历史、transcript 被清空或换掉，两样都置回 null，
- * 下一次组装重取（完整的现行内容随之回到开头消息）。
+ * 下一次组装重取（完整的现行内容随之回到正文段）。
  */
-export type MemoryFreeze = { preamble: readonly AgentMessage[] | null; files: ReadonlyMap<string, string> | null };
+export type MemoryFreeze = { text: string | null; files: ReadonlyMap<string, string> | null };
 
-/** 记忆正文消息与记忆变化通知的 `source`（环境消息的开放来源字符串）。 */
+/** 记忆变化通知的 `source`（环境消息的开放来源字符串）。 */
 export const MEMORY_SOURCE = "memory";
 
-/**
- * 这次 run 的记忆开头消息：冻结过就原样给，没冻结就读盘、组装、冻结。没有可展示的内容 = 空数组。
- * 消息的 `at` 固定为 0（与每轮注入同一口径）：它不进 transcript，重取时不该只因时间不同而换字节。
- */
-export async function memoryPreamble(ctx: AgentMemories, frozen: MemoryFreeze): Promise<readonly AgentMessage[]> {
-  if (frozen.preamble !== null) {
+/** 记忆正文段这次渲染出的文本：冻结过就原样给，没冻结就读盘、组装、冻结。没有可展示的内容 = ""（不出消息）。 */
+export async function memoryContents(ctx: AgentMemories, frozen: MemoryFreeze): Promise<string> {
+  if (frozen.text !== null) {
     // 沿用冻结那份：记一笔「这次没重读盘」（sink 永不抛，兜一层不让观测影响组装）
     try {
       ctx.observe?.offer({ kind: "compose", reused: true, occurredAt: Date.now() });
     } catch {
       // 观测层的异常不进组装
     }
-    return frozen.preamble;
+    return frozen.text;
   }
-  const wrap = (text: string): readonly AgentMessage[] => (text === "" ? [] : [environmentMessage(text, MEMORY_SOURCE, undefined, 0)]);
   // 作用域没绑之前组装出来的没有内容（读不到盘），不能冻结——否则整段会话都看不到记忆
-  if (!ctx.binding.bound()) return wrap(await renderMemoryContent(ctx));
+  if (!ctx.binding.bound()) return await renderMemoryContent(ctx);
   // 正文与变化基线出自**同一份读**：每个文件只读一次，基线先读、组装复用同一份内容。分两次读盘的话，
   // 后台写入恰好落在两次之间，基线已是新版、正文还是旧版，这次变化就永远不通知
   const once = readOnce(ctx.dir);
   const files = await memoryFileVersions(ctx, once);
-  const preamble = wrap(await renderMemoryContent(ctx, once));
-  frozen.preamble = preamble;
+  const text = await renderMemoryContent(ctx, once);
+  frozen.text = text;
   frozen.files = files;
-  return preamble;
+  return text;
 }
 
 /**
@@ -544,12 +546,12 @@ export async function memoryPreamble(ctx: AgentMemories, frozen: MemoryFreeze): 
  *
  * 为什么不带内容（参照物也只列路径）：提取写的东西本来就出自这场对话，再贴一遍是重复；此前整段重贴，
  * 每变一次就在 transcript 里多一份全量快照，长会话里堆着几十份。完整内容在下一次作废（压缩 / reset / 续会话）后
- * 随重新冻结的开头消息回来。
+ * 随重新冻结的正文段回来。
  *
  * `frozen.files === null` = 这一轮没有冻结的记忆正文（没装 `echo:memory`、或刚作废），不发。
  */
 export async function memoryUpdateMessage(ctx: AgentMemories, frozen: MemoryFreeze): Promise<AgentMessage | null> {
-  if (frozen.preamble === null || frozen.files === null) return null;
+  if (frozen.text === null || frozen.files === null) return null;
   const current = await memoryFileVersions(ctx);
   const changed: string[] = [];
   const added: string[] = [];

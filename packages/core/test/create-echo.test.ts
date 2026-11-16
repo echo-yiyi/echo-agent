@@ -1159,10 +1159,10 @@ test("缺省（builtin 不给）：扩展注册的模块是**追加**，内建�
   expect([...agentOf(echo).memory!.memories.keys()].sort()).toEqual(["agent", "memory", "relationship", "user"]);
 });
 
-/* ───────────── 记忆正文会话内冻结 × 续会话（2026-10-29；2026-11-13 起正文是开头消息，不在 system） ───────────── */
+/* ───────────── 记忆正文会话内冻结 × 续会话（2026-10-29；2026-11-13 起正文是 messages 载体的段，不在 system） ───────────── */
 
-test("续上一段会话：开头消息按此刻的记忆重取（完整内容，不进 system）；上个进程那条变化通知原样留在历史里，续上不再补", async () => {
-  // 2026-11-03 起变化只发路径通知、不带内容：续上之后开头那条就是此刻的全文，基线也重记了——
+test("续上一段会话：记忆正文那条消息按此刻的记忆重取（完整内容，不进 system）；上个进程那条变化通知原样留在历史里，续上不再补", async () => {
+  // 2026-11-03 起变化只发路径通知、不带内容：续上之后最前面那条就是此刻的全文，基线也重记了——
   // 历史里那条旧通知只说「那时变过」，不会被当成内容；没有新变化就不补。
   const seen: Context[] = [];
   const replies = ["一", "二", "三"];
@@ -1204,8 +1204,8 @@ test("续上一段会话：开头消息按此刻的记忆重取（完整内容�
   const last = seen[seen.length - 1]!;
   const texts = last.messages.map((m) => m.content.map((b) => (b.type === "text" ? b.text : "")).join(""));
   // 完整的现行内容在对话最前面那条消息里，不在 system 里；它不落 session，所以续上的历史里也没有上个进程的那份。
-  // 记忆正文与变化通知都是环境消息，出门包在来源标签里（2026-11-15）
-  const CONTENT_OPENING = "<environment source=\"memory\">\n# Memory contents";
+  // 记忆正文（`memory-contents` 段）与变化通知都是环境消息，出门包在来源标签里（2026-11-15）
+  const CONTENT_OPENING = "<environment source=\"memory-contents\">\n# Memory contents";
   expect(texts[0]!.startsWith(CONTENT_OPENING)).toBe(true);
   expect(texts[0]).toContain("偏好B");
   expect(last.systemPrompt).not.toContain("偏好B");

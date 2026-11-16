@@ -8,7 +8,7 @@
 
 ## 现状（拍板前）
 
-[`assembleSystem()`](../../../packages/core/src/prompt/assemble.ts#symbol=assembleSystem) 对**每一段**的渲染结果做严格插值：完整的 `{{…}}` 要么是已注册且有值的变量，要么抛 `PromptVariableError`，run 在调用模型前以 error 收场。2026-09-01 这么定的前提是「段文本是产品 / extension 写的受信文本，写错的 `{{modle}}` 要响」。
+[`assembleSystem()`](../../../packages/core/src/prompt/assemble.ts#symbol=assemblePrompt)（2026-11-16 起叫 `assemblePrompt()`，连 messages 载体的段一起装）对**每一段**的渲染结果做严格插值：完整的 `{{…}}` 要么是已注册且有值的变量，要么抛 `PromptVariableError`，run 在调用模型前以 error 收场。2026-09-01 这么定的前提是「段文本是产品 / extension 写的受信文本，写错的 `{{modle}}` 要响」。
 
 但 system 里有几段装的是第三方或模型写的文本：
 
@@ -40,7 +40,7 @@
 ## 验收
 
 - 未声明的段原样：[assembleSystem](../../../packages/core/test/prompt.test.ts#test=没声明-interpolate-的段原样第三方文本里的-secretsx-valuesx-workspace-都不当变量)
-- 项目指令里的 `${{ secrets.X }}` 原样、run 照常：[instructions](../../../packages/cli/test/prompt.test.ts#test=instructionsagentsmd-里一行-github-actions-的-secretsx-原样进-systemrun-照常跑完项目指令不插值)
+- 项目指令里的 `${{ secrets.X }}` 原样、run 照常：[instructions](../../../packages/cli/test/prompt.test.ts#test=instructionsagentsmd-里一行-github-actions-的-secretsx-原样送到模型run-照常跑完项目指令不插值)（2026-11-16 起项目指令不在 system 里，是对话最前面的一条消息）
 - 记忆里的 `{{ user.name }}` 原样、run 照常：[memory](../../../packages/core/test/memory.test.ts#test=记忆正文里写着-username-secretsx-原样送到模型run-照常跑完记忆正文不插值)（2026-11-13 起记忆正文不在 system 里，是对话最前面的一条消息，本来就不经插值）
 - 声明了插值的段写错变量照旧让 run 以 error 收场：[变量错](../../../packages/core/test/prompt.test.ts#test=变量错-run-以-error-收场不静默发一份错的-system)
 

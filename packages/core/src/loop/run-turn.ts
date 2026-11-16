@@ -247,7 +247,7 @@ async function callModel(deps: RunDeps, turnId: string, attempt: number, workset
   const { context, config, emit, signal, streamFn } = deps;
   const { tools, hooks } = workset;
 
-  /* ① AgentMessage 层变换。开头消息（`AgentContext.preamble`，本 run 装好的那份）在最前，
+  /* ① AgentMessage 层变换。messages 载体的 prompt 段（`AgentContext.promptMessages`，本 run 装好的那份）在最前，
      接着按压缩状态投影 transcript（段 → 摘要、旧工具结果 → 占位；transcript 本身不动），
      再拼每轮注入（激活 skill 正文，末尾、不进 transcript），
      再过 transformContext 与 contextBeforeBuild——上层能看到注入后的全貌，有最终话语权。
@@ -255,7 +255,7 @@ async function callModel(deps: RunDeps, turnId: string, attempt: number, workset
      菜单里没有，注入也不许提——否则末尾一段清单要模型用一个它这轮点不到的工具。 */
   const visibleTools: ReadonlySet<string> = new Set(tools.map((t) => t.name));
   const injections = (await config.getTurnInjections?.(visibleTools)) ?? [];
-  let working: AgentMessage[] = [...context.preamble, ...buildWorkingMessages(context.messages, context.compaction)];
+  let working: AgentMessage[] = [...context.promptMessages, ...buildWorkingMessages(context.messages, context.compaction)];
   if (injections.length > 0) working.push(...injections);
   const hookMarks: { transformContext?: "kept" | "replaced"; contextBeforeBuild?: "kept" | "patched" } = {};
   if (config.transformContext !== undefined) {
@@ -272,7 +272,7 @@ async function callModel(deps: RunDeps, turnId: string, attempt: number, workset
   }
 
   /* ①b 观测：这次送进去的上下文（`context.built`）。主线程只交编号与第一次见到的对象（`ContextMirror`），
-     构成与 token 在观测线程里算——视图没被 hook 改过就交「开头消息 + transcript + 压缩状态 + 注入」，那边用同一个投影函数重建 */
+     构成与 token 在观测线程里算——视图没被 hook 改过就交「prompt 消息 + transcript + 压缩状态 + 注入」，那边用同一个投影函数重建 */
   const mirror = deps.observe?.mirror;
   if (mirror !== undefined) {
     const replaced = hookMarks.transformContext === "replaced" || hookMarks.contextBeforeBuild === "patched";
@@ -281,7 +281,7 @@ async function callModel(deps: RunDeps, turnId: string, attempt: number, workset
         kind: "context_built",
         handoff: mirror.handoff({
           systemPrompt: context.systemPrompt,
-          preamble: context.preamble,
+          promptMessages: context.promptMessages,
           transcript: context.messages,
           compaction: context.compaction,
           injections,

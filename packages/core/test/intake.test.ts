@@ -333,7 +333,7 @@ test("退出路径 shouldStopAfterTurn（loop 级决策点，Agent 不暴露）�
   };
   const result = await runAgentLoop(
     [userMessage("go", "human")],
-    { systemPrompt: null, preamble: [], messages: [], compaction: EMPTY_COMPACTION },
+    { systemPrompt: null, promptMessages: [], messages: [], compaction: EMPTY_COMPACTION },
     config,
     async (e) => {
       if (e.type === "agent_end") seen.push(gate.followUp(userMessage("晚到", "human")).kind, gate.steer(userMessage("晚到", "steer")).kind);

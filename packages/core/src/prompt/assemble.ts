@@ -1,5 +1,6 @@
-// 装配器:PromptSection[] + 变量表 → system prompt 字符串。每次 run 由 Agent.assemblePrompt 调一次
-// (冻结的是时刻,不是内容)。本文件不认识任何机制的格式——只管排序、渲染、插值、丢空段、连接。
+// 装配器:PromptSection[] + 变量表 → 一份 system prompt 字符串,加上 messages 载体的段各自的文本。
+// 每次 run 由 Agent 调一次(冻结的是时刻,不是内容)。本文件不认识任何机制的格式——只管排序、渲染、
+// 插值、丢空段、按载体分开:system 的段连成一条,messages 的段一段一份。
 
 import { PROMPT_VARIABLE_NAME, type AssembleContext, type PromptSection, type PromptVariable } from "./types.ts";
 
@@ -7,12 +8,22 @@ export type SectionFailure = (info: { section: string; error: unknown }) => void
 
 /**
  * 一次装配里每一段的结果（观测的 `prompt.assembled` 读它）：段对象本身、渲染出来是有字 / 空 / 抛错、
- * 进 system 的字符数（trim 之后、插值之后；空与失败为 0）。`variables`：插值实际用到的变量名。
+ * 送出去的字符数（trim 之后、插值之后；空与失败为 0）。`variables`：插值实际用到的变量名。
  * 装配循环本来就逐段走一遍，这里只是把那一遍的结论交出来——O(段数)，不另扫正文。
  */
 export type AssembleReport = Readonly<{
   sections: readonly Readonly<{ section: PromptSection; status: "rendered" | "empty" | "failed"; chars: number }>[];
   variables: readonly string[];
+}>;
+
+/**
+ * 一次装配的产物,按载体分开(`PromptSection.carrier`):
+ *   · `system`:system 载体的段按 order 连成的字符串;全空为 null(与「没有 systemPrompt」同义,不发空字符串)。
+ *   · `messages`:messages 载体的段,一段一份、按 order;空段与失败的段不在里面。包成消息是调用方的事。
+ */
+export type AssembledPrompt = Readonly<{
+  system: string | null;
+  messages: readonly Readonly<{ name: string; text: string }>[];
 }>;
 
 /**
@@ -33,22 +44,22 @@ export class PromptVariableError extends Error {
 
 /**
  * 按 order 升序(同数保数组序 = 注册序)→ 逐段 `render(ctx)` → 声明了 `interpolate` 的段做 `{{name}}` 插值
- * (其余原样) → 空段丢弃 → "\n\n" join。
- * 两种失败两种档位:
+ * (其余原样) → 空段丢弃 → 按载体分开:system 的段 "\n\n" join,messages 的段各自一份。
+ * 两种载体同一套规则,两种失败两种档位:
  *   · `render()` 抛错 = 该段隐形 + onFailure 留痕——段是增强面,运行时数据坏一段不许击穿整个 run;
  *   · 插值段的变量错 = **抛** {@link PromptVariableError}——作者错误要响。
- * 全空返回 null(与「没有 systemPrompt」同义,不发空字符串)。
  */
-export async function assembleSystem(
+export async function assemblePrompt(
   sections: readonly PromptSection[],
   variables: ReadonlyMap<string, PromptVariable>,
   ctx: AssembleContext,
   onFailure?: SectionFailure,
   onReport?: (report: AssembleReport) => void,
-): Promise<string | null> {
+): Promise<AssembledPrompt> {
   const ordered = [...sections].sort((a, b) => a.order - b.order); // Array#sort 稳定:同 order 保注册序
   const values = resolveVariables(variables, ctx);
   const blocks: string[] = [];
+  const messages: { name: string; text: string }[] = [];
   const stats: { section: PromptSection; status: "rendered" | "empty" | "failed"; chars: number }[] = [];
   const used = new Set<string>();
   for (const s of ordered) {
@@ -61,11 +72,14 @@ export async function assembleSystem(
       continue;
     }
     const text = (s.interpolate === true ? interpolate(raw, values, s.name, used) : raw).trim();
-    if (text !== "") blocks.push(text);
+    if (text !== "") {
+      if (s.carrier === "messages") messages.push({ name: s.name, text });
+      else blocks.push(text);
+    }
     stats.push({ section: s, status: text === "" ? "empty" : "rendered", chars: text.length });
   }
   onReport?.({ sections: stats, variables: [...used] });
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
+  return { system: blocks.length > 0 ? blocks.join("\n\n") : null, messages };
 }
 
 /** 变量表在装配开始时**一次性**解析:同一次装配里同名同值,provider 只调一次。 */

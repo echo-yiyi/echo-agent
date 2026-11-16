@@ -20,7 +20,7 @@ import { HookRuntime } from "../src/hooks/runtime.ts";
 import type { Context } from "../src/messages.ts";
 import type { StreamFn } from "../src/provider/types.ts";
 import { FAKE_MODEL, scriptedStreamFn, textTurn, toolTurn } from "../src/testing.ts";
-import { assembleSystem, interpolate, PromptVariableError } from "../src/prompt/assemble.ts";
+import { assemblePrompt, interpolate, PromptVariableError } from "../src/prompt/assemble.ts";
 import { sectionFromMarkdown } from "../src/prompt/import.ts";
 import { fenceSafe } from "../src/prompt/sanitize.ts";
 import { PROMPT_ORDER, type AssembleContext, type PromptSection, type PromptVariable } from "../src/prompt/types.ts";
@@ -61,7 +61,10 @@ function spying(turns: Parameters<typeof scriptedStreamFn>[0]): { spy: StreamFn;
 
 /* ───────────────────────── ① 装配 ───────────────────────── */
 
-describe("assembleSystem", () => {
+describe("assemblePrompt", () => {
+  /** system 那一份（system 载体的段拼成的字符串）。 */
+  const assembleSystem = async (...args: Parameters<typeof assemblePrompt>): Promise<string | null> => (await assemblePrompt(...args)).system;
+
   test("按 order 升序、同数保注册序;空段丢弃;全空返回 null", async () => {
     const sections: PromptSection[] = [sec("v", 900, "V"), sec("s1", 10, "S1"), sec("empty", 10, ""), sec("s2", 10, "S2"), sec("id", 0, "ID")];
     expect(await assembleSystem(sections, NO_VARS, CTX)).toBe("ID\n\nS1\n\nS2\n\nV");
@@ -77,6 +80,30 @@ describe("assembleSystem", () => {
     const out = await assembleSystem(sections, NO_VARS, CTX, (f) => failures.push(f.section));
     expect(out).toBe("OK");
     expect(failures).toEqual(["boom"]);
+  });
+
+  test("两种载体:carrier 为 messages 的段不进 system,一段一份、按 order;排序、空段、失败、插值与 system 的段同一套规则", async () => {
+    const vars = new Map<string, PromptVariable>([["workspace", (c) => c.workspace]]);
+    const failures: string[] = [];
+    const msg = (name: string, order: number, text: string): PromptSection => ({ ...sec(name, order, text), carrier: "messages" });
+    const sections: PromptSection[] = [
+      msg("late", 900, "LATE"),
+      sec("id", 0, "ID"),
+      msg("early", 400, "  EARLY  "), // trim 与 system 的段一样
+      msg("empty", 500, ""), // 空段不出消息
+      { name: "boom", order: 450, carrier: "messages", render: () => { throw new Error("坏了"); } }, // 失败的段隐形 + 留痕
+      { ...msg("vars", 950, "W={{workspace}}"), interpolate: true },
+      { ...sec("explicit", 10, "SYS"), carrier: "system" }, // 写明 system 与不写一样
+    ];
+    const report: { name: string; status: string }[] = [];
+    const out = await assemblePrompt(sections, vars, CTX, (f) => failures.push(f.section), (r) => report.push(...r.sections.map((s) => ({ name: s.section.name, status: s.status }))));
+    expect(out.system).toBe("ID\n\nSYS");
+    expect(out.messages).toEqual([{ name: "early", text: "EARLY" }, { name: "late", text: "LATE" }, { name: "vars", text: "W=/repo" }]);
+    expect(failures).toEqual(["boom"]);
+    // 两种载体的段在同一份逐段结论里（观测的 prompt.assembled 读它）
+    expect(report.map((r) => `${r.name}:${r.status}`)).toEqual(["id:rendered", "explicit:rendered", "early:rendered", "boom:failed", "empty:empty", "late:rendered", "vars:rendered"]);
+    // 只有 messages 的段：system 为 null
+    expect(await assemblePrompt([msg("only", 0, "X")], NO_VARS, CTX)).toEqual({ system: null, messages: [{ name: "only", text: "X" }] });
   });
 
   test("render 拿到 AssembleContext;变量从表里取值,同名同值", async () => {
@@ -136,6 +163,12 @@ describe("AgentPrompt registry", () => {
     const offA = svc.section(a);
     expect(() => svc.section(sec("a", 5, "A2"))).toThrow(/已存在/);
     expect(() => svc.section({ name: "nan", order: Number.NaN, render: () => "" })).toThrow(/有限数/);
+    // 载体只有两种：写了别的当场拒，不静默当成 system
+    expect(() => svc.section({ name: "odd", order: 0, carrier: "tools" as never, render: () => "" })).toThrow(/carrier/);
+    const offMsg = svc.section({ name: "m", order: 400, carrier: "messages", render: () => "M" });
+    expect(r.sections.get("m")?.carrier).toBe("messages"); // 同一张表、同一个注册口
+    void offMsg();
+    expect(r.sections.has("m")).toBe(false);
     const offV = svc.variable("ws", () => "/x");
     expect(() => svc.variable("ws", () => "/y")).toThrow(/已存在/);
     expect(() => svc.variable("Bad", () => "")).toThrow(/不合法/);
@@ -366,6 +399,58 @@ describe("Agent 接线", () => {
     const sys = seen[0]?.systemPrompt ?? "";
     expect(sys.startsWith("You are Test, working in /.")).toBe(true); // order 0 最前;{{workspace}} 缺省 "/"
     expect(sys.indexOf("Use x for x-things.")).toBeLessThan(sys.indexOf("# Environment"));
+  });
+
+  test("carrier 为 messages 的段:不进 system,是对话最前面的一条消息(包在来源标签里、按 order 排),不进 transcript;文本没变跨 run 逐字不变,变了才换", async () => {
+    const { spy, seen } = spying([textTurn("一"), textTurn("二"), textTurn("三")]);
+    const agent = new Agent({ model: FAKE_MODEL, streamFunction: spy });
+    const host = await mountBuiltinTools(agent);
+    let conventions = "Use bun.";
+    await host.mount("product", [
+      {
+        entryId: "p:context",
+        definition: definePromptPack("p:context") as never,
+        config: {
+          sections: [
+            { name: "notes", order: 900, carrier: "messages", render: () => "NOTES" },
+            { name: "conventions", order: 400, carrier: "messages", render: () => conventions },
+            sec("identity", 0, "You are Test."),
+          ],
+        },
+      },
+    ]);
+    const texts = (c: Context): string[] => c.messages.map((m) => m.content.map((b) => (b.type === "text" ? b.text : "")).join(""));
+    // 送模前的视图里最前面那两条消息对象（投影之前）：看是不是同一个对象
+    const heads: unknown[][] = [];
+    agent.transformContext = async (messages) => {
+      heads.push(messages.slice(0, 2));
+      return messages;
+    };
+    await agent.prompt("甲");
+    // system 里只有 system 载体的段
+    expect(seen[0]?.systemPrompt).toContain("You are Test.");
+    expect(seen[0]?.systemPrompt).not.toContain("Use bun.");
+    expect(seen[0]?.systemPrompt).not.toContain("NOTES");
+    // 消息：两段各一条，按 order 在最前，来源标签写段名；之后才是用户的输入
+    expect(texts(seen[0]!)).toEqual(['<environment source="conventions">\nUse bun.\n</environment>', '<environment source="notes">\nNOTES\n</environment>', "甲"]);
+    // 不进 transcript
+    expect(agent.state.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+
+    await agent.prompt("乙");
+    // 文本没变：前缀逐字相同，消息只在末尾长
+    expect(seen[1]!.messages.slice(0, 2)).toEqual(seen[0]!.messages.slice(0, 2));
+    expect(texts(seen[1]!).slice(2)).toEqual(["甲", "一", "乙"]);
+    // 而且是同一个消息对象（观测镜像按对象身份记编号，只交一次值）
+    expect(heads[1]![0]).toBe(heads[0]![0]);
+    expect(heads[1]![1]).toBe(heads[0]![1]);
+
+    conventions = "Use bun. Run the type check.";
+    await agent.prompt("丙");
+    // 一段的文本变了：换的只是那一条，另一条不动
+    expect(texts(seen[2]!).slice(0, 2)).toEqual(['<environment source="conventions">\nUse bun. Run the type check.\n</environment>', '<environment source="notes">\nNOTES\n</environment>']);
+    expect(heads[2]![0]).not.toBe(heads[0]![0]);
+    expect(heads[2]![1]).toBe(heads[0]![1]);
+    expect(seen[2]?.systemPrompt).toBe(seen[0]!.systemPrompt);
   });
 
   test("变量错 = run 以 error 收场,不静默发一份错的 system", async () => {

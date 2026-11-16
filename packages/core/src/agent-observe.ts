@@ -38,8 +38,8 @@ export type AgentFactBody =
   | { kind: "input_returned"; inputId?: string; channel: "steer" | "followUp"; reason: string }
   | { kind: "input_blocked"; inputId?: string; channel: "human" | "steer" | "followUp" }
   /**
-   * 这个 run 的 system prompt 是怎么拼成的（2026-11-08，观测白盒化 §3.2）：每一段的名字、order、谁注册的、
-   * 渲染出来有字 / 空 / 抛错、进 system 的字符数，插值用到的变量名，拼起来的总长。每个 run 组装一次就记一次。
+   * 这个 run 的 prompt 是怎么拼成的（2026-11-08，观测白盒化 §3.2）：每一段的名字、order、载体、谁注册的、
+   * 渲染出来有字 / 空 / 抛错、送出去的字符数，插值用到的变量名，system 拼起来的总长。每个 run 组装一次就记一次。
    * 段名、注册者、字符数都是标识与计数，metadata 档就记；正文在 content 档（正文存储，§4）。
    */
   /** `text`：拼好的 system（只是引用，`content` 档才交给观测线程存成 blob）；没有 system 为 null。 */
@@ -47,8 +47,11 @@ export type AgentFactBody =
   /** `ResourceChange` 自带一个 `kind`（tool / skill / mcp …），与本联合的判别字段同名，所以整个嵌进 `change`。 */
   | { kind: "resource_changed"; change: ResourceChange };
 
-/** `prompt.assembled` 里的一段。`owner`：注册它的 extension entryId（不经 Fiber 直接塞进表的段没有）。 */
-export type PromptSectionStat = Readonly<{ name: string; order: number; owner: string | null; status: "rendered" | "empty" | "failed"; chars: number }>;
+/**
+ * `prompt.assembled` 里的一段。`carrier`：这段放在哪（`PromptSection.carrier`）——`messages` 的不在拼好的 system 里，
+ * 是对话最前面的一条消息。`owner`：注册它的 extension entryId（不经 Fiber 直接塞进表的段没有）。
+ */
+export type PromptSectionStat = Readonly<{ name: string; order: number; carrier: "system" | "messages"; owner: string | null; status: "rendered" | "empty" | "failed"; chars: number }>;
 
 export type AgentFact = AgentFactBody & Readonly<{ at: number }>;
 

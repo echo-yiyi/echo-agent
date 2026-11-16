@@ -24,13 +24,14 @@ import type { ContextMirror } from "../observability/context-mirror.ts";
  * `compaction` 是作用在 `messages` 上的视图状态（`compaction/types.ts`）：messages 永远全量原文，
  * 送模前经 `buildWorkingMessages()` 投影。只有压缩流水线会改它。
  *
- * `preamble` 是**开头消息**：与 system 一样每个 run 装一次、run 内不变，送模时排在 transcript 视图之前，
- * 不进 transcript、不落 session、压缩不动它。system 只放开发者写的段；模型写的记忆正文走这里
- * （`docs/decisions/implemented/2026-11-13-memory-content-out-of-system.md`）。没有就是空数组。
+ * `promptMessages` 是 **messages 载体的 prompt 段**（`PromptSection.carrier: "messages"`）装配出来的消息，一段一条：
+ * 与 system 一样每个 run 装一次、run 内不变，送模时排在 transcript 视图之前，不进 transcript、不落 session、
+ * 压缩不动它。system 只放开发者写的段；装着模型或仓库文件写的内容的段（记忆正文、项目指令）在这里
+ * （`docs/decisions/implemented/2026-11-16-prompt-section-carrier.md`）。没有就是空数组。
  */
 export type AgentContext = {
   systemPrompt: string | null;
-  preamble: readonly AgentMessage[];
+  promptMessages: readonly AgentMessage[];
   messages: AgentMessage[];
   compaction: CompactionState;
 };

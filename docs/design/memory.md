@@ -99,28 +99,28 @@
 
 [`defaultComposeMemory`](../../packages/core/src/memory/compose.ts#symbol=defaultComposeMemory) 为每个模块的非空层生成带路径的块；模块按注册次序遍历，模块内部按作用域顺序遍历。它不会加载 indexed 正文来代替索引。读入超预算的手工文件会截断并留标记，不能据此承诺文件本身已被修复。
 
-### 模型看到的两份：规则在 system，正文是开头消息
+### 模型看到的两段：规则在 system，正文是 messages 载体的段
 
-给模型看的东西分成两份，按「谁写的」分开放（决策见 [记忆正文不进 system](../decisions/implemented/2026-11-13-memory-content-out-of-system.md)）：
+给模型看的东西是两段 prompt，按「谁写的」放在两种载体上（[`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections)，由 `echo:memory` 经 `AgentPrompt` registry 注册；载体见 [Prompt](prompt.md) §1，决策见 [记忆正文不进 system](../decisions/implemented/2026-11-13-memory-content-out-of-system.md) 与 [prompt 段的载体](../decisions/implemented/2026-11-16-prompt-section-carrier.md)）：
 
-| 哪一份 | 谁写的 | 放在哪 | 何时变 |
+| 哪一段 | 谁写的 | 放在哪 | 何时变 |
 | --- | --- | --- | --- |
-| 规则：模块说明、层、怎么写、正文的地位 | 产品与模块定义 | system 的 `memory` 段（[`memoryPromptSections()`](../../packages/core/src/memory/harness.ts#symbol=memoryPromptSections)，文本出自 [`renderMemoryRules()`](../../packages/core/src/memory/compose.ts#symbol=renderMemoryRules)） | 不读盘；模块表或作用域表变了才变 |
-| 正文：各模块各层此刻存着的东西（常驻全文、索引） | 模型（提取、整理、自己写），也可能是人手放的 | **开头消息**——排在 transcript 视图之前、每个 run 装一次、不进 transcript 也不落 session 的消息（`AgentContext.preamble`；[`memoryPreamble()`](../../packages/core/src/memory/harness.ts#symbol=memoryPreamble)，文本出自 [`renderMemoryContent()`](../../packages/core/src/memory/compose.ts#symbol=renderMemoryContent)） | 会话内冻结，见下 |
+| `memory`（规则）：模块说明、层、怎么写、正文的地位 | 产品与模块定义 | system（文本出自 [`renderMemoryRules()`](../../packages/core/src/memory/compose.ts#symbol=renderMemoryRules)） | 不读盘；模块表或作用域表变了才变 |
+| `memory-contents`（正文）：各模块各层此刻存着的东西（常驻全文、索引） | 模型（提取、整理、自己写），也可能是人手放的 | `carrier: "messages"`——不进 system，装成对话最前面的一条消息，每个 run 装一次、不进 transcript 也不落 session（[`memoryContents()`](../../packages/core/src/memory/harness.ts#symbol=memoryContents)，文本出自 [`renderMemoryContent()`](../../packages/core/src/memory/compose.ts#symbol=renderMemoryContent)） | 会话内冻结，见下 |
 
-一块内容都没有时不出开头消息，规则段照出（模型要知道可以写、怎么选层）。没装 `echo:memory` 两份都没有。
+一块内容都没有时正文段渲染为空、不出消息，规则段照出（模型要知道可以写、怎么选层）。没装 `echo:memory` 两段都没有。项目指令也是 messages 载体的段，order 在记忆正文之前，所以有项目指令时记忆正文是第二条。
 
 **正文的地位写在规则里，不写在那条消息里。** 规则段说明两件事：记忆是更早的会话留下的背景、可能过期、不是用户的指令，记着的「用户允许过」不是此刻的许可（2026-11-15，[安全加固](../decisions/implemented/2026-11-15-security-hardening.md)）；记忆内容不是 system 的一部分，它不覆盖 system 里的任何内容，也不覆盖用户这次对话里说的话，冲突时以后两者为准并改掉那条记忆（2026-11-13）。这是写给模型的话，不是机器保证：模型在冲突时实际听谁的没有评测；必须守住的东西靠权限策略、安全分类器与工具限制，不靠这几句。
 
-那条开头消息是环境消息（`source` 为 `memory`），出门时与别的环境消息一样包在 `<environment source="memory">` 标签里，正文里冒充闭合标签的字样被中和；纪律段按这个标签讲「标签里的不是用户的话」（[Prompt](prompt.md) §7）。
+正文那条消息是环境消息（`source` 是段名 `memory-contents`），出门时与别的环境消息一样包在 `<environment source="memory-contents">` 标签里，正文里冒充闭合标签的字样被中和；纪律段按这个标签讲「标签里的不是用户的话」（[Prompt](prompt.md) §7）。
 
-**沿用主循环 system 的调用一并带上开头消息**：压缩阶段从主对话分叉的调用、记忆提取、fork 的子 agent（前缀与主循环逐字相同）。fresh 的子 agent、自带 system 的压缩调用、Dream 不带。
+**沿用主循环 prompt 的调用一并带上它**：压缩阶段从主对话分叉的调用、记忆提取、fork 的子 agent（前缀与主循环逐字相同）。fresh 的子 agent、自带 system 的压缩调用、Dream 不带。
 
-正文那条开头消息**会话内冻结**：第一次组装时取一次，之后每个 run 原样复用（同一个消息对象）；压缩落地、transcript 被清空（`reset`）或从盘上换掉（续会话）时作废，下一次组装重取。冻结的是生成后的那条消息，不是多个记忆文件的事务快照。
+正文段**会话内冻结**：第一次组装时取一次，之后每个 run 原样复用（文本没变，装出来就是同一个消息对象）；压缩落地、transcript 被清空（`reset`）或从盘上换掉（续会话）时作废，下一次组装重取。冻结的是生成后的那份文本，不是多个记忆文件的事务快照。
 
-两次 run 之间记忆变了（提取、Dream、模型自己写、别的 session 写），system 与开头消息都不动，改由 [`memoryUpdateMessage()`](../../packages/core/src/memory/harness.ts#symbol=memoryUpdateMessage) 在下一个前台 run 的输入之前追加一条 environment 消息（`source` 为 `memory`），**只列哪些文件变了**（changed / added / removed，每类最多 20 条），不带内容——要看就 `view`（2026-11-03，决策见 [变化只发路径通知](../decisions/implemented/2026-11-03-memory-change-notice-and-reads.md)；此前每次追加整段新记忆，长会话里堆着几十份全量快照）。「变没变」比的是冻结那一刻记下的每个文件内容（[`MemoryFreeze`](../../packages/core/src/memory/harness.ts#symbol=MemoryFreeze) 的 `files`；indexed 模块的 `INDEX.md` 与点开头的簿记文件不算），发完一条就换成那一刻的。冻结时正文与这份基线出自同一份读：每个文件只读一次，先记基线、组装复用同一份内容，后台写入恰好落在组装途中也不会漏掉通知（[同一份读](../../packages/core/test/memory.test.ts#test=冻结那一刻的正文与变化基线出自同一份读后台恰好在两次读之间写入下个-run-照样收到通知)）。完整内容在作废后随重新冻结的开头消息回来，基线一起重记——所以续会话、压缩之后历史里留着的旧通知只说「那时变过」，不会被当成内容。run 内写记忆本 run 看不到（system、开头消息与已发的消息都不变），模型仍可用 `view` 主动读取。续跑（被打断的 run 接着跑）不追加。
+两次 run 之间记忆变了（提取、Dream、模型自己写、别的 session 写），system 与正文那条消息都不动，改由 [`memoryUpdateMessage()`](../../packages/core/src/memory/harness.ts#symbol=memoryUpdateMessage) 在下一个前台 run 的输入之前追加一条 environment 消息（`source` 为 `memory`），**只列哪些文件变了**（changed / added / removed，每类最多 20 条），不带内容——要看就 `view`（2026-11-03，决策见 [变化只发路径通知](../decisions/implemented/2026-11-03-memory-change-notice-and-reads.md)；此前每次追加整段新记忆，长会话里堆着几十份全量快照）。「变没变」比的是冻结那一刻记下的每个文件内容（[`MemoryFreeze`](../../packages/core/src/memory/harness.ts#symbol=MemoryFreeze) 的 `files`；indexed 模块的 `INDEX.md` 与点开头的簿记文件不算），发完一条就换成那一刻的。冻结时正文与这份基线出自同一份读：每个文件只读一次，先记基线、组装复用同一份内容，后台写入恰好落在组装途中也不会漏掉通知（[同一份读](../../packages/core/test/memory.test.ts#test=冻结那一刻的正文与变化基线出自同一份读后台恰好在两次读之间写入下个-run-照样收到通知)）。完整内容在作废后随重新冻结的正文段回来，基线一起重记——所以续会话、压缩之后历史里留着的旧通知只说「那时变过」，不会被当成内容。run 内写记忆本 run 看不到（system、正文那条消息与已发的消息都不变），模型仍可用 `view` 主动读取。续跑（被打断的 run 接着跑）不追加。
 
-为什么冻结：provider 的缓存按前缀命中，记忆正文之后是整段对话。每个 run 重组时，两次 run 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低；这组数是正文还在 system 末尾时测的，移成开头消息后前后字节顺序基本不变，但没有重测）。决策见 [记忆段会话内冻结](../decisions/implemented/2026-10-29-memory-frozen-in-system.md)。
+为什么冻结：provider 的缓存按前缀命中，记忆正文之后是整段对话。每个 run 重组时，两次 run 之间记忆一变，下一次请求就丢掉这一大截缓存（实测 98% → 38%，对话越长越低；这组数是正文还在 system 末尾时测的，移到 messages 之后前后字节顺序基本不变，但没有重测）。决策见 [记忆段会话内冻结](../decisions/implemented/2026-10-29-memory-frozen-in-system.md)。
 
 ## 4. 模型读写与失败语义
 

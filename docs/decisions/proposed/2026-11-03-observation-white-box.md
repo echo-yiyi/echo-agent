@@ -139,7 +139,7 @@ type ContextBuiltHandoff = Readonly<{
 
 ### 3.1 现状
 
-送模型的那一刻在 [`runAttempt`](../../../packages/core/src/loop/run-turn.ts#symbol=runAttempt):按压缩状态投影 transcript → 拼每轮注入 → `transformContext` → `contextBeforeBuild` hook → `convertToLlm` → `streamFn({ systemPrompt, messages, tools: toolSchemas(tools) })`。这一段一个探针都没有。system prompt 在 [`assembleSystem`](../../../packages/core/src/prompt/assemble.ts#symbol=assembleSystem) 组装,也不接观测;段渲染失败只发一条 `[prompt_section_failed]` 通知。类型里留着的 [`TurnWorksetObservation`](../../../packages/core/src/observability/types.ts#symbol=TurnWorksetObservation) 的 `promptSources` / `hooks` 恒空。
+送模型的那一刻在 [`runAttempt`](../../../packages/core/src/loop/run-turn.ts#symbol=runAttempt):按压缩状态投影 transcript → 拼每轮注入 → `transformContext` → `contextBeforeBuild` hook → `convertToLlm` → `streamFn({ systemPrompt, messages, tools: toolSchemas(tools) })`。这一段一个探针都没有。system prompt 在 [`assembleSystem`](../../../packages/core/src/prompt/assemble.ts#symbol=assemblePrompt)（2026-11-16 起叫 `assemblePrompt`）组装,也不接观测;段渲染失败只发一条 `[prompt_section_failed]` 通知。类型里留着的 [`TurnWorksetObservation`](../../../packages/core/src/observability/types.ts#symbol=TurnWorksetObservation) 的 `promptSources` / `hooks` 恒空。
 
 ### 3.2 `prompt.assembled`:每个 run 一条
 
