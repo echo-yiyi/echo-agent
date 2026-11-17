@@ -7,11 +7,13 @@
 //   - 分类器只看用户本人说的话与这一步的参数（`PermissionPolicyInput.userIntent` / `params`），看不到工具结果与 agent 的正文——
 //     注入就藏在那里面；
 //   - 两段：第一段只答一个词、拿不准就判拦；判拦的才进第二段，先说清这一步实际做什么、用户要没要，最后一行给结论，以第二段为准；
-//   - 判拦的理由交回模型；同一个 run 里连着判拦 `CLASSIFIER_BLOCKS_IN_A_ROW` 次或一共 `CLASSIFIER_BLOCKS_TOTAL` 次之后、或判不了
-//     （模型出错、答不清），改成问人（`ask`，没有裁决人时照旧折成拒）。**判拦按 run 数**：一条新输入（人发的、inbox 投来的一批）
-//     开一个新 run，从零数；子循环（subagent、记忆提取）有自己的 runId，各数各的。按整个 Agent 数的话，没人可问的形态
-//     （管道、`--serve`、常驻）熔断一次，此后每个任务里要判的工具都折成拒，直到进程退出（2026-11-16）。
+//   - 判拦的理由交回模型；同一个 run 里连着判拦 `CLASSIFIER_BLOCKS_IN_A_ROW` 次或一共 `CLASSIFIER_BLOCKS_TOTAL` 次就撞到上限：
+//     判拦的结果带上 `limit`。有人可问时，这个 run 余下要判的动作改成问人；没人可问（全自动）时 Agent 让这个 run 停下，
+//     结局 `error{safety_stopped}`（`Agent.permissionStage`）。**判拦按 run 数**：一条新输入（人发的、inbox 投来的一批）
+//     开一个新 run，从零数；子循环（subagent、记忆提取）有自己的 runId，各数各的（2026-11-16）。
+//   - 判不了（模型出错、两段都答不清）：按 `onError`，缺省拒掉这一步（2026-11-16）。
 
+import { errText } from "../errors.ts";
 import { neutralizeClosingTag } from "../prompt/sanitize.ts";
 import type { PermissionPolicyInput, PermissionVerdict } from "./types.ts";
 
@@ -26,7 +28,17 @@ export type SafetyClassifierOptions = Readonly<{
   safeTools?: readonly string[];
   /** 接在判断规则后面的产品说明（比如某个工具的某个参数是什么意思）。模型逐字读，英文。 */
   notes?: string;
+  /**
+   * 判不了（分类器的模型调用出错、两段都答不清）时这一步怎么办。`"deny"`（缺省）：拒掉这一步，理由交回模型；
+   * `"ask"`：改问人，没人可问的形态里照旧折成拒。**没有 `"allow"`**：判不了就放行，等于没开分类器。
+   * 判不了不算判拦，不进上限的计数。
+   */
+  onError?: ClassifierOnError;
 }>;
+
+/** `SafetyClassifierOptions.onError` 收的值。封闭集合：别的值在 `createSafetyClassifier` 当场抛。 */
+export const CLASSIFIER_ON_ERROR = ["deny", "ask"] as const;
+export type ClassifierOnError = (typeof CLASSIFIER_ON_ERROR)[number];
 
 /**
  * 内核自带工具里不用判的：只读的，或者只动 agent 自己的状态（任务、记忆、闹钟、会话、技能激活、提问）。
@@ -40,9 +52,9 @@ export const KERNEL_SAFE_TOOLS: readonly string[] = Object.freeze([
   "session_create", "session_list", "session_send", "session_close",
 ]);
 
-/** 一个 run 里连着判拦几次就改问人：理由交回给了模型，它连着三次都没换出一条能过的路，再判也是白判。只数第二段的判拦。 */
+/** 一个 run 里连着判拦几次算撞到上限：理由交回给了模型，它连着三次都没换出一条能过的路，再判也是白判。只数第二段的判拦。 */
 export const CLASSIFIER_BLOCKS_IN_A_ROW = 3;
-/** 一个 run 里一共判拦几次之后改问人。 */
+/** 一个 run 里一共判拦几次算撞到上限。 */
 export const CLASSIFIER_BLOCKS_TOTAL = 20;
 /**
  * 记着判拦数的 run 最多几个，超了丢最早开始记的那个。并行的 run 只有主循环加几个子循环，远到不了；
@@ -148,17 +160,41 @@ export async function classifyAction(
   return { ...careful, stages: 2 };
 }
 
+/** 一个 run 撞到的判拦上限：连着判拦（`in_a_row`）还是一共判拦（`total`），判拦了几次。 */
+export type ClassifierLimit = Readonly<{ kind: "in_a_row" | "total"; blocks: number }>;
+
+/**
+ * 判一步的结果。这个 run 撞到判拦上限时带 `limit`：撞上的那一次（`verdict` 是那次判拦）与之后每一次（`verdict` 是改问人）都带。
+ * 没人可问的形态据它停下这个 run（`Agent.permissionStage`）。
+ */
+export type SafetyJudgement = Readonly<{ verdict: PermissionVerdict; limit?: ClassifierLimit }>;
+
 /** 一个会话的分类器：名单、规则、判拦计数。Agent 每个实例一个。 */
 export type SafetyClassifier = {
   /** 这件工具要不要判（不在名单上的都要判）。 */
   covers(toolName: string): boolean;
-  /** 判这一步。永不 reject：判不了也给出一个裁决（ask）。 */
-  judge(input: PermissionPolicyInput): Promise<PermissionVerdict>;
+  /** 判这一步。永不 reject：判不了也给出裁决（按 `onError`）。 */
+  judge(input: PermissionPolicyInput): Promise<SafetyJudgement>;
 };
 
+function limitOf(blocks: { inARow: number; total: number }): ClassifierLimit | undefined {
+  if (blocks.inARow >= CLASSIFIER_BLOCKS_IN_A_ROW) return { kind: "in_a_row", blocks: blocks.inARow };
+  if (blocks.total >= CLASSIFIER_BLOCKS_TOTAL) return { kind: "total", blocks: blocks.total };
+  return undefined;
+}
+
 export function createSafetyClassifier(opts: SafetyClassifierOptions = {}): SafetyClassifier {
+  const onError: unknown = opts.onError ?? "deny";
+  if (!(CLASSIFIER_ON_ERROR as readonly unknown[]).includes(onError)) {
+    throw new Error(`safetyClassifier.onError 只能是 ${CLASSIFIER_ON_ERROR.map((v) => `"${v}"`).join(" / ")}，收到 ${JSON.stringify(opts.onError)}`);
+  }
   const safe = new Set([...KERNEL_SAFE_TOOLS, ...(opts.safeTools ?? [])]);
   const system = opts.notes === undefined || opts.notes.trim() === "" ? SAFETY_CLASSIFIER_SYSTEM : `${SAFETY_CLASSIFIER_SYSTEM}\n\n${opts.notes.trim()}`;
+  /** 判不了：按 `onError` 拒掉或改问人。`what` 接在 "the safety classifier " 后面。 */
+  const cannotJudge = (toolName: string, what: string): PermissionVerdict =>
+    onError === "ask"
+      ? { kind: "ask", reason: `Tool '${toolName}' needs approval: the safety classifier ${what}` }
+      : { kind: "deny", reason: `The safety classifier ${what}, so this action did not run.` };
   /** 每个 run 的判拦数（Map 按插入顺序，最早的在前）。 */
   const blocksByRun = new Map<string, { inARow: number; total: number }>();
   const blocksOf = (runId: string): { inARow: number; total: number } => {
@@ -175,28 +211,31 @@ export function createSafetyClassifier(opts: SafetyClassifierOptions = {}): Safe
     async judge(input) {
       const { toolName } = input;
       const blocks = blocksOf(input.runId);
-      if (blocks.inARow >= CLASSIFIER_BLOCKS_IN_A_ROW || blocks.total >= CLASSIFIER_BLOCKS_TOTAL) {
-        const why = blocks.inARow >= CLASSIFIER_BLOCKS_IN_A_ROW ? `${blocks.inARow} actions in a row` : `${blocks.total} actions in this task`;
-        return { kind: "ask", reason: `Tool '${toolName}' needs approval: the safety classifier has blocked ${why}, so the rest of this task asks a person instead` };
+      const reached = limitOf(blocks);
+      if (reached !== undefined) {
+        const why = reached.kind === "in_a_row" ? `${reached.blocks} actions in a row` : `${reached.blocks} actions in this task`;
+        return { verdict: { kind: "ask", reason: `Tool '${toolName}' needs approval: the safety classifier has blocked ${why}, so the rest of this task asks a person instead` }, limit: reached };
       }
       let verdict: ClassifierVerdict;
       try {
         verdict = await classifyAction(input.askModel, system, input.userIntent, toolName, input.params);
       } catch (e) {
-        // 判不了 ≠ 判过：fail-closed，交给人
-        return { kind: "ask", reason: `Tool '${toolName}' needs approval: the safety classifier could not run (${e instanceof Error ? e.message : String(e)})` };
+        // 判不了 ≠ 判过：不放行
+        return { verdict: cannotJudge(toolName, `could not run (${errText(e)})`) };
       }
-      if (verdict.kind === "unclear") return { kind: "ask", reason: `Tool '${toolName}' needs approval: the safety classifier gave no clear answer` };
+      if (verdict.kind === "unclear") return { verdict: cannotJudge(toolName, "gave no clear answer") };
       if (verdict.kind === "allow") {
         blocks.inARow = 0;
-        return { kind: "allow" };
+        return { verdict: { kind: "allow" } };
       }
       blocks.inARow += 1;
       blocks.total += 1;
-      return {
+      const deny: PermissionVerdict = {
         kind: "deny",
         reason: `Blocked by the safety classifier: ${verdict.reason} This action did not run. If the user wants it, they have to ask for it in their own words; otherwise take another approach.`,
       };
+      const limit = limitOf(blocks);
+      return limit === undefined ? { verdict: deny } : { verdict: deny, limit };
     },
   };
 }

@@ -27,7 +27,7 @@
 
 **ID 与计数。** `runId`；`replyId = ${runId}/${k}`，k 按 run 从 1 起；`turnId = ${replyId}#${n}`，n 按 **reply** 从 1 起、每个 turn 加 1，**重试不消耗**；`shouldStopAfterTurn` / `prepareNextTurn` 收到的 `iteration` 就是这个 n，不另设计数器；attempt 用 `(turnId, attempt)` 二元组，attempt 按 turn 从 1 起。turnId 由 loop 产生、随事件带出，permission 与观测都引用它，由同一套 ID 函数生成。
 
-**预算。** `maxIterations` 是每条 reply 的 turn 上限；`maxReplies` 是每个 run 的 reply 上限。两者都是硬闸，命中都以 `error` 收场（`max_iterations` / `max_replies`）。`timeoutMs` 仍是可选的墙钟，不承担总闸。
+**预算。** `maxIterations` 是每条 reply 的 turn 上限；`maxReplies` 是每个 run 的 reply 上限。两者都是硬闸，命中都以 `error` 收场（`max_iterations` / `max_replies`）。`timeoutMs` 仍是可选的墙钟，不承担总闸。另有一道由 Agent 给的轮首硬闸 `halt`：安全分类器在这个 run 里判拦到上限、又没人可问时，下一轮开头以 `error{safety_stopped}` 收场（[决策](../decisions/implemented/2026-11-15-security-hardening.md)）。
 
 ### 1.1 术语边界
 
@@ -140,7 +140,7 @@ reply 内的继续判决归 [`runReply`](../../packages/core/src/loop/run-loop.t
 
 规则三条：
 
-1. **四层成对且严格嵌套；允许空层。** run 内至少一条 reply；reply 内**可以零 turn**——输入吸收之后轮首硬闸就命中（abort / deadline / `max_iterations`，§6 那一行）；turn 内**可以零 attempt**——`turn_start` 之后、发请求之前被 abort。消费者按栈配对消费永远成立；「取 turn 的最后一个 attempt」「按 attempt 数算重试率」这类非空假设不成立。
+1. **四层成对且严格嵌套；允许空层。** run 内至少一条 reply；reply 内**可以零 turn**——输入吸收之后轮首硬闸就命中（abort / deadline / `halt` / `max_iterations`，§6 那一行）；turn 内**可以零 attempt**——`turn_start` 之后、发请求之前被 abort。消费者按栈配对消费永远成立；「取 turn 的最后一个 attempt」「按 attempt 数算重试率」这类非空假设不成立。
 2. **输入消息的 `message_end` 在它引发的 `turn_start` 之前，中间只允许 `compaction_start / compaction_end`**（轮首 `maybeCompact()` 触发时插在这里）；轮首硬闸在吸收之后就命中时没有 `turn_start`，紧接着是 `reply_end`（规则 1 的零 turn reply）。prompt / followUp / stop hook 的在 `reply_start` 之后；steer 的在上一个 `turn_end` 之后。
 3. **失败不破配对。** 失败 attempt 的 assistant 消息照常 `message_start … message_end`，随后 `attempt_end{failed}`；只是不落地。
 
@@ -211,7 +211,7 @@ agent_end{completed}
 | aborted（调用方 signal） | `aborted` | `aborted{reason}` | `aborted{reason}` |
 | aborted（这一步被 `interrupt()`） | `aborted` | 有 steer → 下一 turn；否则 `aborted{reason}`（只收这一条） | 照常走 followUp；没有待办 → `aborted{reason}` |
 | aborted（deadline signal） | `aborted` | `error{timeout}`（reply 区分两个 signal） | `error{timeout}` |
-| — | — | 轮首硬闸：`aborted` / `error{max_iterations}` / `error{timeout}` | 同 reply |
+| — | — | 轮首硬闸：`aborted` / `error{timeout}` / `error{safety_stopped}` / `error{max_iterations}` | 同 reply |
 | — | — | — | reply 之间：达 `maxReplies` 且仍有待办 → `error{max_replies}` |
 
 **abort 的 reason 一路带到 outcome**（[决策](../decisions/implemented/2026-09-01-abort-reason.md)）：`Agent.abort(reason)` 把 reason 装进 `AbortSignal.reason`（[`AbortReason`](../../packages/core/src/errors.ts#symbol=AbortReason)——必须是 `AbortError` 形状的 `DOMException`，provider 靠 `name` 识别「被中止」，裸字符串会被当成别的错误），reply 在收场时从调用方 signal 取回，落在 `agent_end` 与 `LoopResult` 的 `{ kind: "aborted", reason }` 里。宿主传的 reason 是自由字符串原样透传；core 自己发起的中断用 [`ABORT_REASON`](../../packages/core/src/errors.ts#symbol=ABORT_REASON) 里的常量：`lease-lost`（丢锁）、`dispose`（收摊）、`interrupted`（`interrupt()` 没给理由时）。`abort()` 停整个任务——连这个 run 起的后台任务一起停；`interrupt()` 只停当前这一步、run 留着（§2.2）。没给理由的裸 `abort()` 与 admission 的抢占 / 收摊仍是不带 reason 的 `{ kind: "aborted" }`；run 超时不是 aborted，是 `error{timeout}`——deadline 的 signal 里装的是 `AbortReason(run-timeout)`，只为让轮内的等待（fetch、读流、授权）认出「被中止」而不是网络故障，它不进 outcome。

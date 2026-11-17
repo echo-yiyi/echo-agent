@@ -225,6 +225,12 @@ export interface AgentLoopConfig {
   maxReplies: number;
   /** 可选的墙钟；不承担总闸。 */
   timeoutMs?: number;
+  /**
+   * 轮首硬闸之一：这个循环实例该不该就此收场。给出错误就以 `error{它}` 结束这条 reply 与整个 run，不再调模型。
+   * Agent 用它在「安全分类器判拦到上限、又没人可问」时停下（`error{safety_stopped}`，`Agent.permissionStage`）。
+   * 参数是本循环的 `runId`：子循环沿用同一份 config、只换 `runId`，闸按各自的 run 判。
+   */
+  halt?: (runId: string) => AgentError | undefined;
   /** 一个 turn 最多 `maxAttempts` 个 attempt，不分原因。 */
   retryPolicy: RetryPolicy;
   compaction: LoopCompactionConfig;

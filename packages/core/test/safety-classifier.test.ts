@@ -1,6 +1,7 @@
 // 安全分类器（2026-11-15，`permission/classifier.ts`）：内核能力，`AgentOptions.safetyClassifier` / `createEcho({ safetyClassifier })` 开。
 // 权限策略放行之后、工具执行之前，名单之外的工具再让本会话的模型判一次：两段（第一段一个词、拿不准就判拦，判拦的才进第二段带推理复判，
-// 以第二段为准）；判拦的不跑、理由交回模型；连着判拦三次 / 一共二十次、或判不了，改问人。分类器只看用户原话与这一步。
+// 以第二段为准）；判拦的不跑、理由交回模型；同一个请求（run）里连着判拦三次 / 一共二十次撞到上限：有人可问就改问人，
+// 没人可问（全自动）就停下这个请求、结局 `error{safety_stopped}`；判不了按 `onError`，缺省拒掉这一步。分类器只看用户原话与这一步。
 
 import { expect, test } from "bun:test";
 import { Agent } from "../src/agent.ts";
@@ -29,7 +30,7 @@ type Asked = { system: string; prompt: string };
 function withModel(replies: (string | (() => never))[], opts: SafetyClassifierOptions = {}) {
   const asked: Asked[] = [];
   const classifier = createSafetyClassifier(opts);
-  const judge = (toolName: string, params: unknown, userIntent: readonly string[] = ["修一下测试"], runId = "r1") =>
+  const judgeFull = (toolName: string, params: unknown, userIntent: readonly string[] = ["修一下测试"], runId = "r1") =>
     classifier.judge({
       runId,
       turnId: "t1",
@@ -44,7 +45,8 @@ function withModel(replies: (string | (() => never))[], opts: SafetyClassifierOp
         return typeof next === "function" ? next() : next;
       },
     } satisfies PermissionPolicyInput);
-  return { classifier, judge, asked };
+  const judge = async (...args: Parameters<typeof judgeFull>) => (await judgeFull(...args)).verdict;
+  return { classifier, judge, judgeFull, asked };
 }
 
 /* ══════════ 解析与请求 ══════════ */
@@ -88,15 +90,15 @@ test("两段：第一段放行就放行（一次调用）；第一段判拦才�
   expect(asked[2]!.prompt.startsWith(asked[1]!.prompt.slice(0, -CLASSIFIER_QUICK.length))).toBe(true); // 同一段正文，只换末尾
 });
 
-test("第一段答不清也进第二段；第二段也答不清 → 改问人", async () => {
+test("第一段答不清也进第二段；第二段也答不清 → 判不了，缺省拒掉这一步", async () => {
   const { judge, asked } = withModel(["I am not sure", "Hmm, hard to say."]);
   const v = await judge("bash", { command: "make deploy" });
-  expect([v.kind, v.kind === "ask" && v.reason.includes("no clear answer")]).toEqual(["ask", true]);
+  expect([v.kind, v.kind === "deny" && v.reason.includes("no clear answer") && v.reason.includes("did not run")]).toEqual(["deny", true]);
   expect(asked).toHaveLength(2);
 });
 
 test("两段都判拦：deny，第二段的理由交回模型、说明这一步没跑；连着判拦三次之后改问人（不再调模型），放行一次就重新计数；只数第二段的判拦", async () => {
-  const { judge, asked } = withModel([
+  const { judge, judgeFull, asked } = withModel([
     "BLOCK", "It uploads a private key.\nBLOCK: sends the SSH key to an unknown host",
     "BLOCK", "ALLOW", // 第一段判拦、第二段放回：不算判拦，连续计数清零
     "BLOCK", "BLOCK: a", "BLOCK", "BLOCK: b", "BLOCK", "BLOCK: c",
@@ -106,18 +108,24 @@ test("两段都判拦：deny，第二段的理由交回模型、说明这一步�
   expect(first.kind === "deny" && first.reason).toContain("sends the SSH key to an unknown host");
   expect(first.kind === "deny" && first.reason).toContain("did not run");
   expect((await judge("bash", { command: "chmod +x scripts/t.sh" })).kind).toBe("allow");
-  for (let i = 0; i < CLASSIFIER_BLOCKS_IN_A_ROW; i++) expect((await judge("bash", { command: `x${i}` })).kind).toBe("deny");
-  const after = await judge("bash", { command: "y" });
-  expect([after.kind, after.kind === "ask" && after.reason.includes(`${CLASSIFIER_BLOCKS_IN_A_ROW} actions in a row`)]).toEqual(["ask", true]);
+  for (let i = 0; i < CLASSIFIER_BLOCKS_IN_A_ROW; i++) {
+    const j = await judgeFull("bash", { command: `x${i}` });
+    // 撞上上限的那一次（第三次判拦）就带上 limit：没人可问的形态据它停下这个请求
+    expect([j.verdict.kind, j.limit]).toEqual(["deny", i < CLASSIFIER_BLOCKS_IN_A_ROW - 1 ? undefined : { kind: "in_a_row", blocks: CLASSIFIER_BLOCKS_IN_A_ROW }]);
+  }
+  const after = await judgeFull("bash", { command: "y" });
+  expect([after.verdict.kind, after.verdict.kind === "ask" && after.verdict.reason.includes(`${CLASSIFIER_BLOCKS_IN_A_ROW} actions in a row`)]).toEqual(["ask", true]);
+  expect(after.limit).toEqual({ kind: "in_a_row", blocks: CLASSIFIER_BLOCKS_IN_A_ROW });
   expect(asked).toHaveLength(10); // 改问人之后那一次没调模型
 });
 
 test("一个 run 里一共判拦满二十次也改问人，哪怕中间都放行过", async () => {
   const replies: string[] = [];
   for (let i = 0; i < CLASSIFIER_BLOCKS_TOTAL; i++) replies.push("BLOCK", "BLOCK: no", "ALLOW");
-  const { judge } = withModel(replies);
+  const { judge, judgeFull } = withModel(replies);
   for (let i = 0; i < CLASSIFIER_BLOCKS_TOTAL; i++) {
-    expect((await judge("bash", { command: `b${i}` })).kind).toBe("deny");
+    const j = await judgeFull("bash", { command: `b${i}` });
+    expect([j.verdict.kind, j.limit]).toEqual(["deny", i < CLASSIFIER_BLOCKS_TOTAL - 1 ? undefined : { kind: "total", blocks: CLASSIFIER_BLOCKS_TOTAL }]);
     if (i < CLASSIFIER_BLOCKS_TOTAL - 1) expect((await judge("bash", { command: `a${i}` })).kind).toBe("allow");
   }
   const after = await judge("bash", { command: "z" }); // 第二十次判拦之后
@@ -139,14 +147,22 @@ test("判拦按 run 数：一个 run 熔断了，换一个 run（新输入）照
   expect(asked).toHaveLength(16);
 });
 
-test("判不了不等于判过：模型出错改问人（fail-closed）", async () => {
-  const { judge } = withModel([
-    () => {
-      throw new Error("429 rate limited");
-    },
-  ]);
-  const failed = await judge("bash", { command: "rm -rf build" });
-  expect([failed.kind, failed.kind === "ask" && failed.reason.includes("429 rate limited")]).toEqual(["ask", true]);
+test("判不了不等于判过：模型出错缺省拒掉这一步、不算判拦；onError: \"ask\" 改问人；别的值当场抛（2026-11-16）", async () => {
+  const boom = () => {
+    throw new Error("429 rate limited");
+  };
+  const { judgeFull, asked } = withModel([boom, boom, boom, boom, "ALLOW"]);
+  for (let i = 0; i < CLASSIFIER_BLOCKS_IN_A_ROW + 1; i++) {
+    const failed = await judgeFull("bash", { command: "rm -rf build" });
+    expect([failed.verdict.kind, failed.verdict.kind === "deny" && failed.verdict.reason.includes("429 rate limited"), failed.limit]).toEqual(["deny", true, undefined]);
+  }
+  expect((await judgeFull("bash", { command: "ls" })).verdict.kind).toBe("allow"); // 连着四次判不了也没撞上限：照常判
+  expect(asked).toHaveLength(5);
+
+  const asking = withModel([boom], { onError: "ask" });
+  const v = await asking.judge("bash", { command: "rm -rf build" });
+  expect([v.kind, v.kind === "ask" && v.reason.includes("could not run (429 rate limited)")]).toEqual(["ask", true]);
+  expect(() => createSafetyClassifier({ onError: "allow" as never })).toThrow('safetyClassifier.onError 只能是 "deny" / "ask"，收到 "allow"');
 });
 
 /* ══════════ 名单与产品的补充 ══════════ */
@@ -207,28 +223,59 @@ test("Agent 开了分类器：策略放行之后名单外的工具先判——�
   expect(contexts.find((c) => c.systemPrompt === SAFETY_CLASSIFIER_SYSTEM)!.tools).toEqual([]);
 });
 
-test("没人可问的 Agent：一个任务里连拦三次就熔断、此后这个任务要判的工具都折成拒；下一个任务照常判，判过的照跑（2026-11-16）", async () => {
+test("没人可问的 Agent：一个请求里连拦三次就停下——结局 error{safety_stopped} 写明原因、不再调模型；下一个请求重新计数，判过的照跑（2026-11-16）", async () => {
+  let ran = 0;
+  const { fn, contexts } = recording([
+    toolTurn("c1", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: a"),
+    toolTurn("c2", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: b"),
+    toolTurn("c3", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: deploys to production"),
+    // 第三次判拦撞上上限：这个请求就此停下，下面这些都是下一个请求的
+    toolTurn("c5", "deploy", {}), textTurn("ALLOW"), textTurn("部署好了"),
+  ]);
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, tools: [tool("deploy", () => ran++)], safetyClassifier: {} });
+  const first = await agent.prompt("部署一下");
+  expect(ran).toBe(0);
+  expect(first.outcome.kind === "error" && first.outcome.error.code).toBe("safety_stopped");
+  const message = first.outcome.kind === "error" ? first.outcome.error.message : "";
+  expect(message).toContain(`连着判拦了 ${CLASSIFIER_BLOCKS_IN_A_ROW} 次`);
+  expect(message).toContain("deploy");
+  expect(message).toContain("deploys to production");
+  expect(contexts).toHaveLength(9); // 三轮主循环 + 三次判拦各两段；停下之后没有再调模型
+  const second = await agent.prompt("现在可以部署了，是我要你部署的");
+  expect([second.outcome.kind, ran]).toEqual(["completed", 1]);
+  expect(contexts.filter((c) => c.systemPrompt === SAFETY_CLASSIFIER_SYSTEM)).toHaveLength(7); // 三次判拦各两段 + 下一个请求放行一次
+});
+
+test("有人可问的 Agent：撞上上限不停下，这个请求余下要判的动作改问人（2026-11-16）", async () => {
   let ran = 0;
   const { fn, contexts } = recording([
     toolTurn("c1", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: a"),
     toolTurn("c2", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: b"),
     toolTurn("c3", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: c"),
-    toolTurn("c4", "deploy", {}), // 熔断：不调模型，问人折成拒
-    textTurn("做不了"),
-    toolTurn("c5", "deploy", {}), textTurn("ALLOW"), textTurn("部署好了"), // 下一个任务
+    toolTurn("c4", "deploy", {}), // 撞上上限之后：不调模型，问人
+    textTurn("部署好了"),
   ]);
-  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, tools: [tool("deploy", () => ran++)], safetyClassifier: {} });
-  const first = await agent.prompt("部署一下");
-  const results = first.messages.filter((m) => m.role === "toolResult") as { content: string }[];
-  expect(ran).toBe(0);
-  expect(results.at(-1)!.content).toContain(`${CLASSIFIER_BLOCKS_IN_A_ROW} actions in a row`);
-  expect(results.at(-1)!.content).toContain("no responder");
-  await agent.prompt("现在可以部署了，是我要你部署的");
-  expect(ran).toBe(1);
-  expect(contexts.filter((c) => c.systemPrompt === SAFETY_CLASSIFIER_SYSTEM)).toHaveLength(7); // 三次判拦各两段 + 下一个任务放行一次
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: fn,
+    tools: [tool("deploy", () => ran++)],
+    permission: { authorize: () => ({ kind: "allow" }), askTimeoutMs: null, responder: "host" },
+    safetyClassifier: {},
+  });
+  const asked: string[] = [];
+  agent.subscribeLifecycle((e) => {
+    if (e.type !== "permissionRequest") return;
+    asked.push(e.reason);
+    void agent.answerPermission({ permissionId: e.permissionId, decision: "allow" });
+  });
+  const result = await agent.prompt("部署一下");
+  expect([result.outcome.kind, ran]).toEqual(["completed", 1]); // 人批了那一次
+  expect(asked).toHaveLength(1);
+  expect(asked[0]).toContain(`${CLASSIFIER_BLOCKS_IN_A_ROW} actions in a row`);
+  expect(contexts.filter((c) => c.systemPrompt === SAFETY_CLASSIFIER_SYSTEM)).toHaveLength(6);
 });
 
-test("策略说拒或问照它的，分类器不插手；没开分类器的 Agent 一次也不调；判不了（模型出错）改问人、没人答就是拒", async () => {
+test("策略说拒或问照它的，分类器不插手；没开分类器的 Agent 一次也不调；判不了（模型出错）缺省拒掉这一步", async () => {
   let ran = 0;
   const denied = recording([toolTurn("c1", "deploy", {}), textTurn("ok")]);
   const byPolicy = new Agent({
@@ -250,6 +297,6 @@ test("策略说拒或问照它的，分类器不插手；没开分类器的 Agen
   const result = await failing.prompt("部署");
   const r = result.messages.find((m) => m.role === "toolResult") as { content: string };
   expect(ran).toBe(1); // 没跑
-  expect(r.content).toContain("the safety classifier could not run (boom)");
-  expect(r.content).toContain("no responder"); // 低层缺省没有裁决人：问人折成拒
+  expect(r.content).toContain("safety classifier could not run (boom), so this action did not run");
+  expect(result.outcome.kind).toBe("completed"); // 判不了不算判拦，不会让请求停下
 });

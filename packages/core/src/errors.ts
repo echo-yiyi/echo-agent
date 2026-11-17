@@ -28,6 +28,7 @@ export type ErrorCode =
   | "aborted"
   | "max_iterations" // 一条 reply 的 turn 上限
   | "max_replies" // 一个 run 的 reply 上限（达上限且仍有待办）
+  | "safety_stopped" // 安全分类器在这个 run 里判拦到上限、又没人可问：run 停下（`Agent.permissionStage`）
   | "internal";
 
 /* ══════════════════ 中断的理由 ══════════════════ */

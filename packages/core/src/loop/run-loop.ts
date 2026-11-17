@@ -209,13 +209,18 @@ async function runReply(deps: RunDeps, replyId: string, source: ReplySource, inp
     let inputs = await absorb(context, input, emit, probe);
 
     for (;;) {
-      /* 硬闸：三条都在轮首集中判 */
+      /* 硬闸：四条都在轮首集中判 */
       if (callerSignal.aborted) {
         outcome = abortedOutcome(callerSignal);
         break;
       }
       if (fired(deadline)) {
         outcome = await timedOut(deps);
+        break;
+      }
+      const halted = config.halt?.(config.runId);
+      if (halted !== undefined) {
+        outcome = { kind: "error", error: halted };
         break;
       }
       if (n >= config.maxIterations) {

@@ -8,7 +8,7 @@
 //   ③ 决策点需要具名外露——convertToLlm / transformContext / streamFunction / hooks
 //      是公共可替换字段：上层换行为不改内核，评测塞假 streamFn 就能跑。
 
-import { ABORT_REASON, AbortReason, errText, type AgentError } from "./errors.ts";
+import { ABORT_REASON, AbortReason, agentError, errText, type AgentError } from "./errors.ts";
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
@@ -603,6 +603,11 @@ export class Agent {
   private readonly takeover: boolean;
   /** 见 `AgentOptions.safetyClassifier`。`null` = 没开。判拦计数跟着它，一个实例一份。 */
   private readonly safetyClassifier: SafetyClassifier | null;
+  /**
+   * 要在下一轮开头停下的 run → 停下的理由（`AgentLoopConfig.halt` 取走即删）。安全分类器判拦到上限、又没人可问时
+   * 由 `permissionStage` 记下（2026-11-16）。
+   */
+  private readonly safetyHalts = new Map<string, AgentError>();
   /** inbox 轮询的取消函数。非 undefined = 正在轮询（只有 running 才轮）。 */
   private inboxPollCancel?: () => void;
   /** 哪个产品（`AgentOptions.product`）。写进新建会话的 `SessionInfo.product`，也是 holder 与观测 scope 的那一半。 */
@@ -3916,6 +3921,11 @@ export class Agent {
       runId: scope.runId,
       saveToolOutput: (file, text) => this.toolOutputs.write(file, text),
       permission: this.permissionStage(scope),
+      halt: (runId) => {
+        const halted = this.safetyHalts.get(runId);
+        if (halted !== undefined) this.safetyHalts.delete(runId);
+        return halted;
+      },
       sessionId: this._state.sessionId,
       thinkingLevel: binding.thinkingLevel,
       maxRetryDelayMs: binding.maxRetryDelayMs,
@@ -4140,7 +4150,19 @@ export class Agent {
         let verdict = normalizeVerdict(await policy.authorize(policyInput));
         // 安全分类器排在策略之后：策略拒或问照它的；放行的、又不在免判名单上的，再判一次（扩展换了策略也照样判）
         if (verdict.kind === "allow" && this.safetyClassifier?.covers(input.toolName) === true) {
-          verdict = normalizeVerdict(await this.safetyClassifier.judge(policyInput));
+          const judged = await this.safetyClassifier.judge(policyInput);
+          verdict = normalizeVerdict(judged.verdict);
+          // 判拦到上限、又没人能答「问人」（全自动）：这一步拒掉，这个 run 在下一轮开头停下，结局 `error{safety_stopped}`——
+          // 不让模型对着一路被拒的工具接着跑，调用方拿到的是明确的安全终止原因（2026-11-16）。有人能答时照旧：余下的动作改问人
+          const unanswerable = policy.responder === "none" || (policy.responder === "host" && policy.askTimeoutMs === null && !this.hooks.hasSubscribers());
+          if (judged.limit !== undefined && unanswerable && verdict.kind !== "allow") {
+            const times = judged.limit.kind === "in_a_row" ? `连着判拦了 ${judged.limit.blocks} 次` : `一共判拦了 ${judged.limit.blocks} 次`;
+            this.safetyHalts.set(
+              input.runId,
+              agentError("internal", "safety_stopped", `安全分类器在这次请求里${times}，没有人能确认，请求停在这里。最后一次是 ${input.toolName}：${verdict.reason}`, false),
+            );
+            verdict = { kind: "deny", reason: verdict.reason };
+          }
         }
         if (verdict.kind === "ask" && policy.responder === "none") {
           return { kind: "deny", reason: `${verdict.reason} (the policy asks for approval, but no responder is configured: ask counts as deny)` };
