@@ -52,6 +52,7 @@ import { pipeSurfaceEntry } from "./prompt.ts";
 import type { Shell } from "./shell.ts";
 import { run } from "./run.ts";
 import { runObserve } from "./observe.ts";
+import { runSend } from "./send.ts";
 import { expireSessionObservations } from "./observe/expire.ts";
 import type { FirstRunChoice } from "./shell.ts";
 // （FirstRunChoice 同时是装配与选择器的「一家」形状：name = --provider 短名，provider = 实例）
@@ -147,6 +148,9 @@ export function usage(name: string): string {
   observe <last|show <run-id>|export <run-id>|health|serve>
                        看已落盘的 run 观测记录：不启动 agent、不取锁（详见 ${name} observe --help）。
                        管道形态跑完会在 stderr 打一行 \`[run] <run-id>\`，拿它去 observe show。
+  send <会话 id> <要它做的事>
+                       往一段会话的 inbox 投一句话，那段会话的 agent 当成用户的话去做：给同一台机器上
+                       别的进程用（运维后台、脚本），不启动 agent、不取锁（详见 ${name} send --help）。
 
 **每次启动都是新的一段会话**，续上次是显式动作（--continue / --resume）。会话按「目录 + 命令」归属：
 在同一个目录里，${name} 与别的命令各有各的对话，互不相续；续上时界面会说明续了多少条。
@@ -159,7 +163,8 @@ export function usage(name: string): string {
 只能写工作区、临时目录与包管理器缓存，读不到 echo 的凭据文件。缺省不包：整个 agent 放在容器里跑时，容器就是那层边界。
 
 **安全分类器**：$ECHO_HOME/settings.json 里写 "safetyClassifier": true 或 false。开着时，工具执行前先让模型判一次
-该不该自动执行，判拦的不跑、判不了或连着判拦就问你。不写就按形态：交互开、管道关；写了两种形态都照写的来。
+该不该自动执行，判拦的不跑、判不了的也不跑；一次请求里连着判拦到上限，交互形态改问你，管道形态这次请求就此停下并说明原因。
+不写就按形态：交互开、管道关；写了两种形态都照写的来。
 
 上次在界面里选的模型记在 $ECHO_HOME/settings.json（D7）：**显式 --provider / --model 永远赢**，
 设置只是「没说就用上次的」；文件坏了不挡启动，如实说一句然后用缺省。
@@ -463,6 +468,8 @@ function launcher(product: Product, shell: Shell): (argv: readonly string[], int
   return async (argv, interactive, deps) => {
     // `observe` 是只读子命令：不装配、不取锁、不看凭据——在一切启动逻辑之前分走
     if (argv[0] === "observe") return runObserve(argv.slice(1), product.name);
+    // `send` 同款：往一段会话的 inbox 投一句话，不装配、不取锁
+    if (argv[0] === "send") return runSend(argv.slice(1), product.name);
     let opts: CliOptions | null;
     try {
       opts = parseArgs(argv, product.name);

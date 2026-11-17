@@ -126,7 +126,7 @@ interface AgentToolsRegistry {
 会话消息写入目标 inbox；持有目标 lease 的实例负责消费与 ack，发送方只追加 record。[InboxStore](../../packages/core/src/inbox/store.ts#symbol=InboxStore) 提供持久 record、ack marker 与 at-least-once 语义。
 
 - record id 由写者生成，包含时间、计数与随机部分，不依赖多个发送方共享一个内存序号。
-- refresh 扫描外部追加的 record 并加入 pending；运行中发现坏记录报告一次诊断、本进程不再收（不再每拍重读重报），恢复期按恢复规则校验。
+- refresh 扫描外部追加的 record 并加入 pending；运行中发现坏记录报告一次诊断、本进程不再收（不再每拍重读重报），恢复期按恢复规则校验。同一个 dedupeKey 还有没处理完的那条时，后扫到的不收、从盘上删掉（与进程内投递同一条去重规矩，2026-11-16）。
 - Agent 通过 Clock 端口轮询 inbox，在可消费时调度工作；跨进程投递不依赖内存事件通知。
 - 消费确认前中断可能导致重投，接收业务不能把 at-least-once 当成 exactly-once。
 - 一批处理完、ack 却没写成（pre-commit）：整批留在盘上待重启重投，**本进程停止自动消费**——与 transcript 写不进那一支同一条；不停的话下一轮又领到同一批，一轮轮白跑模型（2026-11-13，[后台重试有上界](../decisions/implemented/2026-11-13-background-retry-bounds.md)）。ack 无法裁决（indeterminate）时同样停消费，并连闹钟一起停：到期的提醒要经 inbox 投递，封账之后每一拍都必然被拒。
@@ -134,6 +134,8 @@ interface AgentToolsRegistry {
 **只跟活着的段说话**。一段 session 的**地址是持久的，但它得有宿主才谈得上通信**——所以 `send` 先确认对方活着：没在跑就调容器的 `SessionRunner` 把它叫起来，再投递；叫不起来（容器没给 `run`，或 runner 失败）就 `rejected: unreachable`，**一条消息都不留**。
 
 顺序是**先叫醒再投递**，不能反：反过来会在「容器起不了它」时留下一条躺在没人看的邮箱里的纸条，而工具已经回了「存下了，它下次起来会读」——在没有 runner 的容器里那是句空话。所以 `accepted` 就意味着对方此刻活着，没有中间态。
+
+**进程外投递不叫醒**（2026-11-16，[决策](../decisions/implemented/2026-11-16-session-ingress.md)）。同一台机器上别的进程（运维后台、脚本）经 [`openSessionIngress()`](../../packages/core/src/session/ingress.ts#symbol=openSessionIngress) 或 `<产品名> send` 往一段的 inbox 投，协议是 `DurableIngressPort`：`accepted` 只说落了盘，不说对方活着——对方没在跑，这条等它下次起来处理。与上面 `send` 的「先叫醒再投递」不同，因为调用方是宿主那一侧的进程，要的是一个持久的队列，不是一句对话；这一条在决策记录里列为待拍板。
 
 **唤醒带来的冲突：人优先，后台让位**。叫醒一段之后多了一种撞车——后台把它叫起来了，**人**在另一个终端 `--resume` 同一段就会被挡在门外。锁本来就保证不会两个写者同时在，问题只在**谁输**：人的显式动作输给一次隐式唤醒不能接受。
 

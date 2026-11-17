@@ -7,7 +7,8 @@
 // 那是宿主知识（`isAlive`）；「怎么让新的一段跑起来」更是（`run`）。core 不起进程、不管进程。
 
 import { environmentMessage, type AgentMessage } from "../messages.ts";
-import { createRecordIdSource, recordPath, serializeRecord, type InboxRecordV1 } from "../inbox/records.ts";
+import { createRecordIdSource } from "../inbox/records.ts";
+import { writeInboxRecord } from "../inbox/foreign.ts";
 import type { StorageDir } from "../storage/types.ts";
 import { listSessions, readSessionInfo, setSessionStatus, SessionService, assertSafeSessionId } from "./service.ts";
 import { newSessionId, type SessionInfo } from "./types.ts";
@@ -437,10 +438,7 @@ export class EchoSessions implements SessionFace {
       source = createRecordIdSource();
       this.idSources.set(to, source);
     }
-    const recordId = source();
-    const record: InboxRecordV1 = { recordId, dedupeKey, message, acceptedAt: Date.now() };
-    await store.write(recordPath(recordId), serializeRecord(record));
-    return recordId;
+    return writeInboxRecord(store, source, message, dedupeKey);
   }
 
   private async markClosed(sessionId: string): Promise<void> {

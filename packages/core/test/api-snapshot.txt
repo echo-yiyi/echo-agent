@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 366（value 132 · type 217 · both 17）
+符号 368（value 133 · type 218 · both 17）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -406,6 +406,10 @@ type   QuestionSettlement
 
 -- src/schedule/harness.ts (1) --
 type   AgentSchedule
+
+-- src/session/ingress.ts (2) --
+value  openSessionIngress
+type   SessionIngressOptions
 
 -- src/session/service.ts (3) --
 value  listSessions

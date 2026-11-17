@@ -93,7 +93,8 @@ export class InboxStore {
   private readonly ackBarriers = new Map<string, Promise<void>>();
   /**
    * 本进程**不再收**的 record id：已逻辑 ack 但 cleanup 没删掉的（marker 与 record 都还在盘上），
-   * `clear()` 丢弃的（盘上留着等下次 restore 重放），以及 `refresh()` 读不出来的坏档（报一次，重启时按坏档判红）。
+   * `clear()` 丢弃的（盘上留着等下次 restore 重放），`refresh()` 读不出来的坏档（报一次，重启时按坏档判红），
+   * 以及 `refresh()` 认出的重复投递（同一个 dedupeKey 还有没处理完的；文件随即删掉，删不掉的留在这里）。
    * `refresh()` 重扫盘时跳过它们——
    * 否则每一拍都把它们当「别人新投进来的」重新入队（review 2026-09-07：已 ack 的每秒重投、`/clear` 形同虚设）。
    * 盘上没有了就从这里摘掉，所以它不会比 `inbox/` 里的文件数更大。
@@ -213,7 +214,8 @@ export class InboxStore {
    *
    * 与 `restore()` 的分工：restore 是**打开账本**（验 ack marker、legacy 迁移、cleanup、置 `ready`），
    * 一段 session 一辈子只做一次；refresh 是**看看有没有新的**，只加不减：
-   * 不碰 marker、不做 cleanup、不改 `ready`、不动已经 reserve 的那批。
+   * 不碰 marker、不改 `ready`、不动已经 reserve 的那批。唯一删的是它自己认出的重复投递
+   * （同一个 dedupeKey 还有没处理完的那条，2026-11-16），免得下次 restore 把它当成新的重放。
    *
    * 坏档在这里**不判红**，只报诊断并跳过：refresh 跑在正常运行途中（idle 轮询），
    * 让一条别人写坏的 record 把一个健康的 agent 掀翻，代价比跳过它大得多；
@@ -256,13 +258,35 @@ export class InboxStore {
     if (fresh.length === 0) return 0;
     // 按 recordId 排序 = 按时间排序（id 前缀是定长时间戳），所以别人写进来的这些也按它们的发生顺序入队
     fresh.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0));
+    let added = 0;
+    const duplicates: InboxRecordV1[] = [];
     for (const r of fresh) {
+      // 那个 dedupeKey 所在的整批正在 ack：等裁决出来，下一拍再判（与本进程投递撞上 barrier 时等裁决同一个理由）
+      if (this.ackBarriers.has(r.dedupeKey)) continue;
+      // **同一个 dedupeKey 还有没处理完的**（pending 或已 reserve）：这条是重复投递——别的写者重试、或两个写者同时投。
+      // 不收，与本进程投递「相同 pending dedupeKey 只算一次」同一条规矩（2026-11-16）
+      const existing = this.index.get(r.dedupeKey);
+      if (existing !== undefined && existing.length > 0) {
+        this.notForRefresh.add(r.recordId);
+        duplicates.push(r);
+        this.fact({ kind: "accepted", records: [inboxRecordBrief(r.message, existing[0]!)], deduplicated: true, via: "refresh" });
+        continue;
+      }
       this.pending.push(r);
       this.indexPush(r.dedupeKey, r.recordId);
+      added += 1;
       // 别的进程写进来的（跨 session 的 session_send 就是这条路）：一条一个事实，source / ref 说是谁发的
       this.fact({ kind: "accepted", records: [inboxRecordBrief(r.message, r.recordId)], deduplicated: false, via: "refresh" });
     }
-    return fresh.length;
+    // 重复的那份从盘上删掉，免得下次 restore 把它当成一条新的重放。删不掉的已记在 notForRefresh，本进程不会再收
+    for (const r of duplicates) {
+      try {
+        await store.remove(recordPath(r.recordId));
+      } catch (e) {
+        this.diagnose("inbox_cleanup_pending", `重复投递的 record ${r.recordId} 删除失败：${errText(e)}`);
+      }
+    }
+    return added;
   }
 
   /** 这条 record 本进程已经在管（pending、已 reserve、防重索引里、不许 refresh 捡回、或正在自己落盘）。 */

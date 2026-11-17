@@ -953,6 +953,12 @@ test("mainFor：用法文本用产品的名字", () => {
   expect(() => parseArgs(["--nope"], "echo-试产品")).toThrow("用法：echo-试产品");
 });
 
+test("mainFor：send 子命令在一切启动逻辑之前分走——不装配、不看凭据；会话不存在退 1（不是把 send 当未知参数退 2）（2026-11-16）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "echo-send-"));
+  expect(await mainFor(ECHO_AGENT, terminalShell)(["send", "s-none", "--state-dir", root, "做点事"], false)).toBe(1);
+  expect(usage("echo-agent")).toContain("send <会话 id> <要它做的事>");
+});
+
 test("mainFor：preset 在形态定了之后被调一次、其 Extension 真被 mount；名字与版本进欢迎头", async () => {
   const restore = isolate();
   const ui = fakeTui();

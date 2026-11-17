@@ -167,6 +167,12 @@ export type { InboxBatchAckCommitV1, InboxRecordV1 } from "./inbox/records.ts";
  * 得自己在状态根的 `FileDir` 上开一个实例调 `list()`——列表归 core，不让产品各自扫 meta 文件。
  */
 export { SessionService, listSessions, setSessionStatus } from "./session/service.ts";
+/**
+ * 从进程外往一段会话的 inbox 投递（2026-11-16）：同一台机器上别的进程（运维后台、脚本）让常驻的 agent 做事。
+ * 协议与 `agent.ingress` 同一份（`DurableIngressPort`）。
+ */
+export { openSessionIngress } from "./session/ingress.ts";
+export type { SessionIngressOptions } from "./session/ingress.ts";
 export { EchoSessions, NO_SESSION_FACE, SESSION_SOURCE, DEFAULT_RUN_TIMEOUT_MS } from "./session/sessions.ts";
 export type { CreateSessionInput, EchoSessionsDeps, SendOptions, SendResult, SessionFace, SessionListFilter, SessionRow, SessionRunner } from "./session/sessions.ts";
 // status.json 的读写与文件形状在 core 内部（2026-09-17）：第三方经 `Echo.sessions` 拿合成好的 `SessionRow`，

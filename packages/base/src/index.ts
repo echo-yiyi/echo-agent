@@ -73,6 +73,8 @@ export { readAll } from "./stdin.ts";
 
 /** 观测面板：只读盘上的观测库，不装配、不取锁。 */
 export { runObserve, parseObserveArgs, observeUsage, type ObserveCommand, type ObserveOptions, type ObserveIo } from "./observe.ts";
+/** 往一段会话的 inbox 投一句话（同一台机器上别的进程用）：不装配、不取锁。 */
+export { runSend, parseSendArgs, sendUsage, type SendCommandOptions, type SendIo } from "./send.ts";
 
 /** 观测过期：规则给 `Product.observationExpiry`，时机由 `mainFor()` 定（启动时不等地跑一遍）。 */
 export { retainRecentDays, expireSessionObservations } from "./observe/expire.ts";
