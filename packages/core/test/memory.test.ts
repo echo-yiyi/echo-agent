@@ -590,6 +590,15 @@ describe("Dream 门控", () => {
     const later = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: false, retry: false }, stored: "" });
     expect(later).toContain("last reviewed partway through this conversation");
     // 上一次没看完那段（2026-11-17）：说清写过的已在 Stored now 里，接着补、别重写
+    // 缺省写法（2026-11-17 重写，自己的措辞）：两轮做完、常驻模块带上限、一条事实一个地方、拿不准就不存、没看过的 indexed 文件改不了
+    expect(first).toContain("You have only a few turns, so do it in two");
+    expect(first).toContain("One turn to look: view every file you might change, all in the same turn");
+    expect(first).toContain("One turn to write: make every change in the same turn, then stop");
+    expect(first).toMatch(/- user \([^)]*; resident, limit 1400 characters\)/);
+    expect(first).toContain("When you cannot tell, leave it out");
+    expect(first).toContain("A fact lives in one place");
+    expect(first).toContain("Changing an indexed file you have not viewed is refused; resident modules count as viewed");
+    expect(first).toContain("A full module is not a reason to file the fact somewhere else");
     const retry = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: false, retry: true }, stored: "" });
     expect(retry).toContain("An earlier review of this part stopped before it finished");
     expect(retry).toContain("continue from there instead of writing it again");
