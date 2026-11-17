@@ -7,8 +7,10 @@
 //   - 分类器只看用户本人说的话与这一步的参数（`PermissionPolicyInput.userIntent` / `params`），看不到工具结果与 agent 的正文——
 //     注入就藏在那里面；
 //   - 两段：第一段只答一个词、拿不准就判拦；判拦的才进第二段，先说清这一步实际做什么、用户要没要，最后一行给结论，以第二段为准；
-//   - 判拦的理由交回模型；连着判拦 `CLASSIFIER_BLOCKS_IN_A_ROW` 次或一共 `CLASSIFIER_BLOCKS_TOTAL` 次之后、或判不了（模型出错、答不清），
-//     改成问人（`ask`，没有裁决人时照旧折成拒）。
+//   - 判拦的理由交回模型；同一个 run 里连着判拦 `CLASSIFIER_BLOCKS_IN_A_ROW` 次或一共 `CLASSIFIER_BLOCKS_TOTAL` 次之后、或判不了
+//     （模型出错、答不清），改成问人（`ask`，没有裁决人时照旧折成拒）。**判拦按 run 数**：一条新输入（人发的、inbox 投来的一批）
+//     开一个新 run，从零数；子循环（subagent、记忆提取）有自己的 runId，各数各的。按整个 Agent 数的话，没人可问的形态
+//     （管道、`--serve`、常驻）熔断一次，此后每个任务里要判的工具都折成拒，直到进程退出（2026-11-16）。
 
 import { neutralizeClosingTag } from "../prompt/sanitize.ts";
 import type { PermissionPolicyInput, PermissionVerdict } from "./types.ts";
@@ -38,10 +40,15 @@ export const KERNEL_SAFE_TOOLS: readonly string[] = Object.freeze([
   "session_create", "session_list", "session_send", "session_close",
 ]);
 
-/** 连着判拦几次就改问人：理由交回给了模型，它连着三次都没换出一条能过的路，再判也是白判。只数第二段的判拦。 */
+/** 一个 run 里连着判拦几次就改问人：理由交回给了模型，它连着三次都没换出一条能过的路，再判也是白判。只数第二段的判拦。 */
 export const CLASSIFIER_BLOCKS_IN_A_ROW = 3;
-/** 一个会话里一共判拦几次之后改问人。 */
+/** 一个 run 里一共判拦几次之后改问人。 */
 export const CLASSIFIER_BLOCKS_TOTAL = 20;
+/**
+ * 记着判拦数的 run 最多几个，超了丢最早开始记的那个。并行的 run 只有主循环加几个子循环，远到不了；
+ * 丢掉的只是熔断计数（那个 run 再判拦从零数），每一步照样判。
+ */
+const RUNS_TRACKED = 64;
 
 /**
  * 判断规则（system），两段共用——同一份 system，第二段的请求接得上第一段的前缀缓存。怎么作答由每一段的请求末尾说。
@@ -152,14 +159,25 @@ export type SafetyClassifier = {
 export function createSafetyClassifier(opts: SafetyClassifierOptions = {}): SafetyClassifier {
   const safe = new Set([...KERNEL_SAFE_TOOLS, ...(opts.safeTools ?? [])]);
   const system = opts.notes === undefined || opts.notes.trim() === "" ? SAFETY_CLASSIFIER_SYSTEM : `${SAFETY_CLASSIFIER_SYSTEM}\n\n${opts.notes.trim()}`;
-  const blocks = { inARow: 0, total: 0 };
+  /** 每个 run 的判拦数（Map 按插入顺序，最早的在前）。 */
+  const blocksByRun = new Map<string, { inARow: number; total: number }>();
+  const blocksOf = (runId: string): { inARow: number; total: number } => {
+    let blocks = blocksByRun.get(runId);
+    if (blocks === undefined) {
+      blocks = { inARow: 0, total: 0 };
+      blocksByRun.set(runId, blocks);
+      if (blocksByRun.size > RUNS_TRACKED) blocksByRun.delete(blocksByRun.keys().next().value!);
+    }
+    return blocks;
+  };
   return {
     covers: (toolName) => !safe.has(toolName),
     async judge(input) {
       const { toolName } = input;
+      const blocks = blocksOf(input.runId);
       if (blocks.inARow >= CLASSIFIER_BLOCKS_IN_A_ROW || blocks.total >= CLASSIFIER_BLOCKS_TOTAL) {
-        const why = blocks.inARow >= CLASSIFIER_BLOCKS_IN_A_ROW ? `${blocks.inARow} actions in a row` : `${blocks.total} actions in this session`;
-        return { kind: "ask", reason: `Tool '${toolName}' needs approval: the safety classifier has blocked ${why}, so the rest of this session asks a person instead` };
+        const why = blocks.inARow >= CLASSIFIER_BLOCKS_IN_A_ROW ? `${blocks.inARow} actions in a row` : `${blocks.total} actions in this task`;
+        return { kind: "ask", reason: `Tool '${toolName}' needs approval: the safety classifier has blocked ${why}, so the rest of this task asks a person instead` };
       }
       let verdict: ClassifierVerdict;
       try {

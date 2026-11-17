@@ -29,9 +29,9 @@ type Asked = { system: string; prompt: string };
 function withModel(replies: (string | (() => never))[], opts: SafetyClassifierOptions = {}) {
   const asked: Asked[] = [];
   const classifier = createSafetyClassifier(opts);
-  const judge = (toolName: string, params: unknown, userIntent: readonly string[] = ["修一下测试"]) =>
+  const judge = (toolName: string, params: unknown, userIntent: readonly string[] = ["修一下测试"], runId = "r1") =>
     classifier.judge({
-      runId: "r1",
+      runId,
       turnId: "t1",
       toolCallId: `c${asked.length}`,
       toolName,
@@ -112,7 +112,7 @@ test("两段都判拦：deny，第二段的理由交回模型、说明这一步�
   expect(asked).toHaveLength(10); // 改问人之后那一次没调模型
 });
 
-test("一个会话里一共判拦满二十次也改问人，哪怕中间都放行过", async () => {
+test("一个 run 里一共判拦满二十次也改问人，哪怕中间都放行过", async () => {
   const replies: string[] = [];
   for (let i = 0; i < CLASSIFIER_BLOCKS_TOTAL; i++) replies.push("BLOCK", "BLOCK: no", "ALLOW");
   const { judge } = withModel(replies);
@@ -121,7 +121,22 @@ test("一个会话里一共判拦满二十次也改问人，哪怕中间都放�
     if (i < CLASSIFIER_BLOCKS_TOTAL - 1) expect((await judge("bash", { command: `a${i}` })).kind).toBe("allow");
   }
   const after = await judge("bash", { command: "z" }); // 第二十次判拦之后
-  expect([after.kind, after.kind === "ask" && after.reason.includes(`${CLASSIFIER_BLOCKS_TOTAL} actions in this session`)]).toEqual(["ask", true]);
+  expect([after.kind, after.kind === "ask" && after.reason.includes(`${CLASSIFIER_BLOCKS_TOTAL} actions in this task`)]).toEqual(["ask", true]);
+});
+
+test("判拦按 run 数：一个 run 熔断了，换一个 run（新输入）照常判、从零数；并行的 run 各数各的（2026-11-16）", async () => {
+  const { judge, asked } = withModel([
+    "BLOCK", "BLOCK: a", "BLOCK", "BLOCK: b", "BLOCK", "BLOCK: c", // r1 连拦三次
+    "ALLOW", // r2：熔断没带过来，照常判
+    "BLOCK", "BLOCK: p", "BLOCK", "BLOCK: q", "BLOCK", "BLOCK: s", "BLOCK", "BLOCK: t", // p1 / p2 交替各拦两次
+    "ALLOW", // p1 第三次：两个 run 合起来连拦了四次，但各自只有两次，照常判
+  ]);
+  for (let i = 0; i < CLASSIFIER_BLOCKS_IN_A_ROW; i++) expect((await judge("bash", { command: `x${i}` }, undefined, "r1")).kind).toBe("deny");
+  expect((await judge("bash", { command: "y" }, undefined, "r1")).kind).toBe("ask"); // r1 熔断：不调模型
+  expect((await judge("bash", { command: "y" }, undefined, "r2")).kind).toBe("allow");
+  for (const run of ["p1", "p2", "p1", "p2"]) expect((await judge("bash", { command: run }, undefined, run)).kind).toBe("deny");
+  expect((await judge("bash", { command: "z" }, undefined, "p1")).kind).toBe("allow");
+  expect(asked).toHaveLength(16);
 });
 
 test("判不了不等于判过：模型出错改问人（fail-closed）", async () => {
@@ -190,6 +205,27 @@ test("Agent 开了分类器：策略放行之后名单外的工具先判——�
   expect(ran).toBe(2);
   expect(contexts.filter((c) => c.systemPrompt === SAFETY_CLASSIFIER_SYSTEM)).toHaveLength(3); // 两次判拦（两段）+ 一次放行；lookup 一次没调
   expect(contexts.find((c) => c.systemPrompt === SAFETY_CLASSIFIER_SYSTEM)!.tools).toEqual([]);
+});
+
+test("没人可问的 Agent：一个任务里连拦三次就熔断、此后这个任务要判的工具都折成拒；下一个任务照常判，判过的照跑（2026-11-16）", async () => {
+  let ran = 0;
+  const { fn, contexts } = recording([
+    toolTurn("c1", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: a"),
+    toolTurn("c2", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: b"),
+    toolTurn("c3", "deploy", {}), textTurn("BLOCK"), textTurn("BLOCK: c"),
+    toolTurn("c4", "deploy", {}), // 熔断：不调模型，问人折成拒
+    textTurn("做不了"),
+    toolTurn("c5", "deploy", {}), textTurn("ALLOW"), textTurn("部署好了"), // 下一个任务
+  ]);
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, tools: [tool("deploy", () => ran++)], safetyClassifier: {} });
+  const first = await agent.prompt("部署一下");
+  const results = first.messages.filter((m) => m.role === "toolResult") as { content: string }[];
+  expect(ran).toBe(0);
+  expect(results.at(-1)!.content).toContain(`${CLASSIFIER_BLOCKS_IN_A_ROW} actions in a row`);
+  expect(results.at(-1)!.content).toContain("no responder");
+  await agent.prompt("现在可以部署了，是我要你部署的");
+  expect(ran).toBe(1);
+  expect(contexts.filter((c) => c.systemPrompt === SAFETY_CLASSIFIER_SYSTEM)).toHaveLength(7); // 三次判拦各两段 + 下一个任务放行一次
 });
 
 test("策略说拒或问照它的，分类器不插手；没开分类器的 Agent 一次也不调；判不了（模型出错）改问人、没人答就是拒", async () => {
