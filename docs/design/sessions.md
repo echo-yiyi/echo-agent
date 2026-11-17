@@ -135,7 +135,7 @@ interface AgentToolsRegistry {
 
 顺序是**先叫醒再投递**，不能反：反过来会在「容器起不了它」时留下一条躺在没人看的邮箱里的纸条，而工具已经回了「存下了，它下次起来会读」——在没有 runner 的容器里那是句空话。所以 `accepted` 就意味着对方此刻活着，没有中间态。
 
-**进程外投递不叫醒**（2026-11-16，[决策](../decisions/implemented/2026-11-16-session-ingress.md)）。同一台机器上别的进程（运维后台、脚本）经 [`openSessionIngress()`](../../packages/core/src/session/ingress.ts#symbol=openSessionIngress) 或 `<产品名> send` 往一段的 inbox 投，协议是 `DurableIngressPort`：`accepted` 只说落了盘，不说对方活着——对方没在跑，这条等它下次起来处理。与上面 `send` 的「先叫醒再投递」不同，因为调用方是宿主那一侧的进程，要的是一个持久的队列，不是一句对话；这一条在决策记录里列为待拍板。
+**进程外投递不叫醒**（2026-11-16，[决策](../decisions/implemented/2026-11-16-session-ingress.md)）。同一台机器上别的进程（运维后台、脚本）经 [`openSessionIngress()`](../../packages/core/src/session/ingress.ts#symbol=openSessionIngress) 或 `<产品名> send` 往一段的 inbox 投，协议是 `DurableIngressPort`：`accepted` 只说落了盘，不说对方活着——对方没在跑，这条等它下次起来处理。与上面 `send` 的「先叫醒再投递」不同，因为调用方是宿主那一侧的进程，要的是一个持久的队列，不是一句对话（2026-11-16 用户拍板）。
 
 **唤醒带来的冲突：人优先，后台让位**。叫醒一段之后多了一种撞车——后台把它叫起来了，**人**在另一个终端 `--resume` 同一段就会被挡在门外。锁本来就保证不会两个写者同时在，问题只在**谁输**：人的显式动作输给一次隐式唤醒不能接受。
 
