@@ -17,7 +17,8 @@ import { createProvider } from "../src/provider/models.ts";
 import { createProviderStreams, type Dialect } from "../src/provider/dialect.ts";
 import type { Context } from "../src/messages.ts";
 import { scriptedDialect, textTurn, toolTurn } from "../src/testing.ts";
-import { EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
+import { DEFAULT_EXTRACT_DRAIN_MS, EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
+import { FakeClock } from "../src/schedule/clock.ts";
 import { defineExtension } from "../src/extension/abi.ts";
 import { AgentTools } from "../src/extension/registries.ts";
 import { definePromptPack } from "../src/extension/builtin.ts";
@@ -1303,6 +1304,86 @@ test("没提取过的那截跨重启接着攒：上个进程的提取没跑完�
   expect(extractPrompts).toHaveLength(2);
   expect(extractPrompts[1]).toContain("«上个进程说的：我们的测试一律用 bun 跑»"); // 从盘上记的那里接着看
   expect(extractPrompts[1]).toContain("the last 4 messages");
+});
+
+test("退出前补提取到点：先中止它、等它停下，才卸记忆模块（此前只是不再等，卸完 builtin 它还在跑，写记忆被拒）（2026-11-17）", async () => {
+  const clock = new FakeClock();
+  let extractAborted = false;
+  let abortedWhenUnmounted: boolean | null = null;
+  let markStarted = (): void => {};
+  const extractStarted = new Promise<void>((r) => {
+    markStarted = r;
+  });
+  // 提取那次卡在模型调用上，只认中止
+  const dialect: Dialect = {
+    api: "fake",
+    async *request(_model, context, options) {
+      const extracting = context.messages.some((m) => JSON.stringify(m).includes(EXTRACT_PROMPT_OPENING));
+      if (!extracting) {
+        for (const ev of textTurn("好的")) yield structuredClone(ev);
+        return;
+      }
+      markStarted();
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted) return resolve();
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      extractAborted = true;
+      yield { type: "error", error: { source: "provider", code: "aborted", retryable: false, message: "aborted" } };
+    },
+  };
+  const provider = createProvider({
+    id: "scripted",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams(dialect),
+  });
+  // 卸载探针：产品那一代比 builtin 先卸，卸它的那一刻提取应当已经停了
+  const probeTool: ModelTool = { kind: "model", name: "unmount_probe", label: "探针", description: "卸载时记一笔", parameters: { type: "object", properties: {} }, execute: async () => toolOk("x") };
+  const probe = defineExtension({
+    name: "unmount-probe",
+    hostAbiVersion: 1,
+    inject: { tools: { service: AgentTools, required: true } },
+    apply(ctx) {
+      const tools = ctx.get(AgentTools);
+      void ctx.effect({
+        boundary: "turn",
+        start: () => {
+          const off = tools.register(probeTool);
+          return {
+            value: probeTool.name,
+            dispose: () => {
+              abortedWhenUnmounted = extractAborted;
+              off();
+            },
+          };
+        },
+      });
+    },
+  });
+
+  const echo = await createEcho({
+    provider,
+    allowNetwork: false,
+    sessionsRoot: await tmp(),
+    sharedStore: new InMemoryDir(),
+    extensionDirs: [],
+    extensions: [{ entryId: "unmount-probe", definition: probe }],
+    clock,
+  });
+  running.push(echo);
+  await echo.start();
+  await echo.agent.prompt("以后提交前先跑一遍全量测试，别只跑窄的");
+
+  const stopping = echo.stop();
+  await extractStarted;
+  clock.advance(DEFAULT_EXTRACT_DRAIN_MS); // 补提取到点
+  // 修之前：到点不中止，Agent 收摊时的兜底补提取还会再等一个上限——再拨一次，好让旧代码也能收摊、断言给出红而不是挂住
+  for (let i = 0; i < 50 && abortedWhenUnmounted === null; i++) await new Promise((r) => setTimeout(r, 10));
+  clock.advance(DEFAULT_EXTRACT_DRAIN_MS);
+  await stopping;
+  expect(abortedWhenUnmounted as boolean | null).toBe(true); // 只在闭包里赋值：TS 会把它收窄成 null
 });
 
 test("/clear 之后再续会话：复盘下标越过 reset 之前那几条（它们还在会话里），续上之后不把看过的再看一遍", async () => {

@@ -3327,7 +3327,8 @@ export class Agent {
   }
 
   /**
-   * 退出前把还没看过的那段补看一次（2026-11-03）：不论攒了几轮（`force`），等它跑完，最多 `DEFAULT_EXTRACT_DRAIN_MS`。永不抛。
+   * 退出前把还没看过的那段补看一次（2026-11-03）：不论攒了几轮（`force`），等它跑完，最多 `DEFAULT_EXTRACT_DRAIN_MS`；
+   * 到点就中止两条记忆通道并等它们收完再返回（2026-11-17），返回时不会有提取还在写。永不抛。
    *
    * 两个调用点：`createEcho()` 的 `stop()` **在卸 Extension 之前**调——记忆模块、记忆工具、prompt 段都是 builtin Extension
    * 挂上来的，卸完再补，模块表是空的（提取直接不跑），菜单与 system 也不再是主循环那一份（前缀缓存对不上）；
@@ -3375,9 +3376,11 @@ export class Agent {
       await this.extractChannel.idle();
     })();
     let cancel = (): void => {};
+    let timedOut = false;
     const deadline = new Promise<void>((resolve) => {
       cancel = this.clock.setInterval(() => {
         cancel();
+        timedOut = true;
         resolve();
       }, DEFAULT_EXTRACT_DRAIN_MS);
     });
@@ -3386,6 +3389,9 @@ export class Agent {
     } finally {
       cancel();
     }
+    // **到点要中止并等它真的停下**（2026-11-17）：只是不再等的话，`createEcho()` 的 `stop()` 接着就卸 builtin 那一代——
+    // 记忆模块与记忆工具都在里面——还在跑的提取随后写记忆，全被拒。中止的那次游标不动，续会话时这段再看
+    if (timedOut) await this.settleDream();
   }
 
   /**
