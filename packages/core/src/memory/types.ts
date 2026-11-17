@@ -180,7 +180,10 @@ export const notesMemory: IndexedMemory = indexedMemory("memory", {
  */
 export const MEMORY_INDEX_FILE = "INDEX.md";
 
-export type WriteVerdict = { ok: true } | { ok: false; reason: string };
+/**
+ * 写入校验的裁决。放行时可带一句 `note`，接在成功回执后面给模型看（2026-11-17：缺省校验在模块快写满时提醒先合并、删过时条目）。
+ */
+export type WriteVerdict = { ok: true; note?: string } | { ok: false; reason: string };
 
 /** 一份记忆的正文怎么展示给模型（进对话开头那条记忆消息）。契约:**绝不 throw**;"" = 这份没内容,不出块。 */
 export type ComposeMemory = (memory: AnyMemory, dir: MemoryDir, table: MemoryScopeTable) => Promise<string>;

@@ -23,9 +23,9 @@ import { adoptStorageView } from "./state/write-gate.ts";
 import { attachStateHost } from "./state/host-wiring.ts";
 import { bindMemoryScopes, createAgentMemories } from "./memory/harness.ts";
 import { attachMemoryHost } from "./memory/host-wiring.ts";
-import type { DreamGates } from "./memory/dream.ts";
+import type { MemoryDreamOptions } from "./memory/dream.ts";
 import type { ExtractSettings, MemoryExtractOptions } from "./memory/extract.ts";
-import { resolveDreamGates, resolveExtractOptions } from "./memory/tuning.ts";
+import { resolveDreamOptions, resolveExtractOptions, type DreamSettings } from "./memory/tuning.ts";
 import {
   assertProjectWorkspace,
   expandMemoryPrefix,
@@ -201,15 +201,15 @@ export type CreateAgentOptions = {
      */
     scopes?: readonly MemoryScopeDef[];
     /**
-     * 提取的节奏与上限（2026-11-12）：轮数上限、攒满几轮、攒够多少词。不给的项用缺省；配错在装配时抛。
-     * 见 `MemoryExtractOptions`。
+     * 提取的节奏与上限（2026-11-12）：轮数上限、攒满几轮、攒够多少词；加上提取指令怎么写（`prompt`，2026-11-17）。
+     * 不给的项用缺省；配错在装配时抛。见 `MemoryExtractOptions`。
      */
     extract?: MemoryExtractOptions;
     /**
      * 整理的门（2026-11-12）：给了的项覆盖 `DEFAULT_DREAM_GATES` 里的同名项，其余照缺省；0 = 这一道不设门槛。
-     * 配错在装配时抛。见 `DreamGates`。
+     * 加上整理指令怎么写（`prompt`，2026-11-17）。配错在装配时抛。见 `MemoryDreamOptions`。
      */
-    dream?: DreamGates;
+    dream?: MemoryDreamOptions;
   };
   /**
    * 关掉记忆（C6/D7 的装配面）。缺省 **false** = 装配记忆并让 `start()` 打开 Dream 自调度。
@@ -455,7 +455,7 @@ export async function createAgent(opts: CreateAgentOptions): Promise<Agent> {
   }
   // 记忆的可调取值（2026-11-12）：在碰任何存储之前校验——配错就在这里抛，不回落到缺省。
   // 关着记忆也照样校验：配置写错了，打开记忆那天才发现更糟。
-  const memoryTuning = { extract: resolveExtractOptions(opts.memory?.extract), dream: resolveDreamGates(opts.memory?.dream) };
+  const memoryTuning = { extract: resolveExtractOptions(opts.memory?.extract), dream: resolveDreamOptions(opts.memory?.dream) };
   const store = opts.store ?? new FileDir(stateDir);
   // user 层（记忆、技能）是**另一个根**：状态根成了 session 目录，它们不能跟着下沉。
   // 缺省两个根各自解析；给了自定义 `store` 而没单独给 `sharedStore` 时**跟着 `store` 走**——
@@ -705,7 +705,7 @@ function prepareCapabilities(input: {
   /** `memory.builtin`：`false` = 内建三个模块不装（见 `CreateAgentOptions.memory`）。 */
   memoryBuiltin?: boolean;
   /** `memory.extract` / `memory.dream` 校验并补齐缺省之后的取值。 */
-  memoryTuning: { extract: ExtractSettings; dream: DreamGates };
+  memoryTuning: { extract: ExtractSettings; dream: DreamSettings };
   /** project 层记忆**先**按它分目录(`projects/<hash>/`);`start()` 拿到盘上权威的 workspace 后重指一次。 */
   workspace: string;
 }): AssembledCapabilities {
@@ -793,7 +793,7 @@ function prepareCapabilities(input: {
     input.withoutMemory === true ? undefined : assembly.adopt("echo:memory", () =>
           // `memory.builtin: false` → 交一张空的模块表：`builtinModules` 随之为 false，
           // `echo:memory` 那组不再注册内建三个，模块全部来自扩展的 `AgentMemory.module()`
-          createAgentMemories({ ...(input.memoryBuiltin === false ? { memories: [] } : {}), dream: input.memoryTuning.dream, extract: input.memoryTuning.extract }),
+          createAgentMemories({ ...(input.memoryBuiltin === false ? { memories: [] } : {}), dream: input.memoryTuning.dream.gates, dreamPrompt: input.memoryTuning.dream.prompt, extract: input.memoryTuning.extract }),
         );
 
   // 任务清单与闹钟也落在同一个状态根下。

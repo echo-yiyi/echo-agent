@@ -3418,9 +3418,17 @@ export class Agent {
   ): Promise<ExtractPass> {
     if (fork.range.messages === 0 || !this.memoryWorkAllowed || signal.aborted) return { kind: "not_run" };
     const table = memoryScopeTableOf(memory);
-    // 此刻存着什么由 prompt 自带：上文开头那条记忆正文是会话开头冻结的那一版，之后写的看不到；不给就只能一个个 view 去摸
-    const prompt = defaultExtractPrompt(listMemories(memory), table, fork.range, await memoryManifest(memory));
     const runId = `extract-${crypto.randomUUID()}`;
+    // 此刻存着什么由 prompt 自带：上文开头那条记忆正文是会话开头冻结的那一版，之后写的看不到；不给就只能一个个 view 去摸。
+    // 指令怎么写由产品定（`memory.extract.prompt`，2026-11-17，缺省 `defaultExtractPrompt`）：它抛错或给空串就按这一次没跑成算
+    let prompt: string;
+    try {
+      prompt = memory.extract.prompt({ memories: listMemories(memory), scopes: table, range: fork.range, stored: await memoryManifest(memory) });
+      if (typeof prompt !== "string" || prompt.trim() === "") throw new Error(`返回了 ${JSON.stringify(prompt)}`);
+    } catch (e) {
+      this.reportDiagnostic({ code: "memory_extract_prompt_failed", message: `记忆提取的指令写不出来（memory.extract.prompt）：${errText(e)}` });
+      return { kind: "failed", reason: "prompt_failed", runId };
+    }
     const observe = this.memoryFactsFor(runId);
     // 账（2026-11-03）：前台看过的克隆过来——上文里有那些 view 的结果；再记上指令里全文展示过的常驻文件。
     // 空账起步时，模型以为看过（上文、指令里都有），一覆写就被拒成 not_read，5 轮白花一轮

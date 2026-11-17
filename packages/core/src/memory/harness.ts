@@ -30,6 +30,7 @@ import {
   readDreamState,
   writeDreamState,
   type DreamGates,
+  type DreamPrompt,
   type DreamState,
 } from "./dream.ts";
 import { DEFAULT_EXTRACT_SETTINGS, type ExtractSettings } from "./extract.ts";
@@ -59,8 +60,10 @@ export type MemoryHarnessOptions = {
    * (2026-09-08,对齐压缩的 `builtin` 分法)。
    */
   memories?: readonly AnyMemory[];
-  /** 整理的门，**整份替换** `DEFAULT_DREAM_GATES`（产品配的那份在装配层已与缺省合好，见 `resolveDreamGates`）。 */
+  /** 整理的门，**整份替换** `DEFAULT_DREAM_GATES`（产品配的那份在装配层已与缺省合好，见 `resolveDreamOptions`）。 */
   dream?: DreamGates;
+  /** 整理指令怎么写（2026-11-17）。缺省 `defaultDreamPrompt`。 */
+  dreamPrompt?: DreamPrompt;
   /** 提取的节奏与上限，已补齐缺省的那份（装配层由 `resolveExtractOptions` 给）。缺省 `DEFAULT_EXTRACT_SETTINGS`。 */
   extract?: ExtractSettings;
   /** 替换组装分发(支持自定义 mode 时用)。 */
@@ -96,6 +99,8 @@ export type AgentMemories = MemoryDeps & {
   composeFn: ComposeMemory;
   checkFn: CheckWrite;
   gates: DreamGates;
+  /** 整理指令怎么写（`dreamTask` 读）。 */
+  dreamPromptFn: DreamPrompt;
   /** 提取的节奏与上限（`Agent` 排提取、起提取子循环时读）。 */
   extract: ExtractSettings;
   toolOpts?: CreateMemoryToolOptions;
@@ -158,6 +163,7 @@ export function createAgentMemories(opts?: MemoryHarnessOptions): AgentMemories 
     composeFn: opts?.composeMemory ?? defaultComposeMemory,
     checkFn: opts?.checkWrite ?? defaultCheckWrite,
     gates: opts?.dream ?? DEFAULT_DREAM_GATES,
+    dreamPromptFn: opts?.dreamPrompt ?? defaultDreamPrompt,
     extract: opts?.extract ?? DEFAULT_EXTRACT_SETTINGS,
     ...(opts?.tool !== undefined ? { toolOpts: opts.tool } : {}),
     builtinModules: opts?.memories === undefined,
@@ -849,10 +855,13 @@ export async function dreamTask(
   scope: string,
   opts?: { observe?: CapabilityFactSink<MemoryFact> },
 ): Promise<{ prompt: string; tools: ModelTool[] }> {
+  // 指令先写好再上锁（2026-11-17）：产品给的写法抛错时这一层不该留下一把要等一小时才过期的锁
+  const prompt = ctx.dreamPromptFn({ memories: listMemories(ctx), scopes: ctx.binding.table(), scope });
+  if (typeof prompt !== "string" || prompt.trim() === "") throw new Error(`整理指令是空的（memory.dream.prompt 返回了 ${JSON.stringify(prompt)}）`);
   // 上锁也走串行链:它是同一份状态的读改写,和计数并发时会互相盖掉
   await updateDreamState(ctx, scope, (s) => ({ ...s, startedAt: Date.now() }));
   return {
-    prompt: defaultDreamPrompt(listMemories(ctx), ctx.binding.table(), scope),
+    prompt,
     // 整理跑在 `systemPrompt: null` 下：描述与参数说明不指向 system 的记忆段（产品自己给了描述就用它的）
     tools: [
       {
@@ -1142,8 +1151,13 @@ async function writeMemory(
     await bumpWriteCounter(ctx, path);
     const indexOutcome = await refreshIndex(ctx, owner, path);
     const written = { content: prepared.content, ...(prepared.basedOn === undefined ? {} : { before: prepared.basedOn }) };
-    return finishMemoryMutation(ctx, caller, frame, committed(prepared.content.length, indexOutcome, okText(path, prepared.content.length), written));
+    return finishMemoryMutation(ctx, caller, frame, committed(prepared.content.length, indexOutcome, withNote(okText(path, prepared.content.length), verdict), written));
   });
+}
+
+/** 校验放行时给的那句（快写满的提醒，2026-11-17）接在成功回执后面；没有就原样。 */
+function withNote(text: string, verdict: Awaited<ReturnType<CheckWrite>>): string {
+  return verdict.ok && verdict.note !== undefined ? `${text}\n${verdict.note}` : text;
 }
 
 /**

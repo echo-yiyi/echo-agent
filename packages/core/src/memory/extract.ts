@@ -94,7 +94,28 @@ export type MemoryExtractOptions = {
   everyTurns?: number;
   /** 自上次提取以来用户亲口说的话攒够多少词才跑，≥ 0 的整数；0 = 不设词数门槛。缺省 `DEFAULT_EXTRACT_MIN_USER_WORDS`。 */
   minUserWords?: number;
+  /**
+   * 提取指令（接在主对话后面的那条消息）怎么写（2026-11-17）。缺省 `defaultExtractPrompt`；要在缺省上加几句就
+   * `(i) => defaultExtractPrompt(i) + "…"`。只换文字：只放行记忆工具、轮数上限、游标怎么推仍归内核。
+   * 抛错或返回空串按这一次没跑成算（`failed`，原因码 `prompt_failed`），并报诊断 `memory_extract_prompt_failed`。
+   */
+  prompt?: ExtractPrompt;
 };
+
+/** 提取指令拿到的输入（2026-11-17）。 */
+export type ExtractPromptInput = Readonly<{
+  /** 此刻装着的记忆模块。 */
+  memories: readonly AnyMemory[];
+  /** 有哪几层（`entries` 按宽到窄）；模块在哪几层落盘由它与模块的 `scopes` 定。 */
+  scopes: MemoryScopeTable;
+  /** 这次要看主对话末尾哪一段，以及这一段上次是不是没看完。 */
+  range: ExtractRange;
+  /** 此刻存着什么：每个模块每一层一段，与前台记忆段同一种呈现（常驻模块全文，indexed 模块是它的索引）。 */
+  stored: string;
+}>;
+
+/** 写提取指令的函数（`MemoryExtractOptions.prompt`）。 */
+export type ExtractPrompt = (input: ExtractPromptInput) => string;
 
 /** 提取实际用的取值：`MemoryExtractOptions` 补齐缺省之后。装在记忆包上（`AgentMemories.extract`）。 */
 export type ExtractSettings = Readonly<Required<MemoryExtractOptions>>;
@@ -104,6 +125,7 @@ export const DEFAULT_EXTRACT_SETTINGS: ExtractSettings = Object.freeze({
   maxTurns: DEFAULT_EXTRACT_MAX_TURNS,
   everyTurns: DEFAULT_EXTRACT_EVERY_TURNS,
   minUserWords: DEFAULT_EXTRACT_MIN_USER_WORDS,
+  prompt: defaultExtractPrompt,
 });
 
 /**
@@ -147,8 +169,9 @@ export type ExtractRange = Readonly<{ messages: number; firstUserText: string | 
 const QUOTE_CHARS = 120;
 
 /**
- * 提取的 prompt：接在主对话后面的那条指令。**没有替换口子，也不需要**：什么值得记由各模块的 instructions 定——
- * 判据跟着模块走，`memory.builtin: false` 换掉模块时判据一起换掉（2026-09-10）。这里只有机制：先看、写对地方、可以什么都不写。
+ * 提取的 prompt 的缺省写法：接在主对话后面的那条指令。什么值得记由各模块的 instructions 定（判据跟着模块走，2026-09-10）；
+ * 这里只有机制：先看、写对地方、可以什么都不写。产品要换整份指令经 `MemoryExtractOptions.prompt`（2026-11-17，
+ * 此前判断「不需要替换口子」，使用者的模块与缺省指令配不上时只能干瞪眼）。
  *
  * **对话不再抄进 prompt**（2026-11-03）：提取从主对话分叉，对话就在上文里；prompt 只说清看哪一段——条数加第一句用户原话
  * 的开头，两样一起给，因为 provider 换算消息时会拆合（一次多个工具调用就是好几条），单给条数模型数不准。
@@ -158,7 +181,8 @@ const QUOTE_CHARS = 120;
  * 最后一条是这份 prompt 里最要紧的:**什么都不写是正常结果**。被派了活就想产出,
  * 是记忆变脏的主要来源。
  */
-export function defaultExtractPrompt(memories: readonly AnyMemory[], table: MemoryScopeTable, range: ExtractRange, stored: string): string {
+export function defaultExtractPrompt(input: ExtractPromptInput): string {
+  const { memories, scopes: table, range, stored } = input;
   const layers = table.entries.map((e) => `- ${e.def.name}/ — ${e.def.describe}`).join("\n");
   const modules = memories
     .map((m) => {

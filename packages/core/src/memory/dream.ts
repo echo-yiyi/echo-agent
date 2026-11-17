@@ -36,12 +36,42 @@ export type DreamGates = {
   minIntervalMs?: number;
 };
 
-/** 缺省门:写过 5 次、攒到 10 个文件、距上次 24h,全满足才跑。 */
+/**
+ * 缺省门：写过 5 次、距上次 24h，都满足才跑。
+ *
+ * **缺省不设文件数**（2026-11-17）：`minFiles` 只数 indexed 模块目录下的文件，常驻模块的单文件记 0——一层里参与整理的
+ * 全是常驻模块时这道门永远过不了，整理一次都不跑，常驻内容只会越挤越满（使用者报的就是这个）。产品要它可以自己配回来。
+ * 参照物的做法也是「隔一段时间 + 有活动」，不看文件数。
+ */
 export const DEFAULT_DREAM_GATES: DreamGates = {
   minWritesSinceLast: 5,
-  minFiles: 10,
   minIntervalMs: 24 * 3600_000,
 };
+
+/**
+ * `CreateEchoOptions.memory.dream`（2026-11-17）：整理的门，加可替换的整理指令。
+ * 门的各项见 `DreamGates`；`prompt` 不给用 `defaultDreamPrompt`。
+ */
+export type MemoryDreamOptions = DreamGates & {
+  /**
+   * 整理指令怎么写。缺省 `defaultDreamPrompt`；要在缺省上加几句就 `(i) => defaultDreamPrompt(i) + "…"`。
+   * 只换文字：只给这一层那把记忆工具、够不到别的层与声明了 `dream: false` 的模块，仍归内核。抛错或返回空串，这一次整理不跑、报诊断。
+   */
+  prompt?: DreamPrompt;
+};
+
+/** 整理指令拿到的输入（2026-11-17）。 */
+export type DreamPromptInput = Readonly<{
+  /** 此刻装着的记忆模块（全部；声明了 `dream: false` 的也在，缺省写法只列 `dream` 为真的）。 */
+  memories: readonly AnyMemory[];
+  /** 有哪几层；模块在哪几层落盘由它与模块的 `scopes` 定。 */
+  scopes: MemoryScopeTable;
+  /** 这次整理哪一层。 */
+  scope: string;
+}>;
+
+/** 写整理指令的函数（`MemoryDreamOptions.prompt`）。 */
+export type DreamPrompt = (input: DreamPromptInput) => string;
 
 /** 锁的崩溃恢复:整理 agent 死了没 markDreamed,1 小时后锁自动过期(CC 同款)。 */
 export const DREAM_LOCK_STALE_MS = 3600_000;
@@ -96,12 +126,13 @@ export async function writeDreamState(dir: MemoryDir, scope: string, state: Drea
 }
 
 /**
- * 整理的 prompt。**没有替换口子**：它只讲机制（合并、归位、冲突、预算、不发明）；什么算过时、该归到哪，
- * 由各模块的 instructions 定——判据跟着模块走（2026-09-10）。
+ * 整理的 prompt 的缺省写法：只讲机制（合并、归位、冲突、预算、不发明）；什么算过时、该归到哪，
+ * 由各模块的 instructions 定——判据跟着模块走（2026-09-10）。产品要换整份指令经 `MemoryDreamOptions.prompt`（2026-11-17）。
  * **只讲 `scope` 那一层、且只讲声明了 `dream` 的模块**——别的不在这次整理的范围里,
  * 列出来只会诱它去写。
  */
-export function defaultDreamPrompt(memories: readonly AnyMemory[], table: MemoryScopeTable, scope: string): string {
+export function defaultDreamPrompt(input: DreamPromptInput): string {
+  const { memories, scopes: table, scope } = input;
   const regions = memories
     .filter((m) => m.dream === true)
     .flatMap((m) => memoryPaths(table, m).filter((p) => p.scope === scope).map((p) => ({ m, path: p.path })))

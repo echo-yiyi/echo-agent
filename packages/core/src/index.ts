@@ -153,9 +153,15 @@ export { fenceSafe, neutralizeClosingTag, truncateMarked } from "./prompt/saniti
 
 // 各能力的容器类型——它们出现在 `EchoAgentOptions` / `AgentState` 的签名里
 export type { AgentMemories } from "./memory/harness.ts";
-// 记忆后台活的可调取值：产品经 `CreateEchoOptions.memory.extract` / `.dream` 配（2026-11-12）
-export type { MemoryExtractOptions } from "./memory/extract.ts";
-export type { DreamGates } from "./memory/dream.ts";
+// 记忆后台活的可调取值：产品经 `CreateEchoOptions.memory.extract` / `.dream` 配（2026-11-12）；
+// 2026-11-17 起两边各能换指令（`prompt`），缺省写法一并导出——产品在缺省上加几句，或者整份换掉
+export type { MemoryExtractOptions, ExtractPrompt, ExtractPromptInput, ExtractRange } from "./memory/extract.ts";
+export type { DreamGates, MemoryDreamOptions, DreamPrompt, DreamPromptInput } from "./memory/dream.ts";
+export type { MemoryScopeTable } from "./memory/scope.ts";
+/** 提取指令的缺省写法（`MemoryExtractOptions.prompt` 不给时用它）：产品要在缺省上加几句就 `(i) => defaultExtractPrompt(i) + "…"`。 */
+export { defaultExtractPrompt } from "./memory/extract.ts";
+/** 整理指令的缺省写法（`MemoryDreamOptions.prompt` 不给时用它）。 */
+export { defaultDreamPrompt } from "./memory/dream.ts";
 export type { AgentSchedule } from "./schedule/harness.ts";
 export type { InboxStore } from "./inbox/store.ts";
 // durable ingress 的公共协议（`agent.ingress` 的类型）与两份持久 schema。

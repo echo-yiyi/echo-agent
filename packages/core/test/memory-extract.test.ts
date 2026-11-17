@@ -11,6 +11,8 @@ import {
   EXTRACT_PROMPT_OPENING,
   humanTurns,
   userProseWords,
+  type ExtractPrompt,
+  type ExtractPromptInput,
   type ExtractSettings,
 } from "../src/memory/extract.ts";
 import { assistantMessage, environmentMessage, toolResultMessage, userMessage, type Context } from "../src/messages.ts";
@@ -93,6 +95,45 @@ async function idleExtract(agent: Agent): Promise<void> {
 }
 
 const THREE = ["第一件事：我们的测试一律用 bun 跑", "第二件事：提交信息一律写中文", "第三件事：合并之前先跑全量测试"];
+
+test("提取指令可以换（2026-11-17）：用产品给的写法，拿到要看的那段与此刻存着什么；写法抛错按这一次没跑成算、报诊断、不调模型", async () => {
+  const seen: ExtractPromptInput[] = [];
+  let broken = false;
+  const prompt: ExtractPrompt = (i) => {
+    if (broken) throw new Error("写法坏了");
+    seen.push(i);
+    return `OUR-EXTRACT: review the last ${i.range.messages} messages`;
+  };
+  const extracts: Context[] = [];
+  const fn: StreamFn = (model, context, options) => {
+    if (JSON.stringify(context.messages).includes("OUR-EXTRACT")) {
+      extracts.push(structuredClone(context));
+      return scriptedStreamFn([textTurn("没什么可记的。")])(model, context, options);
+    }
+    return scriptedStreamFn([textTurn("好的")])(model, context, options);
+  };
+  const notices: string[] = [];
+  const hooks = new HookRuntime();
+  hooks.on("notification", (e) => {
+    notices.push(e.message);
+  });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir(), { ...DEFAULT_EXTRACT_SETTINGS, prompt }), hooks });
+
+  await say(agent, ...THREE);
+  await idleExtract(agent);
+  expect(extracts).toHaveLength(1);
+  expect(JSON.stringify(extracts[0]!.messages.at(-1))).toContain("OUR-EXTRACT: review the last");
+  expect(seen).toHaveLength(1);
+  expect([seen[0]!.range.fromStart, seen[0]!.range.retry, seen[0]!.range.firstUserText]).toEqual([true, false, THREE[0]!]);
+  expect(seen[0]!.memories.map((m) => m.name)).toEqual(["agent", "user", "memory"]);
+  expect(seen[0]!.scopes.entries.map((e) => e.def.name)).toEqual(["session"]);
+
+  broken = true;
+  await say(agent, ...NEXT_THREE);
+  await idleExtract(agent);
+  expect(extracts).toHaveLength(1); // 写法抛错：没调模型
+  expect(notices.some((n) => n.includes("记忆提取的指令写不出来（memory.extract.prompt）：写法坏了"))).toBe(true);
+});
 
 test("攒满三轮 → 提取起来、从主对话分叉：上文就是这几轮对话，指令说清从哪句看起，模型用记忆工具写的东西落了盘", async () => {
   expect(DEFAULT_EXTRACT_EVERY_TURNS).toBe(3); // 下面的「三轮」都按它写

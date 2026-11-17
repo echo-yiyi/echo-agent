@@ -36,7 +36,7 @@
 
 **开关归用户，形状归产品。** `withoutMemory` 对应用户的 `--no-memory`，产品碰不到；装哪些模块、分哪几层由产品经 `Product.preset` 返回的 `memory` 决定。`memory.builtin: false` 不装内建的三个模块（agent / user / memory——笔记模块的名字就是 `memory`，点名、关 dream、重新注册都用这个键），模块全部来自扩展经 `AgentMemory.module()` 的注册——扩展注册在缺省情况下只是**追加**，要替换就得先关掉内建这组。想保留其中某几个，就把 `@echo-agent/core/extension` 导出的定义再注册一遍。**什么值得记的判据写在各模块自己的 instructions 里**：记忆段、提取、整理三处 prompt 只讲机制（先看再写、合并不新增近似条、超预算先整理、绝不存凭据、可以什么都不写），所以 `builtin: false` 会连同内建模块的判据一起拿掉，产品模块用自己的 instructions 带自己的判据。
 
-**后台活的节奏也归产品**（2026-11-12，决策见 [记忆的可调取值](../decisions/implemented/2026-11-12-memory-tuning-config.md)）：`memory.extract`（[`MemoryExtractOptions`](../../packages/core/src/memory/extract.ts#symbol=MemoryExtractOptions)：轮数上限 `maxTurns`、攒满几轮 `everyTurns`、攒够多少词 `minUserWords`）与 `memory.dream`（[`DreamGates`](../../packages/core/src/memory/dream.ts#symbol=DreamGates)：整理的各道门，给了的项覆盖缺省里的同名项，0 = 这一道不设门槛）。间隔 `minIntervalMs` 给 0 要知道后果：一层大到一次整理不完（撞轮数上限、按「做了一部分」记、计数不清）时，每次回 idle 都会接着整理；只留文件数一道门、其余全给 0 也一样——文件数整理完不会降回门下。这是产品自己选的节奏，每次都有进展，core 不拦。轮数上限看模型，节奏看对话风格，所以跟着产品走；用户这边仍只有开关。不给的项用第 3 节表里的缺省；**配错在装配时就抛**（[`resolveExtractOptions()`](../../packages/core/src/memory/tuning.ts#symbol=resolveExtractOptions)、[`resolveDreamGates()`](../../packages/core/src/memory/tuning.ts#symbol=resolveDreamGates)：不是整数、低于下限、写错键名），不回落到缺省。连续没写成就放弃的次数、退出前补跑的等待上限、锁的超时是机制内部的取值，不开放。
+**后台活的节奏也归产品**（2026-11-12，决策见 [记忆的可调取值](../decisions/implemented/2026-11-12-memory-tuning-config.md)）：`memory.extract`（[`MemoryExtractOptions`](../../packages/core/src/memory/extract.ts#symbol=MemoryExtractOptions)：轮数上限 `maxTurns`、攒满几轮 `everyTurns`、攒够多少词 `minUserWords`）与 `memory.dream`（[`MemoryDreamOptions`](../../packages/core/src/memory/dream.ts#symbol=MemoryDreamOptions)：整理的各道门，给了的项覆盖缺省里的同名项，0 = 这一道不设门槛）。**两边都能换指令**（`prompt`，2026-11-17，决策见 [提取 / 整理指令交给产品](../decisions/implemented/2026-11-17-memory-prompts-and-gates.md)）：提取指令拿到模块、层、要看的那段与此刻存着什么，整理指令拿到模块、层与这次整理哪一层；缺省写法 `defaultExtractPrompt` / `defaultDreamPrompt` 一并导出，产品可以在缺省上加几句或整份换掉。只换文字：只放行记忆工具、轮数上限、游标、整理只够得到这一层仍归内核。间隔 `minIntervalMs` 给 0 要知道后果：一层大到一次整理不完（撞轮数上限、按「做了一部分」记、计数不清）时，每次回 idle 都会接着整理；只留文件数一道门、其余全给 0 也一样——文件数整理完不会降回门下。这是产品自己选的节奏，每次都有进展，core 不拦。轮数上限看模型，节奏看对话风格，所以跟着产品走；用户这边仍只有开关。不给的项用第 3 节表里的缺省；**配错在装配时就抛**（[`resolveExtractOptions()`](../../packages/core/src/memory/tuning.ts#symbol=resolveExtractOptions)、[`resolveDreamOptions()`](../../packages/core/src/memory/tuning.ts#symbol=resolveDreamOptions)：不是整数、低于下限、写错键名，`prompt` 不是函数），不回落到缺省。连续没写成就放弃的次数、退出前补跑的等待上限、锁的超时是机制内部的取值，不开放。
 
 **作用域回答“谁共享”，记忆模块回答“记什么”。** 路径由两者组合：`<作用域>/<模块路径>`。例如 `project/agent.md` 是这个项目里共同使用的行为记忆，不是某个 agent 实例的私有文件。相同内容出现在不同作用域时，不自动覆盖、去重或跨层提升。
 
@@ -82,14 +82,14 @@
 | 笔记模块预算 | 索引 25000，单文件 4096 | [`notesMemory`](../../packages/core/src/memory/types.ts#symbol=notesMemory) |
 | 构造器缺省 | resident 2000；indexed 索引 25000、单文件 4096 | [`residentMemory()`](../../packages/core/src/memory/types.ts#symbol=residentMemory)、[`indexedMemory()`](../../packages/core/src/memory/types.ts#symbol=indexedMemory) |
 | 索引描述行 | 单行化后截断 200 字符 | [`indexEntries()`](../../packages/core/src/memory/compose.ts#symbol=indexEntries) |
-| Dream 门（产品可配） | 写 5 次、10 个 indexed 文件、24 小时，全满足才跑；**没有轮数门，也没有按占用触发的门** | [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) |
+| Dream 门（产品可配） | 写 5 次、24 小时，都满足才跑；**不看文件数**（2026-11-17：只数 indexed 目录，全是常驻模块的层永远过不了），**没有轮数门，也没有按占用触发的门** | [`DEFAULT_DREAM_GATES`](../../packages/core/src/memory/dream.ts#symbol=DEFAULT_DREAM_GATES) |
 | startedAt 过期 | 1 小时 | [`DREAM_LOCK_STALE_MS`](../../packages/core/src/memory/dream.ts#symbol=DREAM_LOCK_STALE_MS) |
 | 提取轮数上限（产品可配） | 5 | [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS) |
 | 提取门槛（产品可配） | 用户说的话 8 个词，且攒满 3 轮用户输入 | [`DEFAULT_EXTRACT_MIN_USER_WORDS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MIN_USER_WORDS)、[`DEFAULT_EXTRACT_EVERY_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_EVERY_TURNS) |
 | 退出前补提取最多等 | 15 秒 | [`DEFAULT_EXTRACT_DRAIN_MS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_DRAIN_MS) |
 | 提交锁等待 | 10 秒 | [`DEFAULT_LOCK_TIMEOUT_MS`](../../packages/core/src/storage/name-lock.ts#symbol=DEFAULT_LOCK_TIMEOUT_MS) |
 
-预算以 JavaScript 字符串 `length` 计，不是 token 或 UTF-8 字节。resident 校验全文；indexed 同时校验单文件全文和该层完整索引的渲染长度。模块数量和作用域数量可以增长，因此单模块预算不等于展示给模型的那条记忆正文（§3「模型看到的两份」）的总上界。
+预算以 JavaScript 字符串 `length` 计，不是 token 或 UTF-8 字节。resident 校验全文；indexed 同时校验单文件全文和该层完整索引的渲染长度。写完占到预算九成以上时放行并在成功回执后面提醒先合并、删过时的（[`MEMORY_NEAR_FULL_RATIO`](../../packages/core/src/memory/compose.ts#symbol=MEMORY_NEAR_FULL_RATIO)，2026-11-17）；超了照旧拒。模块数量和作用域数量可以增长，因此单模块预算不等于展示给模型的那条记忆正文（§3「模型看到的两份」）的总上界。
 
 ### 索引是派生物，不是记忆真源
 

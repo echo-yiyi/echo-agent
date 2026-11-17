@@ -1386,6 +1386,42 @@ test("退出前补提取到点：先中止它、等它停下，才卸记忆模�
   expect(abortedWhenUnmounted as boolean | null).toBe(true); // 只在闭包里赋值：TS 会把它收窄成 null
 });
 
+test("createEcho 的 memory.extract.prompt / memory.dream.prompt 接到了内核（2026-11-17）：退出前补提取用产品给的提取指令，整理用产品给的整理写法", async () => {
+  const extractPrompts: string[] = [];
+  const dialect: Dialect = {
+    api: "fake",
+    async *request(_model, context) {
+      const ours = context.messages.find((m) => JSON.stringify(m).includes("OUR-EXTRACT"));
+      if (ours !== undefined) extractPrompts.push(JSON.stringify(ours));
+      for (const ev of textTurn(ours !== undefined ? "Nothing to keep." : "好的")) yield structuredClone(ev);
+    },
+  };
+  const provider = createProvider({
+    id: "scripted",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams(dialect),
+  });
+  const dreamPrompt = (i: { scope: string }): string => `OUR-DREAM ${i.scope}`;
+  const echo = await createEcho({
+    provider,
+    allowNetwork: false,
+    sessionsRoot: await tmp(),
+    sharedStore: new InMemoryDir(),
+    extensionDirs: [],
+    memory: { extract: { prompt: () => "OUR-EXTRACT: keep what matters" }, dream: { prompt: dreamPrompt } },
+  });
+  running.push(echo);
+  await echo.start();
+  await echo.agent.prompt("以后提交前先跑一遍全量测试，别只跑窄的");
+  const memory = (agentOf(echo) as unknown as { memory: { dreamPromptFn: unknown } }).memory;
+  expect(memory.dreamPromptFn).toBe(dreamPrompt);
+  await echo.stop();
+  expect(extractPrompts).toHaveLength(1);
+  expect(extractPrompts[0]).toContain("OUR-EXTRACT: keep what matters");
+});
+
 test("/clear 之后再续会话：复盘下标越过 reset 之前那几条（它们还在会话里），续上之后不把看过的再看一遍", async () => {
   const { provider, extractPrompts } = extractRecordingProvider(() => false);
   const base = { provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [] };

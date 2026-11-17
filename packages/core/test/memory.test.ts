@@ -48,7 +48,7 @@ import {
   createAgentMemories, addMemory, removeMemoryRegion, listMemories, getMemory, memoryFor,
   memoryView, memoryCreate, memoryStrReplace, memoryInsert, memoryDelete, memoryRename,
   memoryContents, memoryPromptSections, memoryUpdateMessage, composeMemoryRegion, memoryTool, memoryObserver, bindMemoryScopes, memoryScopeTableOf, dreamScopes,
-  shouldDream, dreamTask, markDreamed, disposeMemory, MEMORY_KIND, MEMORY_SOURCE, type AgentMemories, type MemoryFreeze, type MemoryHarnessOptions,
+  shouldDream, dreamGate, dreamTask, markDreamed, disposeMemory, MEMORY_KIND, MEMORY_SOURCE, type AgentMemories, type MemoryFreeze, type MemoryHarnessOptions,
 } from "../src/memory/harness.ts";
 import type { CompactionStage } from "../src/compaction/types.ts";
 import type { ScriptedTurn } from "../src/testing.ts";
@@ -583,14 +583,14 @@ describe("Dream 门控", () => {
   test("提取 prompt：第一次复盘（从对话开头看起）不说「上次复盘到对话中途」；之后才说", () => {
     const table = memoryScopeTableOf(memories(new InMemoryDir()));
     const mods = listMemories(memories(new InMemoryDir()));
-    const first = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: true, retry: false }, "");
+    const first = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: true, retry: false }, stored: "" });
     expect(first).not.toContain("partway");
     expect(first).toContain("not been reviewed");
     expect(first).not.toContain("stopped before it finished");
-    const later = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: false, retry: false }, "");
+    const later = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: false, retry: false }, stored: "" });
     expect(later).toContain("last reviewed partway through this conversation");
     // 上一次没看完那段（2026-11-17）：说清写过的已在 Stored now 里，接着补、别重写
-    const retry = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: false, retry: true }, "");
+    const retry = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: false, retry: true }, stored: "" });
     expect(retry).toContain("An earlier review of this part stopped before it finished");
     expect(retry).toContain("continue from there instead of writing it again");
   });
@@ -635,8 +635,40 @@ describe("Dream 门控", () => {
     expect(await s2.read(".dream/state.json")).toBeNull(); // 锁也不共用
   });
 
-  test("缺省门:三道节流是 CC 量级,没有按占用触发的门(防手滑改缺省)", () => {
-    expect(DEFAULT_DREAM_GATES).toEqual({ minWritesSinceLast: 5, minFiles: 10, minIntervalMs: 24 * 3600_000 });
+  test("缺省门:写入次数 + 间隔两道节流,不看文件数(2026-11-17),也没有按占用触发的门(防手滑改缺省)", () => {
+    expect(DEFAULT_DREAM_GATES).toEqual({ minWritesSinceLast: 5, minIntervalMs: 24 * 3600_000 });
+  });
+
+  test("缺省门下一层里全是常驻模块也会整理(2026-11-17):此前文件数门只数 indexed 目录,常驻模块记 0,这道门永远过不了", async () => {
+    const h = createAgentMemories({ memories: [agentMemory, userMemory] }); // 只有常驻模块,缺省门
+    bindMemoryScopes(h, tableOf({ user: new InMemoryDir(), project: new InMemoryDir(), session: new InMemoryDir() }));
+    for (let i = 0; i < 5; i++) await call(h, { command: "create", path: "session/user.md", file_text: `第 ${i} 版` });
+    expect(await dreamGate(h, "session")).toEqual({ run: true, decision: "due" });
+  });
+
+  test("整理指令可以换(2026-11-17):dreamTask 用产品给的写法,拿到这一层与模块表;写法抛错时不上锁、不留一把要等一小时的锁", async () => {
+    const seen: string[] = [];
+    const h = memories(new InMemoryDir(), { dream: {}, dreamPrompt: (i) => (seen.push(`${i.scope}:${i.memories.length}:${i.scopes.entries.length}`), `整理 ${i.scope}/ 的我们自己的写法`) });
+    const task = await dreamTask(h, "session");
+    expect(task.prompt).toBe("整理 session/ 的我们自己的写法");
+    expect(seen).toEqual(["session:3:3"]);
+
+    const broken = memories(new InMemoryDir(), { dream: {}, dreamPrompt: () => { throw new Error("写法坏了"); } });
+    await expect(dreamTask(broken, "session")).rejects.toThrow("写法坏了");
+    expect(await shouldDream(broken, "session")).toBe(true); // 没上锁
+    const empty = memories(new InMemoryDir(), { dream: {}, dreamPrompt: () => "  " });
+    await expect(dreamTask(empty, "session")).rejects.toThrow("整理指令是空的");
+  });
+
+  test("快写满时提醒(2026-11-17):写完占到预算九成以上,成功回执后面接一句先合并、删过时的;不到九成不提", async () => {
+    const h = memories(new InMemoryDir());
+    const budget = userMemory.budget;
+    const low = await call(h, { command: "create", path: "session/user.md", file_text: "x".repeat(Math.floor(budget * 0.5)) });
+    expect([low.isError, low.content.includes("Before the next write here")]).toEqual([false, false]);
+    const high = await call(h, { command: "create", path: "session/user.md", file_text: "x".repeat(Math.floor(budget * 0.95)) });
+    expect(high.isError).toBe(false);
+    expect(high.content).toContain(`Module 'user' is now at ${Math.floor(budget * 0.95)} of ${budget} characters`);
+    expect(high.content).toContain("merge overlapping entries and drop ones that no longer hold");
   });
 });
 
@@ -1266,11 +1298,11 @@ describe("判据跟着模块走", () => {
     expect(system).not.toContain("next month");
     expect(system).not.toContain("repository already states");
     expect(system).toContain("moments you shared");
-    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), { messages: 2, firstUserText: "hi", fromStart: false, retry: false }, "");
+    const extract = extractPromptText({ memories: listMemories(custom), scopes: memoryScopeTableOf(custom), range: { messages: 2, firstUserText: "hi", fromStart: false, retry: false }, stored: "" });
     expect(extract).not.toContain("next month");
     expect(extract).not.toContain("true only inside this conversation");
     expect(extract).toContain("moments you shared");
-    const dream = dreamPromptText(listMemories(custom), memoryScopeTableOf(custom), "user");
+    const dream = dreamPromptText({ memories: listMemories(custom), scopes: memoryScopeTableOf(custom), scope: "user" });
     expect(dream).not.toContain("true only once");
   });
 

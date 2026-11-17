@@ -189,6 +189,20 @@ export async function renderMemoryContent(ctx: AgentMemories, dir: MemoryDir = c
 
 /* ───────────────────────── 缺省分发:写入校验 ───────────────────────── */
 
+/**
+ * 写完占到预算的这么多就提醒一句（2026-11-17）：先合并、删过时的，别等写满被拒——被拒时模型得先看一遍、压一遍、再写，
+ * 提取的轮数常常就耗在这上面。参照物在索引快到上限时也是这么提醒的。
+ */
+export const MEMORY_NEAR_FULL_RATIO = 0.9;
+
+function nearFull(what: string, used: number, limit: number): { ok: true; note?: string } {
+  if (used < limit * MEMORY_NEAR_FULL_RATIO) return { ok: true };
+  return {
+    ok: true,
+    note: `${what} is now at ${used} of ${limit} characters. Before the next write here, merge overlapping entries and drop ones that no longer hold.`,
+  };
+}
+
 export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
   switch (m.mode) {
     case "resident": {
@@ -203,7 +217,7 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
             `Do not delete the file: that drops every entry in it.`,
         };
       }
-      return { ok: true };
+      return nearFull(`Module '${r.name}'`, next.length, r.budget);
     }
     case "indexed": {
       const im = m as IndexedMemory;
@@ -223,7 +237,7 @@ export const defaultCheckWrite: CheckWrite = async (m, dir, path, next) => {
             `Consolidate first (merge similar files, delete stale ones), then add the new one.`,
         };
       }
-      return { ok: true };
+      return nearFull(`The '${im.name}' index at ${at.scope}/`, size, im.budget);
     }
     default: {
       // CustomMemories 为空时这里被收窄成 never;有自定义种类合入后就是活分支
