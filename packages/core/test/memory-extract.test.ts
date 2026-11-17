@@ -96,6 +96,56 @@ async function idleExtract(agent: Agent): Promise<void> {
 
 const THREE = ["第一件事：我们的测试一律用 bun 跑", "第二件事：提交信息一律写中文", "第三件事：合并之前先跑全量测试"];
 
+test("hasPendingWork 算上记忆提取（2026-11-17）：提取在跑时为真，跑完才变假——宿主等它再收摊，这段对话就不会没提取过", async () => {
+  let release = (): void => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const extract: StreamFn = (model, context, options) => gate.then(() => scriptedStreamFn([textTurn("没什么可记的。")])(model, context, options)) as never;
+  const { fn } = recording({ extract });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()) });
+  await say(agent, ...THREE); // 攒满三轮：提取起来，卡在模型调用上
+  expect(await until(async () => agent.state.status === "idle")).toBe(true);
+  expect(agent.hasPendingWork).toBe(true); // 前台空闲了，但提取还在跑
+  release();
+  expect(await until(async () => !agent.hasPendingWork)).toBe(true);
+});
+
+test("settleMemory（2026-11-17）：现在就把没提取的部分提取完并返回结局——跑完是 completed 带写成几条；再调是 empty_range；用户的话不够是 too_short；没装记忆是 not_allowed；timeoutMs 不对就抛", async () => {
+  const create = toolTurn("w1", "memory", { command: "create", path: "session/memory/a.md", file_text: "---\ndescription: 测试用 bun\n---\n\n测试一律用 bun 跑" });
+  const { fn } = recording({ extract: scriptedStreamFn([create, textTurn("记好了。")]) });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()) });
+  await say(agent, "以后我们的测试一律用 bun 跑，别再用 npm test 了"); // 一轮：不会自己提取
+  expect(await agent.settleMemory()).toEqual({ kind: "completed", written: 1 });
+  expect(await agent.settleMemory()).toEqual({ kind: "skipped", reason: "empty_range" }); // 游标已在末尾
+  await say(agent, "好");
+  expect(await agent.settleMemory()).toEqual({ kind: "skipped", reason: "too_short" });
+
+  const bare = new Agent({ model: FAKE_MODEL, streamFunction: fn });
+  expect(await bare.settleMemory()).toEqual({ kind: "skipped", reason: "not_allowed" });
+  await expect(agent.settleMemory({ timeoutMs: -1 })).rejects.toThrow("timeoutMs");
+});
+
+test("settleMemory 到时限（2026-11-17）：中止提取、等它停下再返回 aborted，游标不动——下一次再看这段", async () => {
+  const clock = new FakeClock();
+  let reached = (): void => {};
+  const started = new Promise<void>((r) => (reached = r));
+  const hang: StreamFn = (_model, _context, options) =>
+    new Promise((_resolve, reject) => {
+      reached();
+      options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  let calls = 0;
+  const extract: StreamFn = (model, context, options) => (++calls === 1 ? hang(model, context, options) : scriptedStreamFn([textTurn("没什么可记的。")])(model, context, options));
+  const { fn } = recording({ extract });
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()), clock });
+  await say(agent, "以后我们的测试一律用 bun 跑，别再用 npm test 了");
+  const settling = agent.settleMemory({ timeoutMs: 5_000 });
+  await started;
+  clock.advance(5_000);
+  expect(await settling).toEqual({ kind: "aborted" });
+  expect(agent.hasPendingWork).toBe(false); // 返回时提取已经停了
+  expect(await agent.settleMemory()).toEqual({ kind: "completed", written: 0 }); // 游标没动：这段再看一次
+});
+
 test("提取指令可以换（2026-11-17）：用产品给的写法，拿到要看的那段与此刻存着什么；写法抛错按这一次没跑成算、报诊断、不调模型", async () => {
   const seen: ExtractPromptInput[] = [];
   let broken = false;

@@ -581,6 +581,7 @@ export function agentRuntimeOf(agent: RuntimeSource, assembly: RuntimeAssemblyOp
     get hasPendingWork() {
       return agent.hasPendingWork;
     },
+    settleMemory: (opts) => agent.settleMemory(opts),
   };
 }
 
@@ -600,6 +601,7 @@ export type RuntimeSource = Pick<
   | "interrupt"
   | "acceptsWork"
   | "hasPendingWork"
+  | "settleMemory"
 > & {
   prompt(input: string | AgentMessage | AgentMessage[], images?: ImageBlock[]): Promise<{ outcome: AgentOutcome }>;
   /** 装备面（P3a）：Agent 的 get/set 属性对与 `reset()`。守 idle 的抛在 Agent 里，`equip()` 只做映射。 */

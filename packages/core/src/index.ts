@@ -338,7 +338,9 @@ export type { EchoAgentOptions } from "./create-agent.ts";
 // （2026-11-03）：坏扩展在装配里记成诊断，不往外抛。**发现**留着：产品做工作区信任时要先列出约定目录里将被加载的文件给人看
 // （`@echo-agent/base` 的 `trustConventionDir`），只列不加载、不执行。
 export { createEcho, discoverExtensionFiles, EXTENSIONS_DIR } from "./create-echo.ts";
-export type { CreateEchoOptions, Echo, LoadedExtension } from "./create-echo.ts";
+export type { CreateEchoOptions, Echo, EchoStopResult, LoadedExtension } from "./create-echo.ts";
+/** 记忆提取的结局（2026-11-17）：`AgentRuntime.settleMemory()` 与 `Echo.stop()` 交给宿主的，沿用提取的结局与跳过原因。 */
+export type { MemorySettleResult, ExtractSkipReason } from "./memory/observe.ts";
 /** 热部署的结果形状（2026-09-14）：`Echo.reloadExtensions()` 返回的就是它。 */
 export type { ReloadChange, ReloadReport, ReloadResult } from "./extension/reload.ts";
 

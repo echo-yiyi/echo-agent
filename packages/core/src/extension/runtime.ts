@@ -27,6 +27,7 @@
 // | `deliver` / `consumeInbox` | 那是**投递侧**（Schedule / 后台）的入口，不是 UI 的 |
 // | `pauseManagedWork` / `activate` | handoff 语义，属 O3 Runtime，壳子不该碰 |
 
+import type { MemorySettleResult } from "../memory/observe.ts";
 import type { AgentListener, AgentOutcome } from "../events.ts";
 import type { LifecycleEventListener } from "../hooks/runtime.ts";
 import type { AgentState } from "../agent.ts";
@@ -176,13 +177,21 @@ export interface AgentRuntime {
    */
   readonly acceptsWork: boolean;
   /**
-   * 手上还有没收完的活（2026-11-16）：在跑的 run、在跑的后台子 agent、inbox 里会被自动消费却还没消费的消息（含正在落盘的投递）。
+   * 手上还有没收完的活（2026-11-16）：在跑的 run、在跑的后台子 agent、在跑或排着的记忆提取（2026-11-17）、
+   * inbox 里会被自动消费却还没消费的消息（含正在落盘的投递）。记忆整理不算：它推迟到下次不丢东西。
    *
    * 宿主收摊前看它：管道形态等它变 false 再退出，`--serve` 把它算进「忙」。不看的话，后台子 agent 跑到一半就随收摊被停，
    * 它的回执与收尾通知也没人处理。**不算后台 `bash` 作业**：dev server、watcher 这类不会自己结束，算进来管道形态就永远退不出——
    * 它们照旧随收摊停。inbox 停了自动消费（失败、让位）时也不算 inbox：没人会消费，等也等不到。
    */
   readonly hasPendingWork: boolean;
+
+  /**
+   * 现在就把这段对话还没提取的部分提取完，等它结束，返回结局（2026-11-17）。宿主要知道「记忆处理完了没有、成没成」就调它：
+   * `hasPendingWork` 只说还有没有活，不说结局；`Echo.stop()` 的补提取有时限。不看攒了几轮（仍过词数门槛）；在跑的整理先中止。
+   * `timeoutMs` 不给就等到结束；给了到点就中止，结局 `aborted`（游标不动，下次再看）。永不 reject（`timeoutMs` 不对除外）。
+   */
+  settleMemory(opts?: { timeoutMs?: number }): Promise<MemorySettleResult>;
 }
 
 /**

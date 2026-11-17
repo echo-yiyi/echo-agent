@@ -52,11 +52,23 @@ export type DreamDecision = "due" | "in_progress" | "too_soon" | "few_writes" | 
 /**
  * 提取跑了的那一次是怎么结束的（2026-11-16，封闭集）：
  *   · `completed`：模型自己收尾；
- *   · `partial`：中途停了但写成过——游标推过去，记成部分完成；
+ *   · `partial`：中途停了但写成过——游标不动、下次重看（2026-11-17 起；此前推过去）；
  *   · `failed`：一条没写成就停了——游标不动，下次重看；
- *   · `abandoned`：又一次一条没写成，连续次数到了上限——放弃这段，游标推过去。
+ *   · `abandoned`：连续没看完到了上限——放弃这段，游标推过去。
  */
 export type ExtractAttemptOutcome = "completed" | "partial" | "failed" | "abandoned";
+
+/**
+ * `settleMemory()` 与 `Echo.stop()` 交给宿主的提取结局（2026-11-17）。沿用提取的四种结局与跳过原因，只多一种：
+ *   · `aborted`：到了时限（或收摊）被中止，游标不动、下次再看；
+ *   · `skipped`：门没过，原因见 `ExtractSkipReason`（没装记忆、丢锁这类也记成 `not_allowed`；没有新内容是 `empty_range`）。
+ */
+export type MemorySettleResult =
+  | Readonly<{ kind: "completed"; written: number }>
+  | Readonly<{ kind: "partial" | "abandoned"; written: number; reason: string }>
+  | Readonly<{ kind: "failed"; reason: string }>
+  | Readonly<{ kind: "aborted" }>
+  | Readonly<{ kind: "skipped"; reason: ExtractSkipReason }>;
 
 export type MemoryFact =
   | Readonly<{

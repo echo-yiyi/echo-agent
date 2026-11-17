@@ -157,6 +157,7 @@ function runtimeOf(echo: Echo, overrides: Partial<AgentRuntime> = {}): AgentRunt
     get hasPendingWork() {
       return base.hasPendingWork;
     },
+    settleMemory: (opts) => base.settleMemory(opts),
     subscribe: (l) => {
       const list = eventListeners.get(echo) ?? [];
       list.push(l);

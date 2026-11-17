@@ -12,7 +12,7 @@ import { ABORT_REASON, AbortReason, agentError, errText, type AgentError } from 
 import type { AgentEvent, AgentEventInput, AgentListener, AgentOutcome } from "./events.ts";
 import { observationHostOf } from "./observability/host-wiring.ts";
 import { AGENT_ENTRY_ID, builtinOwner, MEMORY_ENTRY_ID, SCHEDULER_ENTRY_ID, TASKS_ENTRY_ID, type ObservationRuntime } from "./observability/runtime.ts";
-import { memoryFactDescriptor, type ExtractAttemptOutcome, type ExtractSkipReason, type MemoryFact } from "./memory/observe.ts";
+import { memoryFactDescriptor, type ExtractAttemptOutcome, type ExtractSkipReason, type MemoryFact, type MemorySettleResult } from "./memory/observe.ts";
 import type { CapabilityFactSink } from "./observability/fact-sink.ts";
 import { memoryHostOf } from "./memory/host-wiring.ts";
 import { MemoryChannel } from "./memory/channel.ts";
@@ -1174,6 +1174,8 @@ export class Agent {
   get hasPendingWork(): boolean {
     if (this.activeRun !== undefined || this._state.status !== "idle" || this.inboxConsumeInFlight !== undefined) return true;
     for (const t of this.background.tasks.values()) if (t.kind === "subagent" && t.status === "running") return true;
+    // 记忆提取在跑或排着（2026-11-17）：它看的是这段对话，收摊前不等它，这段就可能没提取过。整理不算——它推迟到下次不丢东西
+    if (this.extractChannel.busy) return true;
     // 投进 inbox 的消息只有在会被自动消费时才算：自动消费停了（失败、让位），等它也等不到
     return this.autoConsumeInbox && (this.pendingWrites.size > 0 || this.inbox.pendingCount > 0);
   }
@@ -3198,25 +3200,34 @@ export class Agent {
    * reply 收尾时把材料定格、排进提取通道。真跑时两道门（2026-10-30 / 2026-11-03）：游标之后用户说的话攒够
    * `memory.extract.minUserWords`，且攒满 `memory.extract.everyTurns` 轮（产品可配，缺省 `DEFAULT_EXTRACT_SETTINGS`）——
    * 任一没过就不起模型调用、游标不动。
-   * `force` = 退出前那次补跑（`drainExtract`）：不看攒了几轮，之后不会再有下一次了。
+   * `force` = 宿主要现在就提取（`settleMemory`，退出前那次补跑 `drainExtract` 也是它）：不看攒了几轮。
+   * `onSettled` 收这一次的结局（每个出口报一次）：门没过、被中止、跑完了怎么结束的。
    * **不进 admission**，走自己的通道——为什么见 `memory/channel.ts` 头注。
    */
-  private enqueueExtract(opts: { force?: boolean } = {}): void {
+  private enqueueExtract(opts: { force?: boolean; onSettled?: (result: MemorySettleResult) => void } = {}): void {
+    // 这一次的结局只报一次（`settleMemory()` 用，2026-11-17）：每个出口都报，先到的算
+    let reported = false;
+    const settle = (result: MemorySettleResult): void => {
+      if (reported) return;
+      reported = true;
+      opts.onSettled?.(result);
+    };
     const memory = this.memory;
-    if (memory === undefined) return; // 没装记忆：是配置，不是一道门，不记
+    if (memory === undefined) return settle({ kind: "skipped", reason: "not_allowed" }); // 没装记忆：是配置，不是一道门，不记
     const scope = this.activeScope ?? this.lastScope;
     const force = opts.force === true;
     // 每道门没过都记一条原因（观测白盒化 B，`memory.extract.skipped`）；放行不记——跑起来的提取自己是一个子循环 run
     const triggeredBy = scope?.runId;
     const skipped = (reason: ExtractSkipReason): void => {
       this.memoryActivity?.offer({ kind: "extract_skipped", reason, force, ...(triggeredBy === undefined ? {} : { triggeredBy }), occurredAt: Date.now() });
+      settle({ kind: "skipped", reason });
     };
     if (!this.memoryWorkAllowed) return skipped("not_allowed");
     if (scope === undefined) return skipped("no_scope");
     // 一个模块都没有（`memory.builtin: false` 且没有扩展注册）：没有地方可写，不为此起一次模型调用。
     // 退出前补跑（force）时模块为空不记：`createEcho()` 的 `stop()` 卸完 extension 之后 `doStop()` 还会兜底再补一次，
     // 那时模块已经卸了——是收摊顺序，不是这段会话没有记忆模块，每次收摊都记一条只会误导
-    if (memory.memories.size === 0) return force ? undefined : skipped("no_modules");
+    if (memory.memories.size === 0) return force ? settle({ kind: "skipped", reason: "no_modules" }) : skipped("no_modules");
     // **重叠保护**：这条 reply 里前台自己已经写过记忆，这条 reply 就不单独起一次提取——不然刚写完一条，
     // 提取回头看见"这轮有值得记的"，又写一条几乎一样的。**游标不动**（2026-11-03）：攒着的前几轮前台没看过，
     // 下一次提取连同这一条一起看；分叉出来的那次在上文里看得见前台这次写入，prompt 里也有「此刻存着什么」。
@@ -3254,7 +3265,8 @@ export class Agent {
         }
         return this.runExtract(memory, scope, { seed: buildWorkingMessages(messages, compaction), menu, range }, signal);
       });
-      if (pass.kind === "not_run" || epoch !== this.extractEpoch) return;
+      if (pass.kind === "not_run") return settle({ kind: "aborted" }); // 跳过的原因上面已经报过（先到的算），没报过的就是被中止了
+      if (epoch !== this.extractEpoch) return settle({ kind: "skipped", reason: "epoch_changed" });
       // 每一次跑了的提取都留一条结局（2026-11-16）：正常结束 / 部分完成 / 失败（下次重看） / 失败后放弃
       const finished = (outcome: ExtractAttemptOutcome, written: number, reasonCode?: string): void => {
         this.memoryActivity?.offer({
@@ -3266,6 +3278,14 @@ export class Agent {
           ...(triggeredBy === undefined ? {} : { triggeredBy }),
           occurredAt: Date.now(),
         });
+        const reason = reasonCode ?? "unknown";
+        settle(
+          outcome === "completed"
+            ? { kind: "completed", written }
+            : outcome === "failed"
+              ? { kind: "failed", reason }
+              : { kind: outcome, written, reason },
+        );
       };
       let reviewed: { outcome: ExtractOutcome; written: number; reason?: string };
       if (pass.kind === "completed") {
@@ -3334,17 +3354,6 @@ export class Agent {
   }
 
   /**
-   * 退出前把还没看过的那段补看一次（2026-11-03）：不论攒了几轮（`force`），等它跑完，最多 `DEFAULT_EXTRACT_DRAIN_MS`；
-   * 到点就中止两条记忆通道并等它们收完再返回（2026-11-17），返回时不会有提取还在写。永不抛。
-   *
-   * 两个调用点：`createEcho()` 的 `stop()` **在卸 Extension 之前**调——记忆模块、记忆工具、prompt 段都是 builtin Extension
-   * 挂上来的，卸完再补，模块表是空的（提取直接不跑），菜单与 system 也不再是主循环那一份（前缀缓存对不上）；
-   * `doStop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底，前面补过了它就是空转（游标已在末尾）。
-   * **必须在改相位之前**：收摊一开始 `memoryWorkAllowed` 就是 false、业务写入随即关闸，提取起不来，起来了也写不进去。
-   * 到点没跑完就照常收摊——`dispose()` 里的 `settleDream()` 中止它、游标不动。
-   * 丢锁不走这里（一个字都不许再写）；handoff 让位也不走（有人在等这把锁，见 `watchHandoff`）。
-   */
-  /**
    * 收摊的第一步（Host-internal：`createEcho` 的 `stop()` 在卸 extension 之前调）：从此不接新工作——prompt、
    * inbox、闹钟一律拒；中止在跑的前台 run（理由 `dispose`）并等它与它那批 inbox 的 ack 收尾。
    * 不改相位、不释放 lease、不关存储，那些仍是 `stop()` 的事；它只保证卸 extension 的这段时间里不会冒出
@@ -3371,17 +3380,34 @@ export class Agent {
     return n;
   }
 
-  async drainExtract(): Promise<void> {
-    if (!this.memoryWorkAllowed) return;
-    // 在跑的整理先中止（2026-11-13）：提取与整理排成一条（`oneBackgroundWriter`），补跑那次排在整理后面——
-    // 整理一般好几轮、多半超过上限，到点两个一起被中止，最后那段对话就没看到。整理被中止只是推迟到下次（锁过期后重来），
-    // 没看到的对话却可能再也没人看。中止也算在同一个上限里：整理卡在写盘上时收摊不被它拖住
+  /**
+   * 现在就把这段对话还没提取的部分提取完，等它结束，返回结局（2026-11-17，`AgentRuntime.settleMemory`）。
+   * 不看攒了几轮（仍过词数门槛）；在跑的整理先中止——提取排在整理后面，整理被中止只是推迟到下次。
+   * `timeoutMs` 不给就等到结束；给了到点就中止提取与整理、等它们收完，结局 `aborted`（游标不动，下次再看）。永不 reject（参数不对除外）。
+   */
+  async settleMemory(opts: { timeoutMs?: number } = {}): Promise<MemorySettleResult> {
+    const { timeoutMs } = opts;
+    if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+      throw new TypeError(`settleMemory 的 timeoutMs 要是不小于 0 的有限数，收到 ${String(timeoutMs)}`);
+    }
+    if (this.memory === undefined || !this.memoryWorkAllowed) return { kind: "skipped", reason: "not_allowed" };
+    let result: MemorySettleResult | undefined;
     const work = (async (): Promise<void> => {
       await this.dreamChannel.settle();
-      if (!this.memoryWorkAllowed) return;
-      this.enqueueExtract({ force: true });
-      await this.extractChannel.idle();
+      // 通道只记「下一个」：排进去的这次在等的时候可能被随后排进来的一次顶掉（那一次照常跑，但不报给这里）——顶掉了就再排
+      for (let attempt = 0; attempt < 3 && result === undefined; attempt++) {
+        if (!this.memoryWorkAllowed) {
+          result = { kind: "skipped", reason: "not_allowed" };
+          return;
+        }
+        this.enqueueExtract({ force: true, onSettled: (r) => (result ??= r) });
+        await this.extractChannel.idle();
+      }
     })();
+    if (timeoutMs === undefined) {
+      await work;
+      return result ?? { kind: "aborted" };
+    }
     let cancel = (): void => {};
     let timedOut = false;
     const deadline = new Promise<void>((resolve) => {
@@ -3389,7 +3415,7 @@ export class Agent {
         cancel();
         timedOut = true;
         resolve();
-      }, DEFAULT_EXTRACT_DRAIN_MS);
+      }, timeoutMs);
     });
     try {
       await Promise.race([work, deadline]);
@@ -3399,6 +3425,27 @@ export class Agent {
     // **到点要中止并等它真的停下**（2026-11-17）：只是不再等的话，`createEcho()` 的 `stop()` 接着就卸 builtin 那一代——
     // 记忆模块与记忆工具都在里面——还在跑的提取随后写记忆，全被拒。中止的那次游标不动，续会话时这段再看
     if (timedOut) await this.settleDream();
+    return result ?? { kind: "aborted" };
+  }
+
+  /** 记忆的提取或整理在跑或排着（Host-internal：热部署用——它们写的是此刻这一代扩展注册的记忆模块）。 */
+  get memoryWorkInFlight(): boolean {
+    return this.extractChannel.busy || this.dreamChannel.busy;
+  }
+
+  /**
+   * 退出前把还没看过的那段补看一次（2026-11-03）：不论攒了几轮（`force`），等它跑完，最多 `DEFAULT_EXTRACT_DRAIN_MS`；
+   * 到点就中止两条记忆通道并等它们收完再返回（2026-11-17），返回时不会有提取还在写。永不抛。
+   *
+   * 两个调用点：`createEcho()` 的 `stop()` **在卸 Extension 之前**调——记忆模块、记忆工具、prompt 段都是 builtin Extension
+   * 挂上来的，卸完再补，模块表是空的（提取直接不跑），菜单与 system 也不再是主循环那一份（前缀缓存对不上）；
+   * `doStop()` 在改相位之前再调一次，给不经 `createEcho()` 的低层用法兜底，前面补过了它就是空转（游标已在末尾）。
+   * **必须在改相位之前**：收摊一开始 `memoryWorkAllowed` 就是 false、业务写入随即关闸，提取起不来，起来了也写不进去。
+   * 到点没跑完就中止提取与整理、等它们收完再返回（`settleMemory`），游标不动；结局交给 `createEcho()` 的 `stop()` 返回给宿主（2026-11-17）。
+   * 丢锁不走这里（一个字都不许再写）；handoff 让位也不走（有人在等这把锁，见 `watchHandoff`）。
+   */
+  async drainExtract(): Promise<MemorySettleResult> {
+    return this.settleMemory({ timeoutMs: DEFAULT_EXTRACT_DRAIN_MS });
   }
 
   /**

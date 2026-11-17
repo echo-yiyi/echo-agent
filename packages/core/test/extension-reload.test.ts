@@ -20,6 +20,8 @@ import { FakeClock } from "../src/schedule/clock.ts";
 import { STOP_UNMOUNT_LIMIT_MS } from "../src/create-echo.ts";
 import { EXTENSION_APPLY_LIMIT_MS } from "../src/extension/host.ts";
 import { defineExtension } from "../src/extension/public.ts";
+import { EXTRACT_PROMPT_OPENING } from "../src/memory/extract.ts";
+import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
 
 process.env["ECHO_HOME"] = mkdtempSync(join(tmpdir(), "echo-home-"));
 
@@ -374,6 +376,40 @@ test("没有扩展目录的装配（extensionDirs: []）reload 照样能调：�
   await echo.start();
   const r = await echo.reloadExtensions();
   expect(r).toEqual({ kind: "done", report: { changes: [] } });
+});
+
+test("记忆提取或整理在跑时热部署推迟（2026-11-17）：它们写的是这一代扩展注册的记忆模块，换代就是往卸掉的模块里写", async () => {
+  let release = (): void => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const dialect = {
+    api: "fake",
+    async *request(_m: unknown, ctx: { messages: readonly unknown[] }) {
+      const extracting = JSON.stringify(ctx.messages).includes(EXTRACT_PROMPT_OPENING);
+      if (extracting) await gate;
+      for (const ev of textTurn(extracting ? "Nothing to keep." : "好的")) yield structuredClone(ev);
+    },
+  };
+  const dir = join(await tmp(), "extensions");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "hello.ts"), applyOnlySource("hello", "() => {}"));
+  const echo = await createEcho({
+    provider: createProvider({ id: "s", auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } }, defaultModelId: "only", models: [{ id: "only", api: "fake" }], api: createProviderStreams(dialect as never) }),
+    allowNetwork: false,
+    stateDir: join(await tmp(), "state"),
+    sharedStore: new InMemoryDir(),
+    extensionDirs: [dir],
+  });
+  running.push(echo);
+  await echo.start();
+  await echo.agent.prompt("以后提交前先跑一遍全量测试，别只跑窄的");
+  const settling = echo.agent.settleMemory(); // 提取起来，卡在模型调用上
+  for (let i = 0; i < 100 && !agentOf(echo).memoryWorkInFlight; i++) await new Promise((r) => setTimeout(r, 10));
+  const deferred = await echo.reloadExtensions();
+  expect(deferred.kind).toBe("rejected");
+  if (deferred.kind === "rejected") expect(deferred.reason).toContain("记忆提取或整理还在跑");
+  release();
+  expect((await settling).kind).toBe("completed");
+  expect((await echo.reloadExtensions()).kind).toBe("done");
 });
 
 test("后台子 agent 还在跑时热部署推迟：它拿着的是现在这一代的工具，换掉就是在调已经 dispose 的资源", async () => {

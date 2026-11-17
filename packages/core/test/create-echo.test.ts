@@ -1382,8 +1382,22 @@ test("退出前补提取到点：先中止它、等它停下，才卸记忆模�
   // 修之前：到点不中止，Agent 收摊时的兜底补提取还会再等一个上限——再拨一次，好让旧代码也能收摊、断言给出红而不是挂住
   for (let i = 0; i < 50 && abortedWhenUnmounted === null; i++) await new Promise((r) => setTimeout(r, 10));
   clock.advance(DEFAULT_EXTRACT_DRAIN_MS);
-  await stopping;
+  const stopped = await stopping;
   expect(abortedWhenUnmounted as boolean | null).toBe(true); // 只在闭包里赋值：TS 会把它收窄成 null
+  expect(stopped).toEqual({ memory: { kind: "aborted" } }); // 2026-11-17：到点被中止如实交给宿主
+});
+
+test("Echo.stop() 返回退出补提取的结局（2026-11-17）：正常关闭不等于提取成了——跑完是 completed；没说话的段是 no_scope", async () => {
+  const { provider } = extractRecordingProvider(() => false);
+  const base = { provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore: new InMemoryDir(), extensionDirs: [] };
+  const talked = await createEcho(base);
+  await talked.start();
+  await talked.agent.prompt("以后提交前先跑一遍全量测试，别只跑窄的");
+  expect(await talked.stop()).toEqual({ memory: { kind: "completed", written: 0 } });
+
+  const silent = await createEcho(base);
+  await silent.start();
+  expect(await silent.stop()).toEqual({ memory: { kind: "skipped", reason: "no_scope" } }); // 一个 run 都没跑过
 });
 
 test("createEcho 的 memory.extract.prompt / memory.dream.prompt 接到了内核（2026-11-17）：退出前补提取用产品给的提取指令，整理用产品给的整理写法", async () => {

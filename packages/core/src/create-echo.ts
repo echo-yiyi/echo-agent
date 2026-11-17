@@ -40,6 +40,7 @@
 // **诊断不是可选项**：跳过而不上报就是静默失败——`Echo.diagnostics` 是机器可读的那份，
 // 壳子怎么显示归壳子（CLI 在 TUI 里发 notice、管道模式写 stderr）。
 
+import type { MemorySettleResult } from "./memory/observe.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { copyFile, cp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -202,6 +203,12 @@ export function agentOf(echo: Echo): Agent {
   return agent;
 }
 
+/**
+ * `Echo.stop()` 的结局（2026-11-17）：收摊本身出错照旧抛；正常收完返回这次退出补提取的结局——
+ * 正常关闭不等于这段对话的记忆都提取成了，到点被中止、没跑完、被门挡下都在这里说清。
+ */
+export type EchoStopResult = Readonly<{ memory: MemorySettleResult }>;
+
 export type Echo = Readonly<{
   /**
    * 这个 agent 的运行协议：看状态、订阅、说话、回答、换装备、中断。与壳经 `AgentRuntimeService`
@@ -243,7 +250,7 @@ export type Echo = Readonly<{
    */
   sessions: EchoSessions;
   /** 先卸 Extension（构造的逆序），再停 Agent。 */
-  stop(): Promise<void>;
+  stop(): Promise<EchoStopResult>;
 }>;
 
 /**
@@ -811,6 +818,10 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       if (subagents > 0) {
         return { kind: "rejected", reason: `有 ${subagents} 个后台子 agent 还在跑（它们用着现在这一代的工具），等它们结束再热部署` };
       }
+      // 记忆的提取或整理在跑或排着（2026-11-17）：它们写的是此刻这一代扩展注册的记忆模块，换代就是往卸掉的模块里写——同一个口径推迟
+      if (agent.memoryWorkInFlight) {
+        return { kind: "rejected", reason: "记忆提取或整理还在跑（它们写的是现在这一代扩展注册的记忆模块），等它们结束再热部署" };
+      }
       const admitted = await agent.betweenRuns(async (signal) => {
         const changes: ReloadChange[] = [];
         const current = new Map((await discoverRoots(dirs)).map((r) => [r.entry, r]));
@@ -946,14 +957,15 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
      * 「收摊完了」，而实际上第一次还卡在 disposer 里。幂等的含义是**第二次拿到同一个结果**，
      * 不是「第二次直接放行」。
      */
-    let stopPromise: Promise<void> | null = null;
-    const doStop = async (): Promise<void> => {
+    let stopPromise: Promise<EchoStopResult> | null = null;
+    const doStop = async (): Promise<EchoStopResult> => {
       // 先停接活：从此 prompt / inbox / 闹钟一律拒，在跑的 run 中止并收尾。卸 extension 期间（disposer 可能有 I/O）
       // 不许冒出一个跑在「产品的工具与身份段已经卸掉」的 agent 上的新 run。
       await agent.quiesce();
       // 卸 Extension 之前先把没提取过的那段补提取一次（2026-11-03）：记忆模块、记忆工具、prompt 段都是 builtin 挂的，
       // 卸完就没得提取了，菜单与 system 也不再是主循环那一份（前缀缓存对不上）。有上限、永不抛（`Agent.drainExtract`）。
-      await agent.drainExtract();
+      // 结局交给宿主（2026-11-17）：正常关闭不等于提取成功，到点被中止、没跑完、被门挡下都如实返回
+      const memory = await agent.drainExtract();
       // 逆序：先卸 Extension（它们的 disposer 要动 agent 的 tools / hooks / skills），再停 Agent。
       // **两步都要跑到**，各收各的错：上一版是 `try { unmount } finally { agent.stop() }`，
       // 两边同时失败时 finally 里那个抛会把前一个**顶掉**（实测只剩 agent-stop-failed，
@@ -984,6 +996,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
       if (errors.length > 1) {
         throw new AggregateError(errors, `Echo 收摊有 ${errors.length} 处失败：${errors.map(errText).join("；")}`);
       }
+      return { memory };
     };
 
     /** `send()` = user source 的调用方适配器：outcome 来自 loop，观测只给引用（不等观测线程）。 */
@@ -1006,7 +1019,7 @@ export async function createEcho(opts: CreateEchoOptions): Promise<Echo> {
         return Object.freeze([...diagnostics]);
       },
       reloadExtensions,
-      stop: (): Promise<void> => (stopPromise ??= doStop()),
+      stop: (): Promise<EchoStopResult> => (stopPromise ??= doStop()),
     });
     AGENT_OF_ECHO.set(echo, agent);
     return echo;
