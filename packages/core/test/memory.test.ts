@@ -110,7 +110,7 @@ function layered(dirs: { user: MemoryDir; project: MemoryDir; session: MemoryDir
 const T: MemoryScopeTable = tableOf({ user: new InMemoryDir(), project: new InMemoryDir(), session: new InMemoryDir() });
 
 function ctx(): ToolExecutionContext {
-  return { toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
+  return { runId: "r1", turnId: "t1", toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
 }
 
 /**

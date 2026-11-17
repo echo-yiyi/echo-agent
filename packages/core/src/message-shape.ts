@@ -125,6 +125,13 @@ export function assertMessageShape(message: unknown, where: string): void {
       if (typeof m["source"] !== "string") throw new Error(`${where} 的 environment 消息缺 source`);
       // 可选，但给了就得是字符串：它是账本匹配回信的键，形状不对就是永远匹配不上的回信
       if (m["replyTo"] !== undefined && typeof m["replyTo"] !== "string") throw new Error(`${where} 的 environment 消息 replyTo 必须是字符串`);
+      // 可选，给了就得两件齐全：缺一件就挂不回发起它的那次工具调用
+      if (m["startedBy"] !== undefined) {
+        const s = m["startedBy"] as Record<string, unknown> | null;
+        if (typeof s !== "object" || s === null || typeof s["runId"] !== "string" || typeof s["toolCallId"] !== "string") {
+          throw new Error(`${where} 的 environment 消息 startedBy 必须是 { runId, toolCallId } 两个字符串`);
+        }
+      }
       blocks("environment");
       return;
     default:

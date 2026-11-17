@@ -9,7 +9,7 @@
 // 所以这里没有一行 `node:` 内置。一句话:**队列在 core,跑什么在产品。**
 
 import { errText } from "../errors.ts";
-import { environmentMessage } from "../messages.ts";
+import { environmentMessage, type AgentMessage } from "../messages.ts";
 import { OutputBuffer } from "./buffer.ts";
 import {
   DEFAULT_BACKGROUND_LIMITS,
@@ -54,6 +54,7 @@ export function startBackground(ctx: AgentBackground, spec: BackgroundSpec): Bac
     label: spec.label,
     startedAt: Date.now(),
     runId: ctx.currentRunId?.() ?? null,
+    startedBy: spec.startedBy ?? null,
     status: "running",
     endedAt: null,
     error: null,
@@ -151,7 +152,7 @@ function announce(task: BackgroundTask, spec: BackgroundSpec, ctx: AgentBackgrou
   ctx.onChanged?.({ kind: BACKGROUND_KIND, action: "removed", name: task.id, source: task.kind });
   if (spec.onEnd !== undefined) {
     const msg = spec.onEnd(task);
-    if (msg !== null) ctx.deliver?.(msg);
+    if (msg !== null) ctx.deliver?.(stampStartedBy(msg, task));
     return;
   }
   // 只看一眼末尾，**不动游标**——读一眼不该消耗掉别人的增量
@@ -160,7 +161,13 @@ function announce(task: BackgroundTask, spec: BackgroundSpec, ctx: AgentBackgrou
     `[Background job ${task.label} (${task.id}) finished: ${task.status}]` +
     (task.error !== null ? `\nError: ${task.error}` : "") +
     (tail === "" ? "" : `\nLast output:\n${tail}`);
-  ctx.deliver?.(environmentMessage(text, BACKGROUND_KIND, task.id));
+  ctx.deliver?.(stampStartedBy(environmentMessage(text, BACKGROUND_KIND, task.id), task));
+}
+
+/** 结束通知挂回起它的那次工具调用（2026-11-17）：环境消息、还没带的才盖；产品的 `onEnd` 自己填了就不动。 */
+function stampStartedBy(msg: AgentMessage, task: BackgroundTask): AgentMessage {
+  if (task.startedBy === null || msg.role !== "environment" || msg.startedBy !== undefined) return msg;
+  return { ...msg, startedBy: task.startedBy };
 }
 
 /**

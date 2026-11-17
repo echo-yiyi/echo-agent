@@ -169,6 +169,7 @@ export function makeBashTool(
         const r = startBackground(deps.background, {
           kind: "process",
           label: command.slice(0, 60),
+          startedBy: { runId: ctx.runId, toolCallId: ctx.toolCallId },
           run: (bg) =>
             new Promise<void>((resolvePromise, rejectPromise) => {
               const child = spawnShell(command, { cwd: startDir(ctx.workspace).cwd, workspace: ctx.workspace }, via);

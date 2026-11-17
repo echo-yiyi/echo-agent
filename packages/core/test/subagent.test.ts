@@ -7,8 +7,9 @@
 import { expect, test } from "bun:test";
 import { Agent } from "../src/agent.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
-import { listBackground, startBackground } from "../src/background/harness.ts";
+import { BACKGROUND_KIND, listBackground, startBackground } from "../src/background/harness.ts";
 import { environmentMessage } from "../src/messages.ts";
+import { assertMessageShape } from "../src/message-shape.ts";
 import { errorTurn, scriptedDialect, scriptedStreamFn, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { disableTools, restrictTools, visibleTools } from "../src/tools/harness.ts";
@@ -377,10 +378,42 @@ test("后台委派：kind subagent 的后台任务；每条回执当场投 inbox
   expect(all).not.toContain("bg epilogue"); // 交过回执：收尾不带末条正文
 });
 
+test("后台任务挂回起它的那次工具调用（2026-11-17）：任务记下 startedBy，回执与收尾两种环境消息都带同一对 runId 与 toolCallId", async () => {
+  const { fn } = routed(
+    [
+      toolTurn("c1", "subagent", { prompt: "think in the background", system: "You are quiet.", tools: [], background: true }),
+      textTurn("parent done"),
+      textTurn("ack1"),
+      textTurn("ack2"),
+      textTurn("ack3"),
+    ],
+    [toolTurn("k1", "report", { status: "done", summary: "finished: 42" }), textTurn("bg epilogue")],
+    "You are quiet.",
+  );
+  const agent = await agentWith(fn, { autoConsumeInbox: true });
+  const r = await agent.prompt("go");
+  const task = listBackground(agent.background.tasks)[0]!;
+  const startedBy = { runId: r.runId, toolCallId: "c1" };
+  expect(task.startedBy).toEqual(startedBy);
+  await task.settled;
+  const notices = () => agent.state.messages.flatMap((m) => (m.role === "environment" && m.source === BACKGROUND_KIND ? [m] : []));
+  await until(() => notices().length === 2, "回执与收尾都进了对话");
+  expect(notices().map((m) => [m.ref, m.startedBy])).toEqual([
+    [`${task.id}#1`, startedBy],
+    [task.id, startedBy],
+  ]);
+});
+
+test("环境消息的 startedBy 过形状校验（2026-11-17）：给了就得 runId 与 toolCallId 两个字符串，缺一件拒——半份引用挂不回那次调用", () => {
+  const base = environmentMessage("x", BACKGROUND_KIND, "bg-1");
+  expect(() => assertMessageShape({ ...base, startedBy: { runId: "r", toolCallId: "c" } }, "m")).not.toThrow();
+  expect(() => assertMessageShape({ ...base, startedBy: { runId: "r" } }, "m")).toThrow("startedBy");
+});
+
 test("父 run 之外派不了：前台与后台都如实拒绝", async () => {
   const agent = await agentWith(routed([textTurn("x")], [], "never").fn);
   const tool = agent.tools.get("subagent")!;
-  const ctx = { toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
+  const ctx = { runId: "r1", turnId: "t1", toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
   const fg = await tool.execute({ prompt: "x", tools: [] }, ctx);
   expect([fg.isError, fg.content]).toEqual([true, expect.stringContaining("inside a run")]);
   const bg = await tool.execute({ prompt: "x", tools: [], background: true }, ctx);

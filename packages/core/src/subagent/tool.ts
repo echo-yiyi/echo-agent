@@ -13,6 +13,7 @@
 // 唯一硬规则：子 agent 拿不到 `subagent`（只扇一层，不会自己繁殖）。
 
 import { toolError, toolOk, type ModelTool } from "../tools/types.ts";
+import type { ToolCallRef } from "../messages.ts";
 
 export const SUBAGENT_NAME = "subagent";
 /** 子循环菜单上的回执工具。按 run 造一件（`makeReceiptBook`），父的菜单上没有它。 */
@@ -50,7 +51,7 @@ export type SubagentDeps = {
   /** 前台：在父 run 的这次工具调用（`toolCallId`）里嵌套跑到完。`onProgress` 收子 agent 的文字增量与回执（进 tool_execution_update）。 */
   runForeground(spec: SubagentSpec, ctx: { toolCallId: string; signal?: AbortSignal; onProgress?: (text: string) => void }): Promise<SubagentOutcome>;
   /** 后台：起一个 kind "subagent" 的后台任务，每条回执与收尾都投 inbox。`toolCallId` 是派出它的那次工具调用。没有后台队列就不给。 */
-  runBackground?(spec: SubagentSpec, label: string, toolCallId: string): { ok: true; id: string } | { ok: false; message: string };
+  runBackground?(spec: SubagentSpec, label: string, startedBy: ToolCallRef): { ok: true; id: string } | { ok: false; message: string };
 };
 
 type Params = { prompt: string; mode?: string; system?: string; tools?: string[]; max_iterations?: number; background?: boolean };
@@ -121,7 +122,7 @@ export function makeSubagentTool(deps: SubagentDeps): ModelTool<Params, Subagent
       }
       if (background === true) {
         if (deps.runBackground === undefined) return toolError("This agent has no background queue; background: true is not supported");
-        const r = deps.runBackground(spec, task.slice(0, 60), ctx.toolCallId);
+        const r = deps.runBackground(spec, task.slice(0, 60), { runId: ctx.runId, toolCallId: ctx.toolCallId });
         return r.ok
           ? toolOk(`Started subagent ${r.id} in the background; its receipts and final notice will be delivered to you as they happen`, {
               reported: false,

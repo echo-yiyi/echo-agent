@@ -42,7 +42,7 @@ import type { PermissionAnswer, PermissionAnswerResult, PermissionPolicy, Permis
 import { AgentPolicySlots, type AgentPolicyValues } from "./policies.ts";
 import { QuestionLedger } from "./question/ledger.ts";
 import type { QuestionAnswer, QuestionAnswerResult, QuestionAsk, QuestionPolicy, QuestionSettlement } from "./question/types.ts";
-import { defaultConvertToLlm, userMessage, type AgentMessage, type ContentBlock, type ConvertToLlm, type ImageBlock, type Usage, environmentMessage } from "./messages.ts";
+import { defaultConvertToLlm, userMessage, type AgentMessage, type ContentBlock, type ConvertToLlm, type ImageBlock, type ToolCallRef, type Usage, environmentMessage } from "./messages.ts";
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "./provider/dialect.ts";
 import type { Model, StreamFn, ThinkingLevel } from "./provider/types.ts";
 import { abortedOutcome, runAgentLoop, runAgentLoopContinue } from "./loop/run-loop.ts";
@@ -1064,7 +1064,7 @@ export class Agent {
           makeSubagentTool({
             availableTools: () => this.delegableTools().map((t) => t.name),
             runForeground: (spec, ctx) => this.spawnSubagentForeground(spec, ctx),
-            runBackground: (spec, label, toolCallId) => this.spawnSubagentBackground(spec, label, toolCallId),
+            runBackground: (spec, label, startedBy) => this.spawnSubagentBackground(spec, label, startedBy),
           }),
         ],
       },
@@ -3797,7 +3797,7 @@ export class Agent {
    * 每条回执当场投一条环境消息进 inbox（2026-09-14 拍板：允许多次提交，父空闲时每条都会唤醒一轮，不另加节流），
    * 结束再投一条收尾（终态与条数；没交过回执才带末条正文）。
    */
-  private spawnSubagentBackground(spec: SubagentSpec, label: string, toolCallId: string): { ok: true; id: string } | { ok: false; message: string } {
+  private spawnSubagentBackground(spec: SubagentSpec, label: string, startedBy: ToolCallRef): { ok: true; id: string } | { ok: false; message: string } {
     const scope = this.activeScope;
     if (scope === undefined) return { ok: false, message: "a subagent can only be spawned from inside a run" };
     const prepared = this.prepareSubagent(spec);
@@ -3807,12 +3807,13 @@ export class Agent {
     let write: (chunk: string) => void = () => {};
     const book = makeReceiptBook((r) => {
       write(`\n[report ${renderReceiptLine(r)}]\n`);
-      // ref 带 seq：inbox 按 source + ref 去重，每条回执各是一条；收尾那条用裸 task id
-      this.deliver(environmentMessage(`Subagent ${taskId} (${label}) receipt ${renderReceiptLine(r)}`, BACKGROUND_KIND, `${taskId}#${r.seq}`));
+      // ref 带 seq：inbox 按 source + ref 去重，每条回执各是一条；收尾那条用裸 task id。回执与收尾一样挂回派它的那次工具调用（2026-11-17）
+      this.deliver({ ...environmentMessage(`Subagent ${taskId} (${label}) receipt ${renderReceiptLine(r)}`, BACKGROUND_KIND, `${taskId}#${r.seq}`), startedBy } as AgentMessage);
     });
     const started = startBackground(this.background, {
       kind: "subagent",
       label,
+      startedBy,
       run: async (bg) => {
         write = (chunk) => bg.write(chunk);
         const result = await this.runSubagent(
@@ -3821,7 +3822,7 @@ export class Agent {
             ...(await this.subagentPrompt(prepared.system, scope)),
             tools: [...prepared.tools, book.tool],
             seed: prepared.seed,
-            source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: toolCallId, background: true },
+            source: { kind: "subagent", parentRunId: scope.runId, parentToolCallId: startedBy.toolCallId, background: true },
             turnInjections: prepared.turnInjections,
             compaction: "inherit",
             maxIterations: spec.maxIterations ?? SUBAGENT_DEFAULT_MAX_ITERATIONS,

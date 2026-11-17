@@ -842,7 +842,7 @@ test("transcript_read：按下标读原文（含被压掉的）、query 过滤�
   expect(tool.prepareArguments!({ from: "2", to: 4 })).toEqual({ from: 2, to: 4 });
   expect(() => tool.prepareArguments!({ from: -1 })).toThrow(/from/);
   expect(() => tool.prepareArguments!({ from: 3, to: 3 })).toThrow(/to/);
-  const r = await tool.execute({ from: 4, to: 5 }, { toolCallId: "x", workspace: "/", sessionId: null, iteration: 1 });
+  const r = await tool.execute({ from: 4, to: 5 }, { runId: "r1", turnId: "t1", toolCallId: "x", workspace: "/", sessionId: null, iteration: 1 });
   expect(r.content).toBe("#4 [user] second question");
 });
 
@@ -853,7 +853,7 @@ test("echo:compaction 装上之后 transcript_read 常驻菜单（摘要框定�
   await agent.prompt("hello there");
   expect(requests[0]!.tools.map((t) => t.name)).toContain("transcript_read");
   const tool = agent.tools.get("transcript_read")!;
-  const r = await tool.execute({ from: 0 }, { toolCallId: "x", workspace: "/", sessionId: null, iteration: 1 });
+  const r = await tool.execute({ from: 0 }, { runId: "r1", turnId: "t1", toolCallId: "x", workspace: "/", sessionId: null, iteration: 1 });
   expect(r.content).toContain("#0 [user] hello there");
   expect(r.content).toContain("#1 [assistant] hi");
 });

@@ -12,7 +12,7 @@
 import { test, expect } from "bun:test";
 import { Agent } from "../src/agent.ts";
 import { FAKE_MODEL, errorTurn, scriptedStreamFn, textTurn, toolTurn, type ScriptedTurn } from "../src/testing.ts";
-import { toolOk, type ModelTool } from "../src/tools/types.ts";
+import { toolOk, type ModelTool, type ToolExecutionContext } from "../src/tools/types.ts";
 import type { AgentEvent, LifecycleEvent } from "../src/events.ts";
 import { HookRuntime } from "../src/hooks/runtime.ts";
 import { RunIntakeGate } from "../src/loop/intake.ts";
@@ -294,6 +294,24 @@ test("轮首 deadline：输入吸收期间就超时 → 零 turn 的 reply，out
   expect(r.outcome).toMatchObject({ kind: "error", error: { code: "timeout" } });
   expect(validate(events)).toEqual([]);
   expect(types(events)).toEqual([...RUN_OPEN, "agent_start", "reply_start", "message_end", "reply_end", "agent_end", ...RUN_CLOSE]);
+});
+
+test("工具拿到所在的 run 与那一轮（2026-11-17）：ctx.runId 是这次 run 的 id、ctx.turnId 是发起调用的那一轮——业务工具拿它们给异步任务打标签，能对回观测", async () => {
+  const seen: ToolExecutionContext[] = [];
+  const agent = new Agent({
+    model: FAKE_MODEL,
+    streamFunction: scriptedStreamFn([toolTurn("c1", "t", {}), textTurn("done")]),
+    tools: [
+      tool("t", async (_params, ctx) => {
+        seen.push(ctx);
+        return toolOk("ok");
+      }),
+    ],
+  });
+  const events = collect(agent);
+  const r = await agent.prompt("go");
+  const turns = events.flatMap((e) => (e.type === "turn_start" ? [e.turnId] : []));
+  expect(seen.map(({ runId, turnId, toolCallId }) => ({ runId, turnId, toolCallId }))).toEqual([{ runId: r.runId, turnId: turns[0]!, toolCallId: "c1" }]);
 });
 
 test("要工具：第二个 turn 的 cause 是 tool_use，工具事件与 toolResult 落在第一个 turn 里、attempt_end{landed} 之后", async () => {

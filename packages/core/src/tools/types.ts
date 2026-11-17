@@ -20,6 +20,13 @@ export type AgentToolResult<TMeta = Record<string, unknown>> = {
 };
 
 export type ToolExecutionContext = {
+  /**
+   * 这次调用所在的 run（2026-11-17）：与观测里那个 run 的记录是同一个 id。子循环（子 agent、提取）里的调用是子循环自己的 run。
+   * 业务工具提交异步任务、上报问题时拿它和 `turnId` / `toolCallId` 打标签，就能在观测里对回这次执行。
+   */
+  readonly runId: string;
+  /** 这次调用所在的那一轮（2026-11-17）：与观测里工具事件的 turnId 是同一个值。 */
+  readonly turnId: string;
   /** 本次调用的关联键：模型调用 = 模型给的 id；内部调用 = harness 生成的。 */
   readonly toolCallId: string;
   /** session 的工作目录：相对路径的起点，也是文件工具的边界（2026-09-01 起一个字段，归 session）。 */

@@ -17,7 +17,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-const ctxAt = (workspace: string): ToolExecutionContext => ({ toolCallId: "t1", workspace, sessionId: null, iteration: 0 });
+const ctxAt = (workspace: string): ToolExecutionContext => ({ runId: "r1", turnId: "t1", toolCallId: "t1", workspace, sessionId: null, iteration: 0 });
 const ctx = (): ToolExecutionContext => ctxAt(root);
 const tool = (list: ModelTool[], name: string): ModelTool => list.find((t) => t.name === name)!;
 

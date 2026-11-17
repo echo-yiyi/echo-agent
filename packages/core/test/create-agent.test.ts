@@ -206,7 +206,7 @@ test("缺省作用域：user 在 home、project 按 workspace 分；没有角色
   const exec = async (path: string, text: string) =>
     memoryTool!.execute(
       { command: "create", path, file_text: text },
-      { toolCallId: "c1", workspace: "/repo/a", sessionId: agent.state.sessionId, iteration: 0 },
+      { runId: "r1", turnId: "t1", toolCallId: "c1", workspace: "/repo/a", sessionId: agent.state.sessionId, iteration: 0 },
     );
   expect((await exec("user/memory/fact.md", "bun test 跑测试")).isError).toBe(false);
   expect((await exec("project/agent.md", "这个仓库用 bun")).isError).toBe(false);
@@ -237,7 +237,7 @@ test("有角色名时 role 层就在，落在 `agents/<角色名>/memory/`（与
   await agent.prompt("你好");
   const r = await agent.tools.get("memory")!.execute(
     { command: "create", path: "role/agent.md", file_text: "review 时先看 diff" },
-    { toolCallId: "c1", workspace: "/repo/a", sessionId: agent.state.sessionId, iteration: 0 },
+    { runId: "r1", turnId: "t1", toolCallId: "c1", workspace: "/repo/a", sessionId: agent.state.sessionId, iteration: 0 },
   );
   expect(r.isError).toBe(false);
   await agent.stop();
@@ -266,7 +266,7 @@ test("两个 workspace 的 project 层互不可见，user 层是同一份", asyn
   process.env.ECHO_HOME = home;
   const provider = fakeProvider({ id: "t", models: ["only"] });
   const exec = async (agent: Awaited<ReturnType<typeof createAgent>>, params: Record<string, unknown>) =>
-    agent.tools.get("memory")!.execute(params, { toolCallId: "c", workspace: "/w", sessionId: agent.state.sessionId, iteration: 0 });
+    agent.tools.get("memory")!.execute(params, { runId: "r1", turnId: "t1", toolCallId: "c", workspace: "/w", sessionId: agent.state.sessionId, iteration: 0 });
 
   const a = await createAgent({ provider, allowNetwork: false, workspace: "/repo/a" });
   await mountBuiltinTools(a);
@@ -303,7 +303,7 @@ test("resume：project 层重指到盘上权威的 workspace；同一段里 setW
   const write = async (agent: Awaited<ReturnType<typeof createAgent>>, path: string, text: string): Promise<void> => {
     const r = await agent.tools.get("memory")!.execute(
       { command: "create", path, file_text: text },
-      { toolCallId: "c1", workspace: agent.state.workspace, sessionId: agent.state.sessionId, iteration: 0 },
+      { runId: "r1", turnId: "t1", toolCallId: "c1", workspace: agent.state.workspace, sessionId: agent.state.sessionId, iteration: 0 },
     );
     expect([path, r.isError]).toEqual([path, false]);
   };

@@ -119,7 +119,7 @@ test("读回：先找外存文件，找不到再去 transcript 按 id 找原文�
   const files = new Map([[toolOutputFile("spilled"), log]]);
   const cleared = toolResultMessage("cleared", "bash", "the original content of a cleared result", false);
   const read = makeToolOutputReadTool({ read: async (f) => files.get(f) ?? null, transcript: () => [userMessage("hi"), cleared] });
-  const ctx = { toolCallId: "r", workspace: "/", sessionId: null, iteration: 1 };
+  const ctx = { runId: "r1", turnId: "t1", toolCallId: "r", workspace: "/", sessionId: null, iteration: 1 };
 
   const page = await read.execute({ id: "spilled", offset: 0, limit: 100 }, ctx);
   expect(page.content.startsWith(`[characters 0–100 of ${log.length.toLocaleString("en-US")}; continue with offset=100]`)).toBe(true);

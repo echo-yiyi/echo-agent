@@ -382,6 +382,10 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-17-tool-run-ref.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-15-tools-package.md",
       "bilingual": false
     },

@@ -5,7 +5,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ToolExecutionContext } from "@echo-agent/core";
+import type { AgentBackground, AgentMessage, ToolExecutionContext } from "@echo-agent/core";
+import { listBackground } from "@echo-agent/core/background";
 import { detectShellEnvironment, makeBashTool, shellEnv } from "../src/bash.ts";
 import { SHELL_TOOLS, shellToolsSection } from "../src/prompt.ts";
 
@@ -17,7 +18,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-const ctx = (): ToolExecutionContext => ({ toolCallId: "t1", workspace: root, sessionId: null, iteration: 0 });
+const ctx = (): ToolExecutionContext => ({ runId: "r1", turnId: "t1", toolCallId: "t1", workspace: root, sessionId: null, iteration: 0 });
 
 /** 起一个子进程时改一下父进程的环境变量，测完还原。 */
 async function withEnv<T>(vars: Record<string, string>, run: () => Promise<T>): Promise<T> {
@@ -114,6 +115,18 @@ test("运行环境（平台、bash 版本）装配时取一次，写进 tool:she
   expect(unknown).toContain("bash on Linux");
   // 段的正文其余部分与常量一致：环境那句只是接在后面
   expect(linux.startsWith(SHELL_TOOLS)).toBe(true);
+});
+
+test("后台作业挂回起它的那次 bash 调用（2026-11-17）：任务记下 startedBy，结束通知带同一对 runId 与 toolCallId", async () => {
+  const delivered: AgentMessage[] = [];
+  const background: AgentBackground = { tasks: new Map(), deliver: (m) => delivered.push(m) };
+  const bash = makeBashTool({ background });
+  const r = await bash.execute({ command: "true", background: true }, ctx());
+  expect(r.isError).toBe(false);
+  const task = listBackground(background.tasks)[0]!;
+  expect(task.startedBy).toEqual({ runId: "r1", toolCallId: "t1" });
+  await task.settled;
+  expect(delivered.map((m) => (m.role === "environment" ? [m.ref, m.startedBy] : m.role))).toEqual([[task.id, { runId: "r1", toolCallId: "t1" }]]);
 });
 
 test("bash 的 description 与 tool:shell 段说清：没有 TTY、stdin 已关要用非交互参数；读写搜文件用文件工具；长跑进程用 background 不用 &", () => {

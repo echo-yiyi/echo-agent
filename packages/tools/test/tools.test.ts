@@ -21,6 +21,8 @@ afterEach(async () => {
 });
 
 const ctx = (): ToolExecutionContext => ({
+  runId: "r1",
+  turnId: "t1",
   toolCallId: "t1",
   workspace: root,
   sessionId: null,

@@ -16,7 +16,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-const ctx = (): ToolExecutionContext => ({ toolCallId: "t1", workspace: root, sessionId: null, iteration: 0 });
+const ctx = (): ToolExecutionContext => ({ runId: "r1", turnId: "t1", toolCallId: "t1", workspace: root, sessionId: null, iteration: 0 });
 const tool = (name: string): ModelTool => makeSearchTools().find((t) => t.name === name)!;
 
 /** 在 root 里建一个 git 工作树（不提交也行：未跟踪且未被忽略的文件同样算）。 */

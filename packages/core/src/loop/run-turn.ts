@@ -638,6 +638,8 @@ async function runOneTool(
   };
   try {
     result = await tool.execute(params, {
+      runId: config.runId,
+      turnId,
       toolCallId: use.id,
       workspace: config.workspace,
       sessionId: config.sessionId ?? null,

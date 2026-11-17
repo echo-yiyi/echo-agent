@@ -74,7 +74,7 @@ flowchart TD
 | `user` | 人类、steer 或 harness 放入的输入 | provider `user`，剥掉 `at/source/inputId` |
 | `assistant` | provider 的权威定稿、stop reason、usage 与 model 来源 | provider `assistant`，剥掉账本字段；空 content 隐形 |
 | `toolResult` | 某个工具调用的结果及本地 metadata | provider `user` 中的 `tool_result`；metadata 不出门 |
-| `environment` | 后台任务、定时器、webhook 等外部事实 | provider `user`，包在 `<environment source="…">` 标签里（正文里冒充闭合标签的字样中和，见 prompt.md §7）；`at/ref/replyTo` 不出门 |
+| `environment` | 后台任务、定时器、webhook 等外部事实 | provider `user`，包在 `<environment source="…">` 标签里（正文里冒充闭合标签的字样中和，见 prompt.md §7）；`at/ref/replyTo/startedBy` 不出门（`startedBy` 是后台任务的回执与收尾挂回起它的那次工具调用，2026-11-17） |
 
 形状定义与投影见 [`AgentMessage`](../../packages/core/src/messages.ts#symbol=AgentMessage) 和 [`defaultConvertToLlm`](../../packages/core/src/messages.ts#symbol=defaultConvertToLlm)。自定义 role 缺省只进入 transcript 与 session，不送模型；这是忘记实现 projection 时的安全缺省。
 

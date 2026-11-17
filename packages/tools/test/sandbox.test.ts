@@ -29,7 +29,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-const ctx = (workspace: string): ToolExecutionContext => ({ toolCallId: "t1", workspace, sessionId: null, iteration: 0 });
+const ctx = (workspace: string): ToolExecutionContext => ({ runId: "r1", turnId: "t1", toolCallId: "t1", workspace, sessionId: null, iteration: 0 });
 const SANDBOX = detectSandbox();
 const realSandbox = SANDBOX.name !== "unavailable";
 const unavailable: ShellBackend = { name: "unavailable", sandboxed: true, argv: () => ({ ok: false, reason: "no sandbox here (test)" }) };

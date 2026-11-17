@@ -12,7 +12,7 @@
 // 反向边界（不写清以后必混）：`inbox` 是**外部驱动 agent**（事情发生了 → 告诉它）；
 // 这里是**agent 驱动外部**（agent 起了东西 → 得盯着、得收）。方向相反，不共用概念。
 
-import type { AgentMessage } from "../messages.ts";
+import type { AgentMessage, ToolCallRef } from "../messages.ts";
 import type { ResourceChange } from "../events.ts";
 import type { Diagnostic } from "../errors.ts";
 import type { OutputBuffer } from "./buffer.ts";
@@ -36,6 +36,12 @@ export type BackgroundTask = {
    * 这个 run 起的后台任务一起停（2026-11-05）；正常收尾不停——后台任务本来就是要比 run 活得久的。
    */
   readonly runId: string | null;
+  /**
+   * 起它的那次工具调用（2026-11-17）：起任务的工具给了才有（`BackgroundSpec.startedBy`）。与 `runId` 分开记——
+   * `runId` 管 `abort()` 停哪些任务，是 admission 的 run；这一对指向那次工具调用本身，子循环里起的就是子循环的 run。
+   * 结束通知与回执（环境消息）带上同一对值。
+   */
+  readonly startedBy: ToolCallRef | null;
   /** 终态吸收：只有 running 能转移。 */
   status: BackgroundStatus;
   /** 进入终态的时刻；running 时为 null。淘汰按它排序。 */
@@ -74,6 +80,8 @@ export type BackgroundRunContext = {
 export type BackgroundSpec = {
   readonly kind: string;
   readonly label: string;
+  /** 起它的那次工具调用（2026-11-17）：工具里起任务时填 `{ runId: ctx.runId, toolCallId: ctx.toolCallId }`。 */
+  readonly startedBy?: ToolCallRef;
   /** 真正干活的那段——**产品提供**。正常返回 = completed；抛出 = failed。 */
   run(ctx: BackgroundRunContext): Promise<void>;
   /**

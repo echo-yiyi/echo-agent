@@ -8,7 +8,7 @@ import { afterEach, expect, test } from "bun:test";
 import type { ModelTool, ToolExecutionContext } from "@echo-agent/core";
 import { htmlToText, isPrivateAddress, makeWebTools, type WebDeps } from "../src/web.ts";
 
-const ctx = (): ToolExecutionContext => ({ toolCallId: "t1", workspace: "/", sessionId: null, iteration: 0 });
+const ctx = (): ToolExecutionContext => ({ runId: "r1", turnId: "t1", toolCallId: "t1", workspace: "/", sessionId: null, iteration: 0 });
 /** 正文：去掉打头那一句「外部内容」说明（它有自己的判据，见文件末尾）。 */
 const body = (content: string): string => (content.startsWith("[External content from ") ? content.slice(content.indexOf("\n") + 1) : content);
 const fetchTool = (deps: WebDeps = {}): ModelTool<{ url: string; max_chars?: number }> =>

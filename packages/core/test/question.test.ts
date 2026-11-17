@@ -113,7 +113,7 @@ test("answerQuestion 验形：空回答 / 坏 shape 抛 TypeError；工具验选
   await expect(agent.answerQuestion({ questionId: "", selected: ["a"] })).rejects.toThrow(TypeError);
 
   const tool = makeAskUserTool({ ask: async () => ({ kind: "answered", selected: ["x"], text: "and why" }) });
-  const ctx = { toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
+  const ctx = { runId: "r1", turnId: "t1", toolCallId: "t", workspace: "/", sessionId: null, iteration: 0 };
   expect((await tool.execute({ question: "q", options: Array.from({ length: 9 }, (_, i) => ({ label: `o${i}` })) }, ctx)).content).toContain("at most 8");
   expect((await tool.execute({ question: "q", options: [{ label: "a" }, { label: "a" }] }, ctx)).content).toContain("duplicate");
   expect((await tool.execute({ question: "q", options: [{ label: " " }] }, ctx)).isError).toBe(true);

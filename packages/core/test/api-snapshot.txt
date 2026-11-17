@@ -7,7 +7,7 @@
 # 按 exports 入口分组，入口内按**声明来源模块**分组——划根入口与子路径读的就是这一层。
 
 == 入口 "." → src/index.ts ==
-符号 380（value 135 · type 228 · both 17）
+符号 381（value 135 · type 229 · both 17）
 
 -- src/admission/model-snapshot.ts (2) --
 both   ModelSnapshotError
@@ -261,7 +261,7 @@ type   MemorySettleResult
 -- src/memory/scope.ts (1) --
 type   MemoryScopeTable
 
--- src/messages.ts (29) --
+-- src/messages.ts (30) --
 type   AgentMessage
 value  assistantMessage
 type   AssistantMessage
@@ -283,6 +283,7 @@ type   StopReason
 type   TextBlock
 value  textFromMessage
 type   ThinkingBlock
+type   ToolCallRef
 value  toolResultMessage
 type   ToolResultMessage
 type   ToolSchema

@@ -132,7 +132,18 @@ export type EnvironmentMessage = {
    * 靠它从自己的 inbox 里认出那封回信（`Agent.watchInbox`）。可选：绝大多数环境消息不是回信。
    */
   replyTo?: string;
+  /**
+   * 这条消息报告的那件事是哪次工具调用起的（2026-11-17）：后台任务的回执与收尾通知带上它。
+   * 与 `ref` 一样**不出门**，给 UI、观测与宿主把这条消息挂回发起它的那次执行。
+   */
+  startedBy?: ToolCallRef;
 };
+
+/**
+ * 一次工具调用在哪（2026-11-17）：它所在的 run 与它的 `toolCallId`，与观测里那个 run 的记录对得上。
+ * 子循环（子 agent、提取）里的调用，`runId` 是子循环自己的 run。
+ */
+export type ToolCallRef = Readonly<{ runId: string; toolCallId: string }>;
 
 /** 内核认识的四种，闭合。 */
 export type Message = UserMessage | AssistantMessage | ToolResultMessage | EnvironmentMessage;
@@ -325,7 +336,7 @@ function projectOne(m: AgentMessage): ProviderMessage | null {
 
     case "environment":
       // 模型只认三种角色，所以它出门时变成一条 user 消息——**包在来源标签里**（`markEnvironment`）。
-      // 剥壳：at、ref、replyTo 不出门（那些是给 UI 与账本的）；source 只以标签属性的形式出门。
+      // 剥壳：at、ref、replyTo、startedBy 不出门（那些是给 UI 与账本的）；source 只以标签属性的形式出门。
       return { role: "user", content: markEnvironment(m.source, m.content) };
 
     default:
