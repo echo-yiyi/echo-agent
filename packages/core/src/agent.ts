@@ -815,10 +815,12 @@ export class Agent {
    */
   private extractCursor = 0;
   /**
-   * 提取连续几次一条没写成就停了（`ExtractPass` 的 `unfinished`）。到 `DEFAULT_EXTRACT_UNFINISHED_LIMIT` 就放弃那段；推一次游标就归零。
-   * 只在内存：重启归零，最坏是续会话后那段再重试这么多次。
+   * 提取连续几次没看完那段（`ExtractPass` 的 `failed` 与 `partial`，2026-11-17 起部分完成也算）。到 `DEFAULT_EXTRACT_UNFINISHED_LIMIT`
+   * 就放弃那段；推一次游标就归零。只在内存：重启归零，最坏是续会话后那段再重试这么多次。
    */
   private extractUnfinished = 0;
+  /** 这一串没看完的提取一共写成了几条：放弃那段时据它记成「部分完成」（写过）还是「放弃」（一条没写成）。与上面同生同灭。 */
+  private extractUnfinishedWritten = 0;
   /**
    * 内存 transcript 前面还有几条**已落盘、却不在内存里**的消息：`reset`（`/clear`）只清内存、不写会话，
    * 续会话时那些会一起回来。`memory_reviewed` 记的是落盘消息的下标 = 内存下标 + 这个数。续会话归零。
@@ -3241,7 +3243,7 @@ export class Agent {
       if (!force && humanTurns(fresh) < memory.extract.everyTurns) return skipped("too_few_turns");
       // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
       const span = projectRange(messages, compaction, from, end);
-      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0 };
+      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0, retry: this.extractUnfinished > 0 };
       // 与整理排成一条：等的这段里被中止（stop / 丢锁）或 transcript 换了代，就不跑。
       // 后两道是 `runExtract` 自己开头那道判断（它在任何副作用之前返回 not_run），在这里先判只为记下原因
       const pass = await this.oneBackgroundWriter(async (): Promise<ExtractPass> => {
@@ -3266,28 +3268,33 @@ export class Agent {
         });
       };
       let reviewed: { outcome: ExtractOutcome; written: number; reason?: string };
-      if (pass.kind === "failed") {
-        // 一条没写成就停了：下次重看这段。连续几次都这样就放弃——卡住的那段本身已攒够轮数，不放弃的话
-        // 之后每条 reply 都重跑一次、范围一次比一次大（`DEFAULT_EXTRACT_UNFINISHED_LIMIT`）
+      if (pass.kind === "completed") {
+        finished("completed", pass.written);
+        // 这段之前没看完的几次写成的也算这段的（2026-11-17）：会话记录里的 written 是这一段一共写成几条
+        reviewed = { outcome: "completed", written: pass.written + this.extractUnfinishedWritten };
+      } else {
+        // **没看完：游标不动、下次重看这段**——一条没写成就停了（failed），或写了几条就停了（partial，2026-11-17 起也算：
+        // 此前写成过就推游标，没写到的那部分再没人看）。写过的那几条在下次的「Stored now」里，提示词也说清上次看到一半
+        // （`ExtractRange.retry`），模型接着补、不重写。连续几次都没看完就放弃这段、游标照推——卡住的那段本身已攒够轮数，
+        // 不放弃的话之后每条 reply 都重跑一次、范围一次比一次大（`DEFAULT_EXTRACT_UNFINISHED_LIMIT`）
+        const written = pass.kind === "partial" ? pass.written : 0;
         this.extractUnfinished += 1;
+        this.extractUnfinishedWritten += written;
         if (this.extractUnfinished < DEFAULT_EXTRACT_UNFINISHED_LIMIT) {
-          finished("failed", 0, pass.reason);
+          finished(pass.kind, written, pass.reason);
           return;
         }
         this.reportDiagnostic({
           code: "memory_extract_gave_up",
-          message: `记忆提取连续 ${this.extractUnfinished} 次没写成就停了：这段对话不再重看，下次从之后的内容看起`,
+          message: `记忆提取连续 ${this.extractUnfinished} 次没看完这段对话：不再重看，下次从之后的内容看起`,
         });
-        finished("abandoned", 0, pass.reason);
-        reviewed = { outcome: "abandoned", written: 0, reason: pass.reason };
-      } else if (pass.kind === "partial") {
-        finished("partial", pass.written, pass.reason);
-        reviewed = { outcome: "partial", written: pass.written, reason: pass.reason };
-      } else {
-        finished("completed", pass.written);
-        reviewed = { outcome: "completed", written: pass.written };
+        finished("abandoned", written, pass.reason);
+        // 放弃时记成哪种看这一串写没写过：写过是部分完成，一条没写成是放弃
+        const total = this.extractUnfinishedWritten;
+        reviewed = total > 0 ? { outcome: "partial", written: total, reason: pass.reason } : { outcome: "abandoned", written: 0, reason: pass.reason };
       }
       this.extractUnfinished = 0;
+      this.extractUnfinishedWritten = 0;
       this.extractCursor = Math.max(this.extractCursor, end);
       await this.recordReviewed(end + offset, reviewed);
     });
@@ -4379,6 +4386,7 @@ export class Agent {
         this.foregroundReads.clear(); // 前台「看过」的那些随对话一起没了：账不能替一段已经清掉的对话作保
         this.extractCursor = 0;
         this.extractUnfinished = 0;
+        this.extractUnfinishedWritten = 0;
         this.extractEpoch += 1;
         this.persistedOffset += this._state.messages.length; // 这些还在会话里（reset 不写会话），之后的落盘下标要越过它们
         this._state.messages = [];
@@ -4401,6 +4409,7 @@ export class Agent {
         // 游标先设到末尾（这个事件不带复盘下标）；经会话恢复时 `start()` 紧接着按盘上的 `memory_reviewed` 改回去
         this.extractCursor = input.messages.length;
         this.extractUnfinished = 0;
+        this.extractUnfinishedWritten = 0;
         this.extractEpoch += 1;
         this.persistedOffset = 0;
         this._state.messages = [...input.messages];

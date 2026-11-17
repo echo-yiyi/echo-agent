@@ -583,11 +583,16 @@ describe("Dream 门控", () => {
   test("提取 prompt：第一次复盘（从对话开头看起）不说「上次复盘到对话中途」；之后才说", () => {
     const table = memoryScopeTableOf(memories(new InMemoryDir()));
     const mods = listMemories(memories(new InMemoryDir()));
-    const first = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: true }, "");
+    const first = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: true, retry: false }, "");
     expect(first).not.toContain("partway");
     expect(first).toContain("not been reviewed");
-    const later = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: false }, "");
+    expect(first).not.toContain("stopped before it finished");
+    const later = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: false, retry: false }, "");
     expect(later).toContain("last reviewed partway through this conversation");
+    // 上一次没看完那段（2026-11-17）：说清写过的已在 Stored now 里，接着补、别重写
+    const retry = extractPromptText(mods, table, { messages: 6, firstUserText: "hi", fromStart: false, retry: true }, "");
+    expect(retry).toContain("An earlier review of this part stopped before it finished");
+    expect(retry).toContain("continue from there instead of writing it again");
   });
 
   test("dream 那把工具够不到上两层(不是靠 prompt 里说一句,是门)", async () => {
@@ -1261,7 +1266,7 @@ describe("判据跟着模块走", () => {
     expect(system).not.toContain("next month");
     expect(system).not.toContain("repository already states");
     expect(system).toContain("moments you shared");
-    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), { messages: 2, firstUserText: "hi", fromStart: false }, "");
+    const extract = extractPromptText(listMemories(custom), memoryScopeTableOf(custom), { messages: 2, firstUserText: "hi", fromStart: false, retry: false }, "");
     expect(extract).not.toContain("next month");
     expect(extract).not.toContain("true only inside this conversation");
     expect(extract).toContain("moments you shared");

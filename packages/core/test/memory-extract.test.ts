@@ -577,7 +577,7 @@ function extractStarts(extracts: readonly Context[]): Context[] {
   return extracts.filter((c) => JSON.stringify(c.messages.at(-1)).includes(EXTRACT_PROMPT_OPENING));
 }
 
-test("撞上轮数上限、但写成过一条：这段算看过、游标照推——下一次从新的一批看起，不把那段重看一遍（此前游标不动，之后每条 reply 都重看）", async () => {
+test("撞上轮数上限、但写成过一条：游标不动，下一次连同那段一起重看、指令说清上次停在半路（2026-11-17 改：此前写成过就算看过、游标照推，没写到的那部分再没人看）", async () => {
   const view = (id: string) => toolTurn(id, "memory", { command: "view", path: "session/memory/" });
   const extract = scriptedStreamFn([
     toolTurn("w1", "memory", { command: "create", path: "session/memory/a.md", file_text: "---\ndescription: 一条\n---\n\n甲" }),
@@ -597,8 +597,9 @@ test("撞上轮数上限、但写成过一条：这段算看过、游标照推�
 
   const starts = extractStarts(extracts);
   expect(starts).toHaveLength(2);
-  expect(instructionOf(starts[1]!)).toContain(`«${NEXT_THREE[0]}»`);
-  expect(instructionOf(starts[1]!)).toContain("the last 6 messages");
+  expect(instructionOf(starts[1]!)).toContain(`«${THREE[0]}»`);
+  expect(instructionOf(starts[1]!)).toContain("review it from the start"); // 游标还在开头：部分完成那段没算看过
+  expect(instructionOf(starts[1]!)).toContain("An earlier review of this part stopped before it finished");
 });
 
 test("一条没写成就撞上限：下一次重看那段；连续两次都这样就放弃那段（报 memory_extract_gave_up），再下一次从之后的内容看起", async () => {
@@ -730,15 +731,16 @@ test("提取子循环不做自动压缩：主对话在最后那条回答之后�
   expect(compactionHooks).toEqual(["postCompact"]);
 });
 
-test("三种结局分得清（2026-11-16）：会话里的游标记录带上正常结束 / 部分完成 / 失败后放弃、写了几条、停下的原因码；观测每次跑了的提取都记一条（含失败待重试）", async () => {
+test("三种结局分得清（2026-11-16，2026-11-17 部分完成改成不推游标）：会话里的游标记录带上正常结束 / 部分完成 / 失败后放弃、写了几条、停下的原因码；观测每次跑了的提取都记一条（含没看完待重看）", async () => {
   const create = (id: string, path: string) => toolTurn(id, "memory", { command: "create", path, file_text: "---\ndescription: 一条\n---\n\n内容" });
   const view = (id: string) => toolTurn(id, "memory", { command: "view", path: "session/memory/" });
   // 每次提取一份剧本：最后一条消息是那条提取指令，就是新的一次开始
   const attempts = [
     [create("w1", "session/memory/a.md"), textTurn("记好了。")], // 正常结束，写了 1 条
-    [create("w2", "session/memory/b.md"), view("v1"), view("v2"), view("v3"), view("v4")], // 写了 1 条后撞轮数上限：部分完成
-    [view("x1"), view("x2"), view("x3"), view("x4"), view("x5")], // 一条没写成就撞上限：失败，游标不动
-    [view("y1"), view("y2"), view("y3"), view("y4"), view("y5")], // 又失败：连续两次，放弃
+    [create("w2", "session/memory/b.md"), view("v1"), view("v2"), view("v3"), view("v4")], // 写了 1 条后撞轮数上限：部分完成，游标不动
+    [view("x1"), view("x2"), view("x3"), view("x4"), view("x5")], // 重看那段，一条没写成：连续两次没看完，放弃——这一串写过，记部分完成
+    [view("y1"), view("y2"), view("y3"), view("y4"), view("y5")], // 下一段一条没写成：游标不动
+    [view("z1"), view("z2"), view("z3"), view("z4"), view("z5")], // 又没写成：放弃——这一串没写过，记失败后放弃
   ];
   let current: StreamFn | undefined;
   let next = 0;
@@ -757,10 +759,12 @@ test("三种结局分得清（2026-11-16）：会话里的游标记录带上正�
   await idleExtract(agent);
   await say(agent, ...NEXT_THREE);
   await idleExtract(agent);
-  await say(agent, "第七件事：周五不发版", "第八件事：先写测试再改代码", "第九件事：评审意见当天回");
-  await idleExtract(agent); // 失败：游标不动
-  await say(agent, "第十件事：发版说明写中文");
-  await idleExtract(agent); // 重看那段，又失败：放弃
+  await say(agent, "第七件事：周五不发版");
+  await idleExtract(agent); // 重看部分完成的那段，没写成：放弃
+  await say(agent, "第八件事：先写测试再改代码", "第九件事：评审意见当天回", "第十件事：发版说明写中文");
+  await idleExtract(agent); // 没写成：游标不动
+  await say(agent, "第十一件事：回滚先发公告");
+  await idleExtract(agent); // 重看那段，又没写成：放弃
   await agent.stop();
 
   const reviewed: Record<string, unknown>[] = [];
@@ -776,7 +780,48 @@ test("三种结局分得清（2026-11-16）：会话里的游标记录带上正�
   expect(facts.filter((f) => f.kind === "extract_finished").map((f) => [f.outcome, f.written, f.reasonCode])).toEqual([
     ["completed", 1, undefined],
     ["partial", 1, "max_iterations"],
+    ["abandoned", 0, "max_iterations"],
     ["failed", 0, "max_iterations"],
     ["abandoned", 0, "max_iterations"],
   ]);
+});
+
+test("部分完成不推游标（2026-11-17）：写了一部分就停的那段下次接着看——指令从那段第一句看起、说清上次停在半路；补完才推游标，记下这段一共写成几条", async () => {
+  const create = (id: string, path: string) => toolTurn(id, "memory", { command: "create", path, file_text: "---\ndescription: 一条\n---\n\n内容" });
+  const view = (id: string) => toolTurn(id, "memory", { command: "view", path: "session/memory/" });
+  const attempts = [
+    [create("w1", "session/memory/a.md"), view("v1"), view("v2"), view("v3"), view("v4")], // 写了 1 条后撞轮数上限
+    [create("w2", "session/memory/b.md"), textTurn("补完了。")], // 接着补完
+  ];
+  const instructions: string[] = [];
+  let current: StreamFn | undefined;
+  let next = 0;
+  const extract: StreamFn = (model, context, options) => {
+    if (JSON.stringify(context.messages.at(-1)).includes(EXTRACT_PROMPT_OPENING)) {
+      instructions.push(instructionOf(context));
+      current = scriptedStreamFn(attempts[next++]!);
+    }
+    return current!(model, context, options);
+  };
+  const { fn } = recording({ extract });
+  const store = new InMemoryDir();
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir()), sessionService: new SessionService(store), sessionId: "s1" });
+  await agent.start();
+
+  await say(agent, ...THREE);
+  await idleExtract(agent); // 部分完成：游标不动
+  await say(agent, "第四件事：发版前先看 CI");
+  await idleExtract(agent); // 重看那段，补完
+  await agent.stop();
+
+  expect(instructions).toHaveLength(2);
+  expect(instructions[0]).not.toContain("stopped before it finished");
+  expect(instructions[1]).toContain(`«${THREE[0]}»`); // 从部分完成那段的第一句看起，不是从第四件事
+  expect(instructions[1]).toContain("An earlier review of this part stopped before it finished");
+  const reviewed: Record<string, unknown>[] = [];
+  for (const name of (await store.list("entries/")).sort()) {
+    const entry = JSON.parse((await store.read(name))!) as Record<string, unknown>;
+    if (entry.kind === "memory_reviewed") reviewed.push({ outcome: entry.outcome, written: entry.written });
+  }
+  expect(reviewed).toEqual([{ outcome: "completed", written: 2 }]);
 });

@@ -1,6 +1,6 @@
 # 记忆提取的三种结局：正常结束、部分完成、失败后放弃
 
-> 状态:implemented · 提出 2026-11-16（使用者提出要根治：提取要区分正常结束、部分完成、失败后放弃）· 拍板 2026-11-16（用户：「按你的建议做」——三件：会话记录加结局字段、部分完成先只记不重试、先只做提取）· 落地 `packages/core/src/session/types.ts` / `service.ts`、`packages/core/src/memory/extract.ts` / `observe.ts`、`packages/core/src/agent.ts`、`packages/base/src/observe/lexicon.ts` / `page.html`，判据见验收 · 承接 [没跑完时看写成了没有](2026-11-12-memory-extraction-unfinished.md)：游标怎么推一条不改，只把结局分清、记下来
+> 状态:implemented · 提出 2026-11-16（使用者提出要根治：提取要区分正常结束、部分完成、失败后放弃）· 拍板 2026-11-16（用户：「按你的建议做」——三件：会话记录加结局字段、部分完成先只记不重试、先只做提取）· 落地 `packages/core/src/session/types.ts` / `service.ts`、`packages/core/src/memory/extract.ts` / `observe.ts`、`packages/core/src/agent.ts`、`packages/base/src/observe/lexicon.ts` / `page.html`，判据见验收 · 承接 [没跑完时看写成了没有](2026-11-12-memory-extraction-unfinished.md)：游标怎么推一条不改，只把结局分清、记下来 · **2026-11-17 部分完成改成不推游标、下次重看**，见 [部分完成也重看](2026-11-17-memory-extract-partial-retry.md)
 
 **给谁看**：改记忆提取、会话 entry 或观测面板的人。假设已知 [记忆](../../design/memory.md) 里提取游标那一段。
 
@@ -21,7 +21,7 @@
 
 ## Non-Goals
 
-- 部分完成不重试。第二次能在「此刻存着的」里看到第一次写进去的东西、接着补完——但这改的是 11-12 的规矩，先看记下来的数据（部分完成多常见、多半停在哪）再定。
+- ~~部分完成不重试。~~（2026-11-17 改了：部分完成也重看，见 [部分完成也重看](2026-11-17-memory-extract-partial-retry.md)）第二次能在「此刻存着的」里看到第一次写进去的东西、接着补完——但这改的是 11-12 的规矩，先看记下来的数据（部分完成多常见、多半停在哪）再定。
 - 整理（Dream）撞上限的「做了一部分」不在这次。
 - 不回填旧会话里的记录。
 
@@ -29,6 +29,6 @@
 
 去掉对应改动，前两条是红的：
 
-- [三种结局分得清](../../../packages/core/test/memory-extract.test.ts#test=三种结局分得清2026-11-16会话里的游标记录带上正常结束-部分完成-失败后放弃写了几条停下的原因码观测每次跑了的提取都记一条含失败待重试)：同一段会话里依次正常结束（写 1 条）、部分完成（写 1 条后撞轮数上限）、失败、再失败放弃；会话里三条记录、观测里四条结局逐一对上。
+- [三种结局分得清](../../../packages/core/test/memory-extract.test.ts#test=三种结局分得清2026-11-162026-11-17-部分完成改成不推游标会话里的游标记录带上正常结束-部分完成-失败后放弃写了几条停下的原因码观测每次跑了的提取都记一条含没看完待重看)：同一段会话里依次正常结束（写 1 条）、部分完成（写 1 条后撞轮数上限）、失败、再失败放弃；会话里三条记录、观测里四条结局逐一对上。
 - [旧记录与验形](../../../packages/core/test/session-service.test.ts#test=memoryreviewed-的结局三项2026-11-16旧记录没有也照常恢复结局不知道有就得认得出outcome-乱写written-不是非负整数都判红)
 - 面板术语表登记了新记录名（`observe-serve.test.ts` 的术语表覆盖那条）。

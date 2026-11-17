@@ -1,6 +1,6 @@
 # 记忆提取没跑完：写成过就算看过，连续没写成就放弃那段
 
-> 状态:implemented · 提出 2026-11-11（用户点出：游标只在提取跑完后推进，耗尽 5 轮怎么办）· 拍板 2026-11-12（用户：「可以按照他的来做」——照参照物的处理） · 后续 2026-11-16：游标推过去的那段记下结局（正常结束 / 部分完成 / 失败后放弃），见 [提取的三种结局](2026-11-16-memory-extract-outcomes.md)· 落地 `packages/core/src/memory/extract.ts` / `agent.ts`，判据 `packages/core/test/memory-extract.test.ts` · 修改 [从主对话分叉](2026-11-03-memory-extraction-fork.md) 与 [降频](2026-10-30-memory-extraction-gate.md) 里「游标只在正常跑完时推进；出错、轮数用完都不动」那一条 · **后续** 2026-11-13 [core review 第一批修复](2026-11-13-core-review-fixes-batch-1.md)：第 3 条的「被中止」收窄到 signal 真的中止了（stop / 丢锁）；送模前被 `contextBeforeBuild` hook 拦下的提取同样以 aborted 收场，但照 `unfinished` 算、报诊断
+> 状态:implemented · 提出 2026-11-11（用户点出：游标只在提取跑完后推进，耗尽 5 轮怎么办）· 拍板 2026-11-12（用户：「可以按照他的来做」——照参照物的处理） · 后续 2026-11-16：游标推过去的那段记下结局（正常结束 / 部分完成 / 失败后放弃），见 [提取的三种结局](2026-11-16-memory-extract-outcomes.md) · **2026-11-17 推翻「写成过就算看过」**：部分完成也不推游标、下次重看，见 [部分完成也重看](2026-11-17-memory-extract-partial-retry.md)· 落地 `packages/core/src/memory/extract.ts` / `agent.ts`，判据 `packages/core/test/memory-extract.test.ts` · 修改 [从主对话分叉](2026-11-03-memory-extraction-fork.md) 与 [降频](2026-10-30-memory-extraction-gate.md) 里「游标只在正常跑完时推进；出错、轮数用完都不动」那一条 · **后续** 2026-11-13 [core review 第一批修复](2026-11-13-core-review-fixes-batch-1.md)：第 3 条的「被中止」收窄到 signal 真的中止了（stop / 丢锁）；送模前被 `contextBeforeBuild` hook 拦下的提取同样以 aborted 收场，但照 `unfinished` 算、报诊断
 
 **给谁看**：改记忆提取的游标、失败处理或轮数上限的人。假设已知 [从主对话分叉](2026-11-03-memory-extraction-fork.md)（攒满三轮、游标落盘）与 [记忆设计](../../design/memory.md) §5。
 
@@ -33,7 +33,7 @@
 
 ## 验收
 
-- 写成过就算看过：[撞上限但写成过一条](../../../packages/core/test/memory-extract.test.ts#test=撞上轮数上限但写成过一条这段算看过游标照推下一次从新的一批看起不把那段重看一遍此前游标不动之后每条-reply-都重看)
+- 写成过就算看过（2026-11-17 已推翻，同一条测试现在判的是重看）：[撞上限但写成过一条](../../../packages/core/test/memory-extract.test.ts#test=撞上轮数上限但写成过一条游标不动下一次连同那段一起重看指令说清上次停在半路2026-11-17-改此前写成过就算看过游标照推没写到的那部分再没人看)
 - 没写成重看一次、连续两次放弃：[连续两次放弃](../../../packages/core/test/memory-extract.test.ts#test=一条没写成就撞上限下一次重看那段连续两次都这样就放弃那段报-memoryextractgaveup再下一次从之后的内容看起)
 - 一次出错照旧重看：[失败重看](../../../packages/core/test/memory-extract.test.ts#test=提取没跑完模型出错游标不动下一轮就把那段连同新的一轮重看一遍攒着的已经够三轮)
 

@@ -109,9 +109,11 @@ export const DEFAULT_EXTRACT_SETTINGS: ExtractSettings = Object.freeze({
 /**
  * 一次提取的结局，决定游标推不推（2026-11-12），推的话记成哪种（2026-11-16，会话里 `memory_reviewed.outcome`）：
  * - `completed`：模型自己收尾（写没写都算）。游标推进，记「正常结束」。
- * - `partial`：中途停了（轮数用完、模型出错、被 hook 拦下），但已写成至少一条（那几条是真的落了盘）。游标推进，记「部分完成」
- *   ——没写到的那部分不再看；先记下来看多常见，要不要重试另议。
- * - `failed`：一条没写成就停了。游标不动、下次重看；连续 `DEFAULT_EXTRACT_UNFINISHED_LIMIT` 次就放弃那段，记「失败后放弃」。
+ * - `partial`：中途停了（轮数用完、模型出错、被 hook 拦下），但已写成至少一条（那几条是真的落了盘）。**游标不动、下次重看**
+ *   （2026-11-17；此前写成过就推游标，没写到的那部分再没人看）。
+ * - `failed`：一条没写成就停了。游标不动、下次重看。
+ * - `partial` 与 `failed` 同算「没看完」：连续 `DEFAULT_EXTRACT_UNFINISHED_LIMIT` 次就放弃那段、游标照推，这一串里写成过记「部分完成」，
+ *   一条没写成记「失败后放弃」。
  * - `not_run`：没起来，或者被中止（stop / 丢锁）。游标不动，也不算一次失败——丢锁之后一个字都不许再写。
  *
  * `reason` 是中途停下的原因码：循环的错误码（如 `max_iterations`），被 hook 拦下是 `hook_blocked`。`runId` 是那次提取子循环。
@@ -123,7 +125,8 @@ export type ExtractPass =
   | Readonly<{ kind: "not_run" }>;
 
 /**
- * 提取**连续**几次一条没写成就停了（`ExtractPass` 的 `failed`），就放弃那段、游标照推（2026-11-12），记成 `abandoned`。
+ * 提取**连续**几次没看完那段（`ExtractPass` 的 `failed`，2026-11-17 起还有 `partial`），就放弃那段、游标照推（2026-11-12），
+ * 这一串里写成过记成 `partial`，一条没写成记成 `abandoned`。
  *
  * 为什么要放弃：卡住的那段本身已经攒够轮数，游标不动的话之后每条 reply 都会再跑一次，要看的范围一次比一次大——
  * 越大越容易再撞轮数上限，自己越卡越死。为什么不第一次就放弃：模型一时出错、或这一次恰好没写完，重看一次多半就过了。
@@ -135,9 +138,10 @@ export const EXTRACT_PROMPT_OPENING = "A reply just finished.";
 
 /**
  * 这次要看的那一段：在主对话末尾占几条消息，从哪句用户原话开始（没有用户原话就是 null），
- * 以及是不是从这场对话的开头看起（游标为 0：这场对话还没复盘过）。
+ * 是不是从这场对话的开头看起（游标为 0：这场对话还没复盘过），以及这一段上一次是不是没看完（`retry`，2026-11-17：
+ * 上次停在半路，写过的几条已经在「Stored now」里，这次接着补）。
  */
-export type ExtractRange = Readonly<{ messages: number; firstUserText: string | null; fromStart: boolean }>;
+export type ExtractRange = Readonly<{ messages: number; firstUserText: string | null; fromStart: boolean; retry: boolean }>;
 
 /** 引用用户原话时最多带多少字：够模型在上文里认出那一句，又不把长消息整段重抄一遍。 */
 const QUOTE_CHARS = 120;
@@ -168,8 +172,11 @@ export function defaultExtractPrompt(memories: readonly AnyMemory[], table: Memo
   const scope = range.fromStart
     ? `Memory has not been reviewed in this conversation yet; review it from the start — ${last}.`
     : `Memory was last reviewed partway through this conversation; review only what came after that — ${last}.`;
+  const retry = range.retry
+    ? " An earlier review of this part stopped before it finished; anything it wrote is already under \"Stored now\" — continue from there instead of writing it again."
+    : "";
   return [
-    `${EXTRACT_PROMPT_OPENING} Pause the task above: you are now reviewing memory, not continuing the work. ${scope}${quote} Decide whether anything in it is worth keeping after this session ends.`,
+    `${EXTRACT_PROMPT_OPENING} Pause the task above: you are now reviewing memory, not continuing the work. ${scope}${quote}${retry} Decide whether anything in it is worth keeping after this session ends.`,
     "Only the memory tool works here. Calls to any other tool are refused — do not try them.",
     "Work in this order:\n" +
       "1. Check what is already stored — it is listed under \"Stored now\" below (resident modules in full, indexed modules by their index). Most of what feels new is already there in some form.\n" +
