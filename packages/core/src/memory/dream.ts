@@ -73,6 +73,13 @@ export type DreamPromptInput = Readonly<{
 /** 写整理指令的函数（`MemoryDreamOptions.prompt`）。 */
 export type DreamPrompt = (input: DreamPromptInput) => string;
 
+/**
+ * 一次整理最多能把一个常驻模块压到整理开始时长度的几成（2026-11-17）：只管**整理开始时没超上限**的常驻模块——
+ * 超了的本来就得压。真模型对比里，丢事实的整理把常驻模块压到原来的 26%–42%，保住全部事实的紧凑重写落在 66%–67%；
+ * 一半把两类分开。措辞拦不住（三种写法在 flash 上都不稳），所以落在整理那把工具的写入上（`MemoryCaller.floor`）。
+ */
+export const DREAM_RESIDENT_FLOOR = 0.5;
+
 /** 锁的崩溃恢复:整理 agent 死了没 markDreamed,1 小时后锁自动过期(CC 同款)。 */
 export const DREAM_LOCK_STALE_MS = 3600_000;
 

@@ -29,6 +29,7 @@ import {
   dreamStatePath,
   readDreamState,
   writeDreamState,
+  DREAM_RESIDENT_FLOOR,
   type DreamGates,
   type DreamPrompt,
   type DreamState,
@@ -142,6 +143,11 @@ export type MemoryReads = Map<string, string>;
 export type MemoryCaller = {
   readonly reads: MemoryReads;
   readonly observe?: CapabilityFactSink<MemoryFact>;
+  /**
+   * 这把工具写这些文件时不许低于的长度（2026-11-17，整理那把用）：路径 → 整理开始时的长度与下限。
+   * 写之后的全文短于下限就拒；删整个文件也拒。见 `DREAM_RESIDENT_FLOOR`。
+   */
+  readonly floor?: ReadonlyMap<string, Readonly<{ from: number; min: number }>>;
 };
 
 /** `dir` 必给（2026-08-17 起）：能力层不自带落盘默认件，理由见下方 doc comment。评测/单测传 InMemoryDir。 */
@@ -378,6 +384,8 @@ export async function memoryDelete(ctx: AgentMemories, rawPath: string, caller?:
   }
   const deleteDenied = opsGate(frame.owner, "delete");
   if (deleteDenied !== null) return finishMemoryMutation(ctx, caller, frame, rejected("op_not_supported", deleteDenied));
+  const shrunk = belowFloor(caller, path, 0);
+  if (shrunk !== null) return finishMemoryMutation(ctx, caller, frame, rejected("below_floor", shrunk));
   // 删也是「读改写」的一种（存在性检查 + 删 + 重建索引），进与 writeMemory 同一把提交锁
   return commitUnderLock(ctx, caller, frame.owner, path, frame, async () => {
     // 删掉的是你看过的那一版吗：看过之后别人往里写了一笔，删掉就把那一笔一起删了
@@ -858,6 +866,18 @@ export async function dreamTask(
   // 指令先写好再上锁（2026-11-17）：产品给的写法抛错时这一层不该留下一把要等一小时才过期的锁
   const prompt = ctx.dreamPromptFn({ memories: listMemories(ctx), scopes: ctx.binding.table(), scope });
   if (typeof prompt !== "string" || prompt.trim() === "") throw new Error(`整理指令是空的（memory.dream.prompt 返回了 ${JSON.stringify(prompt)}）`);
+  // 整理开始时没超上限的常驻模块：记下长度，这次整理写不到一半以下（`DREAM_RESIDENT_FLOOR`，2026-11-17）
+  const floor = new Map<string, { from: number; min: number }>();
+  for (const m of listMemories(ctx)) {
+    if (m.mode !== "resident" || m.dream !== true) continue;
+    for (const { scope: s, path } of memoryPaths(ctx.binding.table(), m)) {
+      if (s !== scope) continue;
+      const text = await ctx.dir.read(path);
+      if (text !== null && text.length > 0 && text.length <= (m as { budget: number }).budget) {
+        floor.set(path, { from: text.length, min: Math.ceil(text.length * DREAM_RESIDENT_FLOOR) });
+      }
+    }
+  }
   // 上锁也走串行链:它是同一份状态的读改写,和计数并发时会互相盖掉
   await updateDreamState(ctx, scope, (s) => ({ ...s, startedAt: Date.now() }));
   return {
@@ -865,7 +885,7 @@ export async function dreamTask(
     // 整理跑在 `systemPrompt: null` 下：描述与参数说明不指向 system 的记忆段（产品自己给了描述就用它的）
     tools: [
       {
-        ...dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, description: ctx.toolOpts?.description ?? TASK_MEMORY_TOOL_DESCRIPTION, scope, ...(opts?.observe === undefined ? {} : { observe: opts.observe }) })),
+        ...dreamOnlyTool(ctx, createMemoryTool(ctx, { ...ctx.toolOpts, description: ctx.toolOpts?.description ?? TASK_MEMORY_TOOL_DESCRIPTION, scope, floor, ...(opts?.observe === undefined ? {} : { observe: opts.observe }) })),
         parameters: TASK_MEMORY_TOOL_PARAMETERS,
       },
     ],
@@ -1133,6 +1153,8 @@ async function writeMemory(
       return finishMemoryMutation(ctx, caller, frame, failed("check", errText(e)));
     }
     if (!verdict.ok) return finishMemoryMutation(ctx, caller, frame, rejected("budget_exceeded", verdict.reason));
+    const shrunk = belowFloor(caller, path, prepared.content.length);
+    if (shrunk !== null) return finishMemoryMutation(ctx, caller, frame, rejected("below_floor", shrunk));
     // 别的进程在这几毫秒里改过同一个文件 → **拒绝而不是覆盖**:无声吃掉别人一条记忆
     // 是查不出来的丢失,让模型重看一次再改便宜得多。
     let fresh: Awaited<ReturnType<typeof assertFresh>>;
@@ -1153,6 +1175,16 @@ async function writeMemory(
     const written = { content: prepared.content, ...(prepared.basedOn === undefined ? {} : { before: prepared.basedOn }) };
     return finishMemoryMutation(ctx, caller, frame, committed(prepared.content.length, indexOutcome, withNote(okText(path, prepared.content.length), verdict), written));
   });
+}
+
+/** 写之后的长度低于这把工具给这个文件定的下限（`MemoryCaller.floor`）：返回拒因；没定或没低于就是 null。 */
+function belowFloor(caller: MemoryCaller | undefined, path: string, next: number): string | null {
+  const floor = caller?.floor?.get(path);
+  if (floor === undefined || next >= floor.min) return null;
+  return (
+    `This would cut '${path}' from ${floor.from} to ${next} characters. The module was within its limit when this pass started, ` +
+    `so it may shrink to no less than ${floor.min}: merge duplicates and drop only what later entries replaced — keep every other fact.`
+  );
 }
 
 /** 校验放行时给的那句（快写满的提醒，2026-11-17）接在成功回执后面；没有就原样。 */

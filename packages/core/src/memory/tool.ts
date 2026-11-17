@@ -107,6 +107,8 @@ export type CreateMemoryToolOptions = {
    * Agent 留着前台那本的引用，提取从主对话分叉时克隆一份交给提取那把——上文里前台看过的，提取也算看过。
    */
   reads?: MemoryReads;
+  /** 这把工具写这些文件时不许低于的长度（`MemoryCaller.floor`；2026-11-17，整理那把用）。 */
+  floor?: MemoryCaller["floor"];
 };
 
 /** 描述里讲「模块与层在哪」的那一句之后的部分：两种描述共用。 */
@@ -158,7 +160,11 @@ const PARAMETERS = parameters("the Memory section for this session's layers");
 export const TASK_MEMORY_TOOL_PARAMETERS = parameters("the task instructions for the layer");
 
 export function createMemoryTool(memory: AgentMemories, opts?: CreateMemoryToolOptions): ModelTool<MemoryToolParams> {
-  const caller: MemoryCaller = { reads: opts?.reads ?? new Map(), ...(opts?.observe === undefined ? {} : { observe: opts.observe }) };
+  const caller: MemoryCaller = {
+    reads: opts?.reads ?? new Map(),
+    ...(opts?.observe === undefined ? {} : { observe: opts.observe }),
+    ...(opts?.floor === undefined ? {} : { floor: opts.floor }),
+  };
   return {
     kind: "model",
     name: MEMORY_TOOL_NAME,

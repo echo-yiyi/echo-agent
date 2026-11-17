@@ -669,6 +669,37 @@ describe("Dream 门控", () => {
     await expect(dreamTask(empty, "session")).rejects.toThrow("整理指令是空的");
   });
 
+  test("整理兜底(2026-11-17):开始时没超上限的常驻模块,这次整理写不到一半以下、也删不掉;开始时就超了的不设下限;前台那把工具不受限", async () => {
+    const h = memories(new InMemoryDir(), { dream: {} });
+    const start = "x".repeat(1000); // user 上限 1400:没超
+    expect((await call(h, { command: "create", path: "session/user.md", file_text: start })).isError).toBe(false);
+    const task = await dreamTask(h, "session");
+    const dream = task.tools[0]!;
+    const run = (params: Record<string, unknown>) => dream.execute(dream.prepareArguments!(params), ctx());
+    await run({ command: "view", path: "session/user.md" }); // 整理那把也要先看过才能改
+
+    const cut = await run({ command: "create", path: "session/user.md", file_text: "x".repeat(400) });
+    expect(cut.isError).toBe(true);
+    expect(cut.content).toContain("This would cut 'session/user.md' from 1000 to 400 characters");
+    expect(cut.content).toContain("may shrink to no less than 500");
+    expect(cut.content).toContain("keep every other fact");
+    const removed = await run({ command: "delete", path: "session/user.md" });
+    expect([removed.isError, removed.content.includes("from 1000 to 0 characters")]).toEqual([true, true]);
+    expect((await run({ command: "create", path: "session/user.md", file_text: "x".repeat(600) })).isError).toBe(false); // 一半以上:放行
+
+    // 前台那把不受限
+    await call(h, { command: "view", path: "session/user.md" });
+    expect((await call(h, { command: "create", path: "session/user.md", file_text: "y" })).isError).toBe(false);
+
+    // 开始时就超了上限(人手改的):本来就得压,不设下限
+    const over = memories(new InMemoryDir(), { dream: {} });
+    await over.dir.write("session/user.md", "z".repeat(1600));
+    const overTask = await dreamTask(over, "session");
+    const t = overTask.tools[0]!;
+    await t.execute(t.prepareArguments!({ command: "view", path: "session/user.md" }), ctx());
+    expect((await t.execute(t.prepareArguments!({ command: "create", path: "session/user.md", file_text: "z".repeat(300) }), ctx())).isError).toBe(false);
+  });
+
   test("快写满时提醒(2026-11-17):写完占到预算九成以上,成功回执后面接一句先合并、删过时的;不到九成不提", async () => {
     const h = memories(new InMemoryDir());
     const budget = userMemory.budget;

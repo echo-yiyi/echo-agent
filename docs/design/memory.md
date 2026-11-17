@@ -178,7 +178,7 @@
 
 [`dreamTask()`](../../packages/core/src/memory/harness.ts#symbol=dreamTask) 写 startedAt 并生成限定该层的 memory 工具；写操作还会拒绝同层 dream:false 的模块。整理跑在 `systemPrompt: null` 下，所以这把工具的描述与 `path` 参数说明用 [`TASK_MEMORY_TOOL_DESCRIPTION`](../../packages/core/src/memory/tool.ts#symbol=TASK_MEMORY_TOOL_DESCRIPTION) 那一版：模块与层在任务指令里，不指向 system 的记忆段（产品给了自己的描述就用它的）。读取不受该模块整理开关限制。同一层同时只有一个整理者，靠的是第 7 节那把 `.dream/pass` 的试拿；startedAt 管的是失败之后的退避。
 
-[`defaultDreamPrompt()`](../../packages/core/src/memory/dream.ts#symbol=defaultDreamPrompt) 要求去重、把错放的内容重建到正确模块后从原处删掉、剪枝、保留无法裁决的冲突及控制预算。这些语义步骤不具备事务性，也没有机器判据证明模型真的完成了它们。
+[`defaultDreamPrompt()`](../../packages/core/src/memory/dream.ts#symbol=defaultDreamPrompt) 要求去重、把错放的内容重建到正确模块后从原处删掉、剪枝、保留无法裁决的冲突及控制预算。这些语义步骤不具备事务性，也没有机器判据证明模型真的完成了它们。 **唯一的机器兜底**（2026-11-17，[整理兜底](../decisions/implemented/2026-11-17-dream-resident-floor.md)）：整理开始时没超上限的常驻模块，这次整理写不到开始时长度的一半以下（[`DREAM_RESIDENT_FLOOR`](../../packages/core/src/memory/dream.ts#symbol=DREAM_RESIDENT_FLOOR)），删整个文件也不行——真模型上措辞管不住整理把常驻压掉三成事实。
 
 [`Agent.runDreamPass()`](../../packages/core/src/agent.ts#symbol=Agent.runDreamPass) 仅在子循环 outcome 为 completed 且未 abort 时调用 [`markDreamed()`](../../packages/core/src/memory/harness.ts#symbol=markDreamed)，记录时间、清除标记及计数。失败不记成功，标记等过期再允许重来；**轮数用完例外**（2026-11-03）：已提交的改动是真的，按「做了一部分」记（[`markDreamPartial()`](../../packages/core/src/memory/harness.ts#symbol=markDreamPartial)：放锁、记时间、计数不清，报 `dream_partial`），下次按正常间隔接着做——当失败记的话，层大到一次做不完时锁每小时过期一次、门还满着，就每小时整套重跑。单层错误报诊断后继续其他层。completed 仅说明循环完成，不说明记忆质量变好。
 
