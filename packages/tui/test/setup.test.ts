@@ -37,9 +37,20 @@ async function flush(turns = 50): Promise<void> {
   for (let i = 0; i < turns; i++) await Promise.resolve();
 }
 
-/** 等真写盘：`FileCredentialStore` 走 `node:fs`，光推微任务等不到它，要让出一个宏任务。 */
+/**
+ * 给「不该发生的事」留一段时间再断言它没发生（只给反向断言用：没有条件可等）。忙的时候它只会让断言假过，不会假红。
+ */
 async function settle(): Promise<void> {
   await new Promise((r) => setTimeout(r, 30));
+}
+
+/**
+ * 等到条件成立（每 10 ms 看一次，最多 5 秒）。验证与写凭据文件都是异步的：写盘走 `node:fs`，CI 忙的时候
+ * 固定等 30 ms 不够（2026-11-17 起 CI 上偶发红，见 PR 说明）——正向断言前一律等条件，不等固定时长。
+ */
+async function until(cond: () => boolean, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
 }
 
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -150,7 +161,7 @@ test("验过 → 按 provider.id 写进凭据文件，回调 onConfigured", asyn
 
   type(setup, "sk-GOOD");
   setup.handleInput(ENTER);
-  await settle();
+  await until(() => configured.length === 1);
 
   expect(asked, "没有验，或验了不止一次").toEqual(["sk-GOOD"]);
   expect(configured.length).toBe(1);
@@ -175,7 +186,7 @@ test("验不过 → **一个字节都不落盘**，屏幕说清原因（不含 k
 
   type(setup, "-FIXED"); // 坏 key 留在缓冲区里，补几个字符再回车
   setup.handleInput(ENTER);
-  await settle();
+  await until(() => configured.length === 1);
 
   expect(asked).toEqual(["sk-BAD", "sk-BAD-FIXED"]);
   expect(configured.length).toBe(1);

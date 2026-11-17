@@ -31,9 +31,13 @@ const CHOICES: readonly FirstRunChoice[] = [
 async function flush(turns = 50): Promise<void> {
   for (let i = 0; i < turns; i++) await Promise.resolve();
 }
-/** `FileCredentialStore` 真写盘，要让出宏任务。 */
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 30));
+/**
+ * 等到条件成立（每 10 ms 看一次，最多 5 秒）。验证与写凭据文件都是异步的：写盘走 `node:fs`，CI 忙的时候
+ * 固定等 30 ms 不够（2026-11-17 起 CI 上偶发红，见 PR 说明）——正向断言前一律等条件，不等固定时长。
+ */
+async function until(cond: () => boolean, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
 }
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 const screen = (ui: ReturnType<typeof fakeTui>): string => strip(ui.screen());
@@ -113,7 +117,7 @@ test("全流程：选家 → 贴 key（验过按 provider.id 落盘）→ 选模
   ui.feed("1"); // kimi
   type(ui, "sk-GOOD");
   ui.feed(ENTER);
-  await settle();
+  await until(() => screen(ui).includes("选择模型"));
 
   const s = screen(ui);
   expect(s).toContain("选择模型");
@@ -147,7 +151,7 @@ test("验不过：停在收 key 阶段、一个字节不落盘、说清原因", 
   ui.feed("1");
   type(ui, "sk-BAD");
   ui.feed(ENTER);
-  await settle();
+  await until(() => screen(ui).includes("验不过，没有保存"));
 
   expect(screen(ui)).toContain("验不过，没有保存");
   expect(screen(ui)).toContain("HTTP 401");
@@ -219,7 +223,7 @@ test("窄终端：三屏的每一行都不超过宽度——pi-tui 对超宽行�
   fits("key");
   type(ui, "sk-GOOD");
   ui.feed(ENTER);
-  await settle();
+  await until(() => screen(ui).includes("选择模型"));
   expect(screen(ui)).toContain("选择模型");
   fits("model");
   ui.feed(CTRL_D);

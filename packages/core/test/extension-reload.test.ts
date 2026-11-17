@@ -429,7 +429,9 @@ test("后台子 agent 还在跑时热部署推迟：它拿着的是现在这一�
   release();
   for (let i = 0; i < 50 && g.__bgSaw.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
   expect(g.__bgSaw).toEqual(["v1 open=true"]); // 它用的那一代还活着
-  await new Promise((r) => setTimeout(r, 100)); // 子 agent 收尾
+  // 等子 agent 收尾、它的回执也被父 agent 消费完（回执经 inbox 投回，父 agent 消费它那一轮的 ack 裁决期间热部署照样推迟）。
+  // 此前固定等 100 ms：CI 忙的时候不够，第二次热部署被推迟，两个平台都红过（2026-11-17）
+  for (let i = 0; i < 250 && (echo.agent.hasPendingWork || !echo.agent.acceptsWork); i++) await new Promise((r) => setTimeout(r, 20));
   const later = await echo.reloadExtensions();
   expect(later.kind === "done" ? kinds(later.report) : later).toEqual({ [file]: "replaced" });
 });

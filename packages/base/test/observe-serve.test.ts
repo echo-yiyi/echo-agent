@@ -276,7 +276,10 @@ test("跨 session：/api/runs 合并各段、/api/runs/<id> 不必知道在哪�
   const sent = await a.sessions.send(bId, "A 找你");
   expect(sent.kind).toBe("accepted");
   const inboxRun = await waitForInboxRun(b);
-  await b.observations.flush(); // ack 那条在 run 封口之后才记
+  // ack 在 run 封口之后才裁决（那次落盘还在飞）：等 B 重新能接活——裁决出来了、`inbox.acked` 才交给观测——再让观测写完。
+  // 只等封口就 flush 的话，慢机器上读到的只有 `inbox.accepted`（CI 上两个平台都红过）
+  for (let i = 0; i < 250 && !b.agent.acceptsWork; i++) await new Promise((r) => setTimeout(r, 20));
+  await b.observations.flush();
 
   const readers = new SessionObservationReaders({ sessionsRoot: dir });
   const server = startObserveServer({ readers, port: 0 });
