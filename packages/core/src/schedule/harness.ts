@@ -130,6 +130,36 @@ export async function listSchedules(ctx: AgentSchedule): Promise<readonly Schedu
 }
 
 /**
+ * 一条定时任务此刻的状态（2026-11-17，`schedule_list` 与它的 metadata 用）。与 tick 判到期是同一份判断（`dueMark`）：
+ *   · `waiting`：还没到点，等 `nextFireAt`；
+ *   · `due`：已到点、还没投进 inbox——下一拍投；投递一直失败就一直停在这里；
+ *   · `missed`：cron 欠着的那次已超过宽限（`CRON_GRACE_MS`），下一拍跳过、不补投。
+ * 投过的一次性任务不在列表里（投出即删，见 `isSpentAt`），所以没有「已触发」这一态。
+ */
+export type ScheduleStatus = "waiting" | "due" | "missed";
+
+export function scheduleStatus(entry: ScheduleEntry, now: number): ScheduleStatus {
+  const due = dueMark(entry, now);
+  return due === null ? "waiting" : due === "missed" ? "missed" : "due";
+}
+
+/**
+ * 下一次应触发的时刻（2026-11-17）：已到点还没投的，就是欠着的那一次（不晚于此刻）。一次性 = `at`；周期 = 上次投递
+ * （没投过就是创建时刻）加一个周期；cron = 游标之后第一个匹配，五年内匹配不上为 null。
+ */
+export function nextFireAt(entry: ScheduleEntry): number | null {
+  const s = entry.schedule;
+  switch (s.kind) {
+    case "at":
+      return s.at;
+    case "every":
+      return (entry.lastFiredAt ?? s.createdAt) + s.everyMs;
+    case "cron":
+      return nextMatchAfter(s.cron, entry.lastFiredAt ?? s.createdAt - 1);
+  }
+}
+
+/**
  * 投过、还没从盘上删掉的一次性任务（2026-11-13）：内存里 `lastFiredAt` 已记上——`dueMark` 不再判它到期，
  * 列表里也不出现；`save` 写盘时不带它，写成之后才从表里删。落盘一直失败也只重试写盘，不再投第二次。
  */

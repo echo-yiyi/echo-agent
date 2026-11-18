@@ -34,6 +34,8 @@ import {
   startSchedule, stopSchedule, disposeSchedule, SCHEDULE_FILE, type AgentSchedule,
 } from "../src/schedule/harness.ts";
 import type { Schedule } from "../src/schedule/types.ts";
+import { localIso, makeScheduleTools } from "../src/schedule/tools.ts";
+import { FakeClock } from "../src/schedule/clock.ts";
 
 const T0 = Date.parse("2026-08-05T09:00:00"); // 本地时区周三 09:00
 
@@ -501,6 +503,54 @@ describe("Agent 接线", () => {
     await mountBuiltinTools(agent); // 内建工具经 `echo:*` builtin Extension 注册
     await startSchedule(schedule);
     await agent.dispose(); // 内含 stopSchedule(schedule)——测试进程能退出本身就是断言
+  });
+});
+
+/* ───────────────────────── 工具回显时间与状态（2026-11-17） ───────────────────────── */
+
+describe("调度工具的时间与状态", () => {
+  const ctx = { runId: "r1", turnId: "t1", toolCallId: "c1", workspace: "/", sessionId: null, iteration: 0 };
+
+  test("localIso：本地时区、带偏移，读回来是同一刻", () => {
+    for (const ms of [T0, Date.parse("2026-01-15T23:30:00"), Date.parse("2026-07-01T00:00:00Z")]) {
+      const s = localIso(ms);
+      expect(s).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$/);
+      expect(Date.parse(s)).toBe(ms);
+    }
+    expect(localIso(T0).slice(0, 19)).toBe("2026-08-05T09:00:00"); // 墙上时刻就是本地的 9 点
+  });
+
+  test("create 回显解析出的触发规则与下次触发（本地时区带偏移）；list 每条带状态与下次触发——没到点 waiting、到点没投 due、cron 超宽限 missed；同样的字段进 metadata", async () => {
+    const clock = new FakeClock(T0 + 3_600_000); // 周三 10:00
+    const { host } = fakeHost();
+    const h = createAgentSchedule(new InMemoryDir(), { clock });
+    Object.assign(h, host);
+    const [create, list] = makeScheduleTools(h);
+
+    const at = Date.parse("2026-08-05T10:30:00");
+    const once = await create!.execute({ prompt: "看 CI", at: "2026-08-05T10:30:00" }, ctx);
+    expect(once.isError).toBe(false);
+    expect(once.content).toContain(`once at ${localIso(at)}; next fire ${localIso(at)}`);
+    expect(once.metadata).toMatchObject({ schedule: { kind: "at", status: "waiting", nextFireAt: at, lastFiredAt: null } });
+
+    const thursday9 = Date.parse("2026-08-06T09:00:00");
+    const daily = await create!.execute({ prompt: "日报", cron: "0 9 * * 1-5" }, ctx);
+    expect(daily.content).toContain(`cron '0 9 * * 1-5' (local time); next fire ${localIso(thursday9)}`);
+
+    const every = await create!.execute({ prompt: "巡检", every_seconds: 300 }, ctx);
+    expect(every.content).toContain(`every 300s; next fire ${localIso(T0 + 3_600_000 + 300_000)}`);
+
+    const statuses = async (): Promise<string[]> => {
+      const r = await list!.execute({}, ctx);
+      const views = (r.metadata as { schedules: { prompt: string; status: string }[] }).schedules;
+      expect(r.content.split("\n")).toHaveLength(views.length);
+      for (const v of views) expect(r.content).toContain(`] ${v.status}, next `);
+      return views.map((v) => `${v.prompt}:${v.status}`);
+    };
+    expect(await statuses()).toEqual(["看 CI:waiting", "日报:waiting", "巡检:waiting"]);
+
+    clock.advance(26 * 3_600_000); // 周四 12:00，一拍都没走：一次性与周期到点没投，cron 9 点那次已超两小时宽限
+    expect(await statuses()).toEqual(["看 CI:due", "日报:missed", "巡检:due"]);
   });
 });
 
