@@ -69,6 +69,7 @@
 - **开**：`attempt_start`。
 - **内容**：压缩投影 → attempt 注入 → `transformContext` → `contextBeforeBuild`（block 则结果 `blocked`，不调模型）→ `convertToLlm` → 取 key → `streamFn` → 消费流（`message_start / message_update`）→ 定稿入 transcript（`message_end`、`usage`）。
 - **每个 attempt 完整重建。** 同一 turn 内重试时，`getTurnInjections`、`transformContext`、`contextBeforeBuild`、`convertToLlm`、`getApiKey` **每个 attempt 各调一次**。这是有意的：两次 attempt 之间上下文可能已被应急压缩改过，短命 key 可能已过期。代价是这些回调的契约要补一句「同一 turn 内可能被多次调用，有副作用的实现自己去重」。方言层不再执行重试（`packages/core/src/provider/dialect.ts` 只保留 `RetryPolicy` 的定义与缺省值 `DEFAULT_RETRY_POLICY`，供 loop 与压缩摘要器读）。
+- **等模型时与中止信号赛跑**（2026-11-18，[决策](../decisions/implemented/2026-11-18-stop-extract-race.md)）：等 `streamFn` 拿到流、等流的每一块都与 run 的 signal 赛跑。provider 不理会中止时不再等它：已经流出来的半截合成一条 aborted 定稿照常入账（与 provider 自己报 aborted 时同一个 `finalizeError`）。收摊等记忆通道停下、等前台 run 收尾，都因此不依赖 provider 配合。
 - **关**：`attempt_end{result}`。定稿的 `stopReason` 决定 `result.kind`：`end_turn / tool_use / max_tokens` → `landed`；`error` → `failed`；`aborted` → `aborted`。
 
 ### 2.5 tool call

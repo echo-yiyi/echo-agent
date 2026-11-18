@@ -27,6 +27,7 @@ import { AgentMemory as PublicAgentMemory, defineExtension as publicDefineExtens
 import { toolOk, type ModelTool } from "../src/tools/types.ts";
 import { disableTools } from "../src/tools/harness.ts";
 import { InMemoryDir } from "../src/storage/in-memory-dir.ts";
+import { FileDir } from "../src/storage/file-dir.ts";
 import { InMemoryStateLock } from "../src/storage/lock.ts";
 import type { StorageDir } from "../src/storage/types.ts";
 import type { Provider } from "../src/provider/types.ts";
@@ -1385,6 +1386,137 @@ test("退出前补提取到点：先中止它、等它停下，才卸记忆模�
   const stopped = await stopping;
   expect(abortedWhenUnmounted as boolean | null).toBe(true); // 只在闭包里赋值：TS 会把它收窄成 null
   expect(stopped).toEqual({ memory: { kind: "aborted" } }); // 2026-11-17：到点被中止如实交给宿主
+});
+
+/**
+ * 0.12.0 的退出竞态夹具（2026-11-18）：后台提取第一次调用写事实 A，第二次调用卡住；`mode` 定卡住时理不理会取消。
+ * 之后的每次提取调用：上一条是工具结果就收尾，否则写事实 B。记下每次提取调用、被拒的写入。
+ */
+function stopRaceProvider(mode: "cooperative" | "never"): {
+  provider: ReturnType<typeof createProvider>;
+  calls: () => number;
+  rejected: () => number;
+  hanging: Promise<void>;
+} {
+  let calls = 0;
+  let rejected = 0;
+  let markHanging = (): void => {};
+  const hanging = new Promise<void>((r) => (markHanging = r));
+  const dialect: Dialect = {
+    api: "fake",
+    async *request(_model, context, options) {
+      const text = JSON.stringify(context.messages);
+      if (!text.includes(EXTRACT_PROMPT_OPENING)) {
+        for (const ev of textTurn("好的")) yield structuredClone(ev);
+        return;
+      }
+      calls += 1;
+      const at = context.messages.findLastIndex((m) => JSON.stringify(m).includes(EXTRACT_PROMPT_OPENING));
+      // 线上形状：工具结果是 user 消息里的 tool_result 块。数这次提取指令之后被拒的写入
+      rejected += (JSON.stringify(context.messages.slice(at + 1)).match(/is not inside any memory module/g) ?? []).length;
+      const layer = /- memory \(([a-z]+)\/memory\//.exec(text)?.[1] ?? "user";
+      const fact = (name: string, body: string) => ({ command: "create", path: `${layer}/memory/${name}.md`, file_text: `---\ndescription: ${body}\n---\n\n${body}` });
+      let turn: ScriptedTurn;
+      if (calls === 1) turn = toolTurn("a1", "memory", fact("fact-a", "事实 A：测试一律用 bun 跑"));
+      else if (calls === 2) {
+        markHanging();
+        if (mode === "never") await new Promise<never>(() => {}); // 永不返回，也不理会取消
+        await new Promise<void>((resolve) => {
+          if (options?.signal?.aborted) return resolve();
+          options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        yield { type: "error", error: { source: "provider", code: "aborted", retryable: false, message: "aborted" } };
+        return;
+      } else if (JSON.stringify(context.messages.at(-1)).includes("tool_result")) turn = textTurn("记好了。");
+      else turn = toolTurn(`b${calls}`, "memory", fact("fact-b", "事实 B：提交信息一律写中文"));
+      for (const ev of turn) yield structuredClone(ev);
+    },
+  };
+  const provider = createProvider({
+    id: "scripted",
+    auth: { apiKey: { resolve: async () => ({ apiKey: "x" }) } },
+    defaultModelId: "only",
+    models: [{ id: "only", api: "fake" }],
+    api: createProviderStreams(dialect),
+  });
+  return { provider, calls: () => calls, rejected: () => rejected, hanging };
+}
+
+const RACE_TURNS = ["以后我们的测试一律用 bun 跑，别再用 npm test 了", "提交信息一律写中文，别写英文", "合并之前先跑一遍全量测试"];
+
+/** 共享记忆存储里的事实文件：文件名 → 正文。 */
+async function factsIn(store: InMemoryDir): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const path of await store.list("")) {
+    const name = path.split("/").at(-1)!;
+    if (name.startsWith("fact-")) out[name] = (await store.read(path)) ?? "";
+  }
+  return out;
+}
+
+/** 会话目录里记下的 `memory_reviewed`：[from, through]。 */
+async function reviewedIn(sessionsRoot: string, id: string): Promise<unknown[]> {
+  const dir = new FileDir(join(sessionsRoot, id));
+  const out: unknown[] = [];
+  for (const name of (await dir.list("entries/")).sort()) {
+    const entry = JSON.parse((await dir.read(name))!) as Record<string, unknown>;
+    if (entry.kind === "memory_reviewed") out.push([entry.from, entry.through, entry.outcome]);
+  }
+  return out;
+}
+
+test("退出补提取到点之后，不再有提取写进卸掉的记忆模块（2026-11-18，0.12.0 的缺陷）：到点中止在跑的那次、清掉排着的补跑，此前还会再排一次、在卸载之后跑、写入全被拒；结局 aborted、游标不动，续会话再看一次补上", async () => {
+  const clock = new FakeClock();
+  const { provider, calls, rejected, hanging } = stopRaceProvider("cooperative");
+  const sessionsRoot = await tmp();
+  const sharedStore = new InMemoryDir();
+  const base = { provider, allowNetwork: false, sessionsRoot, sharedStore, extensionDirs: [], clock };
+
+  const first = await createEcho(base);
+  await first.start();
+  for (const line of RACE_TURNS) await first.agent.prompt(line); // 攒满三轮：后台提取写 A，卡在写 B 之前
+  await hanging;
+  const id = first.agent.state.sessionId!;
+  const stopping = first.stop();
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 5)); // 让补跑排进通道
+  clock.advance(DEFAULT_EXTRACT_DRAIN_MS);
+  expect(await stopping).toEqual({ memory: { kind: "aborted" } });
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 5)); // 修之前：此刻还会冒出一次提取
+  expect(calls()).toBe(2); // 到点之后一次都没再起
+  expect(rejected()).toBe(0);
+  expect(Object.keys(await factsIn(sharedStore))).toEqual(["fact-a.md"]);
+  expect(await reviewedIn(sessionsRoot, id)).toEqual([]); // 没看完：游标不动
+
+  const second = await createEcho({ ...base, sessionId: id });
+  await second.start();
+  await second.agent.prompt("周五下午不要发版");
+  await second.agent.settleMemory();
+  await second.stop();
+  expect(rejected()).toBe(0);
+  const facts = await factsIn(sharedStore);
+  expect(Object.keys(facts).sort()).toEqual(["fact-a.md", "fact-b.md"]);
+  expect(facts["fact-a.md"]).toContain("事实 A：测试一律用 bun 跑");
+  expect(facts["fact-b.md"]).toContain("事实 B：提交信息一律写中文");
+  expect(await reviewedIn(sessionsRoot, id)).toEqual([[0, 8, "completed"]]); // 续上那次把整段看完
+});
+
+test("provider 不理会取消、永不返回时，退出照样有界（2026-11-18）：到点不再等它，收摊返回 aborted，之后没有提取再起", async () => {
+  const clock = new FakeClock();
+  const { provider, calls, rejected, hanging } = stopRaceProvider("never");
+  const sharedStore = new InMemoryDir();
+  const echo = await createEcho({ provider, allowNetwork: false, sessionsRoot: await tmp(), sharedStore, extensionDirs: [], clock });
+  await echo.start();
+  for (const line of RACE_TURNS) await echo.agent.prompt(line);
+  await hanging;
+  const stopping = echo.stop();
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 5));
+  clock.advance(DEFAULT_EXTRACT_DRAIN_MS);
+  const outcome = await Promise.race([stopping, new Promise((r) => setTimeout(() => r("still waiting"), 3_000))]);
+  expect(outcome).toEqual({ memory: { kind: "aborted" } });
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 5));
+  expect(calls()).toBe(2);
+  expect(rejected()).toBe(0);
+  expect(Object.keys(await factsIn(sharedStore))).toEqual(["fact-a.md"]);
 });
 
 test("Echo.stop() 返回退出补提取的结局（2026-11-17）：正常关闭不等于提取成了——跑完是 completed；没说话的段是 no_scope", async () => {

@@ -294,28 +294,31 @@ async function hangingDreamAgent(
   return { agent, reached, release };
 }
 
-test("**P0**：stop() 返回之后，旧 Agent 的整理不能再写 memory", async () => {
+test("**P0**：stop() 返回之后，旧 Agent 的整理不能再写 memory——卡在不理会中止的模型调用上也一样，而且 stop 不陪它干等（2026-11-18）", async () => {
   // 实测破坏：stop() 返回并释放 lease、新 holder 已拿到锁，而旧 Agent 的 dream 仍在写——
-  // 单写者当场破。两处修：stop() 要**等** dream 收完；dream 提交前重问一次生命周期。
+  // 单写者当场破。两处修：stop() 要等 dream **真停**；dream 提交前重问一次生命周期。
+  // 2026-11-18 起「真停」不再依赖 provider 配合：循环等模型时与中止赛跑（`loop/run-turn.ts`），卡在模型调用上的
+  // 整理在中止那一刻就收尾。此前这里断言「模型还挂着 stop 就不许返回」——那是旧的保证手段，不是要守的性质；
+  // 要守的是下面这条：stop 返回之后，模型迟到的回复也写不进记忆
   const mem = await readyMemory();
   const { agent, reached, release } = await hangingDreamAgent(mem);
 
   await agent.prompt("干点活");
-  await reached; // dream 起来了，卡在模型调用上
+  await reached; // dream 起来了，卡在模型调用上（这个 provider 不理会中止）
 
-  const stopping = agent.stop();
-  let stopDone = false;
-  void stopping.then(() => (stopDone = true));
+  const outcome = await Promise.race([agent.stop().then(() => "stopped"), new Promise((r) => setTimeout(() => r("still waiting"), 2_000))]);
+  expect(outcome).toBe("stopped");
 
-  // stop() 不许在 dream 还挂着的时候就返回
-  await new Promise((r) => setTimeout(r, 20));
-  expect(stopDone, "stop() 没等 dream 收完就返回了").toBe(false);
-
-  release();
-  await stopping;
-
-  // 收摊完成时：整理没有提交（被中断），也没有留下「正在整理」之外的新写入
-  expect((await readDreamState(mem.dir, "session")).lastAt).toBeNull();
+  const snapshot = async (): Promise<Record<string, string | null>> => {
+    const out: Record<string, string | null> = {};
+    for (const path of (await mem.dir.list("session/")).sort()) out[path] = await mem.dir.read(path);
+    return out;
+  };
+  const atStop = await snapshot();
+  release(); // 模型这才返回：没有人再接它的结果
+  await new Promise((r) => setTimeout(r, 50));
+  expect(await snapshot()).toEqual(atStop); // stop 之后一笔都没写
+  expect((await readDreamState(mem.dir, "session")).lastAt).toBeNull(); // 整理没有提交
 });
 
 test("并发写记忆不丢计数——「单写者」防的是跨进程，防不了进程内并发", async () => {

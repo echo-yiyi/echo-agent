@@ -3395,10 +3395,14 @@ export class Agent {
     }
     if (this.memory === undefined || !this.memoryWorkAllowed) return { kind: "skipped", reason: "not_allowed" };
     let result: MemorySettleResult | undefined;
+    // 到点了（2026-11-18）：在计时器回调里同步置位，工作协程每次排之前看它——到点之后一次都不许再排
+    let timedOut = false;
     const work = (async (): Promise<void> => {
       await this.dreamChannel.settle();
-      // 通道只记「下一个」：排进去的这次在等的时候可能被随后排进来的一次顶掉（那一次照常跑，但不报给这里）——顶掉了就再排
-      for (let attempt = 0; attempt < 3 && result === undefined; attempt++) {
+      // 通道只记「下一个」：排进去的这次在等的时候可能被随后排进来的一次顶掉（那一次照常跑，但不报给这里）——顶掉了就再排。
+      // **到点了就不再排**（2026-11-18，0.12.0 的缺陷）：到点时中止会清掉通道里排着的这次，它没有结局，此前这里
+      // 当成「被顶掉」又排一次——`settleMemory` 已经返回、`stop()` 接着卸 builtin，新排的这次往卸掉的记忆模块里写，全被拒
+      for (let attempt = 0; attempt < 3 && result === undefined && !timedOut; attempt++) {
         if (!this.memoryWorkAllowed) {
           result = { kind: "skipped", reason: "not_allowed" };
           return;
@@ -3412,7 +3416,6 @@ export class Agent {
       return result ?? { kind: "aborted" };
     }
     let cancel = (): void => {};
-    let timedOut = false;
     const deadline = new Promise<void>((resolve) => {
       cancel = this.clock.setInterval(() => {
         cancel();
@@ -3426,8 +3429,14 @@ export class Agent {
       cancel();
     }
     // **到点要中止并等它真的停下**（2026-11-17）：只是不再等的话，`createEcho()` 的 `stop()` 接着就卸 builtin 那一代——
-    // 记忆模块与记忆工具都在里面——还在跑的提取随后写记忆，全被拒。中止的那次游标不动，续会话时这段再看
-    if (timedOut) await this.settleDream();
+    // 记忆模块与记忆工具都在里面——还在跑的提取随后写记忆，全被拒。中止的那次游标不动，续会话时这段再看。
+    // **再等工作协程本身收完**（2026-11-18）：它看见 `timedOut` 就不再排，通道此刻已空，所以这一等是有界的；
+    // 返回之后不会再有这次排出来的提取——卸载与补提取之间的先后由这里定死。provider 不理会中止也拖不住：
+    // 循环等模型时与中止信号赛跑（`loop/run-turn.ts`）
+    if (timedOut) {
+      await this.settleDream();
+      await work;
+    }
     return result ?? { kind: "aborted" };
   }
 

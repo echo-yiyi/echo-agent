@@ -27,7 +27,8 @@ import type { createCompactor } from "../compaction/pipeline.ts";
 import type { HookWorkset } from "../hooks/runtime.ts";
 import { deepFreezePlain, normalizeVerdict } from "../permission/ledger.ts";
 import type { PermissionVerdict } from "../permission/types.ts";
-import type { AgentMessage, ToolResultMessage, ToolUseBlock } from "../messages.ts";
+import type { AgentMessage, AssistantMessage, ToolResultMessage, ToolUseBlock } from "../messages.ts";
+import { emptyAssistant, finalizeError } from "../event-stream.ts";
 import { defaultConvertToLlm, toolResultMessage, toolUsesFromMessage } from "../messages.ts";
 import { isModelVisible, toolSchemas, type AgentTool, type AgentToolResult, type McpTool, type ModelTool } from "../tools/types.ts";
 import { spillToolResult, TOOL_OUTPUT_INLINE_TOKENS, TOOL_OUTPUT_READ } from "../tools/output.ts";
@@ -311,40 +312,62 @@ async function callModel(deps: RunDeps, turnId: string, attempt: number, workset
   const apiKey = await config.getApiKey?.(config.model.provider);
 
   /* ④ 调模型 + 消费协议（占槽逐字） */
-  const stream = await streamFn(
-    config.model,
-    { systemPrompt: context.systemPrompt, messages: llmMessages, tools: toolSchemas(tools) },
-    { signal, apiKey, thinkingLevel: config.thinkingLevel },
-  );
-
+  // **等模型时与中止信号赛跑**（2026-11-18）：signal 会交给 provider，但不能指望它配合——不理会中止的 provider
+  // 会把这一轮、连同等它收尾的 `stop()` 一起拖住（退出补提取到点后，收摊一直等那次提取停下）。赛输了就不再等它：
+  // 用已经流出来的半截合成一条 aborted 定稿（与 provider 自己报 aborted 时同一个 `finalizeError`），照常入账收尾
   const { probe } = deps;
-  for await (const item of stream) {
-    if (item.type === "start") {
-      progress.opened = true;
-      probe({ kind: "generation_started" }, turnId);
-      await emit({ type: "message_start", role: "assistant" });
-      continue;
+  let lastPartial: AssistantMessage | null = null;
+  const opened = await raceAbort(
+    Promise.resolve(
+      streamFn(config.model, { systemPrompt: context.systemPrompt, messages: llmMessages, tools: toolSchemas(tools) }, { signal, apiKey, thinkingLevel: config.thinkingLevel }),
+    ),
+    signal,
+  );
+  let final: AssistantMessage;
+  if (opened.kind === "aborted") {
+    final = abortedFinal(lastPartial);
+  } else {
+    const stream = opened.value;
+    const items = stream[Symbol.asyncIterator]();
+    let abandoned = false;
+    while (true) {
+      const step = await raceAbort(items.next(), signal);
+      if (step.kind === "aborted") {
+        abandoned = true;
+        // 不等它：迭代器可能永远不再吐东西。`return()` 只是告诉它可以收了，结果与异常都不要
+        void Promise.resolve(items.return?.()).catch(() => undefined);
+        break;
+      }
+      if (step.value.done === true) break;
+      const item = step.value.value;
+      lastPartial = item.partial;
+      if (item.type === "start") {
+        progress.opened = true;
+        probe({ kind: "generation_started" }, turnId);
+        await emit({ type: "message_start", role: "assistant" });
+        continue;
+      }
+      probe({ kind: "generation_delta", delta: item }, turnId);
+      // 方言丢掉的工具调用不进定稿、也就不进 transcript：单独记一条，否则账本里一点痕迹都没有
+      if (item.type === "warning" && item.toolCall !== undefined) {
+        const tc = item.toolCall;
+        probe(
+          {
+            kind: "tool_call_dropped",
+            code: item.code,
+            args: tc.args,
+            ...(tc.id !== undefined ? { toolCallId: tc.id } : {}),
+            ...(tc.name !== undefined ? { toolName: tc.name } : {}),
+          },
+          turnId,
+        );
+      }
+      await emit({ type: "message_update", delta: item, message: item.partial });
     }
-    probe({ kind: "generation_delta", delta: item }, turnId);
-    // 方言丢掉的工具调用不进定稿、也就不进 transcript：单独记一条，否则账本里一点痕迹都没有
-    if (item.type === "warning" && item.toolCall !== undefined) {
-      const tc = item.toolCall;
-      probe(
-        {
-          kind: "tool_call_dropped",
-          code: item.code,
-          args: tc.args,
-          ...(tc.id !== undefined ? { toolCallId: tc.id } : {}),
-          ...(tc.name !== undefined ? { toolName: tc.name } : {}),
-        },
-        turnId,
-      );
-    }
-    await emit({ type: "message_update", delta: item, message: item.partial });
+    // **入账取权威定稿，不是槽里自己攒的 partial**——拿槽当定稿会被重放/丢包污染。被中止且不再等的那次除外：
+    // 它的定稿可能永远不来
+    final = abandoned ? abortedFinal(lastPartial) : await stream.result();
   }
-
-  // **入账取权威定稿，不是槽里自己攒的 partial**——拿槽当定稿会被重放/丢包污染。
-  const final = await stream.result();
   // 退化路径：违约或无流式后端没发过 start，补一个，保「每个定稿消息必有成对 start/end」。
   if (!progress.opened) {
     progress.opened = true;
@@ -742,6 +765,11 @@ function explainMissingTool(config: AgentLoopConfig, known: ReadonlySet<string>,
  * rejected promise 无人接管，变成 unhandled rejection（实测）。这里始终用 `.then(_, reject)` 消费：
  * 晚到的 rejection 调 `reject(e)` 是 no-op，但已被 handler 接走。
  */
+/** 中止后不再等 provider 时的定稿：已经流出来的半截（一个字都没有就是空的）记成 aborted。 */
+function abortedFinal(partial: AssistantMessage | null): AssistantMessage {
+  return finalizeError(partial ?? emptyAssistant(), agentError("provider", "aborted", "请求被中止", false));
+}
+
 function raceAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<{ kind: "value"; value: T } | { kind: "aborted" }> {
   return new Promise((resolve, reject) => {
     const onAbort = (): void => resolve({ kind: "aborted" });

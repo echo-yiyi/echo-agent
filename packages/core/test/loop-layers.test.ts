@@ -28,6 +28,7 @@ import type { ProviderEvent } from "../src/events.ts";
 import { EMPTY_COMPACTION } from "../src/compaction/types.ts";
 import { mountBuiltinTools } from "../src/extension/builtin.ts";
 import type { Model, StreamFn } from "../src/provider/types.ts";
+import { AssistantMessageEventStream } from "../src/event-stream.ts";
 
 /* ─────────────── 校验器 ─────────────── */
 
@@ -294,6 +295,28 @@ test("轮首 deadline：输入吸收期间就超时 → 零 turn 的 reply，out
   expect(r.outcome).toMatchObject({ kind: "error", error: { code: "timeout" } });
   expect(validate(events)).toEqual([]);
   expect(types(events)).toEqual([...RUN_OPEN, "agent_start", "reply_start", "message_end", "reply_end", "agent_end", ...RUN_CLOSE]);
+});
+
+test("provider 不理会中止时，循环不等它（2026-11-18）：abort 之后这一轮照样以 aborted 收场，已经流出来的半截入账", async () => {
+  let reached = (): void => {};
+  const started = new Promise<void>((r) => (reached = r));
+  const deaf: StreamFn = () => {
+    const stream = new AssistantMessageEventStream();
+    stream.push({ type: "start", partial: { role: "assistant", content: [], stopReason: "end_turn", usage: null } } as never);
+    stream.push({ type: "text_delta", delta: "说到一半", partial: { role: "assistant", content: [{ type: "text", text: "说到一半" }], stopReason: "end_turn", usage: null } } as never);
+    reached();
+    return stream; // 之后再也不 push：不收尾、不理会 signal
+  };
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: deaf });
+  const running = agent.prompt("go");
+  await started;
+  await new Promise((r) => setTimeout(r, 10));
+  agent.abort();
+  const outcome = await Promise.race([running.then((r) => r.outcome.kind), new Promise((r) => setTimeout(() => r("still waiting"), 2_000))]);
+  expect(outcome).toBe("aborted");
+  const last = agent.state.messages.at(-1);
+  expect(last?.role === "assistant" && last.stopReason).toBe("aborted");
+  expect(JSON.stringify(last)).toContain("说到一半");
 });
 
 test("工具拿到所在的 run 与那一轮（2026-11-17）：ctx.runId 是这次 run 的 id、ctx.turnId 是发起调用的那一轮——业务工具拿它们给异步任务打标签，能对回观测", async () => {
