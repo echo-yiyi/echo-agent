@@ -228,6 +228,24 @@ test("提取请求的前缀与前台最后一次请求逐字相同：同一份 s
   expect(ex.messages).toHaveLength(last.messages.length + 2); // 最后那条回答 + 提取指令
 });
 
+test("提取用的就是主循环的模型，不另配一档（2026-11-18）：换了模型厂商的前缀缓存接不上，判断记什么、哪条记错了也正是最吃模型能力的一步", async () => {
+  const seen: { extract: boolean; model: Model }[] = [];
+  const { fn } = recording();
+  const watching: StreamFn = (model, context, options) => {
+    seen.push({ extract: isExtract(context), model });
+    return fn(model, context, options);
+  };
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: watching, memory: memoriesOn(new InMemoryDir()) });
+
+  await say(agent, ...THREE);
+  await idleExtract(agent);
+
+  const main = seen.filter((s) => !s.extract).at(-1)!.model;
+  const extract = seen.filter((s) => s.extract).map((s) => s.model);
+  expect(extract.length).toBeGreaterThan(0);
+  for (const model of extract) expect(model).toEqual(main);
+});
+
 test("提取的「Stored now」：常驻模块照给全文，indexed 模块只给记忆正文冻结之后变过的索引（2026-11-17）——没变的索引在上文开头那条正文里，不重发", async () => {
   const { fn, extracts } = recording();
   const dir = new InMemoryDir();

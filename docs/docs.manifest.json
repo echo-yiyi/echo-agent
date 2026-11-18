@@ -398,6 +398,14 @@
       "bilingual": false
     },
     {
+      "path": "docs/decisions/implemented/2026-11-18-extraction-on-main-model.md",
+      "bilingual": false
+    },
+    {
+      "path": "docs/decisions/rejected/2026-11-18-extract-correction-rule.md",
+      "bilingual": false
+    },
+    {
       "path": "docs/decisions/implemented/2026-11-15-tools-package.md",
       "bilingual": false
     },

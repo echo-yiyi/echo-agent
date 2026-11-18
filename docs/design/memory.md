@@ -159,7 +159,9 @@
 
 **提取从主对话分叉**（[`Agent.runExtract()`](../../packages/core/src/agent.ts#symbol=Agent.runExtract)）：system 是主循环每个 run 装配的那一份，消息最前面是主循环的那条记忆正文（冻结的那一版），菜单是 reply 收尾时主循环的菜单，接着是主循环的 working context（含最后那条回答），末尾接一条提取指令——前缀与主循环最后一次请求逐字相同，厂商的前缀缓存直接接着用。每轮注入（激活 skill 正文、任务清单）不带：它们拼在消息末尾、本来不在共享前缀里。提取与 Dream 的子循环不做压缩（见 [压缩](compaction.md) §4）。菜单照原样摆，只换执行：记忆工具换成这次提取的实例（同一份 schema），其余换成同名同 schema、一点名就在修参那一步拒掉的替身——早于 preToolUse 与权限，后台复盘不会去问人。主菜单上没有记忆工具时补在末尾（前缀在工具那段断开，但照样能写）。指令按游标分两种说法：游标为 0（这场对话还没复盘过）说「从头看起」，否则说「上次复盘到对话中途，只看之后的」（[`ExtractRange.fromStart`](../../packages/core/src/memory/extract.ts#symbol=ExtractRange)）。
 
-[`defaultExtractPrompt()`](../../packages/core/src/memory/extract.ts#symbol=defaultExtractPrompt) 只说清看哪一段——上文的最后几条、从哪句用户原话开始（两样都给：provider 换算消息时会拆合，单给条数模型数不准）——连同作用域与模块说明，要求**先对照此刻存着的记忆**：上文开头那条记忆正文是冻结那一刻的版本，之后写的看不到，所以指令自带 `Stored now` 一节——**常驻模块照给全文，indexed 模块只给冻结之后变过的索引**（2026-11-17，[`memoryStoredSince()`](../../packages/core/src/memory/harness.ts#symbol=memoryStoredSince)，与前台记忆段同一种呈现；对照的是 [`MemoryFreeze`](../../packages/core/src/memory/harness.ts#symbol=MemoryFreeze) 里冻结那一刻的版本，不是变化通知的基线），没变过的索引在上文那条正文里、不重发。常驻照给是因为快满时要整份重写、全文得紧挨着指令（真模型上常驻也只给变化时被重写得更短、丢了内容）。这次装配里没有那条正文（没挂记忆段）就给全部（[`memoryManifest()`](../../packages/core/src/memory/harness.ts#symbol=memoryManifest)）。产品自己写指令时看 `ExtractPromptInput.indexesChangedOnly` 分辨这两种。决策见 [提取范围与只省没变过的索引](../decisions/implemented/2026-11-17-extract-range-and-stored-changes.md)、只在要改某个文件之前 `view`、避免重复、只保留以后有用的事实，允许什么都不写；并说明 INDEX.md 由系统重建。上限来自 [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS)。模型绑定仍来自父 scope，**没有单独实现“便宜模型档”选择**；轮数上限也不等于费用或墙钟时间的硬上界。
+[`defaultExtractPrompt()`](../../packages/core/src/memory/extract.ts#symbol=defaultExtractPrompt) 只说清看哪一段——上文的最后几条、从哪句用户原话开始（两样都给：provider 换算消息时会拆合，单给条数模型数不准）——连同作用域与模块说明，要求**先对照此刻存着的记忆**：上文开头那条记忆正文是冻结那一刻的版本，之后写的看不到，所以指令自带 `Stored now` 一节——**常驻模块照给全文，indexed 模块只给冻结之后变过的索引**（2026-11-17，[`memoryStoredSince()`](../../packages/core/src/memory/harness.ts#symbol=memoryStoredSince)，与前台记忆段同一种呈现；对照的是 [`MemoryFreeze`](../../packages/core/src/memory/harness.ts#symbol=MemoryFreeze) 里冻结那一刻的版本，不是变化通知的基线），没变过的索引在上文那条正文里、不重发。常驻照给是因为快满时要整份重写、全文得紧挨着指令（真模型上常驻也只给变化时被重写得更短、丢了内容）。这次装配里没有那条正文（没挂记忆段）就给全部（[`memoryManifest()`](../../packages/core/src/memory/harness.ts#symbol=memoryManifest)）。产品自己写指令时看 `ExtractPromptInput.indexesChangedOnly` 分辨这两种。决策见 [提取范围与只省没变过的索引](../decisions/implemented/2026-11-17-extract-range-and-stored-changes.md)、只在要改某个文件之前 `view`、避免重复、只保留以后有用的事实，允许什么都不写；并说明 INDEX.md 由系统重建。上限来自 [`DEFAULT_EXTRACT_MAX_TURNS`](../../packages/core/src/memory/extract.ts#symbol=DEFAULT_EXTRACT_MAX_TURNS)。提取用排它那次 run 的模型，**不另配便宜档**（2026-11-18，决策见 [提取沿用主循环的模型](../decisions/implemented/2026-11-18-extraction-on-main-model.md)）；轮数上限也不等于费用或墙钟时间的硬上界。
+
+**提取也会改掉已存的错条目。** 它带着主循环的 system（规则段要求发现记错了就删、与用户在这次对话里说的冲突就照对话改），指令又要求同一条事实只放一处、已经有了就更新那一条。真模型上对话里出现了与已存条目相反的东西——用户亲口说的，或照着它做失败了、换一种做法才成——那一条会被改写或删掉（`deepseek-flash` 六种情形 30 次全部改对，数据见 [给提取指令加一条纠错规则](../decisions/rejected/2026-11-18-extract-correction-rule.md)）。这是提示词纪律加小样本观察，不是机器判据；对话里从没出现反证的错条目，没有任何一步会去查。
 
 提取不通过 admission，不抢前台许可；独立消息数组（分叉时复制的是 reply 收尾时的快照）、不消费前台 steer / followUp，子循环事件不发进主 transcript。但它复用父的循环配置与相关服务，不能笼统宣称与前台完全不共享可变状态。
 
@@ -210,13 +212,12 @@ Dream 与提取都不带父的每轮注入（激活 skill 正文、任务清单�
 
 记忆模块决策里的 `tools` 回调（模块自带工具，只拿 harness 方法、拿不到字节面）没有落地：registry 接收的是 `AnyMemory`，模块形状里没有这一格。harness 的写方法也不在公共面上，所以**包外扩展今天没有办法给自己的模块配一件专用写工具**，只能靠缺省的 `memory` 工具。声明构造器 `residentMemory()` / `indexedMemory()` 同样不在公共面，包外只能手写纯数据 `AnyMemory`（第 3 节）。
 
-### 提取的输入、重叠保护与模型档
+### 提取的输入与重叠保护
 
 [提取决策](../decisions/implemented/2026-09-07-memory-extraction.md)中的以下目标与当前实现（第 5 节）不同：
 
 - **重叠保护**：决策按本 reply 是否出现 `memory.mutation.committed` 事实判断；实现看的是前台那把 memory 工具的非 view 调用是否成功，别名工具的写入不算。
 - **输入**：决策给「这次 reply 实际送给模型的那份」；实现给 reply 收尾时的 working context（经同一份循环配置的 transform 投影），外加最后那条回答，但不带每轮注入。
-- **模型档**：决策走产品配的便宜档；实现沿用父 scope 的模型绑定。
 
 ## 9. 验证范围与人工责任
 
