@@ -583,11 +583,11 @@ describe("Dream 门控", () => {
   test("提取 prompt：第一次复盘（从对话开头看起）不说「上次复盘到对话中途」；之后才说", () => {
     const table = memoryScopeTableOf(memories(new InMemoryDir()));
     const mods = listMemories(memories(new InMemoryDir()));
-    const first = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: true, retry: false }, stored: "" });
+    const first = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: true, retry: false, from: 0, to: 6 }, stored: "", indexesChangedOnly: false });
     expect(first).not.toContain("partway");
     expect(first).toContain("not been reviewed");
     expect(first).not.toContain("stopped before it finished");
-    const later = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: false, retry: false }, stored: "" });
+    const later = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: false, retry: false, from: 0, to: 6 }, stored: "", indexesChangedOnly: false });
     expect(later).toContain("last reviewed partway through this conversation");
     // 上一次没看完那段（2026-11-17）：说清写过的已在 Stored now 里，接着补、别重写
     // 缺省写法（2026-11-17 重写，自己的措辞）：两轮做完、常驻模块带上限、一条事实一个地方、拿不准就不存、没看过的 indexed 文件改不了
@@ -599,7 +599,7 @@ describe("Dream 门控", () => {
     expect(first).toContain("A fact lives in one place");
     expect(first).toContain("Changing an indexed file you have not viewed is refused; resident modules count as viewed");
     expect(first).toContain("A full module is not a reason to file the fact somewhere else");
-    const retry = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: false, retry: true }, stored: "" });
+    const retry = extractPromptText({ memories: mods, scopes: table, range: { messages: 6, firstUserText: "hi", fromStart: false, retry: true, from: 0, to: 6 }, stored: "", indexesChangedOnly: false });
     expect(retry).toContain("An earlier review of this part stopped before it finished");
     expect(retry).toContain("continue from there instead of writing it again");
   });
@@ -999,7 +999,7 @@ describe("Agent 接线", () => {
       list: (p) => inner.list(p),
     };
     const h = memories(racing);
-    const frozen: MemoryFreeze = { text: null, files: null };
+    const frozen: MemoryFreeze = { text: null, files: null, shown: null };
     const text = await memoryContents(h, frozen);
     expect(frozen.text).toBe(text);
     expect(await memoryContents(h, frozen)).toBe(text); // 冻结：第二次原样给同一份，不重读
@@ -1338,7 +1338,7 @@ describe("判据跟着模块走", () => {
     expect(system).not.toContain("next month");
     expect(system).not.toContain("repository already states");
     expect(system).toContain("moments you shared");
-    const extract = extractPromptText({ memories: listMemories(custom), scopes: memoryScopeTableOf(custom), range: { messages: 2, firstUserText: "hi", fromStart: false, retry: false }, stored: "" });
+    const extract = extractPromptText({ memories: listMemories(custom), scopes: memoryScopeTableOf(custom), range: { messages: 2, firstUserText: "hi", fromStart: false, retry: false, from: 0, to: 2 }, stored: "", indexesChangedOnly: false });
     expect(extract).not.toContain("next month");
     expect(extract).not.toContain("true only inside this conversation");
     expect(extract).toContain("moments you shared");

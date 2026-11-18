@@ -790,6 +790,24 @@ test("seal() 之后 discardIfUnused() 不撤：状态根已不归本进程，撤
   expect((await listSessions(root)).map((i) => i.id)).toEqual(["s-lost"]);
 });
 
+test("memory_reviewed 的起点（2026-11-17）：旧记录没有照常恢复；有就得是不超过 through 的非负整数", async () => {
+  const meta = JSON.stringify({ id: "main", name: "main", workspace: "/", product: "default", agent: { definition: {} }, main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 2 });
+  const user = { kind: "message", id: "main-e1", parentId: null, message: { role: "user", source: "human", content: [{ type: "text", text: "hi" }], at: 1 } };
+  const reply = { kind: "message", id: "main-e2", parentId: "main-e1", message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "end_turn", usage: null, at: 2 } };
+  const load = async (reviewed: Record<string, unknown>) => {
+    const dir = new InMemoryDir();
+    await dir.write("meta.json", meta);
+    await dir.write("entries/000001.json", JSON.stringify(user));
+    await dir.write("entries/000002.json", JSON.stringify(reply));
+    await dir.write("entries/000003.json", JSON.stringify({ kind: "memory_reviewed", id: "main-e3", parentId: "main-e2", at: 3, through: 2, ...reviewed }));
+    return new SessionService(dir).createOrResume("main");
+  };
+  expect((await load({})).memoryReviewedThrough).toBe(2);
+  expect((await load({ from: 0 })).memoryReviewedThrough).toBe(2);
+  await expect(load({ from: 3 })).rejects.toThrow("from");
+  await expect(load({ from: -1 })).rejects.toThrow("from");
+});
+
 test("memory_reviewed 的结局三项（2026-11-16）：旧记录没有也照常恢复（结局不知道）；有就得认得出——outcome 乱写、written 不是非负整数都判红", async () => {
   const meta = JSON.stringify({ id: "main", name: "main", workspace: "/", product: "default", agent: { definition: {} }, main: true, status: "active", createdAt: 1, updatedAt: 1, messageCount: 2 });
   const user = { kind: "message", id: "main-e1", parentId: null, message: { role: "user", source: "human", content: [{ type: "text", text: "hi" }], at: 1 } };

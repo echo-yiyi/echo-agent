@@ -70,7 +70,7 @@ import { DurableDeliveryDeferred, type DurableDeliveryRequest, type DurableDeliv
 import {
   claimDreamPass,
   disposeMemory,
-  memoryManifest,
+  memoryStoredSince,
   dreamScopes,
   dreamTask,
   markDreamed,
@@ -758,7 +758,7 @@ export class Agent {
    * 记忆正文段，会话内冻结（`MemoryFreeze`）。压缩落地、transcript 清空或从盘上换掉时
    * 置回 null（`processEvents` 里），下一次组装重取。
    */
-  private readonly memoryFreeze: MemoryFreeze = { text: null, files: null };
+  private readonly memoryFreeze: MemoryFreeze = { text: null, files: null, shown: null };
   /**
    * messages 载体的段上一次装配出的消息（段名 → 那条消息）。文本没变就复用同一个对象：每个 run、每次分叉
    * （提取、fork、压缩）拿到的是同一条，前缀逐字相同；观测镜像按对象身份记编号，也只交一次值。
@@ -3254,7 +3254,8 @@ export class Agent {
       if (!force && humanTurns(fresh) < memory.extract.everyTurns) return skipped("too_few_turns");
       // 要看的那一段在视图里的样子（被压掉的部分以摘要 / 占位出现）：只用来告诉模型看最后几条、从哪句开始
       const span = projectRange(messages, compaction, from, end);
-      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0, retry: this.extractUnfinished > 0 };
+      // 起止记会话记录里的下标（2026-11-17）：与 `memory_reviewed.through` 同一套，观测与会话记录拿它说清看的是哪一段
+      const range: ExtractRange = { messages: span.length, firstUserText: firstUserText(span), fromStart: from === 0, retry: this.extractUnfinished > 0, from: from + offset, to: end + offset };
       // 与整理排成一条：等的这段里被中止（stop / 丢锁）或 transcript 换了代，就不跑。
       // 后两道是 `runExtract` 自己开头那道判断（它在任何副作用之前返回 not_run），在这里先判只为记下原因
       const pass = await this.oneBackgroundWriter(async (): Promise<ExtractPass> => {
@@ -3275,6 +3276,8 @@ export class Agent {
           written,
           ...(reasonCode === undefined ? {} : { reasonCode }),
           extractRunId: pass.runId,
+          from: range.from,
+          to: range.to,
           ...(triggeredBy === undefined ? {} : { triggeredBy }),
           occurredAt: Date.now(),
         });
@@ -3316,7 +3319,7 @@ export class Agent {
       this.extractUnfinished = 0;
       this.extractUnfinishedWritten = 0;
       this.extractCursor = Math.max(this.extractCursor, end);
-      await this.recordReviewed(end + offset, reviewed);
+      await this.recordReviewed(range, reviewed);
     });
   }
 
@@ -3325,11 +3328,11 @@ export class Agent {
    * `settleDream()` 等通道收完，所以收摊不会抢在这笔写之前交出 lease。落盘失败只留诊断：
    * 这次提取写的记忆已经在盘上了，最坏是续会话后把这段再看一遍。
    */
-  private async recordReviewed(through: number, how: { outcome: ExtractOutcome; written: number; reason?: string }): Promise<void> {
+  private async recordReviewed(range: ExtractRange, how: { outcome: ExtractOutcome; written: number; reason?: string }): Promise<void> {
     const id = this._state.sessionId;
     if (id === null || this.sessionService === undefined) return;
     try {
-      await this.sessionService.append(id, [{ kind: "memory_reviewed", at: this.clock.now(), through, ...how }]);
+      await this.sessionService.append(id, [{ kind: "memory_reviewed", at: this.clock.now(), through: range.to, from: range.from, ...how }]);
     } catch (e) {
       this.reportDiagnostic({ code: "memory_extract_cursor_persist_failed", message: errText(e) });
     }
@@ -3466,11 +3469,17 @@ export class Agent {
     if (fork.range.messages === 0 || !this.memoryWorkAllowed || signal.aborted) return { kind: "not_run" };
     const table = memoryScopeTableOf(memory);
     const runId = `extract-${crypto.randomUUID()}`;
-    // 此刻存着什么由 prompt 自带：上文开头那条记忆正文是会话开头冻结的那一版，之后写的看不到；不给就只能一个个 view 去摸。
+    // 主循环每个 run 装一次的那份 prompt（system 与 prompt 消息；记忆正文是冻结的那一版）：与主循环最后一次请求逐字相同。
+    // **先装配再写指令**（2026-11-17）：正文刚作废的话，这一下才重新冻结，「Stored now」要对着这次装进去的那一版比
+    const assembled = await this.assemble(scope.modelBinding.model);
+    // 此刻存着什么由 prompt 自带：上文开头那条记忆正文是冻结那一刻的版本，之后写的看不到。常驻模块照给全文，
+    // indexed 模块只补之后变过的索引（`memoryStoredSince`，2026-11-17；此前每次重发整个记忆库）。这次装配里没有那条正文（没挂记忆段）就给全部。
     // 指令怎么写由产品定（`memory.extract.prompt`，2026-11-17，缺省 `defaultExtractPrompt`）：它抛错或给空串就按这一次没跑成算
     let prompt: string;
     try {
-      prompt = memory.extract.prompt({ memories: listMemories(memory), scopes: table, range: fork.range, stored: await memoryManifest(memory) });
+      const shown = this.promptSections.has("memory") && this.memoryFreeze.text !== null ? this.memoryFreeze.shown : null;
+      const { stored, indexesChangedOnly } = await memoryStoredSince(memory, shown);
+      prompt = memory.extract.prompt({ memories: listMemories(memory), scopes: table, range: fork.range, stored, indexesChangedOnly });
       if (typeof prompt !== "string" || prompt.trim() === "") throw new Error(`返回了 ${JSON.stringify(prompt)}`);
     } catch (e) {
       this.reportDiagnostic({ code: "memory_extract_prompt_failed", message: `记忆提取的指令写不出来（memory.extract.prompt）：${errText(e)}` });
@@ -3505,8 +3514,7 @@ export class Agent {
     const result = await this.runSubagent(
       {
         prompt,
-        // 主循环每个 run 装一次的那份 prompt（system 与 prompt 消息；记忆正文是冻结的那一版）：与主循环最后一次请求逐字相同
-        ...(await this.assemble(scope.modelBinding.model)),
+        ...assembled,
         tools: menu,
         seed: fork.seed,
         runId,
@@ -3877,10 +3885,11 @@ export class Agent {
     };
   }
 
-  /** 冻结的记忆正文作废：正文与通知基线一起清，下一次组装重取（`MemoryFreeze`）。 */
+  /** 冻结的记忆正文作废：正文、通知基线与冻结时的版本一起清，下一次组装重取（`MemoryFreeze`）。 */
   private invalidateMemoryFreeze(): void {
     this.memoryFreeze.text = null;
     this.memoryFreeze.files = null;
+    this.memoryFreeze.shown = null;
   }
 
   /**

@@ -46,14 +46,14 @@ export type SessionEntry = {
    * `reason` 中途停下的原因码（部分完成与放弃才有）。**没有 `outcome` 的是 2026-11-16 之前写的旧记录：结局不知道**，
    * 不当作正常结束——那时三种结局写的是同一条记录。
    */
-  | { kind: "memory_reviewed"; at: number; through: number; outcome?: ExtractOutcome; written?: number; reason?: string }
+  | { kind: "memory_reviewed"; at: number; through: number; from?: number; outcome?: ExtractOutcome; written?: number; reason?: string }
 );
 
 /**
- * 记忆提取推过游标的那段是怎么结束的（2026-11-16，`memory_reviewed.outcome`）：
+ * 记忆提取推过游标的那段是怎么结束的（2026-11-16，`memory_reviewed.outcome`；`from` 是那段的起点，2026-11-17 起才有）：
  *   · `completed`：模型自己收尾（写没写都算）；
- *   · `partial`：中途停了（轮数用完、模型出错、被 hook 拦下），但已写成至少一条——游标照推，没写到的那部分不再看；
- *   · `abandoned`：一条没写成就停，连续几次之后放弃这段，游标推过去。
+ *   · `partial`：连续几次没看完、放弃这段，其间写成过（2026-11-17 起；此前中途停了但写成过就记 partial、游标照推）；
+ *   · `abandoned`：连续几次没看完、放弃这段，一条没写成。
  */
 export type ExtractOutcome = "completed" | "partial" | "abandoned";
 

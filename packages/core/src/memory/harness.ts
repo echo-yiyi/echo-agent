@@ -526,7 +526,11 @@ export function memoryPromptSections(ctx: AgentMemories, frozen: MemoryFreeze): 
  * 由 Agent 持有：只有它知道何时作废——压缩改写了历史、transcript 被清空或换掉，两样都置回 null，
  * 下一次组装重取（完整的现行内容随之回到正文段）。
  */
-export type MemoryFreeze = { text: string | null; files: ReadonlyMap<string, string> | null };
+/**
+ * 冻结的记忆正文与两份文件版本：`files` 是变化通知的基线（每发一条通知换成此刻的）；`shown` 是正文冻结那一刻的版本，
+ * 即上文开头那条正文展示的内容（2026-11-17，提取的「Stored now」据它只给之后变过的模块）。作废时三项一起清。
+ */
+export type MemoryFreeze = { text: string | null; files: ReadonlyMap<string, string> | null; shown: ReadonlyMap<string, string> | null };
 
 /** 记忆变化通知的 `source`（环境消息的开放来源字符串）。 */
 export const MEMORY_SOURCE = "memory";
@@ -551,6 +555,7 @@ export async function memoryContents(ctx: AgentMemories, frozen: MemoryFreeze): 
   const text = await renderMemoryContent(ctx, once);
   frozen.text = text;
   frozen.files = files;
+  frozen.shown = files;
   return text;
 }
 
@@ -721,6 +726,30 @@ export async function memoryManifest(ctx: AgentMemories): Promise<string> {
     if (block !== "") blocks.push(block);
   }
   return blocks.join("\n\n");
+}
+
+/**
+ * 提取指令的「Stored now」（2026-11-17）：常驻模块照给全文；indexed 模块只给冻结之后变过的（与 `memoryManifest()`
+ * 同一种呈现），没变过的索引在上文开头那条记忆正文里（冻结那一刻的版本，`MemoryFreeze.shown`），不重发。
+ *
+ * 为什么常驻照给：它们有上限、成本有界，而快满时加一条要整份重写——全文得紧挨着指令。真模型上只给变化的话，
+ * 8 次里 2 次常驻被重写得更短、丢了内容；索引随文件数增长、没有上限，「每次重发整个记忆库」的成本在它身上。
+ * 一个 indexed 模块任何一个文件改了、新增了、删掉了都算变过。`shown` 为 null（这次装配里没有冻结的记忆正文）就是全部。
+ */
+export async function memoryStoredSince(ctx: AgentMemories, shown: ReadonlyMap<string, string> | null): Promise<{ stored: string; indexesChangedOnly: boolean }> {
+  if (shown === null) return { stored: await memoryManifest(ctx), indexesChangedOnly: false };
+  const table = ctx.binding.table();
+  const current = await memoryFileVersions(ctx);
+  const blocks: string[] = [];
+  for (const m of listMemories(ctx)) {
+    let changed = false;
+    for (const [path, text] of current) if (memoryOwns(table, m, path) && shown.get(path) !== text) changed = true;
+    for (const path of shown.keys()) if (memoryOwns(table, m, path) && !current.has(path)) changed = true;
+    if (!changed && m.mode !== "resident") continue;
+    const block = await composeMemoryRegion(ctx, m);
+    if (block !== "") blocks.push(block);
+  }
+  return { stored: blocks.join("\n\n"), indexesChangedOnly: true };
 }
 
 /* ───────────── Dream:判断归 harness,触发与执行归 core(Agent 的独立通道) ───────────── */

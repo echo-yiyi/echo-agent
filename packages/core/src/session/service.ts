@@ -73,7 +73,7 @@ export type SessionEntryInput =
   | { kind: "compaction"; at: number; reason: CompactionReason; compaction: CompactionState }
   | { kind: "error"; at: number; error: AgentError }
   | { kind: "workspace"; at: number; workspace: string }
-  | { kind: "memory_reviewed"; at: number; through: number; outcome?: ExtractOutcome; written?: number; reason?: string };
+  | { kind: "memory_reviewed"; at: number; through: number; from?: number; outcome?: ExtractOutcome; written?: number; reason?: string };
 
 /**
  * 会话的语义所有者。**一个实例管一段 session**（2026-09-03）：注入的 store 就是那一段的目录，
@@ -571,6 +571,10 @@ function assertEntryShape(entry: SessionEntry, where: string): void {
     case "memory_reviewed":
       if (!Number.isSafeInteger(entry.through) || entry.through < 0) throw new Error(`${where} 是 memory_reviewed 但 through 不是非负整数`);
       if (typeof entry.at !== "number") throw new Error(`${where} 是 memory_reviewed 但缺 at`);
+      // 起点可缺（2026-11-17 之前的旧记录没有），有就得是不超过终点的非负整数
+      if (entry.from !== undefined && (!Number.isSafeInteger(entry.from) || entry.from < 0 || entry.from > entry.through)) {
+        throw new Error(`${where} 是 memory_reviewed 但 from 不是不超过 through 的非负整数`);
+      }
       // 结局三项可缺（2026-11-16 之前的旧记录没有），有就得认得出
       if (entry.outcome !== undefined && !EXTRACT_OUTCOMES.includes(entry.outcome)) throw new Error(`${where} 是 memory_reviewed 但 outcome 不认识：${String(entry.outcome)}`);
       if (entry.written !== undefined && (!Number.isSafeInteger(entry.written) || entry.written < 0)) throw new Error(`${where} 是 memory_reviewed 但 written 不是非负整数`);

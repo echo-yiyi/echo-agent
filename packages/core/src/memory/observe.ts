@@ -124,6 +124,9 @@ export type MemoryFact =
       reasonCode?: string;
       /** 那次提取子循环的 runId。 */
       extractRunId: string;
+      /** 这次看的那一段在会话记录里的消息下标，左闭右开（2026-11-17，`ExtractRange.from` / `to`）。 */
+      from: number;
+      to: number;
       triggeredBy?: string;
       occurredAt: number;
     }>
@@ -170,7 +173,7 @@ export const memoryFactDescriptor: CapabilityFactDescriptor<MemoryFact> = {
     }
     if (fact.kind === "extract_finished") {
       const reason: Record<string, string> = fact.reasonCode === undefined ? {} : { reasonCode: fact.reasonCode };
-      const attributes: Record<string, string | number | boolean> = { outcome: fact.outcome, written: fact.written, runId: fact.extractRunId, ...reason };
+      const attributes: Record<string, string | number | boolean> = { outcome: fact.outcome, written: fact.written, runId: fact.extractRunId, from: fact.from, to: fact.to, ...reason };
       return {
         occurredAt: fact.occurredAt,
         kind: "event",
@@ -181,6 +184,8 @@ export const memoryFactDescriptor: CapabilityFactDescriptor<MemoryFact> = {
           outcome: fact.outcome,
           written: fact.written,
           extractRunId: fact.extractRunId,
+          from: fact.from,
+          to: fact.to,
           ...reason,
           ...(fact.triggeredBy === undefined ? {} : { triggeredBy: fact.triggeredBy }),
         },

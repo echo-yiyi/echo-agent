@@ -228,6 +228,73 @@ test("提取请求的前缀与前台最后一次请求逐字相同：同一份 s
   expect(ex.messages).toHaveLength(last.messages.length + 2); // 最后那条回答 + 提取指令
 });
 
+test("提取的「Stored now」：常驻模块照给全文，indexed 模块只给记忆正文冻结之后变过的索引（2026-11-17）——没变的索引在上文开头那条正文里，不重发", async () => {
+  const { fn, extracts } = recording();
+  const dir = new InMemoryDir();
+  await dir.write("user.md", "回答要简短"); // 常驻：会话开头就有，之后不变——照给全文
+  await dir.write("memory/old-pref.md", "---\ndescription: 早就记过的回答偏好\n---\n\n回答要带代码位置。"); // indexed：之后不变
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(dir) });
+  await mountBuiltinTools(agent); // 挂上记忆段：前台请求最前面有那条冻结的记忆正文
+
+  await say(agent, "以后我们的测试一律用 bun 跑，别再用 npm test 了"); // 第一个 run：记忆正文此刻冻结
+  expect((await agent.settleMemory()).kind).toBe("completed");
+  const first = extracts.at(-1)!;
+  expect(JSON.stringify(first.messages[0])).toContain("早就记过的回答偏好"); // 上文开头那条正文里有索引
+  const unchanged = instructionOf(first);
+  expect(unchanged).toContain("every resident module, and each indexed module changed since the memory snapshot above");
+  expect(unchanged).toContain("回答要简短"); // 常驻：照给
+  expect(unchanged).not.toContain("早就记过的回答偏好"); // 没变过的索引：不重发
+
+  await dir.write("memory/ci.md", "---\ndescription: CI 两个平台都绿才合\n---\n\nubuntu 与 macOS。"); // 冻结之后新增（别的会话、后台写的）
+  await say(agent, "提交信息一律写中文，别再用英文写提交信息了");
+  expect((await agent.settleMemory()).kind).toBe("completed");
+  const ex = extracts.at(-1)!;
+  expect(JSON.stringify(ex.messages[0])).not.toContain("CI 两个平台都绿才合"); // 上文开头仍是冻结那一版
+  const changed = instructionOf(ex);
+  expect(changed).toContain("CI 两个平台都绿才合"); // 变过的 indexed 模块：此刻的索引
+  expect(changed).toContain("早就记过的回答偏好"); // 同一个模块变了，整份索引一起给
+  expect(changed).toContain("回答要简短");
+  expect(changed).toContain("in the memory snapshot above and under");
+});
+
+test("提取范围带起止下标（2026-11-17）：指令的输入、观测里的 memory.extract.finished 与会话里的 memory_reviewed 都记这一段在会话记录里的 [from, to)", async () => {
+  const ranges: unknown[] = [];
+  const prompt: ExtractPrompt = (input) => {
+    ranges.push({ from: input.range.from, to: input.range.to });
+    return DEFAULT_EXTRACT_SETTINGS.prompt(input);
+  };
+  const { fn } = recording();
+  const store = new InMemoryDir();
+  const agent = new Agent({ model: FAKE_MODEL, streamFunction: fn, memory: memoriesOn(new InMemoryDir(), { ...DEFAULT_EXTRACT_SETTINGS, prompt }), sessionService: new SessionService(store), sessionId: "s1" });
+  await agent.start();
+  const facts: { kind: string; from?: number; to?: number }[] = [];
+  (agent as unknown as { memoryActivity: { offer(f: unknown): void } }).memoryActivity = { offer: (f) => void facts.push(f as (typeof facts)[number]) };
+
+  await say(agent, ...THREE); // 三轮六条消息
+  await idleExtract(agent);
+  await say(agent, ...NEXT_THREE);
+  await idleExtract(agent);
+  await agent.stop();
+
+  expect(ranges).toEqual([
+    { from: 0, to: 6 },
+    { from: 6, to: 12 },
+  ]);
+  expect(facts.filter((f) => f.kind === "extract_finished").map((f) => [f.from, f.to])).toEqual([
+    [0, 6],
+    [6, 12],
+  ]);
+  const reviewed: unknown[] = [];
+  for (const name of (await store.list("entries/")).sort()) {
+    const entry = JSON.parse((await store.read(name))!) as Record<string, unknown>;
+    if (entry.kind === "memory_reviewed") reviewed.push([entry.from, entry.through]);
+  }
+  expect(reviewed).toEqual([
+    [0, 6],
+    [6, 12],
+  ]);
+});
+
 test("提取只有记忆工具能执行：菜单上别的工具照样摆着（前缀要一致），点名就被拒、不会真跑", async () => {
   let ran = 0;
   const spy: ModelTool = {
